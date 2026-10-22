@@ -1,0 +1,210 @@
+# Ops the full-CUDA codegen (FLAGOS_CODEGEN_ALL=1) skips.
+# One schema op-name per line; '#' starts a comment.
+# Skipped ops fall through to the existing cpu_fallback (functional, just slower),
+# so coverage still strictly exceeds the hand-written 71-op baseline.
+#
+# Grown empirically during the compile/import fix loop. Group by reason.
+
+# --- dunder Python operator names ---
+# __lshift__ / __rshift__ and their inplace/out variants are Python special-method
+# spellings; they have named equivalents (bitwise_left_shift / bitwise_right_shift)
+# that ARE generated, so skipping the dunder forms loses no capability. They also
+# defeat the leading-underscore disambiguation (>=2 leading underscores) and the
+# trailing-underscore inplace heuristic, so excluding them keeps naming clean.
+__lshift__.Scalar
+__lshift__.Tensor
+__ilshift__.Scalar
+__ilshift__.Tensor
+__rshift__.Scalar
+__rshift__.Tensor
+__irshift__.Scalar
+__irshift__.Tensor
+__lshift__.Scalar_out
+__lshift__.Tensor_out
+__rshift__.Scalar_out
+__rshift__.Tensor_out
+
+# --- templates cannot express these signatures (compile errors) ---
+# attention/rnn/cudnn, fused optimizers, void asserts/helpers, sparse/quantize, etc.
+# Recovered in later rounds:
+#   - _foreach_*.out + split/unbind vector returns via gen_foreach_out / gen_vector_return
+#   - multi-out out-variants via gen_out_variant
+#   - function-only inplace activations (silu_/gelu_/...) via gen_inplace free-fn branch
+#   - cat.out/stack.out/block_diag.out/_chunk_cat.out (TensorList in + single Tensor& out)
+#     via gen_foreach_out single-out branch
+_amp_foreach_non_finite_check_and_unscale
+_amp_update_scale_
+_assert_async
+_assert_async.msg
+_assert_scalar
+_assert_tensor_metadata
+_cslt_sparse_mm_search
+_cudnn_attention_forward
+_cudnn_rnn
+_cudnn_rnn.out
+_cudnn_rnn_backward
+_cudnn_rnn_flatten_weight.out
+_lstm_mps.out
+miopen_rnn.out
+_cummax_helper
+_cummin_helper
+_efficient_attention_forward
+_fill_mem_eff_dropout_mask_
+_fused_adagrad
+_fused_adagrad.tensor_lr
+_fused_adam
+_fused_adam.tensor_lr
+_fused_adamw
+_fused_adamw.tensor_lr
+_fused_sdp_choice
+_fused_sgd
+_fused_sgd.tensor_lr
+_fw_primal
+_has_same_storage_numel
+_histogramdd_bin_edges.out
+_histogramdd_from_bin_tensors.out
+_index_put_impl
+_index_put_impl.out
+_linalg_check_errors
+_nested_tensor_from_mask_left_aligned
+_nested_tensor_from_tensor_list.out
+_print
+_scaled_dot_product_cudnn_attention
+_scaled_dot_product_flash_attention
+_scaled_dot_product_flash_attention.quantized
+_scaled_dot_product_fused_attention_overrideable
+_scaled_mm_v2.out
+_to_sparse
+_to_sparse.sparse_dim
+_to_sparse_bsc
+_to_sparse_bsr
+_to_sparse_csc
+_to_sparse_csr
+_unsafe_index_put
+_unsafe_masked_index
+_unsafe_masked_index_put_accumulate
+_use_cudnn_ctc_loss
+_use_cudnn_ctc_loss.Tensor
+_use_miopen_ctc_loss
+_use_miopen_ctc_loss.Tensor
+_validate_compressed_sparse_indices
+allclose
+ccol_indices
+col_indices
+crow_indices
+dense_dim
+dequantize.tensors_out
+equal
+expand
+index.Tensor_out
+index_put
+index_put.out
+indices
+is_coalesced
+is_pinned
+is_same_size
+is_set_to
+miopen_rnn
+miopen_rnn_backward
+new_empty
+new_empty.out
+new_empty_strided.out
+new_full
+new_full.out
+new_ones.out
+new_zeros
+new_zeros.out
+quantize_per_tensor.tensors_out
+repeat
+row_indices
+sparse_dim
+sym_constrain_range
+sym_constrain_range_for_size
+unfold
+values
+view.dtype
+
+# --- functional variant wrapper-name collides with hand-written inplace wrapper ---
+resize
+set.source_Storage
+set.source_Tensor
+
+# --- out-variant with const-ref mutable out (gen_out_variant string match fails) ---
+resize.out
+_resize_output.out
+resize_as.out
+resize_as_sparse.out
+sparse_resize.out
+sparse_resize_and_clear.out
+
+# --- vendor-only fused ops (present only in some vendor torch wheels) ---
+# Hygon DTK's torch wheel ships 64 extra native_fuse_* ops and its bundled
+# torchgen yaml declares them, so codegen picks them up on a DCU box but not
+# on an upstream-torch box. Generating them would put DTK-only ATen/ops/
+# native_fuse_*.h includes into the shared cuda_kernels.cc and DTK-only routes
+# into the shared backends_cuda.conf, breaking the NVIDIA/MetaX builds. Skipped
+# so codegen output stays identical no matter which wheel it runs against.
+native_fuse_bias_dropout_add
+native_fuse_bias_dropout_add_backward
+native_fuse_bias_dropout_add_backward.out
+native_fuse_bias_dropout_add.out
+native_fuse_bias_gelu
+native_fuse_bias_gelu_backward
+native_fuse_bias_gelu_backward.out
+native_fuse_bias_gelu.out
+native_fuse_bias_swiglu
+native_fuse_bias_swiglu_backward
+native_fuse_bias_swiglu_backward.out
+native_fuse_bias_swiglu.out
+native_fuse_celu_gn
+native_fuse_celu_gn_backward
+native_fuse_celu_gn_backward.out
+native_fuse_celu_gn.out
+native_fuse_ctc_loss
+native_fuse_ctc_loss_backward
+native_fuse_ctc_loss_backward.out
+native_fuse_ctc_loss.out
+native_fuse_dropout_add
+native_fuse_dropout_add_backward
+native_fuse_dropout_add_backward.out
+native_fuse_dropout_add.out
+native_fuse_gn_silu
+native_fuse_gn_silu_backward
+native_fuse_gn_silu_backward.out
+native_fuse_gn_silu.out
+native_fuse_group_norm
+native_fuse_group_norm_backward
+native_fuse_group_norm_backward.out
+native_fuse_group_norm.out
+native_fuse_layer_norm
+native_fuse_layer_norm_backward
+native_fuse_layer_norm_backward.out
+native_fuse_layer_norm.out
+native_fuse_ln_add_dropout
+native_fuse_ln_add_dropout_backward
+native_fuse_ln_add_dropout_backward.out
+native_fuse_ln_add_dropout_bias
+native_fuse_ln_add_dropout_bias_backward
+native_fuse_ln_add_dropout_bias_backward.out
+native_fuse_ln_add_dropout_bias.out
+native_fuse_ln_add_dropout.out
+native_fuse_ln_dropout
+native_fuse_ln_dropout_backward
+native_fuse_ln_dropout_backward.out
+native_fuse_ln_dropout.out
+native_fuse_rmsnorm
+native_fuse_rmsnorm_backward
+native_fuse_rmsnorm_backward.out
+native_fuse_rmsnorm.out
+native_fuse_rn_add_dropout
+native_fuse_rn_add_dropout_backward
+native_fuse_rn_add_dropout_backward.out
+native_fuse_rn_add_dropout_bias
+native_fuse_rn_add_dropout_bias_backward
+native_fuse_rn_add_dropout_bias_backward.out
+native_fuse_rn_add_dropout_bias.out
+native_fuse_rn_add_dropout.out
+native_fuse_rn_dropout
+native_fuse_rn_dropout_backward
+native_fuse_rn_dropout_backward.out
+native_fuse_rn_dropout.out

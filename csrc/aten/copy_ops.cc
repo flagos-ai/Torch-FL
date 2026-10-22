@@ -1,0 +1,992 @@
+// Copyright (c) 2026, BAAI. All rights reserved.
+//
+// Adopted from https://github.com/pytorch/pytorch/tree/main/test/cpp_extensions/open_registration_extension/torch_openreg
+// Below is the original copyright:
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+#include "copy_ops.h"
+#include "contiguous_ops.h"
+#include "copy_dispatcher.h"
+
+#include <ATen/native/Resize.h>
+#include <ATen/ops/_pin_memory.h>
+#include <ATen/ops/_to_copy.h>
+#include <ATen/ops/_to_copy_ops.h>
+#include <ATen/ops/copy_native.h>
+#include <c10/core/DeviceGuard.h>
+#include <flagos.h>
+
+#include <optional>
+#include "device_boxing.h"
+// ascend_copy.h and gcu_copy.h are included unconditionally: the #else
+// branches below cover TsingMicro, GCU and MUSA-without-mudnn as well as
+// Ascend, and these headers supply inline no-op fallbacks for every platform
+// they do not implement. kunlunxin_copy.h supplies the same fallbacks but is
+// pulled in only for the platform that defines USE_KUNLUNXIN, matching how
+// contiguous_ops.cc includes it.
+#include "backends/ascend/ascend_copy.h"
+#include "backends/gcu/gcu_copy.h"
+#if defined(USE_KUNLUNXIN)
+#include "backends/kunlunxin/kunlunxin_copy.h"
+#endif
+#if defined(USE_MPS)
+#include "backends/mps/mps_copy.h"
+#endif
+
+#if defined(FLAGOS_MUSA_KERNEL)
+#include "backends/musa/mudnn_common.h"
+#elif defined(USE_MUSA)
+#include "runtime/accelerator/musa/musa_stream.h"
+#elif defined(USE_GCU)
+#include "runtime/accelerator/gcu/tops_stream.h"
+#endif
+
+// On the CUDA-family backends (including MetaX boxing) the flagos device shares
+// the vendor's CUDA streams, so the current stream is readable from c10::cuda.
+//
+// USE_DCU is excluded for the same reason runtime/guard.h:22 excludes it: the
+// DCU wheel is hipified, so <c10/cuda/CUDAStream.h> resolves through DTK's
+// CUDA-compat shim against USE_ROCM-hipified torch headers and expands to hip*
+// symbols the shim never declares (`'hipStreamCaptureStatus' was not declared`),
+// and c10::cuda::getCurrentCUDAStream would not link there anyway -- DTK exports
+// c10::hip with zero c10::cuda symbols. DCU still shares the vendor's streams,
+// so it needs *some* barrier; see BlockingCopyGuard below.
+// USE_KUNLUNXIN is excluded for the same reason runtime/guard.h does it: the
+// de-boxed XPU backend drives libxpurt directly and never enters the CUDA
+// dispatch key, so c10::cuda is a hollow shell in that build -- including
+// <c10/cuda/CUDAStream.h> there would resolve against headers the runtime does
+// not back with symbols. It still needs *some* barrier; see the arm below.
+// USE_ILUVATAR is excluded for the same reason as USE_KUNLUNXIN, and the same
+// reason as runtime/guard.h: the platform links the CPU torch wheel and owns its
+// streams (runtime/accelerator/iluvatar/stream.cc), so <c10/cuda/CUDAStream.h>
+// has no symbols behind it in that build. Unlike the CUDA-ABI platforms below it
+// does have a stream to name; it just cannot be asked for through c10::cuda. It
+// still needs *some* barrier; see the arm below.
+//
+// FLAGOS_COPY_CUDA_ABI marks the platforms that DO share the vendor's CUDA
+// streams -- cuda, ppu, metax -- i.e. where a barrier is required but
+// the stream cannot be named without c10::cuda. On those, the actual stream
+// query is still gated on FLAGOS_BOXING_BUILD: c10::cuda lives in
+// libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
+// links the CPU-only torch wheel), so getCurrentCUDAStream is an unresolved
+// symbol there. The de-boxed arm below covers both cases.
+#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR)
+#define FLAGOS_COPY_CUDA_ABI 1
+#else
+#define FLAGOS_COPY_CUDA_ABI 0
+#endif
+
+#if defined(FLAGOS_BOXING_BUILD) && FLAGOS_COPY_CUDA_ABI
+#define FLAGOS_COPY_HAS_CUDA_STREAM 1
+#include <c10/cuda/CUDAStream.h>
+#endif
+
+namespace at::native::flagos {
+
+namespace {
+
+#if defined(USE_MPS)
+// An MPS tensor's data_ptr() is not guaranteed to expose host-readable bytes,
+// so this runtime cannot copy it with a host memcpy. PyTorch's MPS copy kernel
+// can move it to host memory; the flagos H2D copy follows that copy.
+at::Tensor mps_source_to_cpu(const at::Tensor& self) {
+  at::Tensor src_contig =
+      self.is_contiguous() ? self : self.contiguous();
+  return src_contig.to(c10::kCPU);
+}
+#endif
+
+// Every `Memcpy` in this file is the *synchronous* one, and a synchronous
+// memcpy is a blocking call with two preconditions, both about which device is
+// current when it is issued.
+//
+// 1. The device the copy touches has to *be* the current one. A blocking
+//    memcpy orders against the device selected at issue time, not against the
+//    device that owns the buffer. MUSA makes the consequence blunt: reading
+//    back a tensor on flagos:1 while flagos:0 was current returned the
+//    buffer's *pre-kernel* contents -- 18 of 20 host reads of an addmm output
+//    came back as the zeros the output was allocated with, and 18 of 20 became
+//    0 of 20 once the read bound flagos:1 first (issue #281). Model-parallel
+//    workloads hit this constantly rather than rarely: with
+//    device_map="auto" the ambient device is whichever one ran last, which is
+//    usually not the one holding the tensor being read back.
+//
+// 2. That device's queue has to be drained. `Memcpy` only orders against the
+//    legacy default stream, and PyTorch creates its side streams with
+//    cudaStreamNonBlocking, so work enqueued on one is NOT awaited by a plain
+//    cudaMemcpy: the copy can read a buffer before the kernel producing it has
+//    run. That is a silent wrong-data bug, not a crash -- FSDP2 CPU offload hit
+//    it because its gradient D2H happens inside the reduce-scatter stream, and
+//    the gradient reached the CPU as zeros (or as a previous tensor's
+//    contents).
+//
+// Doing 1 first is also what makes 2 target the right queue: the CUDA-family
+// stream lookup below resolves against whatever device is current, so draining
+// without the guard drains the ambient device rather than the tensor's.
+//
+// Both are no-ops on the common path -- the inner device guard is only emplaced
+// for a tensor that really lives elsewhere, and a drain of the default stream is
+// already ordered -- so single-device callers pay a GetDevice and the stream
+// probe this file already paid.
+class BlockingCopyGuard {
+ public:
+  // `on_device` is the accelerator-side operand the copy touches: the source
+  // for a D2H or D2D copy (the buffer being read), the destination for an H2D
+  // one. It must outlive the guard, which is to say the whole copy.
+  explicit BlockingCopyGuard(const at::Tensor& on_device) {
+    const auto device = on_device.device();
+    if (device.is_privateuseone() && device.has_index()) {
+      int current = -1;
+      if (::GetDevice(&current) == Success && current != device.index()) {
+        // Constructing a c10::DeviceGuard unconditionally costs ~2.8us/call,
+        // since its ctor and dtor both route through the guard registry
+        // (empty.cc measures the same trade-off); skipping it when the device
+        // already matches removes that from the single-device path.
+        guard_.emplace(device);
+      }
+    }
+    DrainCurrentQueue();
+  }
+
+  BlockingCopyGuard(const BlockingCopyGuard&) = delete;
+  BlockingCopyGuard& operator=(const BlockingCopyGuard&) = delete;
+
+ private:
+  void DrainCurrentQueue() {
+#if defined(FLAGOS_COPY_HAS_CUDA_STREAM)
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    if (stream.stream() != nullptr) {
+      stream.synchronize();
+    }
+#elif defined(USE_DCU)
+    // DCU shares the vendor's streams, so it needs this barrier just as much as
+    // the other CUDA-family backends -- but it cannot ask which stream is
+    // current (no c10::cuda symbols in a hipified wheel; see the guard above).
+    // Fall back to a device-wide sync: a superset of the per-stream wait, so
+    // still correct, just coarser. Only reached on the blocking-copy paths.
+    ::DeviceSynchronize();
+#elif defined(USE_MUSA)
+    // No c10::cuda to ask here either, but the shared per-device stream is
+    // reachable directly. Every producer submits to it -- mudnn through
+    // EXEC_MUDNN_CMD, FlagGems and Triton through flagtree_shim -- so draining
+    // it is the barrier the CUDA arm gets from stream.synchronize(). The guard
+    // above is what makes GetDefaultMusaStream() resolve to *this tensor's*
+    // device; it keys off the current device, like the mudnn handle.
+    musaStreamSynchronize(at::native::flagos::musa::GetDefaultMusaStream());
+#elif defined(USE_GCU)
+    // Same shape as the MUSA arm, and added for the same reason: the tops
+    // stream is shared by both producers -- topsaten submits to
+    // GetCurrentTopsStream() (see EXEC_TOPSATEN_CMD) and FlagGems submits to the
+    // handle triton's enflame driver reads back from
+    // `torch.gcu.current_stream(idx).gcu_stream`, and on an S60 the two were
+    // measured equal, process after process. With no arm here the function
+    // compiles to nothing on GCU, so a blocking copy issued after a FlagGems
+    // kernel could read the buffer before the kernel producing it had run.
+    // Measured with the allocator poisoned and the first host read taken
+    // immediately after the op: 19 of 20 rounds of
+    // `sq.mean(-1, keepdim=True)` came back holding the poison, and 0 of 20 once
+    // this stream was drained first. The result was not merely misreported --
+    // `rsqrt(mean + eps)`, the next step of the RMSNorm it feeds, is a topsaten
+    // op and was wrong in 40 of 40 rounds without the barrier.
+    topsStreamSynchronize(at::native::flagos::gcu::GetCurrentTopsStream());
+#elif defined(USE_KUNLUNXIN)
+    // Same shape as the DCU arm and for the same reason: no c10::cuda to ask
+    // which stream is current (see the guard above). The XPU SDK exports no
+    // stream query at all -- xpu_wait(nullptr) is its only synchronisation
+    // primitive -- and the runtime layer's DeviceSynchronize wraps that, so
+    // this is a device-wide drain: a superset of the per-stream wait, and so
+    // still correct, just coarser. Only reached on the blocking-copy paths.
+    ::DeviceSynchronize();
+#elif defined(USE_ILUVATAR)
+    // iluvatar owns its streams, so the queue every producer submits to is
+    // reachable directly. The guard above selected *this tensor's* device
+    // before this runs, so the current device is the one to ask about -- the
+    // same assumption the MUSA arm makes about GetDefaultMusaStream(). Waiting
+    // on that stream is what the CUDA arm gets from c10::cuda's current stream.
+    // Only reached on the blocking-copy paths.
+    int device = 0;
+    if (::GetDevice(&device) == Success) {
+      Stream_t stream = GetCurrentStreamForDevice(device);
+      if (stream != nullptr) {
+        ::StreamSynchronize(stream);
+      }
+    }
+#elif FLAGOS_COPY_CUDA_ABI
+    // A CUDA-ABI platform with boxing OFF. The vendor runtime still shares its
+    // streams with flagos, so a barrier is required -- but this wheel carries
+    // no libtorch_cuda.so, so there is no c10::cuda::getCurrentCUDAStream to
+    // ask which stream is current (see the guard above). Every stream query in
+    // this build answers id 0 (runtime/guard.h's #else arms), so flagos work
+    // and this memcpy both land on the legacy default stream and the copy is
+    // already ordered; the device-wide sync keeps that guarantee even if a
+    // vendor library submits to a side stream of its own. Same superset the
+    // DCU/Kunlunxin arms use, and only reached on the blocking-copy paths.
+    ::DeviceSynchronize();
+#endif
+  }
+
+  std::optional<c10::DeviceGuard> guard_;
+};
+
+// The guard and the copy it protects always travel together: the guard has to
+// be alive while the memcpy is issued, which is one statement's worth of scope.
+// `on_device` is the accelerator-side operand the copy touches -- the source for
+// a D2H or D2D copy, the destination for an H2D one. Callers that hold the raw
+// pointers already, and need the guard to span more than one memcpy, use
+// BlockingCopyGuard directly.
+//
+// Defined outside this anonymous namespace (below) because contiguous_ops.cc
+// needs it too, for the same hazard in clone()'s contiguous fast path; see the
+// declaration in copy_ops.h.
+
+// A blocking `Memcpy` is blocking only against the device that is current when
+// it is issued: the transfer is submitted to that device's queue, and nothing
+// orders it against the *peer* device's. A same-device copy never notices --
+// BlockingCopyGuard already drained the one queue involved -- but a copy that
+// crosses devices can be read by the destination before it lands.
+//
+// Measured on MTT S5000 / mudnn v3300, on the 13x7 `input_ids != pad` mask cast
+// from flagos:0 to int32 on flagos:1 -- modeling_layers.py:167, the expression
+// that fails test_model_parallelism under device_map="auto": the result came
+// back as uninitialized memory at 1 call in 2000 in one process and 1-2 in
+// 20000 in another, and draining the *default stream* of either device first
+// changed nothing -- only a device-wide sync did, 0 failures in 20000 in every
+// process. So the transfer is not ordered against the destination's default
+// stream either, which is what rules out the per-stream wait BlockingCopyGuard
+// uses everywhere else. The end-to-end measurement agrees: on two builds that
+// differ only in this barrier, Qwen3ModelTest::test_model_parallelism failed 8
+// of 9 fresh processes without it -- 10 to 20 of 26 elements wrong, max|d|
+// 0.20 to 0.46 -- and 0 of 9 with it. Issue #281.
+//
+// Device-wide, therefore, and skipped unless the copy really crosses devices, so
+// the single-device path pays one device comparison and nothing else.
+void SyncPeerCopyVisibility(const at::Tensor& src, const at::Tensor& dst) {
+  if (src.device() == dst.device()) {
+    return;
+  }
+#if defined(USE_MUSA)
+  // The only platform with a measurement of this hazard. The CUDA-family
+  // backends get the same guarantee from cudaMemcpy's own semantics, and a
+  // device-wide sync there would be a real cost on every peer copy.
+  ::DeviceSynchronize();
+#endif
+}
+
+// The device-to-device copy whose two ends are both known, which is what makes
+// the peer-visibility sync above possible. It has to be issued inside the
+// guard's scope: BlockingCopyGuard restores the previous device on teardown, so
+// a `BlockingMemcpy` followed by a separate device sync would drain whatever
+// device happened to be ambient before rather than the one that owns the
+// transfer.
+void CrossDeviceMemcpy(
+    void* dst_ptr,
+    const void* src_ptr,
+    size_t nbytes,
+    const at::Tensor& src,
+    const at::Tensor& dst) {
+  BlockingCopyGuard barrier(src);
+  Memcpy(dst_ptr, src_ptr, nbytes, MemcpyDeviceToDevice);
+  SyncPeerCopyVisibility(src, dst);
+}
+
+#if defined(FLAGOS_BOXING_BUILD)
+// The maca CUDA copy kernel (reached via DeviceBoxingGuard + at::native::copy_)
+// has no UInt16/UInt32/UInt64 case in its dtype dispatch, so any dtype *cast*
+// to or from those types raises `"copy_" not implemented for 'UInt32'`. The
+// host copy kernel supports the full set, so route those casts through a CPU
+// round-trip instead. Same-dtype copies are unaffected: they take the direct
+// memcpy path and never reach a dtype dispatch.
+//
+// Only the boxing arms ask this question: without the boxing kernels every copy
+// goes through strided_copy_cast_via_cpu below, which is a host round-trip
+// already.
+bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
+  if (src == dst) {
+    return false;
+  }
+  const auto is_unsigned = [](c10::ScalarType t) {
+    return t == c10::kUInt16 || t == c10::kUInt32 || t == c10::kUInt64;
+  };
+  return is_unsigned(src) || is_unsigned(dst);
+}
+#endif
+
+// Copy `src` (a flagos device tensor) into `dst` (a flagos device tensor),
+// casting dtype and honoring both tensors' strides, via a host round-trip.
+// This is the fallback for dtype casts the native CUDA copy kernel cannot do
+// (see cast_needs_cpu_roundtrip). Each blocking Memcpy binds the device of the
+// buffer it touches and drains that device's queue first -- src and dst need not
+// live on the same device, so the guard is per-copy rather than per-function.
+void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
+  at::Tensor src_contig = src.is_contiguous()
+      ? src
+      : at::native::flagos::contiguous(src, c10::MemoryFormat::Contiguous);
+  size_t nbytes = src_contig.numel() * src_contig.element_size();
+  at::Tensor cpu_src =
+      at::empty(src_contig.sizes(), src_contig.options().device(at::kCPU));
+  if (nbytes > 0) {
+    BlockingMemcpy(
+        cpu_src.data_ptr(),
+        src_contig.data_ptr(),
+        nbytes,
+        MemcpyDeviceToHost,
+        src_contig);
+  }
+
+  // Map dst's whole storage (not just its view) into CPU byte memory so a
+  // strided in-place copy preserves the parts of the storage dst's view does
+  // not cover. The CPU copy then writes only dst's logical elements.
+  size_t dst_storage_nbytes = dst.storage().nbytes();
+  at::Tensor cpu_dst_storage = at::empty(
+      {static_cast<int64_t>(dst_storage_nbytes)},
+      dst.options().device(at::kCPU).dtype(at::kByte));
+  int64_t dst_storage_offset_bytes =
+      dst.storage_offset() * static_cast<int64_t>(dst.element_size());
+  char* dst_storage_base =
+      static_cast<char*>(dst.data_ptr()) - dst_storage_offset_bytes;
+  if (dst_storage_nbytes > 0) {
+    BlockingMemcpy(
+        cpu_dst_storage.data_ptr(),
+        dst_storage_base,
+        dst_storage_nbytes,
+        MemcpyDeviceToHost,
+        dst);
+  }
+
+  at::Tensor cpu_dst = at::empty({0}, dst.options().device(at::kCPU));
+  cpu_dst.set_(
+      cpu_dst_storage.storage(),
+      dst.storage_offset(),
+      dst.sizes(),
+      dst.strides());
+  at::native::copy_(cpu_dst, cpu_src, false);
+
+  if (dst_storage_nbytes > 0) {
+    BlockingMemcpy(
+        dst_storage_base,
+        cpu_dst_storage.data_ptr(),
+        dst_storage_nbytes,
+        MemcpyHostToDevice,
+        dst);
+  }
+}
+
+} // namespace
+
+// Defined here, outside the anonymous namespace, because contiguous_ops.cc
+// needs it too: clone()'s contiguous fast path issues the same device-to-device
+// memcpy this file's copies do, against a tensor that need not live on the
+// device that is current (issue #281, MUSA). Declared in copy_ops.h.
+void BlockingMemcpy(
+    void* dst,
+    const void* src,
+    size_t nbytes,
+    MemcpyKind kind,
+    const at::Tensor& on_device) {
+  BlockingCopyGuard barrier(on_device);
+  Memcpy(dst, src, nbytes, kind);
+}
+
+ADD_IMPL_TO_DISPATCHER(
+    LocalScalarDenseFn, local_scalar_dense_dispatcher, "_local_scalar_dense")
+ADD_IMPL_TO_DISPATCHER(ToCopyFn, to_copy_dispatcher, "_to_copy")
+
+namespace {
+
+at::Scalar LocalScalarDenseKernel(const at::Tensor& self) {
+  return ::at::native::flagos::_local_scalar_dense(self);
+}
+
+at::Tensor ToCopyKernel(
+    const at::Tensor& self,
+    std::optional<c10::ScalarType> dtype,
+    std::optional<c10::Layout> layout,
+    std::optional<c10::Device> device,
+    std::optional<bool> pin_memory,
+    bool non_blocking,
+    std::optional<c10::MemoryFormat> memory_format) {
+  return ::at::native::flagos::_to_copy(
+      self, dtype, layout, device, pin_memory, non_blocking, memory_format);
+}
+
+}  // namespace
+
+REGISTER_IMPL_TO_DISPATCHER(
+    LocalScalarDenseFn,
+    local_scalar_dense_dispatcher,
+    Backend::kFlagGemsCpp,
+    LocalScalarDenseKernel);
+REGISTER_IMPL_TO_DISPATCHER(
+    ToCopyFn, to_copy_dispatcher, Backend::kFlagGemsCpp, ToCopyKernel);
+
+at::Tensor _copy_from(
+    const at::Tensor& self,
+    const at::Tensor& dst,
+    bool non_blocking) {
+  TORCH_CHECK(self.defined(), "Source tensor (self) is not defined.");
+  TORCH_CHECK(dst.defined(), "Destination tensor (dst) is not defined.");
+
+  // Raw memcpy copies storage bytes and therefore bypasses lazy Conjugate and
+  // Negative math bits. Materialize those bits once before entering any of the
+  // device-copy fast paths, which otherwise intentionally operate on raw data.
+  if (self.is_conj() || self.is_neg()) {
+    return at::native::flagos::_copy_from(
+        at::native::flagos::materialize_math_bits(
+            self, c10::MemoryFormat::Preserve),
+        dst,
+        non_blocking);
+  }
+
+  // Both flagos tensors: copy on-device.
+  if (self.is_privateuseone() && dst.is_privateuseone()) {
+    if (self.is_contiguous() && dst.is_contiguous() &&
+        self.sizes().equals(dst.sizes()) &&
+        self.scalar_type() == dst.scalar_type()) {
+      // Fast path: both contiguous, same shape and dtype → direct memcpy.
+      // Both operands are flagos tensors but not necessarily on the same one, so
+      // this goes through the peer-aware form.
+      size_t nbytes = self.numel() * self.element_size();
+      if (nbytes > 0) {
+        CrossDeviceMemcpy(
+            dst.data_ptr(), self.data_ptr(), nbytes, self, dst);
+      }
+    } else {
+#if defined(FLAGOS_MUSA_KERNEL)
+      // MUSA: mudnn handles strides and dtype casts on device in one pass
+      // (IDENTITY or CAST over stride-carrying Tensors). Without this,
+      // at::native::copy_ would route to the CUDA DispatchStub and fail with
+      // "missing kernel for cuda", since nothing ever fills the CUDA slot on
+      // this platform.
+      musa_ops::MudnnCopy(self, const_cast<at::Tensor&>(dst));
+#elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+#if defined(FLAGOS_BOXING_BUILD)
+      // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
+      // strided copy kernel (handles strides, dtype casts on-device). The
+      // native copy kernel has no UInt16/UInt32/UInt64 case, so those casts
+      // take the host round-trip instead.
+      if (cast_needs_cpu_roundtrip(self.scalar_type(), dst.scalar_type())) {
+        strided_copy_cast_via_cpu(self, dst);
+      } else {
+        DeviceBoxingGuard guard(self, dst);
+        at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
+      }
+#else
+      // CUDA platform without the boxing kernels: the native CUDA strided copy
+      // kernel is not in this wheel (the CUDA DispatchStub is empty), so every
+      // strided or dtype-casting copy goes through host memory, which handles
+      // strides, storage offsets and dtype casts in one pass.
+      strided_copy_cast_via_cpu(self, dst);
+#endif
+#else
+      // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy and
+      // Kunlunxin via the XPU op library's own strided copy; all honor the src
+      // and dst strides and storage offset. Avoids the CPU round-trip below,
+      // which on GCU also D2H's the entire destination storage.
+#if defined(USE_MPS)
+      const bool copied_on_device = mps::CopyStridedToDense(self, dst);
+#elif defined(USE_GCU)
+      const bool copied_on_device = gcu::StridedCopy(dst, self);
+#elif defined(USE_KUNLUNXIN)
+      const bool copied_on_device = kunlunxin::StridedCopy(dst, self);
+#else
+      const bool copied_on_device = ascend::StridedCopy(dst, self);
+#endif
+      if (!copied_on_device) {
+        // Fallback: CPU round-trip (device->host, strided copy on CPU, host->device).
+        at::Tensor self_contig = self.is_contiguous()
+            ? self
+            : at::native::flagos::contiguous(self, c10::MemoryFormat::Contiguous);
+        size_t nbytes = self_contig.numel() * self_contig.element_size();
+        at::Tensor cpu_src =
+            at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
+        if (nbytes > 0) {
+          BlockingMemcpy(
+              cpu_src.data_ptr(),
+              self_contig.data_ptr(),
+              nbytes,
+              MemcpyDeviceToHost,
+              self_contig);
+        }
+        size_t dst_storage_nbytes = dst.storage().nbytes();
+        at::Tensor cpu_dst_storage = at::empty(
+            {static_cast<int64_t>(dst_storage_nbytes)},
+            dst.options().device(at::kCPU).dtype(at::kByte));
+        int64_t dst_storage_offset_bytes =
+            dst.storage_offset() * static_cast<int64_t>(dst.element_size());
+        char* dst_storage_base =
+            static_cast<char*>(dst.data_ptr()) - dst_storage_offset_bytes;
+        if (dst_storage_nbytes > 0) {
+          BlockingMemcpy(
+              cpu_dst_storage.data_ptr(),
+              dst_storage_base,
+              dst_storage_nbytes,
+              MemcpyDeviceToHost,
+              dst);
+        }
+
+        at::Tensor cpu_dst = at::empty({0}, dst.options().device(at::kCPU));
+        cpu_dst.set_(
+            cpu_dst_storage.storage(),
+            dst.storage_offset(),
+            dst.sizes(),
+            dst.strides());
+        at::native::copy_(cpu_dst, cpu_src, false);
+        if (dst_storage_nbytes > 0) {
+          BlockingMemcpy(
+              dst_storage_base,
+              cpu_dst_storage.data_ptr(),
+              dst_storage_nbytes,
+              MemcpyHostToDevice,
+              dst);
+        }
+      }
+#endif
+    }
+    return dst;
+  }
+
+  // Cross-device copies: ensure contiguous src, then memcpy.
+  // For non-contiguous dst, copy into a contiguous temp on dst's device,
+  // then use the boxing path to scatter into dst with proper strides.
+  at::Tensor self_contig = self.is_contiguous() ? self
+      : (self.is_privateuseone()
+             ? at::native::flagos::contiguous(self, c10::MemoryFormat::Contiguous)
+             : self.contiguous());
+
+  // Every `Memcpy` below moves raw storage bytes and takes its byte count from
+  // the *source*, so a cross-device copy between differing dtypes used to hand
+  // the driver a count that did not match the destination's element width. A
+  // CPU f64 source copied into a device f32 destination wrote twice the
+  // destination's length -- a silent device-heap overflow -- and the f32 -> f64
+  // direction wrote half of the destination and left the rest holding whatever
+  // the allocator last had there. The device<->device pair is unaffected: it
+  // takes the strided-copy path below, which casts.
+  //
+  // Measured on GCU before this conversion, `torch.empty(6, dtype=torch.float64,
+  // device="flagos:6").copy_(torch.arange(6) + 0.5)` returned
+  // `[0.125, 128.0, 4096.0, ...]` -- two fp32 values reinterpreted as one fp64,
+  // max|diff| 4.09e3 -- and `dev_f32.copy_(cpu_f64)` gave max|diff| 4.5e0.
+  // Converting the source on the host first keeps both sides the same width, so
+  // `nbytes` describes the copy exactly; the host `copy_` reached below does the
+  // cast that a raw memcpy cannot.
+  if (self.is_cpu() && self.scalar_type() != dst.scalar_type()) {
+    self_contig = self_contig.to(dst.scalar_type());
+  }
+
+  size_t nbytes = self_contig.numel() * self_contig.element_size();
+
+  // Every branch below issues a blocking `Memcpy`. The source may have been
+  // produced by kernels on a non-default stream (and `contiguous()` above may
+  // itself have just enqueued one there), which a synchronous cudaMemcpy does
+  // not wait for. Drain the current stream first.
+  //
+  // The guard binds the accelerator-side operand whichever side it is on -- the
+  // source when the source is the flagos tensor, the destination otherwise --
+  // because exactly one of the four branches below has a flagos source. On a
+  // CUDA-platform backend a flagos tensor's index is the CUDA index of the same
+  // physical device, so a "CUDA" destination binds correctly too.
+  BlockingCopyGuard barrier(self_contig.is_privateuseone() ? self_contig : dst);
+
+  if (self.is_cpu() && dst.is_privateuseone()) {
+    if (dst.is_contiguous()) {
+      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+    } else {
+      auto tmp = at::empty(self_contig.sizes(), dst.options());
+      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+#if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
+    defined(USE_ILUVATAR) || defined(USE_MPS)
+      at::native::flagos::_copy_from(tmp, dst, false);
+#elif defined(FLAGOS_BOXING_BUILD)
+      DeviceBoxingGuard guard(tmp, dst);
+      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+#else
+      // CUDA platform without the boxing kernels: there is no native CUDA copy
+      // kernel to scatter `tmp` into the strided `dst` with, so take the flagos
+      // copy path, which gathers through host memory.
+      at::native::flagos::_copy_from(tmp, dst, false);
+#endif
+    }
+  } else if (self.is_privateuseone() && dst.is_cpu()) {
+    if (self.scalar_type() != dst.scalar_type()) {
+      // The device->host direction of the dtype case described above: land the
+      // source's bytes in a CPU tensor of the *source's* dtype, then let the
+      // host copy_ cast into `dst`. Allocating `tmp` with `dst.options()` (as
+      // the branches below do) would make the memcpy disagree with its own
+      // buffer as well.
+      auto tmp =
+          at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
+      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+    } else if (dst.is_contiguous()) {
+      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+    } else {
+      auto tmp = at::empty(self_contig.sizes(), dst.options());
+      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToHost);
+      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+    }
+  } else if (self.is_privateuseone() && dst.is_cuda()) {
+    if (dst.is_contiguous()) {
+      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+    } else {
+      auto tmp = at::empty(self_contig.sizes(), dst.options());
+      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+    }
+#if defined(USE_MPS)
+  } else if (self.is_mps() && dst.is_privateuseone()) {
+    at::Tensor cpu_src =
+        at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
+    at::native::copy_(cpu_src, self_contig, false);
+    if (dst.is_contiguous()) {
+      BlockingCopyGuard barrier(dst);
+      Memcpy(dst.data_ptr(), cpu_src.data_ptr(), nbytes, MemcpyHostToDevice);
+    } else {
+      at::Tensor tmp = at::empty(self_contig.sizes(), dst.options());
+      BlockingCopyGuard barrier(dst);
+      Memcpy(tmp.data_ptr(), cpu_src.data_ptr(), nbytes, MemcpyHostToDevice);
+      at::native::flagos::_copy_from(tmp, dst, false);
+    }
+#endif
+  } else if (self.is_cuda() && dst.is_privateuseone()) {
+    if (dst.is_contiguous()) {
+      Memcpy(dst.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+    } else {
+      auto tmp = at::empty(self_contig.sizes(), dst.options());
+      Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+#if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
+    defined(USE_ILUVATAR) || defined(USE_MPS)
+      at::native::flagos::_copy_from(tmp, dst, false);
+#elif defined(FLAGOS_BOXING_BUILD)
+      DeviceBoxingGuard guard(tmp, dst);
+      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
+#else
+      // CUDA platform without the boxing kernels: as above, scatter through the
+      // flagos copy path instead of the absent native CUDA copy kernel.
+      at::native::flagos::_copy_from(tmp, dst, false);
+#endif
+    }
+  } else {
+    TORCH_CHECK(
+        false,
+        "Unsupported device combination for copy: ",
+        self.device(),
+        " -> ",
+        dst.device());
+  }
+
+  return dst;
+}
+
+at::Tensor _copy_from_and_resize(
+    const at::Tensor& self,
+    const at::Tensor& dst) {
+  at::native::resize_(dst, self.sizes(), std::nullopt);
+  return at::native::flagos::_copy_from(self, dst, false);
+}
+
+at::Scalar _local_scalar_dense(const at::Tensor& self) {
+  TORCH_CHECK(
+      self.numel() == 1,
+      "_local_scalar_dense expects a tensor with 1 element");
+  at::Tensor cpu_tensor = at::empty({1}, self.options().device(at::kCPU));
+  // `.item()` on a value just computed on a side stream must see that kernel's
+  // result, and a blocking cudaMemcpy does not wait for a non-blocking stream.
+  // It also has to be issued while *self's* device is current -- `.item()` is the
+  // most common host read in a model (loss printing, `if loss > x`, schedulers)
+  // and is usually called on a tensor whose device is not the ambient one.
+  BlockingMemcpy(
+      cpu_tensor.data_ptr(),
+      self.data_ptr(),
+      self.element_size(),
+      MemcpyDeviceToHost,
+      self);
+  return cpu_tensor.item();
+}
+
+at::Tensor _to_copy(
+    const at::Tensor& self,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt,
+    bool non_blocking,
+    std::optional<c10::MemoryFormat> memory_format_opt) {
+  TORCH_CHECK(
+      !layout_opt.has_value() || self.layout() == layout_opt.value(),
+      "to(options) doesn't support converting to a different layout, "
+      "but got self.layout being ",
+      self.layout(),
+      " and options.layout set as ",
+      layout_opt.value());
+  TORCH_CHECK(
+      self.layout() == c10::kStrided,
+      "flagos _to_copy only supports strided tensors, but got ",
+      self.layout());
+  TORCH_CHECK(
+      !self.is_quantized(),
+      "flagos _to_copy does not support quantized tensors yet");
+  const bool want_pinned = pin_memory_opt.value_or(false);
+  auto device = device_opt.value_or(self.device());
+  auto dtype = dtype_opt.value_or(self.scalar_type());
+  auto memory_format = memory_format_opt.value_or(c10::MemoryFormat::Preserve);
+
+  // pin_memory is a host-memory concept: only a CPU destination can be pinned.
+  // (Pinning is applied to the result CPU tensor below via _pin_memory, using
+  // the flagos host allocator = cudaMallocHost on MetaX.)
+  TORCH_CHECK(
+      !want_pinned || device.is_cpu(),
+      "flagos _to_copy: pin_memory=True is only valid for a CPU destination, "
+      "but got destination device ",
+      device);
+
+  if ((device.is_privateuseone() || device.is_cuda()) && device.index() < 0) {
+    const auto self_device = self.device();
+    const auto device_index = self_device.type() == device.type() &&
+            self_device.index() >= 0
+        ? self_device.index()
+        : 0;
+    device = c10::Device(device.type(), device_index);
+  }
+
+  if (device == self.device() && dtype == self.scalar_type()) {
+    if (memory_format == c10::MemoryFormat::Preserve) {
+      return self.clone();
+    }
+    return self.clone().contiguous(memory_format);
+  }
+
+  bool src_is_flagos = self.is_privateuseone();
+  bool dst_is_flagos = device.is_privateuseone();
+  bool dst_is_cuda = device.is_cuda();
+  bool dst_is_cpu = device.is_cpu();
+
+  at::Tensor result;
+
+  // Branches that end in a blocking `Memcpy` drain the current stream first --
+  // after their `contiguous()` call, which may itself enqueue a kernel there.
+  // `tensor.to("cpu")` inside `with flagos.stream(s)` returned stale data
+  // before this. Branches that redispatch to a native CUDA kernel instead need
+  // no drain: those kernels are stream-ordered on their own.
+
+  if (src_is_flagos && dst_is_cuda) {
+    int device_index =
+        device.index() >= 0 ? device.index()
+                            : (self.device().index() >= 0 ? self.device().index() : 0);
+#if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
+    defined(USE_MUSA) || defined(USE_MPS)
+    // No CUDA runtime on these platforms: keep the explicit contiguous + memcpy
+    // path (a "CUDA" destination here is only reachable via shared-memory tricks
+    // that don't exist without cudart).
+    at::Tensor self_contig = self.contiguous();
+    at::Tensor temp = at::empty(
+        self_contig.sizes(),
+        self_contig.options().device(c10::Device(c10::kCUDA, device_index)));
+    size_t nbytes = self_contig.numel() * self_contig.element_size();
+    if (nbytes > 0) {
+      BlockingMemcpy(
+          temp.data_ptr(),
+          self_contig.data_ptr(),
+          nbytes,
+          MemcpyDeviceToDevice,
+          self_contig);
+    }
+    result = (dtype != self.scalar_type()) ? temp.to(dtype) : temp;
+#else
+    // CUDA platform fast path: flagos (PrivateUse1) and CUDA share the same GPU
+    // memory, so box self to CUDA and redispatch straight to the native CUDA
+    // _to_copy with an explicit CUDA DispatchKeySet. That skips re-entering the
+    // dispatcher from the top (no risk of routing back to PrivateUse1) and lets
+    // the native kernel read self's strides + cast dtype in one on-device pass,
+    // allocating the result directly on CUDA -- no intermediate contiguous copy
+    // or manual Memcpy. self is unboxed back to PrivateUse1 on guard teardown.
+    DeviceBoxingGuard guard(self);
+    result = at::_ops::_to_copy::redispatch(
+        c10::DispatchKeySet(c10::DispatchKey::CUDA),
+        self,
+        dtype,
+        /*layout=*/std::nullopt,
+        c10::Device(c10::kCUDA, device_index),
+        /*pin_memory=*/std::nullopt,
+        non_blocking,
+        memory_format);
+#endif
+  } else if (src_is_flagos && dst_is_flagos) {
+    int device_index = device.index() >= 0 ? device.index() : 0;
+    at::Tensor self_contig = self.contiguous();
+    if (dtype != self.scalar_type()) {
+#if defined(FLAGOS_MUSA_KERNEL)
+      // MUSA: mudnn's Unary::CAST converts dtype on device, so no CPU
+      // round-trip for a plain `.to(dtype)`.
+      result = at::empty(self_contig.sizes(), self_contig.options()
+          .dtype(dtype).device(c10::Device(c10::kPrivateUse1, device_index)));
+      musa_ops::MudnnCopy(self_contig, result);
+#elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
+    defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
+    defined(USE_ILUVATAR) || defined(USE_MPS)
+      // No CUDA runtime on these backends, so the CUDA TensorIterator cast
+      // below is unavailable.
+#ifdef USE_ASCEND
+      // Ascend casts on-device via aclnnCast, avoiding the D2H->CPU->H2D
+      // round-trip that dominated HF RMSNorm (two fp16<->fp32 casts per layer).
+      result = ascend::DtypeCast(self_contig, dtype);
+#endif
+#ifdef USE_GCU
+      // GCU casts on-device via topsatenToCopy, the same D2H->CPU->H2D
+      // round-trip being what makes this the single most expensive op in
+      // Qwen-Image's forward: 437.9 ms per cast at the (1, 24, 4114, 4114)
+      // attention shape, against 5.6 ms for the vendor call.
+      result = gcu::DtypeCast(self_contig, dtype);
+#endif
+#ifdef USE_KUNLUNXIN
+      // Kunlunxin casts on-device through the XPU op library's `cast`. That
+      // entry point takes no dtype argument -- the destination descriptor's
+      // declared type is the target -- so DtypeCast allocates the result at
+      // `dtype` and hands it over as the output operand.
+      result = kunlunxin::DtypeCast(self_contig, dtype);
+#endif
+      if (!result.defined()) {
+        // Fallback: CPU round-trip when no on-device cast is available
+        // (TsingMicro / MUSA / BPU, a GCU dtype pair topsatenToCopy declines,
+        // an Ascend dtype pair aclnnCast rejects, or a Kunlunxin pair its
+        // DtypeCast declines).
+        size_t nbytes = self_contig.numel() * self_contig.element_size();
+        at::Tensor cpu_tensor =
+            at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
+        if (nbytes > 0) {
+          BlockingMemcpy(
+              cpu_tensor.data_ptr(),
+              self_contig.data_ptr(),
+              nbytes,
+              MemcpyDeviceToHost,
+              self_contig);
+        }
+        cpu_tensor = cpu_tensor.to(dtype);
+        result = at::empty(
+            cpu_tensor.sizes(),
+            cpu_tensor.options().device(c10::Device(c10::kPrivateUse1, device_index)));
+        size_t result_nbytes = cpu_tensor.numel() * cpu_tensor.element_size();
+        if (result_nbytes > 0) {
+          BlockingMemcpy(
+              result.data_ptr(),
+              cpu_tensor.data_ptr(),
+              result_nbytes,
+              MemcpyHostToDevice,
+              result);
+        }
+      }
+#else
+      result = at::empty(
+          self_contig.sizes(),
+          self_contig.options()
+              .dtype(dtype)
+              .device(c10::Device(c10::kPrivateUse1, device_index)));
+#if defined(FLAGOS_BOXING_BUILD)
+      // CUDA platform: use DeviceBoxingGuard + CUDA TensorIterator copy kernel
+      // for dtype cast on-device, avoiding costly CPU round-trip. The native
+      // copy kernel has no UInt16/UInt32/UInt64 case, so those casts take the
+      // host round-trip instead.
+      if (cast_needs_cpu_roundtrip(self_contig.scalar_type(), dtype)) {
+        strided_copy_cast_via_cpu(self_contig, result);
+      } else {
+        DeviceBoxingGuard guard(self_contig, result);
+        at::native::copy_(result, self_contig, false);
+      }
+#else
+      // CUDA platform without the boxing kernels: there is no native CUDA
+      // TensorIterator cast to dispatch to, so cast through host memory.
+      strided_copy_cast_via_cpu(self_contig, result);
+#endif
+#endif
+    } else {
+      result = at::empty(
+          self_contig.sizes(),
+          self_contig.options().device(c10::Device(c10::kPrivateUse1, device_index)));
+      size_t nbytes = self_contig.numel() * self_contig.element_size();
+      if (nbytes > 0) {
+        // `device` may name a different flagos device than self's, which is the
+        // cross-device case `device_map="auto"` hits on every forward.
+        CrossDeviceMemcpy(
+            result.data_ptr(), self_contig.data_ptr(), nbytes, self_contig, result);
+      }
+    }
+  } else if (src_is_flagos && dst_is_cpu) {
+    at::Tensor self_contig = self.contiguous();
+    at::Tensor temp =
+        at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
+    size_t nbytes = self_contig.numel() * self_contig.element_size();
+    if (nbytes > 0) {
+      BlockingMemcpy(
+          temp.data_ptr(),
+          self_contig.data_ptr(),
+          nbytes,
+          MemcpyDeviceToHost,
+          self_contig);
+    }
+    result = (dtype != self.scalar_type()) ? temp.to(dtype) : temp;
+  } else if (!src_is_flagos && dst_is_flagos) {
+    int device_index = device.index() >= 0 ? device.index() : 0;
+#if defined(USE_MPS)
+    const at::Tensor& src = self.is_mps() ? mps_source_to_cpu(self) : self;
+#else
+    const at::Tensor& src = self;
+#endif
+    at::Tensor src_contig = src.contiguous();
+    if (dtype != src.scalar_type()) {
+      src_contig = src_contig.to(dtype);
+    }
+    result = at::empty(
+        src_contig.sizes(),
+        src_contig.options().device(c10::Device(c10::kPrivateUse1, device_index)));
+    size_t nbytes = src_contig.numel() * src_contig.element_size();
+    if (nbytes > 0) {
+      BlockingCopyGuard barrier(result);
+      if (src.is_cpu()) {
+        Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyHostToDevice);
+      } else if (src.is_cuda()) {
+        Memcpy(result.data_ptr(), src_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
+      } else {
+        TORCH_CHECK(false, "_to_copy: unsupported source device ", self.device());
+      }
+    }
+  } else {
+    at::Tensor cpu_tensor = self.to(at::kCPU).to(dtype);
+    if (dst_is_flagos) {
+      int device_index = device.index() >= 0 ? device.index() : 0;
+      result = at::empty(
+          cpu_tensor.sizes(),
+          cpu_tensor.options().device(c10::Device(c10::kPrivateUse1, device_index)));
+      size_t nbytes = cpu_tensor.numel() * cpu_tensor.element_size();
+      if (nbytes > 0) {
+        BlockingMemcpy(
+            result.data_ptr(),
+            cpu_tensor.data_ptr(),
+            nbytes,
+            MemcpyHostToDevice,
+            result);
+      }
+    } else {
+      result = cpu_tensor.to(device);
+    }
+  }
+
+  if (memory_format != c10::MemoryFormat::Preserve) {
+    result = result.contiguous(memory_format);
+  }
+
+  // Copy the result (CPU) into pinned host memory when requested. Guarded above
+  // so this only runs for a CPU destination; _pin_memory routes to the flagos
+  // host allocator (cudaMallocHost on MetaX) registered via the hooks.
+  if (want_pinned) {
+    result = at::_pin_memory(result, std::nullopt);
+  }
+
+  return result;
+}
+
+} // namespace at::native::flagos

@@ -1,0 +1,677 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set(LIBRARY_NAME torch_fl)
+
+option(FLAGOS_BUILD_VENDOR "Build the FLAGOS_ACCELERATOR vendor's native kernels (no-op where the vendor ships none)" ON)
+option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
+option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
+option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
+option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
+
+file(GLOB_RECURSE SOURCE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
+)
+
+# Apple Metal. The operator layer under aten/backends/mps/ is Objective-C++
+# (.mm) because MPSGraph is an Objective-C API, and the globs above only pick up
+# *.cc/*.cu. Objective-C++ is an Apple-only language, so this is gated on the
+# platform rather than run for every build -- exactly as the runtime's own .mm
+# glob is (csrc/runtime/accelerator/CMakeLists.txt).
+if(FLAGOS_ACCELERATOR STREQUAL "mps")
+  file(GLOB_RECURSE MPS_ATEN_OBJCXX_SOURCES
+      "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/mps/*.mm"
+  )
+  list(APPEND SOURCE_FILES ${MPS_ATEN_OBJCXX_SOURCES})
+endif()
+
+# Exclude runtime/accelerator (built separately as subdirectory)
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/.*")
+# stream_api is built as a separate shared lib
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api\\.cc")
+
+# Select exactly one vendor-specific DeviceTracer implementation. CUDA and PPU
+# use the CUPTI-compatible tracer, MetaX uses that same tracer against MCPTI,
+# DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Iluvatar uses
+# the CUPTI-compatible tracer against corex's CUDA-shaped runtime
+# (libcupti.so.10.2 + cupti_activity.h; the shim dlopens CUPTI, so there is no
+# link-time dependency). Platforms without a supported activity API use the
+# unavailable implementation -- that includes Kunlunxin, whose native XPU backend
+# keeps its kernels off the CUDA dispatch key the CUPTI tracer reads, so the
+# tracer would report an empty device timeline rather than the XPU one.
+#
+# Each source defines the same factory.
+#
+# Every accelerator in cmake/flagos_platforms.json must land in exactly one arm;
+# tests/unit/test_device_tracer_selection.py pins the resulting mapping.
+# Iluvatar's corex SDK ships a CUPTI-named facade over IXPTI whose cuptiGetVersion
+# reports CUPTI API 13 -- the record layout cupti_shim.h assumes -- and it dlopens
+# by the bare soname `libcupti.so`, which corex provides. Measured on a BI-V150
+# (ub22): the shim binds and cuptiActivityRegisterCallbacks resolves, so the CUPTI
+# arm is the correct one for iluvatar.
+if(FLAGOS_ACCELERATOR STREQUAL "cuda"
+   OR FLAGOS_ACCELERATOR STREQUAL "metax"
+   OR FLAGOS_ACCELERATOR STREQUAL "ppu"
+   OR FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+elseif(FLAGOS_ACCELERATOR STREQUAL "ascend")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+else()
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+endif()
+
+# CANN's public MSPTI headers are optional. The tracer is still compiled with a
+# small unavailable implementation when a CPU-only build has no toolkit, while
+# the Python import path likewise treats libmspti.so as optional.
+if(FLAGOS_ACCELERATOR STREQUAL "ascend")
+  find_path(MSPTI_INCLUDE_DIR
+    NAMES mspti.h
+    PATHS
+      "$ENV{ASCEND_HOME}/tools/mspti/include"
+      "$ENV{ASCEND_HOME_PATH}/tools/mspti/include"
+      /usr/local/Ascend/ascend-toolkit/latest/tools/mspti/include
+      /usr/local/Ascend/cann-9.0.0/tools/mspti/include)
+  if(MSPTI_INCLUDE_DIR)
+    include_directories(${MSPTI_INCLUDE_DIR})
+    add_compile_definitions(FLAGOS_HAVE_MSPTI=1)
+    message(STATUS "mspti.h found: ${MSPTI_INCLUDE_DIR}")
+  else()
+    message(STATUS "mspti.h NOT found; Ascend profiler will be unavailable")
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+  find_path(MUPTI_INCLUDE_DIR
+    NAMES mupti_activity.h
+    PATHS
+      "$ENV{MUSA_HOME}/include"
+      /usr/local/musa/include
+      /usr/local/musa-5.1.0/include)
+  if(MUPTI_INCLUDE_DIR)
+    include_directories(${MUPTI_INCLUDE_DIR})
+    add_compile_definitions(FLAGOS_HAVE_MUPTI=1)
+    message(STATUS "mupti_activity.h found: ${MUPTI_INCLUDE_DIR}")
+  else()
+    message(STATUS "mupti_activity.h NOT found; MUSA profiler will be unavailable")
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+  find_path(TOPSPTI_INCLUDE_DIR
+    NAMES topspti_activity.h
+    PATHS
+      "$ENV{TOPS_HOME}/extras/TOPSPTI/include"
+      "$ENV{TOPS_HOME}/include/gcu/topspti"
+      /opt/tops/extras/TOPSPTI/include
+      /opt/tops/include/gcu/topspti)
+  if(TOPSPTI_INCLUDE_DIR)
+    include_directories(${TOPSPTI_INCLUDE_DIR})
+    add_compile_definitions(FLAGOS_HAVE_TOPSPTI=1)
+    message(STATUS "topspti_activity.h found: ${TOPSPTI_INCLUDE_DIR}")
+  else()
+    message(STATUS "topspti_activity.h NOT found; GCU profiler will be unavailable")
+  endif()
+endif()
+
+# Vendor native kernels, gated by FLAGOS_BUILD_VENDOR and by FLAGOS_ACCELERATOR: only the
+# current accelerator's backend directory is ever compiled in (cuda/dcu/
+# tsingmicro/bpu/ppu ship no backend directory, so the switch is a no-op
+# there). This replaces the old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
+# switches, which could never be meaningfully combined anyway -- exactly one
+# vendor is ever enabled per build.
+#
+# MetaX has no native kernel directory: it is a CUDA-boxing vendor, so the
+# hand-written mxcc kernels were removed (git history retains them). Kunlunxin
+# is native: aten/backends/kunlunxin/ wraps the XPU op library (xdnn_pytorch)
+# directly instead of boxing onto CUDA. Iluvatar is native too:
+# aten/backends/iluvatar/ wraps corex's CUDA-named C ABI (ixdnn/ixblas)
+# directly, with FlagGems still owning the ops it covers.
+if(NOT FLAGOS_BUILD_VENDOR)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|gcu|iluvatar|kunlunxin|musa|mps|tsingmicro)/.*")
+  message(STATUS "FLAGOS_BUILD_VENDOR=OFF: no vendor native kernels")
+else()
+  foreach(_vendor_dir ascend gcu iluvatar kunlunxin musa mps tsingmicro)
+    if(NOT FLAGOS_ACCELERATOR STREQUAL _vendor_dir)
+      list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
+    endif()
+  endforeach()
+  message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR}")
+endif()
+
+# Generated CUDA boxing kernels (CUDA-ABI vendor path: the wheel bundles the
+# vendor's libtorch_cuda.so and these wrappers re-dispatch PrivateUse1 ->
+# CUDA into it). Vendors with no CUDA runtime at all (gcu: the tops stack
+# exports no cuda symbols; musa: torch_musa registers under PrivateUse1,
+# never the CUDA key) build with FLAGOS_BUILD_BOXING=OFF, which drops them; the
+# musa wrappers under aten/backends/musa/generated/ replace them there.
+if(NOT FLAGOS_BUILD_BOXING)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/generated/cuda_kernels\\.cc$")
+  message(STATUS "FLAGOS_BUILD_BOXING=OFF: no generated CUDA boxing kernels")
+endif()
+
+# FLAGOS_BUILD_FLAGGEMS path: keep csrc/aten/backends/flagos/python_op_caller.cc and
+# build csrc/aten/generated/flaggems_python_kernels.cc with FLAGOS_FLAGGEMS_PYTHON
+# defined (below). The stale C++/python_wrapper files were removed; nothing to
+# exclude here.
+
+# Drop the flagos backend (only python_op_caller.{h,cc} lives here) when nothing
+# left in SOURCE_FILES needs it. Three independent consumers:
+#
+#   * the FlagGems dispatch paths (FLAGOS_BUILD_FLAGGEMS_CPP / FLAGOS_BUILD_FLAGGEMS), which call
+#     into Python through it;
+#   * the TileOPs path (FLAGOS_BUILD_TILEOPS), which reaches its TileLang kernels the
+#     same way;
+#   * generated/cuda_kernels.cc, whose native RNG kernels call
+#     GetFlagosDefaultCudaGenerator() unconditionally since the unified-RNG
+#     generator injection, regardless of the FlagGems dispatch path;
+#   * the MetaX boxing build, whose vendor runtime calls the same provider even
+#     with FlagGems off.
+#
+# The second consumer is why this test runs *here* and reads SOURCE_FILES
+# instead of options: cuda_kernels.cc is generated code under aten/generated/,
+# governed by FLAGOS_BUILD_BOXING -- not by any vendor switch (the gcu/musa builds
+# exclude it through FLAGOS_BUILD_BOXING=OFF). Keying on options instead once left
+# dcu linking with an undefined GetFlagosDefaultCudaGenerator (its boxing
+# kernels ride the hipified DTK torch, not any switch).
+set(_needs_python_op_caller OFF)
+if(FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_TILEOPS)
+  set(_needs_python_op_caller ON)
+endif()
+if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
+  set(_needs_python_op_caller ON)
+endif()
+if(FLAGOS_ACCELERATOR STREQUAL "gcu")
+  set(_needs_python_op_caller ON)
+endif()
+foreach(_src IN LISTS SOURCE_FILES)
+  if(_src MATCHES ".*/aten/generated/cuda_kernels\\.cc$")
+    set(_needs_python_op_caller ON)
+  endif()
+endforeach()
+if(NOT _needs_python_op_caller)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/flagos/.*")
+endif()
+
+set(_torch_fl_sources ${SOURCE_FILES})
+
+add_library(${LIBRARY_NAME} SHARED ${_torch_fl_sources})
+set_target_properties(${LIBRARY_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# CUPTI headers for the profiler child (Stage B). Runtime symbols are dlopen'd,
+# so we only need the include path, not the link library.
+#
+# CRITICAL: the header MUST match the CUDA runtime actually running in the
+# process (cu12.8 via the external libtorch_cuda.so + pip nvidia-*-cu12 wheels),
+# NOT the system CUDA-13.0 toolkit. The activity-record struct layouts and the
+# CUpti_ActivityKind enum values DIFFER between major versions (e.g.
+# CONCURRENT_KERNEL is 10 in cu12 but 9 elsewhere); using the wrong header
+# decodes kernel timestamps/names as garbage. So probe the pip cu12 CUPTI
+# include dir first, then fall back to system paths.
+execute_process(
+  COMMAND "${PYTHON_EXECUTABLE}" -c
+    "import importlib.util,os,sys; s=importlib.util.find_spec('nvidia'); \
+d=[os.path.join(b,'cuda_cupti','include') for b in (s.submodule_search_locations or []) \
+if os.path.exists(os.path.join(b,'cuda_cupti','include','cupti_activity.h'))]; \
+sys.stdout.write(d[0] if d else '')"
+  OUTPUT_VARIABLE CUPTI_CU12_INCLUDE_DIR
+  ERROR_QUIET)
+find_path(CUPTI_INCLUDE_DIR cupti_activity.h
+  PATHS ${CUPTI_CU12_INCLUDE_DIR}
+        /usr/local/cuda-13.0/targets/x86_64-linux/include
+        /usr/local/cuda/extras/CUPTI/include
+  NO_DEFAULT_PATH)
+find_path(CUPTI_INCLUDE_DIR cupti_activity.h
+  PATHS /usr/local/cuda-13.0/targets/x86_64-linux/include
+        /usr/local/cuda/extras/CUPTI/include)
+if(CUPTI_INCLUDE_DIR)
+  target_include_directories(${LIBRARY_NAME} PRIVATE ${CUPTI_INCLUDE_DIR})
+endif()
+
+# cuda_occupancy.h -- CUDA's occupancy calculator, used by the device tracer to
+# compute the kernel "est. achieved occupancy %" that torch-cuda's trace carries.
+#
+# Unlike the CUPTI headers above this is genuinely version-INsensitive: it is a
+# pure-header calculator with no linking, no CUDA context, and no dependence on
+# activity-record layouts -- it takes device attributes and a launch config as
+# plain integers. So any toolkit's copy will do, and no cu12-vs-cu13 hazard
+# applies. Note it ships in the CUDA *runtime* include dir, NOT alongside the
+# CUPTI headers, hence a separate search.
+#
+# Optional by design: without it we simply omit the three occupancy fields
+# rather than fail the build, so a machine with no CUDA toolkit headers still
+# gets everything else in the trace.
+set(CUDA_OCCUPANCY_SEARCH_PATHS
+  "$ENV{CUDA_HOME}/include"
+  "$ENV{CUDA_HOME}/targets/x86_64-linux/include"
+  /usr/local/cuda/include
+  /usr/local/cuda/targets/x86_64-linux/include
+  /usr/local/cuda-13.0/targets/x86_64-linux/include)
+if(FLAGOS_ACCELERATOR STREQUAL "metax")
+  list(APPEND CUDA_OCCUPANCY_SEARCH_PATHS
+    "${MACA_PATH}/tools/cu-bridge/include")
+endif()
+find_path(CUDA_OCCUPANCY_INCLUDE_DIR cuda_occupancy.h
+  PATHS ${CUDA_OCCUPANCY_SEARCH_PATHS})
+if(CUDA_OCCUPANCY_INCLUDE_DIR)
+  target_include_directories(${LIBRARY_NAME} PRIVATE ${CUDA_OCCUPANCY_INCLUDE_DIR})
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_CUDA_OCCUPANCY=1)
+  message(STATUS "cuda_occupancy.h found: ${CUDA_OCCUPANCY_INCLUDE_DIR}")
+else()
+  message(STATUS "cuda_occupancy.h NOT found; kernel occupancy fields will be omitted")
+endif()
+
+# ROCtracer headers for DCU profiler support. Similar to CUPTI above, we only
+# need headers at build time; runtime symbols are resolved via dlopen.
+#
+# ROCtracer ships with the DTK (DCU ToolKit) at /opt/dtk. The headers live in
+# /opt/dtk/roctracer/include, and the library is at /opt/dtk/lib/libroctracer64.so.
+# Unlike CUPTI's version-sensitivity, ROCtracer 4.1 is stable across DTK releases.
+if(FLAGOS_ACCELERATOR STREQUAL "dcu")
+  find_path(ROCTRACER_INCLUDE_DIR
+    NAMES roctracer.h
+    PATHS
+      $ENV{ROCM_PATH}/roctracer/include
+      $ENV{ROCM_PATH}/roctracer/include
+      /opt/dtk/roctracer/include
+      /opt/rocm/roctracer/include
+    NO_DEFAULT_PATH)
+  find_path(ROCTRACER_INCLUDE_DIR
+    NAMES roctracer.h
+    PATHS
+      /opt/dtk/roctracer/include
+      /opt/rocm/roctracer/include)
+
+  if(ROCTRACER_INCLUDE_DIR)
+    target_include_directories(${LIBRARY_NAME} PRIVATE ${ROCTRACER_INCLUDE_DIR})
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_ROCTRACER=1)
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE __HIP_PLATFORM_AMD__=1)
+    message(STATUS "roctracer.h found: ${ROCTRACER_INCLUDE_DIR}")
+
+    # Find the roctracer library for linking
+    find_library(ROCTRACER_LIBRARY
+      NAMES roctracer64
+      PATHS
+        $ENV{ROCM_PATH}/lib
+        $ENV{ROCM_PATH}/lib
+        /opt/dtk/lib
+        /opt/rocm/lib
+      NO_DEFAULT_PATH)
+    find_library(ROCTRACER_LIBRARY
+      NAMES roctracer64
+      PATHS
+        /opt/dtk/lib
+        /opt/rocm/lib)
+
+    if(ROCTRACER_LIBRARY)
+      message(STATUS "libroctracer64.so found: ${ROCTRACER_LIBRARY}")
+    else()
+      message(WARNING "libroctracer64.so NOT found; profiler may fail at runtime")
+    endif()
+  else()
+    message(STATUS "roctracer.h NOT found; DCU profiler will be unavailable")
+  endif()
+endif()
+
+# Build stream_api as a standalone shared lib so liboperators.so can resolve it at runtime
+if(FLAGOS_BUILD_FLAGGEMS_CPP AND FLAGOS_ACCELERATOR STREQUAL "ascend")
+  add_library(stream_api SHARED "${CMAKE_CURRENT_SOURCE_DIR}/runtime/accelerator/ascend/stream_api.cc")
+  target_compile_definitions(stream_api PRIVATE USE_ASCEND=1)
+  target_include_directories(stream_api PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${ASCEND_HOME}/include
+  )
+  find_library(ASCENDCL_LIB ascendcl
+      PATHS ${ASCEND_HOME}/lib64)
+  target_link_libraries(stream_api PRIVATE torch_cpu_library ${ASCENDCL_LIB})
+  install(TARGETS stream_api
+      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+endif()
+
+target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    FLAGOS_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
+# Compile the generated FlagGems Python-path kernels (guarded by this macro) and
+# python_op_caller only when the Python FlagGems path is requested.
+if(FLAGOS_BUILD_FLAGGEMS)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_PYTHON)
+endif()
+
+# Tells register.cc that the generated CUDA boxing kernels are part of this
+# wheel, so the CUDA-ABI platforms (cuda, metax, dcu, ppu, tsingmicro) may claim
+# every generated op on PrivateUse1. With boxing OFF -- the default for all of
+# them -- those wheels carry no CUDA kernels, so register.cc claims only the ops
+# their conf routes to a FlagGems backend and leaves the rest to cpu_fallback.
+if(FLAGOS_BUILD_BOXING)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_BOXING_BUILD=1)
+endif()
+
+# Compile the FlagGems C++ dispatch kernels (flaggems_cpp_kernels.cc, guarded by
+# this macro) only when linking against liboperators.so is requested.
+if(FLAGOS_BUILD_FLAGGEMS_CPP)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_CPP)
+endif()
+
+# Compile the generated TileOPs kernels (guarded by this macro). Like the
+# FlagGems Python path they call into the interpreter via python_op_caller, so
+# there is nothing to link against -- TileOPs is a pure-Python (TileLang)
+# package, and its absence at runtime is handled by the shims falling back to
+# aten. Building them in costs nothing when unused: the conf files decide
+# whether any op actually routes to Backend::kTileOps.
+if(FLAGOS_BUILD_TILEOPS)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
+endif()
+
+# The kernel sets this wheel actually contains, as one comma-separated list, so
+# a dispatch failure can say whether the backend is missing because this build
+# never compiled it rather than leaving the user to guess. Names match
+# setup.py::KERNEL_SET_NAME, which writes the same set into the generated
+# torch_fl/_build_config.py; the two must not diverge, so the -D and the record
+# are both derived from these very options.
+set(FLAGOS_BUILTIN_KERNELS "")
+if(FLAGOS_BUILD_VENDOR)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "vendor,")
+endif()
+if(FLAGOS_BUILD_FLAGGEMS)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems,")
+endif()
+if(FLAGOS_BUILD_BOXING)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "boxing,")
+endif()
+if(FLAGOS_BUILD_FLAGGEMS_CPP)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems_cpp,")
+endif()
+if(FLAGOS_BUILD_TILEOPS)
+  string(APPEND FLAGOS_BUILTIN_KERNELS "tileops,")
+endif()
+message(STATUS "torch_fl kernel sets: ${FLAGOS_BUILTIN_KERNELS}")
+target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    FLAGOS_BUILTIN_KERNELS="${FLAGOS_BUILTIN_KERNELS}"
+)
+
+# The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
+# c10/cuda/impl/cuda_cmake_macros.h. A boxing build's cuda_memory.h includes
+# CUDACachingAllocator.h to delegate flagos allocation to the CUDA caching
+# allocator; this macro tells CUDAMacros.h to skip that generated configure
+# file. Not needed for Ascend (which does not include c10/cuda headers), and
+# inert on the default FlagGems-primary wheel, where boxing is off and no
+# c10/cuda header is pulled in at all -- the flag is per platform in the table.
+if(FLAGOS_PLATFORM_C10_CUDA_CONFIGURE)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
+endif()
+
+# The platform's USE_* macro (USE_ASCEND, USE_DCU, USE_MUSA, ...), from the table.
+# Selects the per-platform runtime/ATen headers in the C++ sources.
+if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
+endif()
+
+# FLAGOS_ACCEL_<UPPER> for every accelerator. The USE_* macro above is empty for
+# cuda and ppu and names a vendor SDK (USE_MACA, USE_DCU) at that, so it cannot
+# tell register.cc which FlagGems-primary register list a boxing-OFF CUDA-ABI
+# build should compile: cuda, metax, dcu, ppu and tsingmicro all share the one
+# `#else` arm there. This define is that discriminator and nothing else.
+string(TOUPPER "${FLAGOS_ACCELERATOR}" _FLAGOS_ACCEL_UPPER)
+target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    FLAGOS_ACCEL_${_FLAGOS_ACCEL_UPPER}=1
+)
+
+if(FLAGOS_ACCELERATOR STREQUAL "metax")
+  # maca's torch headers are a hard fork gated on USE_MACA (e.g. C10_WARP_SIZE,
+  # Context.h allow_tf32_cudnn). Without it the headers hit static_assert(0).
+  # MCPTI callback ids use a different namespace from NVIDIA CUPTI ids.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    FLAGOS_METAX_MCPTI=1
+    FLAGOS_SOFT_LOWP=1)
+elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_SOFT_LOWP=1)
+  # DTK's libtorch_hip.so carries no index-value bounds check: index.Tensor,
+  # index_select, index_fill, index_add, index_copy and index_reduce all accept
+  # an out-of-range index and read or write outside the tensor (silently wrong
+  # data, or a VMFault that aborts the process -- issue #381). The check cannot
+  # be added back to ATen, so the generated PrivateUse1 wrappers run it instead.
+  # See csrc/aten/index_bounds.h; the call sites cost nothing where this macro
+  # is absent.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_INDEX_BOUNDS_CHECK=1)
+endif()
+
+set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
+if(FLAGOS_BUILD_FLAGGEMS_CPP)
+  if(TARGET FlagGems::operators)
+    list(APPEND _torch_fl_link_libs FlagGems::operators)
+  elseif(TARGET operators)
+    list(APPEND _torch_fl_link_libs operators)
+  endif()
+endif()
+
+if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
+  # The CPU TorchConfig used for the isolated Python environment does not
+  # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
+  # symbols are resolved by ELF instead of being left to process-global lookup.
+  set(_metax_torch_lib "$ENV{FLAGOS_VENDOR_TORCH_LIB}")
+  if(IS_DIRECTORY "${_metax_torch_lib}")
+    if(EXISTS "${_metax_torch_lib}/libtorch_cuda.so")
+      list(APPEND _torch_fl_link_libs
+        "${_metax_torch_lib}/libtorch_cuda.so")
+      target_link_options(${LIBRARY_NAME} PRIVATE "-Wl,--no-as-needed")
+    endif()
+  endif()
+endif()
+
+if(FLAGOS_ACCELERATOR STREQUAL "ascend")
+  find_library(OPAPI_LIB opapi
+      PATHS $ENV{ASCEND_HOME}/lib64
+            /usr/local/Ascend/ascend-toolkit/latest/lib64)
+  find_library(NNOPBASE_LIB nnopbase
+      PATHS $ENV{ASCEND_HOME}/lib64
+            /usr/local/Ascend/ascend-toolkit/latest/lib64)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(OPAPI_LIB)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${OPAPI_LIB})
+  endif()
+  if(NNOPBASE_LIB)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${NNOPBASE_LIB})
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+  # Selects backends/dcu_memory.h (CUDA-compat runtime, no c10::cuda caching
+  # delegation -- the DCU wheel exports c10::hip, not c10::cuda).
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  # Link roctracer library for profiler support
+  if(ROCTRACER_LIBRARY)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${ROCTRACER_LIBRARY})
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+  # Kunlunxin is native, not CUDA-boxing: aten/backends/kunlunxin/ wraps the
+  # vendor xdnn op library directly, so no tensor reaches the CUDA dispatch key
+  # and the generated boxing kernels are not built. The runtime dependency is
+  # libxpurt (via ${CUDA_RUNTIME_LIB} in ${_torch_fl_link_libs}), not libcudart's
+  # kernels -- cudart is on that line only for hooks.h's pinned-pointer probe.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_KUNLUNXIN_KERNEL gates the m.impl subset in register.cc, mirroring
+    # FLAGOS_GCU_KERNEL and FLAGOS_MUSA_KERNEL: without the xdnn kernels there is
+    # nothing to register on PrivateUse1.
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_KUNLUNXIN_KERNEL=1)
+    target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${XDNN_PYTORCH_INCLUDE_DIRS})
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+  # Iluvatar owns its runtime: backends/iluvatar_memory.h (no c10::cuda caching
+  # delegation) and runtime/accelerator/iluvatar/ (its own stream registry). The
+  # corex CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside
+  # ${_torch_fl_link_libs}; nothing on that line resolves to libtorch_cuda.so or
+  # libc10_cuda.so, so the wheel installs against a CPU torch.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_ILUVATAR_KERNEL gates the m.impl subset in register.cc, mirroring
+    # FLAGOS_KUNLUNXIN_KERNEL: without the vendor kernels there is nothing to
+    # register on PrivateUse1. FlagGems stays primary -- its .inc is still
+    # included -- and the native .inc claims only the ops gen_vendor_confs.py
+    # routes to "iluvatar" (the FlagGems set minus its coverage).
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_ILUVATAR_KERNEL=1)
+    target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR})
+    target_link_libraries(${LIBRARY_NAME} PRIVATE
+        ${FLAGOS_ILUVATAR_CUDNN_LIB} ${FLAGOS_ILUVATAR_CUBLAS_LIB})
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_MUSA_KERNEL gates the m.impl subset in register.cc, mirroring
+    # FLAGOS_GCU_KERNEL.
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_MUSA_KERNEL=1)
+    # mudnn's headers and library both live in the MUSA toolkit, already on the
+    # include path via cuda_runtime_compat. Nothing vendor-specific to stage: no
+    # torch_musa tree, and so none of the header-shadowing hazards it brought
+    # (it re-shipped ~1341 of torch's own ATen/ops/*_ops.h frozen at the
+    # vendor's torch version).
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${MUDNN_LIB} ${MURAND_LIB})
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
+  # Selects backends/bpu_memory.h and, like tsingmicro, skips the generated
+  # PrivateUse1 op registrations: the BPU executes whole compiled graphs, so
+  # there is no per-op kernel to register and every aten call reaches
+  # cpu_fallback. Acceleration comes from the torch.compile backend instead.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
+      PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)
+  if(HOBOT_UCP_INCLUDE_DIR)
+    target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_GCU_KERNEL gates the m.impl subset in register.cc: without the
+    # topsaten kernels there is nothing to register on PrivateUse1.
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_GCU_KERNEL=1)
+    target_include_directories(${LIBRARY_NAME} PRIVATE
+        ${TOPSATEN_INCLUDE_DIRS})
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${TOPSATEN_LIB})
+  endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
+  # Apple Metal. The operator layer (backends/mps/, an MPSGraph-first wrapper
+  # set) is Objective-C++ and links the Metal frameworks on top of the
+  # Metal/Foundation pair the runtime already links: MPSNDArray (the
+  # offset-capable tensor description) lives in MetalPerformanceShaders, and the
+  # graph itself in MetalPerformanceShadersGraph. All four ship with the macOS
+  # SDK, so there is no vendor toolkit to find.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_MPS_KERNEL is not needed: register.cc gates the m.impl subset on
+    # USE_MPS alone, which the platform table sets for every mps build.
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    # MPSNDArray/MPSNDArrayDescriptor (the offset-capable tensor description
+    # the marshalling layer uses) live in MetalPerformanceShaders, while the
+    # graph itself is MetalPerformanceShadersGraph. Both are needed.
+    find_library(MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
+    find_library(MPSGRAPH_FRAMEWORK MetalPerformanceShadersGraph REQUIRED)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE
+        ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${MPS_FRAMEWORK} ${MPSGRAPH_FRAMEWORK})
+  endif()
+else()
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+endif()
+
+target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+if(FLAGOS_ACCELERATOR STREQUAL "metax")
+  target_include_directories(${LIBRARY_NAME} PRIVATE
+    "${MACA_PATH}/tools/cu-bridge/include"
+    "${MACA_PATH}/include"
+    "${MACA_PATH}/include/mcr")
+
+  find_library(MCBLAS_LIB mcblas
+      PATHS "${MACA_PATH}/lib"
+            "${MACA_PATH}/lib64"
+            "/opt/maca/lib"
+            "/opt/maca/lib64")
+  if(MCBLAS_LIB)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${MCBLAS_LIB})
+  else()
+    message(WARNING "mcblas not found, MetaX mm will fallback to naive kernel")
+  endif()
+
+endif()
+
+# Self-contained wheel: the installed libtorch_fl.so must NOT bake the build
+# machine's absolute torch/lib path into its RUNPATH -- that path does not exist
+# on a target machine, and on one where it does exist it silently overrides the
+# interpreter actually running. Resolve a bundled forked libtorch via $ORIGIN
+# instead. Everything else the backend put on CMAKE_INSTALL_RPATH is kept,
+# including FlagGems' liboperators.so dir, so the C++ FlagGems path
+# (FLAGOS_BUILD_FLAGGEMS_CPP, kFlagOs) still resolves without LD_LIBRARY_PATH. Mirrors the
+# patchelf pass in scripts/vendor/bundle_*_libtorch.sh.
+flagos_set_portable_rpath(${LIBRARY_NAME})
+
+install(TARGETS ${LIBRARY_NAME}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+if(FLAGOS_PLATFORM_WRITES_MARKER)
+  # Which platforms land here is the `writes_platform_marker` flag in
+  # cmake/flagos_platforms.json. torch_fl/__init__.py pins backends_cuda.conf by
+  # default, which on GCU/MUSA/BPU/Ascend/TsingMicro would route every op to the
+  # (absent) CUDA kernels -- on a tsingmicro wheel that is a hard failure, not a
+  # fallback, since the config routes to `cuda` and the CPU-torch build cannot
+  # init CUDA.
+  # Record the platform next to the libs so the Python side can pick
+  # backends_<platform>.conf instead. BPU additionally uses the marker to decide
+  # whether to register the "bpu" torch.compile backend. Ascend previously
+  # relied on runtime /dev/davinci* detection in torch_fl/__init__.py instead of
+  # this marker (see _select_backend_config()); that detection can silently
+  # fall through on a build/host where /dev is not enumerable, which also
+  # makes tests/integration/platform_support.py misclassify the platform as
+  # "cuda". Writing the marker makes Ascend identification explicit, matching
+  # the other native platforms, while the davinci-based detection stays as a
+  # fallback for wheels built before this change.
+  set(_flagos_platform_marker "${CMAKE_CURRENT_BINARY_DIR}/flagos_platform")
+  file(WRITE "${_flagos_platform_marker}" "${FLAGOS_ACCELERATOR}\n")
+  install(FILES "${_flagos_platform_marker}"
+      DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()

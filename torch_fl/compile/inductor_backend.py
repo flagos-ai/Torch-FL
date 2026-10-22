@@ -1,0 +1,686 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Inductor-based compile backend for the flagos device.
+
+flagos is registered with inductor as a first-class GPU device (see
+device_interface.py and inductor_codegen.py), so the traced graph is handed to
+`compile_fx` *as is* -- still on flagos. Inductor generates Triton kernels for
+it directly.
+
+Why not rewrite the graph to cuda (as an earlier version did): `at::getAccelerator()`
+is PrivateUse1/flagos here, and `torch::autograd::Node::stream()` only yields a
+stream when a node's input device type matches the accelerator. A cuda-rewritten
+graph therefore produces stream-less autograd nodes, and AOT autograd's backward
+trace inside compile_fx trips `opt_ready_stream && opt_parent_stream`
+(engine.cpp:1085). Staying on flagos also removes a copy-in/copy-out per call.
+"""
+
+import os
+import sys
+from typing import Any, Callable, Dict, List, Optional
+
+import torch
+import torch.fx
+import torch.cuda
+
+from torch_fl import _env
+
+
+def _patch_native_triton_autotune() -> None:
+    """Select the first compiled config without CUDA benchmarking.
+
+    Inductor's generic runtime autotuner allocates a CUDA L2-cache buffer and
+    records ``torch.cuda.Event`` pairs. Neither API exists on a native
+    accelerator, and the vendor driver already compiles a valid launch
+    configuration for each kernel. Selecting the first compiled configuration
+    keeps execution native; it does not claim autotuning performance parity.
+    """
+    from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.device_interface import is_native_accelerator
+
+    if not is_native_accelerator():
+        return
+    try:
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+    except ImportError:
+        return
+    if getattr(CachingAutotuner, "_flagos_native_patched", False):
+        return
+
+    vendor = "MThreads FlagTree" if ACCELERATOR == "musa" else "triton_gcu"
+    # triton_gcu miscompiles a persistent reduction at XBLOCK=1: the cross-row
+    # `tl.sum(..., 1)` silently returns wrong values (XBLOCK=2 fails to compile
+    # outright, XBLOCK>=4 is correct). It is the first config Inductor generates
+    # for every persistent reduction, so taking launchers[0] would ship the
+    # broken one -- and being wrong rather than failing, it only surfaces as bad
+    # gradients, since dim-0 reductions are mostly a backward-pass shape.
+    min_xblock = 4 if ACCELERATOR == "gcu" else 0
+
+    def _usable(launcher) -> bool:
+        if not min_xblock:
+            return True
+        xblock = getattr(launcher, "config", None)
+        xblock = getattr(xblock, "kwargs", {}).get("XBLOCK")
+        return xblock is None or xblock >= min_xblock
+
+    def autotune_to_one_config(self, *args, **kwargs):
+        del args, kwargs
+        if not self.launchers:
+            self.precompile()
+        if not self.launchers:
+            raise RuntimeError(f"{vendor} produced no valid launchers")
+        # Prefer a config the vendor compiles correctly; fall back to the first
+        # one rather than failing, so a kernel whose only config is XBLOCK=1
+        # still runs as it did before.
+        self.launchers = [next(filter(_usable, self.launchers), self.launchers[0])]
+
+    CachingAutotuner.autotune_to_one_config = autotune_to_one_config
+    CachingAutotuner._flagos_native_patched = True
+
+
+def _patch_native_cuda_probe() -> None:
+    """Make Inductor's CUDA-shaped FakeTensor probe see native accelerators.
+
+    CPU-only PyTorch reports ``torch.cuda.is_available() == False`` even when
+    the PrivateUse1 vendor runtime is active. Inductor uses that probe to decide
+    whether FakeTensor should initialize a GPU context; without this bridge it
+    skips the registered flagos device and later attempts CPU-torch CUDA lazy
+    initialization ("Torch not compiled with CUDA enabled"). The compiler still
+    receives a ``flagos`` device and never executes a CUDA kernel.
+
+    What it replaces is kept as ``torch.cuda._flagos_original_is_available``,
+    which is torch_fl's only way to ask what torch itself answers once this has
+    run. `torch_fl._real_cuda_is_available` reads it, and the ``cuda`` device
+    alias installs only when torch reports no CUDA device -- which is what the
+    saved copy answers, and what the redirected probe no longer does.
+    """
+    from torch_fl.compile.device_interface import is_native_accelerator
+
+    if not is_native_accelerator():
+        return
+    if getattr(torch.cuda, "_flagos_native_patched", False):
+        return
+    if not torch.flagos.is_available():
+        return
+
+    original = torch.cuda.is_available
+    torch.cuda.is_available = torch.flagos.is_available
+    # Read back by torch_fl._real_cuda_is_available, which has to tell this
+    # redirect from a real CUDA runtime; the alias's guard depends on it.
+    #
+    # An already-stashed copy wins: torch_fl's own earlier redirect (the
+    # ``torch.cuda.is_available = lambda: flagos.device_count() > 0`` in
+    # ``_alias_cuda_to_flagos``'s phase) has usually run by the time this does,
+    # and storing *that* keeps a torch_fl lambda rather than torch's answer --
+    # which is the one value the copy exists to preserve, and reading it back as
+    # "there is real CUDA" would mislabel every native accelerator.
+    torch.cuda._flagos_original_is_available = getattr(
+        torch.cuda, "_flagos_original_is_available", original
+    )
+    torch.cuda._flagos_native_patched = True
+
+
+def _bind_musa_flagtree_runtime() -> None:
+    """Bind MThreads FlagTree to torch_fl's MUSA runtime, not to torch_musa.
+
+    The vendor driver reads its device/stream/capability from the separate
+    ``torch_musa`` plugin, whose ``__init__`` claims the process-global
+    PrivateUse1 hooks torch_fl must own. ``flagtree_shim`` rebinds those lookups
+    onto torch_fl, so the compiler and the native mudnn kernels share one device
+    and one stream. This must run before any Triton driver instance exists, hence
+    module load time.
+    """
+    from torch_fl._build_config import ACCELERATOR
+
+    if ACCELERATOR != "musa":
+        return
+    try:
+        from torch_fl.compile.flagtree_shim import bind_flagtree_musa_driver
+
+        bind_flagtree_musa_driver()
+    except ImportError:
+        pass
+
+
+def _patch_native_cache_system_key() -> None:
+    """Key Inductor's cache on the vendor device instead of a CUDA/HIP probe.
+
+    ``CacheBase.get_system`` reads ``torch.cuda.get_device_properties`` and then
+    picks a branch on ``torch.version.cuda``: ``None`` means HIP, so it reads
+    ``gcnArchName``. torch_fl aliases that CUDA getter onto flagos, so on a
+    native accelerator the call *succeeds* and lands in the HIP branch, where
+    the vendor properties object has no such attribute -- an AttributeError the
+    surrounding ``except (AssertionError, RuntimeError)`` does not catch.
+
+    Report the vendor device name and the Triton target arch instead. Both
+    belong in the key: a cache entry compiled for gcu300 must not be reused on
+    gcu400, whose warp size differs. ``get_system`` is ``functools.cache``d, so
+    this has to be installed before the first compile.
+    """
+    from torch_fl.compile.device_interface import is_native_accelerator
+
+    if not is_native_accelerator():
+        return
+    try:
+        from torch._inductor.codecache import CacheBase
+    except ImportError:
+        return
+    if getattr(CacheBase, "_flagos_native_patched", False):
+        return
+
+    import functools
+    import hashlib
+    import json
+
+    from torch_fl._build_config import ACCELERATOR
+
+    @staticmethod
+    @functools.cache
+    def get_system() -> Dict[str, Any]:
+        from torch._inductor.runtime.triton_compat import HAS_TRITON, triton_key
+
+        triton_version = triton_key() if HAS_TRITON else None
+        system: Dict[str, Any] = {
+            "device": {"name": None},
+            "version": {"triton": triton_version},
+        }
+        try:
+            props = torch.flagos.get_device_properties(torch.flagos.current_device())
+            system["device"]["name"] = getattr(props, "name", None)
+        except (AssertionError, RuntimeError, AttributeError):
+            pass
+        try:
+            from triton.runtime import driver
+
+            system["device"]["arch"] = str(driver.active.get_current_target().arch)
+        except Exception:
+            pass
+        system["version"][ACCELERATOR] = getattr(
+            torch.flagos, "__version__", ACCELERATOR
+        )
+        system["hash"] = hashlib.sha256(
+            json.dumps(system, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return system
+
+    CacheBase.get_system = get_system
+    CacheBase._flagos_native_patched = True
+
+
+def _patch_cuda_rng_for_cpu_torch():
+    """
+    Workaround for CPU torch + external libtorch_cuda.so setup.
+
+    dynamo tries to capture torch.cuda.get_rng_state() during tracing, but
+    CPU torch doesn't have torch._C._cuda_getDevice() binding. We patch
+    torch.cuda to provide stub implementations that prevent the crash.
+
+    Only applied when torch._C lacks CUDA bindings (CPU torch build).
+    """
+    import torch as torch_module
+
+    if hasattr(torch_module._C, "_cuda_getDevice"):
+        return  # Native CUDA torch, no patch needed
+
+    # CPU torch detected - patch CUDA RNG functions
+    import torch.cuda as cuda_module
+
+    # Stub implementations that won't be called (dynamo just needs them callable)
+    def _stub_get_rng_state(device=None):
+        # Return empty tensor as placeholder (dynamo won't execute this)
+        return torch_module.tensor([], dtype=torch_module.uint8)
+
+    def _stub_set_rng_state(new_state, device=None):
+        pass  # No-op
+
+    cuda_module.get_rng_state = _stub_get_rng_state
+    cuda_module.set_rng_state = _stub_set_rng_state
+
+
+_STATIC_LAUNCHER_ENV = "TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER"
+_COMPILE_THREADS_ENV = "TORCHINDUCTOR_COMPILE_THREADS"
+
+
+def _static_cuda_launcher_available() -> bool:
+    """Whether this torch build carries Inductor's static Triton launcher."""
+    return hasattr(torch._C, "_StaticCudaLauncher")
+
+
+def pin_static_cuda_launcher() -> bool:
+    """Point Inductor at Triton's own launcher when the static one is unbuilt.
+
+    ``torch._inductor`` launches Triton kernels through
+    ``torch._C._StaticCudaLauncher`` when it can, and the CPU torch wheel this
+    build pairs with an external ``libtorch_cuda.so`` does not compile that
+    class. The ``"flagos"`` backend has scoped the config patch to its own
+    compiles from the start; every *other* entry point -- a bare
+    ``torch.compile``, or ``transformers``' ``CompiledFlexAttention``, which
+    compiles without naming a backend -- reached Inductor's default and died
+    before generating a kernel::
+
+        InductorError: ImportError: cannot import name
+        '_StaticCudaLauncher' from 'torch._C'
+
+    Reading the capability once at import and writing the answer where Inductor
+    and its compile workers will both read it makes the default entry point work.
+    Measured on the H100 CUDA-boxing build at B=2, H=4, S=256, D=64, fp32:
+    ``torch.compile(flex_attention)`` compiled, reached the same kernel
+    ``backend="flagos"`` does, and agreed with the CPU reference to 5.2e-03 (the
+    ``tf32`` the template runs at), where it previously raised.
+
+    Why the environment and not only the config attribute: ``config.py``
+    evaluates ``static_cuda_launcher_default()`` once, at its own import. If that
+    import has already happened the export is too late for it, and the attribute
+    is what Inductor will read; if it has not, the export is what it will read.
+    Both are covered so neither order can lose the pin. The pin has nothing to
+    override -- a build without the class cannot launch through it -- and it
+    still steps aside rather than half-applying when the variable is already
+    exported, so ``TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=1`` remains available
+    for a build that has the class and wants to be told so.
+
+    Returns whether the pin was applied by this call.
+    """
+    if _static_cuda_launcher_available():
+        return False
+
+    if not _env.set_foreign(_STATIC_LAUNCHER_ENV, "0"):
+        # Already exported -- either this same "0", or an explicit "1".
+        # `set_foreign` treats any export as the user's answer, so leave the
+        # process alone.
+        return False
+
+    config = sys.modules.get("torch._inductor.config")
+    if config is not None:
+        config.use_static_cuda_launcher = False
+    return True
+
+
+def pin_compile_threads() -> bool:
+    """Keep vendor-driver compilation in one process where a worker cannot cope.
+
+    ``flagos_compile_backend`` scopes ``compile_threads = 1`` into its own
+    compiles, which covers ``torch.compile(backend="flagos")`` but *not*
+    Inductor's default entry point. ``transformers``' ``CompiledFlexAttention``
+    -- and ``backend="inductor"`` generally -- reaches the default, and a
+    parallel compile then spawns ``python -m torch._inductor.compile_worker``
+    subprocesses that import ``torch`` and ``triton`` but never ``torch_fl``. On
+    MThreads FlagTree the driver there finds no active backend and the compile
+    dies in ``triton_helpers.set_driver_to_gpu()`` with "Could not find an active
+    GPU backend"; on all of them the vendor driver is unsafe to initialize in a
+    forked worker. Reading the capability once at import and writing it where
+    Inductor and its compile workers both read it is what makes the default
+    entry point work, exactly as ``pin_static_cuda_launcher`` above does for the
+    launcher.
+
+    ``compile_threads`` is a plain Inductor config value that decides the pool at
+    read time, so assigning it here needs no config attribute of torch's -- and
+    the per-compile ``_patch_vendor_flagtree_compile_workers`` cannot reach a
+    compile that never names this backend. Serial compilation costs compile time
+    and nothing else.
+
+    An explicit ``TORCHINDUCTOR_COMPILE_THREADS`` stays authoritative: Inductor
+    turns it into the very config value this would write, so the pin steps aside
+    either way. The vendor compilers that need it are pinned -- GCU, PPU, and
+    MThreads FlagTree on MUSA -- and so is a CPU-only torch on the cuda platform.
+    A CUDA-like build whose torch *does* carry CUDA kernels keeps upstream's
+    parallel compile: its worker links the nvidia Triton backend and finds its
+    driver without torch_fl, so there is nothing to work around. The pin is
+    needed for the CUDA-shaped PPU too, which is why the test is the vendor
+    backend and not ``is_native_accelerator()``.
+
+    Returns whether the pin applied a value.
+    """
+    if os.environ.get(_COMPILE_THREADS_ENV) is not None:
+        return False
+
+    from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.device_interface import _torch_has_cuda_kernels
+    from torch_fl.compile.flagtree_shim import flagtree_backend
+
+    if ACCELERATOR == "gcu":
+        vendor_pinned = True
+    else:
+        backend = flagtree_backend()
+        vendor_pinned = backend == "ppu" or (
+            ACCELERATOR == "musa" and backend == "mthreads"
+        )
+
+    # The default FlagGems-primary CUDA wheel links the CPU-only pip torch, where
+    # `torch.cuda.is_available()` is torch_fl's own shim. The compile worker
+    # imports torch and triton but never torch_fl, so that probe answers False
+    # there and the nvidia Triton driver reports no active backend -- the same
+    # cold-compile failure as the vendors above, on a platform whose *torch* is
+    # the thing that is missing. Autoload's `torch.backends` entry point is the
+    # real cure, but it is disabled wherever `TORCH_DEVICE_BACKEND_AUTOLOAD=0`
+    # (the documented launch env), so pinning here is what keeps the default
+    # `backend="inductor"` entry point -- transformers' CompiledFlexAttention,
+    # for one -- working in that configuration.
+    #
+    # Scoped to the cuda platform: every non-CUDA build's torch answers False to
+    # this probe as well, so gating on the probe alone would pin the vendors that
+    # are deliberately left parallel.
+    if not vendor_pinned and ACCELERATOR == "cuda" and not _torch_has_cuda_kernels():
+        vendor_pinned = True
+    if not vendor_pinned:
+        return False
+
+    # Write both places, for the same reason `pin_static_cuda_launcher` does:
+    # Inductor's config may already have been imported (and would have read the
+    # environment at its own import, too late), or it may not be imported yet (and
+    # would otherwise start from the CPU-count default). The environment also
+    # reaches a compile worker that Inductor spawns fresh.
+    _env.set_foreign(_COMPILE_THREADS_ENV, "1")
+    config = sys.modules.get("torch._inductor.config")
+    if config is not None:
+        config.compile_threads = 1
+    return True
+
+
+# Apply runtime probes at module load time, before FakeTensor is imported by
+# the first compile. Native MUSA and GCU are not CUDA, but Inductor's GPU probe
+# is the shared gate for CUDA-shaped GPU devices. The static-launcher pin goes
+# first because it is the only one that has to be in place before any earlier
+# ``torch._inductor`` import can cache Inductor's answer.
+pin_static_cuda_launcher()
+pin_compile_threads()
+_patch_native_cuda_probe()
+_patch_native_triton_autotune()
+_patch_native_cache_system_key()
+_bind_musa_flagtree_runtime()
+_patch_cuda_rng_for_cpu_torch()
+
+
+def _resolve_config_patches(
+    mode: Optional[str],
+    options: Optional[Dict[str, Any]],
+    dynamic: Optional[bool],
+) -> Dict[str, Any]:
+    """Turn torch.compile's mode/options into an inductor config patch dict.
+
+    Same expansion `_TorchCompileInductorWrapper` does, plus the flagos-specific
+    overrides this build needs. Passing these to compile_fx as `config_patches`
+    scopes them to this compile, instead of mutating inductor's global config.
+    """
+    patches: Dict[str, Any] = {}
+
+    if mode and mode != "default":
+        from torch._inductor import list_mode_options
+
+        patches.update(list_mode_options(mode, dynamic))
+    if options:
+        patches.update({k.replace("-", "_"): v for k, v in options.items()})
+
+    from torch_fl.compile.device_interface import is_native_accelerator
+
+    # Native accelerators have no CUDA implementation for Inductor's CUDA-only
+    # pattern registration (for example SDPA replacement construction, and the
+    # pad_mm bundle, which constructs a real tensor on the device). Keep the
+    # general joint-graph passes, but skip that optional pattern bundle until the
+    # vendor compiler supplies an equivalent lowering.
+    if is_native_accelerator():
+        patches["use_joint_graph_passes"] = False
+        patches["max_autotune"] = False
+        patches["max_autotune_pointwise"] = False
+        patches["max_autotune_gemm"] = False
+        patches["max_autotune_gemm_backends"] = "TRITON"
+        # Coordinate-descent tuning times candidate configs through Inductor's
+        # CUDA benchmarker (torch.cuda.synchronize plus torch.cuda.Event), which
+        # the CPU torch wheel cannot provide. mode="max-autotune" enables it, so
+        # turn it back off; the kernels still compile and run, just untuned.
+        patches["coordinate_descent_tuning"] = False
+
+    from torch_fl._build_config import ACCELERATOR
+
+    # 2D tiling is what makes Inductor emit a transposed load (`in_ptr0 + (y0 +
+    # 128*x1)` against an x-major store), and Triton lowers that pair to
+    # `tt.trans`. triton_gcu's layout inference rejects its own result there --
+    # "'tt.trans' op inferred type(s) ... are incompatible with return type(s)",
+    # differing only in `order = [0, 1]` vs `[1, 0]` -- so the kernel fails to
+    # compile. The same bug is reachable from a hand-written `tl.trans`, which
+    # additionally returns wrong values on shapes it does accept, so this is the
+    # vendor compiler and not Inductor's codegen. One tile per kernel keeps the
+    # indexing linear and sidesteps it; the transpose then costs an extra kernel
+    # rather than a tiled load. Only a default -- an explicit
+    # options={"triton.max_tiles": ...} above still wins.
+    if ACCELERATOR == "gcu":
+        patches.setdefault("triton.max_tiles", 1)
+
+    # CUDA graphs need torch.cuda.CUDAGraph, a dummy base class in the CPU torch
+    # wheel ("Tried to instantiate dummy base class CUDAGraph"). mode=
+    # "max-autotune" turns them on, so force them back off.
+    patches["triton.cudagraphs"] = False
+
+    # The static launcher needs torch._C._StaticCudaLauncher, which the CPU
+    # torch wheel does not build (we supply libtorch_cuda.so externally). Fall
+    # back to the regular Triton launch path. The import-time pin already
+    # answered this for every entry point, including the default backend; scoping
+    # it into this compile's patches as well keeps the "flagos" backend from
+    # depending on that having happened.
+    if not _static_cuda_launcher_available():
+        patches["use_static_cuda_launcher"] = False
+
+    return patches
+
+
+def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
+    """Avoid unsafe vendor-driver initialization in compile workers.
+
+    PPU and MThreads FlagTree drivers, and Enflame's triton_gcu, query a vendor
+    runtime while creating compiler hints. Keeping the first implementation
+    conservative matters for all of them: the vendor runtime owns the current
+    device and stream, while Inductor workers may be forked after the parent has
+    initialized it. On GCU that is sharper than elsewhere, because a tops pointer
+    only resolves against the current device. Explicit per-compile and
+    environment settings remain authoritative.
+    """
+    if "compile_threads" in config_patches:
+        return
+    if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
+        return
+
+    from torch_fl._build_config import ACCELERATOR
+    from torch_fl.compile.flagtree_shim import flagtree_backend
+
+    if ACCELERATOR == "gcu":
+        config_patches["compile_threads"] = 1
+        return
+
+    backend = flagtree_backend()
+    if backend == "ppu" or (ACCELERATOR == "musa" and backend == "mthreads"):
+        config_patches["compile_threads"] = 1
+
+
+# Keep the old helper name for downstream callers and the PPU regression tests.
+def _patch_ppu_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
+    _patch_vendor_flagtree_compile_workers(config_patches)
+
+
+def _patch_ascend_compile_workers(config_patches: Dict[str, Any]) -> None:
+    """Keep Ascend compilation in the parent process by default.
+
+    A kernel built in an inductor compile worker segfaults when the *parent* later
+    launches it, inside triton-ascend's `NPULauncher.__call__`
+    (`triton/backends/ascend/driver.py`). Measured on a 910 with
+    triton-ascend 3.2.0 and a cold inductor cache: `compile_threads=1` runs the
+    whole compile suite (25 passed), while 2 or more crashes on the second compile
+    in a process. One compile per process survives either way, which is why a warm
+    cache or a single test hides it. The start method makes no difference (`fork`
+    and `spawn` both crash), so this is not the CUDA-after-fork problem the PPU
+    path above works around.
+
+    Serial compilation costs compile time and nothing else. An explicit
+    `compile_threads` or `TORCHINDUCTOR_COMPILE_THREADS` still wins, so the
+    parallel path stays reachable for anyone testing a fixed toolchain.
+    """
+    if "compile_threads" in config_patches:
+        return
+    if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
+        return
+
+    from torch_fl.compile.platform_profile import platform_profile
+
+    if not platform_profile().is_cuda_like:
+        config_patches["compile_threads"] = 1
+
+
+def _patch_cuda_compile_workers(config_patches: Dict[str, Any]) -> None:
+    """Keep compilation in-process on a CUDA-like platform without CUDA bindings.
+
+    The compile worker is a *fresh interpreter* (subproc_pool spawns it as a
+    subprocess), so it only has what `import torch` gives it. On the default
+    FlagGems-primary wheel that is a torch with no CUDA bindings and no torch_fl
+    (with `TORCH_DEVICE_BACKEND_AUTOLOAD=0`, which the wheel's own harness sets to
+    keep a vendor backend from claiming PrivateUse1): `torch.cuda.is_available()`
+    is False there, so Triton's NVIDIA driver reports itself inactive and
+    `triton_helpers.set_driver_to_gpu` -- which `_precompile_config` calls for any
+    non-CPU device type -- dies with "Could not find an active GPU backend".
+
+    Nothing can be installed into that interpreter: it never loads torch_fl, so
+    there is no hook to run before the compile. Compiling in the parent, where
+    torch_fl *is* imported and its `torch.cuda` shim answers, is therefore the
+    fix, and it is the same remedy `_patch_ascend_compile_workers` uses for the
+    same class of problem. An explicit `compile_threads` or
+    `TORCHINDUCTOR_COMPILE_THREADS` still wins.
+    """
+    if "compile_threads" in config_patches:
+        return
+    if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
+        return
+
+    from torch_fl.compile.device_interface import _torch_has_cuda_kernels
+    from torch_fl.compile.platform_profile import platform_profile
+
+    if platform_profile().is_cuda_like and not _torch_has_cuda_kernels():
+        config_patches["compile_threads"] = 1
+
+
+def flagos_compile_backend(
+    gm: torch.fx.GraphModule,
+    example_inputs: List[torch.Tensor],
+    mode: Optional[str] = None,
+    options: Optional[Dict[str, Any]] = None,
+    dynamic: Optional[bool] = None,
+) -> Callable:
+    """
+    torch.compile backend for flagos device.
+
+    Registers flagos as an inductor GPU device, then delegates the graph to
+    inductor unchanged. Generated Triton kernels run on flagos tensors directly.
+
+    `mode` / `options` arrive as kwargs from dynamo's `_TorchCompileWrapper`
+    (torch/__init__.py) whenever torch.compile is called with them on a named
+    backend; they are expanded into inductor config patches.
+
+    Usage:
+        model = torch.compile(model, backend="flagos")
+        # or
+        model = torch.compile(model, backend="flagos", mode="max-autotune")
+
+    Environment:
+        FLAGOS_USE_FLAGTREE=1 : Require that the active triton be FlagTree
+        FLAGOS_COMPILE_FALLBACK_EAGER=1 : Fall back to eager on compile errors
+    """
+    # Import inductor lazily (not all torch builds have it)
+    try:
+        from torch._inductor.compile_fx import compile_fx
+    except ImportError as e:
+        if _env.flag("FLAGOS_COMPILE_FALLBACK_EAGER"):
+            return gm.forward
+        raise RuntimeError(
+            "torch._inductor not available. Install torch with inductor support "
+            "or set FLAGOS_COMPILE_FALLBACK_EAGER=1 to fall back to eager."
+        ) from e
+
+    config_patches = _resolve_config_patches(mode, options, dynamic)
+
+    # FlagTree substitutes itself for triton at install time, so if it is
+    # installed inductor already compiles with it and there is nothing to switch
+    # on here. This only asserts that, so the flag cannot silently no-op.
+    if _env.flag("FLAGOS_USE_FLAGTREE"):
+        from torch_fl.compile.flagtree_shim import require_flagtree
+
+        require_flagtree()
+
+        # FlagTree's Ascend backend otherwise dispatches its host runtime
+        # through torch_npu, which would claim PrivateUse1 and lock torch_fl out
+        # of flagos. Swap in a policy backed by torch_fl's own runtime instead.
+        from torch_fl.compile.platform_profile import platform_profile
+
+        if platform_profile().vendor == "ascend":
+            from torch_fl.compile.flagtree_ascend_policy import install_policy
+
+            install_policy()
+
+    # Idempotent: module load already tried this, but a process that imported
+    # the backend before FlagTree was importable gets its second chance here.
+    _bind_musa_flagtree_runtime()
+    _patch_vendor_flagtree_compile_workers(config_patches)
+    _patch_ascend_compile_workers(config_patches)
+    _patch_cuda_compile_workers(config_patches)
+
+    # Make inductor treat flagos as a GPU device. Order matters: is_gpu() must
+    # answer True and the device interface must be resolvable before the
+    # codegen backend registration reads them.
+    from torch_fl.compile.device_interface import register_flagos_device_interface
+    from torch_fl.compile.inductor_codegen import (
+        publish_codegen_on_device_module,
+        register_flagos_codegen,
+    )
+    from torch_fl.compile.triton_64bit_guard import patch_triton_64bit_guard
+    from torch_fl.compile.triton_byte_loads import patch_triton_byte_load_workarounds
+    from torch_fl.compile.triton_libdevice import patch_triton_libdevice_module_map
+    from torch_fl.compile.triton_resource_limits import (
+        patch_triton_resource_limit_errors,
+    )
+
+    register_flagos_device_interface()
+    publish_codegen_on_device_module()
+    register_flagos_codegen()
+    patch_triton_libdevice_module_map()
+    patch_triton_resource_limit_errors()
+    patch_triton_byte_load_workarounds()
+
+    # A GCU300 64-bit kernel aborts the process inside the vendor pass manager,
+    # which no Python handler can catch, so it has to be refused beforehand.
+    patch_triton_64bit_guard()
+
+    # Hand the graph to inductor untouched -- it is on flagos and stays there.
+    try:
+        return compile_fx(gm, example_inputs, config_patches=config_patches)
+    except Exception as e:
+        if _env.flag("FLAGOS_COMPILE_FALLBACK_EAGER"):
+            import warnings
+
+            warnings.warn(f"Inductor compilation failed: {e}. Falling back to eager.")
+            return gm.forward
+        raise
+
+
+def register_backend():
+    """
+    Register the flagos backend with torch._dynamo.
+
+    Called automatically on import torch_fl if torch 2.0+ detected.
+    """
+    try:
+        import torch._dynamo
+
+        torch._dynamo.register_backend(
+            name="flagos", compiler_fn=flagos_compile_backend
+        )
+    except (ImportError, AttributeError):
+        # torch._dynamo not available (torch < 2.0)
+        pass

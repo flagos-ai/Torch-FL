@@ -1,0 +1,66 @@
+{
+  "generated_by": "torch 2.10.0+cu128 / NVIDIA A100-SXM4-40GB / gen_profiler_baseline.py",
+  "note": "Structure only. Counts and durations are deliberately absent -- they drift run to run on a shared GPU. Regenerate with tests/data/gen_profiler_baseline.py under torch-cuda-210.",
+  "categories": [
+    "Trace",
+    "cpu_op",
+    "cuda_runtime",
+    "gpu_memcpy",
+    "gpu_memset",
+    "kernel"
+  ],
+  "categories_observed_in_torch_cuda": [
+    "Trace",
+    "cpu_op",
+    "cuda_runtime",
+    "gpu_memcpy",
+    "gpu_memset",
+    "kernel",
+    "overhead"
+  ],
+  "categories_known_gap": {
+    "overhead": "CUPTI_ACTIVITY_KIND_OVERHEAD is not among the activity kinds flagos enables (see cupti_device_tracer.cc: KERNEL/MEMCPY/MEMSET/RUNTIME/EXTERNAL_CORRELATION). These are CUPTI's self-reported profiling overheads ('Activity Buffer Request', 'Runtime Triggered Module Loading'), not user work, so their absence does not affect any measurement of the workload."
+  },
+  "runtime_cat_equivalents": [
+    "cuda_runtime",
+    "privateuse1_runtime"
+  ],
+  "kernel_arg_keys": [
+    "External id",
+    "block",
+    "blocks per SM",
+    "context",
+    "correlation",
+    "device",
+    "est. achieved occupancy %",
+    "grid",
+    "queued",
+    "registers per thread",
+    "shared memory",
+    "stream",
+    "warps per SM"
+  ],
+  "gpu_memcpy_arg_keys": [
+    "External id",
+    "bytes",
+    "context",
+    "correlation",
+    "device",
+    "memory bandwidth (GB/s)",
+    "stream"
+  ],
+  "gpu_memset_arg_keys": [
+    "External id",
+    "bytes",
+    "context",
+    "correlation",
+    "device",
+    "memory bandwidth (GB/s)",
+    "stream"
+  ],
+  "runtime_arg_keys": [
+    "External id",
+    "cbid",
+    "correlation"
+  ]
+}

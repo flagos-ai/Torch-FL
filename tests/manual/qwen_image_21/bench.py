@@ -1,0 +1,1428 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Qwen-Image-2.1, measured: one JSON of numbers a chip's result can be quoted from.
+
+``infer.py`` and ``sweep.py`` exist to say *whether* a chip runs the pipeline and
+*where* it fails. This file exists to say how fast it is, and it is the only
+thing in this directory that produces a number worth quoting.
+
+What makes the number quotable is not the arithmetic, it is the protocol:
+
+**The prompt is fixed.** There is no ``--prompt`` flag. The prompt comes from
+``prompts.canonical()`` -- the one the 2.1 authors published -- so two runs of
+this file are always the same measurement rather than two measurements of two
+things. Use ``infer.py`` to reach a surface the canonical prompt does not.
+
+**The measurement is repeated and the spread is reported.** ``infer.py`` reports
+one sample, which is the right shape for localising a failure and the wrong shape
+for a benchmark: one number cannot say whether a second would have agreed.
+Latency and every phase carry mean, median, min, max, std, p90 and p99 over the
+measured calls, and the number of calls is recorded next to them -- a percentile
+over six calls is the largest of six, which the log and the table both say.
+
+**Slow work is warmed up first.** The FlagGems path JIT-compiles Triton kernels;
+the README's §4.3 measures a cold cache taking the same 40-step run from 23.8 s
+to 71.5 s. ``--warmup`` calls are run and discarded before any measurement, and
+the count used is recorded. ``--cold-cache`` is the explicit way to measure the
+other thing.
+
+**Dispatch logging is off by default.** ``run.sh`` puts ``dispatch`` in
+``FLAGOS_LOG`` because ``infer`` and ``sweep`` are censuses, and the README
+records that it costs 12% of the denoise loop. ``run.sh bench`` leaves it out,
+and what the environment actually held is written into the JSON, so a number
+taken with it on is identifiable rather than silently inflated.
+
+Where the protocol comes from, and where it departs from its sources:
+
+  - warmup-then-discard, ``torch.utils.benchmark.Timer`` with ``num_threads=1``,
+    and peak allocated memory as the memory figure are the diffusers harness'
+    (``benchmarks/benchmarking_utils.py``), which is the reference measurement
+    for this model family.
+  - ``latency_s_per_image`` and ``throughput_images_per_s`` are MLPerf
+    Inference's ``text_to_image`` metrics -- its SingleStream and Offline
+    scenarios respectively.
+  - Departures, both deliberate: ``min_run_time`` defaults to 60 s rather than
+    diffusers' 0.2 s, because 0.2 s yields a single sample of a 26 s pipeline;
+    and warmup defaults to 2 rather than 5, because five rounds of a 26 s
+    pipeline is 2.2 minutes spent before any measurement at all. Both are flags,
+    and the value used is recorded.
+
+Run:
+    python tests/manual/qwen_image_21/bench.py --device cuda   --out cuda.json
+    python tests/manual/qwen_image_21/bench.py --device flagos --out flagos.json
+    python tests/manual/qwen_image_21/bench.py --device flagos --batch 1 2 4 8 \\
+        --peak-tflops 989 --peak-bandwidth-gbs 3350 --out out/flagos/bench.json
+
+Then, on any interpreter, with no device and no torch:
+    python tests/manual/qwen_image_21/bench.py --table cuda.json flagos.json \\
+        --baseline cuda
+
+Protocol, metric definitions and the readings to record:
+    tests/manual/qwen_image_21/README.md, "Performance measurement".
+
+Two things beyond the latency, because a latency alone cannot say whether a chip
+is fast or merely busy (both are in the README, and the arithmetic is in cost.py):
+
+**A batch sweep.** ``--batch`` takes several values and measures each, one JSON
+per value, because ``images/s`` at one batch is a point and a throughput is a
+curve: whether a card saturates, and at what batch, is the difference between a
+card that is arithmetic-bound and one that is waiting on the host.
+``latency.per_image_s`` falls as the batch grows until it stops falling.
+
+**Achievement against a peak.** ``--peak-tflops`` enables MFU for the denoise
+loop against the modelled FLOPs, and ``--peak-bandwidth-gbs`` enables MBU for the
+elementwise probe. Both peaks are supplied by the caller and recorded, because
+neither is a property of the run: the ratio is only as good as the number it is
+against, and a guessed peak reads like a result. Without them the FLOPs and the
+GB/s are still measured, and the ratios are null.
+"""
+
+import argparse
+import contextlib
+import hashlib
+import json
+import math
+import subprocess
+import sys
+from pathlib import Path
+
+import common
+import cost
+import prompts
+
+#: Phases whose JSON value is in seconds but whose table row reads better in
+#: milliseconds, because it is three orders of magnitude smaller than the others.
+MILLISECOND_PHASES = ("loop per step",)
+
+
+class Unrunnable(Exception):
+    """A call the backend could not execute at all.
+
+    Reported rather than raised through, because on a 40 GB card the 33 GB of
+    weights leave no room for a larger batch and the allocator's own message is
+    the useful part of that result. The caller writes a record carrying it
+    instead of a number.
+    """
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description=(
+            "Measure Qwen-Image-2.1 on one backend into a JSON that --table "
+            "renders. The prompt is fixed; see the module docstring."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    common.add_placement_args(parser)
+    parser.add_argument(
+        "--table",
+        nargs="+",
+        default=None,
+        metavar="JSON",
+        help=(
+            "render these bench JSONs as one markdown table and exit. Needs no "
+            "torch and no device, so it runs anywhere the files can be read"
+        ),
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help=(
+            "with --table: the label to measure ratios against. The label is the "
+            "JSON's file stem. There is deliberately no default -- a ratio "
+            "without a named counterpart is not a measurement"
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default=common.model_ref(),
+        help=f"a directory or a hub id; default: ${common.MODEL_ENV} or its fallback",
+    )
+    parser.add_argument(
+        "--out", default=None, help="where the JSON lands; required to measure"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help=(
+            "cache directory for both Triton and FlagGems; sets "
+            "TRITON_CACHE_DIR and FLAGGEMS_CACHE_DIR before torch is imported"
+        ),
+    )
+    parser.add_argument(
+        "--disable-backend-autoload",
+        action="store_true",
+        help=(
+            "set TORCH_DEVICE_BACKEND_AUTOLOAD=0 before torch is imported; use "
+            "this when a vendor plugin would otherwise claim PrivateUse1"
+        ),
+    )
+    parser.add_argument(
+        "--batch",
+        nargs="+",
+        type=int,
+        default=[1],
+        metavar="N",
+        help=(
+            "images per call, passed as num_images_per_prompt -- all of them from "
+            "the fixed prompt, so the batch is the only thing that varies. Several "
+            "values measure a throughput curve, one record per value. Above 1 a "
+            "throughput is reported; a batch that does not fit writes the "
+            "allocator's message into its record instead of a number"
+        ),
+    )
+    parser.add_argument(
+        "--peak-tflops",
+        type=float,
+        default=None,
+        help=(
+            "one card's dense bf16 arithmetic peak, which is what the MFU row "
+            "divides by. No default: the peak is a property of the part number, "
+            "not of the run, and a ratio against a guessed one reads like a "
+            "result. The modelled FLOPs are reported either way"
+        ),
+    )
+    parser.add_argument(
+        "--peak-bandwidth-gbs",
+        type=float,
+        default=None,
+        help=(
+            "one card's HBM bandwidth in GB/s, which is what the probe's MBU "
+            "column divides by. Same reasoning as --peak-tflops; the probe's GB/s "
+            "are measured either way"
+        ),
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=2,
+        help=(
+            "discarded calls before measurement; at least 1 is always run, because "
+            "a cold Triton cache makes the first call unrepresentative"
+        ),
+    )
+    parser.add_argument(
+        "--min-run-time",
+        type=float,
+        default=60.0,
+        help="seconds the timer aims for; it sizes the number of calls from this",
+    )
+    parser.add_argument("--steps", type=int, default=40)
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--true-cfg-scale", type=float, default=1.0)
+    parser.add_argument("--negative-prompt", default=prompts.NEGATIVE_PROMPT)
+    parser.add_argument(
+        "--no-kv-cache",
+        action="store_true",
+        help=(
+            "disable the prefix KV cache. The pipeline's help is explicit that "
+            "toggling it gives an equally valid but visibly different sample, so "
+            "fix it per comparison rather than mixing"
+        ),
+    )
+    parser.add_argument(
+        "--load-latents",
+        default=None,
+        help=(
+            "inject initial latents from this .pt. This is the only injection 2.1 "
+            "supports, and it is what makes a paired comparison across two "
+            "backends meaningful -- they share no RNG stream"
+        ),
+    )
+    parser.add_argument(
+        "--cold-cache",
+        action="store_true",
+        help=(
+            "point TRITON_CACHE_DIR at a fresh directory, to measure what a box "
+            "that has never run this pays. Never done implicitly"
+        ),
+    )
+    parser.add_argument(
+        "--image", default=None, help="write the last measured call's PNG here"
+    )
+    args = parser.parse_args(argv)
+    if args.table is None and args.out is None:
+        parser.error("--out is required to measure (or use --table)")
+    if any(batch < 1 for batch in args.batch):
+        parser.error("--batch takes values of at least 1")
+    if len(set(args.batch)) != len(args.batch):
+        parser.error(f"--batch lists {args.batch}, which repeats a value")
+    if not args.table and args.warmup < 0:
+        parser.error("--warmup cannot be negative")
+    if args.cold_cache and args.cache_dir:
+        parser.error("--cold-cache and --cache-dir are mutually exclusive")
+    return args
+
+
+def with_batch(args, batch):
+    """A copy of the parsed args whose ``batch`` is one value.
+
+    ``--batch`` takes a list because a throughput is a curve rather than a point;
+    everything downstream describes exactly one batch, so the list is narrowed
+    here once rather than being threaded through ``Caller``, ``record_for`` and
+    ``throughput_for`` separately.
+    """
+    single = argparse.Namespace(**vars(args))
+    single.batch = batch
+    return single
+
+
+def out_paths(out, batches):
+    """Where each batch's record lands.
+
+    One batch keeps the path it was given, so every invocation that names one
+    batch writes where it always did. Several get theirs appended to the stem --
+    ``bench.json`` becomes ``bench-b1.json``, ``bench-b2.json`` -- because a
+    throughput curve is several records and one file cannot hold them. ``table``
+    reads them as one column each, which is what a curve wants.
+    """
+    path = Path(out)
+    if len(batches) == 1:
+        return [path]
+    return [path.with_name(f"{path.stem}-b{batch}{path.suffix}") for batch in batches]
+
+
+def apply_runtime_environment(args):
+    """Apply CLI-owned environment before importing torch or the backend."""
+    import os
+
+    if args.disable_backend_autoload:
+        os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    if args.cache_dir:
+        cache = Path(args.cache_dir).expanduser()
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = str(cache)
+        os.environ["FLAGGEMS_CACHE_DIR"] = str(cache)
+
+
+def revision():
+    """The commit this run measured, or ``None`` outside a checkout."""
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).resolve().parent,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def cold_cache_dir():
+    """A fresh Triton cache directory, named so two concurrent runs do not share."""
+    import os
+    import tempfile
+    import time
+
+    path = Path(tempfile.gettempdir()) / f"triton-cold-{os.getpid()}-{int(time.time())}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def percentile(ordered, fraction):
+    """The value ``fraction`` of the way through an ordered list, interpolating.
+
+    Linear interpolation between the neighbouring samples, which is what the
+    usual libraries' default does. Two things this must not be read as: with the
+    handful of samples a 60 s budget buys of a 7 s pipeline it is a position
+    between two measured calls rather than a tail estimate, and p99 over fewer
+    than 100 samples *is* the largest sample. The table says so in its caveats
+    instead of letting the label imply otherwise -- a p99 quoted off six calls is
+    a maximum wearing a percentile's name.
+    """
+    if len(ordered) == 1:
+        return ordered[0]
+    position = fraction * (len(ordered) - 1)
+    lower = math.floor(position)
+    weight = position - lower
+    if weight == 0:
+        return ordered[lower]
+    return ordered[lower] * (1 - weight) + ordered[lower + 1] * weight
+
+
+def statistics(samples):
+    """``{mean, median, min, max, p90, p99, std, runs}`` over the measured calls.
+
+    Every metric gets this shape rather than a bare number, because the spread is
+    what says whether the mean is worth quoting. A single-sample run -- which
+    ``--min-run-time`` can still produce on a slow chip -- gets a std of 0.0, and
+    the ``runs`` field is what exposes it: a spread of one sample is not a spread.
+
+    The percentiles are here because a latency SLO is a percentile: MLPerf's
+    SingleStream reports p90 and its server scenarios p99, and a mean over ten
+    calls hides the slow one that decides whether a service meets its deadline.
+    """
+    values = list(samples)
+    count = len(values)
+    mean = sum(values) / count
+    ordered = sorted(values)
+    middle = count // 2
+    median = (
+        ordered[middle] if count % 2 else (ordered[middle - 1] + ordered[middle]) / 2.0
+    )
+    variance = sum((value - mean) ** 2 for value in values) / count
+    return {
+        "mean_s": mean,
+        "median_s": median,
+        "min_s": ordered[0],
+        "max_s": ordered[-1],
+        "p90_s": percentile(ordered, 0.90),
+        "p99_s": percentile(ordered, 0.99),
+        "std_s": variance**0.5,
+        "runs": count,
+    }
+
+
+def phase_statistics(samples):
+    """Per-phase statistics over the measured calls, in seconds.
+
+    A phase absent from every sample is absent from the result rather than zero:
+    a run that never reached the VAE decode must not report a 0.000 s decode,
+    which reads as an impossibly fast one.
+
+    Seconds for every phase, including the one the table renders in
+    milliseconds: the unit a measurement is stored in should not depend on how
+    it is displayed.
+    """
+    phases = {}
+    for name in common.PhaseTimer.KEYS:
+        values = [sample[name] for sample in samples if name in sample]
+        if not values:
+            continue
+        phases[name] = statistics(values)
+    return phases
+
+
+def image_hash(image):
+    """sha256 of a PIL image's bytes, for the determinism check.
+
+    Hashed from the in-memory image rather than from a file on disk, so the check
+    does not depend on ``--image`` being given or on the PNG encoder being
+    deterministic across writes.
+    """
+    return hashlib.sha256(image.tobytes()).hexdigest()
+
+
+def versions(torch, device_kind):
+    """The versions a result is only comparable within.
+
+    ``torch_fl`` is read out of ``sys.modules`` rather than imported. Importing
+    it into a process running the vendor's own torch is not a harmless lookup:
+    ``torch_fl``'s import preloads the CUDA assets bundled for the chip under
+    test, and loading them into a process that has already initialised a
+    different CUDA runtime aborts the process with a duplicate-allocator-config
+    error. ``common.import_torch`` has already imported it whenever the run is on
+    ``flagos``, so this reports it exactly when it applies and stays out of the
+    way when it does not.
+    """
+    import sys
+
+    result = {"torch": torch.__version__}
+    for name in ("diffusers", "triton"):
+        try:
+            result[name] = getattr(__import__(name), "__version__", "unknown")
+        except ImportError:
+            result[name] = None
+    module = sys.modules.get("torch_fl")
+    result["torch_fl"] = getattr(module, "__version__", None) if module else None
+    return result
+
+
+def environment():
+    """The environment settings that change what a timing means.
+
+    Read from the environment rather than assumed, because the number is
+    comparable only within them: the dispatch diagnostic writes a line per
+    operator call and costs real time per call, so a run that had it on is a
+    different measurement from one that did not. ``--cold-cache`` has already set
+    ``TRITON_CACHE_DIR`` by the time this is read, so the record shows the
+    directory that was used.
+
+    ``FLAGOS_LOG`` is one comma-separated list, and ``dispatch_log`` is the
+    parsed answer to the question the table actually asks. ``log`` keeps the raw
+    string so the record is readable without knowing the list's spelling.
+    """
+    import os
+
+    raw = os.environ.get("FLAGOS_LOG") or ""
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return {
+        "log": raw or None,
+        "log_items": items,
+        "dispatch_log": "dispatch" in items,
+        "triton_cache_dir": os.environ.get("TRITON_CACHE_DIR") or None,
+        "torch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF") or None,
+    }
+
+
+class Caller:
+    """One ``pipe(...)`` call, and the bookkeeping a benchmark needs around it.
+
+    Three things have to line up per call -- the phase sample, the peak memory and
+    the image hashes -- and they are recorded in one place so an off-by-one in one
+    of them is not possible. ``record`` is called once per call, from the same
+    frame that made it.
+    """
+
+    def __init__(self, torch, pipe, args, prompt, latents, device, timer):
+        self.torch = torch
+        self.pipe = pipe
+        self.args = args
+        self.prompt = prompt
+        self.latents = latents
+        self.device = device
+        self.timer = timer
+        self.device_kind = args.device
+        self.samples = []
+        self.peaks = []
+        self.hashes = []
+        self.calls = 0
+        self.images = None
+
+    def __call__(self):
+        """Make the call and record it. Raises ``Unrunnable`` if it cannot run."""
+        self.timer.reset()
+        # Start every call -- warmup and measured alike -- from a released pool.
+        # A backend whose allocator keeps its pool across calls and cannot carve
+        # a large block back out of it cannot run a second call at all; see
+        # ``common.release_memory`` for the GCU measurement.
+        common.release_memory(self.torch, self.device_kind, self.device)
+        # Reset before, read after: without this the reading is the run's
+        # high-water mark, which the warmup or the model load may have set, and
+        # it would say nothing about the calls being measured.
+        common.reset_peak_memory(self.torch, self.device_kind, self.device)
+        latents = None if self.latents is None else self.latents.clone()
+        generator = self.torch.Generator(device=self.device).manual_seed(self.args.seed)
+        with self.torch.no_grad():
+            try:
+                result = self.pipe(
+                    prompt=self.prompt,
+                    negative_prompt=(
+                        self.args.negative_prompt
+                        if self.args.true_cfg_scale > 1.0
+                        else None
+                    ),
+                    true_cfg_scale=self.args.true_cfg_scale,
+                    num_images_per_prompt=self.args.batch,
+                    num_inference_steps=self.args.steps,
+                    height=self.args.height,
+                    width=self.args.width,
+                    latents=latents,
+                    generator=generator,
+                    output_type="pil",
+                    use_kv_cache=not self.args.no_kv_cache,
+                    callback_on_step_end=self.timer.on_step_end,
+                )
+            except Exception as error:  # noqa: BLE001 - re-raised as Unrunnable
+                raise Unrunnable(f"{type(error).__name__}: {error}") from error
+
+        self.calls += 1
+        self.samples.append(self.timer.sample())
+        self.peaks.append(common.peak_memory(self.torch, self.device_kind, self.device))
+        self.hashes.append([image_hash(image) for image in result.images])
+        self.images = result.images
+
+    def measured(self, count):
+        """The last ``count`` calls, which are the ones the timer timed.
+
+        ``blocked_autorange`` runs the statement while estimating the block size,
+        before it starts the loop it measures, and its reported count covers only
+        that loop. The estimate's calls are therefore always at the front, and
+        keeping the last ``count`` records is what lines the phases, the memory
+        readings and the hashes up with the reported times. Indexing by the count
+        rather than by "a few extra calls" keeps this correct whatever the
+        estimate does.
+        """
+        return (
+            self.samples[-count:],
+            self.peaks[-count:],
+            self.hashes[-count:],
+        )
+
+
+def measured_calls(measurement):
+    """How many times the timed statement ran.
+
+    ``Measurement.number_per_run`` is the block size and ``raw_times`` holds one
+    entry per block, so the count is their product -- not ``len(raw_times)``,
+    which is the number of *blocks* and is 1 whenever a single call already
+    exceeds the duration the block-size estimate aims for, which is the case for
+    any real diffusion pipeline.
+    """
+    return measurement.number_per_run * len(measurement.raw_times)
+
+
+def ensure_minimum_measured_calls(caller, primary, supplement, minimum=2):
+    """Capture timed calls and supplement a one-call autorange result.
+
+    ``blocked_autorange`` may return one call when that call alone exceeds its
+    target duration. The benchmark promises at least two measured calls, so
+    request the missing calls explicitly. Capture each measurement before the
+    next one starts: Timer may issue untimed block-size probes, and selecting
+    from the caller only after all measurements would mix those probes into the
+    phase, memory and determinism receipts.
+    """
+    batches = []
+
+    def capture(measurement):
+        runs = measured_calls(measurement)
+        samples, peaks, hashes = caller.measured(runs)
+        batches.append(
+            {
+                "measurement": measurement,
+                "runs": runs,
+                "samples": list(samples),
+                "peaks": list(peaks),
+                "hashes": list(hashes),
+            }
+        )
+
+    capture(primary)
+    while sum(batch["runs"] for batch in batches) < minimum:
+        missing = minimum - sum(batch["runs"] for batch in batches)
+        capture(supplement(missing))
+    return batches
+
+
+def measure(torch, pipe, args, prompt, device, shape=None):
+    """Warm up, then measure. Returns the record's measurement sections.
+
+    Latents are rebuilt per call from the template and a fresh generator is made
+    each time: a call that consumed them would make every repetition a
+    differently-conditioned run, and the spread would be measuring that instead
+    of the chip.
+
+    ``shape`` is the :class:`cost.ShapeHook` the FLOPs model reads its two
+    sequence lengths from. It is installed around the warmup calls and removed
+    before the timer starts, so a measured call carries no instrumentation; one
+    hook serves every batch of a sweep because the lengths do not depend on the
+    batch.
+    """
+    import torch.utils.benchmark as benchmark
+
+    notes = []
+    discarded = max(args.warmup, 1)
+    if discarded != args.warmup:
+        notes.append(
+            "--warmup 0 raised to 1: a benchmark with no discarded call measures "
+            "the first call's lazy initialisation and compile"
+        )
+    if args.load_latents is None:
+        notes.append(
+            f"latents sampled from seed {args.seed}, with a fresh generator per "
+            "call, so this backend's repetitions are identical. Two backends do "
+            "not share an RNG stream, so pass --load-latents to put both on the "
+            "same noise before comparing them."
+        )
+
+    timer = common.PhaseTimer(torch, pipe, args.device)
+    template = None
+    if args.load_latents is not None:
+        template = torch.load(args.load_latents, map_location="cpu")
+        print(f"  loaded latents <- {args.load_latents} {tuple(template.shape)}")
+
+    caller = Caller(torch, pipe, args, prompt, template, device, timer)
+
+    print(f"warming up: {discarded} call(s), discarded")
+    with shape if shape is not None else contextlib.nullcontext():
+        for index in range(discarded):
+            try:
+                caller()
+            except Unrunnable as error:
+                timer.close()
+                raise Unrunnable(str(error)) from error
+            print(f"  warmup {index + 1}/{discarded} done")
+
+    def timed_call():
+        common.sync(torch, args.device)
+        try:
+            caller()
+        finally:
+            common.sync(torch, args.device)
+
+    print(f"measuring: {args.min_run_time:g}s minimum, at least two calls")
+    measurement = benchmark.Timer(
+        stmt="timed_call()", globals={"timed_call": timed_call}, num_threads=1
+    ).blocked_autorange(min_run_time=args.min_run_time)
+    batches = ensure_minimum_measured_calls(
+        caller,
+        measurement,
+        lambda missing: benchmark.Timer(
+            stmt="timed_call()",
+            globals={"timed_call": timed_call},
+            num_threads=1,
+        ).timeit(missing),
+    )
+
+    timer.close()
+
+    runs = sum(batch["runs"] for batch in batches)
+    samples = [sample for batch in batches for sample in batch["samples"]]
+    peaks = [peak for batch in batches for peak in batch["peaks"]]
+    hashes = [digest for batch in batches for digest in batch["hashes"]]
+    latency_times = [value for batch in batches for value in batch["measurement"].times]
+    # One source for the latency: the timer's own per-call times. Its mean,
+    # median, min and max are computed from exactly these, so computing them here
+    # from the same list keeps one arithmetic in play rather than two. Note that
+    # ``times`` has one entry per *block* of calls, not per call; see the note
+    # below when the block size is not 1.
+    per_call = statistics(latency_times)
+    latency = {
+        "per_call_s": per_call,
+        "per_image_s": {
+            key: (value / args.batch if key != "runs" else value)
+            for key, value in per_call.items()
+        },
+    }
+    block_sizes = [batch["measurement"].number_per_run for batch in batches]
+    if any(size != 1 for size in block_sizes):
+        notes.append(
+            f"the timer measured in blocks of {block_sizes} calls, "
+            f"so {runs} calls gave {len(latency_times)} latency samples: the "
+            "latency spread is over blocks, while the phases are per call. Quote "
+            "`latency.per_image_s.runs` as the latency sample count."
+        )
+    if len(batches) > 1:
+        notes.append(
+            "autorange produced one timed call; one explicit timed call was added"
+        )
+
+    memory = memory_summary(peaks)
+    determinism = {
+        "identical": bool(hashes) and hashes[0] == hashes[-1],
+        "image_sha256": hashes[-1] if hashes else None,
+    }
+    if len(hashes) != len(samples):
+        notes.append(
+            f"{len(samples)} phase samples against {len(hashes)} image hashes; "
+            "the determinism check is over the images it did record"
+        )
+    return {
+        "latency": latency,
+        "phases": phase_statistics(samples),
+        "memory": memory,
+        "determinism": determinism,
+        "images": caller.images,
+        "notes": notes,
+        "runs": runs,
+    }
+
+
+def memory_summary(peaks):
+    """Peak memory over the calls, and which counter it came from.
+
+    The source is recorded because the two counters are not the same
+    measurement: a peak allocated and a reserved total can differ by the
+    allocator's whole pool, and a table that silently mixes them is worse than
+    one that says which it used.
+    """
+    values = [value for value, _ in peaks if value is not None]
+    sources = {source for _, source in peaks if source is not None}
+    if not values:
+        return {"peak_gib": None, "source": None}
+    return {
+        "peak_gib": max(values),
+        "source": sources.pop() if len(sources) == 1 else "mixed",
+    }
+
+
+def hardware(args):
+    """The peaks the achievement ratios divide by, exactly as they were given.
+
+    Recorded because the ratios are only as good as these two numbers: a reader
+    who wants to disagree with an MFU needs to see what it was measured against,
+    and a record that stored the ratio without the peak would be unreproducible.
+    """
+    return {
+        "peak_tflops": args.peak_tflops,
+        "peak_bandwidth_gbs": args.peak_bandwidth_gbs,
+    }
+
+
+def compute_for(args, measured, shape, config, bandwidth):
+    """The FLOPs-and-achievement section, or ``None`` when nothing was measured.
+
+    ``None`` rather than a guess when the hook saw no forward: without the two
+    sequence lengths the model has no inputs, and a FLOPs figure invented from
+    ``--height``/``--width`` would be the one number in this file that cannot be
+    checked against the run that produced it.
+
+    MFU is taken against the denoise loop's own time, not the whole call's: the
+    model covers the transformer, and dividing its FLOPs by a time that also
+    contains the text encoder and the VAE would produce a low ratio for a reason
+    that is not about utilisation.
+    """
+    if not measured or shape is None or shape.joint_tokens is None:
+        return None
+    model = cost.image_flops(
+        config,
+        text_tokens=shape.text_tokens,
+        target_tokens=shape.target_tokens,
+        steps=args.steps,
+        batch=args.batch,
+        kv_cache=not args.no_kv_cache,
+    )
+    loop = _dig(measured, "phases", "denoise loop", "median_s")
+    return {
+        "sequence": {
+            "text_tokens": shape.text_tokens,
+            "target_tokens": shape.target_tokens,
+            "joint_tokens": shape.joint_tokens,
+        },
+        "transformer": model,
+        # The per-image figures are the ones that compare across batches. The
+        # FLOPs one is constant by construction -- the model is linear in the
+        # batch -- and its constancy is the check that the model is right; the
+        # time one is not, and it is what moves MFU between two batches.
+        "flops_per_image": model["flops_per_image"],
+        "loop": cost.achievement(
+            model["flops_per_call"], loop, args.peak_tflops, args.batch
+        ),
+        "bandwidth": bandwidth,
+    }
+
+
+def record_for(
+    args, prompt, torch=None, placement=None, measured=None, error=None, compute=None
+):
+    """The whole JSON, measured or not.
+
+    A run whose batch did not fit still writes a record: the failure is a result
+    and a table that lists the chip with ``n/a`` says more than one that omits it.
+    """
+    measured = measured or {}
+    return {
+        "schema": 1,
+        "kind": "qwen-image-21-bench",
+        "revision": revision(),
+        "prompt": {
+            "id": prompt["id"],
+            "sha256": prompt["sha256"],
+            "text": prompt["prompt"],
+        },
+        "config": {
+            "height": args.height,
+            "width": args.width,
+            "steps": args.steps,
+            "batch": args.batch,
+            "dtype": "bfloat16",
+            "seed": args.seed,
+            "true_cfg_scale": args.true_cfg_scale,
+            "negative_prompt": args.negative_prompt,
+            "use_kv_cache": not args.no_kv_cache,
+            "omit_all_valid_prompt_mask": args.omit_all_valid_prompt_mask,
+            "latents": "loaded" if args.load_latents else "sampled",
+            "placement": placement,
+        },
+        "protocol": {
+            "warmup_rounds": max(args.warmup, 1),
+            "min_run_time_s": args.min_run_time,
+            "runs": measured.get("runs", 0),
+            "num_threads": 1,
+            "timer": "torch.utils.benchmark.Timer.blocked_autorange",
+            "cold_cache": args.cold_cache,
+        },
+        "latency": measured.get("latency"),
+        "phases": measured.get("phases", {}),
+        "throughput": throughput_for(args, measured.get("latency"), error),
+        "compute": compute,
+        "hardware": hardware(args),
+        "memory": measured.get("memory", {"peak_gib": None, "source": None}),
+        "determinism": measured.get(
+            "determinism", {"identical": None, "image_sha256": None}
+        ),
+        "environment": environment(),
+        "versions": versions(torch, args.device) if torch is not None else None,
+        # The failure's own text lives in throughput.error; repeating it here
+        # would print an allocator dump twice in the table's caveats.
+        "notes": measured.get("notes", [])
+        + (
+            [
+                "the requested batch did not run, so this record carries no "
+                "latency or phase measurement; `throughput.error` has the "
+                "backend's message"
+            ]
+            if error
+            else []
+        ),
+    }
+
+
+def throughput_for(args, latency, error):
+    """``{images_per_s, error}`` -- measured, absent, or refused with the reason.
+
+    Reported only when it is real. At batch 1 nothing is derived from the latency:
+    a batch-1 rate is the latency restated, and restating it as a rate would
+    invite a comparison against a real throughput number. Above batch 1 the rate
+    is the batch divided by the per-call median, which is the quantity MLPerf's
+    Offline scenario reports.
+    """
+    if error:
+        return {"images_per_s": None, "error": error}
+    if args.batch < 2 or latency is None:
+        return {"images_per_s": None, "error": None}
+    return {
+        "images_per_s": args.batch / latency["per_call_s"]["median_s"],
+        "error": None,
+    }
+
+
+def release_cache(torch, device_kind):
+    """Give the allocator's cached blocks back between batches, where supported.
+
+    Best effort, like the other backend surface this file touches: a backend
+    without ``empty_cache`` still runs, it just carries the previous batch's
+    blocks into the next one. The reason to ask at all is that the cached blocks
+    are what makes a larger batch fail to find room on a card that has plenty,
+    and the failure would read as "this card cannot hold it" when the truth is
+    "the previous call is still holding it".
+    """
+    module = getattr(torch, device_kind, None)
+    empty = getattr(module, "empty_cache", None)
+    if empty is None:
+        return False
+    try:
+        empty()
+        return True
+    except Exception:  # noqa: BLE001 - a cache that refuses is not a failure
+        return False
+
+
+def report_batch(record, measured, args, path, error=None):
+    """The per-batch block: where the record went and what is in it.
+
+    Printed from the record rather than from the measurement, so a number that
+    disagrees with the file would be visible here rather than discovered later.
+    """
+    print()
+    print(f"-> {path}")
+    if error or record["latency"] is None:
+        return
+    latency = record["latency"]
+    print(
+        f"  latency    {latency['per_image_s']['median_s']:.2f} s/image "
+        f"(median over {record['protocol']['runs']} calls), "
+        f"p90 {latency['per_image_s']['p90_s']:.2f} "
+        f"p99 {latency['per_image_s']['p99_s']:.2f}"
+    )
+    throughput = record["throughput"]["images_per_s"]
+    if throughput is not None:
+        print(f"  throughput {throughput:.4f} images/s at batch {args.batch}")
+    peak = record["memory"]["peak_gib"]
+    print(
+        f"  memory     {'n/a' if peak is None else f'{peak:.2f}'} GiB "
+        f"({record['memory']['source']})"
+    )
+    print(
+        "  determinism "
+        + ("two calls agreed" if record["determinism"]["identical"] else "FAILED")
+    )
+    compute = record.get("compute")
+    if compute:
+        sequence = compute["sequence"]
+        loop = compute["loop"]
+        print(
+            f"  flops      {cost.human_flops(compute['flops_per_image'])}/image "
+            f"(text {sequence['text_tokens']} + image {sequence['target_tokens']} "
+            f"= {sequence['joint_tokens']} joint, "
+            f"{compute['transformer']['prefill_calls']} prefill + "
+            f"{compute['transformer']['decode_calls']} decode)"
+        )
+        print(
+            f"  loop       {loop['tflops']:.1f} TFLOP/s over "
+            f"{loop['seconds_per_call']:.2f} s of loop "
+            f"({loop['seconds_per_image']:.2f} s/image)"
+            + (f", MFU {cost.percent(loop['mfu'])}" if loop["mfu"] is not None else "")
+        )
+    bandwidth = (record.get("compute") or {}).get("bandwidth")
+    summary = cost.probe_summary(bandwidth)
+    if summary is not None:
+        print(
+            f"  bandwidth  {summary['op']} {summary['median_gb_per_s']:.0f} GB/s, "
+            f"median of {summary['measured_ops']} "
+            f"({cost.probe_spread(summary)})"
+            + (f", MBU {cost.percent(summary['mbu'])}" if summary["mbu"] else "")
+        )
+    elif bandwidth:
+        print("  bandwidth  the probe measured nothing; see its `ops` in the JSON")
+    # Seconds for every phase; print_phases owns the one row shown in milliseconds.
+    common.print_phases(
+        {name: stats["median_s"] for name, stats in measured["phases"].items()}
+    )
+
+
+def run(argv=None):
+    args = parse_args(argv)
+    apply_runtime_environment(args)
+
+    if args.cold_cache:
+        cache = cold_cache_dir()
+        import os
+
+        os.environ["TRITON_CACHE_DIR"] = str(cache)
+        print(f"cold cache: TRITON_CACHE_DIR={cache}")
+
+    torch = common.import_torch(args.device)
+    diffusers = common.import_diffusers()
+
+    prompt = prompts.canonical()
+    encoder, transformer, vae = common.resolve_placement(torch, args)
+    device = torch.device(transformer[0])
+
+    print(f"device: {args.device}   torch: {torch.__version__}")
+    print(
+        f"prompt: {prompt['id']}  sha256 {prompt['sha256'][:16]}...  {prompt['prompt']}"
+    )
+    print(
+        f"{args.width}x{args.height}, {args.steps} steps, "
+        f"batch {' '.join(str(batch) for batch in args.batch)}, "
+        f"true_cfg_scale={args.true_cfg_scale}, seed={args.seed}"
+    )
+    print("loading the pipeline (outside the measurement)")
+
+    pipe = diffusers.QwenImage21Pipeline.from_pretrained(
+        args.model, dtype=torch.bfloat16
+    )
+    # What place_components returns, not what was asked for: the two differ
+    # whenever --vae-device or --devices cannot be honoured, and a record that
+    # describes the request rather than the run is worse than no record.
+    _, placement = common.place_components(
+        torch, pipe, encoder, transformer, vae, args.blocks_per_device
+    )
+    if args.omit_all_valid_prompt_mask:
+        common.enable_all_valid_prompt_mask_elision(pipe)
+
+    # The card's own reading, taken before the model is measured and off the
+    # measured path: which elementwise ops a chip streams well is a property of
+    # the chip and of the routing, and it is the half of this workload's time that
+    # no FLOPs figure can see.
+    print()
+    print("bandwidth probe (outside the measurement)")
+    bandwidth = cost.bandwidth_probe(
+        torch, device, args.device, args.peak_bandwidth_gbs
+    )
+    for op in bandwidth["ops"]:
+        if op.get("error"):
+            print(f"  {op['op']:<8} FAILED {op['error']}")
+            continue
+        line = (
+            f"  {op['op']:<8} {op['gb_per_s']:8.0f} GB/s "
+            f"({op['passes']} passes over {bandwidth['tensor_mib']:.0f} MiB)"
+        )
+        if op.get("mbu") is not None:
+            line += f"  MBU {cost.percent(op['mbu'])}"
+        print(line)
+
+    paths = out_paths(args.out, args.batch)
+    # One hook for the whole sweep: it reads the two sequence lengths during a
+    # warmup and is removed before that batch's timer starts, and the lengths do
+    # not depend on the batch, so the first reading covers every batch.
+    shape = cost.ShapeHook(pipe.transformer)
+    config = dict(pipe.transformer.config)
+    failures = 0
+
+    for batch, path in zip(args.batch, paths):
+        single = with_batch(args, batch)
+        print()
+        print(f"---- batch {batch} ----")
+        try:
+            measured = measure(torch, pipe, single, prompt["prompt"], device, shape)
+            error = None
+        except Unrunnable as failure:
+            measured = {}
+            error = str(failure)
+            failures += 1
+            print()
+            print(f"the requested batch could not run: {error}")
+
+        record = record_for(
+            single,
+            prompt,
+            torch,
+            placement,
+            measured,
+            error,
+            compute_for(single, measured, shape, config, bandwidth),
+        )
+        Path(path).write_text(
+            json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        # Printed, not just written: run.sh reads its own log for these lines to
+        # know which records to summarise, so a sweep summarises every batch
+        # instead of assuming where the files went.
+        print(f"wrote {path}")
+
+        report_batch(record, measured, single, path, error)
+        if args.image and measured.get("images"):
+            measured["images"][0].save(args.image)
+            print(f"last call's first image -> {args.image}")
+        release_cache(torch, args.device)
+
+    if shape.joint_tokens is None:
+        print()
+        print(
+            "note: the transformer never ran a forward, so no FLOPs could be "
+            "modelled and `compute` is null in every record above"
+        )
+    if len(args.batch) > 1:
+        print()
+        print(
+            f"{len(args.batch)} records written. Render the curve, on any interpreter:"
+        )
+        print(
+            f"  bash tests/manual/qwen_image_21/run.sh table "
+            f"{' '.join(str(path) for path in paths)}"
+        )
+    elif args.batch[0] < 2:
+        print()
+        print(
+            "batch 1: no throughput is reported. Pass --batch N for one, or "
+            "several values for the curve; see the README."
+        )
+    common.report_memory(torch, args.device)
+    return 1 if failures == len(args.batch) else 0
+
+
+def load_records(paths):
+    """Read the bench JSONs, refusing anything that is not one.
+
+    A file that is missing, unreadable or not JSON fails with the path rather
+    than a traceback: this is the one entry point that runs on a machine that
+    did not produce the files, so the error is the user interface.
+    """
+    records = []
+    for path in paths:
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except OSError as error:
+            raise SystemExit(f"{path}: {error.strerror}") from error
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"{path}: not JSON ({error})") from error
+        if data.get("kind") != "qwen-image-21-bench":
+            raise SystemExit(
+                f"{path}: not a qwen-image-21 bench JSON (kind={data.get('kind')!r})"
+            )
+        records.append((Path(path).stem, data))
+    return records
+
+
+def _cell(records, getter, fmt="{:.2f}"):
+    cells = []
+    for _, data in records:
+        value = getter(data)
+        cells.append("n/a" if value is None else fmt.format(value))
+    return cells
+
+
+def _row(name, records, getter, fmt="{:.2f}"):
+    return f"| {name} | " + " | ".join(_cell(records, getter, fmt)) + " |"
+
+
+def _text_row(name, records, getter):
+    """A row whose cells are already strings, so a reading can carry its unit.
+
+    ``probe bandwidth`` is ``mul 2810 GB/s``: the op named is part of the reading,
+    because which operator streamed well is the point of the probe.
+    """
+    cells = []
+    for _, data in records:
+        value = getter(data)
+        cells.append("n/a" if value is None else str(value))
+    return f"| {name} | " + " | ".join(cells) + " |"
+
+
+def _probe_cell(data):
+    summary = cost.probe_summary(_dig(data, "compute", "bandwidth"))
+    if summary is None:
+        return None
+    return f"{summary['op']} {summary['median_gb_per_s']:.0f} GB/s"
+
+
+def _probe_mbu(data):
+    summary = cost.probe_summary(_dig(data, "compute", "bandwidth"))
+    return None if summary is None else cost.percent(summary["mbu"])
+
+
+def _probe_spread(data):
+    return cost.probe_spread(cost.probe_summary(_dig(data, "compute", "bandwidth")))
+
+
+def _peak_cell(data):
+    """The peaks the ratios above were taken against, as given.
+
+    A row rather than a caveat: every ratio in a column is only as good as these
+    numbers, and a reader comparing two columns has to be able to see that they
+    were divided by the same thing.
+    """
+    peaks = _dig(data, "hardware") or {}
+    parts = []
+    if peaks.get("peak_tflops"):
+        parts.append(f"{peaks['peak_tflops']:g} TFLOPS")
+    if peaks.get("peak_bandwidth_gbs"):
+        parts.append(f"{peaks['peak_bandwidth_gbs']:g} GB/s")
+    return " + ".join(parts) if parts else None
+
+
+def _phase(data, name, key):
+    phase = (data.get("phases") or {}).get(name)
+    return None if phase is None else phase.get(key)
+
+
+def render_table(paths, baseline):
+    """One markdown table, one column per JSON. Needs no torch and no device.
+
+    Rows are the readings a chip's result is quoted from. A value a run could not
+    obtain renders as ``n/a`` rather than being dropped, so "not measured" is
+    distinguishable from "not shown", and the reasons are listed below the table
+    instead of being folded into a cell.
+    """
+    records = load_records(paths)
+    labels = [label for label, _ in records]
+    if baseline is not None and baseline not in labels:
+        raise SystemExit(f"--baseline {baseline!r} is none of {labels}")
+
+    lines = [
+        "| metric | " + " | ".join(labels) + " |",
+        "| --- | " + " | ".join("---" for _ in labels) + " |",
+        "| prompt | "
+        + " | ".join(
+            f"{d['prompt']['id']} / `{d['prompt']['sha256'][:8]}`" for _, d in records
+        )
+        + " |",
+        "| config | "
+        + " | ".join(
+            f"{d['config']['width']}x{d['config']['height']}, "
+            f"{d['config']['steps']} steps, batch {d['config']['batch']}, "
+            f"kv={d['config']['use_kv_cache']}"
+            for _, d in records
+        )
+        + " |",
+        _row(
+            "latency, median s/image",
+            records,
+            lambda d: _dig(d, "latency", "per_image_s", "median_s"),
+        ),
+        _row(
+            "latency, mean s/image",
+            records,
+            lambda d: _dig(d, "latency", "per_image_s", "mean_s"),
+        ),
+        _row(
+            "latency, min s/image",
+            records,
+            lambda d: _dig(d, "latency", "per_image_s", "min_s"),
+        ),
+        _row(
+            "latency std, s",
+            records,
+            lambda d: _dig(d, "latency", "per_image_s", "std_s"),
+            "{:.3f}",
+        ),
+        _row(
+            "latency, p90 s/image",
+            records,
+            lambda d: _dig(d, "latency", "per_image_s", "p90_s"),
+        ),
+        _row(
+            "latency, p99 s/image",
+            records,
+            lambda d: _dig(d, "latency", "per_image_s", "p99_s"),
+        ),
+        _row("measured calls", records, lambda d: d["protocol"]["runs"], "{:d}"),
+    ]
+    for phase in common.PhaseTimer.KEYS:
+        if phase in MILLISECOND_PHASES:
+            lines.append(
+                _row(
+                    f"{phase}, median ms",
+                    records,
+                    lambda d, p=phase: _scaled(_phase(d, p, "median_s"), 1e3),
+                    "{:.1f}",
+                )
+            )
+        else:
+            lines.append(
+                _row(
+                    f"{phase}, median s",
+                    records,
+                    lambda d, p=phase: _phase(d, p, "median_s"),
+                )
+            )
+    lines += [
+        _row(
+            "throughput, images/s",
+            records,
+            lambda d: d["throughput"]["images_per_s"],
+            "{:.4f}",
+        ),
+        _row("peak GiB", records, lambda d: d["memory"]["peak_gib"]),
+        "| memory counter | "
+        + " | ".join(str(d["memory"]["source"] or "n/a") for _, d in records)
+        + " |",
+        # The arithmetic and the two achievement ratios. They are n/a on a record
+        # that measured nothing or whose peaks were not supplied, which is what
+        # the caveats below explain.
+        _row(
+            "transformer FLOPs/image, PFLOP",
+            records,
+            lambda d: _scaled(_dig(d, "compute", "flops_per_image"), 1e-15),
+            "{:.3f}",
+        ),
+        _row(
+            "loop per image, median s",
+            records,
+            lambda d: _dig(d, "compute", "loop", "seconds_per_image"),
+        ),
+        _row(
+            "loop, achieved TFLOP/s",
+            records,
+            lambda d: _dig(d, "compute", "loop", "tflops"),
+            "{:.1f}",
+        ),
+        _text_row(
+            "MFU (denoise loop)",
+            records,
+            lambda d: cost.percent(_dig(d, "compute", "loop", "mfu")),
+        ),
+        _text_row("bandwidth probe, median op", records, _probe_cell),
+        _text_row("MBU (that op)", records, _probe_mbu),
+        _text_row("probe spread", records, _probe_spread),
+        _text_row("peaks supplied", records, _peak_cell),
+        "| determinism | "
+        + " | ".join(
+            {True: "identical", False: "**differs**"}.get(
+                d["determinism"]["identical"], "n/a"
+            )
+            for _, d in records
+        )
+        + " |",
+        "| `FLAGOS_LOG` | "
+        + " | ".join(str(_dig(d, "environment", "log") or "unset") for _, d in records)
+        + " |",
+        "| triton cache | "
+        + " | ".join(
+            str(_dig(d, "environment", "triton_cache_dir") or "default")
+            for _, d in records
+        )
+        + " |",
+    ]
+
+    if baseline is not None:
+        base = dict(records)[baseline]
+        cells = []
+        for _, data in records:
+            mine = _dig(data, "latency", "per_image_s", "median_s")
+            theirs = _dig(base, "latency", "per_image_s", "median_s")
+            cells.append("n/a" if not mine or not theirs else f"{mine / theirs:.2f}x")
+        lines.append(f"| vs {baseline}, latency | " + " | ".join(cells) + " |")
+
+        cells = []
+        for _, data in records:
+            mine = data["throughput"]["images_per_s"]
+            theirs = base["throughput"]["images_per_s"]
+            cells.append("n/a" if not mine or not theirs else f"{mine / theirs:.2f}x")
+        lines.append(f"| vs {baseline}, throughput | " + " | ".join(cells) + " |")
+
+    caveats = []
+    for label, data in records:
+        identical = data["determinism"]["identical"]
+        if identical is False:
+            caveats.append(
+                f"- **{label}: repeated calls did not produce identical images.** "
+                "The latency is still a measurement; a paired comparison against "
+                "another backend is not, because the two are not sampling the same "
+                "trajectory."
+            )
+        if data["throughput"]["error"]:
+            caveats.append(f"- {label}: no throughput -- {data['throughput']['error']}")
+        if data["latency"] is None:
+            caveats.append(f"- {label}: nothing was measured; see its `notes` field")
+        elif (_dig(data, "latency", "per_image_s", "runs") or 0) < 2:
+            caveats.append(
+                f"- {label}: {_dig(data, 'latency', 'per_image_s', 'runs')} latency "
+                "sample(s), so the spread is not a spread. Raise --min-run-time."
+            )
+        runs = _dig(data, "latency", "per_image_s", "runs") or 0
+        if data["latency"] is not None and 2 <= runs < 100:
+            caveats.append(
+                f"- {label}: {runs} latency samples. The p90 and p99 rows are "
+                "positions between calls that were measured, not estimates of a "
+                "tail; below 100 samples p99 is the largest call in the run."
+            )
+        if data["latency"] is not None and data.get("compute") is None:
+            caveats.append(
+                f"- {label}: no `compute` section -- the hook that reads the two "
+                "sequence lengths saw no transformer forward, so the FLOPs and MFU "
+                "rows are n/a."
+            )
+        if (
+            _dig(data, "compute", "loop", "tflops") is not None
+            and _dig(data, "compute", "loop", "mfu") is None
+        ):
+            caveats.append(
+                f"- {label}: MFU is n/a because --peak-tflops was not given. The "
+                "achieved TFLOP/s does not need it, and a ratio against a guessed "
+                "peak is worse than none: it reads like a result."
+            )
+        if data["protocol"]["cold_cache"]:
+            caveats.append(
+                f"- {label}: measured with a **cold Triton cache**, which is not "
+                "comparable with a warm run."
+            )
+        if _dig(data, "environment", "dispatch_log"):
+            caveats.append(
+                f"- {label}: `FLAGOS_LOG={_dig(data, 'environment', 'log')}` includes "
+                "`dispatch`, which writes a line per operator call and costs real "
+                "time. Do not quote this number against a run with it off."
+            )
+        for note in data.get("notes", []):
+            caveats.append(f"- {label}: {note}")
+
+    text = "\n".join(lines) + "\n"
+    if caveats:
+        text += "\n" + "\n".join(caveats) + "\n"
+    print(text)
+    return 0
+
+
+def _dig(data, *keys):
+    """A nested field, or ``None`` -- a missing section is a missing reading, not
+    an error, since a run that could not measure anything has no latency."""
+    current = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _scaled(value, factor):
+    """``value * factor``, or ``None`` -- so a missing reading survives the
+    unit conversion instead of becoming a zero that looks like a measurement."""
+    return None if value is None else value * factor
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.table:
+        return render_table(args.table, args.baseline)
+    return run(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

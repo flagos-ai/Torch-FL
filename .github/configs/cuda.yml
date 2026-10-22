@@ -1,0 +1,94 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: CUDA
+
+# Platform-specific preparation is implemented outside the common workflows.
+setup_script: .github/scripts/set_env.sh
+setup_platform: cuda
+
+# Carries CUDA PyTorch, the FlagGems C++ operators, and an Ubuntu 24.04 userland
+# recent enough for the FlagTree wheels the job installs (they bind GLIBC_2.38).
+# Both CUDA entry points use it: the integration pipeline takes the digest from
+# this file, and the manual Build Wheel path reaches it through the shared,
+# vendor-agnostic workflows, which also need Python and git in the image.
+# set_env_cuda.sh checks the image glibc before installing FlagTree, so a future
+# rebuild on an older userland fails naming the requirement.
+ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev
+
+runner_labels:
+  - torch-fl-nv
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/cuda/
+  - torch_fl/configs/backends_cuda.conf
+  - csrc/aten/backends/cuda/
+  - csrc/runtime/accelerator/cuda/
+  - csrc/runtime/allocator/backends/cuda_memory.h
+  - .github/scripts/hooks/set_env_cuda.sh
+  - .github/scripts/set_env_cuda.sh
+  - scripts/vendor/with_cuda_libtorch.sh
+
+container_volumes:
+  - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
+
+container_options: >-
+  --gpus all
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-cuda
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# This lane tests the default wheel: FlagGems-primary, boxing off. Both halves
+# of that are asserted here from the build record rather than from an
+# environment variable, so the check describes the wheel that was built. A
+# bundled libtorch_cuda.so would mean the wheel still carries the
+# accelerator-side libtorch, which is the dependency this lane exists to prove
+# absent, and a `boxing` kernel set would mean it shipped the CUDA dispatch-key
+# routes instead of the FlagGems ones.
+#
+# The Triton that compiles those FlagGems routes is the flagtree build the setup
+# script installs. Failing here names an image with the wrong Triton once,
+# instead of ninety errors into the FlagGems group.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
+  forbid_build_kernels:
+    - boxing
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0rc2
+    triton_prefix: "3.6."
+  model_dir: true

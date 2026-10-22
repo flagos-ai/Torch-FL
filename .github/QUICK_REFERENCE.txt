@@ -1,0 +1,188 @@
+┌─────────────────────────────────────────────────────────────────┐
+│                   torch_fl Contribution Quick Reference          │
+└─────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                        FOR AI AGENTS                              ║
+║           (Claude Code, GitHub Codex, Cursor, etc.)               ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────┐
+│ BEFORE STARTING: Read These (in order)                            │
+├───────────────────────────────────────────────────────────────────┤
+│ 1. cat CLAUDE.md                                                  │
+│ 2. cat .github/AI_AGENT_GUIDE.md                                  │
+│ 3. cat .github/CLAUDE_CODE_GUIDE.md  (if using Claude Code)      │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ MANDATORY REQUIREMENTS                                            │
+├───────────────────────────────────────────────────────────────────┤
+│ ✓ ALL GitHub text in ENGLISH (no Chinese/other languages)        │
+│ ✓ Use AI templates for issues/PRs                                │
+│ ✓ Run validation script before submitting                        │
+│ ✓ Include ACTUAL test output (not just "tests pass")             │
+│ ✓ Provide root cause analysis (not just symptoms)                │
+│ ✓ Document investigation process                                 │
+│ ✓ Assign human reviewer                                          │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ WORKFLOW                                                          │
+├───────────────────────────────────────────────────────────────────┤
+│ 1. Investigate                                                    │
+│    • Read relevant code (don't guess)                             │
+│    • Understand existing patterns                                │
+│    • Find root cause                                              │
+│                                                                   │
+│ 2. Implement                                                      │
+│    • Follow existing code style                                   │
+│    • Reuse existing utilities                                     │
+│    • No debug code (print, TODO, etc.)                            │
+│                                                                   │
+│ 3. Verify                                                         │
+│    • ruff check && ruff format --check                            │
+│    • pytest tests/unit/ -v                                        │
+│    • pytest tests/integration/... -v                              │
+│    • Manual verification                                          │
+│                                                                   │
+│ 4. Validate                                                       │
+│    • python scripts/tools/validate_ai_pr.py --pr-body pr.md       │
+│                                                                   │
+│ 5. Submit                                                         │
+│    • gh pr create --body-file pr.md --label "ai-generated"        │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ TEMPLATES                                                         │
+├───────────────────────────────────────────────────────────────────┤
+│ Issues:  .github/ISSUE_TEMPLATE/ai_agent_issue.md                │
+│ PRs:     .github/PULL_REQUEST_TEMPLATE/ai_agent_pr.md            │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ COMMIT MESSAGE FORMAT                                             │
+├───────────────────────────────────────────────────────────────────┤
+│ <type>: <description>                                             │
+│                                                                   │
+│ <body explaining what and why>                                    │
+│                                                                   │
+│ Fixes #<issue-number>                                             │
+│                                                                   │
+│ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic...>│
+├───────────────────────────────────────────────────────────────────┤
+│ Types: feat, fix, perf, refactor, docs, test, ci, build          │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ VERIFICATION COMMANDS                                             │
+├───────────────────────────────────────────────────────────────────┤
+│ # Linting (REQUIRED)                                              │
+│ ruff check                                                        │
+│ ruff format --check                                               │
+│                                                                   │
+│ # Tests (REQUIRED - paste output in PR)                           │
+│ pytest tests/unit/ -v                                             │
+│ pytest tests/integration/ops/test_*.py -v                         │
+│                                                                   │
+│ # Validation (REQUIRED before PR)                                 │
+│ python scripts/tools/validate_ai_pr.py --pr-body pr.md            │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ COMMON MISTAKES TO AVOID                                          │
+├───────────────────────────────────────────────────────────────────┤
+│ ✗ Using Chinese in PR/commit messages                             │
+│ ✗ Claiming "tests pass" without showing output                    │
+│ ✗ Not investigating root cause                                    │
+│ ✗ Copying code without understanding                              │
+│ ✗ Leaving debug code (print, TODO, commented code)                │
+│ ✗ Using human PR template instead of AI template                  │
+│ ✗ Not assigning human reviewer                                    │
+│ ✗ Skipping linting checks                                         │
+└───────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                    FOR HUMAN CONTRIBUTORS                         ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────┐
+│ QUICK START                                                       │
+├───────────────────────────────────────────────────────────────────┤
+│ 1. Read CONTRIBUTING.md                                           │
+│ 2. Fork and create branch                                         │
+│ 3. Make changes                                                   │
+│ 4. Run tests: pytest tests/unit/ -v                               │
+│ 5. Run linting: ruff check && ruff format --check                 │
+│ 6. Create PR: gh pr create                                        │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ TEMPLATES                                                         │
+├───────────────────────────────────────────────────────────────────┤
+│ Bug Report:      .github/ISSUE_TEMPLATE/bug_report.md            │
+│ Feature Request: .github/ISSUE_TEMPLATE/feature_request.md       │
+│ Platform Request:.github/ISSUE_TEMPLATE/platform_support.md      │
+│ Operator Request:.github/ISSUE_TEMPLATE/operator_support.md      │
+│ Pull Request:    .github/PULL_REQUEST_TEMPLATE.md                │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ BRANCH NAMING                                                     │
+├───────────────────────────────────────────────────────────────────┤
+│ feature/    - New features                                        │
+│ fix/        - Bug fixes                                           │
+│ perf/       - Performance improvements                            │
+│ refactor/   - Code refactoring                                    │
+│ docs/       - Documentation changes                               │
+│ test/       - Test additions                                      │
+└───────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                      PLATFORM SUPPORT                             ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────┐
+│ Supported Platforms                                               │
+├───────────────────────────────────────────────────────────────────┤
+│ • CUDA    - Primary development platform (PyTorch 2.11)          │
+│ • MetaX   - Boxing mode (PyTorch 2.10, reuses CUDA kernels)      │
+│ • Ascend  - ACL backend                                           │
+│ • PPU     - CUDA-compatible via PPU SDK                           │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ Test Marks                                                        │
+├───────────────────────────────────────────────────────────────────┤
+│ @pytest.mark.anyplatform   - Runs on all platforms               │
+│ @pytest.mark.cuda          - CUDA specific                        │
+│ @pytest.mark.ascend        - Ascend NPU specific                  │
+│ @pytest.mark.flaggems      - FlagGems backend required            │
+│ @pytest.mark.flaggems_python - FlagGems Python wrapper required   │
+└───────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                     GETTING HELP                                  ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────┐
+│ Documentation                                                     │
+├───────────────────────────────────────────────────────────────────┤
+│ • CLAUDE.md              - Project conventions                    │
+│ • CONTRIBUTING.md        - Contribution workflow                  │
+│ • README.md              - Build and usage                        │
+│ • .github/AI_AGENT_GUIDE.md - AI agent guidelines                 │
+│ • .github/TEMPLATES.md   - Template index                         │
+└───────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────┐
+│ Resources                                                         │
+├───────────────────────────────────────────────────────────────────┤
+│ • GitHub Discussions: Ask questions                               │
+│ • Issues: Report bugs, request features                           │
+│ • PRs: Review examples of good contributions                      │
+└───────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  Questions? See .github/TEMPLATES.md for complete template guide ║
+╚═══════════════════════════════════════════════════════════════════╝

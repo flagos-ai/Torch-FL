@@ -1,0 +1,234 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+permissions:
+  contents: read
+  pull-requests: read
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # 02:00 CST daily
+  push:
+    branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa, iluvatar_build_and_test]
+  pull_request:
+    branches: [main, dev, devops, dev-hygon]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated platforms to run, or all'
+        required: false
+        default: all
+        type: string
+      pr_number:
+        description: 'PR number for a trusted fork on-demand run'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Resolve the source repository and immutable commit before any reusable
+  # workflow starts. Fork on-demand runs are dispatched from this workflow on
+  # the base branch, so the workflow definition remains trusted while the jobs
+  # test the PR head commit supplied by the API.
+  resolve-checkout:
+    name: Resolve checkout source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repository: ${{ steps.resolve.outputs.repository }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Resolve trusted source
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_REF: ${{ github.sha }}
+          PR_NUMBER: ${{ inputs.pr_number || '' }}
+        run: |
+          set -euo pipefail
+
+          repository="$EVENT_REPOSITORY"
+          ref="$EVENT_REF"
+          if [[ -n "$PR_NUMBER" ]]; then
+            if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::pr_number must be a positive integer"
+              exit 1
+            fi
+            pr=$(gh api "repos/${EVENT_REPOSITORY}/pulls/${PR_NUMBER}")
+            repository=$(jq -r '.head.repo.full_name // empty' <<<"$pr")
+            ref=$(jq -r '.head.sha // empty' <<<"$pr")
+            state=$(jq -r '.state // empty' <<<"$pr")
+            if [[ "$state" != "open" ]]; then
+              echo "::error::PR #${PR_NUMBER} is not open"
+              exit 1
+            fi
+            if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+              echo "::error::PR head repository is unavailable (the fork may have been deleted)"
+              exit 1
+            fi
+            if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::PR head SHA is not a full commit SHA"
+              exit 1
+            fi
+            echo "Testing PR #${PR_NUMBER} from ${repository}@${ref}"
+          fi
+
+          printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
+          printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: resolve-checkout
+    uses: ./.github/workflows/lint.yml
+    with:
+      checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
+      checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+
+  # Repository-wide checks that need no accelerator, no vendor image, and no
+  # built wheel. They run against the same immutable source as the hardware
+  # matrix, so fork on-demand runs test the submitted PR rather than base main.
+  agnostic-checks:
+    name: Platform-agnostic checks
+    needs: [resolve-checkout, lint]
+    uses: ./.github/workflows/agnostic-checks.yml
+    with:
+      checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
+      checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+
+  codegen-checks:
+    name: Codegen checks
+    needs: [resolve-checkout, lint]
+    uses: ./.github/workflows/codegen-checks.yml
+    with:
+      checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
+      checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+
+  discover-platforms:
+    name: Discover platforms
+    needs: [resolve-checkout, lint, agnostic-checks, codegen-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      platforms: ${{ steps.detect.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve-checkout.outputs.repository }}
+          ref: ${{ needs.resolve-checkout.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install matrix parser dependency
+        run: python -m pip install PyYAML
+
+      # Emits `platforms` as a JSON array of config basenames, narrowed to the
+      # platforms a pull request can affect. Labels take precedence over files.
+      - name: Detect configured platforms
+        id: detect
+        env:
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          DISPATCH_PLATFORMS: ${{ inputs.platforms || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          PR_LABELS=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            PR_LABELS=$(jq -r 'join(",")' <<<"$PR_LABELS_JSON")
+          fi
+
+          python .github/scripts/ci/generate_matrix.py \
+            --event-name "$EVENT_NAME" \
+            --base-ref "$BASE_REF" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --configs-dir .github/configs \
+            --pr-labels "$PR_LABELS" \
+            --dispatch-platforms "$DISPATCH_PLATFORMS" \
+            >> "$GITHUB_OUTPUT"
+
+  # One hardware pipeline per configured platform. The reusable workflow reads
+  # runner, image, timeout, and test manifest values from that platform config.
+  platform-pipeline:
+    name: Platform pipeline (${{ matrix.platform }})
+    needs: [resolve-checkout, discover-platforms]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
+    uses: ./.github/workflows/integration-tests.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
+    with:
+      platform: ${{ matrix.platform }}
+      checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
+      checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+
+  # Single required-check gate for branch protection.
+  ci-complete:
+    name: CI complete
+    if: always()
+    needs:
+      - resolve-checkout
+      - lint
+      - agnostic-checks
+      - codegen-checks
+      - discover-platforms
+      - platform-pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify shared checks and selected platforms passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          jobs = json.loads(os.environ["RESULTS"])
+          errors = []
+          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks", "discover-platforms"):
+              if jobs[name]["result"] != "success":
+                  errors.append(f"{name}: {jobs[name]['result']}")
+
+          try:
+              selected = json.loads(jobs["discover-platforms"]["outputs"]["platforms"])
+              if not isinstance(selected, list) or not all(isinstance(p, str) for p in selected):
+                  raise ValueError("platforms must be an array of strings")
+          except (KeyError, TypeError, ValueError) as exc:
+              errors.append(f"Invalid platform discovery: {exc}")
+              selected = []
+
+          platform_result = jobs["platform-pipeline"]["result"]
+          if selected and platform_result != "success":
+              errors.append(f"platform-pipeline: {platform_result}")
+          elif not selected and platform_result not in ("success", "skipped"):
+              errors.append(f"platform-pipeline: {platform_result}")
+
+          for error in errors:
+              print(f"::error::{error}")
+          if errors:
+              sys.exit(1)
+          print("Shared checks and all selected platforms passed.")
+          PY

@@ -1,0 +1,154 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Platform-agnostic repository checks.
+#
+# This job runs the checks that need no accelerator, no vendor image, and no
+# built wheel, so they fail in seconds on ubuntu-latest instead of after a
+# multi-minute hardware job. ci.yml gates every platform pipeline on this job
+# (through discover-platforms), which is what stops a repository-wide breakage
+# -- a stale generated conf, a shell syntax error in a setup script -- from
+# surfacing as a red hardware job on an unrelated platform (e.g. a PPU conf
+# drift failing the DCU pipeline's trailing unit group).
+#
+# The test list below is the subset of tests/unit verified to pass with only
+# pytest and transformers installed (no torch, no device). Everything else in
+# tests/unit needs torch, a built torch_fl, or hardware, and stays on the
+# hardware runners -- today that means the DCU manifest's per-file group, which
+# keeps running the whole directory including these files. tests/unit/bpu/ is
+# excluded too: it imports torch and is collected nowhere today
+# (run_unit_tests.py globs non-recursively), so wiring it in needs a CPU-torch
+# install first.
+#
+# transformers is a deliberate second dependency, not scope creep:
+# tests/manual/transformers_hf_tests.py resolves architecture keys through
+# transformers' own registry (model_type_to_module_name), and the automation
+# unit tests build their fixtures through that helper, so they cannot run
+# without it. The floor (>=4.51) is where Qwen3 model_type support landed --
+# the same lower bound the hardware venvs use; there is no upper bound, matching
+# the DCU job that already runs these files. No numpy pin is needed here: the
+# numpy<2 constraint elsewhere protects the stock torch C extensions, and this
+# job installs no torch.
+#
+# setuptools is the third: test_ci_version_pins.py executes setup.py to check
+# that the requirements the wheel declares are the pins the platform scripts
+# install. That is the file's own subject -- the pin wiring -- and setup.py
+# needs no torch to be read, only setuptools. It is listed explicitly rather
+# than assumed from the runner image.
+# PyYAML parses the workflows exercised by the pip-cache regression tests.
+# coverage.py exercises the hardware collector against a small installed test
+# package without importing torch or loading any accelerator libraries.
+
+name: Platform-agnostic checks
+
+on:
+  workflow_call:
+    inputs:
+      checkout_repository:
+        required: false
+        type: string
+        default: ''
+      checkout_ref:
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+
+jobs:
+  agnostic-checks:
+    name: Platform-agnostic checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install platform-agnostic test dependencies
+        run: pip install pytest pytest-json-report==1.5.0 coverage==7.10.7 "transformers>=4.51" setuptools PyYAML
+
+      - name: Check setup-script syntax
+        run: |
+          set -euo pipefail
+          for script in .github/scripts/set_env.sh .github/scripts/set_env_*.sh \
+            .github/scripts/hooks/set_env_*.sh .github/scripts/lib/*.sh \
+            .github/version-pins.env; do
+            bash -n "$script"
+            echo "OK $script"
+          done
+
+      - name: Run platform-agnostic unit tests
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/unit/test_ai_reviewer.py \
+            tests/unit/test_backend_autoload_contract.py \
+            tests/unit/test_ci_pip_cache.py \
+            tests/unit/test_ci_platform_routing.py \
+            tests/unit/test_ci_matrix.py \
+            tests/unit/test_ci_commands.py \
+            tests/unit/test_ci_resolution.py \
+            tests/unit/test_flagcicd_reports.py \
+            tests/unit/test_flagcicd_coverage.py \
+            tests/unit/test_ci_version_pins.py \
+            tests/unit/test_cupti_runtime_cbid_table.py \
+            tests/unit/test_dcu_core_decoupling.py \
+            tests/unit/test_dcu_env_script.py \
+            tests/unit/test_device_tracer_correlation.py \
+            tests/unit/test_device_tracer_selection.py \
+            tests/unit/test_env_registry.py \
+            tests/unit/test_gen_vendor_confs.py \
+            tests/unit/test_import_phase_order.py \
+            tests/unit/test_iluvatar_env_script.py \
+            tests/unit/test_iluvatar_cpu_runtime.py \
+            tests/unit/test_integration_manifest.py \
+            tests/unit/test_integration_workdir.py \
+            tests/unit/test_mps_collection_without_numpy.py \
+            tests/unit/test_musa_ci_manifest.py \
+            tests/unit/test_musa_env_script.py \
+            tests/unit/test_ops_conftest_platform.py \
+            tests/unit/test_patch_triton_ascend.py \
+            tests/unit/test_platform_capability_matrix.py \
+            tests/unit/test_platform_detect.py \
+            tests/unit/test_platform_support_detect.py \
+            tests/unit/test_run_integration_tests.py \
+            tests/unit/test_run_unit_tests.py \
+            tests/unit/test_set_env_common.py \
+            tests/unit/test_set_env_runner.py \
+            tests/unit/test_startup_lifecycle.py \
+            tests/unit/test_startup_subprocess.py \
+            tests/unit/test_transformers_automation.py \
+            tests/unit/test_transformers_hf_tests.py \
+            tests/unit/test_transformers_model_probe.py \
+            tests/unit/test_vendor_resolution.py \
+            tests/unit/test_vendor_libtorch_overlay.py \
+            tests/unit/test_release_publishing.py \
+            tests/unit/test_wheel_preflight.py \
+            -v --tb=short -p no:cacheprovider
+
+      # A trusted dispatch can test a source commit from before this entry existed.
+      - name: Run FlagCICD entry contract tests
+        if: hashFiles('tests/unit/test_flagcicd_entry.py') != ''
+        run: python -m pytest tests/unit/test_flagcicd_entry.py -v --tb=short -p no:cacheprovider

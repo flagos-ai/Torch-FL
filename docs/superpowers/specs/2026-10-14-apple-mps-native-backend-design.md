@@ -1,0 +1,1356 @@
+# Apple M-series (Metal/MPS) backend for torch-fl — design document
+
+Date: 2026-10-14
+Status: Accepted. Operator strategy is decided (§6): MPSGraph-first with an MSL
+fallback, delivered stage by stage per §7.
+
+## 1. Goal
+
+Add Apple M-series GPUs (Apple Silicon: M1 through M5) as a supported `flagos`
+accelerator. A Mac with Apple Silicon should be able to run ordinary PyTorch
+eager code on the `flagos` device, the way the CUDA, Ascend, GCU and MUSA
+platforms do, by building a macOS arm64 wheel with `FLAGOS_ACCELERATOR=mps`.
+
+The backend is **native**. torch-fl's own device runtime and its own operator
+kernels talk to Apple's Metal stack directly. It reuses neither the CUDA runtime
+sources nor the CUDA boxing machinery.
+
+## 2. Non-goals
+
+- **No boxing.** Boxing is explicitly ruled out and is on the path to removal
+  from the tree. Concretely: no `DeviceBoxingGuard` /
+  `SetTensorImplDevice` re-tag of `flagos` tensors onto another dispatch key, no
+  re-dispatch onto `DispatchKey::MPS` or `DispatchKey::CUDA`, and no
+  `cuda_kernels.cc` boxing backend for this platform. `FLAGOS_BUILD_BOXING` is
+  pinned **off**.
+- **No FlagGems / FlagTree / Triton.** There is no Metal backend in the Triton
+  line torch-fl pins and no FlagTree build for Apple, so `FLAGOS_BUILD_FLAGGEMS`
+  and `FLAGOS_BUILD_FLAGGEMS_CPP` are pinned off. Ops with no native kernel reach
+  `cpu_fallback`.
+- **No FlagCX / distributed and no profiler** in the first cut. Apple has no
+  FlagCX build; the profiler needs a Metal/os_signpost tracer, which is a
+  follow-up.
+- **Apple GPUs only.** On a Mac without an MPS-capable GPU,
+  `torch.flagos.device_count()` reports 0 rather than offering a device that
+  fails on first use.
+- **No `torch.compile`** initially.
+
+## 3. Background
+
+Two facts shape the design.
+
+**The pattern already exists.** A non-CUDA native platform (`gcu`, `musa`,
+`ascend`) is built from: a per-vendor runtime directory implementing the
+28-function C ABI in `csrc/include/flagos.h` plus the 10 `DeviceMemoryInterface`
+virtuals; a per-vendor aten kernel directory produced through the codegen
+category system; a `Backend::k<Platform>` slot in `csrc/aten/dispatcher.h`; a
+`torch_fl/configs/backends_<platform>.conf` routing table; and a
+`writes_platform_marker` entry in `cmake/flagos_platforms.json`. Apple is an
+instance of that pattern, not a new architecture. The bring-up order is the one
+in `.claude/skills/runtime-bringup/SKILL.md`: get the floor green with zero
+operators, then add kernels through the `native-op-backend` route.
+
+**Apple exposes the GPU through Metal, and its operator libraries through MPS /
+MPSGraph.** There is no C op library equivalent to ACLNN / topsaten / mudnn.
+MPSGraph is the closest analogue — a graph API whose node set covers a large
+fraction of elementwise, reduction, matmul, convolution and normalization ops —
+and MPS provides standalone primitives (e.g. `MPSMatrixMultiplication`,
+`MPSGraph` softmax). `libtorch`'s own MPS backend is built this way, which is
+both the proof that the composition works and the reason re-implementing all of
+it is a large project.
+
+## 4. Why not the two cheaper-looking alternatives
+
+### 4.1 Why not box to the MPS dispatch key
+
+Re-tagging `flagos` tensors to `DispatchKey::MPS` and calling ATen's MPS kernels
+is technically the least code, because it reuses the `mm`/`add`/`conv` kernels
+`libtorch` already ships. It is also, precisely, boxing — the same device-metadata
+rewrite the CUDA path uses, just aimed at a different dispatch key. It would
+require a second box target threaded through `device_boxing.h` and
+`scripts/codegen/codegen_ops.py`, which is the machinery being removed. It is
+ruled out by §2.
+
+### 4.2 Why not CPU fallback as the deliverable
+
+`cpu_fallback` is the designated path for an *unrouted* op, and a platform whose
+GPU never runs a kernel is a "Runtime only" entry in the matrix (the BPU
+precedent), not accelerator support. CPU fallback with a working device runtime
+is fine as an interim milestone (§7, stage 0) but not as the finished feature.
+
+## 5. Architecture
+
+### 5.1 Device runtime floor — `csrc/runtime/accelerator/mps/`
+
+Same three-file split as every other backend (`device.cc` 5 functions,
+`memory.cc` 9, `stream.cc` 14). Metal maps onto the contract as follows.
+
+| `flagos.h` function | Metal implementation |
+|---|---|
+| `GetDeviceCount` | 1 when `MTLCreateSystemDefaultDevice()` returns an Apple GPU, else 0 |
+| `GetDevice` / `SetDevice` | single index 0, `thread_local` (Apple has one GPU) |
+| `DeviceGetStreamPriorityRange` | `MTLCommandQueue` has no priority knob; report 0/0 (BPU precedent) |
+| `DeviceSynchronize` | drain the current command buffer(s) on the default queue and wait |
+| `Malloc` / `Free` | `-[MTLDevice newBufferWithLength:options:]` retained in a side table; release on `Free` |
+| `MallocHost` / `FreeHost` | `malloc` / `free` (unified memory; page-locking is not a separate concept) |
+| `Memcpy` / `MemcpyAsync` | `memcpy` for shared buffers; a blit encoder on the stream's queue for private buffers |
+| `Memset` / `MemsetAsync` | blit `fillBuffer` (or `memset` for shared buffers) |
+| `PointerGetAttributes` | side table `ptr -> (size, device)`; `MemoryTypeDevice` |
+| `StreamCreate*` | `-[MTLDevice newCommandQueue]` |
+| `StreamGetPriority` | 0 |
+| `StreamDestroy` / `StreamQuery` / `StreamSynchronize` | release / poll / `waitUntilCompleted` on the queue's committed buffers |
+| `StreamWaitEvent` | encode a wait on a `MTLSharedEvent` |
+| `EventCreate*` / `EventDestroy` / `EventRecord` / `EventSynchronize` / `EventQuery` | `MTLSharedEvent` with a monotonically increasing signal value |
+| `EventElapsedTime` | Metal has no elapsed-time query; capture `MTLCommandBuffer.GPUStartTime`/`GPUEndTime` at record points and report their difference (the same technique the in-tree MPS work uses) |
+
+Two behaviors from the skill are load-bearing and easy to get wrong:
+
+- `StreamQuery` and `EventQuery` **must** return `ErrorNotReady` (not a generic
+  error) while work is outstanding, or the caching allocator's block-reuse path
+  misreads a live buffer as corrupt.
+- `Memcpy` must **drain the current command buffer first** when ops dispatch
+  asynchronously on the shared queue, or a `.cpu()` races the kernel that
+  produces the data. Metal encodes work into a command buffer that is only
+  committed at a synchronize point, so this is a real hazard here, not a
+  theoretical one.
+
+`MallocHost`/`FreeHost` and the allocator's `provides_caching()` follow the
+defaults: return `false` from `provides_caching()` so the built-in block pool is
+used. There is no mature Apple allocator to delegate to and no PrivateUse1 slot
+collision to worry about.
+
+### 5.2 Build and toolchain
+
+- `cmake/flagos_platforms.json`: a new `mps` row with
+  `project_languages: ["OBJCXX", "CXX", "C"]`, `runtime_dir: "mps"`,
+  `use_macro: "USE_MPS"`, `writes_platform_marker: true`, `vendor_torch_libraries:
+  false`, `c10_cuda_no_cmake_configure: true`, empty `wheel_local` and
+  `pypi_lane` (no lane publishes an Apple wheel), and kernel defaults
+  `vendor: true`, `boxing: false`, `flaggems: false`, `flaggems_cpp: false`,
+  `tileops: false`.
+- The runtime CMake glob is `*.cc` today; a `mps` arm must also pick up `*.mm`.
+  Objective-C++ is required for the Metal/Foundation interop, so `OBJCXX` joins
+  the `project()` languages for this platform only.
+- Link Apple frameworks: `-framework Metal -framework Foundation` for the
+  runtime; `-framework MetalPerformanceShaders -framework
+  MetalPerformanceShadersGraph` for the operator layer (see §6).
+- `setup.py`: a `mps` arm with no SDK discovery (there is no vendor SDK — the
+  macOS torch wheel already carries MPS), no bundled libtorch, and no FlagTree
+  pin. `python_requires` is not pinned to a vendor cp tag (no FlagTree to link).
+- The wheel platform tag comes from the build host, so a build on macOS arm64
+  produces a `macosx_*_arm64` wheel with no extra work.
+
+### 5.3 Python wiring
+
+- `torch_fl/_platform.py`: add `"mps": "mps"` to `_ACCELERATOR_TO_PLATFORM` and
+  `"mps"` to `_CONF_PLATFORM_FRAGMENTS`.
+- `torch_fl/accelerator/mps/` for the Python compat module (stream/event
+  wrappers that `torch.flagos.Stream` dispatches to), mirroring the MUSA layout.
+- The device name stays `flagos`; only the accelerator value and conf file are
+  platform-specific.
+
+## 6. Operator strategy — decided: MPSGraph-first, MSL fallback (Option A)
+
+This is the one choice that changes the size of the project by an order of
+magnitude. It is decided: **Option A**. The three options are recorded here so
+the reasoning survives the choice.
+
+**Option A — MPSGraph-first, MSL fallback (recommended).** Treat MPSGraph as the
+"vendor operator library" the way Ascend treats ACLNN. `csrc/aten/backends/mps/`
+wraps `MetalPerformanceShadersGraph` nodes; each op builds a one-node graph,
+binds flagos-allocated `MTLBuffer`s through `MPSGraphTensorData`, runs it on an
+`MPSGraphDevice`, and returns the flagos tensor. Ops MPSGraph cannot express
+cheaply (odd dtypes, exotic layouts, small elementwise ops where graph build
+cost dominates) are written as hand-authored MSL compute kernels compiled once at
+startup with `newLibraryWithSource:` and cached. This reaches broad coverage
+fastest and matches the repo's "reuse before reimplement" principle.
+
+**Option B — pure MSL codegen.** No MPSGraph. Hand-write `.metal` kernels and
+generate their C++ wrappers through a category system (`unary`, `binary`,
+`reduce`, `gemm`, …) exactly like `codegen_ascend.py`. Highest control and best
+small-op latency, but it is a re-implementation of a large slice of
+`libtorch`'s MPS backend — the largest of the three options.
+
+**Option C — runtime only, all ops on CPU.** Ship stage 0 alone: the device
+runtime is real and `flagos` tensors allocate, copy and synchronize, but every op
+reaches `cpu_fallback`. This is a genuinely useful first PR and a complete
+"Runtime only" platform row, and it de-risks everything below it.
+
+The recommended path is C first (it is stage 0 of both A and B and is verifiable
+end to end on any Apple Silicon machine), then A, widening the op set by category
+from `unary` outward and filling gaps with B.
+
+**Marshalling contract (measured on an M5).** MPSNDArray is not a dense view of a
+buffer once it has more than one dimension: it rounds the stride between rows up
+to 16 bytes. A `(4, 5)` float32 operand, whose rows are 20 bytes, is therefore
+read as four 32-byte rows and every row after the first comes from the wrong
+offset — under the first implementation row 1 compared as
+`[0, 0, 0, 0.4681, 0.1577]` against a torch row of
+`[-1.5551, -0.3414, 1.853, 0.4681, -0.1577]`, and the same arithmetic is what
+`initWithBuffer:offset:descriptor:` reports as "buffer is not large enough. Must
+be 128 bytes" when a small buffer is passed. The pitch cannot be corrected from
+the outside: `rowBytes` is not a public property of `MPSNDArrayDescriptor` and
+reads back 0. Buffers are therefore always described to MPSGraph as a 1-D array
+of `numel` elements and the aten shape is applied inside the graph, where a
+reshape is a metadata operation (`MpsFlatPlaceholder`, `MpsReshape`,
+`MpsFlatten` in `mps_common.h`). Stages 2 and 3 inherit the rule, and
+`tests/integration/ops/test_mps_unary.py` pins it on the shapes -- and the
+aligned controls -- that an aten-shaped descriptor would get wrong.
+
+**Graph reuse, measured on an M5 (this is what stage 3 fixes).** The
+marshalling contract above is only half of what the first implementation got
+wrong. The nine stage-1/2 kernels ran per call at a cost that did not depend on
+size: 4751 us for `abs` and 6458 us for `mul` at 128 elements, against CPU
+fallbacks of 1.7-348 us, so the arithmetic was not what was being measured. A
+bare-Metal probe separates the two halves: `[[MPSGraph alloc] init]` plus node
+construction costs ~3.5-4.5 ms per call, and awaiting a command buffer that
+already holds the compiled graph costs another ~270-370 us, while the same
+graph scheduled with `runAsyncWithMTLCommandQueue:` and never awaited costs
+~18 us. Only the `MPSGraphExecutable` plus
+`runAsync…inputsArray:resultsArray:` path reaches that: reusing one `MPSGraph`
+and its `runAsync…feeds:resultsDictionary:` measured ~159 us, and dynamic-shape
+placeholders -- which would have collapsed the cache keys -- measured ~409 us.
+`MpsRunGraph` therefore compiles a plan once per (body key, operand dtypes and
+shapes), caches it up to 64 entries, schedules without waiting, and commits one
+empty sentinel command buffer afterwards so that `StreamQuery` and
+`StreamSynchronize` still cover the work (§5.1's allocator hazard). The same
+ops then measure ~20-75 us per call, and a `.cpu()` read back immediately after
+one still returns the right values.
+
+## 7. Staged delivery
+
+| Stage | Content | Exit criteria |
+|---|---|---|
+| 0 | Runtime floor only, `cpu_fallback` for all ops | The skill's operator-free smoke test passes: `device_count > 0`, `empty`/H2D/D2H, stream + timing event, allocator churn across two streams, `empty_cache` |
+| 1 | `unary` category via MPSGraph/MSL, one op end to end | Unary op matches CPU within tolerance |
+| 2 | `binary`, `binary_scalar`, `reduce` | Category suites pass |
+| 3 | `gemm`/matmul, conv, softmax, the lanes a small model needs | Qwen3-0.6B (or a comparable small model) forward matches CPU |
+| 4 | Per-op support record, matrix rows, vendor install doc | `docs/reference/operator-support.md` updated from measured results |
+
+Each stage ends with a green build and a measured result; operator support is
+recorded only from measurements, per CLAUDE.md.
+
+Status: stage 0 landed with the `mps` platform row; stage 1 landed with `abs`
+as the first `unary` op (`csrc/aten/backends/mps/`, `scripts/codegen/codegen_mps.py`,
+`backends_mps.conf` routing `abs` to `mps`), verified on an M-series host with
+`tests/integration/ops/test_mps_unary.py` (matches CPU across f32/f16/bf16 and
+the integer dtypes at row widths that are not multiples of 16 bytes as well as
+aligned ones, bool declined to the same `NotImplementedError` as CPU).
+Stage 2 landed with the `binary`, `binary_scalar` and `reduce` categories --
+`add`/`sub`/`mul` over two tensors and over a tensor and a host scalar, and
+`sum.dim_IntList`/`mean.dim` -- verified with
+`tests/integration/ops/test_mps_binary.py` and
+`tests/integration/ops/test_mps_reduce.py` (CPU-equal across f32/f16/bf16 and
+the integer dtypes at unaligned row widths, broadcasting inside the graph,
+`alpha` folded in as a constant, and the declined cases -- mixed dtypes,
+fractional scalars and alphas on integral operands, int64 beyond +/-2^53,
+integer/bool/float64 reductions, empty operands, repeated or out-of-range axes
+-- taking the annotated CPU round-trip). `max.dim`/`min.dim` stay on the
+fallback: MPSGraph's argmax selector has no documented tie-break and the
+reference has an answer.
+
+Stage 3 opened with the `gemm` category -- `mm` and `bmm` -- the ops the
+category exists for and the ones the stage's promise is measured against:
+MPSGraph exposes a single selector,
+`matrixMultiplicationWithPrimaryTensor:secondaryTensor:`, which broadcasts, so
+one graph node serves both ops and the kernel is what enforces aten's shapes (a
+non-2-D `mm` operand, a non-3-D or mismatched-batch `bmm` operand, and a
+mismatched contracting dimension are declined to the CPU round-trip so the
+reference raises its own error). The layout is the part worth recording:
+`nn.Linear` hands over `weight.t()`, and a transposed last two axes over dense
+memory is the one stride pattern the kernel recognises (`MpsGemmOperand` in
+`mps_common.h`), carrying the transpose into the graph instead of copying the
+operand. Measured on an M5 with a (512, 1024) x (1024, 32768) f32 product, the
+graph transpose cost 11.9 ms against 13.1 ms for an already-dense operand and
+2.96 ms for the transpose node on its own, so reading a weight down its columns
+(70 ms) is what the copy was paying for. Because the layout is a host value the
+kernel reads, it is part of the plan key: a `(32, 32)` dense operand and the
+same buffer transposed present identical dtypes and shapes and would otherwise
+be answered by one another's compiled graph. On a single Qwen3-0.6B layer --
+eight `mm` and two `bmm` calls -- device dispatch time for the layer fell from
+163.2 ms to 43.7-47.6 ms with the ten calls going from 121.5 ms (74% of it) to
+0.42-0.51 ms (1%), and nine timed forwards went from a 239.0 ms median (212.6 ms
+minimum) to 68.4 ms (61.9 ms); those are single-host numbers on a machine shared
+with other load, so they are a same-session A/B rather than an absolute. The
+stage-3 `gemm` increment is
+verified with `tests/integration/ops/test_mps_gemm.py` (CPU-equal across
+f32/f16/bf16, the graph-transpose and the copied slice case distinguished by
+the allocator's peak, the declined shapes and integral/float64 round-trips, and
+the dispatch log naming `mps`).
+
+Stage 3 then added `softmax` and the two elementwise unaries a small model
+reaches for beside it, `neg` and `pow.Tensor_Scalar`, each measured on the M5
+against the CPU round-trip the previous commit's composite path paid -- a
+device-to-host copy, the CPU kernel, and a host-to-device copy back, which is
+what a device-resident model pays rather than a bare CPU kernel. A
+(1, 16, 512, 512) attention-score softmax fell from 3.04 ms to 1.03 ms, the
+(1, 512, 1024) `pow(x, 2)` of a LayerNorm variance from 1.35 ms to 0.38 ms, and
+the (1, 16, 512, 64) `neg` a `rotate_half` is built from from 0.48 ms to
+0.33 ms -- the last one the smallest win of the three because a 512x64 slice is
+where the copy is cheap relative to the schedule. The largest single item on the
+layer is still `embedding` on the fallback (44 ms of its dispatch time), which
+this stage did not touch.
+
+Two decisions narrow the surface and are worth recording. **`softmax.int` is
+not registered because it cannot be.** On this PyTorch build it is
+`CompositeImplicitAutograd`: the dispatcher decomposes it above the backend key,
+so a kernel for it is never called and there is no wrapper in
+`csrc/aten/generated/register.inc` to fill. What does reach `PrivateUse1` --
+what `torch.softmax`, `F.softmax`, SDPA and `torch.softmax(dtype=...)` all lower
+to -- is `aten._softmax(self, dim, half_to_float)`, so that one spelling is the
+whole category. `softmax.int_out` joins the other `.out` forms on the fallback,
+because serving one means writing into a tensor the caller owns. **`bfloat16`
+is declined for both `softmax` and `pow`**, on a measurement rather than a
+tolerance: a bfloat16 MPSGraph softmax returned a denormal for every element and
+a bfloat16 `pow` returned values up to 36 from the reference on the SDK in use,
+while float16 was bit-identical and float32 within 29 ulp. The gate takes
+float32 and float16; everything else keeps the round-trip, which stays correct.
+
+This increment is verified with `tests/integration/ops/test_mps_softmax.py`,
+`test_mps_pow.py`, and the extended `test_mps_unary.py`: CPU-equal over every
+axis including the negative spellings, f32/f16 accepted with bf16/f64/integral/
+bool declined into the reference's own values and errors, an empty operand, a
+rank-0 operand, a strided operand, plan reuse across axes, exponents and dtypes,
+and the dispatch log naming `mps` for the public `torch.softmax` spelling rather
+than only for `_softmax`.
+
+Stage 3 closed with the `conv` category. Two facts decide its shape. **The
+registered spelling is `convolution_overrideable`**, because `aten.convolution`
+is `CompositeImplicitAutograd` on this build: it validates and decomposes above
+the backend key, so a kernel for it is never called. It is `F.conv2d`,
+`F.conv3d`, `nn.Conv2d` and `nn.ConvTranspose2d` that all reach
+`aten.convolution_overrideable` on `PrivateUse1`, which the dispatch-log cases
+hold. **The geometry lives on the host.** MPSGraph's convolution descriptors
+(`MPSGraphConvolution2DOpDescriptor`/`...3DOpDescriptor`) carry the stride,
+dilation, groups and an explicit front/back padding pair per axis -- aten's flat
+`padding` is `[front_0, front_1, ..., back_0, back_1, ...]`, the same split the
+descriptor wants -- and none of that is visible in the operand shapes, so every
+one of those values is part of the plan key. Two mappings are easy to get wrong
+and so are spelled out in `MpsConvDescriptor`: the per-axis order runs opposite
+to aten's (`p = rank - 1 - axis` between them, a wrong number rather than a
+shape error for a non-square kernel) and the bias has to be reshaped to
+`(1, OC, 1, ...)` before the add, because `(1, 1, 1, OC)` crashes the MPSGraph
+compiler and `broadcastTensor:toShape:` expands along the wrong axes. MPSGraph
+has no 1-D selector, so `conv1d` takes the round-trip. The dtype gate is
+deliberately wider than the softmax one: **bfloat16 is served here**, because a
+bfloat16 convolution measured bit-identical to a bfloat16 reference convolution
+on an M5 (both 6.52e-03 against an exact float64 reference -- bfloat16's own
+precision) where a bfloat16 softmax came back denormal, which is why the
+predicate is per category rather than per dtype.
+
+This increment is verified with `tests/integration/ops/test_mps_conv.py`:
+CPU-equal over the plain, strided, dilated, pointwise, depthwise, grouped,
+asymmetric-padding and anisotropic-kernel cases in 2-D and 3-D, f32/f16/bf16
+accepted with f64/integral/bool and every declined shape taking the reference's
+own value or error, `conv1d` and `nn.ConvTranspose2d` round-tripping, plan reuse
+across stride, padding, dilation, groups and the bias flag, and the dispatch log
+naming `mps` for the public `F.conv2d`/`F.conv3d` spellings. That completes the
+stage-3 lanes the design names (`gemm`, `conv`, `softmax`); stage 4 is open.
+
+Stage 4 opened with the `silu` category, which is the first op here MPSGraph has
+no selector for. The definition is `x * sigmoid(x)` and MPSGraph has
+`sigmoidWithTensor:`, so the body is a two-node composition -- the first in this
+layer -- and the interesting question is whether composing at all is legitimate.
+It is not, automatically: **aten's CPU `silu` is its own kernel rather than the
+definition**, and evaluated on the host the two readings differ by 7.8e-03 on
+float16 and 3.1e-02 on bfloat16, which would be a wrong answer rather than a
+rounding difference. So the gate is a measurement of the graph against
+`at::silu` rather than a statement of the identity, taken on an M5 over operands
+spanning [-40, 40] with the saturated tails, denormals and a rank-0 shape
+included: bit-identical on float16 and bfloat16, and 2.7e-07 relative on
+float32, where the graph and the reference sit 1.2353e-06 from an exact float64
+evaluation to the last digit -- the same distance, so they round differently
+rather than one being wrong. All three widths are therefore served, which is
+wider than the `softmax` gate that declines bfloat16 and narrower than nothing:
+**the widths a category serves are per op here, not a per-dtype list this
+backend keeps.** The key has no host parts, since `silu` takes no argument
+beyond its operand.
+
+This increment is verified with `tests/integration/ops/test_mps_silu.py`:
+CPU-equal on all three float widths, the SwiGLU `(batch, seq, 3072)` shape, the
+saturated tail where a weaker `sigmoid` would show as a number, the sign of the
+negative tail, the `inf`/`nan` pair, rank-0 and empty operands, strided operands,
+plan reuse across interleaved dtypes and shapes, and the dispatch log naming
+`mps` for both the `F.silu` and `aten.silu` spellings. There is a case there that
+guards the *reference* rather than the kernel: it fails if a future PyTorch makes
+`silu` the composition, because then the note this gate rests on would be stale.
+
+`silu_backward` followed as the first backward body and the first op here whose
+graph takes the upstream gradient alongside the forward operand. It computes
+`g * sigmoid(x) * (1 + x * (1 - sigmoid(x)))`, keeping `sigmoid` as a node rather
+than differentiating through `exp`, which overflows before the host reference's
+cancellation settles the derivative at a large positive `x`. Equal float32 and
+float16 operands are served; bfloat16 is declined because its graph and
+autograd reference differ by up to 3.1e-02 around `x = 3`. Mixed widths,
+incompatible devices and non-broadcastable shapes take the CPU round-trip so the
+reference keeps its promotion and error behaviour. The functional op is
+registered; `silu_backward.grad_input` remains on the fallback.
+
+This increment is verified with the backward cases in
+`tests/integration/ops/test_mps_silu.py`: explicit and autograd gradients at both
+served widths, broadcasting, strided operands, plan reuse, the decline paths,
+and the dispatch log naming `mps`. PyTorch 2.10's autograd engine still asserts
+on backward after an explicit `import torch_fl` in a process where MPS is also
+available, so those cases use the backend's own autograd path. The upstream
+coexistence limitation recorded in §10 remains; this op does not change it.
+The conf moves from 34 to 35 native routes.
+
+Stage 4 continued with the `embedding` category, which section 7 recorded as
+~47% of a Qwen3-0.6B layer's device dispatch time -- the largest single item
+left. It is the first op here whose cost is a *read* of its operand rather than
+a computation over it, and the reason it mattered was not the arithmetic: the op
+was routed to `none`, so every call took `cpu_fallback`, which copies the whole
+`(151936, 1024)` weight to the host. Measured on an M5, one `F.embedding` call
+with a `(1, 512)` index tensor cost 55.3 ms, of which 55.8 ms was the host copy
+of the table, against 0.697 ms for the same read performed entirely on the CPU.
+The graph side is one node -- `gatherWithUpdatesTensor:indicesTensor:axis:0
+batchDimensions:0` -- and it reproduces `at::embedding` bit for bit.
+
+Two things about this kernel are worth recording, because each is a case where
+the obvious reading of the reference is wrong. The first is the index range:
+MPSGraph's gather has no range contract, and measured on an M5 with a 6-row
+table and the index list `(5, 6, 2, 0)` it returns the table's *first row* for
+the out-of-range 6 -- likewise for `-1` and for `100` -- where the reference
+raises `IndexError: index out of range in self`. A plausible wrong answer is the
+one outcome worse than a round-trip, so the body validates the range on the host
+before any node exists and declines, handing the call to the reference for its
+own error. The other gather spelling, `gatherAlongAxis:`, was measured first and
+rejected: it requires the indices to carry the operand's rank, and its own
+out-of-range behaviour is to insert a 0, which would look like a padding row.
+
+The second is `padding_idx`, which the forward op **does not read**. Measured
+against the CPU reference with a `(4, 3)` table and the index list
+`(0, 1, 2, 3)`, the result is bit-identical for `padding_idx` `-1`, `-3`, `-4`
+and `2`, and an out-of-range `padding_idx` (`7`, `-9`) is accepted rather than
+rejected; the zeroing that name asks for is a property of
+`embedding_dense_backward`, not of this op's output. That matters because the
+first version of this body assumed otherwise and declined whenever
+`padding_idx >= 0` -- and `F.embedding` passes `padding_idx=None`, which arrives
+at the op as `-1` and was read as "count back from the end", so *every* ordinary
+`F.embedding` call took the whole-table round-trip the increment existed to
+remove. The kernel measured 77-99 ms with that bug and 0.25-0.29 ms without it.
+`padding_idx` is not in the graph key either: two calls that differ only in it
+produce the same bytes and are one plan.
+
+This increment is verified with `tests/integration/ops/test_mps_embedding.py`:
+bit-exact CPU equality on all three float widths and both integer index widths,
+the index rank preserved from `(1,)` to `(2, 3, 4, 5)`, empty and non-contiguous
+operands, every `padding_idx` spelling including the `None`-as-`-1` the front end
+passes, the three out-of-range `IndexError` cases and the float-index
+`RuntimeError`, plan reuse across dtypes and across `padding_idx`, the dispatch
+log naming `mps` for both the `F.embedding` and `aten.embedding` spellings, a
+declined float64 table that never reaches the graph, and a cost case that fails
+if the whole-table round-trip comes back.
+
+Stage 4 continued with `div`, `div.Scalar` and `reciprocal`, which close the
+elementwise arithmetic set that `add`, `sub` and `mul` opened in stage 2. The
+increment was chosen from a measurement rather than from the op list: on an M5
+over a `(2, 512, 1024)` float32 tensor, `div.Scalar` cost 0.68-0.95 ms and
+`div.Tensor` 1.36-2.66 ms against 0.24 ms for a device-to-host copy of the same
+tensor, so the routed path was making three host passes where the kernel makes
+one. All three ops are served by a single graph node,
+`divisionWithPrimaryTensor:secondaryTensor:`, and the body is one node for
+`reciprocal` too -- `reciprocalWithTensor:` was measured and rejected on cost,
+since `a * reciprocal(b)` and `a / b` are bit-identical to each other and to
+the reference over zero and signed-zero denominators, inf, nan and denormals,
+which makes the reciprocal a two-node cost decision rather than a correctness
+one. `div.out`, the `mode` spellings (`div.Tensor_mode`, `div.Scalar_mode`,
+`div.out_mode`, `div.Scalar_out`, `div.Scalar_mode_out`), the in-place
+`div_.Tensor` / `div_.Scalar`, `reciprocal.out` and `reciprocal_` are not
+served: the `mode` forms need a floor or trunc composition after an exact
+division, which is a different body.
+
+The honest finding of this increment is a bug the first version shipped. The
+gate reused `MpsSupportsBinaryDtype`, the predicate written for `mul`, and that
+predicate admits integral widths -- which is correct for a multiplication and
+wrong for a division, because `aten::div` promotes integers to float. Measured
+through the backend, `aten::div.Tensor(tensor([-7]), tensor([2]))` returned the
+truncated int64 `-3` where the reference returns the float32 `-3.5`: a silently
+wrong value *and* a silently wrong dtype. The fix is a dedicated
+`MpsSupportsDivDtype` that requires the two dtypes to match and both to be
+float32, float16 or bfloat16, plus a second new predicate,
+`MpsSupportsDivScalarDtype`, because `div.Scalar` reaches the same promotion
+through `MpsSupportsScalarDtype` and had the same defect. `reciprocal` is gated
+by the division predicate rather than by the wider unary one, since `x / 2` and
+`1 / x` are one node family and have to agree on the widths they claim.
+
+One behavioural difference from the reference is measured, recorded and shared:
+MPSGraph flushes a subnormal *result* to zero. The boundary is the result, at
+the smallest normal float -- `1e-38 / 2` returns `0` where the reference returns
+`5.0e-39`, while `2.35e-38 / 2` returns the normal `1.175494e-38` untouched --
+and it holds through both bodies, `aten::div.Tensor(x, tensor(2.0))` and
+`aten::div.Scalar(x, 2.0)` alike; `reciprocal` overflows the same way, with
+`1 / 1.17e-38` returning `inf` where the reference returns `8.5e37`. It is not a
+division property: `mul.Tensor`, routed since stage 2, flushes identically
+(`1e-38 * tensor(0.5)` returns `0`), as does `add.Tensor` (`1e-39 + 1e-39`
+returns `0`). The subtlety worth recording is that the Python operators do *not*
+reproduce it: `x / 2.0` and `x * 0.5` are resolved by PyTorch's own composite
+wrapper before PrivateUse1 dispatch, so no graph node is built for the constant
+and the result keeps its subnormal -- even though the dispatch log names
+`div.Tensor` for that spelling, because that is the schema name and not the
+kernel that ran. Only the opaque `aten::div.Scalar(t, 2.0)` and
+`aten::div.Tensor(t, tensor([2.0]))` reach the graph. A future reader who
+measures only the Python form would wrongly conclude the graph preserves
+subnormals, so both spellings are pinned in the suite.
+
+This increment is verified with `tests/integration/ops/test_mps_div.py`:
+bit-exact CPU equality on all three float widths including the zero and
+signed-zero sign bits, the inf and nan quadrants, exact quotients, the dtype
+promotions the reference applies to integers and booleans, the subnormal
+boundary through both bodies and in both the Python and the opaque spellings,
+the declined integral, complex and mismatched-dtype pairs that never reach the
+graph, plan reuse across shapes and dtypes, and the dispatch log naming `mps`
+for the `a / b`, `a / 2.0`, `2.0 / a` and `torch.reciprocal` spellings.
+
+Stage 4 continued with `index_select`, which was *not* the op this section had
+recorded as next. The plan was `embedding_dense_backward`, and it was measured
+and dropped: the only correct graph for it is `oneHot(N, V)ᵀ @ grad(N, H)`,
+verified bit-exact, and its work is `O(V·N)` -- 18.8 ms at `N=1` (a win against
+the fallback's 43 ms), 68.3 ms at `N=512` and 243 ms at `N=2048` (losses), with
+chunking over `V` measured at 162 ms and 670 ms and no better. The
+`scatterAlongAxis:withDataTensor:` node that would have made it linear is
+unusable: the SDK enforces `indices.shape == updates.shape`, and with equal
+shapes it writes updates as a rolling window rather than by row index (a
+`(N, 1, 1)` sparse index is rejected outright, and MPSGraph exposes no
+`broadcastTensor:withShape:` to build the equal-shape form). Every row *write*
+primitive round-trips as well -- `index_copy_` 117 ms, `index_add_` 115 ms,
+`out[idx] = grad` 66 ms -- all of them `aten::_to_copy` over the whole `(V, H)`
+table, so the dense output has to be materialised either way. The measurement
+pointed instead at the read family those ops all share, and that is this
+increment.
+
+`index_select` is the gather the `embedding` body above already builds, reached
+through the op the caller names rather than through the embedding front end, and
+it is served on the same evidence: measured on an M5 over a `(151936, 1024)`
+float32 operand, the fallback cost 40.4 ms for a *single* row and the graph
+costs 0.29 ms, with 0.29 ms at 512 rows and 0.78 ms at 4096 -- the fallback's
+cost is the dimension of the operand (V=10000 → 2.4 ms, V=151936 → 41.7 ms, same
+one row, profiled as `aten::_to_copy` over 622 MB) while the graph's cost is the
+number of rows asked for. The body is one node,
+`gatherWithUpdatesTensor:indicesTensor:axis:0 batchDimensions:0`, over the same
+`(rows, row_width)` reshape the embedding body uses for the row-pitch reason
+recorded above.
+
+What is new here, and the whole of the increment's design, is that
+`index_select` carries arguments where `embedding` carried only operands. The
+body resolves `dim` against the operand's rank and **declines** unless it
+resolves to axis 0 -- the only axis the one node reaches -- alongside an
+out-of-range `dim`, an index whose dtype is not int32/int64, and an index that
+falls outside the operand. Declining is not a degradation of the contract: the
+round-trip *is* the reference's implementation and its own
+`IndexError`/`RuntimeError`, so a declined call answers correctly and simply
+costs what it costs today. The alternative -- building the axis-0 node and
+returning its answer for a different axis -- is a plausible-looking wrong
+answer, which is the failure class the `embedding` range check exists for.
+
+The honest finding of this increment is a second member of that class, found by
+the suite rather than by review. `index_select` takes a *vector* index and says
+so (`IndexError: index_select(): Index is supposed to be a vector`), where
+`embedding` reads any index shape as a batch dimension -- but the first version
+of this body set `out_shape[0] = index.numel()` and flattened the index buffer
+for the graph, so a `(2, 2)` index over a `(6, 4)` operand came back as a
+`(4, 4)` tensor with a silent flatten where the reference raises. The fix is an
+explicit `index.dim() != 1` decline, and it is held by a case that fails without
+it.
+
+This increment is verified with `tests/integration/ops/test_mps_index_select.py`:
+bit-exact CPU equality across the three float widths and both index widths,
+the index length becoming the leading dimension, rank-1 and rank-3 operands,
+repeated and reordered indices, an empty index, non-contiguous operands and
+non-contiguous indices, the `dim` cases (axis 1 and 2 declined, `dim=-3` over a
+rank-3 operand served, an out-of-range `dim` reaching aten's error, and a square
+operand read at `dim=0` and `dim=1` giving two different answers, which is what
+`dim` being in the plan key is for), the range contract (out-of-range, negative,
+and one bad index among good ones all raising the reference's `IndexError`, in
+both index widths), the declined dtypes and the higher-rank index, plan reuse
+across dtypes, index widths and index values, the dispatch log naming `mps`, and
+a cost case over the `(151936, 1024)` shape that fails if the whole-operand
+round-trip returns.
+
+Stage 4 continued with `take`, the second reader of the same node and the one
+that proved the node's *contract* is not the node's *behaviour*. It was picked
+over `gather` on measurement: both route to `none` and both pay the same
+whole-operand round-trip, and on a `(151936, 1024)` float32 operand the fallback
+costs 45.6 ms for a single element, 46.3 ms for 512 and 42.0 ms for a
+one-element `gather` at `dim=0` -- the cost is the operand, not the question,
+which is the same profile `index_select` had. The node costs 0.29 ms.
+
+Every argument `take` has, `index_select` does not: there is no `dim`, the
+operand is read as a flat `numel()`-length sequence rather than along an axis,
+the result's shape is the index's own shape rather than the index's length
+prepended to the operand's trailing dimensions, the index may have any rank
+rather than being a vector, and a negative index is in range rather than an
+error. Each of those was measured against the CPU reference before the body was
+written, and the last one cost a real bug. The first version of the body
+range-checked the index on the host and handed the original through, which is
+what the `index_select` body does and what the `embedding` range check is for.
+Measured through that version, `take(t, [-1, 0, 19])` over a 20-element operand
+returned `[0, 0, 19]` against the reference's `[19, 0, 19]`: MPSGraph's gather
+answers a negative index with the *first* element, so the check had admitted the
+index correctly and the graph had then read it wrongly. The fix is that the
+range check and the wrap are one host pass -- a negative entry is normalised
+against `numel()` and an entry outside `[-numel, numel)` takes the round-trip --
+so the graph is only ever handed a non-negative index. That the wrong answer is
+plausible is the point: it is the same failure class as the out-of-range index
+the `embedding` check exists for, and it is why the case that holds it asks for a
+single element rather than one negative index among positive ones.
+
+The second finding is a graph limit worth recording because its cause is
+unobvious. The body reshapes the index to its own shape from a buffer that
+carries the operand's trailing 1 (the same row-pitch reshape the `embedding`
+body uses), and a `(1, numel)` index is rejected by that reshape:
+`error: 'mps.reshape' op the result shape is not compatible with the input shape
+… (tensor<3x20xf32>) -> tensor<3xf32>`. The index's *runtime* shape overrides the
+static placeholder shape the graph was compiled with, so the shapes the node
+produces are the operand's `(N, 1)` against an index of `(K)` giving `(K, 1)`,
+`(2, 2)` giving `(2, 2, 1)`, and so on -- read through `MPSGraphTensorData`'s
+`mpsndarray` and `MPSNDArray readBytes:strideBytes:`, because a standalone probe
+run with `runWithFeeds:` answers zeros and would have hidden it.
+
+This increment is verified with `tests/integration/ops/test_mps_take.py`:
+bit-exact CPU equality across the index ranks (rank-1, rank-2, rank-3, one row,
+one column) and the operand ranks (rank-0 through rank-3, all read as flat), the
+operand structure being discarded and the index shape being the result shape,
+the `(2, 2)` index that separates the two siblings' shape rules, negative
+indices including the two ends of the wrap, the int8-width operand the
+normalisation reads `numel` from, the out-of-range cases in both signs reaching
+the reference's own `IndexError`, the int64-only index contract, the empty
+index, non-contiguous operands and indices, plan reuse across index values and
+across a declined call, the dispatch log naming `mps` on both the served and the
+declined path, and a cost case over the `(151936, 1024)` shape that fails if the
+whole-operand round-trip returns.
+
+Stage 4 continued with `gather`, the third reader of this node and the first
+one whose node is a *different* node. `gatherWithUpdatesTensor:indicesTensor:`
+has no axis, and the axis spelling `gatherAlongAxis:withUpdatesTensor:-
+indicesTensor:name:` carries a shape precondition that `gather` does not ask
+for: MPSGraph requires the updates tensor and the indices tensor to have the
+same shape apart from `axis`, and it enforces that in the compiler rather than
+at run time -- measured, a `(4, 5)` operand against a `(4, 2)` index does not
+raise a deferrable error, it aborts the process with `failed assertion
+'original module failed verification'`. So the body trims the operand to the
+index's shape on the non-axis dimensions before it builds the node. The node is
+permissive in the other direction -- it compiles a `(4, 5)` operand against a
+`(4, 7)` index and answers `4x7` -- which is why the non-axis rule is checked on
+the host: a non-axis dimension of the index may be smaller than the operand's
+but never larger, and the reference is what says so (`Size does not match at
+dimension 0 expected index [5, 5] to be no larger than self [4, 5] apart from
+dimension 1`). The *axis* dimension is free to exceed the operand's in both
+directions, which is the shape rule the body has to keep straight.
+
+The honest finding of this increment is a shape rule with a view behind it, and
+it was a real bug before it was a paragraph. `narrow` returns a *view*, and
+`MpsRunGraph` describes every operand as a flat 1-D array of `numel` elements
+read densely from that operand's buffer offset. The first version of the body
+narrowed the operand and fed the view straight to the graph, so a
+`gather((4, 5), 0, (3, 1))` over `arange(20)` -- whose reference answer is
+`[0, 10, 15]` -- came back as `[0, 1, 2]`, which is `t.reshape(-1)[:3]`: the
+operand's first three elements, not the narrowed block. The fix is a
+`contiguous()` when the narrow changed the shape, and the measurement is
+recorded above the body. The same class of finding, one layer down, is that the
+trim must be a *host* `narrow` rather than the graph's `sliceTensor:`: a
+`sliceTensor:` built from the same indices answers `[0, 10, 0]` where the
+reference answers `[0, 10, 15]`.
+
+Three more measured behaviours decide the body, and each is a decline rather
+than a degradation, because a declined call takes the round-trip and therefore
+the reference's own error. The **index rank must equal the operand's** in both
+directions -- a `(5,)` index into a `(4, 5)` operand raises `Index tensor must
+have the same number of dimensions as input tensor`, and so does a higher rank
+-- so the rank is checked rather than left to the node, which accepted some
+mismatched-rank inputs in the probes. The **index dtype** is int32 or int64,
+where `take` is int64-only. An **out-of-range index** raises `index 99 is out
+of bounds for dimension 0 with size 5` -- the bound is the operand's
+`size(axis)`, not its `numel` -- and a **negative index raises**, the opposite
+of `take`, so there is no wrap here and the check is a rejection. MPSGraph's
+gather answers an out-of-range index with an inserted zero rather than failing,
+which is the same plausible-answer failure class the `embedding` and `take`
+range checks exist for.
+
+The last measured finding belongs to the platform rather than to `gather`, and
+it is recorded here so it is not re-derived as a `gather` regression. The trim
+above costs what MPS charges for any strided copy whose parent is large:
+measured on a `(151936, 1024)` float32 operand, a `dim=0` gather with a
+full-width index costs 0.26 ms, the same gather with an `(8, 16)` index -- which
+needs a `(151936, 16)` trim -- costs 52 ms, and the trim alone costs ~48 ms,
+while the gather over an already-trimmed operand is back to 0.22 ms. A dense
+`op[:8, :16].contiguous()`, a bare `view * 2` and `view.abs()` over the same
+huge-parent view all cost ~42-47 ms, with the same 128-element view over an
+8-row parent at 0.007 ms, so the cost is the parent allocation's size and not
+the view's. A leading (`dim=0`) narrow stays a dense prefix and is cheap for
+that reason, which is why the cost case in the suite is written on a `dim=1`
+call whose non-axis narrow is the leading one.
+
+This increment is verified with `tests/integration/ops/test_mps_gather.py` (65
+cases): bit-exact CPU equality across the three float widths plus f16, bf16,
+int32, int64, uint8 and bool, the index rank equalling the operand's, the
+one-sided non-axis rule in both directions and on rank-2 and rank-3 operands,
+the axis being free to exceed the operand's, the out-of-range and negative
+indices reaching the reference's own `RuntimeError`, the int64-only sibling
+contract that this op does *not* share, `dim` normalisation and an out-of-range
+`dim`, non-contiguous operands and indices, the empty index, plan reuse, the
+dispatch log naming `mps`, and the two cost cases above -- one asserting the
+range pass does not move the operand, one asserting the trim costs what the
+platform charges. The `[0, 10, 15]` value assertion that caught the view bug is
+kept.
+
+Stage 4 continued with `native_layer_norm`, the first op here that answers with
+more than one tensor -- and the increment that corrected this document. Section
+7 recorded `F.layer_norm` as a multi-op increment built from `native_batch_norm`
+plus `addcmul`, measured at 1.50-4.56 ms. That reading was taken from the *CPU
+fallback*, which is what the op was routed to at the time, and it does not
+describe the graph at all: MPSGraph has a single node for the whole thing,
+`normalizationWithTensor:meanTensor:varianceTensor:gammaTensor:betaTensor:epsilon:name:`,
+which is exactly `(x - mean) / sqrt(var + eps) * gamma + beta`. The mean and
+variance are `meanOfTensor:axes:` and `varianceOfTensor:meanTensor:axes:`, both
+of which already return keepdim -- the shape the reference's `mean`/`rstd`
+carry -- so the body builds four nodes (`mean`, `variance`, the `+ eps` and the
+`rsqrt` behind `rstd`, then the normalisation) and hands back three results.
+Measured on `(2, 512, 1024)`: 0.958 ms through the fallback against 0.411 ms
+served.
+
+The **population** variance is what the node computes, checked on an `N=3` case
+whose sample and population answers differ rather than assumed from the
+selector's name, and it is what the reference's `layer_norm` uses. The
+**trailing-run precondition** is a host check rather than the graph's: MPSGraph
+reduces whatever axes it is given, so `normalized_shape` is compared against the
+input's suffix and a call that is not the trailing run, is longer than the
+input, or is rank-0 declines into the reference's own `Given normalized_shape=
+[...], expected input with shape [*, ...]`. The dtype gate is the reduction
+family's; an integral input declines, and measured, `native_layer_norm` on an
+integer tensor raises `LayerNormKernelImpl is not implemented for 'Int'` on the
+CPU as well, so the round-trip is what reaches the reference's error rather than
+a graph computing at the operand's width.
+
+Two body-level findings came out of this increment. A **`weight`/`bias` left on
+the host** -- the ordinary `F.layer_norm(x, shape, w, b)` spelling -- is moved to
+the input's device, because a host tensor resolved no Metal buffer and the
+measured failure was silent rather than loud: the operand was refused, the
+refusal took the round trip, and the caller received the *host* tensors with the
+right values and the wrong device. And this is the one body here whose **round
+trip yields several tensors**, so every decline ends in `.to(input.device())`
+over all three results; the sibling entry point `MpsRunGraphMulti` exists for the
+same reason, with the single-result `MpsRunGraph` contract left untouched so the
+other kernels cannot be handed a plan that writes somewhere they did not
+describe.
+
+One reported crash is recorded so it is not chased again: an early probe blamed
+a segfault on `native_batch_norm` with null statistics, and the same call aborts
+in plain PyTorch on CPU tensors, so it belongs to neither this backend nor this
+op. This increment is verified with
+`tests/integration/ops/test_mps_layer_norm.py` (61 cases): CPU equality for the
+trailing shapes across f32/f16/bf16, the affine pair in every combination
+including on the host, the keepdim statistic shapes, the population-vs-sample
+check, the trailing-run and rank declines reaching the reference's own error,
+the dtype gate, plan reuse across `normalized_shape`, `eps` and the affine
+flags, the dispatch log naming `mps`, and the cost case.
+
+`native_batch_norm` followed as the second three-tensor route, and it landed the
+prediction this document had made about it in the opposite direction: the plan
+was a `native_batch_norm`-plus-`addcmul` composition, read off the CPU fallback,
+and the graph answers the whole inference path with the same single
+normalisation node `native_layer_norm` uses, fed the caller's running statistics
+instead of the graph's own reductions. Training is declined — it writes the
+running statistics in place and weights the update by the unbiased batch
+variance, neither of which a graph node does — and so is the null-statistics
+shape, whose reference aborts in plain PyTorch. Measured, the graph does have
+the batch statistics behind `meanOfTensor:axes:` and
+`varianceOfTensor:meanTensor:axes:`, so that shape is a body that has not grown
+rather than a node that does not exist. The increment is verified with
+`tests/integration/ops/test_mps_batch_norm.py` (38 cases). `embedding_dense_backward`
+stays dropped for the reason recorded above.
+The MPS lane uses a GitHub-hosted `macos-15` runner and runs directly on
+that runner's Metal GPU, without a container.
+
+Stage 4 continued with `sigmoid`, and the increment is small on purpose -- it is
+the smallest body in the layer, one node, and it is the *same* node the `silu`
+composition above already builds. What it contributes is a correction to how
+this document had been reading the stage-4 dtype gates. Until now the rule it
+applied was "the widths a category serves are per op rather than a list this
+backend keeps", written when `silu` served all three float widths and `softmax`
+declined bfloat16. `sigmoid` shows the rule holds even when the *graph is
+identical*: `silu`'s body is `x * sigmoid(x)` and its first node is
+`sigmoidWithTensor:`, so the two ops compile the same selector and could not
+plausibly disagree about what it computes -- and they disagree about which
+widths to serve anyway, because the thing being gated is not the node's
+arithmetic but the meaning of its error in the surrounding graph.
+
+The measurement is taken on the node, not on `silu`, by reading the graph's
+sigmoid out of the routed `silu` as `silu(x)/x`, and comparing it with
+`at::sigmoid` evaluated in the operand's own dtype over `[-40, 40]` with the
+saturated tails, the denormals and an exact zero included. **float32 is served**:
+1.788e-07 max absolute and 3.091e-07 relative, largest at `x = 1.33` -- a
+rounding difference of the same size the `silu` increment measured and accepted,
+so the two agree here. **float16 is declined**, at 3.088e-02 absolute and 6.2e-02
+relative, and the cause is the platform rather than the arithmetic: this SDK
+flushes a subnormal *result* to zero, which is the behaviour the `div` increment
+already recorded for a subnormal quotient, and the left tail of a float16
+sigmoid is almost entirely subnormal -- 151465 of 400001 samples came back below
+float16's smallest normal while the reference kept them. `silu` serves float16
+off that same tail because a silu's tail is multiplied by its own `x`, which is
+likewise subnormal and flushes to the `x * 0 = 0` the reference produces too; a
+bare sigmoid's tail has no such partner, so the flush is visible and the width is
+declined. **bfloat16 is declined** at 1.061e-02 relative with nothing subnormal
+in it -- bfloat16's exponent range is float32's -- so that one is plain rounding
+at a width holding about three decimal digits, declined by the same rule that
+keeps `softmax` and `pow` off bfloat16.
+
+The same platform policy reaches the *served* width, and that is the increment's
+second finding because the first version of its gate note asserted otherwise.
+For float32 the flush is confined to the input band where the reference's own
+answer is subnormal-but-nonzero: `sigmoid(-87.0)` is 1.6458e-38 on both sides,
+`sigmoid(-88.0)` is 6.0546e-39 on the reference and exactly 0 on the graph, and
+by -89.0 the reference is subnormal-*and*-zero so the two agree again. It is
+recorded rather than gated, because a sigmoid is never evaluated there by a model
+and a per-call host decision on a value the graph cannot express would cost the
+common case to protect a point in the range; the float16 decline is what the same
+policy costs when the band is wide instead of a point. Two smaller corrections
+came out of the same pass. An integral or bool operand is **promoted** to float32
+rather than raising -- `at::sigmoid(torch.arange(-2, 3))` returns
+`[0.1192, 0.2689, 0.5, 0.7311, 0.8808]` on the CPU -- so the body declines those
+widths and lets the round-trip perform the promotion, and the note that claimed a
+reference error was wrong until a case caught it. And a tail case written to be
+bit-exact failed at `x = -20.0` by one ulp, which is the ordinary float32
+rounding and not a flush: the suite now holds the saturated ends and the
+subnormal band exactly and the mid-range to the served tolerance, which is what
+each of them actually is.
+
+This increment is verified with `tests/integration/ops/test_mps_sigmoid.py` (31
+cases): CPU equality at float32 across shapes including the 20-byte and
+16-byte-aligned rows, a rank-0 and an empty operand and a strided one, the
+saturated tails held exactly with the negative tail asserted nonzero so a weaker
+expression shows as a number, the two ends of the subnormal band pinned on both
+sides so a widening flush fails, the `inf`/`nan` triple, the three declined
+widths asserting the round-trip's own dtype, the float16 tail asserted against
+the reference's nonzero count, the bfloat16 round-trip asserted bit-exact where
+the graph is 8.3e-03 away, the integral and bool promotions asserted at float32,
+plan reuse across interleaved signatures, and the dispatch log naming `mps` on
+the served path and on a declined one.
+
+Stage 4 continued with `exp`, the largest elementwise unary left on a small
+model's fallback profile and the node the rest of the cohort is written in terms
+of -- a `log`, an `rsqrt` and a hand-written `tanh` are all built over an
+exponential. MPSGraph names it directly (`exponentWithTensor:`), so the body is
+the plain unary template and, as with `sigmoid`, the increment is the width
+list. This time the list *widens* past the sibling activations', and that is the
+finding: it is the case the `sigmoid` increment predicted. That increment
+concluded that the widths a category serves are a property of the op rather than
+of the node, because a flush or a rounding means something different in a
+different surrounding graph; `exp` is the first op where the difference runs the
+*other* way, serving two widths `sigmoid` declined.
+
+Measured on an M5 against `at::exp` in the operand's own dtype, over each width's
+whole representable curve. **float16 is served** and bit-identical -- 400001
+points spanning `[-30, 11]`, which reaches the lowest subnormal an `exp` can
+produce, with zero mismatches. Where the `sigmoid` float16 decline was the
+platform's subnormal flush, this is the same platform and the same width with no
+flush at all: the flush is a property of the *node*, not of the width, and the
+exponential keeps the subnormals the sigmoid dropped. **bfloat16 is served** and
+bit-identical over `[-30, 88]`, where the `sigmoid` bfloat16 decline was a
+1.061e-02 rounding at a width holding about three decimal digits; the
+exponential has no such rounding. **float32 is served** on the same reading the
+`silu` increment accepted: 1.897e-07 max relative, two ulp at the top of the
+range, and against an exact float64 evaluation at `x = 20.0` the graph sits
+2.06e+01 above it and the CPU reference 1.14e+01 below -- both one ulp from
+exact, on opposite sides, so the two round differently rather than one being
+wrong. The subnormal flush that does appear, at float32 and bfloat16 below about
+`-87.3`, is the same policy the `div` and `sigmoid` bodies record and is confined
+to the band where the reference's own answer is subnormal; measured, it never
+reaches a normal answer. float64 has no MPSGraph element type, and an integral or
+bool operand is promoted by the reference to float32, so both keep the
+round-trip -- the promotion rule lives in the reference even though the graph
+path happens to reproduce it for a small input.
+
+This increment is verified with `tests/integration/ops/test_mps_exp.py` (30
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, the narrow widths held *bit-exact* when the cohort's other ops are held to a
+tolerance, the float16 low tail asserted against the reference across the whole
+subnormal band so a body that started flushing it like the sibling would fail,
+the saturated tails held with the top asserted `inf` and the low tail a small
+positive, the two ends of the float32 subnormal band pinned on both sides so a
+widening flush fails, the `inf`/`nan` triple, the one declined width asserting
+the round-trip's own dtype and bit-exactness, the integral and bool promotions
+asserted at float32, plan reuse across interleaved signatures, and the dispatch
+log naming `mps` on the served path and on a declined one.
+
+Stage 4 continued with `log`, the inverse of `exp` above and the other half of
+every logit-space composition a model writes by hand -- a log-sum-exp, a
+temperature-scaled score, a KL term -- and the second-largest elementwise unary
+left on the fallback profile, at 4.51 ms per `cpu_fallback` round-trip on a
+(3, 512, 3072) float32 operand on an M5. MPSGraph names it directly
+(`logarithmWithTensor:`), so like `exp` the body is the plain one-node template
+and the increment is the width list plus the *domain*: a logarithm's answer is
+not a magnitude near zero, it is `-inf` at 0, `nan` below 0 and unbounded above,
+and each of those edges is an answer the graph has to reproduce rather than
+approach.
+
+Measured on an M5 against `at::log` in the operand's own dtype, over 400001
+samples per width and over the domain's edges. **bfloat16 is bit-identical.**
+**float16** differs on 3 of 400001 samples, max relative 6.184e-04, which is one
+float16 ulp; at those points the *graph* is the one marginally closer to the
+exact answer (measured at `x = 552.5`, `|graph - exact| = 1.953433e-03` against
+`|cpu - exact| = 1.952817e-03`), so it is the same "both are correct" reading
+`silu` and `exp` took at float32 rather than a graph error -- and it is the
+answer the `sigmoid` increment's question deserves, because it is the sibling's
+*declined* width served here. **float32** differs on one ulp for 129358 of
+400001 samples (max relative 1.291e-07, max absolute 7.629e-06), the same
+rounding reading. All of `log(0)`, `log(-0.0)`, `log(1)`, `log(-1)`, `log(-5)`,
+`log(inf)`, `log(-inf)` and `log(nan)` reproduce the reference bit for bit, which
+is what makes this increment's finding a property of the *input* rather than of
+the magnitude: the one divergence is the platform's subnormal flush, which makes
+float32 flush a subnormal *input* to zero before the node evaluates, and since
+`log(0)` is `-inf`, a positive input below the smallest normal comes back `-inf`
+where the reference answers a finite and large number. Measured, the boundary
+sits exactly at the smallest normal float32 (`1.1754944e-38` agrees, `1.17e-38`
+flushes), so the wrong answer is confined to the band where the reference's own
+*input* is subnormal and never reaches a normal one. float16 does *not* flush
+subnormal inputs (`log(5.96e-8) = -16.640625`, exact), so the boundary is a
+float32 property of the platform rather than a width-independent rule -- the
+contrast the increment is written to record. float64 has no MPSGraph element type
+and an integral or bool operand is promoted by the reference to float32, so both
+keep the round-trip.
+
+This increment is verified with `tests/integration/ops/test_mps_log.py` (33
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, bfloat16 held *bit-exact*, the float16 sweep and the explicit one-ulp
+neighbourhood of `1.0` held against the reference so a body that followed the
+`sigmoid` gate would fail, a small positive operand near `1` asserted with both
+sides' sign so a flushed result shows, the saturated tails held with `log(1)`
+asserted exactly 0, the domain's eight edges asserted exactly rather than under
+a tolerance, the two ends of the float32 subnormal-input band pinned on both
+sides so a widening flush fails, a walk down the normals asserting the flush
+never reaches one, the float16 subnormal inputs asserted finite so the float32
+boundary is not generalised, the one declined width asserting the round-trip's
+own dtype and bit-exactness with the domain's edges intact, the integral and bool
+promotions asserted at float32 including the `log(0) = -inf` edge, plan reuse
+across interleaved signatures, and the dispatch log naming `mps` on the served
+path and on a declined one.
+
+The same stage took `rsqrt`, and it is the first body here built from *two*
+MPSGraph nodes rather than one. `1 / sqrt(x)` is the tail every normalisation is
+written in terms of -- `x * rsqrt(v + eps)` is a layer norm, an RMS norm and a
+batch norm, and the `1 / sqrt(d)` attention scale is the same shape -- and
+MPSGraph names the fused `reciprocalSquareRootWithTensor:`. That selector is
+macOS 15+. The earlier hosted MPS lane ran on a `macos-14` image, where building
+that selector raised `NSInvalidArgumentException: -[MPSGraph
+reciprocalSquareRootWithTensor: name:]: unrecognized selector` from inside the
+graph-building block with no handler, so the process aborts rather than the op
+declining. The body therefore composes the two selectors both SDKs have and
+this tree already uses --
+`squareRootWithTensor:` (the `sqrt` node) and `reciprocalWithTensor:` (the
+`reciprocal` kernel's node and `layer_norm`'s rstd) -- which is the same
+arithmetic at one extra node, amortised over every call that shares the plan.
+
+The finding is what a *composition* does at the widths, and it has three parts.
+The first is the result half a composition was expected to risk: a reciprocal
+whose output is subnormal is exactly the band `sigmoid` declined float16 for,
+and it turns out to be unreachable here, because `rsqrt` is subnormal at float32
+or bfloat16 only for an input beyond the largest representable value (the
+boundary is above `3.4e38`) and at float16 the curve saturates at
+`rsqrt(inf) = 0` before it goes subnormal. The second is the input half, which
+is the `log` finding unchanged: float32 flushes a subnormal *input* to zero
+before the sqrt and `rsqrt(0)` is `inf`, so an input below the smallest normal
+comes back `inf` where the reference answers a finite and large number --
+measured, the boundary sits exactly at `1.1754944e-38`, and float16 does *not*
+flush (`rsqrt(3.051758e-05) = 181.0`, exact). The third is the width list, and
+it is where the composition reads differently from its siblings: float32 is
+bit-identical to the reference over 400001 samples and over a sweep of the top
+of the range, while float16 and bfloat16 differ on 115782 and 122658 of 400001
+samples respectively. Ranked against the exact answer rather than against the
+reference, every one of those differences is a last-ulp rounding in which the
+*graph* is the closer of the two: measured, the graph is farther from
+`1 / sqrt(x)` on zero samples at either width, so both roundings are correct and
+the graph's is the better one -- the same "both are correct" reading `log`'s
+float16 recorded, at a far larger share. The domain's edges are reproduced
+exactly at all three widths, the signed zero included: the composition reaches
+`-inf` through `sqrt(-0.0) = -0.0` and `reciprocal(-0.0) = -inf` rather than
+through a fused node. float64 has no MPSGraph element type and an integral or
+bool operand is promoted by the reference to float32, so both keep the
+round-trip.
+
+This increment is verified with `tests/integration/ops/test_mps_rsqrt.py` (34
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, float32 held *bit-exact*, the two wide-difference widths held to two eps
+*and* ranked so the graph is asserted never to round farther from exact than the
+reference, the middle of the curve held as equality so a wrong node ordering
+shows as a scale, the domain's eight edges asserted exactly at every served
+width rather than under a tolerance, the two ends of the float32
+subnormal-input band pinned on both sides so a widening flush fails, a walk down
+the normals asserting the flush never reaches one, the float16 subnormal inputs
+asserted finite so the float32 boundary is not generalised, the top of each
+width's range swept so the result-side band is asserted still unreachable, the
+one declined width asserting the round-trip's own dtype and bit-exactness with
+the domain's edges intact, the integral and bool promotions asserted at float32
+including the `rsqrt(0) = inf` edge, plan reuse across interleaved signatures,
+and the dispatch log naming `mps` on the served path and on a declined one.
+
+`sqrt` then landed as the single node `rsqrt`'s body wanted in the first place,
+`squareRootWithTensor:` -- it is the other half of the composition the paragraph
+above records, and the increment is what separates the two readings. The result
+half is the one `rsqrt` could not show: at float32 and bfloat16 the graph flushes
+a subnormal *input* to zero before the node, and `sqrt(0)` is `0`, not the `inf`
+`rsqrt` reaches through its reciprocal -- so the same flush reads as a zero
+answer here, which is inside the representable range and would pass a
+finite-value check. Measured, the boundary is exactly where `rsqrt` put it: an
+input at `1.1754944e-38` (the smallest normal) agrees with the reference and
+`1.1754942e-38` (the largest subnormal) comes back `0`. float16 does *not* flush,
+and all 1023 positive float16 subnormals are bit-identical. The domain's edges
+are reproduced exactly at all three widths including the signed zero --
+`sqrt(-0.0) = -0.0`, the sign surviving the node rather than a fused
+`reciprocal` cancelling it -- and the negative half is a *wrong-kind* boundary
+rather than a wrong value: a negative subnormal flushes to `-0.0` and takes the
+node to `-0.0` where the reference answers `nan`, while a negative at normal
+magnitude correctly reaches `nan`. Unlike `rsqrt`, whose two composed widths
+differed on 115782 of 400001 samples, all three float widths here are
+bit-identical to the reference -- 400001 logspace samples, 200001 per width over
+the all-negative-free band, plus every edge -- so the increment has no tolerance
+to explain away. The performance note is the honest one: measured `3.921 ms`
+device against `2.424 ms` for the `cpu_fallback` round-trip (whose floor is the
+measured `1.004 ms` d2h copy) on `(3, 512, 3072)` float32, so the native path is
+the slower of the two at that shape and is taken for correctness and for not
+leaving the device, not for the number.
+
+This increment is verified with `tests/integration/ops/test_mps_sqrt.py` (34
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, the three widths held *bit-exact* rather than to a tolerance, the domain's
+eight edges asserted exactly at every served width with the signed zero pinned by
+sign bit, the two ends of the float32 and bfloat16 subnormal-input band pinned on
+both sides so a widening flush fails, a walk down the normals asserting the flush
+never reaches one, the float16 subnormal inputs asserted bit-identical so the
+float32 boundary is not generalised, the negative-subnormal edge held as the
+`-0.0` it is rather than as a `nan` the kernel does not promise, a negative at
+normal magnitude asserted `nan`, the one declined width asserting the
+round-trip's own dtype and bit-exactness, the integral and bool promotions
+asserted at float32 with a negative integral operand asserted `nan` (the
+reference's answer, not an error), plan reuse across interleaved signatures, and
+the dispatch log naming `mps` on the served path and on a declined one.
+
+`tanh` followed, the activation a transformer block reaches for at both ends --
+the tanh approximation inside a GELU and the one inside a recurrent or attention
+gate -- and MPSGraph names it directly as `tanhWithTensor:`. The body is the
+shared one-node unary template plus one guard, and both the guard and the gate
+are the increment's findings.
+
+The guard comes first because the node deviates from the reference in a way that
+is a wrong *answer* rather than a rounding: measured at all three float widths,
+the bare node answers `tanh(nan) = 1.0` -- it saturates a NaN operand rather than
+propagating it -- where the reference answers `nan`. `isNaNWithTensor:` therefore
+selects a NaN back over the node's answer, and all three widths propagate nan
+through the body. This is the first guard on the backend that is not a dtype
+gate: the body is the node *plus* an operation, because the node alone is not the
+reference's function.
+
+The gate is the increment's real finding, and it is the first one here to decline
+the *widest* float. float32 is **not** served. The node is not a differently-
+rounded exact tanh at that width, it is a coarser approximation of one, and three
+measurements say so. It breaks odd symmetry by `1.788e-07` over `max |g(x) +
+g(-x)|` where the reference is *exactly* symmetric. Its error against the exact
+(float64) answer is roughly `100x` the reference's at every scale of the curve
+and not only at the ends -- `4.321e-08` against `4.328e-10` over `[0.001, 0.01)`,
+`1.069e-07` against `2.981e-08` over `[0.5, 1)`. And 165340 of a 400001 sample
+sweep of `[-10, 10]` -- 41% -- come back a different float32 value, up to an
+int32 distance of 1597438 inside the saturation band, which is a *visibly*
+different number rather than a neighbouring ulp. On a `torch.randn(1000000)`
+operand 545055 samples differ and the graph is the less accurate of the two on
+544303 of them.
+
+The two narrow widths are served, and they are served because the node *is* the
+reference's function there rather than an approximation of it. Over the same
+400001-sample sweep the graph and the reference have the same max error against
+the exact tanh to the digit -- `4.3226e-04` at float16 and `3.3111e-03` at
+bfloat16 -- and the two tensors differ on 5 samples at float16 and 1 at
+bfloat16, every one of them within a few of the width's own representable steps.
+The sharper reading is symmetry: `max |g(x) + g(-x)|` is exactly `0.0` at both
+widths, the reference's own value, where the float32 node breaks the same
+measurement by `1.788e-07`. A coarser node does not stay odd.
+
+Two edges at the served widths turned out to be the *host's* rather than the
+body's, and both were measured both ways rather than pinned as an invariant --
+the lesson `rsqrt` and `sqrt` already taught, read again here.
+
+On an M5 with a current SDK, bfloat16 flushes a subnormal operand: all 127 of the
+float32 subnormals that width represents come back `0` where the reference
+answers a subnormal bfloat16. The `macos-14` runner CI uses reproduces the
+reference's subnormal answers exactly. The same split holds for the sign of a
+zero: the M5 answers `+0.0` for `tanh(-0.0)` at both served widths where the
+reference answers `-0.0`, and the CI runner answers the reference's `-0.0`. The
+first of these is the platform flush `sigmoid` recorded at the result side, read
+at the operand; float16 does not flush at all on either host, with all 1023 of
+its positive subnormals reproducing the reference.
+
+So the tests assert the reading that survives both machines -- a subnormal
+operand answers the reference *or* a flushed zero and never a third value, the
+band's far edge (the smallest normal and up) is the reference bit for bit, and
+the sign is preserved everywhere the operand is not a zero -- and the two
+host-dependent readings are recorded in `MpsSupportsTanhDtype` and in the suite's
+docstring instead. Pinning either as an assertion would have failed on one of the
+two hosts, which is exactly what this increment's first CI run did.
+
+The decline costs something and the number is on the record: measured on an M5
+with a `(3, 512, 3072)` float32 operand, the node is `3.168 ms` against
+`5.394 ms` on the CPU plus a `1.253 ms` device-to-host copy for the round-trip,
+so the float32 decline leaves roughly a factor of two on the table. It is taken
+anyway, because the number it buys is not the reference's answer, and `tanh` is
+the op a reader is least likely to re-measure.
+
+This increment is verified with `tests/integration/ops/test_mps_tanh.py` (42
+cases): CPU equality at the two served widths, the sweep held to a *handful* of
+samples and a few of the width's own steps rather than to a share of the curve,
+the odd-symmetry invariant asserted exactly at both served widths and at float32
+through the round-trip, the nan guard asserted at every served width (the case
+that fails if the `isNaNWithTensor:` select is dropped), the saturation edges
+`tanh(+-inf) = +-1` and a near-bound `-7.0` asserted exactly, the bfloat16
+subnormal band held to the reference's answer or a flushed zero with the cone at
+the smallest normal asserted bit-exact, float16's 1023 subnormals asserted
+bit-identical so the band is not generalised, the signed zero asserted as a zero
+with the sign preserved at every nonzero operand, and the reference's sign
+asserted on the float32 and float64 round-trips, float32 asserted bit-exact over the whole `[-10, 10]` curve (the
+case that would fail if the gate were widened), the declined widths asserting the
+round-trip's own dtype, the integral and bool promotions asserted at float32,
+plan reuse across interleaved signatures, and the dispatch log naming `mps` on
+the served path and on both declined ones.
+
+`erf` is the increment written as the deliberate inverse of the one before it,
+and MPSGraph names it directly as `erfWithTensor:`. Where `tanh` needed a
+per-element guard to stop the node saturating a NaN operand, the `erf` node
+propagates NaN on its own, so the body is the shared one-node unary template
+with no guard at all -- measured at all three float widths, an all-NaN operand
+comes back all-NaN through the node and the `isNaNWithTensor:` select `tanh`
+added would be dead work here.
+
+The gate is the opposite of `tanh`'s and it is the reason this increment was
+worth a measurement rather than a reused verdict. `tanh` declined the *widest*
+float because the node is a coarser approximation of the exact curve there --
+its float32 error against exact is roughly `100x` the reference's at every
+scale. `erf`'s node is not that. Over the same kind of `[-6, 6]`, 400001-sample
+sweep and a probe grid that samples between grid points, the node's error
+against the exact (float64) erf stays bounded near the reference's own error.
+The probe grid is the dense sweep plus three samples per cell of a
+16384-part grid over `[0, 9]`, and their negatives, 498299 operands in all:
+the regular sweep alone misses much of float32's rounding. On that grid, on an
+M5, the float32 node's error reaches `1.64` steps at 1.0, against `4.14` for
+`at::erf`; where the two round differently the node is closer on `63.3%`. Where
+the reference error is above half a step, the node's error can be larger by at
+most `0.98` of a step. The hosted `macos-14` runner's node does not share that
+ordering, so neither the closer-point share nor the reference's maximum error
+is pinned. The node's gap from the
+reference is at most `4.19` steps at 1.0 across the 498299 points. At float16
+and bfloat16 the node agrees bit for bit on `498160` and `498290` points, with
+a gap of half a step at 1.0 and `0.0039` of one. On the dense sweep alone those
+agreement counts are `399878` and `399994` of `400001`; the handful of differing
+interleaved probes are ordinary narrow-width roundings below one step, not the
+exact equality the dense sweep alone could suggest. That is the `sqrt` and
+`rsqrt` reading rather than `tanh`'s: the error is bounded and close to the
+reference's own error, so all three float widths are served. The absolute
+node error on the runner is larger -- `4.14` steps at 1.0 -- but its gap from
+the reference remains within the same five-step bound. The test therefore
+checks that float32 dispatches to `mps` and that both hosts satisfy the gap
+bound; it records the M5's exact-curve ranking without asserting it.
+
+The measurement lesson is to test operands between grid points and compare the
+exact curve in float64. Comparing the two float32 answers with one another, or
+against one neighbouring step, hides differences in float32's own rounding and
+can make a drift near zero look thousands of steps wide. The suite therefore
+holds the gap to a bound read from the two answers in float64. It does not
+claim that the node is closer on every point, or that either host's share of
+closer points is a property of the kernel.
+
+Two edges read exactly as `sqrt`'s and are worth stating because they are the
+ones a reader would otherwise expect to need the `tanh` guard. `erf(+-inf) =
++-1` and the curve saturates to exactly `+-1` from `|x| >= 4` -- the band where
+the step counts explode is also the band where both answers are the same
+representable `+-1`, so the explosion is not an error. Signed zero survives the
+node: `erf(-0.0) = -0.0` at every served width, the sign bit preserved rather
+than a flushed `+0.0`. The one band this increment *records* rather than pins
+is the operand side, the `tanh` finding read again: a bfloat16 subnormal
+operand rounds to `0` on both the node and the reference (they agree), while
+float16 differs from the reference on 877 of its 1023 positive subnormals, by
+one or two steps. As with `tanh`, the suite asserts only the reading that
+survives both hosts, and the finer readings are recorded in the docstring
+rather than pinned. The CI runner flushed two bfloat16 results, `erf(tiny)` and
+`erf(2 * tiny)`, to zero while this M5 kept them subnormal. The suite checks the
+monotonic shape of that band and asserts that the smallest normal and the
+values above it are never flushed.
+
+This increment is verified with `tests/integration/ops/test_mps_erf.py` (45
+cases): CPU equality at the three served widths across shapes including the
+20-byte and 16-byte-aligned rows, a rank-0 and an empty operand and a strided
+one, bit-exactness asserted where it holds (the narrow widths on ordinary
+points, and every width across the saturating `|x| >= 4` band where both
+answers are exactly `+-1`), the wrong-answer cases
+for the float32 band held to the measured probe-grid error bounds, including
+the five-step gap between the node and the reference across both hosts, with
+the dispatch log proving float32 was served by the native path, the
+nan-propagation case that would fail if a
+`tanh`-style guard were ever bolted on, the signed zero pinned by sign bit at
+every served width, the saturation edges `erf(+-inf) = +-1` and the `|x| >= 4`
+plateau asserted exactly, the bfloat16 subnormal band held to the reference's
+answer or a flushed zero with no flush at or above the smallest normal, the
+float16 subnormal band checked without pinning either host's result, the
+declined float64 asserting the
+round-trip's own dtype, the integral and bool promotions asserted at float32,
+plan reuse across interleaved signatures, and the dispatch log naming `mps` on
+the served path and on a declined one.
+
+Stage 4 also took `cat` and `where.self` out of the `none` cohort because the
+runtime-conformance traversal named both: `tests/integration/runtime/
+runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real
+backend, and `require_routed()` raises rather than skips when one of them lands
+on `none` -- deliberately, because a `none` route there is a generation gap
+rather than a platform that does not implement the op. Every other platform's
+conf already routed both; only `backends_mps.conf` had them on `none`, so the
+fix is the two kernels and not a skip. `cat` is MPSGraph's variadic
+`concatTensors:dimension:name:`, and the increment's two bugs are the two halves
+of the shape work. The first is the **row-pitch trap** section 6 records:
+`cat([tensor([0., 1.]), tensor([2., 3.])], dim=0)` handed to the node as two
+*ranked* operands returned all zeros, and an int32 form returned
+`[0, 0, 1, 0, 2, 0]` -- the eight-byte row pitch of a four-byte element, because
+MPSGraph reads a rank-1 input to `concatTensors:` as one row. Every operand now
+reaches the graph as a two-dimensional `(outer, inner)` view with the
+concatenation over the *inner* axis. The second is that this view's `inner` must
+be read per operand: the first version computed it once from `ops[0]`, and a
+rank-1 three-operand list of `(2,)`, `(2,)` and `(1,)` reshaped the third
+operand to a shape its one element cannot fill, which made MPSGraph fail the
+compiled module (`mps.reshape op the result shape is not compatible with the
+input shape`, then `original module failed verification`) and take the
+**process** with it rather than declining. A third bug was in the decline path:
+written `at::cat(tensors, dim)` against the caller's list, it re-entered this
+same kernel -- a bool `cat`, which has no MPSGraph element type and is correctly
+declined, recursed until the stack ran out and the process died with SIGSEGV,
+measured at 23810 dispatch lines. The reference is now called on host copies
+built once before any early return, and both bugs are held as cases rather than
+as notes. `where.self` is
+`selectWithPredicateTensor:truePredicateTensor:falsePredicateTensor:name:` and
+the increment is the reference's three surrounding rules rather than the node:
+the condition is narrowed to bool (bool or uint8, the rest declining to the
+reference's own `where expected condition to be a boolean tensor`), the two
+branches are promoted where the node does not promote, and the result's shape
+is broadcast from all three operands rather than from any one of them. Both
+increments keep the no-boxing property: they are new cases in the same
+`codegen_mps.py` template tables and no conf route moves off the native
+PrivateUse1 key. This increment is verified with
+`tests/integration/ops/test_mps_cat.py` (46 cases) and
+`tests/integration/ops/test_mps_where.py` (37 cases): the row-pitch rank-1
+cases, the per-operand-`inner` ragged lists, the bool decline held in a
+subprocess so a recursive re-entry shows as a signal, the `(4, 1)`-condition
+broadcast, the branch promotion asserted by dtype, the condition-width declines
+reaching the reference's message, the axis and dtype key parts, the dispatch log
+naming `mps`, and the cost cases.
+
+## 8. Conformance surface (files added or changed)
+
+| File | Change |
+|---|---|
+| `cmake/flagos_platforms.json` | new `mps` row |
+| `csrc/runtime/accelerator/mps/{device,memory,stream}.cc` (+ `.mm` as needed) | new |
+| `csrc/runtime/accelerator/CMakeLists.txt` | `mps` arm: glob `*.mm`, link Metal/Foundation, `FATAL_ERROR` if the Metal SDK is absent |
+| `csrc/CMakeLists.txt` | `USE_MPS` define; exclude `backends/mps/` from other platforms |
+| `csrc/runtime/allocator/backends/mps_memory.h` | new `DeviceMemoryInterface` |
+| `csrc/runtime/allocator/caching_device_allocator.cc` | include guard + `GetCachingAllocator()` arm |
+| `csrc/aten/dispatcher.h` | `Backend::kMps` slot and `GetBackendForOp` arm (stage 1+) |
+| `csrc/aten/register.cc` | `USE_MPS` arm that does not fall through to the generic `#else` |
+| `csrc/aten/backends/mps/` | native kernels (+ `generated/`) |
+| `scripts/codegen/codegen_mps.py` (+ `gen_vendor_confs.py` `VENDORS["mps"]`) | new generator / routing table |
+| `torch_fl/configs/backends_mps.conf` | new |
+| `torch_fl/_platform.py`, `torch_fl/accelerator/mps/` | detection + compat |
+| `setup.py` | `mps` arm |
+| `tests/integration/test_mps_runtime.py` | smoke test, `@pytest.mark.mps` |
+| `tests/integration/ops/test_mps_unary.py` | stage-1 unary op suite, `@pytest.mark.mps` |
+| `tests/integration/ops/test_mps_binary.py`, `test_mps_reduce.py` | stage-2 elementwise and reduction suites, `@pytest.mark.mps` |
+| `tests/unit/test_platform_capability_matrix.py` inventory lines | add `mps` to the three inventories |
+| `docs/reference/{compatibility,platform-capability-matrix,operator-support}.md`, `docs/vendors/mps/installation.md` | platform rows and guide |
+| `.github/configs/mps.yml` + workflow job | CI on a GitHub-hosted `macos-15` arm64 runner |
+
+`tests/unit/test_platform_capability_matrix.py` machine-checks the three
+directory inventories against the tree, so those doc lines and the new
+directories must land together or unit tests fail.
+
+## 9. Validation
+
+- Stage 0 and each stage build with
+  `FLAGOS_ACCELERATOR=mps pip install -e . --no-build-isolation` on Apple
+  Silicon, which is the machine this design was written on — the floor is
+  fully testable locally, unlike every other vendor backend.
+- The operator-free smoke test from the skill is the stage-0 gate.
+- Per-op: CPU comparison at the tolerances the skill records (unary ≤ 4.4e-5,
+  binary ≤ 4.7e-6, comparisons exact), across shapes including empty and
+  1-element, every claimed dtype, and non-contiguous inputs.
+- Confirm tensors stay on `flagos` through a compute chain (no silent CPU
+  fallback) and that `torch.__version__` still reports the expected build.
+- CI: the GitHub `macos-15` runner is Apple Silicon and runs MPS headless, so
+  the smoke test and the operator suites are CI-gated there.
+
+## 10. Risks and unknowns
+
+- **MPSGraph from C++.** MPSGraph is an Objective-C API; the op layer must be
+  Objective-C++, and every kernel boundary crosses the ObjC++/C++ seam. The
+  extent of that seam is not yet measured.
+- **Graph-build cost — resolved by the plan cache.** It measured far worse than
+  expected (~4.5 ms per call, described in §6) and was worth fixing before
+  adding ops: the fix is compiled-graph reuse keyed on the graph body and the
+  operand signature, plus an asynchronous run with a sentinel commit, which
+  takes the same ops to ~20-75 us. Whether the remaining per-op floor still
+  argues for MSL kernels is a question for stage 3+ and for ops with real
+  arithmetic, not for the elementwise family the cache now covers.
+- **Unified memory and the allocator.** Apple GPUs use unified memory; whether
+  the block pool should hand out `MTLResourceStorageModePrivate` buffers (fast,
+  needs blit for host access) or `Shared` buffers (simple, host-visible) is a
+  stage-0 measurement, not an assumption.
+- **`MTLSharedEvent` timing.** `EventElapsedTime` has no direct Metal analogue;
+  the `GPUStartTime`/`GPUEndTime` approach needs to be validated against a known
+  duration.
+- **Coexistence with `torch.backends.mps`.** Registering `flagos` on
+  `PrivateUse1` makes `at::getAccelerator()` report `PrivateUse1`. In PyTorch
+  2.10, `torch::autograd::Node::stream()` asks that global accelerator for the
+  node's ready stream, and finds MPS input metadata with a ready stream but no
+  parent stream. The autograd engine asserts:
+
+  ```text
+  opt_ready_stream && opt_parent_stream INTERNAL ASSERT FAILED
+  at torch/csrc/autograd/engine.cpp
+  ```
+
+  [PyTorch issue #161129](https://github.com/pytorch/pytorch/issues/161129)
+  tracks this coexistence failure. PyTorch main still contains the same check,
+  so a newer release alone is not the remedy. Maintainers have not accepted
+  deriving the stream from each node's actual input devices; their current
+  autograd contract assumes a single available accelerator. A process with
+  only `import torch` runs MPS backward, because `at::getAccelerator()` still
+  reports MPS; explicitly importing `torch_fl` changes that result. Forward
+  dispatch, copies, streams and the thirty-four native ops continue to work on
+  both backends in one process. MPS training with an explicit `import torch_fl`
+  remains blocked until upstream autograd either matches the node's actual
+  device type or handles MPS stream metadata when another accelerator claims
+  `PrivateUse1`.
+
+  The MPS distribution therefore omits the `torch.backends` autoload entry
+  point. A bare `import torch` stays on the pure MPS path; an explicit
+  `import torch_fl` selects `flagos`. The integration tests cover both fresh
+  processes. Boxing, replacing the MPS stream metadata, or patching PyTorch's
+  native library sidesteps the engine contract and is not accepted as a
+  backend fix.
+- **Strided copies now run on the device.** `contiguous()`, non-contiguous
+  `clone()` and `copy_` from a strided flagos source into a contiguous flagos
+  destination use MPSGraph over the runtime's Metal buffers. A dense prefix is
+  an MPSGraph slice; any other layout, including negative strides, is gathered
+  with per-axis coordinates. The compiled plan is cached by device, storage
+  length, shape, offset, strides and dtype. A scalar copy uses a Metal blit.
+  Non-contiguous destinations and dtype-converting copies retain the existing
+  fallback. Copies between MPS and flagos storage still pass through the host;
+  retaining the storage boundary is part of the no-boxing design.
+
+  A standalone M5 probe covers the gather floor, excluding tensor dispatch and
+  the plan cache: 1M float32 elements took about 0.3 ms; the large-parent cases
+  measured about 1.0 ms for 16 MB, 2.3 ms for 64 MB and 1.4 ms for 100 MB.
+  The earlier 84.6 ms `w_t.contiguous()` was the host round-trip, against
+  10.4 ms for `torch.mps`; the native copy removes that round-trip.
+- **CI scope.** The MPS suite is gated on an Apple Silicon host. The shared
+  pipeline schedules it on a GitHub-hosted `macos-15` arm64 runner directly,
+  outside a container. A local M5 run remains the check for hosts beyond the CI
+  machine.
+- **Scope.** Option B is a multi-week project; the staged plan exists so value
+  lands at every stage instead of only at the end.

@@ -1,0 +1,80 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: MUSA
+
+# MUSA-specific environment preparation stays outside the common workflow.
+setup_script: .github/scripts/set_env.sh
+setup_platform: musa
+
+# Keep the previously running MUSA 5.1 image until the runner driver is
+# upgraded for MUSA 5.2 and that image can be pulled within the job budget.
+# Its torch_musa is isolated from the CPU PyTorch 2.10 build environment.
+ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-musa-dev
+
+runner_labels:
+  - mt-8g-cicd-pytorch
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/musa/
+  - torch_fl/configs/backends_musa.conf
+  - csrc/aten/backends/musa/
+  - csrc/runtime/accelerator/musa/
+  - csrc/runtime/allocator/backends/musa_memory.h
+  - .github/scripts/hooks/set_env_musa.sh
+  - .github/scripts/set_env_musa.sh
+  - scripts/codegen/codegen_musa_flaggems.py
+  - scripts/codegen/codegen_mudnn.py
+
+container_volumes: []
+
+integration_environment: {}
+
+# MUSA is non-NVIDIA: expose the /dev/mtgpu* device nodes through --privileged
+# (mirrors the MetaX layout). MTHREADS_VISIBLE_DEVICES=all lets musart see every
+# MT device from container start; set_env_musa.sh re-exports it for subprocesses.
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+  --env MTHREADS_VISIBLE_DEVICES=all
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-musa
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# The isolated venv must hold CPU torch 2.10 with no libtorch_cuda.so and no
+# torch_musa leak: torch_fl installs a shim under that name, so the real vendor
+# package in the same interpreter means an ABI mismatch, which is worth failing
+# on here rather than as a device error later.
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    more_than: 0
+  torch_musa_shim_only: true

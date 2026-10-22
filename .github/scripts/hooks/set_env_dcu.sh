@@ -1,0 +1,592 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
+
+# Locate the DTK install root. The image may ship DTK under /opt/dtk,
+# /opt/dtk-26.04, or a versioned directory; honor an explicit ROCM_PATH,
+# then probe common roots, then fall back to a filesystem search.
+discover_dtk_root() {
+  local candidate
+  local -a candidates=(
+    "${ROCM_PATH:-}"
+    "/opt/dtk"
+    "/opt/dtk-26.04"
+    "/opt/dtk26.04"
+    "/opt/dtk-26.04.4"
+    "/opt/dtk-25.04.4"
+  )
+  for candidate in "${candidates[@]}"; do
+    [[ -z "$candidate" ]] && continue
+    if [[ -f "$candidate/env.sh" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  local found
+  found="$(find /opt /usr/local -maxdepth 3 -type f -name env.sh \
+    \( -path '*dtk*' -o -path '*rocm*' \) -print -quit 2>/dev/null | head -n1)"
+  if [[ -n "$found" ]]; then
+    printf '%s' "$(dirname "$found")"
+    return 0
+  fi
+  return 1
+}
+
+if ! ROCM_PATH="$(discover_dtk_root)"; then
+  echo "::error::DTK env.sh not found under /opt or /usr/local; set ROCM_PATH explicitly"
+  exit 1
+fi
+echo "ROCM_PATH discovered: $ROCM_PATH"
+set +u
+# shellcheck disable=SC1091
+source "$ROCM_PATH/env.sh"
+set -u
+export ROCM_PATH
+
+select_vendor_python() {
+  local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
+  if [[ -n "$candidate" && "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+  if [[ -z "$candidate" ]]; then
+    candidate="$(command -v python 2>/dev/null || true)"
+  fi
+  if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+    echo "::error::Unable to find the vendor Python interpreter" >&2
+    exit 1
+  fi
+  if ! "$candidate" -c "import torch" >/dev/null 2>&1; then
+    echo "::error::Vendor Python cannot import torch: $candidate (was DTK env.sh sourced?)" >&2
+    exit 1
+  fi
+  printf '%s' "$candidate"
+}
+
+VENDOR_PYTHON="$(select_vendor_python)"
+VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
+import json
+from pathlib import Path
+import sys
+
+import torch
+
+print(json.dumps({
+    "version": torch.__version__,
+    "base_version": torch.__version__.split("+", 1)[0],
+    "root": str(Path(torch.__file__).resolve().parent),
+    "python": sys.version.split()[0],
+}, sort_keys=True))
+PY
+)"
+
+readarray -t VENDOR_FIELDS < <(
+  VENDOR_INFO="$VENDOR_INFO" "$VENDOR_PYTHON" - <<'PY'
+import json
+import os
+
+info = json.loads(os.environ["VENDOR_INFO"])
+for key in ("version", "base_version", "root", "python"):
+    print(info.get(key) or "")
+PY
+)
+VENDOR_TORCH_VERSION="${VENDOR_FIELDS[0]}"
+VENDOR_TORCH_BASE_VERSION="${VENDOR_FIELDS[1]}"
+VENDOR_TORCH_ROOT="${VENDOR_FIELDS[2]}"
+VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[3]}"
+VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
+
+# DCU is a boxing build: the DTK torch wheel is a hipified build whose HIP
+# kernels are registered under the CUDA dispatch key, so torch_fl reaches them
+# via PrivateUse1->CUDA boxing kernels without shipping its own kernels.
+# libtorch_hip.so is the DTK analogue of CUDA's libtorch_cuda.so; the bundle
+# script stages it (plus the core .so) into torch_fl/lib_dcu for a
+# self-contained wheel.
+if [[ ! -f "$VENDOR_TORCH_LIB/libtorch_hip.so" ]]; then
+  echo "::error::$VENDOR_TORCH_LIB has no libtorch_hip.so, not a DTK torch/lib" >&2
+  exit 1
+fi
+export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
+
+# CPU torch base version must match the vendor's for ABI compatibility. The
+# DTK wheel version (e.g. 2.10.0+das on the current CI image) may differ across
+# DTK releases and from the CUDA/MetaX images, so derive the target from the
+# vendor wheel instead of hard-coding it.
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$VENDOR_TORCH_BASE_VERSION}"
+
+# FlagGems C++ package is optional for DCU (FLAGOS_BUILD_FLAGGEMS_CPP=OFF in setup.py);
+# the flaggems runtime path uses the DTK triton hcu backend + Python flag_gems.
+# Probe it for CMAKE_PREFIX_PATH but never fail when absent.
+VENDOR_FLAGGEMS_DIR="$("$VENDOR_PYTHON" - <<'PY'
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.find_spec("flag_gems")
+if spec is None or not spec.submodule_search_locations:
+    print("")
+else:
+    root = Path(next(iter(spec.submodule_search_locations))).resolve()
+    candidate = root / "lib" / "cmake" / "FlagGems"
+    print(candidate if (candidate / "FlagGemsConfig.cmake").is_file() else "")
+PY
+)"
+VENDOR_FLAGGEMS_LIB=""
+if [[ -n "$VENDOR_FLAGGEMS_DIR" ]]; then
+  VENDOR_FLAGGEMS_LIB="$(cd "$VENDOR_FLAGGEMS_DIR/../.." && pwd)"
+  if ! compgen -G "$VENDOR_FLAGGEMS_LIB/liboperators.so*" >/dev/null; then
+    echo "::notice::FlagGems C++ liboperators.so not found under $VENDOR_FLAGGEMS_LIB (optional for DCU)"
+    VENDOR_FLAGGEMS_LIB=""
+  fi
+else
+  echo "::notice::FlagGems C++ package not found in vendor image (optional for DCU)"
+fi
+
+echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
+echo "Vendor PyTorch: $VENDOR_TORCH_VERSION (base $VENDOR_TORCH_BASE_VERSION)"
+echo "Vendor torch root: $VENDOR_TORCH_ROOT"
+echo "CPU torch target: $CPU_TORCH_VERSION+cpu"
+
+# Isolated venv with the matching CPU-only torch wheel. Unlike CUDA, DCU does
+# not stage libtorch_cuda.so into .libtorch_cuda_assets; the DTK forked libtorch
+# .so are bundled into torch_fl/lib_dcu by bundle_dcu_libtorch.sh below.
+PREBUILT_VENV="${TORCH_FL_PREBUILT_DCU_VENV:-/opt/torch-fl-dcu-venv}"
+if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
+  VENV_ROOT="$PREBUILT_VENV"
+  echo "Using prebuilt DCU venv: $VENV_ROOT"
+else
+  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-dcu-${CI_STAGE}}"
+  if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
+    echo "::warning::Vendor Python cannot create a venv; trying uv"
+    if ! command -v uv >/dev/null 2>&1; then
+      "$VENDOR_PYTHON" -m pip install --upgrade uv
+    fi
+    uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
+  fi
+fi
+VENV_PYTHON="$VENV_ROOT/bin/python"
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  echo "::error::Isolated Python was not created at $VENV_ROOT"
+  exit 1
+fi
+
+if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
+  # patchelf is required by setup.py (rewrites _C.so RPATH to $ORIGIN/lib and
+  # $ORIGIN/lib_dcu after copy) and by bundle_dcu_libtorch.sh (sets RPATH on the
+  # bundled DTK .so). The pinned CI image ships it at /usr/bin/patchelf; the pip
+  # install here is a redundant fallback in case the image lacks it.
+  "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake build patchelf
+  install_cpu_torch
+  if [[ "$CI_STAGE" == "integration" ]]; then
+    # Pin numpy<2: the CPU torch wheel is built against the NumPy 1.x ABI, and
+    # transformers pulls numpy 2.x which breaks torch's C extensions at import.
+    "$VENV_PYTHON" -m pip install pytest transformers "numpy<2"
+  fi
+fi
+
+# Install the published DTK-specific FlagCX wheel below. Triton is deliberately
+# not copied from the vendor image: the FlagTree wheel supplies the hcu backend
+# and its entry-point metadata.
+VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+
+# --- Published Hygon wheels --------------------------------------------------
+# Installed for both stages, not just integration: build and integration share
+# one platform job, and restricting this to CI_STAGE=integration would leave the
+# build job's venv without flag_gems -- the wheel then fails as soon as a
+# FlagGems route dispatches. Same reasoning as set_env_musa.sh.
+#
+# --no-deps on the wheels prevents their metadata from replacing the pinned
+# CPU torch with a vendor wheel or another PyTorch version.
+# Reuse a correctly provisioned image. Older images copied the vendor's triton
+# without dist-info, so only a matching FlagTree distribution with the hcu
+# backend is safe to keep. Otherwise remove the old tree by path before pip
+# installs the wheel, and bound the uninstall loop by remaining dist-info.
+#
+# `pip uninstall -y` exits 0 even when it skips every named package ("WARNING:
+# Skipping triton as it is not installed"), so a loop keyed on the pip command
+# itself never terminates. It did exactly that on the first run of this
+# manifest: the DCU job sat in this line with all output redirected to
+# /dev/null for the remainder of its 60-minute budget and was cancelled before
+# reaching a single test.
+# flagtree is the Triton build carrying the "hcu" (Hygon) backend. 3.6 is not a
+# preference but a requirement: current FlagGems uses tl.map_elementwise and
+# triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
+# fails at import, so the two pins move together.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_dcu}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
+if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+import importlib.metadata as metadata
+import sys
+
+try:
+    import triton.backends
+    assert metadata.version("flagtree") == sys.argv[1]
+    assert "hcu" in triton.backends.backends
+except (AssertionError, ImportError, metadata.PackageNotFoundError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using preinstalled FlagTree $FLAGTREE_VERSION with hcu backend"
+else
+  if [[ -d "$VENV_SITE/triton" || -d "$VENV_SITE/triton_kernels" ]]; then
+    echo "Removing pre-existing triton from the venv before installing FlagTree"
+  fi
+  rm -rf "$VENV_SITE/triton" "$VENV_SITE/triton_kernels"
+  while compgen -G "$VENV_SITE/triton-*.dist-info" >/dev/null ||
+        compgen -G "$VENV_SITE/triton_kernels-*.dist-info" >/dev/null; do
+    "$VENV_PYTHON" -m pip uninstall -y triton triton_kernels >/dev/null 2>&1 || break
+  done
+  install_flagtree
+fi
+
+HYGON_INDEX_URL="${TORCH_FL_HYGON_INDEX_URL:-$HYGON_INDEX_URL_DEFAULT}"
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="$HYGON_INDEX_URL"
+FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_dcu}"
+
+# The release wheel avoids a GitHub clone on every job. The index advertises a
+# SHA-256 for each wheel, so pip verifies the download before installing it.
+install_flag_gems
+
+# FlagCX is a cp310 wheel built for DTK 26.04, matching the DCU CI image.
+# Remove any files previously copied from the vendor Python before installing
+# a different version, since those copies are not necessarily pip-managed.
+if "$VENV_PYTHON" - "$FLAGCX_VERSION" <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import sys
+
+try:
+    assert metadata.version("flagcx") == sys.argv[1]
+    assert importlib.util.find_spec("flagcx") is not None
+except (AssertionError, metadata.PackageNotFoundError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using preinstalled FlagCX $FLAGCX_VERSION"
+else
+  rm -rf "$VENV_SITE/flagcx" "$VENV_SITE"/flagcx-*.dist-info
+  pip_retry --no-deps --only-binary=:all: --index-url "$HYGON_INDEX_URL" \
+    "flagcx===$FLAGCX_VERSION"
+fi
+# Keep PyTorch from auto-loading FlagCX during this step and the separate wheel
+# build step. The DTK libraries are preloaded by torch_fl before its explicit
+# FlagCX communication import, not by a bare import torch in the build backend.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+
+# FlagGems' own runtime deps, installed one at a time for the IncompleteRead
+# reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
+# the stock +cpu torch C extensions at import.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+
+CPU_TORCH_ROOT="$(CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
+import os
+from pathlib import Path
+import torch
+
+print(Path(torch.__file__).resolve().parent)
+assert torch.__version__.split("+", 1)[0] == os.environ["CPU_TORCH_VERSION"], torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+)"
+
+export VIRTUAL_ENV="$VENV_ROOT"
+export PATH="$VENV_ROOT/bin:$PATH"
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
+export FLAGOS_ACCELERATOR=dcu
+# This lane builds the DCU boxing wheel: it stages the hipified DTK libtorch into
+# the bundle and asserts libtorch_hip.so/libc10_hip.so. Boxing is off by default
+# for every accelerator now (cmake/flagos_platforms.json), so the lane opts in
+# explicitly; otherwise the wheel would compile no CUDA boxing kernels.
+# The CUDA lane no longer opts in -- it measures the FlagGems-primary default a
+# `pip install` gets. DCU keeps the vendor path until the ops backends_dcu.conf
+# routes to `cuda` have a FlagGems or DTK-native route of their own; flipping it
+# first would leave those ops on cpu_fallback.
+export FLAGOS_BUILD_BOXING=1
+# FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
+# one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
+# exactly the CUDA-compatible path a kernel library needs here. Mirrors the
+# backend selection set_env_musa.sh performs -- FLAGOS_BUILD_FLAGGEMS_CPP is the C++
+# switch and stays off so nothing tries to rebuild flag_gems
+# against the DCU toolchain.
+export FLAGOS_BUILD_FLAGGEMS_CPP=0
+export FLAGOS_BUILD_FLAGGEMS=1
+export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
+export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
+
+CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
+CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
+CLEAN_LD_LIBRARY_PATH="$(strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
+
+# libhydmi.so (Hygon DMI device management) ships in the host hyhal driver,
+# which dcu.yml bind-mounts into the container at the standard hyhal root.
+# DTK's env.sh does not add it to the search path, so flagos device init's
+# dlopen(libhydmi.so) fails with "cannot open shared object file". Probe the
+# standard roots (honoring an explicit HYHAL_ROOT) and prepend them so the
+# loader finds libhydmi.so plus its sibling driver libs (libhydrm, libamd_smi).
+HYHAL_LD_PATH=""
+for hyhal_root in "${HYHAL_ROOT:-}" /usr/local/hyhal /opt/hyhal; do
+  [[ -z "$hyhal_root" ]] && continue
+  [[ -d "$hyhal_root/lib" ]] || continue
+  HYHAL_LD_PATH="${HYHAL_LD_PATH:+$HYHAL_LD_PATH:}$hyhal_root/lib"
+done
+# Recreate the host's /opt/hyhal -> /usr/local/hyhal symlink inside the
+# container (the flagos image lacks it). dlopen(libhydmi.so) goes through
+# LD_LIBRARY_PATH above, but sibling hyhal libs or host code may resolve .so
+# by absolute /opt/hyhal/... paths; mirror the host layout so those resolve.
+if [[ -d /usr/local/hyhal && ! -e /opt/hyhal ]]; then
+  ln -sf /usr/local/hyhal /opt/hyhal 2>/dev/null || \
+    echo "::warning::failed to create /opt/hyhal -> /usr/local/hyhal symlink"
+fi
+if [[ -n "$HYHAL_LD_PATH" ]]; then
+  echo "hyhal lib path: $HYHAL_LD_PATH"
+else
+  echo "::warning::No hyhal/lib found; flagos device init may fail to dlopen libhydmi.so"
+fi
+
+export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${VENDOR_FLAGGEMS_DIR:+:$VENDOR_FLAGGEMS_DIR}${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
+export LIBRARY_PATH="${HYHAL_LD_PATH:+$HYHAL_LD_PATH:}$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${HYHAL_LD_PATH:+$HYHAL_LD_PATH:}$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
+
+cd "$REPO_ROOT"
+if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
+  # Prebuild so package_data sees libtorch_fl.so before python -m build.
+  build_flagos_inplace
+fi
+
+# Bundle DTK's device .so into torch_fl/lib_dcu for a self-contained wheel
+# (replaces CUDA's .libtorch_cuda_assets staging step). Default is the decoupled
+# mode: device libraries only, running on the official torch+cpu core installed
+# above, with the DTK-private ATen symbols supplied by
+# libflagos_dtk_core_compat.so. The script's own ABI guard fails the build if a
+# DTK release ever needs more from the vendor core than the shim covers.
+# FLAGOS_DCU_VENDOR_CORE=1 selects the full-core bundle and private facade; CI
+# smoke-tests that path separately below.
+FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
+  PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
+
+# Wheel invariants for the decoupled default. A vendor core .so in lib_dcu means
+# the wheel would shadow the official core through RPATH order, i.e. silently
+# fall back to the old coupled layout; the shim's absence means the DTK device
+# libraries have nothing to satisfy their DTK-private imports with.
+if [[ "${FLAGOS_DCU_VENDOR_CORE:-0}" != "1" ]]; then
+  python - <<'PY'
+from pathlib import Path
+import sys
+
+bundle = Path("torch_fl/lib_dcu")
+core = (
+    "libc10.so",
+    "libtorch_cpu.so",
+    "libtorch.so",
+    "libtorch_global_deps.so",
+    "libtorch_python.so",
+    "libshm.so",
+)
+leaked = [name for name in core if (bundle / name).exists()]
+if leaked:
+    print(f"::error::decoupled DCU bundle contains vendor core libs: {leaked}")
+    sys.exit(1)
+for required in ("libtorch_hip.so", "libc10_hip.so", "libflagos_dtk_core_compat.so"):
+    if not (bundle / required).is_file():
+        print(f"::error::{bundle / required} is missing from the DCU bundle")
+        sys.exit(1)
+print(f"Decoupled DCU bundle verified: {len(list(bundle.glob('*.so*')))} .so, no vendor core")
+PY
+
+  # Import gate: the device libraries must bind to the official core and register
+  # CUDA-key kernels. _validate_dcu_decoupled_runtime() in torch_fl/__init__.py
+  # enforces this, so a regression fails here rather than inside a later test's
+  # dispatch. Also checks the torch.cuda shim, which is what triton's hcu backend
+  # and therefore all of FlagGems gate on.
+  python - <<'PY'
+import torch_fl  # noqa: F401  (must precede torch: preload happens at import)
+import torch
+
+assert torch.cuda.is_available(), "torch.cuda shim did not activate on DCU"
+assert torch.version.hip, f"torch.version.hip not restored: {torch.version.hip!r}"
+# triton's autotuner times candidate configs with this, so every FlagGems op that
+# autotunes depends on it being constructible (the +cpu wheel ships a dummy).
+torch.cuda.Event(enable_timing=True)
+for op in ("aten::mm", "aten::add.Tensor", "aten::_softmax", "aten::bmm"):
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(op, "CUDA"), op
+a = torch.randn(64, 64, device="flagos")
+b = torch.randn(64, 64, device="flagos")
+err = (a @ b).cpu() - (a.cpu() @ b.cpu())
+assert err.abs().max().item() < 1e-3, err.abs().max().item()
+props = torch.cuda.get_device_properties(0)
+print(
+    f"Decoupled DCU runtime OK: torch {torch.__version__} hip {torch.version.hip}, "
+    f"{props.name} {props.gcnArchName} x{props.multi_processor_count}, "
+    f"mm err {err.abs().max().item():.3g}"
+)
+PY
+
+  # Legacy-mode smoke path (FLAGOS_DCU_VENDOR_CORE=1). It is the documented
+  # rollback for anything the decoupled mode cannot express -- DTK-private
+  # schemas such as aten::native_fuse_rmsnorm, whose wrappers live in the core
+  # fork -- so it must not be allowed to rot. Two properties are checked:
+  #
+  #   1. Selecting legacy mode against a decoupled bundle fails fast with the
+  #      mode-mismatch message, without touching torch/lib.
+  #   2. A full legacy bundle selects the vendor core and computes cleanly.
+  #
+  # Order matters: this runs *after* the decoupled gates because it rebuilds
+  # lib_dcu. The last step restores the decoupled bundle, which is what the wheel
+  # is built from, and re-runs the invariant check to prove it.
+  if [[ "${FLAGOS_DCU_SKIP_LEGACY_SMOKE:-0}" != "1" ]]; then
+    echo "Legacy-mode smoke: refusing a decoupled bundle"
+    FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
+try:
+    import torch_fl  # noqa: F401
+except RuntimeError as exc:
+    assert "bundled in decoupled mode" in str(exc), exc
+    print(f"Legacy mode correctly refused the decoupled bundle: {exc}")
+else:
+    raise SystemExit(
+        "::error::FLAGOS_DCU_VENDOR_CORE=1 silently accepted a decoupled bundle"
+    )
+PY
+
+    echo "Legacy-mode smoke: full-core bundle"
+    FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
+      PYTHON="$VENV_PYTHON" FLAGOS_DCU_VENDOR_CORE=1 \
+      bash scripts/vendor/bundle_dcu_libtorch.sh
+    FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
+import hashlib
+import importlib.util
+from pathlib import Path
+
+lib = Path(importlib.util.find_spec("torch").submodule_search_locations[0]) / "lib"
+before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+          for path in lib.iterdir() if path.is_file()}
+import torch_fl  # noqa: F401  (selects DTK's core without changing torch/lib)
+import torch
+
+from torch_fl.accelerator.dcu._dcu_libtorch_link import restore_original_libtorch
+
+try:
+    assert torch.version.hip, f"torch.version.hip not restored: {torch.version.hip!r}"
+    a = torch.randn(64, 64, device="flagos")
+    b = torch.randn(64, 64, device="flagos")
+    err = (a @ b).cpu() - (a.cpu() @ b.cpu())
+    assert err.abs().max().item() < 1e-3, err.abs().max().item()
+    after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in lib.iterdir() if path.is_file()}
+    assert after == before, "DCU vendor-core import changed the installed torch/lib"
+    print(
+        f"Legacy DCU runtime OK: torch {torch.__version__} hip {torch.version.hip}, "
+        f"mm err {err.abs().max().item():.3g}"
+    )
+finally:
+    # Kept for older callers. The private facade leaves the installed wheel intact.
+    restore_original_libtorch()
+PY
+    CPU_TORCH_ROOT="$CPU_TORCH_ROOT" python - <<'PY'
+import os
+from pathlib import Path
+import sys
+
+lib = Path(os.environ["CPU_TORCH_ROOT"]) / "lib"
+links = sorted(entry.name for entry in os.scandir(lib) if entry.is_symlink())
+if links or (lib / "_orig_backup").exists():
+    print(f"::error::legacy smoke left {lib} modified: {links}")
+    sys.exit(1)
+print(f"Legacy smoke left the installed torch/lib unchanged: {lib}")
+PY
+
+    echo "Restoring the decoupled bundle for the wheel"
+    FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
+      PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
+    python - <<'PY'
+from pathlib import Path
+import sys
+
+bundle = Path("torch_fl/lib_dcu")
+leaked = [
+    name
+    for name in ("libc10.so", "libtorch_cpu.so", "libtorch.so", "libtorch_python.so")
+    if (bundle / name).exists()
+]
+if leaked or not (bundle / "libflagos_dtk_core_compat.so").is_file():
+    print(f"::error::decoupled bundle not restored after the legacy smoke: {leaked}")
+    sys.exit(1)
+print("Decoupled bundle restored")
+PY
+  fi
+fi
+
+# --- Verify the FlagGems stack imports ---------------------------------------
+# Integration only: torch_fl._C does not exist until the wheel is built, and the
+# import below needs it. set_env_dcu.sh runs before the wheel build, so torch_fl
+# is not importable at that stage.
+#
+# torch_fl is imported before flag_gems on purpose. It installs the torch.cuda
+# shim that makes this box look like the CUDA-compatible device FlagGems expects;
+# importing flag_gems first would resolve the vendor against a stock torch and
+# pick the wrong backend.
+#
+# The assertions cover the three ways this provisioning can silently regress:
+# the flagtree wheel failing to replace the deleted vendor triton, the hcu
+# backend not being discoverable, and FlagGems falling back to a non-Hygon
+# vendor. Each of those would otherwise surface as a confusing per-op failure
+# deep inside the FlagGems test group.
+if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
+  "$VENV_PYTHON" - <<'PY'
+import torch_fl  # noqa: F401  -- must precede flag_gems; installs the torch.cuda shim
+
+import triton
+import triton.backends
+import flag_gems
+
+assert "hcu" in triton.backends.backends, sorted(triton.backends.backends)
+assert flag_gems.vendor_name == "hygon", flag_gems.vendor_name
+print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
+PY
+fi
+
+if ! command -v rocm-smi >/dev/null 2>&1; then
+  echo "::error::rocm-smi is unavailable"
+  exit 1
+fi
+rocm-smi
+
+python - <<'PY'
+import os
+from pathlib import Path
+import sys
+import torch
+
+torch_path = Path(torch.__file__).resolve()
+assert sys.executable.startswith("/"), sys.executable
+assert torch.version.cuda is None, torch.version.cuda
+assert "/opt/conda/" not in str(torch_path), torch_path
+assert Path("torch_fl/lib/libtorch_fl.so").is_file()
+print(f"Isolated Python: {sys.executable}")
+print(f"CPU PyTorch: {torch.__version__}")
+print(f"CPU torch path: {torch_path}")
+print(f"DCU torch lib: {os.environ.get('FLAGOS_VENDOR_TORCH_LIB', '?')}")
+PY
+
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
+fi
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
+fi

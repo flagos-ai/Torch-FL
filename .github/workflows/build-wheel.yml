@@ -1,0 +1,88 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The one wheel build, parameterized by the platform it is handed.
+#
+# release.yml used to reach build-wheel-common.yml through a wrapper per
+# platform (`build-wheel-<p>.yml`, six of them) plus a seventh spelling for GCU,
+# which had no wrapper, and each wrapper carried nothing but the platform name
+# and the input it forwarded. Adding a publishing platform meant adding another
+# near-identical file and remembering to wire it up; forgetting did not fail
+# anything, it shipped a release with a lane missing.
+#
+# There is one caller now. It reads `.github/configs/<platform>.yml` through
+# load-platform-config.yml -- the same reader the integration pipeline uses --
+# and hands the values to build-wheel-common.yml, which stays the single
+# implementation of the build, the compatibility check, the wheel verification,
+# the vendor-lane publish and the artifact upload. A platform is a config file.
+
+name: Build platform wheel
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: Config basename under .github/configs (without .yml)
+        required: true
+        type: string
+      upload-artifact:
+        description: "Whether to upload the built wheel as an artifact"
+        required: false
+        type: boolean
+        default: true
+      publish:
+        description: "Whether to publish the built wheel to its vendor Nexus lane"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      NEXUS_TOKEN:
+        description: "user:token for the vendor Nexus lanes, read only when publish is set"
+        required: false
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Config basename under .github/configs (without .yml)
+        required: true
+        type: string
+      upload-artifact:
+        description: "Whether to upload the built wheel as an artifact"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  configuration:
+    uses: ./.github/workflows/load-platform-config.yml
+    with:
+      platform: ${{ inputs.platform }}
+
+  build:
+    name: Build (${{ needs.configuration.outputs.display_name }})
+    needs: configuration
+    uses: ./.github/workflows/build-wheel-common.yml
+    with:
+      display_name: ${{ needs.configuration.outputs.display_name }}
+      setup_script: ${{ needs.configuration.outputs.setup_script }}
+      setup_platform: ${{ needs.configuration.outputs.setup_platform }}
+      image: ${{ needs.configuration.outputs.ci_image }}
+      runs_on: ${{ needs.configuration.outputs.runner_labels }}
+      container_volumes: ${{ needs.configuration.outputs.container_volumes }}
+      container_options: ${{ needs.configuration.outputs.container_options }}
+      timeout_minutes: ${{ fromJson(needs.configuration.outputs.timeout_minutes) }}
+      artifact_name: ${{ needs.configuration.outputs.wheel_artifact_name }}
+      upload_artifact: ${{ inputs['upload-artifact'] }}
+      publish: ${{ inputs.publish }}
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}

@@ -1,0 +1,96 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Ascend
+
+setup_script: .github/scripts/set_env.sh
+setup_platform: ascend
+
+# Ascend's hook prebuilds the native library in place and probes the device only
+# when it is invoked as `build`; called as `integration` it skips both, and the
+# wheel build then finds no library to link. Every other platform provisions at
+# `integration`, so this is the one stage that is not the default.
+setup_stage: build
+
+# The official FlagTree Ascend image: CANN 9.0.0, Python 3.11, aarch64. It is the
+# supported base for flagtree 0.7.0rc3+ascend3.5, whose wheel is cp311-only, and it
+# already carries the FlagTree `triton`. set_env_ascend.sh is still self-contained
+# -- it installs stock CPU torch + build deps into a fresh venv and re-pins
+# flagtree/FlagGems from the FlagOS index -- so the image only has to supply
+# python3.11 + CANN + a compiler. No vendor torch is baked in and torch_npu is
+# explicitly forbidden.
+ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-ascend-dev
+
+# Self-hosted Huawei (Ascend) runner registered by the teacher. The job is
+# dispatched only to a runner carrying this label.
+runner_labels:
+  - flagcicd-910c
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/ascend/
+  - torch_fl/configs/backends_ascend.conf
+  - csrc/aten/backends/ascend/
+  - csrc/runtime/accelerator/ascend/
+  - csrc/runtime/allocator/backends/ascend_memory.h
+  - .github/scripts/hooks/set_env_ascend.sh
+  - .github/scripts/set_env_ascend.sh
+  - scripts/vendor/patch_triton_ascend.py
+  - scripts/codegen/codegen_ascend.py
+
+container_volumes: []
+
+integration_environment: {}
+
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+  --device=/dev/davinci_manager
+  --device=/dev/davinci0
+  --device=/dev/davinci1
+  --device=/dev/davinci2
+  --device=/dev/davinci3
+  --device=/dev/davinci4
+  --device=/dev/davinci5
+  --device=/dev/davinci6
+  --device=/dev/davinci7
+  --device=/dev/devmm_svm
+  --device=/dev/hisi_hdc
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+
+timeout_minutes: 120
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-ascend
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# Ascend is a pure ACLNN build: no CUDA dispatcher library ships in the wheel,
+# and CANN exposes eight logical devices on the 910C runner.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    at_least: 8

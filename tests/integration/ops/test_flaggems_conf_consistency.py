@@ -1,0 +1,316 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+FlagGems routing consistency (full coverage)
+
+Every op in ``FLAGGEMS_PYTHON_OPS`` -- the FlagGems Python coverage ceiling the
+generator intersects each platform conf with -- must have a real
+``Backend::kFlagGems`` kernel generated in the C++ layer. Generated kernels
+intentionally retained for explicit per-op overrides are also allowed when the
+code generator lists them in ``flaggems_recursive_fallback``. This guards the
+whole FlagGems Python surface against drift between the coverage data and the
+codegen output.
+
+The coverage set lives in ``scripts/codegen/backend_coverage.py`` rather than in a
+``backends_flaggems.conf``: the confs were unified on one full-coverage table
+per platform, so the shared file only ever read by the generator became a data
+module. This check reads the same module the generator does.
+
+This is a pure text/parse check: it reads the coverage data and generated
+sources, so it needs no GPU, no ``flag_gems`` install, and runs in
+milliseconds on any platform.
+
+The op-name -> kernel bridge is:
+
+    coverage ``"op" in FLAGGEMS_PYTHON_OPS``
+      -> register.inc  ``m.impl("op", WrapperFoo);``
+      -> WrapperFoo body ``... foo_dispatcher(...)``
+      -> flaggems_python_kernels.cc
+         ``REGISTER_IMPL_TO_DISPATCHER(_, foo_dispatcher, Backend::kFlagGems, _)``
+
+so we compare the set of ``*_dispatcher`` names on each side.
+
+Usage:
+    pytest tests/integration/ops/test_flaggems_conf_consistency.py -v
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+import pytest
+
+
+# tests/integration/ops/<this file> -> repo root is three levels up.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_COVERAGE = _REPO_ROOT / "scripts" / "codegen" / "backend_coverage.py"
+_REGISTER_INC = _REPO_ROOT / "csrc" / "aten" / "generated" / "register.inc"
+_KERNELS_CC = _REPO_ROOT / "csrc" / "aten" / "generated" / "flaggems_python_kernels.cc"
+_CODEGEN = _REPO_ROOT / "scripts" / "codegen" / "codegen_ops.py"
+
+# The generated C++ sources this check parses exist only in a repo checkout; they
+# are never shipped in a wheel. Pipelines that stage a wheel-only workspace (the
+# Enflame GCU pipeline copies just `tests/` and `pyproject.toml`) therefore have
+# nothing to compare, so the module skips rather than reporting drift it cannot
+# see. `scripts/` and `csrc/` are the markers: if the checkout is present, every
+# individual file below must be too, and a missing one still fails.
+if not (_REPO_ROOT / "scripts").is_dir() or not (_REPO_ROOT / "csrc").is_dir():
+    pytest.skip(
+        "FlagGems conf/codegen consistency needs a repo checkout; this workspace "
+        f"has no scripts/ or csrc/ under {_REPO_ROOT}",
+        allow_module_level=True,
+    )
+
+
+def _read(path: Path) -> str:
+    assert path.is_file(), f"expected generated/config file is missing: {path}"
+    return path.read_text()
+
+
+def _module_op_set(module_path: Path, name: str) -> set[str]:
+    """Read a ``name = {...}`` / ``name = frozenset({...})`` literal out of a script.
+
+    Accepts the frozen form because ``backend_coverage.py`` publishes its sets as
+    ``frozenset`` so that no caller can mutate the coverage ceiling in place.
+    """
+    module = ast.parse(_read(module_path))
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            continue
+        value = node.value
+        if isinstance(value, ast.Call):  # frozenset({...}) / set([...])
+            assert value.args, f"{name} is a bare call, not a set literal"
+            value = value.args[0]
+        ops = set(ast.literal_eval(value))
+        assert all(isinstance(op, str) for op in ops)
+        return ops
+    raise AssertionError(f"{name} is missing from {module_path.name}")
+
+
+def _conf_flagos_python_ops() -> set[str]:
+    """Op names the generator treats as FlagGems-Python coverage."""
+    return _module_op_set(_COVERAGE, "FLAGGEMS_PYTHON_OPS")
+
+
+def _codegen_op_set(name: str) -> set[str]:
+    """Read a ``name = {"op", ...}`` set literal out of the codegen source."""
+    return _module_op_set(_CODEGEN, name)
+
+
+def _override_only_ops() -> set[str]:
+    """Ops with generated Python kernels retained only for explicit overrides.
+
+    Two sets in codegen_ops.py force a route back to the cuda boxing kernel:
+
+    ``flaggems_recursive_fallback`` -- gems re-enters ``torch.<op>`` for non-cuda
+    device types, which on a PrivateUse1 (flagos) tensor lands back on the same
+    flagos_python kernel and recurses forever.
+
+    ``flaggems_runtime_broken`` -- the gems call raises (required keyword-only
+    ``out``, a hard ``device.type == "cuda"`` assert, a DTK triton compile
+    failure) or returns wrong numerics on the flagos device.
+
+    In both cases the kernel stays generated and reachable via
+    ``FLAGOS_OP_<op>=flagos_python``, so it is a legitimate orphan on the
+    kernels side.
+    """
+    return _codegen_op_set("flaggems_recursive_fallback") | _codegen_op_set(
+        "flaggems_runtime_broken"
+    )
+
+
+def _op_to_wrapper() -> dict[str, str]:
+    """``m.impl("op", WrapperFoo);`` -> {op: WrapperFoo} from register.inc."""
+    return dict(re.findall(r'm\.impl\("([^"]+)",\s*(\w+)\);', _read(_REGISTER_INC)))
+
+
+def _wrapper_to_dispatcher() -> dict[str, str]:
+    """WrapperFoo(...) { ... foo_dispatcher(...) } -> {WrapperFoo: foo_dispatcher}.
+
+    The wrapper name is anchored to ``Wrapper`` because the file's own header
+    comment (``// ... m.impl() lines.``) otherwise matches ``(\\w+)\\([^;{]*\\)``
+    and consumes the first real wrapper definition along with it.
+
+    The dispatcher call is searched for anywhere in the wrapper body rather than
+    anchored to the first statement. The soft-lowp-gated wrappers (``mm``,
+    ``bmm``, ``addmm`` and their variants) open with an
+    ``#if defined(FLAGOS_SOFT_LOWP)`` prelude that returns through the
+    ``soft_lowp::`` shim before falling through to the dispatcher, so an
+    anchored pattern silently reports those wrappers as unmapped and every op
+    they bridge as an orphan.
+    """
+    out: dict[str, str] = {}
+    for name, body in re.findall(
+        r"\b(Wrapper\w*)\([^;{]*\)\s*\{(.*?)\n\}", _read(_REGISTER_INC), re.S
+    ):
+        call = re.search(r"(?:at::native::flagos::)?(\w+_dispatcher)\(", body)
+        if call:
+            out.setdefault(name, call.group(1))
+    return out
+
+
+def _cc_flagos_python_dispatchers() -> set[str]:
+    """Dispatcher names registered with Backend::kFlagGems in the kernels cc."""
+    return set(
+        re.findall(
+            r"REGISTER_IMPL_TO_DISPATCHER\(\s*\w+\s*,\s*(\w+)\s*,"
+            r"\s*Backend::kFlagGems",
+            _read(_KERNELS_CC),
+        )
+    )
+
+
+def _ops_to_dispatchers(ops: set[str]) -> tuple[set[str], list[str]]:
+    """Map op names to their dispatcher names via register.inc.
+
+    Returns (dispatcher_names, unmapped_ops).
+    """
+    op2wrap = _op_to_wrapper()
+    wrap2disp = _wrapper_to_dispatcher()
+    dispatchers: set[str] = set()
+    unmapped: list[str] = []
+    for op in ops:
+        wrapper = op2wrap.get(op)
+        dispatcher = wrap2disp.get(wrapper) if wrapper else None
+        if dispatcher:
+            dispatchers.add(dispatcher)
+        else:
+            unmapped.append(op)
+    return dispatchers, sorted(unmapped)
+
+
+def _conf_dispatchers() -> tuple[set[str], list[str]]:
+    """Map configured flagos_python ops to dispatcher names."""
+    return _ops_to_dispatchers(_conf_flagos_python_ops())
+
+
+def _override_only_dispatchers() -> tuple[set[str], list[str]]:
+    """Map explicit-override-only ops to dispatcher names."""
+    return _ops_to_dispatchers(_override_only_ops())
+
+
+class TestFlagGemsConfConsistency:
+    """backends_flaggems.conf <-> generated kFlagGems kernels must agree."""
+
+    @pytest.mark.anyplatform
+    def test_conf_has_flagos_python_ops(self):
+        """Sanity: the conf actually routes a meaningful number of ops here."""
+        ops = _conf_flagos_python_ops()
+        assert len(ops) > 100, (
+            f"expected many flagos_python ops in {_COVERAGE.name}, got {len(ops)}"
+        )
+
+    @pytest.mark.anyplatform
+    def test_every_conf_op_maps_to_a_dispatcher(self):
+        """Every flagos_python op resolves through register.inc to a dispatcher."""
+        _, unmapped = _conf_dispatchers()
+        assert not unmapped, (
+            "conf routes these ops to flagos_python but register.inc has no "
+            f"m.impl/dispatcher for them: {unmapped}"
+        )
+
+    @pytest.mark.anyplatform
+    def test_conf_ops_have_flagos_python_kernels(self):
+        """Each flagos_python op must have a real kFlagGems C++ kernel."""
+        conf_disp, _ = _conf_dispatchers()
+        cc_disp = _cc_flagos_python_dispatchers()
+        missing = sorted(conf_disp - cc_disp)
+        assert not missing, (
+            "these ops are routed to flagos_python in "
+            f"{_COVERAGE.name} but have NO kFlagGems kernel in "
+            f"{_KERNELS_CC.name} (conf/codegen drift): {missing}"
+        )
+
+    @pytest.mark.anyplatform
+    def test_override_only_ops_are_not_default_routes(self):
+        """Recursive fallbacks keep kernels but must not use them by default."""
+        overlap = sorted(_override_only_ops() & _conf_flagos_python_ops())
+        assert not overlap, (
+            f"override-only ops are still routed to flagos_python by default: {overlap}"
+        )
+
+    @pytest.mark.anyplatform
+    def test_no_orphan_flagos_python_kernels(self):
+        """Every kernel is configured by default or retained for an override."""
+        conf_disp, _ = _conf_dispatchers()
+        override_disp, unmapped = _override_only_dispatchers()
+        assert not unmapped, (
+            f"override-only ops have no generated dispatcher: {unmapped}"
+        )
+        cc_disp = _cc_flagos_python_dispatchers()
+        orphans = sorted(cc_disp - conf_disp - override_disp)
+        assert not orphans, (
+            f"these kFlagGems kernels in {_KERNELS_CC.name} are not routed "
+            f"by {_COVERAGE.name} and are not listed as override-only kernels: {orphans}"
+        )
+
+    @pytest.mark.anyplatform
+    def test_counts_match(self):
+        """Configured plus override-only routes match generated kernels exactly.
+
+        A set comparison rather than a length comparison: equal counts can hide a
+        route with no kernel against a kernel with no route, which is precisely
+        the drift this guards.
+        """
+        conf_disp, _ = _conf_dispatchers()
+        override_disp, _ = _override_only_dispatchers()
+        cc_disp = _cc_flagos_python_dispatchers()
+        expected = conf_disp | override_disp
+        missing = sorted(cc_disp - expected)
+        extra = sorted(expected - cc_disp)
+        assert not missing and not extra, (
+            "kFlagGems kernels with no route: "
+            f"{missing}; routes with no kFlagGems kernel: {extra}"
+        )
+
+    def test_python_kernels_use_runtime_resolved_names(self):
+        """Generated calls must name the package-level FlagGems entry point.
+
+        ``flag_gems.<fn>`` is the name the active backend has already rebound to
+        its vendor-specialized callable (``SpecOpRegistrar`` writes into the
+        package globals at import). Anything deeper -- ``flag_gems.ops.<mod>.<fn>``
+        or a vendor alias such as ``_metax.ops.log_softmax.log_softmax_backward``
+        or ``_hygon.ops.mul`` -- pins one implementation instead: the vendor alias
+        fails outright on a host that lacks that module, and the generic module
+        path silently picks the generic kernel where the platform ships an
+        override (72 of 666 kernels did, and ``_log_softmax_backward_data`` then
+        raised ``TypeError: dynamic_func() missing 1 required positional
+        argument: 'BLOCK_N'`` on MetaX hardware).
+
+        So the requirement is one dot: the ``flag_gems`` package, then the
+        operator name. ``PythonOpCache::GetFunc`` resolves that through its
+        dotted branch by importing the prefix and taking the attribute.
+        """
+        paths = re.findall(
+            r'CallPythonOp_\w+\("([^"]+)"',
+            _read(_KERNELS_CC),
+        )
+        assert paths, f"no Python operation calls found in {_KERNELS_CC.name}"
+        noncanonical = sorted(
+            path
+            for path in paths
+            if not path.startswith("flag_gems.") or path.count(".") != 1
+        )
+        assert not noncanonical, (
+            "generated FlagGems calls must be the two-component package-level "
+            f"name flag_gems.<op>, not a module path or vendor alias: {noncanonical}"
+        )

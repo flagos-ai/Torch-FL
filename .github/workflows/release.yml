@@ -1,0 +1,153 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tag a release, get the wheels.
+#
+# Push `v2.10.0` and this builds the wheel on every publishing platform's own
+# runner and uploads each one to the vendor PyPI lane it belongs to -- build and
+# upload in the same job, on the same runner. The tag names the release and each
+# wheel's local segment names its SDK, so `v2.10.0` produces
+# `torch_fl-2.10.0+cuda13.3`, `torch_fl-2.10.0+dtk2604`, and so on: one release,
+# one artifact per platform.
+#
+# The build reuses `build-wheel.yml`, the one wheel build, with the platform's
+# own config, so a release builds exactly what CI verified (same image, same
+# setup hook, same wheel build, and the same `Verify wheel` step that re-installs
+# the artifact before it is offered here). Nothing about the build is
+# release-only; `publish: true` is the only release-specific input.
+#
+# Uploading from the platform's own job is deliberate, and is how
+# flagos-ai/build-infra releases its own wheels. The other shape -- one
+# GitHub-hosted job downloading all seven artifacts and pushing them to Nexus --
+# put 2.35 GB on a cross-border link at ~0.13 MB/s and was killed by its own
+# 60-minute timeout on v2.10.0rc1, while the same bytes uploaded from a runner in
+# China at 13-23 MB/s. GitHub's own artifact hop is not the cost: that run moved
+# all seven artifacts in 22 seconds. Where each wheel goes is the `pypi_lane`
+# column of cmake/flagos_platforms.json; the upload itself is
+# .github/scripts/publish_wheels.py, run per platform by `build-wheel-common.yml`.
+#
+# Credentials: the organization secret NEXUS_TOKEN, in `user:token` form -- the
+# same one flagos-ai/build-infra uses. Publishing from each platform's own job
+# means it now reaches every vendor runner, with write access to every vendor
+# lane; the guard that travels with it is publish_wheels.py's version check,
+# which refuses to publish a wheel whose base version is not the tag, plus the
+# ref check that refuses to publish from anything but a tag. It is mapped
+# explicitly at every `uses:` hop, because `secrets: inherit` is not transitive.
+# No per-repo secret is needed; if the organization secret is not visible to this
+# repository, each build job fails on an empty token before it builds anything
+# rather than uploading nothing quietly.
+#
+# Recovering a single failed lane: each wheel is still uploaded as a workflow
+# artifact, so `gh run download <run-id> --pattern 'wheel-<platform>'` plus a
+# local `python .github/scripts/publish_wheels.py --wheels <dir> --tag <tag>`
+# re-uploads just that lane in about a minute, without rebuilding anything. The
+# version check makes it a no-op for lanes that already have the wheel. See
+# docs/development/releasing.md.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release from (dispatch this workflow from that tag's ref)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag decides whether this is a release at all. Mirrors the guard in
+  # flagos-ai/build-infra/.github/workflows/upload-nexus.yml so the two agree:
+  # a bare version tag publishes, a variant or pre-release tag does not, and a
+  # manual dispatch always does.
+  guard:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Read the tag
+        id: check
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "push" ]; then
+            # The wheels are built from this run's ref, and the pre-release
+            # suffix comes from the ref too, so a dispatch from a branch would
+            # publish a branch tip under the tag's version in the wrong wheel
+            # version. Requiring the tag makes the input description true and
+            # makes the dispatch path a real re-run.
+            if [ "$DISPATCH_TAG" != "$REF_NAME" ]; then
+              echo "::error::This workflow builds from its own ref. Dispatch it from the tag's ref (the 'Use workflow from' selector) rather than from a branch: ref is '${REF_NAME}', tag input is '${DISPATCH_TAG}'."
+              exit 1
+            fi
+            echo "tag=${DISPATCH_TAG}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch for ${DISPATCH_TAG} - publishing."
+            exit 0
+          fi
+          echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
+          stable='^v?[0-9]+(\.[0-9]+){0,3}(\.post[0-9]+)?$'
+          prerelease='^v?[0-9]+(\.[0-9]+){0,3}(a|b|rc)[0-9]+$'
+          if [[ "$REF_NAME" =~ $stable ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Stable release tag '${REF_NAME}' - publishing."
+          elif [[ "$REF_NAME" =~ $prerelease ]]; then
+            # A release candidate publishes too, deliberately: a candidate
+            # nobody can install cannot be tested, which is the only reason to
+            # cut one. It cannot be mistaken for the release -- the suffix is in
+            # the version (`torch_fl-2.10.0rc1+cuda13.3`), where PEP 440 sorts
+            # it below `2.10.0`.
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Pre-release tag '${REF_NAME}' - publishing the candidate."
+          else
+            # A variant tag like v2.10.0+cuda13.3, or any spelling this does not
+            # recognise. The organization's shared uploader would skip these for
+            # a stable release, so they are not published here by surprise
+            # either; workflow_dispatch is the deliberate way through.
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Non-release tag '${REF_NAME}' - building nothing. Re-run this workflow with workflow_dispatch to release it deliberately."
+          fi
+
+  # One job per publishing platform, as a matrix rather than seven spelled-out
+  # blocks: the runner label, image, mounts and timeout each one used to name
+  # come from `.github/configs/<platform>.yml` through build-wheel.yml. The list
+  # below is what a release ships, so it is held to the platforms that carry a
+  # `pypi_lane` in cmake/flagos_platforms.json, in both directions, by
+  # tests/unit/test_release_publishing.py. `fail-fast: false` so one vendor's
+  # runner cannot cancel another vendor's build -- the blocks were independent
+  # before. Every job carries the upload with it.
+  build:
+    name: Build wheel (${{ matrix.platform }})
+    if: needs.guard.outputs.publish == 'true'
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ascend, cuda, dcu, gcu, metax, musa, ppu]
+    uses: ./.github/workflows/build-wheel.yml
+    with:
+      platform: ${{ matrix.platform }}
+      publish: true
+    secrets:
+      NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}

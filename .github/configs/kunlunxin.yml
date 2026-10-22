@@ -1,0 +1,91 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Kunlun P800 XPU
+
+# Kunlunxin-specific environment preparation stays outside the common workflow.
+setup_script: .github/scripts/set_env.sh
+setup_platform: kunlunxin
+
+# Kunlunxin's hook prebuilds the native library in place and probes the device
+# only when it is invoked as `build`; called as `integration` it skips both, and
+# the wheel build then finds no library to link. Every other platform provisions
+# at `integration`, so this is the one stage that is not the default.
+setup_stage: build
+
+# Pinned Kunlunxin XRE image (driver 5.37.1). The hook creates the isolated
+# Python 3.10 venv inside the job, reusing the image's TORCH_FL_PREBUILT_KUNLUNXIN_VENV
+# when it provides one; a derived CI image should bake python3.10-venv in to
+# avoid the apt fallback on every job.
+ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-kunlunxin-dev
+
+runner_labels:
+  - p800-8g-cicd-pytorch
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/kunlunxin/
+  - torch_fl/configs/backends_kunlunxin.conf
+  - csrc/aten/backends/kunlunxin/
+  - csrc/runtime/accelerator/kunlunxin/
+  - csrc/runtime/allocator/backends/kunlunxin_memory.h
+  - .github/scripts/hooks/set_env_kunlunxin.sh
+  - .github/scripts/set_env_kunlunxin.sh
+  - scripts/codegen/codegen_kunlunxin.py
+
+container_volumes: []
+
+integration_environment: {}
+
+# The image ships no `build` module, and a missing one does not fail cleanly: the
+# checkout's own CMake `build/` directory shadows it as a namespace package, so
+# `python -m build` resolves to the wrong module. Upgrade it before the build.
+integration_build_tools:
+  - python -m pip install --upgrade build
+
+# The isolated venv carries neither an upgraded pip nor pytest; the pipeline
+# installs both after the wheel.
+integration_test_dependencies:
+  - python -m pip install --upgrade pip
+  - python -m pip install pytest
+
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-kunlunxin
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# The FlagGems stack has to be the flagtree build, not a stock triton wheel left
+# behind by the image: only flagtree carries the xpu backend the XPU kernels are
+# compiled for. One P800 is enough for the suites that run here.
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /usr/local/lib/python3.10/dist-packages
+  flagos_devices:
+    at_least: 1
+  triton_backend: xpu

@@ -1,0 +1,37 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# pip constraints for the CI provisioning venvs.
+#
+# Applied through PIP_CONSTRAINT, which set_env.sh exports before the platform
+# hook runs, so every pip install in a platform script honours it.
+#
+# .github/version-pins.env fixes the *specified* packages (torch, FlagTree,
+# FlagGems, FlagCX). This file fixes the ones a script installs unpinned and the
+# transitive pulls that otherwise drift with the runner image -- the case the pin
+# table cannot reach. Keep the two in sync: a version here must not contradict
+# the pin table or a script's explicit install.
+#
+# Torch is pinned in version-pins.env and installed explicitly; the constraint
+# keeps a transitive requirement from resolving a second, incompatible build.
+torch==2.10.0
+
+# NumPy 2.x breaks the stock CPU torch C extensions at import, and transformers
+# pulls it by default. Every script that needs NumPy already asks for <2; this
+# makes it hold for the transitive pull too.
+numpy<2
+
+# The floor the agnostic-checks job and the hardware venvs use: Qwen3 model_type
+# support landed in transformers 4.51.
+transformers>=4.51

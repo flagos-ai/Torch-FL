@@ -1,0 +1,116 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+# torch is pinned to 2.10 to match the checked-in generated ATen bindings; the
+# same pin is applied to install_requires via TORCH_PIN in setup.py, where the
+# reasoning is spelled out.
+requires = ["setuptools>=45", "wheel", "cmake>=3.18", "torch>=2.10,<2.11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch_fl"
+# Version is computed in setup.py: it names the supported PyTorch minor line and
+# appends the platform's SDK local segment (e.g. 2.10.0+cuda13.3) from
+# cmake/flagos_platforms.json. A static value here would override setup()'s
+# version, so it must be declared dynamic.
+description = "FlagGems operators as a custom PyTorch device (flagos)"
+readme = "README.md"
+# Computed in setup.py from FLAGTREE_PYTHON_VERSION_<platform> in
+# .github/version-pins.env. Not a range: a FlagTree build exists for exactly one
+# cp tag and torch_fl links it, so each platform has a single usable interpreter
+# (3.12 on cuda/gcu/metax/ppu, 3.10 on dcu/musa, 3.11 on ascend). The wheel
+# filename already carries the cp tag; this makes the resolver say so instead of
+# failing later inside the extension.
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "FlagGems Team"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# flag_gems is the default operator source for the flagos device: its Triton
+# kernels are routed via backends_*.conf and are on by default, so it is a hard
+# runtime dependency (pure Python + Triton, installs cleanly from PyPI). It is
+# NOT vendored into the wheel — flag_gems iterates fast and pinning a copy would
+# only make upgrades harder. Versions match the validated 2.10 env.
+#
+# Declared dynamic so setup.py can drop flag_gems/triton on platforms built in
+# pure-boxing mode (FLAGOS_ACCELERATOR=dcu), where PyPI's NVIDIA-targeted triton wheel
+# is the wrong artifact — DTK ships its own. See _install_requires() in setup.py.
+# entry-points is dynamic so setup.py can omit it from the MPS wheel. PyTorch's
+# device-backend autoload runs at the end of `import torch`; on macOS that would
+# register flagos before a program that only wants torch.backends.mps says so.
+dynamic = ["version", "dependencies", "requires-python", "entry-points"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    # Pinned to the version CI installs in .github/workflows/lint.yml so a local
+    # `ruff` behaves identically to the gate.
+    "ruff==0.15.12",
+]
+# There was a `flagcx` extra here, declaring a bare `flagcx` for the
+# heterogeneous unified-comm inner backend. It is gone because the package is
+# now a pinned requirement on every platform that has a build for it (CUDA,
+# DCU, GCU, MetaX, MUSA -- see _flagos_sibling_requires in setup.py), and the
+# extra could not have worked where it was not: `flagcx` is not on PyPI, and the
+# build is per-vendor (`0.14.0rc2.post2+dtk2604`). The four platforms without a
+# pin have no FlagCX build at all and fall back to the NCCL-shaped route.
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
+
+# Native libs (libtorch_fl.so) are built via setup.py cmdclass; editable install must
+# run build_ext — see EditableWheelWithCmake in setup.py.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+# Repo-owned baseline. The values below reproduce ruff's built-in defaults,
+# which is what CI ran before this config existed, so committing it is
+# behavior-neutral for the existing tree. A stricter profile lands separately.
+line-length = 88
+# The gate's tool version, enforced rather than documented: ruff refuses to run
+# under any other version, so a local run cannot disagree with CI. The lint
+# *rules* are already frozen by `select` below, but the formatter has no
+# equivalent switch, so what a newer ruff wants to reformat and what the gate
+# checks stop being the same set. Measured with 0.17.0 on this tree: `format
+# --check` names 18 Markdown files, because it formats code fences inside them
+# (448 files scanned against the gate's 377), and `ruff format .` rewrites all
+# 18. Keep this equal to the `dev` extra below and to what
+# `.github/workflows/lint.yml` installs; tests/unit/test_ruff_version_pin.py
+# fails if the three drift apart.
+required-version = "0.15.12"
+# Inferred from requires-python; stated explicitly so local runs and CI agree
+# even if the interpreter or ruff default changes.
+target-version = "py38"
+
+[tool.ruff.lint]
+# ruff's default rule set, spelled out so a future ruff release cannot silently
+# change what this repository checks.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# Defaults, made explicit for the same reason.
+quote-style = "double"
+indent-style = "space"

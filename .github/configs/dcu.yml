@@ -1,0 +1,106 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Hygon DCU
+
+# Platform-specific preparation is implemented outside the common workflows.
+setup_script: .github/scripts/set_env.sh
+setup_platform: dcu
+
+# Pinned CI image: DTK base plus the /opt/torch-fl-dcu-venv Python environment
+# used by set_env_dcu.sh. The script still falls back to creating a fresh venv
+# when the prebuilt one is absent, but the CI image should avoid network installs.
+ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
+
+runner_labels:
+  - hg-8g-cicd-pytorch
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/dcu/
+  - torch_fl/configs/backends_dcu.conf
+  - csrc/aten/backends/dcu/
+  - csrc/runtime/accelerator/dcu/
+  - csrc/runtime/accelerator/cuda/
+  - csrc/runtime/allocator/backends/dcu_memory.h
+  - .github/scripts/hooks/set_env_dcu.sh
+  - .github/scripts/set_env_dcu.sh
+  - scripts/vendor/bundle_dcu_libtorch.sh
+  - scripts/vendor/check_dcu_core_abi.py
+
+# Bind-mount the host hyhal driver into the container. libhydmi.so (Hygon DMI
+# device management) and its sibling driver libs live here on the host, not in
+# the flagos image; set_env_dcu.sh probes /usr/local/hyhal/lib and prepends it
+# to LD_LIBRARY_PATH so flagos device init can dlopen libhydmi.so. Mount the
+# real path /usr/local/hyhal (not the /opt/hyhal symlink) -- docker does not
+# follow a symlink bind source. The runner host installs hyhal at the same
+# standard layout as any DCU box, so the source path is portable across hosts.
+container_volumes:
+  - /usr/local/hyhal:/usr/local/hyhal:ro
+
+integration_environment: {}
+
+# The per-file unit suite executes CI checkout resolution with the real jq.
+# Reuse it when present; provision it before tests in older DCU images.
+integration_test_dependencies:
+  - >-
+    command -v jq >/dev/null 2>&1 ||
+    (apt-get update &&
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq)
+
+# DCU is non-NVIDIA: expose the /dev/kfd and /dev/dri device nodes through
+# --privileged (mirrors the MetaX layout) instead of --gpus all.
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+# 90, not the 60 the other platforms use. This is the only manifest that also
+# runs the whole tests/unit directory (per file, one process each) on top of a
+# wheel build and thirteen integration groups, and it does not fit in an hour:
+# measured on this job, 58m18s for one green run (2026-09-28T16:26Z) and 62m26s
+# for the next, which was cancelled by the limit with every test already
+# reported -- 72/72 unit files PASS and no failing step. The limit was the only
+# thing that was red. Raise this rather than trim the group: the unit directory
+# is the per-file coverage that caught the cp310 `tomllib` collection error, and
+# nothing else runs it. Ascend, the other long manifest, is already at 120.
+timeout_minutes: 90
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-dcu
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# DCU is a boxing build (DTK torch is hipified, HIP kernels live under the CUDA
+# dispatch key), so the vendor bundle takes the CUDA library's place. FlagTree
+# (the DTK triton build carrying the hcu backend) and FlagGems are provisioned
+# by set_env_dcu.sh, and FlagGems-first routing comes from backends_dcu.conf
+# itself -- no switch involved. What runs here is what a stock DCU install gets:
+# the setup script refuses to continue if the hcu backend or the hygon vendor is
+# not what the process actually resolved, which is where that assertion lives
+# rather than here, where it would be a second copy of the same value.
+environment_check:
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib/libtorch_fl.so
+  flagos_devices:
+    more_than: 0

@@ -1,0 +1,100 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: MetaX
+
+setup_script: .github/scripts/set_env.sh
+setup_platform: metax
+
+ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-dev
+
+runner_labels:
+  - mx-8g-cicd-pytorch
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/metax/
+  - torch_fl/configs/backends_metax.conf
+  - csrc/aten/backends/metax/
+  - csrc/runtime/accelerator/metax/
+  - csrc/runtime/allocator/backends/metax_memory.h
+  - csrc/runtime/allocator/backends/cuda_memory.h
+  - .github/scripts/hooks/set_env_metax.sh
+  - .github/scripts/set_env_metax.sh
+  - scripts/vendor/bundle_maca_libtorch.sh
+
+container_volumes: []
+
+# Issue #253. The MetaX image exports TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, which
+# ATen reads while it initialises its TF32 state, so
+# torch.backends.cuda.matmul.allow_tf32 is already True before user code runs
+# and MACA's GEMM takes its TF32 kernel for an fp32 mm/bmm. That is the
+# documented meaning of the variable and MACA honors it -- the kernel is not the
+# defect -- but it makes every numeric assertion in this job a TF32 assertion:
+# measured on the C550, an fp32 64x128 @ 128x32 mm lands 1.5e-02 from an fp64
+# reference with the variable set and 1.3e-05 without.
+#
+# "0" is the explicit-off spelling, and it is what overrides an inherited 1. A
+# non-numeric value such as "false" or an empty string raises a UserWarning and
+# is treated as off, so both are load-bearing spellings and neither is used
+# here; unset and 0 are numerically identical but unset cannot cancel the
+# image's value.
+#
+# This is the environment, not set_env_metax.sh, because the setup script runs
+# as its own step: each step gets a fresh shell, so an unset inside the script
+# reaches nothing, and $GITHUB_ENV would only be a second copy of this line.
+# Nothing in the build reads the flag. tests/integration/test_dtype_coverage.py
+# pins the resulting precision, so a dropped pin fails a test -- and fails it on
+# the step below that names test_dtype_coverage.py -- rather than passing
+# silently.
+integration_environment:
+  TORCH_ALLOW_TF32_CUBLAS_OVERRIDE: "0"
+
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-metax
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# MetaX runs in an isolated /opt/venv with stock +cpu torch, and reads its
+# devices through BOTH surfaces: torch.cuda (the MACA shim) and the flagos
+# device. The FlagGems group cannot run without both halves -- the generated
+# kernels call flag_gems.<name>, and the Triton that compiles them has to be the
+# vendor one carrying the metax backend. `require_imports` is where that second
+# half is stated: the import itself is the check.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  torch_path_prefix: /opt/venv/
+  torch_path_forbidden:
+    - /opt/conda/
+  flagos_devices:
+    exactly: 8
+  cuda_available: true
+  cuda_devices:
+    exactly: 8
+  triton_backend: metax
+  require_imports:
+    - flag_gems

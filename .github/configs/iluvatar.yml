@@ -1,0 +1,93 @@
+# Copyright 2026 FlagOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+# Shared CI lane for the CoreX 4.5.0 BI-V150 host.
+# Initial PR runs retain known runtime failures; see the bring-up guide.
+display_name: Iluvatar
+setup_script: .github/scripts/set_env.sh
+setup_platform: iluvatar
+setup_stage: integration
+
+# Operator-published manual-20261016-iluvatar-cpu-dev, confirmed 2026-10-17.
+ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:bc1b3c0beb22b301ec501896ea1c77903879526fb7303358669321d609458023
+runner_labels:
+  - ts-v150-cicd-pytorch
+
+paths_watch:
+  - torch_fl/accelerator/iluvatar/
+  - torch_fl/configs/backends_iluvatar.conf
+  - csrc/aten/backends/iluvatar/
+  - csrc/runtime/accelerator/iluvatar/
+  - csrc/runtime/allocator/backends/iluvatar_memory.h
+  - scripts/codegen/codegen_iluvatar.py
+  - scripts/codegen/codegen_iluvatar_flaggems.py
+  - .github/scripts/hooks/set_env_iluvatar.sh
+  - .github/scripts/set_env_iluvatar.sh
+  - .github/scripts/lib/iluvatar_packages.sh
+  - .github/scripts/verify_iluvatar.py
+
+container_volumes:
+  - /usr/local/corex-4.5.0/lib64/libcuda.so.1:/usr/local/corex/lib64/libcuda.so.1:ro
+  - /usr/local/corex-4.5.0/lib64/libixml.so:/usr/local/corex/lib64/libixml.so:ro
+  # The base's ixsmi is an empty placeholder. Triton matmul tuning calls it.
+  - /usr/local/corex-4.5.0/bin/ixsmi:/usr/local/corex/bin/ixsmi:ro
+
+# These are the manually validated reservations on u121. The runner must keep
+# physical cards 8 and 9 reserved. Environment here applies to test commands;
+# Docker options also set the masks for all container steps.
+integration_environment:
+  CUDA_VISIBLE_DEVICES: "8,9"
+  COREX_VISIBLE_DEVICES: all
+  TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+
+# /dev/itrctl is required by cuInit in addition to the compute nodes. Omitting
+# it returns error 1001 even with all 16 compute nodes mapped. No privileged
+# container is required for the cold Triton smoke test on this host.
+container_options: >-
+  --runtime=runc
+  --shm-size=16g
+  --ulimit=memlock=-1
+  --env=CUDA_VISIBLE_DEVICES=8,9
+  --env=COREX_VISIBLE_DEVICES=all
+  --device=/dev/itrctl
+  --device=/dev/iluvatar0
+  --device=/dev/iluvatar1
+  --device=/dev/iluvatar2
+  --device=/dev/iluvatar3
+  --device=/dev/iluvatar4
+  --device=/dev/iluvatar5
+  --device=/dev/iluvatar6
+  --device=/dev/iluvatar7
+  --device=/dev/iluvatar8
+  --device=/dev/iluvatar9
+  --device=/dev/iluvatar10
+  --device=/dev/iluvatar11
+  --device=/dev/iluvatar12
+  --device=/dev/iluvatar13
+  --device=/dev/iluvatar14
+  --device=/dev/iluvatar15
+
+timeout_minutes: 60
+wheel_artifact_name: wheel-iluvatar
+
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_prefix: /opt/torch-fl-iluvatar-venv/
+  require_package_files:
+    - lib/libtorch_fl.so
+    - lib/libtorch_bindings.so
+  forbid_package_files:
+    - lib_iluvatar
+    - lib/libtorch_cuda.so
+    - lib/libc10_cuda.so
+  cuda_available: true
+  cuda_devices:
+    exactly: 2
+  flagos_devices:
+    exactly: 2
+  triton_backend: iluvatar
+  flaggems_vendor: iluvatar
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.6.2a3+iluvatar3.6
+    triton_prefix: "3.6."

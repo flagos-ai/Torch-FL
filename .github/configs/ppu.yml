@@ -1,0 +1,108 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: PPU
+
+setup_script: .github/scripts/set_env.sh
+setup_platform: ppu
+
+ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
+
+runner_labels:
+  - flagcicd-810e
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/ppu/
+  - torch_fl/configs/backends_ppu.conf
+  - csrc/aten/backends/ppu/
+  - csrc/runtime/accelerator/ppu/
+  - csrc/runtime/accelerator/cuda/
+  - csrc/runtime/allocator/backends/cuda_memory.h
+  - csrc/runtime/allocator/backends/ppu_memory.h
+  - .github/scripts/hooks/set_env_ppu.sh
+  - .github/scripts/set_env_ppu.sh
+  - scripts/vendor/bundle_ppu_libtorch.sh
+
+container_volumes:
+  # PPU_SDK (underscore, /usr/local/PPU_SDK) is baked into the image with
+  # CUDA_SDK/lib64/libcudart.so; no host mount needed. Neither is FlagGems: the
+  # image ships it as a PEP 660 editable install pointing at a /workspace/FlagGems
+  # bind mount, which is no longer part of the runner pod. set_env_ppu.sh instead
+  # installs the FlagGems stack into the job venv from published FlagOS wheels,
+  # so the environment is reproducible from the image plus those indexes alone.
+  - /mnt/cpfs/models/Qwen3-0.6B:/models/Qwen3-0.6B:ro
+
+integration_environment:
+  MODEL_PATH: /models/Qwen3-0.6B
+
+# DSW authZ plugin denies --privileged / --ipc=host / --security-opt /
+# --cap-add (Aliyun DSW docs: "authorization denied by plugin authZ"). Mount
+# the AliXPU device nodes explicitly with --device instead (authZ allows it).
+# Three node classes: /dev/alixpu (base), /dev/alixpu_ctl (control),
+# /dev/alixpu_ppu0-15 (compute, 16 on the probed pod -- adjust if the runner
+# exposes a different count). Multi-card NCCL uses --shm-size shared memory,
+# not SysV IPC, so --ipc=host is not needed. GitHub Actions container.options
+# passes these verbatim to docker create, so the list must be static (no shell
+# $(ls ...) expansion).
+container_options: >-
+  --shm-size=4g
+  --device=/dev/alixpu
+  --device=/dev/alixpu_ctl
+  --device=/dev/alixpu_ppu0
+  --device=/dev/alixpu_ppu1
+  --device=/dev/alixpu_ppu2
+  --device=/dev/alixpu_ppu3
+  --device=/dev/alixpu_ppu4
+  --device=/dev/alixpu_ppu5
+  --device=/dev/alixpu_ppu6
+  --device=/dev/alixpu_ppu7
+  --device=/dev/alixpu_ppu8
+  --device=/dev/alixpu_ppu9
+  --device=/dev/alixpu_ppu10
+  --device=/dev/alixpu_ppu11
+  --device=/dev/alixpu_ppu12
+  --device=/dev/alixpu_ppu13
+  --device=/dev/alixpu_ppu14
+  --device=/dev/alixpu_ppu15
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-ppu
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# PPU takes the CUDA dispatch key over with its own bundled libtorch_cuda.so
+# under lib_ppu, which is why torch.version.cuda reads 13.0 in a stock +cpu
+# wheel, and why both the torch.cuda and the flagos device surfaces have to
+# report devices. The Qwen3 groups are the two steps that need the mounted
+# checkpoint, so the mount is asserted here.
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: "13.0"
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib_ppu/libtorch_cuda.so
+  flagos_devices:
+    more_than: 0
+  cuda_available: true
+  cuda_devices:
+    more_than: 0
+  model_dir: true

@@ -1,0 +1,670 @@
+# torch.compile Integration for flagos Device
+
+This document describes the `torch.compile` integration for the flagos device, enabling automatic kernel fusion and optimization via TorchInductor.
+
+## Overview
+
+The flagos device now supports PyTorch 2.0+ `torch.compile` for automatic performance optimization:
+
+```python
+import torch_fl  # Import first on MetaX.
+import torch
+
+model = MyModel().to("flagos:0")
+compiled_model = torch.compile(model, backend="flagos")
+
+# Automatic fusion of elementwise ops, reduced dispatch overhead
+output = compiled_model(input)
+```
+
+**Key benefits**:
+- Automatic kernel fusion (no manual optimization needed), cutting per-op dispatch overhead
+- Graph stays on flagos: no cuda round trip, no copy at the graph boundary
+- Compatible with existing flagos dispatch (FlagGems Python/C++, CUDA boxing)
+- Optional FlagTree compilation for multi-backend kernel generation (drop-in: it
+  replaces `triton` at install time, so no code change is needed)
+
+## Quick Start
+
+### Basic Usage
+
+```python
+import torch_fl  # Import first on MetaX.
+import torch
+
+# Standard model definition
+model = torch.nn.Sequential(
+    torch.nn.Linear(512, 512),
+    torch.nn.ReLU(),
+    torch.nn.Linear(512, 512),
+).to("flagos:0")
+
+# Compile with flagos backend
+model = torch.compile(model, backend="flagos")
+
+# Use as normal
+x = torch.randn(64, 512, device="flagos:0")
+y = model(x)  # Automatically fused kernels
+```
+
+### Compilation Modes
+
+```python
+# Default: balanced optimization
+model = torch.compile(model, backend="flagos")
+
+# Maximum performance (longer compile, better runtime)
+model = torch.compile(model, backend="flagos", mode="max-autotune")
+
+# Explicit inductor config overrides
+model = torch.compile(model, backend="flagos", options={"max_autotune": True})
+```
+
+`mode` and `options` are expanded into inductor config patches scoped to that
+compile. Note that CUDA graphs are always forced off (see Limitations), so
+`mode="reduce-overhead"` -- whose main lever is cudagraphs -- has little effect
+here.
+
+### FlagTree Integration
+
+[FlagTree](https://github.com/flagos-ai/FlagTree) is a Triton fork whose kernel
+compiler targets many vendor backends. It integrates by **substitution at install
+time**, which is the whole thing to understand about it:
+
+- Its wheel is named `flagtree`, but the module it installs is **`triton`**.
+- Installing it **uninstalls the official `triton`** and takes its place.
+- So inductor's own `import triton` already resolves to FlagTree once installed,
+  and nothing in `torch_fl` patches `sys.modules`.
+
+Wheels from 0.6.2 on also install a real `flagtree` package, which is the
+FlagPrism debugger/profiler host -- it borrows the DSL out of
+`triton.language.core` rather than providing a compiler of its own. Importing it
+is still not how you reach FlagTree; reach for `triton` and check which build it
+is with `is_flagtree_active()`.
+
+There is no `flagtree` package on PyPI; build it from source. On a machine whose
+`triton` is in use by FlagGems, build into a separate virtualenv, since the
+install removes the existing `triton`:
+
+```bash
+# System deps (nlohmann-json must match cmake/json-version.txt)
+apt install zlib1g-dev libxml2-dev nlohmann-json3-dev
+
+git clone https://github.com/flagos-ai/FlagTree.git
+cd FlagTree
+pip install -r python/requirements.txt
+
+# Pick the vendor backend. Do NOT set this for nvidia or amd.
+# export FLAGTREE_BACKEND=metax
+
+# Repo root for Triton 3.4+ (branch main); use `cd python` first on 3.1-3.3.
+MAX_JOBS=64 pip install . --no-build-isolation -v
+```
+
+LLVM arrives as a prebuilt tarball (~4.5 GB unpacked), so this does not build
+LLVM from source. Verify, from any directory other than `FlagTree/python`:
+
+```bash
+pip show flagtree                                  # wheel name
+python -c 'import triton; print(triton.__path__)'  # module name
+```
+
+Branch selects the Triton base version, which must match what your torch
+expects: `main` is Triton 3.6 (correct for torch 2.10), `triton_v3.5.x` is 3.5
+and carries the Ascend backend.
+
+#### Using a FlagTree build without replacing your triton
+
+Since FlagTree's install removes the existing `triton`, the cheapest way to test
+against it is to build into a separate virtualenv and shadow `triton` by path,
+keeping torch and `torch_fl` from your main environment. Triton does not link
+against torch, so the two mix freely as long as the Python versions match:
+
+```bash
+PYTHONPATH=/path/to/flagtree-venv/lib/python3.12/site-packages \
+  FLAGOS_USE_FLAGTREE=1 pytest tests/integration/test_compile.py
+```
+
+This avoids rebuilding `torch_fl` inside the FlagTree venv, and leaves the
+FlagGems-facing `triton` in the main environment untouched.
+
+Once built, compilation goes through FlagTree with no further configuration.
+Setting `FLAGOS_USE_FLAGTREE=1` **asserts** that the active `triton` is FlagTree
+and errors out if it is stock Triton — it cannot switch FlagTree on, because that
+was decided when the environment was built:
+
+```bash
+FLAGOS_USE_FLAGTREE=1 python your_script.py
+```
+
+Detection uses the FlagTree-only module `triton._flagtree_spec`. Note that
+`triton._flagtree_backend.FLAGTREE_BACKEND` is *not* a usable signal: it is the
+empty string on nvidia/amd builds, since upstream directs you not to set
+`FLAGTREE_BACKEND` for those.
+
+PPU FlagTree currently queries `torch.cuda.current_device()` while selecting
+compiler hints. Inductor's asynchronous compile workers can make that query
+after a PPU CUDA context was initialized in the parent, which PyTorch rejects as
+CUDA reinitialization after `fork` ([FlagTree #1031](https://github.com/flagos-ai/FlagTree/issues/1031)).
+The flagos backend therefore defaults PPU FlagTree to one compile thread until
+the upstream driver no longer initializes CUDA in a worker. An explicit
+`TORCHINDUCTOR_COMPILE_THREADS` value or `compile_threads` compile option remains
+authoritative.
+
+#### MUSA / MThreads FlagTree
+
+MUSA uses the vendor FlagTree runtime (`flagtree-0.5.0+mthreads3.1`, Triton 3.1)
+and its `mthreads` Python backend. The compiler emits a `musa` target. A stock
+Triton wheel only provides `nvidia`/`amd` backends and cannot compile MUSA
+kernels.
+
+FlagTree talks to `torch_fl` directly; the separate `torch_musa` plugin is not
+required and its `__init__` is never imported. The vendor MThreads driver reads
+four runtime facts from `torch_musa` — device availability (which is what makes
+Triton select the backend at all), current device, compute capability, and the
+raw `musaStream_t`. Running that plugin's `__init__` in this process is not an
+option, because it claims the process-global PrivateUse1 hooks that `torch_fl`
+must own. So
+[`torch_fl/compile/flagtree_shim.py`](../../torch_fl/compile/flagtree_shim.py)
+answers those four questions from `torch_fl`'s own MUSA runtime and rebinds them
+onto the vendor driver class before the first driver instance exists. The
+consequence that matters: compiled kernels are submitted to the same stream the
+native mudnn kernels use, so a compiled graph is ordered against eager MUSA work
+without an explicit synchronize between them.
+
+The binding must happen before Triton instantiates its driver, since the driver's
+`__init__` copies these attributes onto the instance. `flagos_compile_backend`
+therefore binds at module load and again per compile, both idempotently.
+`tests/integration/test_compile.py::test_musa_flagtree_binds_to_torch_fl_runtime`
+asserts the binding took effect by checking that every rebound driver callable
+resolves inside `torch_fl`. That, rather than `torch_musa` being absent from
+`sys.modules`, is the property worth pinning: the driver would also "work"
+against some other runtime, and `torch_fl` itself publishes a small
+compatibility surface under that module name when FlagGems is enabled (see
+`_install_musa_flaggems_compat`).
+
+MThreads FlagTree currently queries the MUSA runtime while compiling. The flagos
+backend therefore defaults this path to one Inductor compile thread, preserving
+an explicit `TORCHINDUCTOR_COMPILE_THREADS` or `compile_threads` setting. This
+serialization is a safety workaround for the vendor driver, not a performance
+claim; remove it only after the relevant FlagTree driver is verified fork-safe.
+
+On the measured MTT S5000 setup, validation requires the vendor FlagTree runtime,
+`FLAGOS_ACCELERATOR=musa`, and `FLAGOS_USE_FLAGTREE=1`. The generic Triton 3.7.1 runtime
+is not MThreads execution evidence.
+
+Example environment:
+
+```bash
+PYTHONPATH=/path/to/flagtree-mthreads-runtime:$PWD \
+LD_LIBRARY_PATH=/path/to/flagtree-mthreads-runtime/triton/_C:/usr/local/musa/lib:$LD_LIBRARY_PATH \
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 FLAGOS_ACCELERATOR=musa FLAGOS_USE_FLAGTREE=1 \
+pytest tests/integration/test_compile.py -v
+```
+
+The focused FlagTree test must compare compiled output with eager output and
+assert that outputs and gradients remain on `flagos`; CPU-only tests can cover
+registration and vendor target selection but do not establish MUSA compiler
+support.
+### Ascend (FlagTree, formerly triton-ascend)
+
+Ascend's FlagGems route now runs on **FlagTree** (`0.6.2a1+ascend3.5`, Triton
+3.5), which installs itself as the `triton` package and registers an
+`AscendBackend`. `FLAGOS_USE_FLAGTREE=1` asserts that the active `triton` really
+is FlagTree — it cannot switch anything on, because the wheel replaces `triton`
+at install time — so on a FlagTree environment
+`test_flagtree_compiles_correct_results` runs rather than skipping.
+
+The **compile** path described below was measured against `triton-ascend 3.2.0`,
+the toolchain Ascend used before this move, and has not been re-measured on
+FlagTree; no CI step exercises it either way. Treat the numbers and the three
+workarounds as unvalidated on the current toolchain. The rest of this section
+explains why a torch_npu-free policy is needed at all, and that part is
+toolchain-independent.
+
+FlagTree's Ascend backend routes its host runtime through `torch_npu`, which
+claims PrivateUse1 on import, after which `torch_fl` cannot register `flagos` —
+the same conflict documented under vendor setup. This is a genuine
+incompatibility with the plugin model, not a packaging detail.
+
+  The coupling is deeper than the `import torch_npu` lines suggest
+  (`driver.py:231`, `utils.py:48`, `backend_register.py:87`). FlagTree dispatches
+  these operations through a *backend policy*, and the `torch_npu` policy also
+  decides generated C++ and link flags: `get_cc_cmd` emits `-ltorch_npu`,
+  `header_file` includes `<torch_npu/csrc/core/npu/NPUWorkspaceAllocator.h>`, and
+  `allocate_sync_block_lock`/`async_launch` emit `at_npu::native::` calls
+  (`backend_register.py:227`, `:293`, `:316`, `:340`). So stubbing `sys.modules`
+  cannot fix it — the launcher `.so` needs real headers and `libtorch_npu.so`.
+  Upstream's own `allocate_memory` allocates on `at::kPrivateUse1`
+  (`backend_register.py:305`), i.e. it wants exactly the slot `flagos` needs.
+
+  The seam that does work is the registry itself: `register(category, method)`
+  accepts any category string, and `mindspore` already exists as a second,
+  non-torch_npu policy. `torch_fl/compile/flagtree_ascend_policy.py` registers a
+  third, `flagos`, backed by `torch.flagos` and the ACL stream registry, emitting
+  plain ATen against PrivateUse1. It has to set `utils.backend_policy` directly,
+  because `get_backend_func` only honours `TRITON_BACKEND` when it names
+  `torch_npu` or `mindspore` (`utils.py:42-44`), and it forces
+  `TRITON_ENABLE_TASKQUEUE=false` since the task queue is torch_npu-only.
+  Upstream request to make this unnecessary:
+  https://github.com/flagos-ai/FlagTree/issues/1046
+
+  Verified against a real FlagTree build (`triton_v3.5.x` @ `d2063b06`,
+  `flagtree-0.6.0+ascend`, built with the prebuilt LLVM `7d5de303` and
+  `TRITON_CODEGEN_BACKENDS=nvidia;amd;ascend` on aarch64/Python 3.10, and again
+  against the `flagtree-0.6.2a1+ascend3.5` wheel the Ascend FlagGems route now
+  runs on): after
+  `install_policy()`, the registry reports `['flagos', 'mindspore', 'torch_npu']`,
+  `flagos` covers all 15 required strategies with no parity gap against
+  `torch_npu`, and each signature matches upstream's. The generated output is
+  clean: `header_file` emits `<ATen/ATen.h>` with no `torch_npu`/`at_npu`
+  reference, and `get_cc_cmd` does not link `-ltorch_npu`. `torch_fl.flagos`
+  calls `install_policy()` during device init, ahead of the first FlagGems
+  kernel, so eagerly launched kernels take the `flagos` policy too.
+
+  The build also exposed a second, import-order-dependent coupling, separate from
+  the policy: `backends/ascend/__init__.py:24` imports `do_bench_npu`, and
+  `testing.py:28` imports `torch_npu` at module scope. Only profiling needs it,
+  but it runs during backend *discovery*, before any policy can be selected. With
+  `torch_fl` holding PrivateUse1, a real torch_npu refuses to load
+  (`Two accelerators cannot be used at the same time`). In practice this is
+  already absorbed: `torch_fl/__init__.py:828` installs a `torch_npu` stub for
+  FlagGems' sake, and that stub satisfies FlagTree's import too — verified on the
+  real build, where `import torch_fl` first yields `backend_policy = flagos` with
+  PrivateUse1 named `flagos`. The failure only appears if `triton` is imported
+  *before* `torch_fl`, which the stub-ordering guard already exists to prevent.
+  Making the upstream import lazy would remove the ordering constraint
+  altogether; `install_policy()` reports this case with an actionable message
+  rather than letting the bare "npu and npu" error through.
+
+The naming side, at least, is already compatible: FlagTree's Ascend backend
+reports `name.conf` = `ascend` and `supports_target` accepts only
+`target.backend == "npu"` — exactly the pair `_ASCEND_PROFILE` already encodes,
+so `triton_device_type`/`triton_backend_key` need no change. The three
+workarounds below would still need re-testing, since that backend is separate
+code with its own defect surface.
+
+No extra configuration is needed beyond
+the environment FlagGems already requires
+([vendor setup](../vendors/ascend/installation.md)) — `torch.compile(backend="flagos")`
+picks the Ascend profile from `FLAGOS_ACCELERATOR=ascend`.
+
+Measured on a real 910 (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0,
+torch 2.10.0+cpu, Python 3.10): forward, backward, fused elementwise, and
+matmul+normalization graphs all compile and match eager. **This measurement is
+stale**: it was taken on triton-ascend, and the toolchain Ascend ships is now
+FlagTree. Nothing has re-run the compile suite on FlagTree, so whether these
+numbers, and whether the three workarounds below, still hold is unmeasured.
+Support is
+**experimental** — three vendor-toolchain defects had to be worked around, and
+each workaround is a place where a toolchain upgrade should let us delete code:
+
+| Defect | Symptom | Workaround |
+|---|---|---|
+| Masked 2-D load of an 8-bit dtype is miscompiled | Silently reads only the first two elements of each row, repeated. Surfaced as wrong `relu` gradients (4090/4096 elements off, max abs diff 3.05), no error raised | `triton_byte_loads.py`: pass `enable_linearize=True` on every compile, **and** rewrite bool kernel args from `*i1` to `*i8`. Both are needed — linearize does not fix the `*i1` pointer type, and the identical bytes read correctly through `*i8` |
+| `ub overflow` is raised as a generic compilation error | An oversized autotune config fails the whole compile instead of being dropped | `triton_resource_limits.py`: parse `requires N bits while M bits available` and re-raise as Triton's `OutOfResources`, which inductor already knows to skip |
+| A kernel built in a compile worker segfaults when the parent launches it | Crash in `NPULauncher.__call__` (`triton/backends/ascend/driver.py`), only with a cold inductor cache and two or more compiles in one process | `inductor_backend.py` defaults Ascend to `compile_threads=1`. `fork` and `spawn` both crash, so this is not the CUDA-after-fork problem the PPU path above hits |
+
+`triton_libdevice.py` additionally fills the Ascend backend's libdevice module
+map, which the vendor backend leaves empty.
+
+The first row's `enable_linearize` requirement is exercised directly by
+`test_ascend_masked_byte_load_requires_linearize`, which asserts the bug is
+*still present* without the option. That test failing is the signal that the
+toolchain was fixed and the workaround can go.
+
+## Architecture
+
+### Phase 1: Inductor Integration
+
+flagos is registered with TorchInductor as a **first-class GPU device**. The
+traced graph is handed to `compile_fx` unchanged -- still on flagos -- and
+inductor generates Triton kernels that operate on flagos tensors directly.
+
+**Components**:
+1. **Backend registration** (`torch_fl/compile/inductor_backend.py`)
+   - Registers `"flagos"` with `torch._dynamo.register_backend`
+   - Expands `mode` / `options` into inductor `config_patches`
+   - Delegates to `compile_fx` with no graph rewriting
+
+2. **Platform profile** (`torch_fl/compile/platform_profile.py`)
+   - flagos has no Triton backend of its own, so the compile path must name the
+     *hardware's* backend. The profile carries the three facts that differ per
+     vendor: the name reported as `DeviceProperties.type` (and therefore as
+     `GPUTarget.backend`), the key that backend is registered under in
+     `triton.backends.backends`, and whether the runtime is CUDA-like at all
+   - The two names are not the same string everywhere. On Ascend the driver
+     reports `GPUTarget(backend="npu", ...)` and `AscendBackend.supports_target`
+     accepts only `"npu"`, but the package key is `"ascend"`
+   - `is_cuda_like=False` (Ascend only) routes hardware queries, raw streams and
+     generated device snippets away from `torch.cuda`, which does not exist there
+
+3. **Device interface** (`torch_fl/compile/device_interface.py`)
+   - `DeviceInterface` subclass: device state always from `torch.flagos`;
+     hardware properties from `torch.cuda` on CUDA-like builds (the same physical
+     GPU), from `torch.flagos` plus the ACL runtime on Ascend
+   - Adds `"flagos"` to inductor's `GPU_TYPES` so `is_gpu()` is True and the
+     Triton codegen path is taken instead of C++/CPU
+   - Reports the hardware's backend name at the Triton boundary
+     (`DeviceProperties.create`), because each vendor backend hard-checks
+     `target.backend`. Target and package key per vendor: `cuda`/`nvidia` on
+     CUDA-compatible builds, `maca`/`metax` on MetaX, `npu`/`ascend` on Ascend
+   - On Ascend, `get_compute_capability` returns the SoC name (e.g.
+     `Ascend910_9382`) rather than a number, because that is what reaches Triton
+     as `GPUTarget.arch`
+
+4. **Codegen registration** (`torch_fl/compile/inductor_codegen.py`)
+   - CUDA-like builds: device op overrides inheriting the CUDA ones, and the
+     stock CUDA/Triton scheduling + wrapper pipeline
+   - Ascend: overrides that emit the ACL raw stream and `torch.flagos` device
+     calls, plain `TritonScheduling`, and *no* C++ wrapper — `CppWrapperGpu`
+     emits CUDA-runtime C++, so the slot is left unregistered rather than
+     pointing at something that cannot build. The C++ members raise
+     `NotImplementedError` instead of emitting a translation unit CANN rejects
+
+4. **Dispatch integration**
+   - Ops inductor does not fuse fall back to eager flagos dispatch
+     (FlagGems Python/C++ or CUDA boxing) with no changes needed
+
+5. **GCU 64-bit guard** (`torch_fl/compile/triton_64bit_guard.py`)
+   - GCU300 cannot compile a kernel that needs a 64-bit value, and one of the
+     two ways to reach that state segfaults below inductor's own error handling.
+     Wraps `CachingAutotuner._precompile_config` to raise a named
+     `InductorError` instead, before `triton.compile` is entered
+   - GCU-only (`platform_profile().vendor`, checked inside the patch), so other
+     targets are untouched. Installed from both `flagos_compile_backend` and
+     `torch_fl`'s eager registration, since the default `backend="inductor"`
+     path never reaches the former
+
+**Flow**:
+```
+torch.compile(model, backend="flagos")
+  → dynamo captures FX graph (on flagos)
+  → compile_fx / AOT autograd, graph never leaves flagos
+  → inductor generates fused Triton kernels for flagos tensors
+  → unfused ops fall back to flagos eager dispatch
+```
+
+**Why the graph is not rewritten to cuda.** An earlier version converted the
+graph and example inputs to cuda first. Beyond the copy per call, this breaks
+backward: `at::getAccelerator()` is PrivateUse1/flagos, and
+`torch::autograd::Node::stream()` only yields a stream when a node's input
+device type equals the accelerator, so a cuda-rewritten graph produces
+stream-less autograd nodes and AOT autograd's backward trace trips
+`opt_ready_stream && opt_parent_stream` (engine.cpp:1085).
+
+### FlagTree Compilation
+
+**Components**:
+1. **Detection only** (`torch_fl/compile/flagtree_shim.py`)
+   - No import patching: FlagTree *is* the `triton` module once installed, so
+     inductor picks it up with no interception
+   - `is_flagtree_active()` tests for the FlagTree-only `triton._flagtree_spec`
+   - `FLAGOS_USE_FLAGTREE=1` calls `require_flagtree()`, which errors if the
+     active Triton is stock
+
+2. **Backend selection**
+   - Chosen at FlagTree build time via `FLAGTREE_BACKEND` (unset for nvidia/amd),
+     not at runtime
+   - Same Triton kernel code, different backend compiler
+
+**Benefits**:
+- Multi-backend: same compiled model runs on NVIDIA/Ascend/Cambricon/MetaX
+- Future-proof for non-NVIDIA hardware
+
+## Performance
+
+**Not yet measured.** Correctness is verified (`tests/integration/test_compile.py`);
+benchmarking the fusion gain, and comparing it against stock `inductor` on cuda,
+is still open work. Structurally the two should land close together -- same
+inductor fusion passes, same Triton codegen, and since the graph stays on flagos
+there is no per-call copy -- but that is an expectation, not a measurement.
+
+### Benchmarking
+
+```bash
+# Run performance benchmark
+python tests/perf/bench_compile.py --model=mlp --batch-size=64
+
+# Compare with CUDA baseline
+python tests/perf/bench_compile.py --model=transformer --compare-cuda
+
+# Test FlagTree integration
+FLAGOS_USE_FLAGTREE=1 python tests/perf/bench_compile.py
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLAGOS_USE_FLAGTREE` | `0` | Require the active triton to be FlagTree (assert, not switch) |
+| `FLAGOS_COMPILE_FALLBACK_EAGER` | `0` | Fall back to eager on compile errors |
+
+Existing dispatch variables (`FLAGOS_BACKEND_CONFIG`) still apply to compiled kernels.
+
+## Troubleshooting
+
+### Compilation Errors
+
+**Symptom**: `torch.compile` raises errors during graph capture or codegen.
+
+**Solutions**:
+1. Enable fallback to eager: `FLAGOS_COMPILE_FALLBACK_EAGER=1`
+2. Check for unsupported ops (dynamic shapes, custom ops)
+3. Verify meta implementations for custom ops
+
+### 64-bit Kernels on GCU (`InductorError: ... has no 64-bit support`)
+
+**Symptom**: a compile on GCU fails with
+
+```
+InductorError: RuntimeError: The GCU300 target has no 64-bit support, and kernel
+'triton_red_fused_...' needs 64-bit values:
+  line 21: tmp1 = tl.full([1, 1], 7, tl.int64)
+```
+
+The GCU300 target has no 64-bit support at all, in either of the two forms a
+generated kernel can reach it:
+
+* a 64-bit **operand** (an int64 or float64 tensor), visible in the kernel
+  signature as `*i64` / `*fp64`;
+* a 64-bit **promotion of size arithmetic**, which keeps an int32 signature.
+  Inductor's `SIMDScheduling.select_index_dtype` falls back to `torch.int64`
+  whenever `can_use_32bit_indexing` declines the buffer set, and every
+  size-derived value in the kernel then carries that dtype. No input tensor is
+  64-bit in this case, and no inductor config knob selects the index dtype.
+
+The second form is why `torch_fl/compile/triton_64bit_guard.py` refuses the
+kernel **before** `triton.compile` is entered rather than translating an error
+afterwards. The vendor compiler cannot legalize the `arith.extsi` that feeds an
+i64 value and aborts the pass pipeline: the process dies with SIGSEGV, exit code
+139, no traceback. That abort is below the `try/except` inductor wraps around
+`triton.compile` in `CachingAutotuner._precompile_config`, so nothing on
+inductor's exception path runs and no Python-level handler can catch it. The
+guard is a predicate over the generated source and the signature, and it raises
+in place of the crash.
+
+**What to do**:
+1. Keep the values 32-bit where the model allows it.
+2. Skip compiling the kernel that generates it. Flex attention's
+   `create_block_mask` hits the promotion on *any* input dtype, so pass
+   `_compile=False` (or wrap the factory in `torch._dynamo.disable`) — the mask
+   builds eagerly and the rest of the model still compiles.
+   `torch_fl.compile.triton_64bit_guard.gcu_64bit_unsupported()` answers True on
+   such a build, for code that wants to choose the route itself.
+3. `FLAGOS_COMPILE_FALLBACK_EAGER=1` turns the refusal into an eager run
+   (`backend="flagos"` only — the guard also covers the default
+   `backend="inductor"` path, which has no fallback wrapper).
+
+This is a limitation of the target, not of the guard: with the guard removed the
+same kernels come back as a pipeline error or a segfault. A build whose vendor
+compiler gains 64-bit support should drop the guard; it is gated on the GCU
+vendor string, so it cannot affect any other platform.
+
+### No Speedup
+
+**Symptom**: Compiled model runs at same speed as eager.
+
+**Possible causes**:
+1. Model is compute-bound (large matmuls) — fusion won't help much
+2. Compilation didn't fuse ops (check inductor logs)
+3. Dispatch overhead is small relative to kernel time
+
+**Debug**: Run with `TORCH_LOGS="+inductor"` to see fusion decisions.
+
+### FlagTree Not Active
+
+**Symptom**: `FLAGOS_USE_FLAGTREE=1` raises "the active 'triton' module is stock
+Triton, not FlagTree".
+
+The env's `triton` is the official one. FlagTree is selected when the environment
+is built, so this cannot be fixed at runtime — build FlagTree per the section
+above, into this interpreter. Check what you have with:
+
+```bash
+python -c 'import triton; print(triton.__path__)'
+python -c 'import importlib.util as u; print(u.find_spec("triton._flagtree_spec") is not None)'
+```
+
+Do not reach for `import flagtree` when debugging this; on recent wheels it
+imports, but what it gives you is the FlagPrism debugger/profiler namespace, not
+the compiler. The compiler is `triton`, whichever build it is.
+
+## Testing
+
+```bash
+# Run integration tests
+pytest tests/integration/test_compile.py -v
+
+# Test specific scenarios
+pytest tests/integration/test_compile.py::test_basic_compile
+pytest tests/integration/test_compile.py::test_compile_backward
+
+# Regression guards for the two codegen fixes this integration required
+pytest tests/integration/test_compile.py -k fake_tensor
+pytest tests/integration/ops/test_clamp_dispatch.py -v
+
+# Test FlagTree compilation (requires a FlagTree-built env)
+FLAGOS_USE_FLAGTREE=1 pytest tests/integration/test_compile.py::test_flagtree_compiles_correct_results
+
+# Platform-profile selection and the vendor workarounds, on any platform
+# including plain CPU -- these test the selection logic, not the toolchain
+pytest tests/unit/test_compile_platform_profile.py -v
+
+# The 64-bit predicate and the guard's install/refuse behaviour, on any
+# platform; the GCU arm of it needs the vendor Triton stack and a real card
+pytest tests/unit/test_triton_64bit_guard.py -v
+pytest tests/integration/test_compile.py -k "64bit or block_mask" -v
+
+# Ascend, on a real 910. Clear the inductor cache first: a warm cache hides the
+# compile-worker crash the serial-compile default exists for
+rm -rf /tmp/torchinductor_root
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest tests/integration/test_compile.py -v
+```
+
+### Codegen fixes this integration required
+
+Two generated-kernel bugs only surface under compilation, so their regression
+tests live alongside it:
+
+- **`detach` re-dispatch.** The generated kernel called `at::detach(self)`, which
+  is registered on PrivateUse1 too and so dispatched back into itself. Eager hid
+  the recursion because `DeviceBoxingGuard` rewrites self's device metadata
+  first; under FakeTensor it cannot, since the Python dispatch key sits *above*
+  the backend key. Dynamo traces every `nn.Linear` through detach, so this was a
+  stack-overflow segfault at trace time. Fixed by emitting `at::native::detach`
+  (`NATIVE_DIRECT_VIEW_OPS` in `scripts/codegen/codegen_ops.py`).
+- **`optional<Tensor>` boxing in in-place kernels.** `gen_inplace` handed only
+  plain `at::Tensor` args to `DeviceBoxingGuard`, so `clamp_.Tensor` passed
+  unboxed flagos `min`/`max` into a CUDA `self` and crashed. Fixed by
+  materializing each optional into a holder, matching `gen_functional_pure`.
+
+## Limitations
+
+1. **torch >= 2.0 required**: Older PyTorch versions don't have `torch.compile`
+2. **Inductor-compatible ops only**: Custom C++ ops may not fuse
+3. **Dynamic shapes**: Some models with dynamic shapes may not compile
+4. **CUDA graphs off**: `torch.cuda.CUDAGraph` is a dummy class in the CPU torch
+   wheel, so `triton.cudagraphs` is forced off even under `mode="max-autotune"`
+5. **FlagTree maturity**: Backend support varies by hardware; Hygon HCU is
+   validated on `gfx936` and MetaX on C550/MACA 3.8.0, while other vendor
+   backends remain untested here
+6. **Ascend is experimental**: compiles serially by default, has no C++ wrapper
+   codegen (`CppWrapperGpu` emits CUDA-runtime C++), and carries three
+   toolchain workarounds — see [Ascend](#ascend-flagtree-formerly-triton-ascend)
+   above. Those workarounds were measured against `triton-ascend 3.2.0` and have
+   not been re-tested on FlagTree, the toolchain the FlagGems route now runs on.
+   Only the
+   graphs in `tests/integration/test_compile.py` are validated; whole-model
+   compilation is not yet exercised there
+7. **GCU has no 64-bit kernels**: the GCU300 target cannot compile a kernel that
+   needs a 64-bit value, whether the operand is int64/float64 or Inductor
+   promoted the index dtype on its own. Those kernels are refused with a
+   diagnosis instead of crashing the interpreter — see
+   [64-bit Kernels on GCU](#64-bit-kernels-on-gcu-inductorerror--has-no-64-bit-support).
+   Removing the refusal (a compiler that gains 64-bit support) is what closes
+   this, not a change on the torch_fl side
+8. **TsingMicro is new here**: the profile, the raw stream and the warp-size
+   correction are wired up and the graphs in `tests/integration/test_compile.py`
+   are validated on a TX8, but nothing beyond them is. Two things are known and
+   deliberately left alone: the TX runtime exposes no device-properties query, so
+   `torch.flagos.get_device_properties` reports constants matching FlagGems' own
+   tsingmicro descriptor rather than values read from the hardware; and the
+   Ascend-only Triton workarounds (`triton_byte_loads.py`,
+   `triton_resource_limits.py`) are gated on `is_cuda_like=False`, so TsingMicro
+   inherits them — they are unverified there. There is no CI lane for this
+   vendor, so none of it runs automatically
+9. **TsingMicro's matmul is reduced-precision, and compiling changes which op
+   you get**: a single `1x128 . 128x1` dot on a `flagos` tensor differs from a
+   float32 CPU reference by ~1.6e-3, the signature of a TF32-shaped accumulation
+   inside FlagGems' `mm` kernel. Eager `nn.Linear` does not show it because ATen
+   sends it to `addmm`, which is exact here; inductor instead schedules
+   `extern_kernels.mm` plus a bias add, so a *compiled* Linear is measurably
+   further from the reference than the eager one (measured ~7e-4 relative on
+   |out| ~ 2). Elementwise fusion stays bit-exact. This is the device's matmul
+   precision rather than a compile defect — the same `mm` is what a hand-written
+   `torch.mm` calls — but it means compiled-vs-eager comparisons on this platform
+   need a ~1e-3 relative tolerance, which is what
+   `tests/integration/test_compile.py` uses for it
+
+## Roadmap
+
+- [x] Phase 1: Inductor integration (flagos as a first-class GPU device)
+- [x] Phase 2: FlagTree integration — needs no shim; FlagTree substitutes for
+      triton at install time, so inductor picks it up unaided. Built from source
+      on H800 (`flagtree-0.6.0`, Triton 3.6, nvidia backend).
+- [x] `torch.compile(backend="flagos")` end-to-end on FlagTree — forward and
+      backward compile and match eager on NVIDIA and MetaX, with outputs and
+      gradients remaining on `flagos`. The complete compile suite passes on both
+      targets (the MetaX-specific event regression adds one case there).
+- [x] Ascend via triton-ascend — experimental. Forward, backward, fused
+      elementwise and matmul+normalization compile and match eager on a real 910
+      (`Ascend910_9382`, CANN 9.0.0, triton-ascend 3.2.0, torch 2.10.0+cpu);
+      `test_compile.py` passes 30/32 with a cold cache, the two skips being the
+      FlagTree-only and MetaX-only cases. Superseded for the FlagGems route by
+      FlagTree, and not re-measured there
+- [x] FlagTree on Ascend, for the FlagGems eager route — `flagtree_ascend_policy.py`
+      gives FlagTree's Ascend backend a torch_npu-free policy and `torch_fl.flagos`
+      installs it during device init, so eagerly launched FlagGems kernels run on
+      FlagTree `0.6.2a1+ascend3.5`; the route table was re-measured op by op on
+      that stack (see
+      [`docs/reference/operator-support.md`](../reference/operator-support.md))
+- [ ] FlagTree on Ascend, for the `torch.compile` path — the policy is in place
+      and the emitted C++ compiles against ATen with every strategy resolving
+      through FlagTree's real registry, but the compile suite itself has not been
+      run on FlagTree, so the three workarounds above are unverified there
+      ([#1046](https://github.com/flagos-ai/FlagTree/issues/1046))
+- [ ] Benchmark fusion gains vs. stock inductor+triton on cuda
+- [ ] Benchmark Ascend compile vs. the aclnn eager path
+- [ ] Re-run the Ascend compile suite on FlagTree and retire the workarounds once
+      its replacements land
+- [ ] Phase 3: FlagGems-aware fusion (recognize pre-optimized patterns)
+- [ ] Phase 4: Custom fusion patterns for flagos-specific ops
+
+## See Also
+
+- [PyTorch 2.0 torch.compile documentation](https://pytorch.org/docs/stable/torch.compiler.html)
+- [TorchInductor overview](https://pytorch.org/docs/stable/torch.compiler_inductor_overview.html)
+- [FlagTree repository](https://github.com/flagos-ai/FlagTree)
+- [CPU torch + external libtorch_cuda.so](../vendors/cuda/external-libtorch-cuda.md) — why several `torch.cuda` bindings need shimming
+- [`torch_fl/compile/README.md`](../../torch_fl/compile/README.md) — the registration surface in detail

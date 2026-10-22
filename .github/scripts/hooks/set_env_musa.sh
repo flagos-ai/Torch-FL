@@ -1,0 +1,442 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Moore Threads MUSA environment for the common build/integration workflow.
+#
+# MUSA runs native mudnn operator kernels, not CUDA boxing: the toolkit ships no
+# CUDA runtime and there is no vendor dispatch key to box into. mudnn links
+# against musart only and pulls in no torch symbols, so this backend builds
+# against a stock CPU PyTorch.
+#
+# The vendor torch_musa package present in the base image is deliberately never
+# imported, linked, or copied into the isolated environment: its libtorch is a
+# 2.9.1 build whose C++ object layout differs from 2.10 (sizeof(c10::MessageLogger)
+# 408 -> 400), so mixing the two ABIs corrupts memory at runtime rather than
+# failing to link. See docs/vendors/musa/installation.md.
+CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
+CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
+
+# --- MUSA toolkit ------------------------------------------------------------
+export MUSA_HOME="${MUSA_HOME:-/usr/local/musa}"
+if [[ ! -d "$MUSA_HOME" ]]; then
+  echo "::error::MUSA toolkit not found at MUSA_HOME=$MUSA_HOME" >&2
+  exit 1
+fi
+echo "MUSA_HOME=$MUSA_HOME"
+
+# FLAGOS_BUILD_VENDOR selects the native mudnn build. Default ON to match setup.py and
+# the documented native-only contract, and fail loudly when the image lacks the
+# C++ assets rather than silently shipping a wheel that looks native but reaches
+# cpu_fallback for every compute op.
+export FLAGOS_BUILD_VENDOR="${FLAGOS_BUILD_VENDOR:-1}"
+if [[ "$FLAGOS_BUILD_VENDOR" != "0" ]]; then
+  missing=()
+  for asset in \
+    "include/mudnncxx/mudnn.h" \
+    "include/murand.h" \
+    "lib/libmudnn.so" \
+    "lib/libmurand.so"; do
+    [[ -e "$MUSA_HOME/$asset" ]] || missing+=("$MUSA_HOME/$asset")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "::error::FLAGOS_BUILD_VENDOR=$FLAGOS_BUILD_VENDOR requires the mudnn/murand C++ assets, but this image is missing:" >&2
+    printf '::error::  %s\n' "${missing[@]}" >&2
+    echo "::error::Install the mudnn and murand components of the MUSA toolkit." >&2
+    echo "::error::Building with FLAGOS_BUILD_VENDOR=0 is not a substitute: the MUSA path also excludes the CUDA backend and the generated CUDA boxing kernels, so the result is a fallback-only wheel, not a native MUSA wheel." >&2
+    exit 1
+  fi
+  echo "mudnn C++ assets: present"
+fi
+
+# --- Device node -------------------------------------------------------------
+# Only the integration stage needs a card; a build can run on any MUSA host.
+if [[ "$CI_STAGE" == "integration" ]] && ! ls /dev/mtgpu* >/dev/null 2>&1; then
+  echo "::error::No Moore Threads device node (/dev/mtgpu*) is visible"
+  exit 1
+fi
+
+# --- Backend selection -------------------------------------------------------
+# Chip selection is FLAGOS_ACCELERATOR's job alone: FLAGOS_BUILD_VENDOR covers this
+# platform's native kernels and FLAGOS_BUILD_BOXING=OFF (set in setup.py) drops the
+# generated CUDA boxing kernels. No per-chip switches.
+export FLAGOS_ACCELERATOR=musa
+# FlagGems Python ops are provisioned and validated on MUSA via the MThreads
+# Triton build (flagtree). The C++ kernels (FLAGOS_BUILD_FLAGGEMS_CPP=1) require
+# FLAGOS_BUILD_FLAGGEMS_CPP=ON at build time and are not yet available.
+export FLAGOS_BUILD_FLAGGEMS_CPP=0
+export FLAGOS_BUILD_FLAGGEMS=1
+# MUSA bundles no libtorch_cuda.so and the toolkit exports no cuda symbols, so
+# the CUDA asset preload has nothing to open.
+export FLAGOS_DISABLE_CUDA_ASSETS=1
+export MTHREADS_VISIBLE_DEVICES="${MTHREADS_VISIBLE_DEVICES:-all}"
+unset CUDA_HOME 2>/dev/null || true
+unset CUDA_PATH 2>/dev/null || true
+
+export PATH="$MUSA_HOME/bin:$PATH"
+export CPATH="$MUSA_HOME/include${CPATH:+:$CPATH}"
+export LIBRARY_PATH="$MUSA_HOME/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$MUSA_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# --- Isolated Python ---------------------------------------------------------
+# The vendor image Python has torch_musa (and its 2.9.1 libtorch) installed, so
+# the build runs in a venv holding nothing but stock CPU torch.
+# Clear inherited Python paths before probing or provisioning any interpreter.
+# Backend autoload is disabled only for probes, not for the integration tests.
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
+# The shared retry helper already supports caching; opt in only for MUSA.
+PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"
+
+musa_prepare_pip_cache() {
+  [[ "${PIP_RETRY_NO_CACHE:-0}" == "1" ]] && return 0
+  # GitHub containers may inherit a HOME whose pip cache is owned by another
+  # user. Use the writable job workspace instead; honour explicit overrides.
+  local cache_dir="${PIP_CACHE_DIR:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache/musa}"
+  if ! mkdir -p "$cache_dir" || [[ ! -O "$cache_dir" || ! -w "$cache_dir" ]]; then
+    echo "::error::MUSA pip cache must be owned and writable by the current user: $cache_dir" >&2
+    return 1
+  fi
+  cache_dir="$(cd "$cache_dir" && pwd -P)"
+  export PIP_CACHE_DIR="$cache_dir"
+  echo "MUSA pip cache: $PIP_CACHE_DIR"
+}
+
+musa_validate_build_tools() {
+  # setup.py imports editable_wheel even for a non-editable native build.
+  # Validate real imports after provisioning, before any large wheel download.
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
+import build
+import setuptools
+from setuptools.command.editable_wheel import editable_wheel
+
+print(f"Build frontend: {build.__version__}")
+print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
+PY
+}
+
+musa_venv_is_isolated() {
+  venv_is_usable || return 1
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+assert Path(sys.prefix).resolve() == root
+assert sys.prefix != sys.base_prefix
+settings = {}
+for line in (root / "pyvenv.cfg").read_text().splitlines():
+    key, separator, value = line.partition("=")
+    if separator:
+        settings[key.strip().lower()] = value.strip().lower()
+assert settings.get("include-system-site-packages") == "false"
+assert importlib.util.find_spec("torch_musa") is None
+try:
+    metadata.distribution("torch_musa")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise SystemExit("vendor torch_musa metadata is present")
+PY
+}
+
+musa_cpu_torch_is_usable() {
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PY'
+import sys
+import torch
+
+expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+}
+
+BOOTSTRAP_PYTHON="${TORCH_FL_BOOTSTRAP_PYTHON:-}"
+if [[ -z "$BOOTSTRAP_PYTHON" || ! -x "$BOOTSTRAP_PYTHON" ]]; then
+  for candidate in python3.10 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      BOOTSTRAP_PYTHON="$(command -v "$candidate")"
+      break
+    fi
+  done
+fi
+if [[ -z "$BOOTSTRAP_PYTHON" || ! -x "$BOOTSTRAP_PYTHON" ]]; then
+  echo "::error::Unable to find Python to bootstrap the isolated environment"
+  exit 1
+fi
+
+PREBUILT_VENV="${TORCH_FL_PREBUILT_MUSA_VENV:-/opt/torch-fl-musa-venv}"
+if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
+  VENV_ROOT="$PREBUILT_VENV"
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  if ! musa_venv_is_isolated; then
+    echo "::error::Prebuilt MUSA venv is not isolated and usable: $VENV_ROOT" >&2
+    exit 1
+  fi
+  echo "Using prebuilt MUSA venv: $VENV_ROOT"
+else
+  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-musa-${CI_STAGE}}"
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  if musa_venv_is_isolated 2>/dev/null; then
+    echo "Reusing isolated MUSA venv: $VENV_ROOT"
+  else
+    "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT" || true
+  fi
+  # Ensure system site-packages are not inherited (torch_musa from base image)
+  if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
+    # Remove any existing include-system-site-packages line and add our own
+    grep -v '^include-system-site-packages' "$VENV_ROOT/pyvenv.cfg" > "$VENV_ROOT/pyvenv.cfg.tmp"
+    echo "include-system-site-packages = false" >> "$VENV_ROOT/pyvenv.cfg.tmp"
+    mv "$VENV_ROOT/pyvenv.cfg.tmp" "$VENV_ROOT/pyvenv.cfg"
+  fi
+fi
+
+VENV_PYTHON="$VENV_ROOT/bin/python"
+if ! musa_venv_is_isolated; then
+  # The vendor base image may not ship the matching python*-venv package. Keep
+  # that dependency in the chip-specific setup path so the common workflow stays
+  # image agnostic; a derived CI image should bake it in.
+  if command -v apt-get >/dev/null 2>&1 && [[ "$(id -u)" -eq 0 ]]; then
+    python_mm="$($BOOTSTRAP_PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends "python${python_mm}-venv"
+    "$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT"
+    # Ensure system site-packages are not inherited (torch_musa from base image)
+    if [[ -f "$VENV_ROOT/pyvenv.cfg" ]]; then
+      echo "::debug::pyvenv.cfg before modification:"
+      cat "$VENV_ROOT/pyvenv.cfg"
+      # Remove any existing include-system-site-packages line and add our own
+      grep -v '^include-system-site-packages' "$VENV_ROOT/pyvenv.cfg" > "$VENV_ROOT/pyvenv.cfg.tmp"
+      echo "include-system-site-packages = false" >> "$VENV_ROOT/pyvenv.cfg.tmp"
+      mv "$VENV_ROOT/pyvenv.cfg.tmp" "$VENV_ROOT/pyvenv.cfg"
+      echo "::debug::pyvenv.cfg after modification:"
+      cat "$VENV_ROOT/pyvenv.cfg"
+    else
+      echo "::warning::pyvenv.cfg not found at $VENV_ROOT/pyvenv.cfg after venv creation"
+    fi
+  fi
+fi
+
+if ! musa_venv_is_isolated; then
+  echo "::error::Isolated Python was not created at $VENV_ROOT; install the matching python*-venv package in the CI image" >&2
+  exit 1
+fi
+
+# Reconcile build dependencies even in a prebuilt venv (older images lack
+# pypa/build). No --upgrade: satisfied requirements need no download.
+musa_prepare_pip_cache
+# editable_wheel was added in setuptools 64. The distro's 59.6.0 satisfies
+# the older >=45 metadata floor but cannot import the current setup.py.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" \
+  'pip>=23' 'setuptools>=64' wheel 'cmake>=3.18' ninja build
+musa_validate_build_tools
+if ! musa_cpu_torch_is_usable 2>/dev/null; then
+  # Request the local +cpu version explicitly: torch==2.10.0 alone also
+  # considers a preinstalled non-CPU 2.10.0 build satisfied.
+  CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
+  echo "Installing CPU PyTorch $CPU_TORCH_VERSION in $VENV_ROOT"
+  install_cpu_torch
+fi
+
+if [[ "$CI_STAGE" == "integration" ]]; then
+  # Test dependencies. transformers pulls numpy 2.x, which breaks the stock
+  # +cpu torch C extensions at import, so numpy stays on 1.x.
+  #
+  # transformers is also used by the MUSA BERT dispatch regression; removing
+  # it would silently skip existing coverage even when Qwen3 is not enabled.
+  #
+  # transformers is pinned to [4.51, 5): 4.51 is where Qwen3 model_type support
+  # landed (older releases raise "Unrecognized model" on AutoConfig), and 5.x has
+  # an unresolved TokenizersBackend regression that breaks the Qwen3 slow-to-fast
+  # conversion even with sentencepiece installed. An unpinned install picks
+  # whichever of those two failure modes is latest on PyPI.
+  #
+  # Installed even into a prebuilt venv: a venv baked without them turns the
+  # inference and training groups into an environment failure that looks like a
+  # platform failure. pip is a no-op when they are already present.
+  pip_retry --index-url "$PIP_INDEX_URL_ARG" \
+    pytest "transformers>=4.51,<5" "numpy<2" safetensors 'PyYAML==6.0.1'
+  # Enable when adding a Qwen3 model mount/test group, or for manual Qwen3 runs.
+  if [[ "${TORCH_FL_INSTALL_QWEN_DEPS:-0}" == "1" ]]; then
+    pip_retry --index-url "$PIP_INDEX_URL_ARG" sentencepiece tiktoken protobuf
+  fi
+fi
+
+export VIRTUAL_ENV="$VENV_ROOT"
+export PATH="$VENV_ROOT/bin:$PATH"
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
+
+# Persist venv activation to subsequent workflow steps via GITHUB_ENV
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  {
+    echo "VIRTUAL_ENV=$VENV_ROOT"
+    echo "PATH=$VENV_ROOT/bin:$PATH"
+    echo "PYTHONNOUSERSITE=1"
+    echo "PYTHONPATH="
+  } >> "$GITHUB_ENV"
+fi
+
+# Ensure torch_musa from the base image is not importable in the venv.
+# The venv should be isolated by default, but explicitly uninstall if present.
+if "$VENV_PYTHON" -c "import importlib.util; exit(0 if importlib.util.find_spec('torch_musa') is None else 1)" 2>/dev/null; then
+  : # torch_musa is not visible, isolation is working
+else
+  echo "::warning::torch_musa is visible in the venv; attempting to uninstall"
+  echo "::debug::sys.path from venv:"
+  "$VENV_PYTHON" -c "import sys; print('\n'.join(sys.path))"
+  echo "::debug::pyvenv.cfg content:"
+  cat "$VENV_ROOT/pyvenv.cfg" || echo "pyvenv.cfg not found"
+  "$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
+  # Verify torch_musa is now gone
+  if "$VENV_PYTHON" -c "import importlib.util; exit(0 if importlib.util.find_spec('torch_musa') is None else 1)" 2>/dev/null; then
+    echo "::notice::torch_musa successfully removed from venv"
+  else
+    echo "::error::torch_musa still visible after uninstall attempt"
+    exit 1
+  fi
+fi
+
+# --- MThreads Triton (flagtree) + FlagGems -----------------------------------
+# Installed for both stages, not just integration: build and integration share
+# one platform job, and restricting this to CI_STAGE=integration would leave the
+# build job's venv without flag_gems -- the wheel then fails as soon as a
+# FlagGems route dispatches. Same reasoning as set_env_ascend.sh.
+#
+# --no-deps on both binary packages so pip cannot replace the pinned CPU torch
+# 2.10 with something a transitive requirement prefers.
+#
+# flagtree is the Triton build carrying the "mthreads" backend. 3.6 is not a
+# preference but a requirement: current FlagGems uses tl.map_elementwise and
+# triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
+# fails at import, so the two pins move together.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_musa}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
+install_flagtree
+
+# flagtree may bring torch_musa as a dependency or in its wheel. Uninstall it
+# again to ensure isolation.
+"$VENV_PYTHON" -m pip uninstall -y torch_musa 2>/dev/null || true
+
+# Install the MThreads-indexed wheel instead of cloning FlagGems from GitHub.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-mthreads/simple}"
+install_flag_gems
+
+# The published FlagCX RC wheel requires MUSA 5.2. Current CI still uses the
+# working MUSA 5.1 image: its runner reported driver 3.3.5-server, while the
+# 5.2 base image requires 5.2.0-server and took over an hour to pull. Keep the
+# wheel path ready for an explicit image/driver upgrade rather than loading a
+# binary against the wrong toolkit in this job.
+if [[ "${TORCH_FL_MUSA_FLAGCX_WHEEL:-0}" == "1" ]]; then
+  FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
+  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+    "flagcx===$FLAGCX_VERSION"
+  export FLAGCX_TORCH_BACKEND=flagos
+  # Wheel building runs in a separate step whose isolated backend cannot
+  # import torch_fl. torch_fl imports FlagCX explicitly when comm needs it.
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+fi
+
+# FlagGems' own runtime deps, installed one at a time for the IncompleteRead
+# reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
+# the stock +cpu torch C extensions at import.
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+
+# --- Verify the isolation held ----------------------------------------------
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+import torch
+
+torch_path = Path(torch.__file__).resolve()
+expected = os.environ["CPU_TORCH_VERSION"].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+assert "/opt/conda/" not in str(torch_path), torch_path
+# The 2.9.1 vendor ABI must not be reachable from this interpreter.
+assert importlib.util.find_spec("torch_musa") is None, "torch_musa leaked into the isolated venv"
+
+print(f"Isolated Python: {sys.executable}")
+print(f"CPU PyTorch: {torch.__version__}")
+print(f"CPU torch path: {torch_path}")
+print(f"MUSA_HOME: {os.environ['MUSA_HOME']}")
+print(f"FLAGOS_BUILD_VENDOR: {os.environ['FLAGOS_BUILD_VENDOR']}")
+PY
+
+# --- Verify the FlagGems stack imports --------------------------------------
+# Integration only: torch_fl._C does not exist until the wheel is built, and the
+# import order below needs it. Check for the extension module before attempting
+# import -- CI calls set_env_musa.sh before building the wheel, so torch_fl is
+# not yet importable at that stage.
+#
+# torch_fl must be imported before flag_gems. FlagGems 5.x selects its MThreads
+# backend by reading torch.musa, which stock PyTorch does not have -- torch_fl
+# installs that surface as a shim (_install_musa_flaggems_compat). Importing
+# flag_gems first raises AttributeError: module 'torch' has no attribute 'musa'.
+#
+# That shim is itself conditional on the active conf routing at least one op to
+# FlagGems, so this check also fails if backends_musa.conf has no flaggems route
+# -- which is exactly the state this environment is being provisioned to leave.
+if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
+  "$VENV_PYTHON" - <<'PY'
+import torch_fl  # noqa: F401  -- must precede flag_gems; installs the torch.musa shim
+
+import triton
+import flag_gems
+
+assert "mthreads" in triton.backends.backends, sorted(triton.backends.backends)
+print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
+print(f"FlagGems: {flag_gems.__version__} (vendor: {flag_gems.vendor_name})")
+PY
+fi
+
+if command -v mthreads-gmi >/dev/null 2>&1; then
+  mthreads-gmi
+fi
+
+# Integration keeps the existing operator/contract baseline, including BERT.
+# Qwen3 tokenizer dependencies are opt-in. FlagTree supplies MThreads Triton.
+
+# --- Export to later workflow steps ------------------------------------------
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
+fi
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  if [[ -n "${PIP_CACHE_DIR:-}" ]]; then
+    export_ci_env PIP_CACHE_DIR
+  fi
+  if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
+    printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
+  fi
+  if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
+    printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
+  fi
+fi
+
+cd "$REPO_ROOT"
+# build_ext produces the libtorch_fl.so that package_data stages into the wheel,
+# and build and test share one job, so it must run in both stages. No device is
+# required here; the card was checked above for the integration stage.
+build_flagos_inplace

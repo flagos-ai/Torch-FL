@@ -1,0 +1,282 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Common Wheel Build
+
+on:
+  workflow_call:
+    inputs:
+      checkout_repository:
+        required: false
+        type: string
+        default: ''
+      checkout_ref:
+        required: false
+        type: string
+        default: ''
+      display_name:
+        required: true
+        type: string
+      setup_script:
+        required: true
+        type: string
+      setup_platform:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+      timeout_minutes:
+        required: true
+        type: number
+      artifact_name:
+        required: true
+        type: string
+      upload_artifact:
+        required: false
+        type: boolean
+        default: true
+      # Publish the wheel to its vendor Nexus lane from this same job, on the
+      # runner that built it. Releasing from here rather than funneling every
+      # wheel to one GitHub-hosted job is what keeps the upload off a
+      # cross-border link: measured on v2.10.0rc1, a GitHub-hosted runner pushed
+      # 2.35 GB to resource.flagos.net at ~0.13 MB/s and was killed by its
+      # 60-minute timeout, while the same bytes uploaded from a runner in China
+      # at 13-23 MB/s. Only release.yml sets this.
+      publish:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      NEXUS_TOKEN:
+        description: "user:token for the vendor Nexus lanes, read only when publish is set"
+        required: false
+
+jobs:
+  build:
+    name: Build wheel (${{ inputs.display_name }})
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    # A platform without a `ci_image` builds directly on its runner. MPS needs
+    # a macOS host with its Metal GPU, and macOS jobs cannot use containers.
+    container: ${{ inputs.image && fromJson(format('{{"image":{0},"volumes":{1},"options":{2}}}', toJson(inputs.image), inputs.container_volumes, toJson(inputs.container_options))) || null }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      # Fail in seconds rather than after seven platform builds. An organization
+      # secret that is not visible to this repository, or one of the `secrets:`
+      # hops that carries it to a vendor runner, is otherwise only noticed when
+      # the upload finally runs.
+      - name: Check the release credentials
+        if: inputs.publish
+        env:
+          NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NEXUS_TOKEN:-}" ]]; then
+            echo "::error::NEXUS_TOKEN is empty: the organization secret is not visible to this repository, or this workflow was not given it"
+            exit 1
+          fi
+          echo "NEXUS_TOKEN is set (${#NEXUS_TOKEN} characters)"
+
+      # Discard host leftovers before restoring the managed pip download cache.
+      - name: Reset pip cache dir
+        shell: bash
+        run: |
+          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
+          rm -rf "$PIP_CACHE_DIR"
+          mkdir -p "$PIP_CACHE_DIR"
+          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+
+      # Look up first: a transfer timeout can return success with no matched key.
+      # A cold miss may save later; a failed matched transfer must not upload.
+      - name: Look up pip downloads
+        id: pip-cache-lookup
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 1
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
+          lookup-only: true
+          restore-keys: |
+            ${{ inputs.display_name }}-pip-${{ runner.os }}-
+            ${{ inputs.display_name }}-build-pip-${{ runner.os }}-
+            ${{ inputs.display_name }}-integration-pip-${{ runner.os }}-
+
+      # Cache downloads only; installation and tests always run.
+      - name: Restore pip downloads
+        id: pip-cache
+        if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
+
+      - name: Prepare platform environment
+        env:
+          CI_STAGE: build
+        run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build
+
+      # A release candidate tag has to reach setup.py, which is what turns
+      # `v2.10.0rc1` into `torch_fl-2.10.0rc1+cuda13.3`. The version the tag
+      # names and the version in the artifact are then the same string, which is
+      # what the release uploader asserts before it publishes anything. A branch
+      # or a plain release tag matches nothing here and the version is unchanged.
+      - name: Derive a pre-release from the tag
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]] &&
+             [[ "${GITHUB_REF_NAME:-}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)$ ]]; then
+            echo "FLAGOS_WHEEL_PRERELEASE=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+            echo "Building a pre-release: ${BASH_REMATCH[1]}"
+          else
+            echo "Not a pre-release tag (${GITHUB_REF_TYPE:-?}:${GITHUB_REF_NAME:-?}); building the release version."
+          fi
+
+      - name: Build package
+        run: python -m build --wheel --no-isolation
+
+      - name: Validate wheel compatibility manifest
+        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
+
+      - name: Verify wheel
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python - <<'PY'
+          from importlib.metadata import files, metadata
+
+          package_metadata = metadata("torch_fl")
+          package_files = [str(path) for path in files("torch_fl")]
+          assert any("torch_fl" in path for path in package_files), (
+              "torch_fl module not found in wheel"
+          )
+          assert any(path.endswith("torch-fl-preflight") for path in package_files), (
+              "Installed wheel is missing the preflight script"
+          )
+          print(f"Package: {package_metadata['Name']} {package_metadata['Version']}")
+          print(f"Installed files: {len(package_files)}")
+          PY
+
+      - name: Publish the wheel to its vendor lane
+        if: inputs.publish
+        timeout-minutes: 20
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          NEXUS_TOKEN: ${{ secrets.NEXUS_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .github/version-pins.env
+
+          # Only release.yml sets publish, and it runs on a tag ref -- but this
+          # workflow can also be dispatched by hand, and a branch tip must never
+          # be published under a release version.
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" ]]; then
+            echo "::error::publish was requested on ${GITHUB_REF_TYPE:-unknown} ref '${GITHUB_REF_NAME:-?}'; a release is published from a tag"
+            exit 1
+          fi
+
+          # Installed before the route probe below so the probe trusts the same
+          # CA store twine will (the probe prefers certifi, which twine's
+          # dependency tree is what puts in this venv).
+          python -m pip install --only-binary=:all: "twine==$TWINE_VERSION_DEFAULT"
+
+          # The ways to the vendor lanes differ per runner: PPU's pod proxy
+          # refuses the CONNECT to resource.flagos.net while the MUSA runner's
+          # serves it, so ask the pod which route works instead of assuming.
+          # TORCH_FL_PROXY_ROUTE=direct|proxy overrides the probe.
+          source .github/scripts/lib/proxy_route.sh
+          prefer_direct_route "$FLAGOS_WHEEL_ROOT_DEFAULT" "the vendor lanes"
+
+          # publish_wheels.py reads the platform out of the artifact directory
+          # name, and the artifact name is the platform's own config value, so
+          # the lane a wheel goes to and the artifact it came from cannot
+          # disagree. It refuses a directory that names no publishing platform.
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          shopt -u nullglob
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "::error::expected exactly one wheel in dist/, found ${#wheels[@]}"
+            exit 1
+          fi
+          platform="${ARTIFACT_NAME#wheel-}"
+          mkdir -p "wheels/wheel-$platform"
+          mv "${wheels[0]}" "wheels/wheel-$platform/"
+
+          python .github/scripts/publish_wheels.py \
+            --wheels wheels \
+            --tag "$GITHUB_REF_NAME"
+
+          {
+            echo "## Release $GITHUB_REF_NAME"
+            echo
+            echo "- \`$(basename "${wheels[0]}")\` -> the \`$platform\` lane"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # After the upload on purpose, and it is the step after that which
+      # decides this order. The wheel goes to the vendor lane from a runner in
+      # China (18-32 s measured on every platform), while this artifact step
+      # crosses the border and is the slow, fragile one: measured on the 2.10.0
+      # release, 2m25s for 476 MB, 3m15s for 316 MB, 9m43s for 672 MB, and it
+      # failed outright after 21 minutes on DCU's 889 MB wheel. Uploading first
+      # made that the gate on publishing -- DCU's publish step was skipped twice
+      # and the platform shipped nothing -- so publishing runs first instead.
+      # `if: always()` keeps the artifact, which is the documented way to
+      # re-upload one lane without rebuilding, on the failure path too; the
+      # artifact step still fails the job when it fails, which is what makes a
+      # slow or refused upload visible.
+      - name: Upload wheel
+        if: always() && inputs.upload_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: dist/*.whl
+
+      # Save outside post-job cleanup so the upload has its own deadline.
+      # Keep downloaded dependencies even if a later build/test step fails:
+      # !cancelled() intentionally permits saving after failure (no success()).
+      # Skip exact hits, failed lookups/transfers and cancelled jobs.
+      # Cache errors must not change the build/test result.
+      - name: Save pip downloads
+        if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}

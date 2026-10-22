@@ -1,0 +1,301 @@
+{
+  "description": "Ascend validation profile baseline for Qwen-Image-2512 (issue #327). Produced by ascend_profile.py --record.",
+  "hardware": "Ascend 910",
+  "torch": "2.10.0+cpu",
+  "stages": {
+    "full": {
+      "cpu_fallback ops": 0,
+      "libentry failures": 0,
+      "dispatch records": 1477184,
+      "distinct ATen ops": 53,
+      "exit status": 0
+    },
+    "text-encoder": {
+      "cpu_fallback ops": 0,
+      "libentry failures": 0,
+      "dispatch records": 7239,
+      "distinct ATen ops": 33,
+      "exit status": 0
+    },
+    "transformer-step": {
+      "cpu_fallback ops": 0,
+      "libentry failures": 0,
+      "dispatch records": 31872,
+      "distinct ATen ops": 42,
+      "exit status": 0
+    },
+    "vae": {
+      "cpu_fallback ops": 0,
+      "libentry failures": 0,
+      "dispatch records": 2755,
+      "distinct ATen ops": 22,
+      "exit status": 0
+    }
+  },
+  "placement": {
+    "encoder": "flagos:2",
+    "vae": "flagos:2",
+    "blocks": [
+      [
+        0,
+        29,
+        "flagos:0"
+      ],
+      [
+        30,
+        59,
+        "flagos:1"
+      ]
+    ],
+    "transformer": [
+      "flagos:0",
+      "flagos:1"
+    ],
+    "manifest": {
+      "encoder": "flagos:2",
+      "vae": "flagos:2",
+      "transformer": [
+        "flagos:0",
+        "flagos:1"
+      ],
+      "blocks_per_device": [
+        30,
+        30
+      ]
+    }
+  },
+  "routing": {
+    "flagos_python": [
+      "_unsafe_view",
+      "add.Tensor",
+      "addmm",
+      "all",
+      "arange",
+      "arange.start",
+      "clamp",
+      "clamp_min",
+      "constant_pad_nd",
+      "cos",
+      "div.Tensor",
+      "embedding",
+      "exp",
+      "linalg_vector_norm",
+      "mean.dim",
+      "native_layer_norm",
+      "neg",
+      "ones",
+      "pow.Tensor_Scalar",
+      "reciprocal",
+      "rsqrt",
+      "silu",
+      "sin",
+      "sub.Tensor",
+      "sum",
+      "transpose.int",
+      "zero_",
+      "zeros"
+    ],
+    "ascend": [
+      "_scaled_dot_product_efficient_attention",
+      "_upsample_nearest_exact2d",
+      "add.Tensor",
+      "alias",
+      "cat",
+      "convolution",
+      "detach",
+      "empty_like",
+      "eq.Scalar",
+      "gelu",
+      "index.Tensor",
+      "index_select",
+      "lift_fresh",
+      "mul.Tensor",
+      "permute",
+      "randn.generator",
+      "select.int",
+      "slice.Tensor",
+      "split.Tensor",
+      "split_with_sizes",
+      "squeeze.dim",
+      "stack",
+      "sum.dim_IntList",
+      "t",
+      "unbind.int",
+      "unsqueeze"
+    ]
+  },
+  "stats_tolerance": {
+    "mean": 0.05,
+    "std": 0.05
+  },
+  "images": [
+    {
+      "id": "01",
+      "prompt": "A 20-year-old East Asian girl with delicate, charming features and large, bright brown eyes\u2014expressive and lively, with a cheerful or subtly smiling expression. Her naturally wavy long hair is either loose or tied in twin ponytails. She has fair skin and light makeup accentuating her youthful freshness. She wears a modern, cute dress or relaxed outfit in bright, soft colors\u2014lightweight fabric, minimalist cut. She stands indoors at an anime convention, surrounded by banners, posters, or stalls. Lighting is typical indoor illumination\u2014no staged lighting\u2014and the image resembles a casual iPhone snapshot: unpretentious composition, yet brimming with vivid, fresh, youthful charm.",
+      "file": "01.png",
+      "seconds": 440.5,
+      "memory": {
+        "reserved_gib": 26.07,
+        "allocated_gib": 18.31
+      },
+      "mean": 0.4222,
+      "std": 0.3073,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "02",
+      "prompt": "A Chinese female college student, around 20 years old, with a very short haircut that conveys a gentle, artistic vibe. Her hair naturally falls to partially cover her cheeks, projecting a tomboyish yet charming demeanor. She has cool-toned fair skin and delicate features, with a slightly shy yet subtly confident expression\u2014her mouth crooked in a playful, youthful smirk. She wears an off-shoulder top, revealing one shoulder, with a well-proportioned figure. The image is framed as a close-up selfie: she dominates the foreground, while the background clearly shows her dormitory\u2014a neatly made bed with white linens on the top bunk, a tidy study desk with organized stationery, and wooden cabinets and drawers. The photo is captured on a smartphone under soft, even ambient lighting, with natural tones, high clarity, and a bright, lively atmosphere full of youthful, everyday energy.",
+      "file": "02.png",
+      "seconds": 471.5,
+      "memory": {
+        "reserved_gib": 26.33,
+        "allocated_gib": 18.31
+      },
+      "mean": 0.4916,
+      "std": 0.2459,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "03",
+      "prompt": "An East Asian teenage boy, aged 15\u201318, with soft, fluffy black short hair and refined facial contours. His large, warm brown eyes sparkle with energy. His fair skin and sunny, open smile convey an approachable, friendly demeanor\u2014no makeup or blemishes. He wears a blue-and-white summer uniform shirt, slightly unbuttoned, made of thin breathable fabric, with black headphones hanging around his neck. His hands are in his pockets, body leaning slightly forward in a relaxed pose, as if engaged in conversation. Behind him lies a summer school playground: lush green grass and a red rubber track in the foreground, blurred school buildings in the distance, a clear blue sky with fluffy white clouds. The bright, airy lighting evokes a joyful, carefree adolescent atmosphere.",
+      "file": "03.png",
+      "seconds": 470.3,
+      "memory": {
+        "reserved_gib": 26.33,
+        "allocated_gib": 18.31
+      },
+      "mean": 0.6253,
+      "std": 0.2323,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "04",
+      "prompt": "An elderly Chinese couple in their 70s in a clean, organized home kitchen. The woman has a kind face and a warm smile, wearing a patterned apron; the man stands behind her, also smiling, as they both gaze at a steaming pot of buns on the stove. The kitchen is bright and tidy, exuding warmth and harmony. The scene is captured with a wide-angle lens to fully show the subjects and their surroundings.",
+      "file": "04.png",
+      "seconds": 468.2,
+      "memory": {
+        "reserved_gib": 26.35,
+        "allocated_gib": 18.31
+      },
+      "mean": 0.5157,
+      "std": 0.2894,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "05",
+      "prompt": "A turquoise river winds through a lush canyon. Thick moss and dense ferns blanket the rocky walls; multiple waterfalls cascade from above, enveloped in mist. At noon, sunlight filters through the dense canopy, dappling the river surface with shimmering light. The atmosphere is humid and fresh, pulsing with primal jungle vitality. No humans, text, or artificial traces present.",
+      "file": "05.png",
+      "seconds": 467.9,
+      "memory": {
+        "reserved_gib": 26.23,
+        "allocated_gib": 18.32
+      },
+      "mean": 0.3188,
+      "std": 0.2607,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "06",
+      "prompt": "At dawn, a thin mist veils the sea. An ancient stone lighthouse stands at the cliff\u2019s edge, its beacon faintly visible through the fog. Black rocks are pounded by waves, sending up bursts of white spray. The sky glows in soft blue-purple hues under cool, hazy light\u2014evoking solitude and solemn grandeur.",
+      "file": "06.png",
+      "seconds": 467.7,
+      "memory": {
+        "reserved_gib": 26.35,
+        "allocated_gib": 18.32
+      },
+      "mean": 0.4988,
+      "std": 0.2734,
+      "min": 0.0,
+      "max": 0.9373
+    },
+    {
+      "id": "07",
+      "prompt": "An ultra-realistic close-up of a golden retriever outdoors under soft daylight. Hair is exquisitely detailed: strands distinct, color transitioning naturally from warm gold to light cream, light glinting delicately at the tips; a gentle breeze adds subtle volume. Undercoat is soft and dense; guard hairs are long and well-defined, with visible layering. Eyes are moist, expressive; nose is slightly damp with fine specular highlights. Background is softly blurred to emphasize the dog\u2019s tangible texture and vivid expression.",
+      "file": "07.png",
+      "seconds": 431.4,
+      "memory": {
+        "reserved_gib": 26.36,
+        "allocated_gib": 18.32
+      },
+      "mean": 0.4775,
+      "std": 0.2109,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "08",
+      "prompt": "A male argali stands atop a barren, rocky mountainside. Its coarse, dense grey-brown coat covers a powerful, muscular body. Most striking are its massive, thick, outward-spiraling horns\u2014a symbol of wild strength. Its gaze is alert and sharp. The background reveals steep alpine terrain: jagged peaks, sparse low vegetation, and abundant sunlight\u2014conveying the harsh yet majestic wilderness and the animal\u2019s resilient vitality.",
+      "file": "08.png",
+      "seconds": 470.4,
+      "memory": {
+        "reserved_gib": 26.35,
+        "allocated_gib": 18.32
+      },
+      "mean": 0.4755,
+      "std": 0.2711,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "09",
+      "prompt": "\u8fd9\u662f\u4e00\u5f20\u73b0\u4ee3\u98ce\u683c\u7684\u79d1\u6280\u611f\u5e7b\u706f\u7247\uff0c\u6574\u4f53\u91c7\u7528\u6df1\u84dd\u8272\u6e10\u53d8\u80cc\u666f\u3002\u6807\u9898\u662f\u201cQwen-Image\u53d1\u5c55\u5386\u7a0b\u201d\u3002\u4e0b\u65b9\u4e00\u6761\u6c34\u5e73\u5ef6\u4f38\u7684\u53d1\u5149\u65f6\u95f4\u8f74\uff0c\u8f74\u7ebf\u4e2d\u95f4\u5199\u7740\u201c\u751f\u56fe\u8def\u7ebf\u201d\u3002\u7531\u5de6\u4fa7\u6de1\u84dd\u8272\u6e10\u53d8\u4e3a\u53f3\u4fa7\u6df1\u7d2b\u8272\uff0c\u5e76\u4ee5\u7cbe\u81f4\u7684\u7bad\u5934\u6536\u5c3e\u3002\u65f6\u95f4\u8f74\u4e0a\u6bcf\u4e2a\u8282\u70b9\u901a\u8fc7\u865a\u7ebf\u8fde\u63a5\u81f3\u4e0b\u65b9\u9192\u76ee\u7684\u84dd\u8272\u5706\u89d2\u77e9\u5f62\u65e5\u671f\u6807\u7b7e\uff0c\u6807\u7b7e\u5185\u4e3a\u6e05\u6670\u767d\u8272\u5b57\u4f53\uff0c\u4ece\u5de6\u5411\u53f3\u4f9d\u6b21\u5199\u7740\uff1a\u201c2025\u5e745\u67086\u65e5 Qwen-Image \u9879\u76ee\u542f\u52a8\u201d\u201c2025\u5e748\u67084\u65e5  Qwen-Image \u5f00\u6e90\u53d1\u5e03\u201d\u201c2025\u5e7412\u670831\u65e5 Qwen-Image-2512 \u5f00\u6e90\u53d1\u5e03\u201d \uff08\u5468\u56f4\u5149\u6655\u663e\u8457\uff09\u5728\u4e0b\u65b9\u4e00\u6761\u6c34\u5e73\u5ef6\u4f38\u7684\u53d1\u5149\u65f6\u95f4\u8f74\uff0c\u8f74\u7ebf\u4e2d\u95f4\u5199\u7740\u201c\u7f16\u8f91\u8def\u7ebf\u201d\u3002\u7531\u5de6\u4fa7\u6de1\u84dd\u8272\u6e10\u53d8\u4e3a\u53f3\u4fa7\u6df1\u7d2b\u8272\uff0c\u5e76\u4ee5\u7cbe\u81f4\u7684\u7bad\u5934\u6536\u5c3e\u3002\u65f6\u95f4\u8f74\u4e0a\u6bcf\u4e2a\u8282\u70b9\u901a\u8fc7\u865a\u7ebf\u8fde\u63a5\u81f3\u4e0b\u65b9\u9192\u76ee\u7684\u84dd\u8272\u5706\u89d2\u77e9\u5f62\u65e5\u671f\u6807\u7b7e\uff0c\u6807\u7b7e\u5185\u4e3a\u6e05\u6670\u767d\u8272\u5b57\u4f53\uff0c\u4ece\u5de6\u5411\u53f3\u4f9d\u6b21\u5199\u7740\uff1a\u201c2025\u5e748\u670818\u65e5 Qwen-Image-Edit \u5f00\u6e90\u53d1\u5e03\u201d\u201c2025\u5e749\u670822\u65e5 Qwen-Image-Edit-2509 \u5f00\u6e90\u53d1\u5e03\u201d\u201c2025\u5e7412\u670819\u65e5 Qwen-Image-Layered \u5f00\u6e90\u53d1\u5e03\u201d\u201c2025\u5e7412\u670823\u65e5 Qwen-Image-Edit-2511 \u5f00\u6e90\u53d1\u5e03\u201d",
+      "file": "09.png",
+      "seconds": 480.5,
+      "memory": {
+        "reserved_gib": 26.34,
+        "allocated_gib": 18.32
+      },
+      "mean": 0.2346,
+      "std": 0.2524,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "10",
+      "prompt": "\u8fd9\u662f\u4e00\u5f20\u73b0\u4ee3\u98ce\u683c\u7684\u79d1\u6280\u611f\u5e7b\u706f\u7247\uff0c\u6574\u4f53\u91c7\u7528\u6df1\u84dd\u8272\u6e10\u53d8\u80cc\u666f\u3002\u9876\u90e8\u4e2d\u592e\u4e3a\u767d\u8272\u65e0\u886c\u7ebf\u7c97\u4f53\u5927\u5b57\u6807\u9898\u201cQwen-Image-2512\u91cd\u78c5\u53d1\u5e03\u201d\u3002\u753b\u9762\u4e3b\u4f53\u4e3a\u6a2a\u5411\u5bf9\u6bd4\u56fe\uff0c\u89c6\u89c9\u7126\u70b9\u96c6\u4e2d\u4e8e\u4e2d\u95f4\u7684\u5347\u7ea7\u5bf9\u6bd4\u533a\u57df\u3002\u5de6\u4fa7\u4e3a\u9762\u90e8\u5149\u6ed1\u6ca1\u6709\u4efb\u4f55\u7ec6\u8282\u7684\u5973\u6027\u4eba\u50cf\uff0c\u8d28\u611f\u5dee\uff1b\u53f3\u4fa7\u4e3a\u9ad8\u5ea6\u5199\u5b9e\u7684\u5e74\u8f7b\u5973\u6027\u8096\u50cf\uff0c\u76ae\u80a4\u5448\u73b0\u771f\u5b9e\u6bdb\u5b54\u7eb9\u7406\u4e0e\u7ec6\u5fae\u5149\u5f71\u53d8\u5316\uff0c\u53d1\u4e1d\u6839\u6839\u5206\u660e\uff0c\u773c\u7738\u900f\u4eae\uff0c\u8868\u60c5\u81ea\u7136\uff0c\u6574\u4f53\u8d28\u611f\u63a5\u8fd1\u5199\u5b9e\u6444\u5f71\u3002\u4e24\u56fe\u50cf\u4e4b\u95f4\u4ee5\u4e00\u4e2a\u7eff\u8272\u6d41\u7ebf\u578b\u7bad\u5934\u94fe\u63a5\u3002\u9020\u578b\u79d1\u6280\u611f\u5341\u8db3\uff0c\u4e2d\u90e8\u6807\u6ce8\u201c2512\u8d28\u611f\u5347\u7ea7\u201d\uff0c\u4f7f\u7528\u767d\u8272\u52a0\u7c97\u5b57\u4f53\uff0c\u5c45\u4e2d\u663e\u793a\u3002\u7bad\u5934\u4e24\u4fa7\u6709\u5fae\u5f31\u5149\u6655\u6548\u679c\uff0c\u589e\u5f3a\u52a8\u6001\u611f\u3002\u5728\u56fe\u50cf\u4e0b\u65b9\uff0c\u4ee5\u767d\u8272\u6587\u5b57\u5448\u73b0\u4e09\u884c\u8bf4\u660e\uff1a\u201c\u25cf \u66f4\u771f\u5b9e\u7684\u4eba\u7269\u8d28\u611f\u3002\u5927\u5e45\u5ea6\u964d\u4f4e\u4e86\u751f\u6210\u56fe\u7247\u7684AI\u611f\uff0c\u63d0\u5347\u4e86\u56fe\u50cf\u771f\u5b9e\u6027 \u25cf \u66f4\u7ec6\u817b\u7684\u81ea\u7136\u7eb9\u7406\u3002\u5927\u5e45\u5ea6\u63d0\u5347\u4e86\u751f\u6210\u56fe\u7247\u7684\u7eb9\u7406\u7ec6\u8282\u3002\u98ce\u666f\u56fe\uff0c\u52a8\u7269\u6bdb\u53d1\u523b\u753b\u66f4\u7ec6\u817b\u3002\u25cf \u66f4\u590d\u6742\u7684\u6587\u5b57\u6e32\u67d3\u3002\u5927\u5e45\u63d0\u5347\u4e86\u6587\u5b57\u6e32\u67d3\u7684\u8d28\u91cf\u3002\u56fe\u6587\u6df7\u5408\u6e32\u67d3\u66f4\u51c6\u786e\uff0c\u6392\u7248\u66f4\u597d\u201d",
+      "file": "10.png",
+      "seconds": 473.8,
+      "memory": {
+        "reserved_gib": 26.34,
+        "allocated_gib": 18.33
+      },
+      "mean": 0.2493,
+      "std": 0.2313,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "11",
+      "prompt": "\u8fd9\u662f\u4e00\u5e45\u4e13\u4e1a\u7ea7\u5de5\u4e1a\u6280\u672f\u4fe1\u606f\u56fe\u8868\uff0c\u6574\u4f53\u91c7\u7528\u6df1\u84dd\u8272\u79d1\u6280\u611f\u80cc\u666f\uff0c\u5149\u7ebf\u5747\u5300\u67d4\u548c\uff0c\u8425\u9020\u51fa\u51b7\u9759\u3001\u7cbe\u51c6\u7684\u73b0\u4ee3\u5de5\u4e1a\u6c1b\u56f4\u3002\u753b\u9762\u5206\u4e3a\u5de6\u53f3\u4e24\u5927\u677f\u5757\uff0c\u5e03\u5c40\u6e05\u6670\uff0c\u89c6\u89c9\u5c42\u6b21\u5206\u660e\u3002\u5de6\u4fa7\u677f\u5757\u6807\u9898\u4e3a\u201c\u5b9e\u9645\u53d1\u751f\u7684\u73b0\u8c61\u201d\uff0c\u4ee5\u6d45\u84dd\u8272\u5706\u89d2\u77e9\u5f62\u6846\u7a81\u51fa\u663e\u793a\uff0c\u5185\u90e8\u6392\u5217\u4e09\u4e2a\u6df1\u84dd\u8272\u6309\u94ae\u5f0f\u6761\u76ee\uff0c\u7b2c\u4e00\u4e2a\u6761\u76ee\u5c55\u793a\u4e00\u5806\u68d5\u8272\u7c89\u672b\u72b6\u539f\u6599\u4e0a\u6ef4\u843d\u6c34\u6ef4\u7684\u56fe\u6807\uff0c\u6587\u5b57\u4e3a\u201c\u56e2\u805a/\u7ed3\u5757\u201d\uff0c\u540e\u9762\u914d\u6709\u7eff\u8272\u5bf9\u94a9\uff1b\u7b2c\u4e8c\u4e2a\u6761\u76ee\u4e3a\u4e00\u4e2a\u88c5\u6709\u84dd\u8272\u6db2\u4f53\u5e76\u5192\u51fa\u6c14\u6ce1\u7684\u9525\u5f62\u74f6\uff0c\u6587\u5b57\u4e3a\u201c\u4ea7\u751f\u6c14\u6ce1/\u7f3a\u9677\u201d\uff0c\u540e\u9762\u914d\u6709\u7eff\u8272\u5bf9\u94a9\uff1b\u7b2c\u4e09\u4e2a\u6761\u76ee\u4e3a\u4e24\u4e2a\u751f\u9508\u7684\u9f7f\u8f6e\uff0c\u6587\u5b57\u4e3a\u201c\u8bbe\u5907\u8150\u8680/\u50ac\u5316\u5242\u5931\u6d3b\u201d\uff0c\u540e\u9762\u914d\u6709\u7eff\u8272\u5bf9\u94a9\u3002\u53f3\u4fa7\u677f\u5757\u6807\u9898\u4e3a\u201c\u3010\u4e0d\u4f1a\u3011\u53d1\u751f\u7684\u73b0\u8c61\u201d\uff0c\u4f7f\u7528\u7c73\u9ec4\u8272\u5706\u89d2\u77e9\u5f62\u6846\u5448\u73b0\uff0c\u5185\u90e8\u56db\u4e2a\u6761\u76ee\u5747\u7f6e\u4e8e\u6df1\u7070\u8272\u80cc\u666f\u65b9\u6846\u4e2d\u3002\u56fe\u6807\u5206\u522b\u4e3a\uff1a\u4e00\u7ec4\u7cbe\u5bc6\u556e\u5408\u7684\u91d1\u5c5e\u9f7f\u8f6e\uff0c\u6587\u5b57\u4e3a\u201c\u53cd\u5e94\u6548\u7387\u3010\u663e\u8457\u63d0\u9ad8\u3011\u201d\uff0c\u4e0a\u65b9\u8986\u76d6\u9192\u76ee\u7684\u7ea2\u8272\u53c9\u53f7\uff1b\u4e00\u6346\u6574\u9f50\u6392\u5217\u7684\u91d1\u5c5e\u7ba1\u6750\uff0c\u6587\u5b57\u4e3a\u201c\u6210\u54c1\u5185\u90e8\u3010\u7edd\u5bf9\u65e0\u6c14\u6ce1/\u5b54\u9699\u3011\u201d\uff0c\u4e0a\u65b9\u8986\u76d6\u9192\u76ee\u7684\u7ea2\u8272\u53c9\u53f7\uff1b\u4e00\u6761\u575a\u56fa\u7684\u91d1\u5c5e\u94fe\u6761\u6b63\u5728\u627f\u53d7\u62c9\u529b\uff0c\u6587\u5b57\u4e3a\u201c\u6750\u6599\u5f3a\u5ea6\u4e0e\u8010\u4e45\u6027\u3010\u5f97\u5230\u589e\u5f3a\u3011\u201d\uff0c\u4e0a\u65b9\u8986\u76d6\u9192\u76ee\u7684\u7ea2\u8272\u53c9\u53f7\uff1b\u4e00\u5806\u8150\u8680\u7684\u6273\u624b\uff0c\u6587\u5b57\u4e3a\u201c\u52a0\u5de5\u8fc7\u7a0b\u3010\u96f6\u8150\u8680/\u96f6\u526f\u53cd\u5e94\u98ce\u9669\u3011\u201d\uff0c\u4e0a\u65b9\u8986\u76d6\u9192\u76ee\u7684\u7ea2\u8272\u53c9\u53f7\u3002\u5e95\u90e8\u4e2d\u592e\u6709\u4e00\u884c\u5c0f\u5b57\u6ce8\u91ca\uff1a\u201c\u6ce8\uff1a\u6c34\u5206\u7684\u5b58\u5728\u901a\u5e38\u4f1a\u5bfc\u81f4\u8d1f\u9762\u6216\u5e72\u6270\u6027\u7684\u7ed3\u679c\uff0c\u800c\u975e\u7406\u60f3\u6216\u589e\u5f3a\u7684\u72b6\u6001\u201d\uff0c\u5b57\u4f53\u4e3a\u767d\u8272\uff0c\u6e05\u6670\u53ef\u8bfb\u3002\u6574\u4f53\u98ce\u683c\u73b0\u4ee3\u7b80\u7ea6\uff0c\u914d\u8272\u5bf9\u6bd4\u5f3a\u70c8\uff0c\u56fe\u5f62\u7b26\u53f7\u51c6\u786e\u4f20\u8fbe\u6280\u672f\u903b\u8f91\uff0c\u9002\u5408\u7528\u4e8e\u5de5\u4e1a\u57f9\u8bad\u6216\u79d1\u666e\u6f14\u793a\u573a\u666f\u3002",
+      "file": "11.png",
+      "seconds": 476.2,
+      "memory": {
+        "reserved_gib": 26.35,
+        "allocated_gib": 18.33
+      },
+      "mean": 0.2842,
+      "std": 0.2365,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "id": "12",
+      "prompt": "\u8fd9\u662f\u4e00\u5e45\u7531\u5341\u4e8c\u4e2a\u5206\u683c\u7ec4\u6210\u76843\u00d74\u7f51\u683c\u5e03\u5c40\u7684\u5199\u5b9e\u6444\u5f71\u4f5c\u54c1\uff0c\u6574\u4f53\u5448\u73b0\u201c\u5065\u5eb7\u7684\u4e00\u5929\u201d\u4e3b\u9898\uff0c\u753b\u9762\u98ce\u683c\u7b80\u6d01\u6e05\u6670\uff0c\u6bcf\u4e00\u5206\u683c\u72ec\u7acb\u6210\u666f\u53c8\u7edf\u4e00\u4e8e\u751f\u6d3b\u8282\u594f\u7684\u53d9\u4e8b\u8109\u7edc\u3002\u7b2c\u4e00\u884c\u5206\u522b\u662f\u201c06:00 \u6668\u8dd1\u5524\u9192\u8eab\u4f53\u201d\uff1a\u9762\u90e8\u7279\u5199\uff0c\u4e00\u4f4d\u5973\u6027\u8eab\u7a7f\u7070\u8272\u8fd0\u52a8\u5957\u88c5\uff0c\u80cc\u666f\u662f\u521d\u5347\u7684\u671d\u9633\u4e0e\u8471\u90c1\u7eff\u6811\uff1b\u201c06:30 \u52a8\u6001\u62c9\u4f38\u6fc0\u6d3b\u5173\u8282\u201d\uff1a\u5973\u6027\u8eab\u7740\u745c\u4f3d\u670d\u5728\u9633\u53f0\u505a\u6668\u95f4\u62c9\u4f38\uff0c\u8eab\u4f53\u8212\u5c55\uff0c\u80cc\u666f\u4e3a\u6de1\u7c89\u8272\u5929\u7a7a\u4e0e\u8fdc\u5c71\u8f6e\u5ed3\uff1b\u201c07:30 \u5747\u8861\u8425\u517b\u65e9\u9910\u201d\uff1a\u684c\u4e0a\u6446\u653e\u5168\u9ea6\u9762\u5305\u3001\u725b\u6cb9\u679c\u548c\u4e00\u676f\u6a59\u6c41\uff0c\u5973\u6027\u5fae\u7b11\u7740\u51c6\u5907\u7528\u9910\uff1b\u201c08:00 \u8865\u6c34\u6da6\u71e5\u201d\uff1a\u900f\u660e\u73bb\u7483\u6c34\u676f\u4e2d\u6d6e\u6709\u67e0\u6aac\u7247\uff0c\u5973\u6027\u624b\u6301\u6c34\u676f\u8f7b\u555c\uff0c\u9633\u5149\u4ece\u5de6\u4fa7\u659c\u7167\u5165\u5ba4\uff0c\u676f\u58c1\u6c34\u73e0\u6ed1\u843d\uff1b\u7b2c\u4e8c\u884c\u5206\u522b\u662f\uff1a\u201c09:00 \u4e13\u6ce8\u9ad8\u6548\u5de5\u4f5c\u201d\uff1a\u5973\u6027\u4e13\u6ce8\u6572\u51fb\u952e\u76d8\uff0c\u5c4f\u5e55\u663e\u793a\u7b80\u6d01\u754c\u9762\uff0c\u8eab\u65c1\u653e\u6709\u4e00\u676f\u5496\u5561\u4e0e\u4e00\u76c6\u7eff\u690d\uff1b\u201c12:00 \u9759\u5fc3\u9605\u8bfb\u65f6\u5149\u201d\uff1a\u5973\u6027\u5750\u5728\u4e66\u684c\u524d\u7ffb\u9605\u7eb8\u8d28\u4e66\u7c4d\uff0c\u53f0\u706f\u6563\u53d1\u6696\u5149\uff0c\u4e66\u9875\u6cdb\u9ec4\uff0c\u65c1\u653e\u534a\u676f\u7ea2\u8336\uff1b\u201c12:30 \u5348\u540e\u8f7b\u677e\u6f2b\u6b65\u201d\uff1a\u5973\u6027\u5728\u6797\u836b\u9053\u4e0a\u6f2b\u6b65\uff0c\u8138\u90e8\u7279\u5199\uff1b\u201c15:00 \u8336\u9999\u4f34\u5348\u540e\u201d\uff1a\u5973\u6027\u7aef\u7740\u9aa8\u74f7\u8336\u676f\u7ad9\u5728\u7a97\u8fb9\uff0c\u7a97\u5916\u662f\u57ce\u5e02\u8857\u666f\u4e0e\u98d8\u52a8\u4e91\u6735\uff0c\u8336\u9999\u8885\u8885\uff1b\u7b2c\u4e09\u884c\u5206\u522b\u662f\uff1a\u201c18:00 \u8fd0\u52a8\u91ca\u653e\u538b\u529b\u201d\uff1a\u5065\u8eab\u623f\u5185\uff0c\u5973\u6027\u6b63\u5728\u7ec3\u4e60\u745c\u4f3d\uff1b\u201c19:00 \u7f8e\u5473\u665a\u9910\u201d\uff1a\u5973\u6027\u5728\u5f00\u653e\u5f0f\u53a8\u623f\u4e2d\u5207\u83dc\uff0c\u7827\u677f\u4e0a\u6709\u756a\u8304\u4e0e\u9752\u6912\uff0c\u9505\u4e2d\u70ed\u6c14\u5347\u817e\uff0c\u706f\u5149\u6e29\u6696\uff1b\u201c21:00 \u51a5\u60f3\u52a9\u7720\u201d\uff1a\u5973\u6027\u76d8\u817f\u5750\u5728\u67d4\u8f6f\u5730\u6bef\u4e0a\u51a5\u60f3\uff0c\u53cc\u624b\u8f7b\u653e\u819d\u4e0a\uff0c\u95ed\u76ee\u5b81\u9759\uff1b\u201c21:30 \u8fdb\u5165\u7761\u7720\u201d\uff1a\u5973\u6027\u8eba\u5728\u5e8a\u4e0a\u4f11\u606f\u3002\u6574\u4f53\u91c7\u7528\u81ea\u7136\u5149\u7ebf\u4e3a\u4e3b\uff0c\u8272\u8c03\u4ee5\u6696\u767d\u4e0e\u7c73\u7070\u4e3a\u57fa\u8c03\uff0c\u5149\u5f71\u5c42\u6b21\u5206\u660e\uff0c\u753b\u9762\u5145\u6ee1\u6e29\u99a8\u7684\u751f\u6d3b\u6c14\u606f\u4e0e\u89c4\u5f8b\u7684\u8282\u594f\u611f\u3002",
+      "file": "12.png",
+      "seconds": 481.1,
+      "memory": {
+        "reserved_gib": 26.36,
+        "allocated_gib": 18.34
+      },
+      "mean": 0.446,
+      "std": 0.2798,
+      "min": 0.0,
+      "max": 1.0
+    }
+  ]
+}

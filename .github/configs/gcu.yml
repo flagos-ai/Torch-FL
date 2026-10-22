@@ -1,0 +1,83 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Enflame GCU
+
+# GCU-specific environment preparation stays outside the common workflow.
+setup_script: .github/scripts/set_env.sh
+setup_platform: gcu
+
+# Pinned TopsRider image used for the manual wheel validation. The setup script
+# can install python3.12-venv when this base image is used directly; a derived
+# CI image should bake it in (or provide TORCH_FL_PREBUILT_GCU_VENV) to avoid
+# the apt fallback on every job.
+ci_image: harbor.baai.ac.cn/flagtree/flagtree-enflame3.6-py312-torch2.10.0-ubuntu24.04@sha256:fadc6e46fa89dffacc6ebf6b85eb1b19b6098b16ae0ff25186aa83be4f93a718
+
+runner_labels:
+  - sy-8g-cicd-pytorch
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/gcu/
+  - torch_fl/configs/backends_gcu.conf
+  - csrc/aten/backends/gcu/
+  - csrc/runtime/accelerator/gcu/
+  - csrc/runtime/allocator/backends/gcu_memory.h
+  - .github/scripts/hooks/set_env_gcu.sh
+  - .github/scripts/set_env_gcu.sh
+  - scripts/codegen/codegen_gcu.py
+  - scripts/codegen/codegen_gcu_flaggems.py
+
+container_volumes: []
+
+integration_environment: {}
+
+# GCU builds and tests the same wheel in one hardware job, against the isolated
+# CPU-PyTorch environment set_env.sh provisions. That environment does not carry
+# pytest, so the pipeline installs it after the wheel.
+integration_test_dependencies:
+  - python -m pip install pytest
+
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-gcu
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py. The vocabulary is documented on
+# that script; the values are this platform's, and they assert the same things
+# the hand-written heredoc that used to sit here did.
+#
+# The FlagGems stack has to be the flagtree build, not a stock triton wheel left
+# behind by the image: only flagtree carries the enflame backend, and without it
+# every FlagGems route in backends_gcu.conf fails to compile.
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /usr/local/lib/python3.12/dist-packages
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    at_least: 8
+  triton_backend: enflame
+  flaggems_vendor: enflame

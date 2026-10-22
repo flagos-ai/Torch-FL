@@ -1,0 +1,2608 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import ctypes
+import os
+import re
+import sys
+
+# Single access point for every FLAGOS_* variable (see torch_fl/_env.py). Imported
+# for its side effect as well: it scans the environment once and warns about a
+# FLAGOS_* name torch_fl does not recognise, which is the only way a typo like
+# FLAGOS_LOG_DISPACH is ever noticed -- the misspelled variable is simply never
+# read and the setting silently does nothing.
+from torch_fl import _env  # noqa: F401
+from torch_fl import _platform
+from torch_fl import _vendor
+
+
+def _build_accelerator() -> str:
+    """Accelerator this wheel was built for, lowercased ("" if unknown).
+
+    Thin alias for torch_fl._platform.build_accelerator(), which the integration
+    test trees read too (loaded by path). Read from the _build_config.py setup.py
+    writes at build time, and never from the environment. The generated file is
+    what makes a DCU wheel self-describing: _select_backend_config() runs before
+    `import torch`, so it cannot inspect torch.version.hip to detect DCU on its
+    own. A stale FLAGOS_ACCELERATOR from another build must not select a conf the
+    wheel was not built for; to route through a different conf on purpose,
+    FLAGOS_BACKEND_CONFIG names the file directly.
+    """
+    return _platform.build_accelerator()
+
+
+def _is_ppu_build() -> bool:
+    """True for a PPU wheel, which needs backends_ppu.conf rather than CUDA's.
+
+    PPU has its own value in the build record's ACCELERATOR now (it is a CUDA-ABI
+    boxing vendor like MetaX/DCU), so the record already answers this -- no
+    environment probe. The lib_ppu/ bundle directory stays as a fallback so a
+    wheel built before PPU had an accelerator value of its own is still
+    recognised.
+
+    Without this, PPU read backends_cuda.conf and inherited its FlagGems routes.
+    That is what sent mm/bmm through the _hygon kernel PPU's triton cannot
+    compile: 28 minutes inside a single test_mm and a SIGSEGV at interpreter
+    exit, on a runner where every assertion still passed.
+    """
+    if _build_accelerator() == "ppu":
+        return True
+    return os.path.isdir(os.path.join(os.path.dirname(__file__), "lib_ppu"))
+
+
+# The conf _select_backend_config() resolved, or "" when the user named one
+# through FLAGOS_BACKEND_CONFIG (nothing to resolve) or none was found. Handed to
+# the C++ routing table right after _C loads; read through backend_config_path().
+_BACKEND_CONFIG_PATH = ""
+_STARTUP_PROFILE = "full"
+
+
+def _mps_shutdown_allocator() -> None:
+    """Drain Metal and free its cached blocks before interpreter teardown."""
+    try:
+        if "torch_fl._C" in sys.modules:
+            torch_fl._C._synchronize()
+            torch_fl._C._shutdown_allocator()
+    except (NameError, AttributeError):
+        # Python may clear this module before atexit runs. The runtime's own
+        # final-buffer hook still releases the cache.
+        pass
+
+
+def _select_backend_config() -> None:
+    """Pick the op-routing config file for this build.
+
+    Every conf is backends_<platform>.conf -- one file per platform, no per-mode
+    suffix -- so the selection is a property of the build, not of an env var:
+
+      * a native-kernel vendor marker -> backends_<that platform>.conf
+      * a MetaX build                 -> backends_metax.conf (boxing-only build)
+      * a DCU build                   -> backends_dcu.conf
+      * a Kunlunxin build             -> backends_kunlunxin.conf (native XPU)
+      * a PPU wheel                   -> backends_ppu.conf
+      * otherwise                     -> backends_cuda.conf
+
+    There is no FlagGems opt-in left to apply. FLAGOS_USE_FLAGGEMS,
+    FLAGOS_USE_FLAGGEMS_CPP and FLAGOS_USE_TILEOPS each used to name a conf of
+    their own; every one of those files was the platform's own conf with one
+    backend column rewritten, which is why they could -- and did -- drift from it.
+    Each conf now states all five keys per op directly
+    (flaggems_cpp > flaggems > tileops > <vendor> > none), so the routing those
+    flags used to select is already in the file the platform reads.
+
+    Which entry point an op actually takes is then decided by what got compiled
+    in, not by which file was read. flaggems_cpp is Backend::kFlagGemsCpp and needs
+    FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor); tileops is
+    Backend::kTileOps and needs FLAGOS_BUILD_TILEOPS=ON plus an SM90 device. Where the
+    slot is empty Dispatcher::GetFn degrades to the boxing kernel rather than
+    raising, so one file stays correct across both builds. FLAGOS_FORCE_BACKEND
+    survives as a table transform in common.cc (ApplyForcedBackend): the tileops
+    mode repins every op the conf annotates `# tileops` onto that path, which is
+    the same op set backends_tileops.conf used to carry.
+
+    backends_metax.conf routes 10 ops to flaggems_cpp: the 15 in
+    METAX_CPP_MEASURED minus the five that also sit in MetaX's triton gap set,
+    which the dispatcher checks first. `mm` and `_softmax`/`embedding` are left
+    out of the measured set deliberately -- `mm` because flag_gems' C++ mm kernel
+    passes a SPLIT_K kwarg triton-metax rejects, the other two because the
+    FlagGems build the MetaX lane installs ships no C++ half, so those routes
+    could not be served, and both ops reach the flaggems Python path instead.
+    Those 10 need a FlagGems built for MACA (cpp/ -DFLAGGEMS_BACKEND=MACA) linked
+    in; without it Dispatcher::GetFn sees an empty kFlagGemsCpp slot and boxes
+    them, which is why one file is safe for both builds.
+
+    Native-kernel vendors (musa, ascend, gcu, tsingmicro) do not take part in that
+    choice; each takes backends_<platform>.conf directly. For musa, ascend and gcu
+    that conf is generated full-coverage: every routable op appears exactly once,
+    already resolved by the priority flaggems_cpp > flaggems > tileops > <vendor>
+    > none, so operator support is countable from the file alone. tsingmicro stays
+    hand-written and sparse because it registers the full generated op list rather
+    than a subset -- a `none` entry there would reach the dispatcher and raise on
+    an empty slot instead of boxing to cpu_fallback, so the whole-list shape is
+    not available to it. Such a build is detected via lib/flagos_platform, or for
+    Ascend via /dev/davinci* device nodes. To collapse that table onto a single
+    backend family for A/B measurement, set FLAGOS_FORCE_BACKEND to flaggems,
+    vendor or tileops -- one name, so "two of them at once" is unrepresentable.
+    Every mode is applied in common.cc over the parsed table: an op only moves
+    if the target backend actually implements it, known from the routed value
+    plus its `# <backend>` annotation. Ops with no such implementation are
+    listed on stderr and stay on their configured backend -- the vendor mode is
+    therefore partial by nature, since a vendor implements far fewer ops than
+    FlagGems.
+
+    The two boxing confs (metax, dcu) are generated by the same script and have
+    the same full-coverage shape as the vendor ones; only the fallback key
+    differs, spelled `cuda` because a CUDA-compatible platform can box every op
+    (which is why they have no `none` entries). Each routes the ops its own triton
+    backend cannot run back to that boxing kernel instead of to flaggems:
+    mm/bmm/mean.dim and friends on MetaX (maca libtorch_cuda), slice_backward
+    (hardware VMFault) and silu_backward (missing div_rn lowering) on DCU under
+    DTK's hcu triton. Those per-platform gap sets are measured on hardware, so the
+    generator recovers them from the confs rather than restating them. An explicit
+    FLAGOS_BACKEND_CONFIG always wins (advanced/testing use), and the per-op
+    FLAGOS_OP_<name> overrides in common.cc still apply on top. This must run
+    before the first op dispatch triggers BackendTable() init; setting it at
+    import time (before any flagos tensor op) is well before that.
+
+    The choice is handed to the C++ reader through
+    _C._set_backend_config_path(), not written to os.environ. It used to be an
+    environment write, which made the wheel's own selection indistinguishable
+    from a user's for the rest of the process -- see backend_config_path().
+    """
+    global _BACKEND_CONFIG_PATH
+
+    # Recorded per call, not accumulated. backend_config_path() reports what this
+    # resolution picked *first*, mirroring the C++ reader's setter-before-env
+    # order, so a path left over from an earlier call would outrank the user's
+    # FLAGOS_BACKEND_CONFIG and the early return below would leave it in place.
+    # At import time the function runs once and the reset is a no-op; it is what
+    # makes a direct second call -- which tests/unit/test_ascend_platform_marker.py
+    # makes, against a different fake tree each time -- answer for the
+    # environment in front of it rather than for the previous test's.
+    _BACKEND_CONFIG_PATH = ""
+
+    if _env.value("FLAGOS_BACKEND_CONFIG"):
+        return
+
+    # A vendor build whose kernels are native (no CUDA boxing) records its
+    # platform in lib/flagos_platform. backends_<platform>.conf is generated by
+    # scripts/codegen/gen_vendor_confs.py and already lists every routable op with its
+    # final backend (flaggems_cpp > flaggems > tileops > <vendor> > none), so
+    # there is no FlagGems opt-in to apply here -- the conf is FlagGems-first by
+    # construction. FLAGOS_FORCE_BACKEND narrows it afterwards.
+    marker = os.path.join(os.path.dirname(__file__), "lib", "flagos_platform")
+    if os.path.exists(marker):
+        with open(marker) as f:
+            platform = f.read().strip().lower()
+        platform_conf = os.path.join(
+            os.path.dirname(__file__), "configs", f"backends_{platform}.conf"
+        )
+        if os.path.exists(platform_conf):
+            _BACKEND_CONFIG_PATH = platform_conf
+            return
+
+    conf_dir = os.path.join(os.path.dirname(__file__), "configs")
+
+    # Ascend builds compile the ACL C++ backend (Backend::kAscend), not the CUDA
+    # boxing kernels, so the cuda/flaggems confs (which route ops to `cuda`) can
+    # never apply. Since every wheel ships all backends*.conf files, the conf set
+    # can't distinguish the build; use the runtime hardware signal instead. An
+    # Ascend NPU exposes /dev/davinci* device nodes -- their presence means this
+    # is an Ascend box, where the only usable routing is the ascend conf. (A CUDA
+    # build could not run here anyway, so this never mis-fires on a CUDA host.)
+    ascend_default = os.path.join(conf_dir, "backends_ascend.conf")
+    try:
+        is_ascend_build = os.path.exists(ascend_default) and any(
+            name.startswith("davinci") for name in os.listdir("/dev")
+        )
+    except OSError:
+        is_ascend_build = False
+
+    if is_ascend_build:
+        _BACKEND_CONFIG_PATH = ascend_default
+        return
+
+    # The conf follows from the build itself, not from a runtime mode switch:
+    # the accelerator (plus the lib/flagos_platform marker above) is what the
+    # wheel was built for. MetaX is built boxing-only (setup.py forces
+    # FLAGOS_BUILD_VENDOR=OFF), so it maps straight to backends_metax.conf with no
+    # mode variable to consult. A future native build of a CUDA-compatible
+    # vendor would select its conf from the same record.
+    if _build_accelerator() == "metax":
+        conf_name = "backends_metax.conf"
+    elif _build_accelerator() == "dcu":
+        conf_name = "backends_dcu.conf"
+    elif _build_accelerator() == "kunlunxin":
+        conf_name = "backends_kunlunxin.conf"
+    elif _build_accelerator() == "mps":
+        conf_name = "backends_mps.conf"
+    elif _is_ppu_build():
+        conf_name = "backends_ppu.conf"
+    else:
+        conf_name = "backends_cuda.conf"
+    conf_path = os.path.join(os.path.dirname(__file__), "configs", conf_name)
+    if os.path.exists(conf_path):
+        _BACKEND_CONFIG_PATH = conf_path
+
+
+def backend_config_path() -> str:
+    """Path of the conf the op-routing table is read from ("" if none).
+
+    Answers in the same order the C++ reader resolves it
+    (csrc/aten/common.cc:ResolveBackendConfigPath): what _select_backend_config()
+    picked and handed over, then the user's FLAGOS_BACKEND_CONFIG, then nothing --
+    the last case being a path C++ derives from its own library location and
+    Python has no reason to duplicate.
+
+    It used to be answered by reading os.environ["FLAGOS_BACKEND_CONFIG"], which
+    torch_fl wrote at import time. That made "the user overrode the conf" and
+    "the wheel chose its own conf" the same observable state for the rest of the
+    process, and it leaked the path into every child process the wheel spawns.
+    """
+    return _BACKEND_CONFIG_PATH or _env.value("FLAGOS_BACKEND_CONFIG") or ""
+
+
+def _conf_routes_to_flaggems() -> bool:
+    """True when the selected conf routes at least one op to a FlagGems path.
+
+    The FlagGems Python path needs process-level setup before flag_gems is
+    imported (the torch.musa surface its MThreads backend selects on, the Philox
+    seed bridge). That setup used to be gated on FLAGOS_USE_FLAGGEMS=1, which no
+    longer decides anything: a generated vendor conf is FlagGems-first by
+    construction, so the opt-in is gone and the gate would never open -- leaving
+    flag_gems to fail its own backend discovery on the very ops the conf routes
+    to it. Read the conf instead, which is the thing that actually decides.
+    """
+    conf = backend_config_path()
+    if not conf or not os.path.exists(conf):
+        return False
+    try:
+        with open(conf) as f:
+            for line in f:
+                value = line.split("#")[0].partition("=")[2].strip()
+                if value in ("flaggems", "flaggems_python", "flagos_python"):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _relink_vendor_libtorch() -> None:
+    """Select bundled vendor libtorch before importing torch.
+
+    MetaX, DCU and PPU all run on a *forked* libtorch whose core .so
+    (libc10/libtorch_cpu/libtorch_python/...) differ from the upstream ones a
+    stock ``torch==X.Y.Z+cpu`` wheel ships.  A self-contained wheel bundles them
+    under torch_fl/lib_{maca,dcu,ppu}/ and expose them through a private torch
+    package facade without modifying the installed PyTorch wheel;
+    see torch_fl.accelerator._vendor_libtorch for why a ctypes preload alone is
+    not enough there.
+
+    This MUST run before `import torch` -- afterwards libc10 is already mapped
+    and selecting another core is too late. Every backend's entry point is idempotent and a
+    no-op when its bundle dir is absent (a plain in-place build, where torch
+    already IS the vendor wheel), so this is safe to call unconditionally.
+
+    MetaX is a boxing-only build: accel=="metax" selects its core unconditionally (an
+    in-place build reaches the vendor torch through FLAGOS_VENDOR_TORCH_LIB, a
+    self-contained wheel through lib_maca/).  DCU and PPU have no native-kernel
+    mode, so bundle-dir presence alone decides.  The CUDA backend is not here:
+    the official +cpu wheel's core .so ARE the upstream ones, so only the extra
+    CUDA libs are missing and _preload_cuda_assets() below handles those with
+    ctypes.
+    """
+    accel = _build_accelerator()
+
+    if accel == "metax":
+        from torch_fl.accelerator.metax._metax_libtorch_link import (
+            ensure_maca_libtorch_links,
+        )
+
+        ensure_maca_libtorch_links()
+        return
+
+    if accel == "dcu":
+        # Decoupled by default: preload only DTK's device libraries on top of the
+        # official core, leaving torch/lib untouched. FLAGOS_DCU_VENDOR_CORE=1
+        # selects the full vendor core through a private facade. See
+        # torch_fl/accelerator/dcu/_dcu_libtorch_link.py.
+        from torch_fl.accelerator.dcu._dcu_libtorch_link import setup_dcu_runtime
+
+        setup_dcu_runtime()
+        return
+
+    # PPU is its own accelerator now; an older PPU wheel reports "cuda" and is
+    # recognised by its lib_ppu/ bundle instead.
+    if accel in ("cuda", "", "ppu"):
+        from torch_fl.accelerator._vendor_libtorch import bundled_lib_dir
+
+        if bundled_lib_dir("lib_ppu", "libtorch_cuda.so"):
+            from torch_fl.accelerator.ppu._ppu_libtorch_link import (
+                ensure_ppu_libtorch_links,
+            )
+
+            ensure_ppu_libtorch_links()
+
+
+def _preload_cuda_assets() -> None:
+    """Load the bundled CUDA .so into this process BEFORE `import torch`.
+
+    Hard constraint (docs/vendors/cuda/external-libtorch-cuda.md, constraint 1):
+    PyTorch caches its CUDAHooks on first `import torch`. If libtorch_cuda.so is
+    loaded afterwards, device init fails with "Cannot initialize CUDA without
+    ATen_cuda library" even though the kernels register. So we ctypes-dlopen it
+    here, at the very top of torch_fl, before torch is imported.
+
+    libtorch_cuda.so has unresolved deps on the NVIDIA runtime libs (libcudart,
+    libcublas, libcudnn, libnvshmem_host, ...) shipped by the pip nvidia-*-cu12
+    wheels. Since the process is already running, LD_LIBRARY_PATH cannot help;
+    we must explicitly dlopen those deps (RTLD_GLOBAL) in dependency order first,
+    then torch's own libc10/libtorch_cpu, then the CUDA libs.
+
+    Skipped when:
+      * FLAGOS_DISABLE_CUDA_ASSETS=1 (Ascend/MetaX/pure-CPU, or external preload)
+      * the bundled libtorch_cuda.so is absent (e.g. slim build)
+    """
+    import ctypes
+    import glob
+    import importlib.util
+
+    if _env.flag("FLAGOS_DISABLE_CUDA_ASSETS"):
+        return
+
+    lib_dir = os.path.join(os.path.dirname(__file__), "lib")
+    main_cuda = os.path.join(lib_dir, "libtorch_cuda.so")
+    if not os.path.exists(main_cuda):
+        # No bundled assets; rely on an out-of-band preload (e.g. LD_PRELOAD via
+        # scripts/vendor/with_cuda_libtorch.sh) if the user set one up.
+        return
+
+    def _try(path, mode=ctypes.RTLD_GLOBAL):
+        try:
+            ctypes.CDLL(path, mode=mode)
+            return True
+        except OSError:
+            return False
+
+    # 1) NVIDIA runtime deps from pip nvidia-*-cu12 wheels. Locate their lib dirs
+    #    via the installed `nvidia` namespace package (no torch import needed).
+    nvidia_lib_dirs = []
+    spec = importlib.util.find_spec("nvidia")
+    if spec is not None and spec.submodule_search_locations:
+        for base in spec.submodule_search_locations:
+            nvidia_lib_dirs.extend(sorted(glob.glob(os.path.join(base, "*", "lib"))))
+    # Dependency order: cudart first (everything needs it), then the math/comm
+    # libs, then nvshmem. Load by soname glob; ignore any that are absent.
+    _dep_order = [
+        "libcudart.so*",
+        "libnvrtc.so*",
+        "libnvjitlink.so*",
+        "libcublasLt.so*",
+        "libcublas.so*",
+        "libcudnn*.so*",
+        "libcufft.so*",
+        "libcurand.so*",
+        "libcusparse.so*",
+        "libcusparseLt.so*",
+        "libcusolver.so*",
+        "libnccl.so*",
+        "libnvshmem_host.so*",
+        "libnvToolsExt.so*",
+        "libcupti.so*",
+    ]
+    for pattern in _dep_order:
+        for d in nvidia_lib_dirs:
+            for so in sorted(glob.glob(os.path.join(d, pattern))):
+                _try(so)
+
+    # 2) torch's own CPU libs (libtorch_cuda depends on libc10 / libtorch_cpu).
+    torch_spec = importlib.util.find_spec("torch")
+    if torch_spec is not None and torch_spec.submodule_search_locations:
+        torch_lib = os.path.join(list(torch_spec.submodule_search_locations)[0], "lib")
+        for name in ("libc10.so", "libtorch_cpu.so"):
+            _try(os.path.join(torch_lib, name))
+
+    # 3) Bundled CUDA libs. Order: nvshmem/nvrtc helpers, libc10_cuda, then the
+    #    big libtorch_cuda.so (which pulls linalg on demand via bare dlopen, so
+    #    its dir must be resolvable -- it is, since we load from lib_dir).
+    for name in (
+        "libtorch_nvshmem.so",
+        "libcaffe2_nvrtc.so",
+        "libc10_cuda.so",
+        "libtorch_cuda.so",
+        # linalg ops dlopen this by bare soname on demand; preloading makes the
+        # loaded copy satisfy that later bare-name dlopen.
+        "libtorch_cuda_linalg.so",
+    ):
+        p = os.path.join(lib_dir, name)
+        if os.path.exists(p):
+            _try(p)
+
+
+def _disable_vendor_backend_autoload() -> None:
+    """Stop a vendor PrivateUse1 backend from claiming the key before flagos.
+
+    torch_musa ships a `torch.backends` entry point, so a bare `import torch`
+    autoloads it, and it calls rename_privateuse1_backend("musa") + registers the
+    PrivateUse1 hooks/allocator. flagos wants that same single key, and PyTorch
+    allows exactly one owner: our later rename raises "already been set!
+    Current backend: musa".
+
+    torch.__init__ honours TORCH_DEVICE_BACKEND_AUTOLOAD=0 to skip entry-point
+    autoloading, so set it before `import torch`. Nothing of torch_musa is
+    needed either way: the MUSA operator route calls mudnn, which is part of the
+    MUSA toolkit and independent of the vendor's torch plugin.
+
+    An explicit user setting always wins, so exporting
+    TORCH_DEVICE_BACKEND_AUTOLOAD=1 restores stock torch_musa behaviour (useful
+    for A/B testing against the vendor plugin, with torch_fl not imported).
+    """
+    if _build_accelerator() != "musa":
+        return
+    _env.set_foreign("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+
+
+def _validate_dcu_decoupled_runtime() -> None:
+    """Prove the DTK device libs really bound to the official core.
+
+    Only runs for a decoupled DCU build (a DCU wheel without
+    FLAGOS_DCU_VENDOR_CORE=1), right after `import torch`; the checks themselves
+    live in accelerator/dcu/_dcu_runtime_check.py. Set
+    FLAGOS_DCU_SKIP_RUNTIME_CHECK=1 to bypass (e.g. when deliberately testing a
+    non-matching wheel pair).
+    """
+    if _build_accelerator() != "dcu":
+        return
+    if _env.flag("FLAGOS_DCU_SKIP_RUNTIME_CHECK"):
+        return
+
+    from torch_fl.accelerator.dcu._dcu_libtorch_link import vendor_core_mode
+
+    if vendor_core_mode():
+        return  # legacy mode replaces the core wholesale; nothing to reconcile.
+
+    from torch_fl.accelerator.dcu._dcu_runtime_check import validate_decoupled_runtime
+
+    validate_decoupled_runtime(os.path.join(os.path.dirname(__file__), "lib_dcu"))
+
+
+def _check_privateuse1_unclaimed() -> None:
+    """Fail with an actionable message if a vendor plugin already took the key.
+
+    PrivateUse1 admits exactly one backend name. `import torch` autoloads any
+    `torch.backends` entry point -- torch_musa has one -- so when torch is
+    imported before torch_fl, the name is already "musa" and our rename raises a
+    bare "already been set!". _disable_vendor_backend_autoload only covers the
+    torch_fl-first order, since by the time we run in the other order torch has
+    already been initialised.
+    """
+    current = torch._C._get_privateuse1_backend_name()
+    if current in ("privateuseone", "flagos"):
+        return
+    raise RuntimeError(
+        f"PrivateUse1 is already claimed by the '{current}' backend, so torch_fl "
+        "cannot register 'flagos'. A vendor plugin was autoloaded by `import "
+        "torch` before torch_fl. Either import torch_fl first, or export "
+        "TORCH_DEVICE_BACKEND_AUTOLOAD=0 before starting Python."
+    )
+
+
+_MUSA_MEM_GET_INFO = []
+
+
+def _musa_mem_get_info():
+    """The MUSA runtime's ``musaMemGetInfo``, resolved through ctypes.
+
+    torch_fl links the MUSA runtime, so the soname resolves without a path --
+    the same lookup the MetaX compat shim uses for mcMemGetInfo. The returned
+    callable takes two out-parameters and reports the *current* device; callers
+    bind the device they want first.
+    """
+    if not _MUSA_MEM_GET_INFO:
+        runtime = ctypes.CDLL("libmusart.so")
+        fn = runtime.musaMemGetInfo
+        fn.argtypes = [ctypes.POINTER(ctypes.c_size_t)] * 2
+        fn.restype = ctypes.c_int
+        _MUSA_MEM_GET_INFO.append(fn)
+    return _MUSA_MEM_GET_INFO[0]
+
+
+def _install_musa_flaggems_compat() -> None:
+    """Expose the MUSA surface expected by FlagGems on top of flagos.
+
+    FlagGems 5.x selects its MThreads backend from ``torch.musa`` and imports
+    ``current_device``/``get_device_capability`` from ``torch_musa``. The
+    native torch_musa plugin cannot claim PrivateUse1 in the same process, so
+    provide only the small compatibility surface required during FlagGems
+    discovery. The actual tensor device remains ``flagos``.
+
+    The surface is also read by third-party feature detection. Publishing a
+    ``torch_musa`` entry in ``sys.modules`` makes
+    ``importlib.util.find_spec("torch_musa")`` succeed, and libraries gate on
+    exactly that -- transformers' ``is_torch_musa_available()``, then
+    ``set_seed()`` -> ``torch.musa.manual_seed_all``; accelerate's
+    ``is_musa_available()``, then ``set_module_tensor_to_device()`` ->
+    ``torch.musa.empty_cache``. Whatever the injected module makes detectable
+    has to actually answer, so the CUDA-shaped device API is carried below
+    rather than left to raise ``AttributeError`` inside an unrelated caller.
+    """
+    if _build_accelerator() != "musa" or not _conf_routes_to_flaggems():
+        return
+
+    import functools
+    import importlib.machinery
+    import importlib.util
+    import types
+
+    musa = types.ModuleType("torch.musa")
+    for name in (
+        "device",
+        "device_count",
+        "current_device",
+        "set_device",
+        "synchronize",
+        "is_available",
+        "get_device_properties",
+        "current_stream",
+        "stream",
+        "Event",
+        "default_generators",
+        "manual_seed",
+        "manual_seed_all",
+        "initial_seed",
+        "get_rng_state",
+        "set_rng_state",
+    ):
+        setattr(musa, name, getattr(flagos, name))
+
+    def _get_device_capability(device=None):
+        if device is None:
+            device = flagos.current_device()
+        props = flagos.get_device_properties(device)
+        return props.major, props.minor
+
+    musa.get_device_capability = _get_device_capability
+    musa.get_device_name = lambda device=None: (
+        flagos.get_device_properties(
+            flagos.current_device() if device is None else device
+        ).name
+    )
+
+    # Device management calls other accelerators route here. FlagGems needs
+    # only the device and stream names above, so without these the MUSA branch
+    # those libraries open from the detection described above ends in an
+    # AttributeError inside a caller that never mentioned MUSA.
+    musa.empty_cache = flagos.empty_cache
+    musa.memory_allocated = flagos.memory_allocated
+    musa.memory_reserved = flagos.memory_reserved
+    musa.reset_peak_memory_stats = flagos.reset_peak_memory_stats
+    # torch.cuda spells "read the peak watermark" max_memory_allocated and
+    # "drop it" reset_max_memory_allocated; flagos tracks one peak per pool, so
+    # both reset spellings are the same call. A disabled caching allocator
+    # reports no stats at all, hence the default rather than a KeyError.
+    musa.max_memory_allocated = lambda device=None: flagos.memory_stats(device).get(
+        "peak_allocated_bytes", 0
+    )
+    musa.max_memory_reserved = lambda device=None: flagos.memory_stats(device).get(
+        "peak_reserved_bytes", 0
+    )
+    musa.reset_max_memory_allocated = flagos.reset_peak_memory_stats
+    musa.is_bf16_supported = lambda: torch.bfloat16 in flagos.get_amp_supported_dtype()
+
+    def _mem_get_info(device=None):
+        """(free, total) device bytes, matching `torch.cuda.mem_get_info`.
+
+        musaMemGetInfo takes no index and reads whichever device is current, so
+        bind the requested one for the call and put the previous one back.
+        """
+        if device is None:
+            device = flagos.current_device()
+        elif not isinstance(device, int):
+            index = torch.device(device).index
+            device = flagos.current_device() if index is None else index
+        previous = flagos.current_device()
+        restore = device != previous
+        if restore:
+            flagos.set_device(device)
+        try:
+            free = ctypes.c_size_t(0)
+            total = ctypes.c_size_t(0)
+            status = _musa_mem_get_info()(ctypes.byref(free), ctypes.byref(total))
+            if status != 0:
+                raise RuntimeError(
+                    f"musaMemGetInfo failed on MUSA device {device} (error {status})"
+                )
+            return free.value, total.value
+        finally:
+            if restore:
+                flagos.set_device(previous)
+
+    musa.mem_get_info = _mem_get_info
+
+    def _get_rng_state_all():
+        return [flagos.get_rng_state(index) for index in range(flagos.device_count())]
+
+    def _set_rng_state_all(states):
+        for index, state in enumerate(states):
+            flagos.set_rng_state(state, index)
+
+    musa.get_rng_state_all = _get_rng_state_all
+    musa.set_rng_state_all = _set_rng_state_all
+
+    # transformers' Trainer reads these off `torch.<device>.random`, not off the
+    # device module itself.
+    musa.random = types.ModuleType("torch.musa.random")
+    musa.random.get_rng_state = flagos.get_rng_state
+    musa.random.set_rng_state = flagos.set_rng_state
+    musa.random.get_rng_state_all = _get_rng_state_all
+    musa.random.set_rng_state_all = _set_rng_state_all
+
+    # torch.cuda.amp's entry points, bound to the real autocast/GradScaler
+    # implementations under this backend's registered device name.
+    musa.amp = types.ModuleType("torch.musa.amp")
+    musa.amp.autocast = functools.partial(torch.amp.autocast, "flagos")
+    musa.amp.GradScaler = functools.partial(torch.amp.GradScaler, "flagos")
+    musa.amp.custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="flagos")
+    musa.amp.custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="flagos")
+
+    # `torch_musa` lands `Module.musa` the way the CUDA build lands `Module.cuda`,
+    # and accelerate's `dispatch_model` reads it off the model unconditionally on
+    # its MUSA branch. `generate_methods_for_privateuse1_backend` above produced
+    # the same wrapper under this backend's real name, so alias it rather than
+    # write a second mover.
+    torch.nn.Module.musa = torch.nn.Module.flagos
+
+    musa.__spec__ = importlib.machinery.ModuleSpec(
+        name="torch.musa", loader=None, origin="torch_fl_shim"
+    )
+    torch.musa = musa
+
+    # FlagTree's MThreads benchmark helper allocates its cache with the literal
+    # device name "musa" while running under a context that bypasses
+    # TorchFunctionMode. Stock PyTorch cannot parse that vendor device name, so
+    # translate this one factory call to the renamed PrivateUse1 backend.
+    original_empty = torch.empty
+
+    def _musa_empty(*args, **kwargs):
+        device = kwargs.get("device")
+        if isinstance(device, str) and (device == "musa" or device.startswith("musa:")):
+            suffix = device[4:]
+            kwargs = {**kwargs, "device": f"flagos{suffix}"}
+        return original_empty(*args, **kwargs)
+
+    torch.empty = _musa_empty
+
+    if "torch_musa" not in sys.modules:
+        # Preserve access to the installed package's distributed submodule for
+        # MCCL fallback without importing torch_musa.__init__, which would claim
+        # the process-global PrivateUse1 hooks before torch_fl can own them.
+        search_locations = None
+        try:
+            spec = importlib.util.find_spec("torch_musa")
+        except (ImportError, ValueError):
+            spec = None
+        if spec is not None:
+            search_locations = spec.submodule_search_locations
+        torch_musa = types.ModuleType("torch_musa")
+        torch_musa.current_device = flagos.current_device
+        torch_musa.set_device = flagos.set_device
+        torch_musa.current_stream = flagos.current_stream
+        torch_musa.get_device_properties = flagos.get_device_properties
+        torch_musa.get_device_name = musa.get_device_name
+        torch_musa.get_device_capability = musa.get_device_capability
+        torch_musa._MUSAC = types.SimpleNamespace(
+            _musa_getCurrentRawStream=flagos._C._get_musa_current_raw_stream
+        )
+        torch_musa.musa = musa
+        torch_musa.__path__ = list(search_locations or ())
+        torch_musa.__spec__ = importlib.machinery.ModuleSpec(
+            name="torch_musa",
+            loader=None,
+            origin="torch_fl_shim",
+            is_package=True,
+        )
+        torch_musa.__spec__.submodule_search_locations = torch_musa.__path__
+        sys.modules["torch_musa"] = torch_musa
+
+    # ProcessGroupMCCL may already be registered by a linked vendor library.
+    # Publishing it through the shim keeps process_group.py's fallback lookup
+    # useful even when importing torch_musa.distributed itself is unavailable.
+    mccl_cls = getattr(torch.distributed, "ProcessGroupMCCL", None)
+    if mccl_cls is not None and "torch_musa.distributed" not in sys.modules:
+        distributed = types.ModuleType("torch_musa.distributed")
+        distributed.ProcessGroupMCCL = mccl_cls
+        distributed.__spec__ = importlib.machinery.ModuleSpec(
+            name="torch_musa.distributed", loader=None, origin="torch_fl_shim"
+        )
+        sys.modules["torch_musa.distributed"] = distributed
+        sys.modules["torch_musa"].distributed = distributed
+
+
+# FlagGems operators registered for the flagos device. Always empty: the Python
+# registration layer is gone and everything dispatches through the C++ stub path,
+# so this exists only to back get_registered_ops() / is_flaggems_enabled().
+
+
+def _install_tsingmicro_flaggems_compat() -> None:
+    """Expose the ``torch.txda`` surface FlagGems' TSINGMICRO backend needs.
+
+    Only built for a TsingMicro wheel that routes at least one op to FlagGems
+    (``backends_tsingmicro.conf`` is entirely ``flagos_python``), and inert
+    otherwise, mirroring the MUSA shim above.
+
+    torch_fl must NOT import ``torch_txda``: that package hard-links its own
+    ``libtorch.so``/``libtorch_cpu.so`` and is ABI-bound to the vendor's torch
+    minor, so it fails at import on any other torch line
+    (``undefined symbol: c10::TensorImpl::compute_strides_like_channels_last_3d``
+    on 2.10) -- and it would additionally claim the process-global PrivateUse1
+    key as ``txda``, colliding with torch_fl's ``flagos``. FlagGems only needs a
+    few attributes off ``torch.txda`` for its device discovery, device guard and
+    Triton launch, so synthesize exactly those from ``torch_fl.flagos`` -- the
+    same surface, backed by the TX runtime torch_fl already owns.
+    """
+    if _build_accelerator() != "tsingmicro" or not _conf_routes_to_flaggems():
+        return
+
+    import importlib.machinery
+    import types
+
+    txda = types.ModuleType("torch.txda")
+
+    # Straight proxies to the flagos device module.
+    for name in (
+        "device",
+        "device_count",
+        "current_device",
+        "set_device",
+        "synchronize",
+        "is_available",
+        "get_device_properties",
+        "current_stream",
+        "stream",
+        "Stream",
+        "Event",
+        "default_generators",
+        "empty_cache",
+        "mem_get_info",
+        "memory_allocated",
+        "memory_reserved",
+        "manual_seed",
+        "initial_seed",
+        "get_rng_state",
+        "set_rng_state",
+    ):
+        value = getattr(flagos, name, None)
+        if value is not None:
+            setattr(txda, name, value)
+
+    # flag_gems' codegen config and its Triton launch grid read
+    # `.multi_processor_count` / `.major` / `.minor` off the object, and
+    # torch_fl.flagos._DeviceProperties supplies name/total_memory already.
+    def _get_device_capability(device=None):
+        if device is None:
+            device = flagos.current_device()
+        props = flagos.get_device_properties(device)
+        return props.major, props.minor
+
+    txda.get_device_capability = _get_device_capability
+    txda.get_device_name = lambda device=None: (
+        flagos.get_device_properties(
+            flagos.current_device() if device is None else device
+        ).name
+    )
+
+    # triton.backends.tsingmicro.driver imports torch_txda at module scope, a
+    # requirement torch_fl deliberately does not satisfy. Publish a STUB under
+    # that name so the import succeeds and returns the same torch.txda object;
+    # the driver then only ever reads torch.txda.{current_device,set_device,
+    # current_stream,is_available}, which this shim provides.
+    if "torch_txda" not in sys.modules:
+        stub = types.ModuleType("torch_txda")
+        stub.torch = torch
+        stub.txda = txda
+        stub.__getattr__ = lambda name: getattr(torch.txda, name)
+        stub.__spec__ = importlib.machinery.ModuleSpec(
+            name="torch_txda", loader=None, origin="torch_fl_shim"
+        )
+        sys.modules["torch_txda"] = stub
+
+    txda.__spec__ = importlib.machinery.ModuleSpec(
+        name="torch.txda", loader=None, origin="torch_fl_shim"
+    )
+    torch.txda = txda
+
+    # Qwen-Image-2.1's rope puts a complex64 operand on the device, and FlagGems'
+    # Triton kernels have no complex pointer type for the cat/mul it feeds. Patch
+    # the rotation to stay real-valued. Inert when diffusers or the 2.1
+    # transformer is absent, and skippable via FLAGOS_DISABLE_QWENIMAGE_ROPE.
+    from torch_fl.accelerator.tsingmicro._tsingmicro_compat import (
+        patch_diffusers_qwenimage21_rope,
+    )
+
+    patch_diffusers_qwenimage21_rope()
+
+
+_registered_ops = []
+
+
+def _patch_flaggems_philox():
+    """Route MUSA FlagGems RNG reservations through the flagos generator.
+
+    Native muRAND/mudnn kernels and this bridge both consume one 64-bit seed per
+    stochastic operation from the selected PrivateUse1 generator. FlagGems then
+    starts its per-operation Philox stream at offset zero. This keeps
+    manual_seed/get_rng_state/set_rng_state and mixed native/FlagGems call order
+    deterministic without maintaining a second CUDA-style generator state.
+    """
+    if (
+        _build_accelerator() not in ("musa", "tsingmicro")
+        or not _conf_routes_to_flaggems()
+    ):
+        return
+
+    try:
+        # Import the *package* first, then the submodule. ``flag_gems.utils.
+        # random_utils`` does ``import flag_gems`` at module scope, and
+        # ``flag_gems/__init__.py`` imports ``flag_gems.ops``, which imports
+        # ``random_utils`` back -- so entering through the submodule runs that
+        # cycle with ``random_utils`` half-built and raises ImportError. The
+        # package entry point has ``random_utils`` already loaded by then and
+        # completes.
+        #
+        # This is not merely "the bridge fails to install". A failed import
+        # leaves the submodules that *did* load in ``sys.modules`` while
+        # removing ``flag_gems`` itself, so every one of them keeps a reference
+        # to the abandoned half-initialised package object. The next
+        # ``import flag_gems`` (the dispatcher's, on first op) builds a fresh
+        # module with ``vendor_name`` set, but those stale bindings still read
+        # the orphan -- and FlagGems' own ``tensor_wrapper``/``pointwise_dynamic``
+        # read ``flag_gems.vendor_name``, so ops that go through them (``cat``
+        # among them) die with ``module 'flag_gems' has no attribute
+        # 'vendor_name'``.
+        import flag_gems  # noqa: F401
+        from flag_gems.utils import random_utils
+
+        _orig = random_utils.philox_backend_seed_offset
+
+        def _patched(increment, generator=None):
+            if generator is None:
+                device = random_utils.torch_device_fn.current_device()
+                seed = flagos._C._reserve_rng_seed(device)
+            else:
+                generator_device = getattr(generator, "device", None)
+                if getattr(generator_device, "type", None) not in (
+                    "flagos",
+                    "privateuseone",
+                ):
+                    return _orig(increment, generator=generator)
+                device = generator_device.index
+                if device is None:
+                    device = random_utils.torch_device_fn.current_device()
+                seed = flagos._C._reserve_rng_seed(device, generator)
+
+            # FlagGems obtains CUDA generator seeds through an int64 state tensor.
+            # Preserve those signed bit semantics when the reserved uint64 has its
+            # high bit set.
+            if seed >= 1 << 63:
+                seed -= 1 << 64
+            return seed, 0
+
+        # Bind the canonical module first. The sweep below is best-effort; every
+        # module it fails to reach still falls back to this one through
+        # `random_utils`, so the bridge must never be skipped because the sweep
+        # was interrupted.
+        random_utils.philox_backend_seed_offset = _patched
+
+        # RNG modules bind this function with ``from ... import`` at import time,
+        # so update every already-loaded copy as well as the canonical module.
+        # Match on the bound object rather than on the module name: FlagGems
+        # republishes each vendor backend's op tree under the package-level names
+        # (`flag_gems.randn` is `_mthreads.ops.randn.randn` on MUSA), and those
+        # modules are named `_mthreads.ops.*`, not `flag_gems.*`. A name filter
+        # silently skips them and the vendor kernel reaches the unpatched
+        # function, whose `state_copy.view(torch.int64)` unpacks the flagos
+        # generator's MT19937 state into two variables and raises ValueError.
+        #
+        # Nothing about foreign modules may abort the sweep. ``sys.modules``
+        # holds modules with a module-level ``__getattr__`` that runs arbitrary
+        # code and raises on a missing optional dependency — transformers'
+        # lazy image-processor modules raise ``ModuleNotFoundError: No module
+        # named 'torchvision'`` — and it also holds non-module entries such as
+        # ``torch.ops``. The namespace is therefore read from ``__dict__``,
+        # which neither consults ``__getattr__`` nor depends on the entry being
+        # a module, and every step is isolated so one bad entry costs one module
+        # rather than the whole bridge. Which modules are loaded when torch_fl's
+        # import runs depends on the host's installed packages: a bare
+        # interpreter has no lazy transformers modules loaded and the sweep
+        # completes, while a pytest process that imported transformers first does
+        # and the sweep used to die at the first of them, leaving every
+        # ``randn``/``rand``/``randperm`` on the failure path above.
+        for mod in list(sys.modules.values()):
+            try:
+                namespace = vars(mod)
+                if namespace.get("philox_backend_seed_offset") is not _orig:
+                    continue
+                namespace["philox_backend_seed_offset"] = _patched
+            except Exception:
+                continue
+    except Exception:
+        # FlagGems remains optional; native MUSA kernels stay available.
+        pass
+
+
+def _patch_flaggems_layer_norm_backward() -> None:
+    """Correct flag_gems' layer-norm backward for inputs above 2-D.
+
+    flag_gems' wrapper derives the reduced-row count from ``input.shape[0]``:
+
+        M = input.shape[0]
+        N = input.numel() // M
+
+    That is only the row count for a 2-D input. On a 3-D transformer tensor
+    ``shape[0]`` is the batch size, so the dX kernel's grid is short by the
+    sequence length and the weight/bias reduction sums the wrong number of
+    rows. Measured on A100 (flag_gems 5.4.0, no boxing kernels compiled, so
+    ``native_layer_norm_backward`` can only route to the FlagGems Python path):
+    for a (13, 7, 32) input with a ones/zeros affine the bias gradient must be
+    the constant 91.0 and comes back with max 13.0 -- exactly ``shape[0]``.
+    The error is large, not a rounding artifact (dX off by 4.96, dbeta by 96.5)
+    and it makes the result non-reproducible: 40 identical forward/backward
+    passes over one frozen BERT gave 23 distinct losses, while vendor CUDA
+    torch on the same box gave 1.
+
+    The kernels are correct for a 2-D input -- the 2-D case is bit-exact -- so
+    the fix is to feed the existing wrapper a contiguous (M, N) view, which
+    makes its own M/N derivation right, and reshape dX back. That relies only
+    on the 2-D contract the wrapper already satisfies, rather than restating
+    its kernel launch code here, so it keeps working as flag_gems evolves.
+
+    Cross-platform: this is a flag_gems defect, not a CUDA one, but it is
+    deliberately not applied to every platform. Only the routing decides
+    whether the op reaches this wrapper at all, and a platform whose conf keeps
+    ``native_layer_norm_backward`` on its own kernels (metax, dcu, ppu, ascend)
+    never calls it. Installing it unconditionally would replace a correct
+    vendor kernel with the patched gems one on those platforms, which is a
+    behaviour change this evidence does not cover. The gate is therefore the
+    same one the other flag_gems patches use -- some op in the selected conf
+    routes to a FlagGems path -- and it is a no-op wherever the op is not
+    routed there.
+
+    Remove this once the wrapper computes M from ``normalized_shape`` itself.
+    """
+    if not _conf_routes_to_flaggems():
+        return
+    if _build_accelerator() not in ("cuda", "", "ppu", "musa", "tsingmicro"):
+        return
+
+    try:
+        import math
+
+        import flag_gems
+        import flag_gems.ops.layernorm as _layernorm
+
+        _orig = flag_gems.layer_norm_backward
+
+        def _patched(
+            grad_out,
+            input,
+            normalized_shape,
+            mean,
+            rstd,
+            weight=None,
+            bias=None,
+            output_mask=None,
+        ):
+            if input.dim() <= 2:
+                return _orig(
+                    grad_out,
+                    input,
+                    normalized_shape,
+                    mean,
+                    rstd,
+                    weight,
+                    bias,
+                    output_mask,
+                )
+            shape = tuple(input.shape)
+            n = math.prod(normalized_shape)
+            m = input.numel() // n
+            dx, dweight, dbias = _orig(
+                grad_out.reshape(m, n),
+                input.reshape(m, n),
+                [n],
+                mean,
+                rstd,
+                weight,
+                bias,
+                output_mask,
+            )
+            if dx is not None:
+                dx = dx.reshape(shape)
+            return dx, dweight, dbias
+
+        # The generated kernel calls the package-level name
+        # ("flag_gems.layer_norm_backward" in flaggems_python_kernels.cc) and
+        # resolves it on first use, so patch both bindings before any op runs.
+        flag_gems.layer_norm_backward = _patched
+        _layernorm.layer_norm_backward = _patched
+    except Exception:
+        # FlagGems remains optional; a missing or renamed entry point must not
+        # make torch_fl unimportable.
+        pass
+
+
+def _restore_dcu_hip_version() -> None:
+    """Set torch.version.hip/rocm for a self-contained DCU wheel.
+
+    See the DCU branch of _patch_flaggems_codegen_config() for why this matters:
+    the bundled libtorch is DTK's HIP build, but torch/version.py comes from the
+    stock torch+cpu wheel in front and reports hip=None, which switches triton's
+    hcu backend off. scripts/vendor/bundle_dcu_libtorch.sh copies the vendor torch's own
+    version.py next to the bundled .so as vendor_version.py; read the strings
+    back from there. No-op when a real vendor torch is in front.
+    """
+    import torch
+
+    if getattr(torch.version, "hip", None):
+        return  # a real DTK torch is in front; leave its values alone.
+
+    hip_ver = _env.value("FLAGOS_DCU_HIP_VERSION", "")
+    rocm_ver = ""
+    if not hip_ver:
+        ver_py = os.path.join(os.path.dirname(__file__), "lib_dcu", "vendor_version.py")
+        try:
+            with open(ver_py, encoding="utf-8") as f:
+                for line in f:
+                    m = re.match(r"\s*hip\s*(?::[^=]*)?=\s*'([^']+)'", line)
+                    if m:
+                        hip_ver = m.group(1)
+                        continue
+                    m = re.match(r"\s*rocm\s*(?::[^=]*)?=\s*'([^']+)'", line)
+                    if m:
+                        rocm_ver = m.group(1)
+        except OSError:
+            return  # not a bundled build (source checkout); nothing to restore.
+    if hip_ver:
+        torch.version.hip = hip_ver
+        if rocm_ver:
+            torch.version.rocm = rocm_ver
+
+
+def _patch_flaggems_codegen_config():
+    """
+    Configure FlagGems' vendor + torch.cuda shim for the flagos device.
+
+    FlagGems uses GEMS_VENDOR env var to detect the hardware vendor.
+
+    - Generic NVIDIA CUDA (default when a real NVIDIA GPU is reachable via
+      libcuda.so and MetaX compat is not requested): set GEMS_VENDOR=nvidia and
+      shim torch.cuda so FlagGems' Triton kernels can compile/run under CPU
+      torch + external libtorch_cuda.so. GEMS_VENDOR=nvidia is REQUIRED so
+      FlagGems' tl_extra_shim resolves triton.language.extra.cuda.libdevice
+      (which has `pow`); otherwise it falls back to tl.math (no `pow`).
+      Disable with FLAGOS_DISABLE_CUDA_SHIM=1.
+
+    - MetaX (boxing + FlagGems): set GEMS_VENDOR=metax so FlagGems uses the
+      MetaX codegen config (triton-metax backend, prefer_block_pointer=False to
+      avoid the triton-metax block-pointer bug), and patch torch.cuda (device
+      props + stream/availability) so FlagGems' Triton kernels run on the
+      CPU-frozen torch wheel against maca's libtorch_cuda.so. Auto-selected on a
+      MetaX build or with FLAGOS_METAX_COMPAT=1 when a MetaX
+      card is present.
+
+    - Hygon DCU (DTK): set GEMS_VENDOR=hygon so FlagGems uses its _hygon
+      codegen config (triton hcu backend, triton_extra_name="hip"). No
+      torch.cuda shim is needed -- DTK ships a hipified torch with a real,
+      working torch.cuda. This branch must precede the generic-NVIDIA one:
+      is_nvidia_cuda_available() is False on DTK (there is no libcuda.so, only
+      libgalaxyhip), so without it DCU would reach the ascend fallback and get
+      GEMS_VENDOR=ascend -- which also breaks the comm layer, since that vendor
+      selects the HCCL profile (see comm/process_group.py _VENDOR_PROFILES).
+
+    - Ascend: set GEMS_VENDOR=ascend so FlagGems uses the ASCEND codegen
+      config (prefer_block_pointer=False, avoiding the Ascend Triton backend's
+      tl.make_block_ptr bug), and register torch.flagos as a torch.npu shim so
+      FlagGems' gen_torch_device_object('ascend') resolves correctly. This
+      branch is taken only for an Ascend build or an explicit
+      GEMS_VENDOR=ascend; any other accelerator reaching this point had vendor
+      detection fail, which raises rather than silently selecting Ascend.
+
+    - Iluvatar (corex): set GEMS_VENDOR=iluvatar so FlagGems uses its _iluvatar
+      codegen tree. Iluvatar is FlagGems-primary -- every covered op routes to
+      flaggems in backends_iluvatar.conf and nothing boxes to CUDA. The branch
+      must precede the generic-NVIDIA one: corex's runtime is CUDA-shaped, so a
+      runtime probe cannot separate iluvatar from a real NVIDIA GPU and
+      GEMS_VENDOR=nvidia would select FlagGems' NVIDIA backend instead.
+    """
+    import os
+    import sys
+
+    # An explicitly exported GEMS_VENDOR that torch_fl cannot configure is a
+    # mistake to surface now, not to hand to FlagGems and the comm layer: the
+    # branches below would leave it in place (set_foreign never overrides an
+    # explicit export) and the failure would appear as a wrong-vendor crash
+    # later. Unknown values raise; unset/blank returns None.
+    _explicit_vendor = _vendor.validate_explicit(os.environ.get("GEMS_VENDOR"))
+
+    # --- Apple MPS branch ---
+    # The Metal backend ships no FlagGems route at all (the platform table turns
+    # FLAGOS_BUILD_FLAGGEMS off and backends_mps.conf is empty; there is no Metal
+    # Triton line to build against), so there is no vendor to name and no codegen
+    # config to patch. Keyed on the build accelerator because, unlike every other
+    # branch below, MPS has no vendor runtime probe that could have failed --
+    # reaching the ascend fallback would mislabel the vendor and abort the import.
+    if _build_accelerator() == "mps":
+        return
+
+    # --- Moore Threads MUSA branch ---
+    if _build_accelerator() == "musa":
+        _env.set_foreign("GEMS_VENDOR", "mthreads")
+        return
+
+    # --- Kunlunxin XPU branch (native vendor kernels) ---
+    # Keyed on the build accelerator, like MUSA. The de-boxed Kunlunxin wheel
+    # talks to the vendor SDK (libxpurt + xdnn_pytorch) over the flagos
+    # PrivateUse1 device rather than the CUDA key, so the generic NVIDIA branch
+    # below must not claim it: its CUDA shim reports itself available through the
+    # vendor's CUDA-compatible runtime headers and then installs CUDA-backed
+    # generators, rebinding torch.flagos.get_rng_state/set_rng_state onto
+    # torch.Generator(device="cuda") -- which this CPU wheel cannot construct
+    # ("Cannot get CUDA generator without ATen_cuda library"). The native
+    # torch_fl.flagos.random module (PrivateUse1-backed _C._get_default_generator)
+    # is the correct implementation and must be left in place, so this branch
+    # only labels the vendor and returns before any shim runs.
+    if _build_accelerator() == "kunlunxin":
+        _env.set_foreign("GEMS_VENDOR", "kunlunxin")
+        return
+
+    # --- MetaX branch (boxing + FlagGems) ---
+    # Auto-detects MetaX hardware (like DCU does) or triggered by explicit
+    # FLAGOS_METAX_COMPAT=1. Must come before the ascend
+    # fallback so MetaX never wrongly gets GEMS_VENDOR=ascend.
+    _metax_requested = _build_accelerator() == "metax" or _env.flag(
+        "FLAGOS_METAX_COMPAT"
+    )
+    if _metax_requested and os.environ.get("GEMS_VENDOR") not in ("nvidia", "ascend"):
+        from torch_fl.accelerator.metax._metax_compat import (
+            is_metax_available,
+            patch_torch_cuda_for_metax,
+        )
+
+        if is_metax_available():
+            _env.set_foreign("GEMS_VENDOR", "metax")
+            patch_torch_cuda_for_metax()
+            return
+
+    # --- Hygon DCU branch (DTK) ---
+    # Keyed on the build accelerator rather than probing the runtime: DTK's torch
+    # is hipified, so torch.cuda/torch.version.hip look "cuda-ish" and no
+    # libcuda.so probe can tell the two apart. Must come before both the generic
+    # NVIDIA branch (which no-ops here anyway -- no libcuda.so) and the ascend
+    # fallback. setdefault so an explicit GEMS_VENDOR still wins.
+    if _build_accelerator() == "dcu" and os.environ.get("GEMS_VENDOR") != "ascend":
+        _env.set_foreign("GEMS_VENDOR", "hygon")
+        # torch.version is pure Python (torch/version.py), generated when the
+        # wheel is built -- swapping the bundled DTK .so files cannot change it.
+        # A self-contained DCU wheel therefore front-ends a stock torch+cpu whose
+        # torch.version.hip is None, while the DTK torch it replaces reports
+        # e.g. "6.3.26113". triton's hcu backend gates on exactly that value
+        # (backends/hcu/driver.py is_active(): torch.cuda.is_available() and
+        # torch.version.hip is not None), so with None the driver never activates
+        # and any flag_gems op dies in triton's driver factory with
+        # "0 active drivers ([]). There should only be one." Restore the attribute
+        # from the bundled libtorch's own version so triton sees a HIP torch,
+        # matching what the vendor wheel reported.
+        _restore_dcu_hip_version()
+        from torch_fl.accelerator.dcu._dcu_compat import (
+            install_dcu_rng_bridge,
+            patch_torch_cuda_for_dcu,
+        )
+
+        # Order matters. A decoupled DCU wheel runs on the official torch+cpu
+        # wheel, whose torch.cuda reports is_available()=False and raises from
+        # _lazy_init() ("Torch not compiled with CUDA enabled") -- the other half
+        # of triton's hcu gate, alongside the torch.version.hip restored above. So
+        # patch torch.cuda first (a no-op when a real DTK torch is in front), then
+        # bridge the flagos RNG onto the CUDA generators it now exposes.
+        patch_torch_cuda_for_dcu()
+        install_dcu_rng_bridge()
+        return
+
+    # --- TsingMicro branch ---
+    # Keyed on the build accelerator: the TX8 host has no libcuda.so and no
+    # /dev/davinci*, so without this branch the vendor falls through to the
+    # ascend fallback below and gets GEMS_VENDOR=ascend. flag_gems picks its
+    # backend from that variable, and only TSINGMICRO resolves the torch.txda
+    # device object the shim above publishes -- so the fallback does not merely
+    # mislabel the vendor, it makes device discovery fail outright.
+    if (
+        _build_accelerator() == "tsingmicro"
+        and os.environ.get("GEMS_VENDOR") != "ascend"
+    ):
+        os.environ.setdefault("GEMS_VENDOR", "tsingmicro")
+        return
+
+    # --- Enflame GCU branch ---
+    # Keyed on the build accelerator for the same reason as DCU: no runtime probe
+    # distinguishes GCU here, and the tops stack has no libcuda.so, so without
+    # this branch GCU would reach the ascend fallback and get GEMS_VENDOR=ascend
+    # (which also picks the wrong comm profile). FlagGems' Triton kernels need a
+    # vendor Triton backend for the GCU -- FlagTree's enflame backend, or
+    # Enflame's older triton_gcu plugin with its /opt/triton_gcu toolchain. If
+    # neither is installed, patch_gcu_triton_for_flagos() returns False and we
+    # leave GEMS_VENDOR unset so the topsaten kernels and cpu_fallback stay in
+    # charge.
+    if _build_accelerator() == "gcu" and os.environ.get("GEMS_VENDOR") != "ascend":
+        from torch_fl.accelerator.gcu._gcu_compat import (
+            install_gcu_rng_generators,
+            patch_diffusers_qwenimage_rope,
+            patch_gcu_triton_for_flagos,
+        )
+
+        install_gcu_rng_generators()
+        if patch_gcu_triton_for_flagos():
+            _env.set_foreign("GEMS_VENDOR", "enflame")
+        # diffusers keys the Qwen-Image rotation on device type, so without this a
+        # flagos tensor multiplies by a complex exponential the topsaten stack
+        # serves slowly -- 57.5% of a transformer forward against 34.0% for the
+        # real-valued entry diffusers provides for a device with no complex dtype.
+        # It has to run here rather than at the call site: the operand half is
+        # cached per device on first use, and this is the last point that is
+        # reliably before the pipeline exists. Costs a diffusers import -- the
+        # call is a no-op when diffusers is not installed.
+        patch_diffusers_qwenimage_rope()
+        return
+
+    # --- Iluvatar branch ---
+    # Keyed on the build accelerator for the same reason as DCU: the vendor torch
+    # is a real CUDA build over corex's CUDA-shaped runtime, so
+    # is_nvidia_cuda_available() can report True and the generic-NVIDIA branch
+    # below would claim the platform with GEMS_VENDOR=nvidia -- selecting
+    # FlagGems' NVIDIA backend instead of _iluvatar. No runtime probe distinguishes
+    # the two, so the build record is the only authoritative key.
+    if _build_accelerator() == "iluvatar":
+        _env.set_foreign("GEMS_VENDOR", "iluvatar")
+        # FlagGems' _iluvatar descriptor is a copy of its NVIDIA one, so it reads
+        # torch.cuda directly in two places the CPU wheel does not back: the
+        # philox generators behind every generator-less RNG op, and the device
+        # name every op compares its input against.
+        from torch_fl.accelerator.iluvatar._ilu_compat import (
+            _ensure_corex_headers_on_path,
+            install_ilu_cuda_shim,
+            install_ilu_rng_generators,
+            patch_iluvatar_flag_gems_device_name,
+            patch_triton_benchmark_allocator,
+        )
+
+        _ensure_corex_headers_on_path()
+        install_ilu_cuda_shim()
+        install_ilu_rng_generators()
+        # Triton's autotuner flushes the L2 with a buffer it allocates on
+        # "cuda", which this build does not have; without this every autotuned
+        # kernel (layernorm among them) fails before it is benchmarked.
+        try:
+            patch_triton_benchmark_allocator()
+        except Exception:
+            pass
+        try:
+            import flag_gems  # noqa: F401
+        except Exception:
+            pass
+        else:
+            try:
+                patch_iluvatar_flag_gems_device_name()
+            except Exception:
+                pass
+        return
+
+    # --- Generic NVIDIA CUDA branch (default) ---
+    if (
+        not _env.flag("FLAGOS_DISABLE_CUDA_SHIM")
+        and not _env.flag("FLAGOS_METAX_COMPAT")
+        and _build_accelerator() != "metax"
+        and os.environ.get("GEMS_VENDOR") != "ascend"
+    ):
+        from torch_fl.accelerator.cuda._cuda_compat import (
+            is_nvidia_cuda_available,
+            patch_torch_cuda_for_flagos,
+        )
+
+        if is_nvidia_cuda_available():
+            _env.set_foreign("GEMS_VENDOR", "nvidia")
+            # patch_torch_cuda_for_flagos installs per-device CUDA generators as
+            # torch.cuda.default_generators and routes cuda seeding to them, so
+            # flag_gems' philox_backend_seed_offset finds a real, seedable
+            # generator on its own -- no philox monkeypatch needed.
+            patch_torch_cuda_for_flagos()
+            return
+
+    # --- Ascend branch, or the detection-failure guard ---
+    # An explicit GEMS_VENDOR that reached this far names a vendor none of the
+    # branches above claimed. Honor it (set_foreign could not override it) and
+    # do not install the Ascend shims for a vendor that is not Ascend.
+    if _explicit_vendor is not None and _explicit_vendor != "ascend":
+        return
+
+    # BPU has no FlagGems path at all (its kernels are whole compiled graphs),
+    # and FLAGOS_DISABLE_CUDA_SHIM=1 is an explicit opt-out of vendor shimming:
+    # both leave GEMS_VENDOR unset rather than claiming the Ascend config.
+    if _build_accelerator() == "bpu" or _env.flag("FLAGOS_DISABLE_CUDA_SHIM"):
+        return
+
+    # Ascend is the only remaining legitimate user of the Ascend codegen config.
+    # Any other accelerator here means vendor detection failed with GEMS_VENDOR
+    # unset -- the silent-ascend fallback this replaces. Fail loud: the previous
+    # behavior handed FlagGems the wrong vendor and surfaced the breakage far
+    # from its cause (a CUDA wheel with no reachable GPU, a MetaX wheel with no
+    # card). An explicit GEMS_VENDOR=ascend still selects this branch.
+    if _build_accelerator() != "ascend" and _explicit_vendor != "ascend":
+        raise RuntimeError(
+            f"FlagGems vendor detection failed for FLAGOS_ACCELERATOR="
+            f"{_build_accelerator()!r}: no vendor runtime was reachable and "
+            f"GEMS_VENDOR is unset. Set GEMS_VENDOR to one of "
+            f"{sorted(_vendor.KNOWN_VENDORS)} to select a vendor explicitly."
+        )
+
+    # Set vendor before FlagGems runtime initializes
+    _env.set_foreign("GEMS_VENDOR", "ascend")
+
+    # FlagGems' RNG ops (rand/randn/uniform_/exponential_/bernoulli_/
+    # multinomial/native_dropout) unpack the generator state as a CUDA philox
+    # (seed, offset) pair. torch_fl's flagos generator is a CPU mt19937, so
+    # install per-device philox state objects for them -- the same bridge GCU
+    # uses, and for the same reason. Must run before the torch.npu shim below,
+    # which copies default_generators off the flagos module.
+    from torch_fl.accelerator.ascend._ascend_compat import (
+        install_ascend_rng_generators,
+    )
+
+    install_ascend_rng_generators()
+
+    # FlagGems' ASCEND backend expects torch.npu to exist (device_name="npu").
+    # Provide torch.flagos as a shim so gen_torch_device_object() succeeds.
+    # Mark is_available()=False so transformers/accelerate don't think real
+    # NPU hardware is present and try to import npu_fusion_attention etc.
+    if not hasattr(torch, "npu"):
+        import types
+
+        _npu_device_shim = types.ModuleType("torch.npu")
+        _npu_device_shim.is_available = lambda: False
+        _npu_device_shim.device_count = flagos.device_count
+        _npu_device_shim.current_device = flagos.current_device
+        _npu_device_shim.set_device = flagos.set_device
+        _npu_device_shim.synchronize = flagos.synchronize
+        _npu_device_shim.device = flagos.device
+        _npu_device_shim.Stream = flagos.Stream
+        _npu_device_shim.Event = flagos.Event
+        _npu_device_shim.current_stream = flagos.current_stream
+        _npu_device_shim.default_generators = flagos.default_generators
+        # FlagGems' utils/triton_driver_helper.py captures
+        # torch_device_fn.get_device_properties at import time and falls back to
+        # triton's driver on AttributeError -- and the Ascend backend's version
+        # returns a plain dict, so gems' `get_device_properties(idx).multi_processor_count`
+        # raises AttributeError deep inside a kernel launch. cumsum hit this on the
+        # (1, 151936) logits of Qwen3's sampler, failing every generate() on the
+        # gems path while smaller shapes took a branch that never queried it.
+        _npu_device_shim.get_device_properties = flagos.get_device_properties
+        torch.npu = _npu_device_shim
+
+    # The Ascend Triton backend (FlagTree and triton-ascend alike) imports
+    # torch_npu in _get_vendor_from_quick_cmd. Provide a minimal shim module so
+    # the import doesn't fail.
+    # Also set __spec__ to satisfy importlib.util.find_spec() checks (used by
+    # accelerate.utils.imports.is_npu_available).
+    # backend_register.py also checks torch_npu._C for stream APIs.
+    if "torch_npu" not in sys.modules:
+        import types
+        import importlib.machinery
+
+        _npu_shim = types.ModuleType("torch_npu")
+        _npu_shim.npu = _npu_device_shim
+        _npu_shim.__spec__ = importlib.machinery.ModuleSpec(
+            name="torch_npu",
+            loader=None,
+            origin="torch_fl_shim",
+        )
+        # backend_register.py checks hasattr(torch_npu._C, "_npu_getCurrentRawStreamNoWait")
+        # Provide a minimal _C shim with mock stream functions
+        _npu_c_shim = types.ModuleType("torch_npu._C")
+
+        # Mock stream API - return flagos stream handle
+        def _mock_get_current_stream(device_index=0):
+            return flagos.current_stream(device_index).cuda_stream
+
+        _npu_c_shim._npu_getCurrentRawStreamNoWait = _mock_get_current_stream
+        _npu_shim._C = _npu_c_shim
+        # Marks this as torch_fl's stub rather than the real extension. The
+        # real torch_npu owns PrivateUse1 and would lock flagos out, so code
+        # that has to tell them apart (FlagTree's Ascend backend policy, which
+        # uses a torch_npu-backed implementation only if torch_npu is real)
+        # cannot go by presence or by `_C` alone.
+        _npu_shim.__torch_fl_shim__ = True
+        sys.modules["torch_npu"] = _npu_shim
+        sys.modules["torch_npu._C"] = _npu_c_shim
+
+    # diffusers keys the Qwen-Image rotary embedding on device type and knows
+    # only `cuda` (complex exponential) and `neuron` (rotation angles). An
+    # unlisted device takes the `cuda` fallback, whose operands are complex --
+    # and CANN has no complex compute at all, so `_compute_video_freqs` raises
+    # "Unsupported dtype for ACL: ComplexFloat" from the `torch.cat` over
+    # `freqs_neg`/`freqs_pos` before the first rotation is applied, and the
+    # transformer cannot run. Registering the `flagos` device in both halves of
+    # that extension point is what makes the rotation expressible on this backend.
+    #
+    # It has to run here rather than at the call site: `_get_device_freqs` caches
+    # per device on first use, so this is the last point reliably before the
+    # pipeline exists. Costs a diffusers import -- the call is a no-op when
+    # diffusers is not installed, when it has no Qwen-Image rope table, or when
+    # FLAGOS_DISABLE_QWENIMAGE_ROPE is set. See
+    # torch_fl/accelerator/ascend/_ascend_compat.py.
+    from torch_fl.accelerator.ascend._ascend_compat import (
+        patch_diffusers_qwenimage_rope,
+    )
+
+    patch_diffusers_qwenimage_rope()
+
+
+def _install_gcu_device_module_probes() -> None:
+    """Point torch.cuda's device queries at torch_fl on a GCU build.
+
+    The torch wheel here is CPU-only, but two things make torch believe a CUDA
+    device exists: torch_fl reports the flagos device through
+    `torch.cuda.is_available` (that is how FlagTree's enflame backend finds it)
+    and inductor imports `torch.cuda` to write kernels. The next CUDA call then
+    runs `_lazy_init()` and raises "Torch not compiled with CUDA enabled" -- from
+    dynamo's trace, from inductor's autotune cache, or from a Triton probe, each
+    of which the GCU lane has shown in turn.
+
+    `_alias_cuda_to_flagos` answers part of this, but only when it decides there
+    is no real CUDA, and on this lane it decides there is (a probe was flipped to
+    True by something else before the decision), so it stands down. This installs
+    the same answers unconditionally: the set a CUDA build's device module
+    provides, plus a no-op `_lazy_init` so nothing below can reach the CPU wheel's.
+
+    It deliberately leaves `torch.utils._triton` alone. Priming that module's
+    probes to False fixes the CUDA errors but hides the working FlagTree enflame
+    backend, and inductor then raises `TritonMissing` (`scheduler.create_backend`)
+    -- measured on this lane.
+
+    Called at the end of `_phase_claim`, after `torch._register_device_module
+    ("flagos", flagos)` and before `_phase_vendor_compat` and the first
+    `import flag_gems`, both of which can reach these queries. Remove once torch's
+    CUDA getters answer here without `_lazy_init` raising.
+    """
+    from torch_fl import flagos as _flagos
+
+    def device_capability(device=None):
+        properties = _flagos.get_device_properties(device)
+        return properties.major, properties.minor
+
+    torch.cuda.is_available = lambda: _flagos.device_count() > 0
+    torch.cuda.device_count = _flagos.device_count
+    torch.cuda.current_device = _flagos.current_device
+    torch.cuda.set_device = _flagos.set_device
+    torch.cuda.synchronize = _flagos.synchronize
+    torch.cuda.get_device_properties = _flagos.get_device_properties
+    torch.cuda.get_device_capability = device_capability
+    torch.cuda._lazy_init = lambda: None
+
+
+def _patch_cuda_device_context():
+    """
+    Monkey-patch torch.cuda.device to handle flagos devices.
+
+    FlagGems internally calls torch_device_fn.device(tensor.device), but when
+    tensor.device is 'flagos:0', torch.cuda.device() fails because it expects
+    a CUDA device. This patch wraps torch.cuda.device.__init__ to extract just
+    the device index from flagos/privateuseone devices.
+    """
+    _original_cuda_device_init = torch.cuda.device.__init__
+
+    def _patched_cuda_device_init(self, device):
+        # Handle flagos/privateuseone devices by extracting just the index
+        if hasattr(device, "type") and hasattr(device, "index"):
+            if device.type in ("privateuseone", "flagos"):
+                device = device.index if device.index is not None else 0
+        return _original_cuda_device_init(self, device)
+
+    torch.cuda.device.__init__ = _patched_cuda_device_init
+
+
+def _keep_device_identity_checks_working(real_device, shim):
+    """Repair the two torch registries that compare against ``torch.device``.
+
+    Rebinding ``torch.device`` to a Python class (above) is invisible to almost
+    everything -- ``isinstance`` still works, and every consumer that only
+    *calls* it gets a genuine device back. Two places compare the attribute by
+    identity instead, and both silently change behaviour:
+
+    ``torch.fx.graph.add_global`` carves out ``obj != torch.device`` so that a
+    device constant is emitted as the bare name ``device(type='cpu')`` and
+    resolved through the ``device`` custom builtin. With the attribute swapped,
+    the real device class no longer equals it, so the branch falls through to
+    the qualified-name HACK path meant for custom ops -- the name is never added
+    to the module's globals, and the generated forward dies with
+    ``NameError: name 'device' is not defined`` the moment it runs. It is
+    ``torch.arange(..., device=x.device)`` that emits such a constant, which is
+    how every HF model builds its position ids, so this took out essentially
+    every transformer under ``torch.compile``.
+
+    ``torch._dynamo.utils.common_constant_types`` holds the types Dynamo may
+    wrap as a ``ConstantVariable``, and it is tested with ``type(obj) in ...``.
+    Reading ``tensor.device`` while tracing then asserts with "Cannot construct
+    ``ConstantVariable`` for value of type ``torch.device``".
+
+    Both registries are keyed on objects rather than rebuilt per call, so they
+    can be corrected in place once, here. Re-running this is harmless.
+    """
+    from torch.fx.graph import _register_custom_builtin
+
+    # Point the builtin at the shim: `add_global` skips the qualified-name path
+    # for anything not defined under `torch`, so the shim reaches the normal
+    # branch and the name lands in the generated module's globals. Calling it
+    # still yields a real device, which is all the generated code needs.
+    _register_custom_builtin("device", "from torch import device", shim)
+
+    # Dynamo compares `type(obj)`, and a constructed device is always the real
+    # C type whatever `torch.device` currently names -- so it is the real class
+    # that has to be in the set.
+    from torch._dynamo.utils import common_constant_types
+
+    common_constant_types.add(real_device)
+
+
+# Whether _alias_cuda_to_flagos has taken over torch.cuda, i.e. whether every
+# "cuda" this process reports is the flagos device wearing a CUDA name. Read by
+# torch_fl.flagos._stand_down_foreign_triton_drivers. Stays False on a build
+# with real CUDA, where cuda means cuda.
+_cuda_alias_active = False
+
+
+# Device strings that have to mean the flagos device on this build, keyed by
+# accelerator. "cuda" is on every row: it is the name the ecosystem hardcodes.
+# The second entry on a row is the vendor's *own* torch device name, which the
+# vendor's Triton/FlagGems integration hands to torch.device but which is not
+# registered here -- torch_fl claims PrivateUse1 as "flagos" and never imports
+# the vendor package (torch_musa / torch_txda) that would register it.
+#
+#   musa       torch_musa's device, and FlagGems' own device.name.
+#   tsingmicro FlagTree's TsingMicro Triton driver resolves its active device as
+#              torch.device("txda", ...) (triton/backends/tsingmicro/driver.py),
+#              and FlagGems' tsingmicro VendorDescriptor names the device "txda"
+#              too. That call happens at *import* of flag_gems, from Triton's
+#              hint manager, so leaving "txda" out does not merely mistype a
+#              tensor: `import flag_gems` raises and every flaggems-routed op
+#              on TsingMicro is unreachable.
+_VENDOR_DEVICE_ALIASES = {
+    "musa": ("cuda", "musa"),
+    "tsingmicro": ("cuda", "txda"),
+}
+
+# The CUDA probe as it stands when the alias decision is made: torch's own
+# answer, or the constant-True probe a CUDA-ABI vendor compat layer installed
+# (`patch_torch_cuda_for_flagos` and the MetaX/DCU equivalents), and before
+# `_alias_cuda_to_flagos` itself replaces the attribute. `_real_cuda_is_available`
+# answers from this; see the note at the assignment in `_phase_ecosystem` for
+# why neither the live attribute nor the `_flagos_original_is_available` stash
+# can be read there.
+_TORCH_CUDA_PROBE = None
+
+
+def _real_cuda_is_available() -> bool:
+    """Whether a genuine CUDA runtime is reachable through ``torch.cuda``.
+
+    That is torch's own answer on a CUDA build, and the CUDA-ABI vendor compat
+    layers' constant-True probe on a CPU torch wheel paired with the vendor's
+    externally loaded ``libtorch_cuda.so``. It is *not* the answer once torch_fl
+    itself owns the attribute: `_alias_cuda_to_flagos` writes
+    ``lambda: flagos.device_count() > 0`` and `_patch_native_cuda_probe` writes
+    ``torch.flagos.is_available``, both of which answer True on any build with a
+    flagos device, whether or not a CUDA runtime exists.
+
+    Reading the alias's own probe instead answers yes on exactly the builds the
+    alias exists for. Measured on MUSA with the redirect in place and this guard
+    reading it: nothing past the guard ran, ``torch.cuda.current_device()``,
+    ``synchronize``, ``device_count`` and ``get_device_properties`` all stayed
+    torch's, and dynamo's ``cuda_extra_check`` -- which calls
+    ``torch.cuda.current_device()`` -- landed in ``torch.cuda._lazy_init`` and
+    raised ``AssertionError: Torch not compiled with CUDA enabled``, so
+    ``torch.compile(model, fullgraph=True)`` could not compile at all.
+
+    The answer is captured while it still means that, not read live: by the time
+    anything else asks, torch_fl may own the attribute.
+    """
+    return bool(_TORCH_CUDA_PROBE())
+
+
+def _alias_cuda_to_flagos():
+    """Make ``device="cuda"`` mean the flagos device when there is no real CUDA.
+
+    Most of the PyTorch ecosystem hardcodes ``"cuda"``: ``model.cuda()``,
+    ``device_map="cuda"``, ``torch.device("cuda")`` in example scripts, and
+    ``torch.cuda.is_available()`` as the "do I have an accelerator" test. On a
+    vendor backend built without CUDA (Ascend), every one of those raises
+    ``AssertionError: Torch not compiled with CUDA enabled`` -- so code that runs
+    unmodified elsewhere has to be edited to say ``"flagos"``.
+
+    This rewrites ``cuda`` device *arguments* to the flagos device, so that
+    hardcoded-``cuda`` code lands on the accelerator that is actually present.
+
+    Deliberately a no-op when *torch* reports a CUDA device: on the CUDA and
+    boxing backends ``cuda`` already means a real device, and hijacking it there
+    would break the boxing path, which submits genuine CUDA work. Which is not
+    the same question as whether ``torch.cuda.is_available()`` says so --
+    torch_fl redirects that probe on a build without a CUDA runtime, and reading
+    the redirect here is what kept this alias uninstalled; see
+    ``_real_cuda_is_available``.
+
+    Opt out with ``FLAGOS_ALIAS_CUDA=0`` -- worth doing if you need
+    ``device="cuda"`` to keep failing loudly rather than silently redirecting.
+    """
+    if _real_cuda_is_available():
+        return
+    if not _env.flag("FLAGOS_ALIAS_CUDA", True):
+        return
+
+    # From here on, every "cuda" this process sees is this alias. Anything that
+    # treats torch.cuda as a hardware probe has to be told, because it can no
+    # longer distinguish the accelerator from a CUDA device that does not exist;
+    # see torch_fl.flagos._stand_down_foreign_triton_drivers.
+    global _cuda_alias_active
+    _cuda_alias_active = True
+
+    from torch.overrides import TorchFunctionMode
+
+    _flagos_type = torch._C._get_privateuse1_backend_name()  # "flagos"
+    _orig_device = torch.device
+
+    def _remap(dev):
+        """Vendor accelerator aliases -> flagos; everything else untouched."""
+        if isinstance(dev, str):
+            aliases = _VENDOR_DEVICE_ALIASES.get(_build_accelerator(), ("cuda",))
+            for alias in aliases:
+                if dev == alias:
+                    return _flagos_type
+                if dev.startswith(f"{alias}:"):
+                    return f"{_flagos_type}:{dev[len(alias) + 1 :]}"
+            return dev
+        if isinstance(dev, _orig_device) and dev.type == "cuda":
+            return _orig_device(_flagos_type, dev.index if dev.index is not None else 0)
+        return dev
+
+    # A TorchFunctionMode, not a wrapper around torch.device.
+    #
+    # Wrapping torch.device is not enough and was tried first: factory functions
+    # parse their `device=` argument in C++ (THPDevice / the argument parser), so
+    # `torch.randn(4, device="cuda")` never reaches a Python torch.device call and
+    # still dies in torch.cuda._lazy_init. A torch-function mode sits above the
+    # C++ parser and sees the keyword before it is resolved, which catches every
+    # factory uniformly -- randn, zeros, empty, tensor, arange, and `.to()`.
+    #
+    # Pushed permanently onto the mode stack at import. That is unusual but
+    # intended: the alias has to hold for the whole process, not a `with` block.
+    # `__torch_function__` runs on every op, so the body is kept to a dict lookup
+    # and a `str.startswith` on the miss path.
+    class _CudaAliasMode(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            dev = kwargs.get("device")
+            if dev is not None:
+                remapped = _remap(dev)
+                if remapped is not dev:
+                    kwargs = {**kwargs, "device": remapped}
+            # Positional device, as in `Tensor.to("cuda")`.
+            elif args and func is torch.Tensor.to:
+                remapped = _remap(args[1]) if len(args) > 1 else None
+                if remapped is not None and len(args) > 1 and remapped is not args[1]:
+                    args = (args[0], remapped) + args[2:]
+            return func(*args, **kwargs)
+
+    torch._C._push_on_torch_function_stack(_CudaAliasMode())
+
+    # torch.device("cuda") itself, for code that builds the device object first
+    # and only later passes it to a factory (transformers' device_map does this).
+    # torch.device is a C type and cannot be subclassed, so wrap the constructor;
+    # isinstance(x, torch.device) must keep working, hence __instancecheck__.
+    class _DeviceMeta(type):
+        def __instancecheck__(cls, obj):
+            return isinstance(obj, _orig_device)
+
+    class device(metaclass=_DeviceMeta):  # noqa: N801  (mirrors torch.device)
+        def __new__(cls, *args, **kwargs):
+            if args:
+                args = (_remap(args[0]),) + args[1:]
+            elif "device" in kwargs:
+                kwargs = {**kwargs, "device": _remap(kwargs["device"])}
+            return _orig_device(*args, **kwargs)
+
+    # Pickle saves a *class* by reference, looking it up as
+    # ``__module__.__qualname__``. Left as defined, that is
+    # ``torch_fl._alias_cuda_to_flagos.<locals>.device``, which is unreachable,
+    # so ``pickle.dumps(torch.device)`` fails with "Can't get local object".
+    # That costs more than hand-pickling a device: Inductor pickles the graph
+    # module to build its FX graph cache key, and a device constant in the graph
+    # brings this class along, so every compile hits BypassFxGraphCache ("Failed
+    # to pickle cache key") and recompiles from scratch. Naming it ``torch.device``
+    # -- which is exactly what the next line makes it -- makes that lookup find
+    # this same object, so the reference round-trips.
+    device.__module__ = "torch"
+    device.__qualname__ = "device"
+    device.__name__ = "device"
+
+    torch.device = device
+    _keep_device_identity_checks_working(_orig_device, device)
+
+    # Tensor.cuda() / Module.cuda() -> the flagos device.
+    def _tensor_cuda(self, device=None, non_blocking=False, **kwargs):
+        idx = 0
+        if device is not None:
+            d = _orig_device(_remap(device))
+            idx = d.index if d.index is not None else 0
+        return self.to(f"{_flagos_type}:{idx}", non_blocking=non_blocking)
+
+    torch.Tensor.cuda = _tensor_cuda
+
+    # `torch.cuda.is_available()` is the ecosystem's "have I got an accelerator"
+    # probe, and gating on it is what sends code down the CPU path. Report the
+    # flagos device count so that probe finds the accelerator that is there.
+    #
+    # Left alone: is_bf16_supported, get_device_capability, and the rest of
+    # torch.cuda -- the vendor shim already owns those, and overriding them here
+    # would fight it.
+    torch.cuda.is_available = lambda: flagos.device_count() > 0
+    torch.cuda.device_count = flagos.device_count
+    torch.cuda.current_device = flagos.current_device
+    torch.cuda.set_device = flagos.set_device
+    torch.cuda.synchronize = flagos.synchronize
+    # Once is_available() says yes, dynamo's CudaInterface.get_device_properties
+    # is called for every device while building compilation metrics, and the
+    # stock one goes through torch.cuda._lazy_init -> "Torch not compiled with
+    # CUDA enabled". Point it at the flagos properties instead.
+    torch.cuda.get_device_properties = flagos.get_device_properties
+
+
+def _register_flaggems_operators():
+    """
+    Prepare FlagGems for the flagos dispatch key.
+
+    No Python-layer FlagGems registration happens here: every FlagGems op is
+    dispatched through the C++ stub path, addressed per overload by
+    FLAGOS_BACKEND_CONFIG. Only the GCU runtime shims below are installed eagerly.
+    """
+    if _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY"):
+        return
+
+    import importlib.util
+
+    if importlib.util.find_spec("flag_gems") is None:
+        # flag_gems not installed, will use cpu_fallback
+        return
+
+    # GCU FlagGems uses the C++ dispatcher path. Its generated kernels are
+    # compiled when FLAGOS_BUILD_FLAGGEMS=ON and selected per overload by
+    # FLAGOS_BACKEND_CONFIG. Calling flag_gems.enable() here would register a
+    # competing PrivateUse1 implementation and bypass the shared dispatcher.
+    if _build_accelerator() == "gcu":
+        from torch_fl.accelerator.gcu._gcu_compat import is_gcu_triton_available
+
+        if not is_gcu_triton_available():
+            return
+        try:
+            import flag_gems
+
+            from torch_fl.accelerator.gcu._gcu_compat import (
+                bind_vendor_ops_in_generic_modules,
+                patch_flaggems_device_name,
+            )
+
+            patch_flaggems_device_name()
+            bind_vendor_ops_in_generic_modules(flag_gems)
+        except Exception as exc:
+            import warnings
+
+            warnings.warn(
+                f"FlagGems runtime preparation for GCU failed ({type(exc).__name__}: "
+                f"{exc}); flagos_python routes may be unavailable.",
+                stacklevel=2,
+            )
+
+
+def get_registered_ops():
+    """Return list of registered FlagGems operators for flagos device."""
+    return list(_registered_ops)
+
+
+def is_flaggems_enabled():
+    """Check if FlagGems operators are registered for flagos device."""
+    return len(_registered_ops) > 0
+
+
+# ---------------------------------------------------------------------------
+# Distributed: register "flagos" ProcessGroup backend for privateuseone
+# ---------------------------------------------------------------------------
+
+
+def _register_distributed_backend():
+    """Register ProcessGroupFlagOS as the 'flagos' torch.distributed backend.
+
+    After this call:
+      - ``torch.distributed.init_process_group("flagos")`` works
+      - ``torch.distributed.init_process_group(
+            device_id=torch.device("privateuseone:0"))`` auto-selects "flagos"
+      - All ``torch.distributed.*`` collectives work on flagos tensors without
+        any monkeypatching — the ProcessGroup itself does the view conversion.
+    """
+    from torch_fl.comm import register_flagos_backend
+
+    register_flagos_backend()
+
+
+# ---------------------------------------------------------------------------
+# DDP auto-patch: torch.nn.parallel.DistributedDataParallel
+# ---------------------------------------------------------------------------
+
+
+def _patch_ddp_for_flagos():
+    """Patch DDP to transparently support flagos (privateuseone) models.
+
+    PyTorch's C++ Reducer has CUDA-specific assertions that fail for
+    privateuseone tensors. This patch detects when the wrapped module lives on
+    a flagos device and transparently:
+      1. Forces ``python_reducer`` mode (bypasses the C++ Reducer).
+      2. Replaces default accum-grad hooks with flagos-compatible ones that
+         call ``dist.all_reduce`` (routed through ProcessGroupFlagOS).
+
+    Users call standard DDP — no ``flagos_dist.DistributedDataParallel`` needed:
+        model = torch.nn.parallel.DistributedDataParallel(model)
+    """
+    import functools
+    import torch.distributed as _dist
+    from torch.nn.parallel import DistributedDataParallel as _DDP
+
+    _orig_init = _DDP.__init__
+
+    @functools.wraps(_orig_init)
+    def _patched_init(self, module, **kwargs):
+        # torch_fl renames PrivateUse1 to "flagos", so parameter tensors report
+        # device.type == "flagos" (not the raw "privateuseone").
+        device_types = {p.device.type for p in module.parameters()}
+        if not device_types & {"flagos", "privateuseone"}:
+            return _orig_init(self, module, **kwargs)
+
+        # Force python_reducer to avoid C++ Reducer CUDA assertions
+        import torch._dynamo.utils
+
+        _orig_mode = torch._dynamo.utils.get_optimize_ddp_mode
+        torch._dynamo.utils.get_optimize_ddp_mode = lambda: "python_reducer"
+        try:
+            kwargs.setdefault("gradient_as_bucket_view", True)
+            kwargs.setdefault("broadcast_buffers", False)
+            _orig_init(self, module, **kwargs)
+        finally:
+            torch._dynamo.utils.get_optimize_ddp_mode = _orig_mode
+
+        # Replace DDP's python_reducer accum hooks. The stock hooks use
+        # torch.distributed._functional_collectives (torch.ops._c10d_functional.*),
+        # whose dispatcher path is not registered for privateuseone. We instead
+        # go through dist.all_reduce on the group, which routes to
+        # ProcessGroupFlagOS and does the privateuseone->cuda view conversion.
+        # Mirrors DDP.compiled_accum_grad_hook, including _comm_hooks support.
+        for h in self._accum_grad_hooks:
+            h.remove()
+        self._accum_grad_hooks.clear()
+
+        def _accum_grad_hook(param, *, ddp_model=self):
+            if not ddp_model.require_backward_grad_sync:
+                return
+            if param.grad is None:
+                return
+            pg = ddp_model.process_group
+            if ddp_model._comm_hooks:
+                for hook, state in ddp_model._comm_hooks:
+                    hook(state, (param.grad, param))
+            else:
+                param.grad.div_(pg.size())
+                _dist.all_reduce(param.grad, op=_dist.ReduceOp.SUM, group=pg)
+
+        for param in self._module_parameters:
+            if param.requires_grad:
+                self._accum_grad_hooks.append(
+                    param.register_post_accumulate_grad_hook(
+                        functools.partial(_accum_grad_hook, ddp_model=self)
+                    )
+                )
+
+    _DDP.__init__ = _patched_init
+
+
+# ---------------------------------------------------------------------------
+# DataParallel auto-patch: torch.nn.parallel.DataParallel and its comm layer
+# ---------------------------------------------------------------------------
+
+# Both spellings name the same device: the claim phase renames PrivateUse1 to
+# "flagos", so tensors created afterwards report "flagos", while
+# "privateuseone" is the raw name a tensor can still carry from before the
+# rename (or from a wheel whose rename never ran).
+_FLAGOS_DEVICE_TYPES = ("flagos", "privateuseone")
+
+
+def _flagos_device_type_of_tensors(tensors):
+    """Device type of the first flagos device among ``tensors``, else None."""
+    for tensor in tensors:
+        if tensor.device.type in _FLAGOS_DEVICE_TYPES:
+            return tensor.device.type
+    return None
+
+
+def _flagos_module_device_type(module):
+    """Device type a module is placed on if it is a flagos one, else None.
+
+    Parameters and buffers both: DataParallel's own device guard walks the two
+    together, and a module can hold buffers with no parameters.
+    """
+    for group in (module.parameters(), module.buffers()):
+        device_type = _flagos_device_type_of_tensors(group)
+        if device_type is not None:
+            return device_type
+    return None
+
+
+def _patch_comm_for_flagos():
+    """Hand ``torch.nn.parallel.comm``'s device moves to the flagos ops.
+
+    ``comm.scatter``, ``comm.gather`` and ``comm.broadcast_coalesced`` -- and
+    the ``_out`` forms DataParallel reaches through their ``out=`` argument --
+    are thin validators over seven CUDA-only ops on ``torch._C`` (``_scatter``,
+    ``_scatter_out``, ``_gather``, ``_gather_out``, ``_broadcast``,
+    ``_broadcast_out``, ``_broadcast_coalesced``). Each reads the caller's
+    device list as a list of *CUDA* indices whatever the tensors are, so on a
+    flagos build it either mislabels the result or refuses outright -- measured
+    on PPU:
+
+        torch._C._scatter(flagos:0 tensor, [0, 1], ...) -> [flagos:0, cuda:1]
+        torch._C._gather([flagos:0, flagos:1], 0, 0)    -> RuntimeError:
+            "Expected all input tensors to be CUDA tensors, but tensor at
+             index 0 has device flagos:0"
+
+    The flagos implementations live in the extension
+    (torch_fl/csrc/dataparallel_comm.cc) and are published by rebinding those
+    seven attributes on ``torch._C``, which is how torch_npu reaches the same
+    symbols (its ``initCommMethods()``). They read and write flagos tensors the
+    way the CUDA ones read and write CUDA ones, and each delegates to the
+    original it replaced as soon as no flagos tensor is involved, so CUDA and
+    CPU keep the stock code path. Nothing in comm's Python is replaced: the
+    validation, the ``_handle_complex`` handling and the device index
+    resolution DataParallel already relies on all stay torch's.
+
+    Rebinding is idempotent on the extension side, so calling this more than
+    once is harmless.
+    """
+    from torch_fl import _C
+
+    _C._init_dataparallel_comm()
+
+
+def _patch_dataparallel_for_flagos():
+    """Make ``torch.nn.DataParallel`` place its replicas on flagos devices.
+
+    Three device decisions in DataParallel are CUDA-only, and a flagos-placed
+    module trips all three:
+
+      * the device *type* comes from ``torch._utils._get_available_device_type()``,
+        which answers "cuda" before it ever asks privateuse1. So on PPU and MetaX
+        (where ``torch.cuda.is_available()`` is shimmed True) a module on
+        ``flagos:0`` is given ``src_device_obj = torch.device("cuda", 0)`` and
+        then fails DataParallel's own guard in forward with "module must have its
+        parameters and buffers on device cuda:0 (device_ids[0]) but found one of
+        them on device: flagos:0";
+      * the default device list is ``_get_all_device_indices()``, i.e. torch.cuda's
+        device count, which on a stock +cpu torch is 0;
+      * ``_check_balance`` is CUDA-only, and on MetaX it is also what moves the
+        current device: ``_query_metax_device_properties`` calls ``mcSetDevice``
+        per device and never restores, so after the probe loop every later
+        operation meant for device 0 runs on the last device probed.
+
+    A flagos-placed module therefore builds its own state: devices counted and
+    typed from the flagos device module, no balance probe. Everything after
+    construction is DataParallel's own code -- scatter, replicate,
+    parallel_apply, gather -- and works once ``torch.nn.parallel.comm`` has
+    flagos branches, which is what ``_patch_comm_for_flagos`` installs.
+
+    A module that is not on a flagos device goes to the original ``__init__``
+    unchanged, so CUDA and CPU behavior is untouched.
+    """
+    import functools
+
+    from torch._utils import _get_device_index
+    from torch.nn.parallel import DataParallel as _DataParallel
+
+    _orig_init = _DataParallel.__init__
+    _orig_scatter = _DataParallel.scatter
+
+    @functools.wraps(_orig_init)
+    def _patched_init(self, module, device_ids=None, output_device=None, dim=0):
+        device_type = _flagos_module_device_type(module)
+        if device_type is None:
+            return _orig_init(self, module, device_ids, output_device, dim)
+
+        # Module.__init__ has to run before anything is assigned to self: it
+        # installs the __setattr__ machinery that every `self.x = ...` below goes
+        # through. The original __init__ is not called, so this replaces the
+        # super().__init__() at its top.
+        torch.nn.Module.__init__(self)
+        torch._C._log_api_usage_once("torch.nn.parallel.DataParallel")
+
+        if device_ids is None:
+            # The flagos device module rather than torch.cuda: whatever
+            # torch.cuda reports on this host is unrelated to the devices the
+            # module's parameters live on. torch.flagos is the fallback for the
+            # raw "privateuseone" spelling, whose own attribute does not exist.
+            device_ids = range(getattr(torch, device_type, torch.flagos).device_count())
+        if len(device_ids) == 0:
+            raise RuntimeError("no available devices were found")
+        if output_device is None:
+            output_device = device_ids[0]
+
+        self.dim = dim
+        self.module = module
+        self.device_ids = [_get_device_index(x, True) for x in device_ids]
+        self.output_device = _get_device_index(output_device, True)
+        self.src_device_obj = torch.device(device_type, self.device_ids[0])
+        # The marker DataParallel.scatter reads below to decide whether the
+        # device ids it hands to comm.scatter are flagos ones.
+        self._flagos_device_type = device_type
+
+        # No _check_balance: it is the CUDA memory/cores warning, and on MetaX
+        # running it is a side effect on the current device.
+        if len(self.device_ids) == 1:
+            self.module.to(self.src_device_obj)
+
+    @functools.wraps(_orig_scatter)
+    def _patched_scatter(self, inputs, kwargs, device_ids):
+        if getattr(self, "_flagos_device_type", None) is None:
+            return _orig_scatter(self, inputs, kwargs, device_ids)
+        # Tells torch._C._scatter that the integer device ids it is about to
+        # receive name flagos devices. Only load-bearing for a CPU input, which
+        # carries no device type of its own; see SetScatterScope in
+        # torch_fl/csrc/dataparallel_comm.h for why the ids alone are ambiguous
+        # here.
+        from torch_fl import _C
+
+        previous = _C._set_scatter_scope(True)
+        try:
+            return _orig_scatter(self, inputs, kwargs, device_ids)
+        finally:
+            _C._set_scatter_scope(previous)
+
+    _DataParallel.__init__ = _patched_init
+    _DataParallel.scatter = _patched_scatter
+
+
+def _patch_data_parallel_for_flagos():
+    """Give the functional ``torch.nn.parallel.data_parallel()`` flagos support.
+
+    It is the class's forward path with the device resolution restated inline,
+    so it fails a flagos-placed module the same way (and additionally raises
+    "device type could not be determined" on a build where nothing reports
+    availability). For a flagos-placed module it is delegated to the patched
+    class instead of restating torch's logic a second time, which keeps the two
+    from drifting. Two consequences of that delegation, both deliberate:
+    ``_check_balance`` is skipped where the class would also skip it, and a
+    single-device call now ends with ``module.to(device_ids[0])``, which the
+    class does in ``__init__`` and the function does not -- a no-op for a module
+    already on the device it is being run on.
+    """
+    import functools
+
+    from torch.nn.parallel import DataParallel as _DataParallel
+    from torch.nn.parallel.data_parallel import data_parallel as _data_parallel
+
+    @functools.wraps(_data_parallel)
+    def _patched_data_parallel(
+        module, inputs, device_ids=None, output_device=None, dim=0, module_kwargs=None
+    ):
+        if _flagos_module_device_type(module) is None:
+            return _data_parallel(
+                module, inputs, device_ids, output_device, dim, module_kwargs
+            )
+        if not isinstance(inputs, tuple):
+            inputs = (inputs,) if inputs is not None else ()
+        return _DataParallel(module, device_ids, output_device, dim)(
+            *inputs, **(module_kwargs or {})
+        )
+
+    # Both spellings of the name: torch.nn.parallel re-exports the function, and
+    # the module that defines it is still reachable by path.
+    torch.nn.parallel.data_parallel = _patched_data_parallel
+    sys.modules[
+        "torch.nn.parallel.data_parallel"
+    ].data_parallel = _patched_data_parallel
+
+
+# Register torch.compile backend for flagos device (torch 2.0+)
+def _register_compile_backend():
+    """Register the 'flagos' backend with torch._dynamo if available."""
+    try:
+        from torch_fl.compile.inductor_backend import register_backend
+
+        register_backend()
+
+        # Also wire flagos into inductor *eagerly*, so the default
+        # `torch.compile` backend (`backend="inductor"`) works on flagos too.
+        # transformers' `CompileConfig` compiles with `backend="inductor"`
+        # rather than our `"flagos"` backend; without this, `backend="inductor"`
+        # lowers e.g. RMSNorm (`aten.mean.dim`) and trips
+        # `get_backend_features("flagos") -> assert scheduling_ctor`
+        # (torch/_inductor/codegen/common.py:460) because flagos was never
+        # registered in inductor's codegen table. These patches are idempotent
+        # and mirror what `flagos_compile_backend` runs before every
+        # compile_fx.
+        from torch_fl.compile.device_interface import register_flagos_device_interface
+        from torch_fl.compile.inductor_codegen import (
+            publish_codegen_on_device_module,
+            register_flagos_codegen,
+        )
+        from torch_fl.compile.triton_libdevice import (
+            patch_triton_libdevice_module_map,
+        )
+        from torch_fl.compile.triton_byte_loads import (
+            patch_triton_byte_load_workarounds,
+        )
+        from torch_fl.compile.triton_resource_limits import (
+            patch_triton_resource_limit_errors,
+        )
+        from torch_fl.compile.triton_64bit_guard import patch_triton_64bit_guard
+
+        register_flagos_device_interface()
+        publish_codegen_on_device_module()
+        register_flagos_codegen()
+        patch_triton_libdevice_module_map()
+        patch_triton_resource_limit_errors()
+        patch_triton_byte_load_workarounds()
+
+        # The default `backend="inductor"` path bypasses `flagos_compile_backend`
+        # entirely, and a GCU300 64-bit kernel kills the process from inside the
+        # vendor pass manager where no Python handler can reach it. Install the
+        # guard here, not only on the flagos backend.
+        patch_triton_64bit_guard()
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError("torch.compile integration is unavailable") from exc
+
+
+def _register_bpu_compile_backend() -> None:
+    """Register torch.compile(backend="bpu") on a BPU build.
+
+    The RDK BPU executes whole compiled graphs (a .hbm produced by hbdk4), not
+    individual operators, so it has no per-op kernels: eager ops reach
+    cpu_fallback and all acceleration comes through this backend. That is the
+    opposite of every other platform here, where the compile path is incidental
+    and the kernels do the work.
+
+    The optional integration runner reports import failures independently. A
+    board without the ONNX toolchain can still use its eager fallback.
+    """
+    if _build_accelerator() != "bpu":
+        raise RuntimeError("BPU compile backend requires a BPU build")
+    from torch_fl.accelerator import bpu
+
+    bpu.register()
+
+
+_OPTIONAL_INTEGRATIONS = (
+    "apex",
+    "ddp",
+    "parallel_comm",
+    "dataparallel",
+    "data_parallel",
+    "compile",
+    "flex_attention",
+    "bpu",
+)
+_optional_integration_state = {}
+
+
+def _install_apex_compat() -> bool:
+    from torch_fl.compat.apex import install_apex_compat
+
+    return install_apex_compat()
+
+
+def _install_flex_attention_compat() -> bool:
+    from torch_fl.compat.flex_attention import install_flex_attention_compat
+
+    return install_flex_attention_compat()
+
+
+def optional_integration_status() -> dict:
+    """Report each optional hook as inactive, active, or failed with a reason."""
+    return {
+        name: _optional_integration_state.get(name, "inactive")
+        for name in _OPTIONAL_INTEGRATIONS
+    }
+
+
+def activate_optional_integrations(*names: str, strict: bool = True) -> dict:
+    """Install optional framework hooks after the mandatory device bootstrap.
+
+    Repeated calls do not wrap PyTorch objects twice. A failed hook is not
+    retried in the same process because it may have partly changed global
+    state. ``strict=False`` reports failures and continues with other hooks;
+    the import-time compatibility profile uses that mode. Explicit calls raise
+    so applications know when a requested integration was unavailable.
+    """
+    selected = names or tuple(
+        name
+        for name in _OPTIONAL_INTEGRATIONS
+        if name != "bpu" or _build_accelerator() == "bpu"
+    )
+    unknown = sorted(set(selected) - set(_OPTIONAL_INTEGRATIONS))
+    if unknown:
+        raise ValueError(f"Unknown torch_fl integration(s): {', '.join(unknown)}")
+
+    installers = {
+        "apex": _install_apex_compat,
+        "ddp": _patch_ddp_for_flagos,
+        "parallel_comm": _patch_comm_for_flagos,
+        "dataparallel": _patch_dataparallel_for_flagos,
+        "data_parallel": _patch_data_parallel_for_flagos,
+        "compile": _register_compile_backend,
+        "flex_attention": _install_flex_attention_compat,
+        "bpu": _register_bpu_compile_backend,
+    }
+    prerequisites = {
+        "dataparallel": ("parallel_comm",),
+        "data_parallel": ("parallel_comm", "dataparallel"),
+        "flex_attention": ("compile",),
+    }
+
+    def activate(name: str) -> None:
+        status = _optional_integration_state.get(name)
+        if status == "active":
+            return
+        if status is not None:
+            if strict:
+                raise RuntimeError(f"torch_fl integration {name} previously {status}")
+            return
+        for prerequisite in prerequisites.get(name, ()):
+            activate(prerequisite)
+            if _optional_integration_state.get(prerequisite) != "active":
+                message = f"failed: prerequisite {prerequisite} is unavailable"
+                _optional_integration_state[name] = message
+                if strict:
+                    raise RuntimeError(f"torch_fl integration {name} {message}")
+                _env.warn(f"Optional integration {name} {message}")
+                return
+        try:
+            installed = installers[name]()
+        except Exception as exc:  # noqa: BLE001 - independent optional hooks
+            message = f"failed: {type(exc).__name__}: {exc}"
+            _optional_integration_state[name] = message
+            if strict:
+                raise RuntimeError(f"torch_fl integration {name} {message}") from exc
+            _env.warn(f"Optional integration {name} {message}")
+        else:
+            if installed is False:
+                if strict:
+                    raise RuntimeError(f"torch_fl integration {name} is unavailable")
+            else:
+                _optional_integration_state[name] = "active"
+
+    for name in selected:
+        activate(name)
+    return optional_integration_status()
+
+
+def _phase_conf() -> None:
+    """Pick the op-routing conf and stage the MetaX cudart shim.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    global _STARTUP_PROFILE
+    _STARTUP_PROFILE = _env.choice(
+        "FLAGOS_STARTUP_PROFILE", ("full", "minimal"), "full"
+    )
+    _select_backend_config()
+
+    # Optional: PyTorch wheels may require libcudart.so.12 version tags on MetaX.
+    if _env.flag("FLAGOS_METAX_CUDART_SHIM"):
+        from torch_fl.accelerator.metax._metax_cudart_shim import ensure_cudart_shim
+
+        ensure_cudart_shim()
+
+
+def _phase_preload() -> None:
+    """Select/preload the vendor libtorch and CUDA assets before `import torch`.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    _relink_vendor_libtorch()
+
+    _preload_cuda_assets()
+    _disable_vendor_backend_autoload()
+
+
+def _phase_claim() -> None:
+    """Import torch, claim PrivateUse1, load _C and install the device module.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    global torch, flagos
+    import torch  # noqa: E402
+
+    # Immediately after `import torch`, and before anything relies on CUDA dispatch:
+    # confirm the DTK device libraries actually bound to the official core.
+    _validate_dcu_decoupled_runtime()
+
+    # A self-contained PPU build may front its bundled CUDA-enabled libtorch with
+    # the official torch+cpu Python wheel. The actual runtime then supports CUDA
+    # dispatch while torch/version.py still reports cuda=None. Restore that build
+    # metadata before optional packages inspect it and select a native library.
+    if _is_ppu_build():
+        from torch_fl.accelerator.ppu._ppu_libtorch_link import (  # noqa: E402
+            restore_ppu_cuda_version,
+        )
+
+        restore_ppu_cuda_version()
+
+    if sys.platform == "win32":
+        from ._utils import _load_dll_libraries
+
+        _load_dll_libraries()
+        del _load_dll_libraries
+
+    # Optional FlagGems-on-MetaX compat (does not patch torch.cuda unless enabled).
+    if _env.flag("FLAGOS_METAX_COMPAT"):
+        from torch_fl.accelerator.metax._metax_compat import (  # noqa: E402
+            is_metax_available,
+            patch_torch_cuda_for_metax,
+        )
+
+        if is_metax_available():
+            patch_torch_cuda_for_metax()
+
+    # Expose libtorch symbols globally so the Ascend Triton backend's JIT-compiled
+    # launcher .so can resolve c10/ATen symbols (it links implicitly, not via
+    # DT_NEEDED). Applies to both FlagTree and the legacy triton-ascend toolchain.
+    import os as _os  # noqa: E402
+
+    _torch_lib = _os.path.join(_os.path.dirname(torch.__file__), "lib")
+    for _lib in ("libc10.so", "libtorch.so", "libtorch_cpu.so"):
+        _p = _os.path.join(_torch_lib, _lib)
+        if _os.path.exists(_p):
+            ctypes.CDLL(_p, mode=ctypes.RTLD_GLOBAL)
+
+    # Load libstream_api.so with RTLD_GLOBAL so that liboperators.so (FlagGems)
+    # can resolve GetCurrentStream at runtime.
+    _stream_api_path = _os.path.join(
+        _os.path.dirname(__file__), "lib", "libstream_api.so"
+    )
+    if _os.path.exists(_stream_api_path):
+        ctypes.CDLL(_stream_api_path, mode=ctypes.RTLD_GLOBAL)
+
+    # Checked *before* loading _C, not just before the rename: libtorch_fl.so
+    # registers the AutogradPrivateUse1 fallback at dlopen time, and a vendor plugin
+    # that already registered one makes that a std::terminate ("Tried to register
+    # multiple backend fallbacks for the same dispatch key") -- an abort we cannot
+    # catch or report. Running the check first turns that into the actionable
+    # message below.
+    _check_privateuse1_unclaimed()
+
+    import torch_fl._C  # type: ignore[misc]  # noqa: E402, F401
+
+    # Hand the conf _select_backend_config() resolved to the C++ reader, which builds
+    # the routing table on the first op dispatch -- still well after this point.
+    # This is a call rather than an os.environ write so the wheel's own choice stays
+    # distinguishable from the user's FLAGOS_BACKEND_CONFIG; see
+    # backend_config_path(). Nothing to hand over when the user set the variable or
+    # nothing was found, in which case the C++ reader resolves it itself.
+    if _BACKEND_CONFIG_PATH:
+        torch_fl._C._set_backend_config_path(_BACKEND_CONFIG_PATH)
+
+    from . import flagos  # noqa: E402
+
+    if _build_accelerator() == "mps":
+        # Finish the allocator before torch's module teardown clears Storage
+        # objects. A DataPtr can then be deleted without the caching allocator
+        # reinitialising during static destruction.
+        import atexit
+
+        atexit.register(_mps_shutdown_allocator)
+
+    torch.utils.rename_privateuse1_backend("flagos")
+    torch._register_device_module("flagos", flagos)
+    torch.utils.generate_methods_for_privateuse1_backend(for_storage=True)
+
+    if _build_accelerator() == "gcu":
+        _install_gcu_device_module_probes()
+        # `has_triton` has to answer for the FlagTree enflame backend before
+        # inductor's `create_backend` asks (it raises `TritonMissing` otherwise,
+        # measured on this lane). `_prime_has_triton` is the routine that makes
+        # it answer -- it borrows a table row and memoizes True -- and it is
+        # normally first reached from `register_flagos_device_interface`, which
+        # only runs when the compile backend starts, i.e. too late here.
+        from torch_fl.compile.device_interface import _prime_has_triton
+
+        _prime_has_triton()
+
+
+def _phase_vendor_compat() -> None:
+    """Install the vendor runtime shims and resolve GEMS_VENDOR (fail-loud).
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    _install_musa_flaggems_compat()
+    _install_tsingmicro_flaggems_compat()
+
+    # torch::utils::device_lazy_init(PrivateUse1) imports the module named
+    # `torch_<backend_name>` and calls its _lazy_init(). It only does so once some
+    # library has called set_requires_device_init(PrivateUse1, true) -- which
+    # some vendor libraries do, so the very first flagos factory call can raise
+    # "No module named 'torch_flagos'". Publishing the device module under that name
+    # satisfies the lookup; flagos._lazy_init is the real initializer, so this is a
+    # rename, not a stub. Harmless on backends that never trigger lazy init.
+    sys.modules.setdefault("torch_flagos", flagos)
+
+    # Apex's amp_C extension bypasses the ATen dispatcher and therefore cannot use
+    # the normal DeviceBoxingGuard. Install an optional, CUDA-alias-only shim at the
+    # common MultiTensorApply boundary; it remains lazy when Apex is not installed
+    # and supports applications that import Apex either before or after torch_fl.
+    if _STARTUP_PROFILE == "full":
+        activate_optional_integrations("apex", strict=False)
+
+    # Patch FlagGems codegen config before any FlagGems code is imported
+    _patch_flaggems_codegen_config()
+    # _patch_flaggems_philox() is deliberately NOT called here: it imports
+    # flag_gems, and on a build where the vendor's own device name has to be
+    # aliased first (TsingMicro) that import needs _alias_cuda_to_flagos to have
+    # run. See its call site in _phase_ecosystem.
+
+
+def _phase_ecosystem() -> None:
+    """Mandatory FlagGems/distributed setup, then profile-selected framework hooks.
+
+    One phase of the import-time pipeline below; the order is
+    load-bearing, so the constraints are documented at the runner.
+    """
+    global _TORCH_CUDA_PROBE
+
+    # Patch torch.cuda.device before FlagGems is used
+    _patch_cuda_device_context()
+
+    # Initialize CUDA runtime only when FlagGems Python path needs it (CUDA backend ops).
+    # The check must be against the *build* backend, not torch.cuda.is_available():
+    # a DCU self-contained wheel selects a hipified libtorch for a stock +cpu torch,
+    # which makes is_available() return True even though the CUDA runtime libs are
+    # absent, and torch.cuda.init() would fail with "libcaffe2_nvrtc.so: not found".
+    # PPU is included: its torch is a real CUDA-13 build with the CUDA runtime libs
+    # bundled, so the init works and is what its FlagGems/Triton path relies on.
+    if (
+        not _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY")
+        and _build_accelerator() in ("cuda", "", "ppu")
+        and torch.cuda.is_available()
+    ):
+        torch.cuda.init()
+
+    # Capture the CUDA probe at the only point that answers the guard's
+    # question. Every vendor compat layer has run by now: `_phase_vendor_compat`
+    # -> `_patch_flaggems_codegen_config` installs the CUDA, MetaX and DCU
+    # facades, each of which sets `is_available = lambda: True` because the CPU
+    # torch wheel is paired with the vendor's externally loaded libtorch_cuda.so
+    # and CUDA genuinely works (the optional MetaX branch in `_phase_claim` does
+    # the same, earlier). The alias below has not yet replaced the attribute
+    # with its own lambda.
+    #
+    # Not at `_phase_claim`: there the capture sees the pristine CPU wheel's
+    # `False`, the alias installs on a build that has real CUDA, and
+    # `_stand_down_foreign_triton_drivers` then disables the nvidia Triton
+    # backend -- every `torch.compile` dies in `set_driver_to_gpu()` with
+    # "Could not find an active GPU backend".
+    #
+    # Not after this point either: the alias writes its own lambda, and
+    # `_patch_native_cuda_probe` overwrites it with `torch.flagos.is_available`
+    # later in this phase; both answer True on every build with a flagos
+    # device, whether or not a CUDA runtime exists.
+    _TORCH_CUDA_PROBE = torch.cuda.is_available
+
+    _alias_cuda_to_flagos()
+
+    # Both of these have to precede the flag_gems import below, which happens
+    # here rather than in _phase_vendor_compat for exactly that reason. That
+    # import reaches Triton's hint manager, which asks the driver factory to
+    # resolve -- and the factory refuses while two backends claim to be active.
+    # On a FlagTree wheel the alias installed just above is what makes the stock
+    # nvidia backend claim that (its probe is `torch.cuda.is_available()`), so
+    # the foreign driver has to be stood down first; `flagos._lazy_init` does
+    # this too, but only on the first device operation, which is after this.
+    # FlagTree's TsingMicro driver then answers `torch.device("txda", ...)`,
+    # which resolves only once the alias has mapped "txda" to flagos.
+    #
+    # Getting either wrong makes the import raise, and a failed import leaves
+    # every flag_gems submodule that *did* load in sys.modules bound to the
+    # abandoned half-initialised package. FlagGems' own tensor_wrapper and
+    # pointwise_dynamic read `flag_gems.vendor_name` off that binding, so ops
+    # going through them (`cat` among them) then fail with `module 'flag_gems'
+    # has no attribute 'vendor_name'` for the life of the process.
+    flagos._stand_down_foreign_triton_drivers()
+    _patch_flaggems_philox()
+
+    # Correct flag_gems' layer-norm backward for 3-D+ inputs; must precede the
+    # first op call, which is where the generated kernel resolves the callable.
+    _patch_flaggems_layer_norm_backward()
+
+    # Auto-register FlagGems operators on import
+    _register_flaggems_operators()
+
+    from . import quantization  # noqa: E402, F401
+
+    _register_distributed_backend()
+
+    if _STARTUP_PROFILE == "full":
+        activate_optional_integrations(
+            "ddp",
+            "parallel_comm",
+            "dataparallel",
+            "data_parallel",
+            "compile",
+            "flex_attention",
+            strict=False,
+        )
+        if _build_accelerator() == "bpu":
+            activate_optional_integrations("bpu", strict=False)
+
+
+# ===========================================================================
+# Import-time phase pipeline.
+#
+# torch_fl runs a fixed sequence of side effects at import. The order is
+# load-bearing -- a wrong order produces a dlopen abort or a wrong-vendor build,
+# not a Python exception -- so it lives in exactly one place here instead of
+# being implied by where each statement happens to sit in the file.
+#
+#   1. conf          pick the op-routing config and stage the MetaX shim
+#   2. preload       select/preload the vendor libtorch and CUDA assets
+#   3. claim         import torch, free PrivateUse1, load _C, install the device
+#   4. vendor_compat install the vendor runtime shims and resolve GEMS_VENDOR
+#   5. ecosystem     mandatory FlagGems/distributed setup, then optional hooks
+#
+# Constraints, each next to the phase it constrains:
+#   * preload before claim: the vendor libtorch has to be in place before
+#     `import torch`, and the CUDA assets before _C is dlopened.
+#   * within claim, the PrivateUse1 check precedes `import torch_fl._C`: the .so
+#     registers the AutogradPrivateUse1 fallback at dlopen time, and a vendor
+#     plugin that already claimed the key turns that into an uncatchable abort.
+#   * claim before vendor_compat: FlagGems reads GEMS_VENDOR at its import, so
+#     the shims and the vendor resolution must precede the ecosystem hooks.
+#   * vendor_compat before ecosystem: the FlagGems/dist/compile hooks act on the
+#     vendor surface the previous phase installed.
+# ===========================================================================
+_phase_conf()
+_phase_preload()
+_phase_claim()
+_phase_vendor_compat()
+_phase_ecosystem()
+
+
+__all__ = [
+    "flagos",
+    "distributed",
+    "get_registered_ops",
+    "is_flaggems_enabled",
+    "activate_optional_integrations",
+    "optional_integration_status",
+    "quantization",
+]

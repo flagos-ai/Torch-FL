@@ -1,0 +1,2943 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import contextlib
+import importlib
+import os
+import sys
+import time
+
+import torch
+
+from .. import _C  # type: ignore[misc]
+
+from . import meta  # noqa: F401
+
+
+_initialized = False
+
+# The platform cannot change while the process runs, so it is resolved once. The
+# stream helpers below consult it on every call, and a call happens once per
+# FlagGems kernel launch -- 483 a step on the Qwen-Image transformer -- while
+# detect_platform() stats the wheel on each call, which made this 0.34 s of every
+# step before it was cached.
+_platform_name: str | None = None
+
+
+def _platform() -> str:
+    """The accelerator this wheel was built for, as torch_fl itself names it.
+
+    Delegates to ``torch_fl._platform.detect_platform()`` -- the one detector
+    ``_select_backend_config()`` and the integration trees read too -- so the
+    stream helpers below cannot disagree with the conf this wheel routes its ops
+    through.
+
+    Reading ``lib/flagos_platform`` alone, as this used to, is wrong for every
+    CUDA-ABI boxing platform: ``cmake/flagos_platforms.json`` leaves
+    ``writes_platform_marker`` false for cuda, ppu, metax, kunlunxin and dcu,
+    because their conf follows from the build record rather than from a file the
+    build writes. On a DCU wheel the marker read therefore returned ``""`` -- an
+    accelerator no arm below knows -- while ``_select_backend_config()`` had
+    already resolved that same wheel to ``backends_dcu.conf``. That empty token
+    is what reached ``Stream.__init__``'s final arm and raised.
+
+    detect_platform() consults the marker too, but after the build record: the
+    marker names a native-kernel platform, and those are exactly the ones with a
+    stream class of their own.
+    """
+    global _platform_name
+    if _platform_name is None:
+        from .._platform import detect_platform
+
+        _platform_name = detect_platform()
+    return _platform_name
+
+
+def _has_cuda_runtime() -> bool:
+    """Whether torch.cuda is backed by a real CUDA runtime on this build.
+
+    Every vendor branch below (Ascend ACL, Enflame tops, MUSA) exists for
+    accelerators that have no CUDA runtime at all. The obvious test for "no CUDA
+    runtime" -- ``torch._C._cuda_getCurrentStream`` -- is really a test for "torch
+    was compiled with CUDA", and the CPU torch wheel that torch_fl drives against
+    an external libtorch_cuda.so fails it while the runtime underneath is
+    perfectly real. Reading it as a vendor signal sends NVIDIA runs down the
+    Ascend path, where constructing a stream raises "libascendcl.so not found"
+    and every autotuned Triton kernel is misreported as failing to compile.
+    """
+    if hasattr(torch._C, "_cuda_getCurrentStream"):
+        return True
+    try:
+        from torch_fl.accelerator.cuda._cuda_compat import cuda_shim_active
+    except Exception:
+        return False
+    return cuda_shim_active()
+
+
+def _cuda_stream_shim(device):
+    """A CUDA stream stand-in for a build whose torch has no CUDA stream class.
+
+    Same object ``torch.cuda.current_stream`` returns on such a build, so both
+    spellings denote the same (null) stream the boxing kernels submit to.
+    """
+    from torch_fl.accelerator.cuda._cuda_compat import _StreamShim, _device_index
+
+    return _StreamShim(_device_index(device))
+
+
+class device:
+    r"""Context-manager that changes the selected device.
+
+    Args:
+        device (torch.device or int): device index to select. It's a no-op if
+            this argument is a negative integer or ``None``.
+    """
+
+    def __init__(self, device):
+        self.idx = torch.accelerator._get_device_index(device, optional=True)
+        self.prev_idx = -1
+
+    def __enter__(self):
+        self.prev_idx = _C._exchangeDevice(self.idx)
+
+    def __exit__(self, type, value, traceback):
+        _C._set_device(self.prev_idx)
+        return False
+
+
+def is_available():
+    return _C._get_device_count() > 0
+
+
+def device_count() -> int:
+    return _C._get_device_count()
+
+
+def current_device():
+    return _C._get_device()
+
+
+def set_device(device) -> None:
+    return _C._set_device(device)
+
+
+def synchronize(device=None):
+    r"""Waits for all operations on the flagos device to complete.
+
+    Args:
+        device (torch.device or int, optional): device to synchronize.
+            It uses the current device, given by :func:`~torch_fl.current_device`,
+            if :attr:`device` is ``None`` (default).
+    """
+    if device is not None:
+        idx = torch.accelerator._get_device_index(device, optional=True)
+        prev_idx = _C._exchangeDevice(idx)
+        try:
+            _C._synchronize()
+        finally:
+            _C._set_device(prev_idx)
+    else:
+        _C._synchronize()
+
+
+def init():
+    _lazy_init()
+
+
+def is_initialized():
+    return _initialized
+
+
+def _lazy_init():
+    global _initialized
+    if is_initialized():
+        return
+    _C._init()
+    _initialized = True
+
+    # Before FlagGems is importable, Triton has to agree with torch_fl on which
+    # accelerator owns this process: triton's driver factory refuses to resolve
+    # while two backends claim to be active, and on a FlagTree wheel the CUDA
+    # alias above makes the nvidia backend claim exactly that.
+    _stand_down_foreign_triton_drivers()
+
+    # FlagGems' kernels are Triton kernels, and on a FlagTree Ascend build the
+    # host side of every one of them is generated by FlagTree's policy layer,
+    # which needs to be pointed at torch_fl before the first launch.
+    _install_flagtree_ascend_policy()
+
+    # FlagGems reads a FlagTree autotuning knob by a name 0.7.0 removed, and
+    # raises on the read instead of falling through. Restore the name before the
+    # first FlagGems kernel; see the function for the exact build mapping.
+    _align_flagtree_autotuning_knobs()
+
+    # FlagGems' Ascend backend imports triton.experimental.tle.language at module
+    # scope, and on FlagTree that import cannot complete without AscendSHMEM,
+    # which no FlagTree wheel ships. Left alone, `import flag_gems` fails and
+    # with it every FlagGems kernel on Ascend; see the module for why a
+    # placeholder is the right answer here.
+    from torch_fl.compile.flagtree_ascend_tle import ensure_tle_importable
+
+    ensure_tle_importable()
+
+    # FlagGems' autotuned kernels ask Triton for their config on the first call
+    # of every process, and Triton's persisted autotune cache is off by default.
+    # The knob is read when the @triton.autotune decorators run, i.e. while the
+    # import below executes. See the function for the measurement.
+    _enable_flaggems_autotune_cache()
+
+    # Eagerly import FlagGems to avoid deep import chain during dispatch.
+    # FlagGems has a deep lazy import chain (fused → FLA → utils → models → sqlalchemy)
+    # that can exceed Python's recursion limit when triggered inside PyTorch dispatch.
+    #
+    # Not just ImportError: FlagGems' vendor autodetect raises RuntimeError("No
+    # device were detected on your machine") when it is installed but cannot
+    # identify the backend -- which is the normal state on a vendor box whose
+    # Triton plugin is absent, and must not take down device init. The FlagGems
+    # kernels are optional everywhere; whatever is not registered runs on the
+    # native or CPU path.
+    try:
+        import flag_gems  # noqa: F401
+    except Exception:
+        pass  # FlagGems unavailable or undetectable here, skip
+
+    # Triton has to hash its own build before it can read a single compiled
+    # kernel out of its on-disk cache, and that hash is the last thing that
+    # cannot be warmed by the patches below. Start it here, while the caller is
+    # still materialising weights. See the function for the measurement.
+    _prewarm_triton_key()
+
+    # FlagGems locates itself in the device namespace by the vendor's own device
+    # string ("cuda" for nvidia), while torch_fl registers this accelerator as
+    # "flagos". Its ops compare the two and hand the call back to ATen when they
+    # disagree, which they always did -- so the routed ops that make that
+    # comparison never ran their kernel. Realigning the names has to happen after
+    # the import above, because both the detector singleton and the op modules'
+    # module-level copies are fixed by then.
+    _align_flaggems_device_identity()
+
+    # Same window, same reason: FlagGems' L2 vector_norm materialises a
+    # transposed copy of its input, and the C++ bridge caches the callable it
+    # resolved, so this has to be in place before the first routed op runs. See
+    # the function for the measurement. No-op outside the vendors it was
+    # measured on.
+    _patch_flaggems_vector_norm()
+
+    # Same window and the same caching rule: these two pick a better FlagGems
+    # kernel for a square and for a short last-dim mean, which is what the q/k
+    # RMSNorm is made of. See each function for the measurement.
+    _patch_flaggems_pow_scalar_square()
+    _patch_flaggems_mean_last_dim()
+
+    # Same window as the two above, and the same requirement: the dispatcher
+    # kernel is claimed before the first routed op can reach it. See the
+    # function for the measurement.
+    _patch_flaggems_index_put()
+
+    # Same window again: these replace the launch path every FlagGems pointwise
+    # op goes through, so they have to be in place before the first one runs.
+    # See the function for the measurement.
+    _patch_flaggems_pointwise_dispatch()
+
+    # And again for the tuner: the mthreads `mm` tune space asks more shared
+    # memory on float64 than this device has, so a matmul it refuses has to be
+    # repaired rather than retried. See the function for the measurement.
+    _patch_flaggems_tune_space()
+
+    # Advanced indexing on this device takes the C++ dispatcher and needs no
+    # Python patch here. `index.Tensor` is registered on PrivateUse1 from
+    # csrc/aten/generated/register.inc, so `x[:, tensor_idx]` and its siblings
+    # reach `IndexTensorKernelCuda` directly.
+    #
+    # Do not reintroduce a `torch.Tensor.__getitem__` assignment. It is a
+    # CPython special method, so assigning to it also populates the type's
+    # `sq_item` slot and `PySequence_Check()` flips from 0 to 1 for *every*
+    # Tensor, on every device. `torch.tensor([tensor(1.), tensor(2.)])` then
+    # takes the sequence-protocol branch in
+    # `torch/csrc/utils/tensor_new.cpp::compute_sizes`, calls
+    # `PySequence_Length`, and raises `TypeError: len() of a 0-d tensor` --
+    # including for CPU tensors, in a process that merely touched a non-CPU
+    # device. Restoring the attribute afterwards does not undo it; only never
+    # assigning it does.
+
+
+from .random import *  # noqa: F403, E402
+
+
+# default_generators: list of one Generator per device, required by FlagGems
+class _DefaultGenerators:
+    """Lazy list-like accessor for per-device default generators.
+
+    Bounds-checked so iteration terminates: with no ``__iter__``, Python's
+    legacy protocol calls ``__getitem__(0, 1, 2, ...)`` until IndexError, and
+    an out-of-range index otherwise surfaces as a RuntimeError from C++ (which
+    aborts iteration instead of ending it).
+    """
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
+
+    def __getitem__(self, device):
+        n = len(self)
+        if isinstance(device, slice):
+            return tuple(self[i] for i in range(*device.indices(n)))
+        device = int(device)
+        if device < 0:  # negative indices wrap, as on a list
+            device += n
+        if not 0 <= device < n:
+            raise IndexError(
+                f"device index {device} out of range for {n} flagos device(s)"
+            )
+        return _C._get_default_generator(device)
+
+    def __len__(self):
+        return device_count()
+
+
+default_generators = _DefaultGenerators()
+
+
+# ---------------------------------------------------------------------------
+# Caching Allocator APIs
+# ---------------------------------------------------------------------------
+
+
+def empty_cache():
+    """Release all unoccupied cached memory held by the caching allocator.
+
+    This frees GPU memory that is reserved but not currently used by tensors,
+    making it available for other GPU applications or new allocations.
+    """
+    _C._empty_cache()
+
+
+def memory_stats(device=None):
+    """Return a dictionary of memory allocator statistics for the given device.
+
+    Args:
+        device: device index (int) or None for current device.
+
+    Returns:
+        dict with keys: allocated_bytes, reserved_bytes, peak_allocated_bytes,
+        peak_reserved_bytes, num_alloc_calls, num_free_calls,
+        num_device_malloc, num_device_free, num_alloc_retries.
+    """
+    if device is None:
+        device = current_device()
+    return _C._memory_stats(device)
+
+
+def memory_allocated(device=None):
+    """Return the current GPU memory occupied by tensors in bytes.
+
+    Args:
+        device: device index (int) or None for current device.
+    """
+    if device is None:
+        device = current_device()
+    return _C._memory_allocated(device)
+
+
+def memory_reserved(device=None):
+    """Return the current GPU memory managed by the caching allocator in bytes.
+
+    This includes both used and cached (free) memory.
+
+    Args:
+        device: device index (int) or None for current device.
+    """
+    if device is None:
+        device = current_device()
+    return _C._memory_reserved(device)
+
+
+def reset_peak_memory_stats(device=None):
+    """Reset the peak memory statistics tracked by the allocator.
+
+    Args:
+        device: device index (int) or None for current device.
+    """
+    if device is None:
+        device = current_device()
+    _C._reset_peak_memory_stats(device)
+
+
+# ---------------------------------------------------------------------------
+# Stream API required by FSDP
+# Since flagos shares the same GPU as CUDA, we proxy to torch.cuda streams.
+# ---------------------------------------------------------------------------
+
+
+class Stream(torch.cuda.Stream):
+    """Flagos stream: a real CUDA stream where there is a CUDA runtime.
+
+    Where there is not, ``__new__`` falls back to ``object.__new__(cls)`` and
+    ``__init__`` builds one of the ``torch_fl.accelerator`` vendor streams --
+    Enflame tops, MUSA, or Ascend ACL -- or, on any accelerator that has no
+    stream class of its own, the same handle-only stand-in ``current_stream()``
+    returns -- and delegates every method below to it.
+    """
+
+    def __new__(cls, device=None, priority=0, **kwargs):
+        if device is None:
+            device = current_device()
+        try:
+            return super().__new__(cls, device=device, priority=priority, **kwargs)
+        except RuntimeError as e:
+            # torch.cuda.Stream unavailable (CPU-only build on Ascend, etc.)
+            if "cuda" in str(e).lower():
+                return object.__new__(cls)
+            raise
+
+    def __init__(self, device=None, priority=0, **kwargs):
+        # On a vendor backend with no CUDA runtime, __new__ returns
+        # object.__new__(cls) and we need a full native implementation. Import the
+        # vendor module late to avoid touching it on CUDA runs.
+        if not _has_cuda_runtime():
+            vendor = _platform()
+            if vendor == "gcu":
+                from torch_fl.accelerator.gcu.tops_stream import TopsStream
+
+                self._stream = TopsStream(device, priority)
+            elif vendor == "musa":
+                from torch_fl.accelerator.musa.musa_stream import MusaStream
+
+                self._stream = MusaStream(device, priority)
+            elif vendor == "ascend":
+                from torch_fl.accelerator.ascend.acl_stream import AclStream
+
+                self._stream = AclStream(device, priority)
+            elif vendor == "mps":
+                # Apple Silicon (M-series). Metal has real command queues, so
+                # this is an owning stream rather than the handle-0 stand-in the
+                # unnamed arms below get -- see torch_fl/accelerator/mps/.
+                from torch_fl.accelerator.mps.mps_stream import MpsStream
+
+                self._stream = MpsStream(device, priority)
+            elif vendor == "iluvatar":
+                # Corex is CUDA-shaped, so this really creates a stream like
+                # MPS rather than borrowing the one shared queue MUSA has.
+                from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+                self._stream = IluStream(device, priority)
+            else:
+                # The accelerators with a stream class of their own are named
+                # above; everything else denotes its one queue with handle 0.
+                # That is the TX runtime, whose only stream *is* the default one
+                # -- FSDP builds four streams at startup and nothing owns a
+                # handle, so this is a borrowed view of that single queue -- the
+                # CUDA-ABI boxing platforms (cuda, metax, ppu, dcu), whose
+                # kernels are submitted through the C++ runtime to the same
+                # default stream the boxing shim hands out, and the de-boxed
+                # native kunlunxin backend, whose single queue is likewise
+                # denoted by handle 0.
+                # The CUDA-ABI platforms reach this arm with a real CUDA runtime
+                # absent from torch: their device library is dlopen'd by the
+                # compat layer rather than being the runtime ``torch.cuda.Stream``
+                # was built for, so ``_has_cuda_runtime()`` is false for them
+                # here. Kunlunxin has no CUDA runtime at all -- its native XPU
+                # backend deliberately routes around the CUDA-shaped surface the
+                # SDK ships -- so it is false for kunlunxin too.
+                #
+                # The stand-in is deliberately the one ``current_stream()``
+                # returns (see _real_current_stream), which is what lets a
+                # stream built here stand in for the current one -- FSDP and the
+                # cross-stream-ordering contract both assume that.
+                #
+                # This arm used to be a bare ``else`` that meant Ascend, so any
+                # accelerator named neither "gcu" nor a CUDA runtime took it.
+                # MUSA did: constructing a stream imported
+                # torch_fl.accelerator.ascend.acl_stream -- whose first statement
+                # is ctypes.CDLL("libascendcl.so") -- on a host with no Ascend
+                # toolkit. The named arms keep that from coming back, and the
+                # manual allowlist that replaced them is gone: an accelerator
+                # with no stream class of its own is a property of the runtime
+                # (one queue, handle 0), not a name to keep adding to a list.
+                self._stream = _DefaultStreamHandle(_device_index(device))
+            # Set device attribute for __repr__ compatibility with torch.cuda.Stream
+            self.device = self._stream.device
+        elif not hasattr(torch._C, "_cuda_getCurrentStream"):
+            # CUDA runtime present, but torch.cuda.Stream is the wheel's dummy base
+            # class rather than a real stream. Delegate to the same shim
+            # torch.cuda.current_stream hands out.
+            self._stream = _cuda_stream_shim(device)
+            self.device = self._stream.device
+        # else: real torch.cuda.Stream path -- __new__ constructed it, do nothing.
+
+    def __repr__(self):
+        if hasattr(self, "_stream"):
+            return f"<torch_fl.flagos.Stream device={self.device} native_stream={self._stream.handle:#x}>"
+        return super().__repr__()
+
+    def wait_stream(self, other):
+        if hasattr(self, "_stream"):
+            return self._stream.wait_stream(other)
+        return super().wait_stream(other)
+
+    def wait_event(self, event):
+        if hasattr(self, "_stream"):
+            return self._stream.wait_event(event)
+        return super().wait_event(event)
+
+    def record_event(self, event=None):
+        if hasattr(self, "_stream"):
+            return self._stream.record_event(event)
+        return super().record_event(event)
+
+    def synchronize(self):
+        if hasattr(self, "_stream"):
+            return self._stream.synchronize()
+        return super().synchronize()
+
+    def query(self):
+        if hasattr(self, "_stream"):
+            return self._stream.query()
+        return super().query()
+
+    @property
+    def cuda_stream(self):
+        if hasattr(self, "_stream"):
+            return self._stream.handle
+        return super().cuda_stream
+
+    @property
+    def gcu_stream(self):
+        if hasattr(self, "_stream"):
+            return self._stream.handle
+        return self.cuda_stream
+
+    @property
+    def musa_stream(self):
+        if hasattr(self, "_stream"):
+            return self._stream.handle
+        return self.cuda_stream
+
+    @property
+    def device_index(self):
+        if hasattr(self, "_stream"):
+            return self._stream.device_index
+        return super().device_index
+
+    @property
+    def stream_id(self):
+        if hasattr(self, "_stream"):
+            return self._stream.stream_id
+        return super().stream_id
+
+    @property
+    def device_type(self):
+        if hasattr(self, "_stream"):
+            return self._stream.device_type
+        return super().device_type
+
+
+class _DefaultStreamHandle:
+    """Minimal stream stand-in for backends with no CUDA runtime.
+
+    Vendor Triton launchers (and FlagGems through them) want an object exposing
+    a raw stream handle, under whichever name their vendor uses -- ``cuda_stream``
+    for CUDA-derived backends, ``gcu_stream`` for Enflame's triton_gcu. On
+    Enflame GCU, Ascend and MUSA the kernels go to the vendor's default stream,
+    which every one of them denotes with handle 0. The synchronization those
+    backends need already happens in their own op paths, so
+    ``synchronize``/``wait_stream`` have nothing to do here.
+    """
+
+    __slots__ = (
+        "cuda_stream",
+        "gcu_stream",
+        "musa_stream",
+        "txda_stream",
+        "device_index",
+    )
+
+    def __init__(self, device_index: int = 0):
+        self.cuda_stream = 0
+        self.gcu_stream = 0
+        get_musa_stream = getattr(_C, "_get_musa_current_raw_stream", None)
+        self.musa_stream = get_musa_stream(device_index) if get_musa_stream else 0
+        # TsingMicro's triton launcher (triton.backends.tsingmicro.driver) reads
+        # `.txda_stream`; the TX runtime only has the default stream, handle 0.
+        self.txda_stream = 0
+        self.device_index = device_index
+
+    def __int__(self) -> int:
+        return 0
+
+    @property
+    def device(self) -> torch.device:
+        """The device whose queue this handle denotes.
+
+        ``Stream.__init__`` assigns ``self._stream.device`` to itself, so a stream
+        built on a backend with no CUDA runtime still has to name a device; the
+        handle's own is the flagos one, not the CUDA one ``torch.cuda.Stream``
+        would have defaulted to.
+        """
+        return torch.device("flagos", self.device_index)
+
+    @property
+    def handle(self) -> int:
+        """The raw handle, under the name ``Stream``'s properties read."""
+        return self.cuda_stream
+
+    @property
+    def stream_id(self) -> int:
+        """The handle, under the name ``torch.cuda.Stream`` uses for one.
+
+        These backends keep no stream registry to look an id up in, so the id is
+        the handle itself -- the only queue the device has.
+        """
+        return self.cuda_stream
+
+    @property
+    def device_type(self) -> int:
+        """``at::DeviceType::CUDA``, matching what the shim reports.
+
+        ``Stream.device_type`` and ``stream()``'s CUDA path both read this off
+        whatever they wrap, so a stand-in without it turns a wrapper that was
+        otherwise complete into an AttributeError. It is the CUDA device type
+        even on a vendor backend because that is the ABI the boxing kernels and
+        ``_cuda_setStream`` speak; on a backend that reaches neither, nothing
+        reads it.
+        """
+        return 1
+
+    def synchronize(self):
+        pass
+
+    def wait_stream(self, other):
+        pass
+
+    def query(self) -> bool:
+        return True
+
+    def wait_event(self, event):
+        return None
+
+    def record_event(self, event=None):
+        """Return an event over the work submitted so far.
+
+        ``MusaStream`` is the native counterpart of this handle and carries the
+        same method; FSDP asks whichever object ``current_stream()`` returned for
+        an event it can later wait on, so the stand-in has to answer too. The
+        event is what ``flagos.Event`` already is on these backends -- the
+        vendor's own event where one exists, else the host-clock
+        ``_HostTimedEvent`` -- and recording it on this handle is the whole
+        contract, since every stream on the device *is* this one queue.
+        """
+        from torch_fl.flagos import Event
+
+        if event is None:
+            event = Event()
+        native = getattr(event, "_event", event)
+        native.record(self)
+        return event
+
+
+def _real_current_stream(device=None):
+    """Resolve the actual current CUDA stream as a real ``torch.cuda.Stream``.
+
+    Under MetaX boxing, ``torch.cuda.current_stream`` is monkey-patched to a
+    lightweight shim (only ``.cuda_stream``, for triton/FlagGems launch), which
+    is NOT a real Stream and makes ``torch.cuda.Event.record()`` fail with
+    "invalid StreamId". We instead read the true stream tuple straight from the
+    C++ runtime (``_cuda_getCurrentStream``) and rebuild a real Stream from it,
+    so events record/wait on the same physical (default) stream the boxing
+    kernels submit to.
+
+    On a vendor backend with no CUDA runtime at all (Enflame GCU, Ascend, MUSA)
+    ``_cuda_getCurrentStream`` does not exist and ``torch.cuda`` cannot even be
+    lazily initialized ("Torch not compiled with CUDA enabled"). There is no CUDA
+    stream to describe, so return a stand-in carrying the vendor's default stream
+    handle: callers such as FlagGems' Triton launcher only read ``.cuda_stream``
+    off the result, and those backends submit to their default stream.
+
+    A CUDA runtime with no ``_cuda_getCurrentStream`` is the CPU torch wheel case
+    instead; there the stream to describe is whatever ``torch.cuda.current_stream``
+    reports, which is the shim ``_StreamShim``.
+    """
+    idx = current_device() if device is None else int(device)
+    if hasattr(_C, "_get_musa_current_raw_stream"):
+        return _DefaultStreamHandle(idx)
+    if not _has_cuda_runtime():
+        if _platform() == "gcu":
+            from torch_fl.accelerator.gcu.tops_stream import current_tops_stream
+
+            return current_tops_stream(idx)
+        if _platform() == "ascend":
+            from torch_fl.accelerator.ascend.acl_stream import current_acl_stream
+
+            try:
+                return current_acl_stream(idx)
+            except RuntimeError:
+                return _DefaultStreamHandle(idx)
+        if _platform() == "mps":
+            from torch_fl.accelerator.mps.mps_stream import current_mps_stream
+
+            return current_mps_stream(idx)
+        if _platform() == "iluvatar":
+            # A real stream from the platform's own registry, not a stand-in:
+            # corex has per-device queues and the registry tracks which one is
+            # current, so every caller below can wait, record and synchronize on
+            # it. It is the same handle the eager kernels submit to.
+            from torch_fl.accelerator.iluvatar.ilu_stream import current_ilu_stream
+
+            return current_ilu_stream(idx)
+        # MUSA answers from the C++ runtime at the top of this function and never
+        # arrives here; an accelerator with no stream class of its own has no
+        # current stream to describe and gets this same handle-only stand-in,
+        # rather than being sent to Ascend for one. That is the TX runtime and the
+        # CUDA-ABI boxing platforms -- dcu arrives here because its device library
+        # is dlopen'd by the DCU compat layer, not built into the torch it runs
+        # against, so ``_has_cuda_runtime()`` reads false for it even though a
+        # DTK runtime is very much there. Same object ``Stream()`` wraps.
+        return _DefaultStreamHandle(idx)
+    if not hasattr(torch._C, "_cuda_getCurrentStream"):
+        return _cuda_stream_shim(idx)
+    stream_id, device_index, device_type = torch._C._cuda_getCurrentStream(idx)
+    return torch.cuda.Stream(
+        stream_id=stream_id, device_index=device_index, device_type=device_type
+    )
+
+
+class _HostTimedEvent:
+    """Host-clock event for backends with no CUDA event under the hood.
+
+    On Ascend ``torch.cuda.Event`` is a dummy base class, so instantiating it
+    raises "Tried to instantiate dummy base class Event". Triton's autotuner
+    calls ``Event(enable_timing=True)`` in ``testing.do_bench`` to time candidate
+    configs, so without this every gems kernel that autotunes over more than one
+    config dies -- that is what broke ``sum`` with multiple dims, ``all.dim``,
+    ``any.dim``, ``amax`` and ``prod.dim_int``.
+
+    ``record`` synchronizes the device and reads the host clock. That measures
+    wall time around a drained queue rather than true device time, which is
+    exactly what do_bench needs (it only compares candidates against each other),
+    and it makes ``wait``/``query`` trivially correct because nothing is
+    outstanding once ``record`` returns.
+    """
+
+    def __init__(
+        self, enable_timing=False, blocking=False, interprocess=False, external=False
+    ):
+        self.enable_timing = enable_timing
+        self._t = None
+
+    def record(self, stream=None):
+        synchronize()
+        self._t = time.perf_counter()
+
+    def wait(self, stream=None):
+        return None
+
+    def synchronize(self):
+        synchronize()
+
+    def query(self):
+        return self._t is not None
+
+    def elapsed_time(self, end_event):
+        if self._t is None or end_event._t is None:
+            raise RuntimeError("elapsed_time called on an unrecorded event")
+        return (end_event._t - self._t) * 1000.0  # ms, matching torch.cuda.Event
+
+
+class Event(torch.cuda.Event):
+    """Flagos event: a real CUDA event where there is a CUDA runtime.
+
+    Where there is not, this is the vendor's event (Enflame tops, Ascend ACL) or,
+    on MUSA and any accelerator without one, the host-clock
+    ``_HostTimedEvent``.
+    """
+
+    def __new__(
+        cls, enable_timing=False, blocking=False, interprocess=False, external=False
+    ):
+        if not _has_cuda_runtime():
+            # One spelling of the host-clock fallback for the arms below, so they
+            # differ only in which vendor class they try first.
+            host_timed = dict(
+                enable_timing=enable_timing,
+                blocking=blocking,
+                interprocess=interprocess,
+                external=external,
+            )
+            if _platform() == "gcu":
+                try:
+                    from torch_fl.accelerator.gcu.tops_stream import TopsEvent
+
+                    obj = object.__new__(cls)
+                    obj._event = TopsEvent(**host_timed)
+                    return obj
+                except RuntimeError:
+                    return _HostTimedEvent(**host_timed)
+            if _platform() == "ascend":
+                try:
+                    from torch_fl.accelerator.ascend.acl_stream import AclEvent
+
+                    obj = object.__new__(cls)
+                    obj._event = AclEvent(
+                        enable_timing=enable_timing,
+                        blocking=blocking,
+                        external=external,
+                    )
+                    return obj
+                except RuntimeError:
+                    return _HostTimedEvent(**host_timed)
+            if _platform() == "mps":
+                # Apple Silicon: MTLSharedEvent is a real device event, so timing
+                # is measured on the queue rather than on the host clock.
+                from torch_fl.accelerator.mps.mps_stream import MpsEvent
+
+                obj = object.__new__(cls)
+                obj._event = MpsEvent(**host_timed)
+                return obj
+            if _platform() == "iluvatar":
+                # Corex events carry a device timestamp, so timing is measured
+                # on the queue rather than read from the host clock -- the same
+                # reason the MPS arm above takes this path.
+                from torch_fl.accelerator.iluvatar.ilu_stream import IluEvent
+
+                obj = object.__new__(cls)
+                obj._event = IluEvent(**host_timed)
+                return obj
+            # MUSA, whose vendor events live behind the shared C ABI: its timing
+            # flags are not musa_runtime's, so there is nothing here to wrap and
+            # the host clock is the clock that is left. Any other accelerator with
+            # no event class takes the same answer, rather than being sent to
+            # Ascend for one. See torch_fl/accelerator/musa/musa_stream.py.
+            return _HostTimedEvent(**host_timed)
+        if not hasattr(torch._C, "_cuda_getCurrentStream"):
+            # CPU torch wheel over a real CUDA runtime: torch.cuda.Event is the
+            # wheel's dummy base class and no C++ CUDA event is reachable, so the
+            # host-clock event is the only thing left to time with.
+            return _HostTimedEvent(
+                enable_timing=enable_timing,
+                blocking=blocking,
+                interprocess=interprocess,
+                external=external,
+            )
+        return super().__new__(
+            cls,
+            enable_timing=enable_timing,
+            blocking=blocking,
+            interprocess=interprocess,
+            external=external,
+        )
+
+    def __init__(
+        self, enable_timing=False, blocking=False, interprocess=False, external=False
+    ):
+        del enable_timing, blocking, interprocess, external
+
+    def record(self, stream=None):
+        if hasattr(self, "_event"):
+            native = getattr(stream, "_stream", stream)
+            return self._event.record(native)
+        if stream is None:
+            stream = _real_current_stream()
+        return super().record(stream)
+
+    def wait(self, stream=None):
+        if hasattr(self, "_event"):
+            native = getattr(stream, "_stream", stream)
+            return self._event.wait(native)
+        if stream is None:
+            stream = _real_current_stream()
+        return super().wait(stream)
+
+    def synchronize(self):
+        if hasattr(self, "_event"):
+            return self._event.synchronize()
+        return super().synchronize()
+
+    def query(self):
+        if hasattr(self, "_event"):
+            return self._event.query()
+        return super().query()
+
+    def elapsed_time(self, end_event):
+        if hasattr(self, "_event"):
+            other = getattr(end_event, "_event", end_event)
+            return self._event.elapsed_time(other)
+        return super().elapsed_time(end_event)
+
+
+def current_stream(device=None):
+    """Return the currently selected stream for the given device.
+
+    Returns a real ``torch.cuda.Stream`` (bypassing the boxing shim on
+    ``torch.cuda.current_stream``) so it is usable for event record/wait and
+    stream ordering, not just triton launch.
+    """
+    return _real_current_stream(device)
+
+
+@contextlib.contextmanager
+def stream(s):
+    """Context-manager that selects a given stream.
+
+    Reimplemented instead of delegating to ``torch.cuda.stream`` because the
+    latter saves/restores via ``torch.cuda.current_stream``, which boxing
+    replaces with a non-Stream shim (no ``.device``) -> AttributeError. We
+    save/restore the real stream through ``_cuda_setStream`` directly.
+    """
+    if s is None:
+        yield
+        return
+
+    # On native runtimes with no CUDA, switch the thread-local stream registry.
+    if not hasattr(torch._C, "_cuda_setStream"):
+        native = getattr(s, "_stream", s)
+        vendor = _platform()
+        if vendor == "gcu":
+            from torch_fl.accelerator.gcu.tops_stream import TopsStream
+
+            native_type = TopsStream
+        elif vendor == "ascend":
+            from torch_fl.accelerator.ascend.acl_stream import AclStream
+
+            native_type = AclStream
+        elif vendor == "mps":
+            # Apple Silicon: Metal command queues and a thread-local current
+            # stream, so this really switches rather than running the body in
+            # place -- see torch_fl/accelerator/mps/mps_stream.py.
+            from torch_fl.accelerator.mps.mps_stream import MpsStream
+
+            native_type = MpsStream
+        elif vendor == "iluvatar":
+            # Corex has real per-device streams and the runtime tracks which one
+            # is current (SetCurrentStreamForDevice), so this really switches.
+            from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
+
+            native_type = IluStream
+        else:
+            # MUSA, the de-boxed native Kunlunxin backend, and any accelerator
+            # with no stream class of its own -- the TX runtime and the CUDA-ABI
+            # boxing platforms (cuda, metax, ppu, dcu, the last of which arrives
+            # here because its runtime is dlopen'd rather than built into torch):
+            # every stream on the device *is* the shared one, so there is nothing
+            # to switch to and nothing to restore. Running the body is the whole
+            # contract, and it keeps this call from reaching for Ascend.
+            # Kunlunxin is native (its flagos tensor is not a cuda alias): its
+            # per-device current stream is switched by the C++ StreamGuard in
+            # csrc/runtime/guard.h (SetCurrentStreamForDevice), not from Python,
+            # and the Python stream object here is a handle-only stand-in with no
+            # ``set_current`` to call. The restore below is also why MUSA cannot
+            # be routed through the arms above: the stream
+            # ``_real_current_stream`` returns there is a handle-only stand-in
+            # with no ``set_current`` to restore with.
+            native_type = None
+        if native_type is not None and isinstance(native, native_type):
+            previous = _real_current_stream(native.device_index)
+            native.set_current()
+            try:
+                yield
+            finally:
+                previous.set_current()
+            return
+        yield
+        return
+
+    # CUDA path: real stream switching via _cuda_setStream
+    prev = _real_current_stream(s.device.index)
+    torch._C._cuda_setStream(
+        stream_id=s.stream_id,
+        device_index=s.device_index,
+        device_type=s.device_type,
+    )
+    try:
+        yield
+    finally:
+        torch._C._cuda_setStream(
+            stream_id=prev.stream_id,
+            device_index=prev.device_index,
+            device_type=prev.device_type,
+        )
+
+
+def get_amp_supported_dtype():
+    """Return list of supported dtypes for AMP (Automatic Mixed Precision).
+
+    Required by torch.autocast for custom device backends.
+    """
+    return [torch.float16, torch.bfloat16]
+
+
+class _DeviceProperties:
+    """Minimal device properties object for compiler/runtime compatibility."""
+
+    def __init__(self, device_id):
+        if _platform() == "tsingmicro":
+            # The TX runtime exposes no device-properties query at all -- the
+            # only tx* calls reachable from Python are device count/get/set,
+            # synchronize, malloc/free and the stream/event set -- so these are
+            # constants, matching the ones FlagGems' own tsingmicro descriptor
+            # reports (`_tsingmicro.get_device_properties`). Falling through to
+            # the Ascend arm below would name the device "Ascend NPU {id}" and
+            # report its AICore count as multi_processor_count, which inductor
+            # uses for its reduction-split heuristics and for its cache key.
+            self.name = "TX81"
+            self.multi_processor_count = 16
+            self.total_memory = 64 * 1024**3
+            self.major = 8
+            self.minor = 1
+            self.gcnArchName = self.name
+            self.warp_size = 16
+            self.L2_cache_size = 3 * 1024 * 1024
+            self.max_threads_per_multi_processor = 2048
+            self.regs_per_multiprocessor = 65536
+            self.shared_memory_per_multiprocessor = 0
+            return
+
+        get_musa_properties = getattr(_C, "_get_musa_device_properties", None)
+        if get_musa_properties is not None:
+            props = get_musa_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = props["major"]
+            self.minor = props["minor"]
+            # Inductor's cache fingerprint reads this ROCm-shaped optional
+            # attribute even for custom GPU devices. Keep it descriptive rather
+            # than pretending that MUSA is a GCN target.
+            self.gcnArchName = self.name
+            # Compiler-facing fields, all reported by musaGetDeviceProperties.
+            # Inductor sizes its Triton launch grids and its benchmarking L2
+            # flush buffer from these, so they must be the device's real values
+            # (an invented zero L2 size yields an empty buffer that mudnn's
+            # Fill rejects). Older builds of the extension did not return them.
+            self.warp_size = props.get("warp_size", 128)
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.max_threads_per_multi_processor = props.get(
+                "max_threads_per_multi_processor", 2048
+            )
+            self.regs_per_multiprocessor = props.get("regs_per_block", 65536)
+            self.shared_memory_per_multiprocessor = props.get(
+                "shared_memory_per_multiprocessor", 0
+            )
+            return
+
+        # Iluvatar corex ships a complete cuda_runtime.h, so the same fields come
+        # from cudaGetDeviceProperties. It is not the MUSA getter because that one
+        # is compiled only into a MUSA build; the dict shape is deliberately the
+        # same.
+        get_ilu_properties = getattr(_C, "_get_iluvatar_device_properties", None)
+        if get_ilu_properties is not None:
+            props = get_ilu_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = props["major"]
+            self.minor = props["minor"]
+            # Same reason as the MUSA arm above: Inductor's cache fingerprint
+            # reads gcnArchName whenever torch.version.cuda is None, which is
+            # every CPU-torch build.
+            self.gcnArchName = self.name
+            self.warp_size = props.get("warp_size", 32)
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.max_threads_per_multi_processor = props.get(
+                "max_threads_per_multi_processor", 1024
+            )
+            self.regs_per_multiprocessor = props.get("regs_per_block", 65536)
+            self.shared_memory_per_multiprocessor = props.get(
+                "shared_memory_per_multiprocessor", 0
+            )
+            return
+
+        # Kunlunxin: the XPU runtime has no per-device property struct, only the
+        # individual xpu_device_get_attr queries the binding wraps. The XPU
+        # reports no compute-capability pair at all, and nothing downstream asks
+        # it for one -- FlagOSDeviceInterface reads the arch FlagTree's XPU
+        # backend compiles for (_kunlunxin_arch) instead -- so major/minor stay
+        # the CUDA-shaped sentinels torch.utils._triton's probes expect.
+        get_kunlunxin_properties = getattr(_C, "_get_kunlunxin_device_properties", None)
+        if get_kunlunxin_properties is not None:
+            props = get_kunlunxin_properties(device_id)
+            self.name = props["name"]
+            self.multi_processor_count = props["multi_processor_count"]
+            self.total_memory = props["total_memory"]
+            self.major = 8
+            self.minor = 0
+            # Inductor sizes its benchmarking L2 flush buffer from this field;
+            # a zero leaves it empty. The binding reports the on-die L3, the
+            # only cache capacity the XPU SDK exposes.
+            self.L2_cache_size = props.get("l2_cache_size", 0)
+            self.gcnArchName = self.name
+            return
+
+        # Ascend analogue: use the AICore count reported by the Ascend Triton
+        # backend. The module path is the same on FlagTree and triton-ascend.
+        self.name = f"Ascend NPU {device_id}"
+        self.multi_processor_count = _aicore_count()
+        self.total_memory = _C._memory_reserved(device_id)
+        # CUDA-style sentinels required by torch.utils._triton probes.
+        self.major = 8
+        self.minor = 0
+
+        # Inductor's cache key reads the device name from `gcnArchName` whenever
+        # `torch.version.cuda` is None (codecache.py CacheBase.get_system), which
+        # is the case for the CPU torch wheel these backends run on -- upstream
+        # only reaches that branch on ROCm, where the field exists. Without it
+        # every compile_fx dies with AttributeError while hashing the graph.
+        # The value is used purely as a string in that hash, so the device name
+        # is the honest answer.
+        self.gcnArchName = self.name
+
+
+def _align_flaggems_device_identity():
+    """Make FlagGems' device name agree with the one torch_fl registered.
+
+    FlagGems compares the device type of its inputs against the device string its
+    own vendor backend declares before it runs any kernel, falling back to ATen
+    when the two differ. On a generic NVIDIA box those are ``flagos`` (torch_fl's
+    registered backend) and ``cuda`` (what FlagGems' nvidia descriptor says), so
+    every op that makes that comparison fell back and never ran its kernel under
+    the ``backends_cuda.conf`` routing.
+
+    No platform gate here: the remedy is decided by which vendor descriptor
+    FlagGems resolved, and of the CUDA-compatible ones only nvidia's and hygon's
+    name this accelerator differently from torch_fl while also being measured
+    against the realignment. DCU needs it as much as CUDA does -- its guarded
+    modules raise rather than fall back, which is the ``ValueError: i0: input
+    tensor must be on cuda device`` class in the DCU survey. On every other
+    vendor (Ascend, GCU, MetaX, MUSA, and the remaining descriptors that say
+    ``cuda``) the call returns immediately -- see
+    ``torch_fl.accelerator.cuda._cuda_compat.patch_flaggems_device_name``, which
+    GCU mirrors in ``torch_fl.accelerator.gcu._gcu_compat``.
+
+    Best-effort -- the name check is a dispatch guard, so failing to realign it
+    costs the routed ops their Triton kernel but must not take down device init.
+    """
+    try:
+        from torch_fl.accelerator.cuda._cuda_compat import patch_flaggems_device_name
+
+        patch_flaggems_device_name()
+    except Exception:
+        pass
+
+
+def _vector_norm_permutes(x, dims) -> bool:
+    """Whether FlagGems' ``dim_compress`` would materialise a transposed copy.
+
+    ``dim_compress`` (flag_gems/utils/shape_utils.py) builds
+    ``order = batch_dims + sorted(reduced_dims, key=stride, reverse=True)`` and
+    returns ``permute(order).contiguous()``. That only stays a view when ``order``
+    is already the identity, which is the case for a reduction over the
+    innermost dim of a contiguous tensor -- and for a full-tensor reduction,
+    where every dim is in the list.
+    """
+    order = [i for i in range(x.ndim) if i not in dims]
+    order += sorted(dims, key=lambda d: x.stride(d), reverse=True)
+    return order != list(range(x.ndim))
+
+
+def _flaggems_vector_norm_wrapper(original):
+    """Wrap FlagGems' ``vector_norm`` so single-dim L2 avoids the transpose.
+
+    See ``_patch_flaggems_vector_norm`` for why. Everything the fast path does
+    not cover -- any other ``ord``, a multi-dim or full reduction, an explicit
+    ``dtype``, a half input, and every reduction whose dim is already innermost --
+    goes to ``original`` unchanged.
+    """
+
+    def vector_norm(x, ord=2, dim=None, keepdim=False, dtype=None):
+        dims = None
+        if dim is not None and x.ndim:
+            try:
+                # dim is an int for torch.linalg.vector_norm calls that name a
+                # single axis, and a sequence otherwise; the aten schema
+                # (OptionalIntArrayRef) does not say which.
+                dims = [dim] if isinstance(dim, int) else [int(d) for d in dim]
+                dims = [d % x.ndim for d in dims]
+            except Exception:
+                dims = None
+        if (
+            dims is None
+            or len(dims) != 1
+            or ord != 2
+            or dtype is not None
+            # x*x is evaluated in the input dtype, so a half input would round
+            # (and, for fp16 above 256, overflow) before FlagGems' fp32
+            # accumulator ever sees it. FlagGems' own kernel promotes first.
+            or x.dtype not in (torch.float32, torch.float64)
+            or x.numel() == 0
+            or not _vector_norm_permutes(x, dims)
+        ):
+            return original(x, ord, dim, keepdim, dtype)
+        # aten-level spellings, so the conf still decides each sub-op's route:
+        # sum.dim_IntList and sqrt are both FlagGems, and sum's single-dim path
+        # reduces the strided axis in place instead of permuting it.
+        out = torch.sqrt(torch.sum(x * x, dim=dims, keepdim=True))
+        return out if keepdim else out.squeeze(dim=dims)
+
+    vector_norm.__wrapped__ = original
+    vector_norm._torch_fl_composite_l2 = True
+    return vector_norm
+
+
+def _rebind_flag_gems_name(name, original, wrapper):
+    """Point every module that *holds* ``name`` at ``wrapper`` instead.
+
+    The C++ bridge resolves ``"flag_gems.<name>"`` once and caches the callable,
+    and each re-export on the way down (``flag_gems``, ``flag_gems.ops``, and
+    the submodule that defines it) holds its own reference, so all of them have
+    to move. Matched by identity, so a module that happens to export a
+    different callable under the same name is left alone.
+
+    The test is ``__dict__`` membership rather than ``getattr``. On this
+    interpreter the two are not the same question: ``transformers`` installs a
+    ``_LazyModule`` for every model it ships, and ``getattr`` on one of those
+    imports the submodule behind the name and warns about the alias it hands
+    back. Sweeping several thousand of them costs seconds of load time and
+    materialises hundreds of image-processing modules that nothing asked for.
+    A module that only computes the name in ``__getattr__`` was never holding
+    the reference that has to move, so ``__dict__`` is also the right test.
+
+    ``sys`` is a module-level import here, not one of the function-local ones the
+    patch functions use for their own imports: a local ``import sys`` binds a
+    local name and leaves this function's ``sys`` unbound, which is a
+    ``NameError`` on the dispatch path -- and every caller of this helper wraps
+    it in ``except Exception: pass``, so the patch installs nothing and says
+    nothing.
+    """
+    for mod in list(sys.modules.values()):
+        try:
+            if mod.__dict__.get(name) is original:
+                mod.__dict__[name] = wrapper
+        except Exception:
+            continue
+
+
+def _patch_flaggems_vector_norm():
+    """Stop FlagGems' L2 ``vector_norm`` from materialising a transposed copy.
+
+    ``flag_gems.ops.vector_norm`` sends every partial reduction through
+    ``dim_compress``, which permutes the reduced dim to innermost and then calls
+    ``.contiguous()`` on the result. On a strided reduction that permute is not
+    the identity, so the tensor is gathered into a fresh buffer a few hundred
+    bytes at a time. Measured on a DCU bw1000 with ``(1, 144, 1, 2048, 2048)``
+    fp32 (2.42 GB), against the same device's 1.34 TB/s on a plain contiguous
+    copy of the same buffer:
+
+        dim_compress(x, [1])          354869 us    13.6 GB/s
+        x.clone()                       3606 us  1339.8 GB/s
+        flag_gems.vector_norm(x,2,[1]) 357307 us
+        sqrt(sum_dim(x*x, [1]))           5801 us
+
+    So 99.3% of the op is the copy, and the ``l2_norm_kernel`` it was copied for
+    is ~2.4 ms. FlagGems' own ``sum`` does not do this -- its single-dim path
+    reduces the strided axis in place over a plain ``contiguous()`` -- so the
+    same reduction spelled ``sqrt(sum(x*x, dim=dim, keepdim=True))`` is 61x
+    faster and keeps every sub-op on the route the conf already gives it
+    (``sum.dim_IntList`` and ``sqrt`` are both FlagGems). Nothing is rerouted to
+    the CUDA-boxing path: the op still runs FlagGems Triton kernels.
+
+    Scoped to the configuration that was measured -- DCU, L2, one dim -- and
+    gated on the route actually being FlagGems. Upstream workaround rather than
+    a design: remove it once FlagGems' vector_norm stops permuting. Best-effort,
+    like ``_align_flaggems_device_identity``: an unpatched FlagGems is slow here,
+    not broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems.ops as _gems_ops
+
+        # ``flag_gems.ops.__init__`` re-exports the function under the
+        # submodule's own name, so ``from flag_gems.ops import vector_norm``
+        # yields the *function* and ``getattr``-ing ``.vector_norm`` off it
+        # finds nothing. Take the defining module out of sys.modules instead.
+        _gems_module = sys.modules.get("flag_gems.ops.vector_norm")
+        original = getattr(_gems_module, "vector_norm", None)
+        if original is None:
+            original = getattr(_gems_ops, "vector_norm", None)
+        if original is None or getattr(original, "_torch_fl_composite_l2", False):
+            return
+        wrapper = _flaggems_vector_norm_wrapper(original)
+        # The C++ bridge resolves "flag_gems.vector_norm" once and caches the
+        # callable, and every re-export above holds its own reference, so rebind
+        # every module that currently points at the original.
+        _rebind_flag_gems_name("vector_norm", original, wrapper)
+        if _gems_module is not None:
+            _gems_module.vector_norm = wrapper
+    except Exception:
+        pass
+
+
+def _pow_exponent_is_two(exponent) -> bool:
+    """Whether a ``Scalar`` exponent is exactly 2, without trusting its type."""
+    try:
+        return float(exponent) == 2.0
+    except Exception:
+        return False
+
+
+def _flaggems_pow_scalar_square_wrapper(original, square):
+    """Wrap FlagGems' ``pow_tensor_scalar`` so an exponent of 2 is a multiply.
+
+    See ``_patch_flaggems_pow_scalar_square`` for why. Every other exponent, and
+    every input that is not floating point, goes to ``original`` unchanged.
+    ``square`` is the value of ``flag_gems.mul`` seen when the patch was
+    installed; it is only a fallback, because the patch can run before that name
+    exists (see below).
+    """
+
+    def pow_tensor_scalar(A, exponent):
+        try:
+            fast = A.dtype.is_floating_point and _pow_exponent_is_two(exponent)
+        except Exception:
+            fast = False
+        if fast:
+            import flag_gems
+
+            mul = getattr(flag_gems, "mul", None) or square
+            if mul is not None:
+                return mul(A, A)
+        return original(A, exponent)
+
+    pow_tensor_scalar.__wrapped__ = original
+    pow_tensor_scalar._torch_fl_square_via_mul = True
+    return pow_tensor_scalar
+
+
+def _patch_flaggems_pow_scalar_square():
+    """Compute ``x.pow(2)`` as ``x * x`` instead of one ``powf`` each.
+
+    ``pow.Tensor_Scalar`` reaches ``flag_gems.pow_tensor_scalar``, which on this
+    backend is not upstream's ``flag_gems/ops/pow.py`` at all: the backend
+    registrar swaps in ``flag_gems/runtime/backend/_hygon/ops/pow.py``, and that
+    copy evaluates ``_pow(x.to(tl.float64), exponent.to(tl.float64))`` for every
+    non-half input -- an fp64 libdevice ``powf`` per element. The exponent is a
+    runtime operand, so the kernel is the same whether it was handed 2.0 or
+    1.37. Measured on a DCU bw1000, fp32 ``(1, 4122, 32, 128)`` (16.9M elements,
+    67.6 MB), pair of device events around a back-to-back launch loop against
+    the same loop's host time:
+
+        pow_tensor_scalar(z, 2.0)   host  185.6 us   device  418.3 us
+        flag_gems.mul(z, z)         host   20.1 us   device  104.8 us
+
+    and on bf16, where the same two ops are 384.6/169.7 and 56.5/20.1. The
+    replacement is also at least as accurate: ``x * x`` is correctly rounded,
+    whereas ``exp2(2 * log2(x))`` is not, and the two agree bit for bit at 0,
+    -0, inf and nan.
+
+    It is spelled with FlagGems' own ``mul`` rather than ``torch.mul`` so the
+    whole op stays on FlagGems Triton kernels. That is a deliberate ~50 us: the
+    conf routes ``mul.Tensor`` to the CUDA-boxing path, whose kernel is about
+    twice as fast on fp32, and taking it would move a routed op off FlagGems,
+    which is what this patch exists to avoid.
+
+    ``flag_gems.mul`` is read at call time rather than captured here, because
+    this function can run in the middle of ``import flag_gems``. Triton asks for
+    the active device while ``flag_gems/__init__.py`` is still importing
+    ``flag_gems.fused``, that query goes through the PrivateUse1 lazy init back
+    into ``_lazy_init``, and the top-level names -- ``mul`` among them -- are not
+    bound until ``from flag_gems.ops import *`` a few lines later, so on that
+    first pass there is nothing to capture. By the time anything is dispatched
+    ``flag_gems.mul`` is the function the bridge would have called, so binding it
+    late costs a dict lookup and removes the ordering question entirely.
+
+    Reached through ``flag_gems.pow_tensor_scalar`` rather than through the
+    defining module, because those are two different functions here: the
+    backend override is what the C++ bridge resolves, and upstream's copy is
+    left alone only if nothing else calls it. Both are rebound if both are
+    present.
+
+    Scoped to the configuration that was measured -- DCU, on a conf that routes
+    to FlagGems, exponent exactly 2, floating-point input -- and gated on the
+    route actually being FlagGems. Best-effort, like
+    ``_align_flaggems_device_identity``: an unpatched ``pow`` is slow here, not
+    broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+        import flag_gems.ops as _gems_ops
+
+        # The backend-resolved name first: that is the one the bridge calls.
+        # The defining module can hold a different function, the way
+        # ``_hygon/ops/pow.py`` shadows ``flag_gems/ops/pow.py``, so take it
+        # too and let the identity sweep below find every reference to each.
+        candidates = []
+        resolved = getattr(flag_gems, "pow_tensor_scalar", None)
+        if resolved is not None:
+            candidates.append(resolved)
+        _gems_module = sys.modules.get("flag_gems.ops.pow")
+        upstream = getattr(_gems_module, "pow_tensor_scalar", None)
+        if upstream is None:
+            upstream = getattr(_gems_ops, "pow_tensor_scalar", None)
+        if upstream is not None and upstream is not resolved:
+            candidates.append(upstream)
+
+        # And the vendor's own copy, which is the one that ends up in the
+        # registry: this runs from inside ``import flag_gems``, while
+        # ``SpecOpRegistrar.apply`` is a few lines further down the same file,
+        # and that registrar reads its functions out of ``_{vendor}.ops`` with
+        # ``inspect.getmembers`` at that later moment. Rebinding the vendor
+        # package now is therefore what decides what gets published -- the name
+        # the sweep above fixes on ``flag_gems`` is overwritten either way.
+        try:
+            from flag_gems import runtime as _gems_runtime
+
+            vendor = _gems_runtime.device.vendor_name
+        except Exception:
+            vendor = None
+        if vendor:
+            try:
+                vendor_ops = importlib.import_module(f"_{vendor}.ops")
+            except Exception:
+                vendor_ops = None
+            vendor_pow = getattr(vendor_ops, "pow_tensor_scalar", None)
+            if vendor_pow is not None and all(vendor_pow is not c for c in candidates):
+                candidates.append(vendor_pow)
+
+        if not candidates:
+            return
+        square = getattr(flag_gems, "mul", None)
+        # The C++ bridge resolves "flag_gems.pow_tensor_scalar" once and caches
+        # the callable, and every re-export above holds its own reference, so
+        # rebind every module that currently points at an original -- matched
+        # by identity, the way _patch_flaggems_vector_norm does it.
+        for original in candidates:
+            if getattr(original, "_torch_fl_square_via_mul", False):
+                continue
+            wrapper = _flaggems_pow_scalar_square_wrapper(original, square)
+            _rebind_flag_gems_name("pow_tensor_scalar", original, wrapper)
+    except Exception:
+        pass
+
+
+# A contiguous last-dim reduction at or below this width is short enough that
+# one CTA per row is the wrong shape for it; see the patch for the measurement.
+_MEAN_TILED_MAX_N = 1024
+
+
+def _mean_is_last_dim(inp, dim) -> bool:
+    """Whether ``mean_dim`` is reducing a contiguous tensor's last axis."""
+    if not isinstance(inp, torch.Tensor) or inp.ndim < 1:
+        return False
+    if not inp.dtype.is_floating_point or not inp.is_contiguous() or inp.numel() == 0:
+        return False
+    if dim is None:
+        return False
+    try:
+        # dim is an int for calls that name a single axis and a sequence
+        # otherwise; the aten schema (OptionalIntArrayRef) does not say which.
+        dims = [dim] if isinstance(dim, int) else [int(d) for d in dim]
+    except Exception:
+        return False
+    if len(dims) != 1 or not -inp.ndim <= dims[0] < inp.ndim:
+        # The range test is not redundant with the modulo below: ``%`` normalises
+        # a negative dim, it does not reject an out-of-range one, and an
+        # out-of-range dim would otherwise read as the last axis (dim 3 on a 2-D
+        # input) and return a mean over the wrong axis instead of raising the way
+        # the composite it replaces does.
+        return False
+    return dims[0] % inp.ndim == inp.ndim - 1 and inp.shape[-1] <= _MEAN_TILED_MAX_N
+
+
+def _flaggems_mean_last_dim_wrapper(original, kernel, cdiv, device_ctx):
+    """Wrap FlagGems' ``mean_dim`` so a row mean goes to the tiled kernel.
+
+    See ``_patch_flaggems_mean_last_dim`` for why. Everything the fast path does
+    not cover -- an explicit ``dtype``, a non-float or non-contiguous input, a
+    reduction that is not over the last axis, a wide row -- goes to ``original``
+    unchanged.
+    """
+
+    def mean_dim(inp, dim=None, keepdim=False, *, dtype=None):
+        if dtype is None and _mean_is_last_dim(inp, dim):
+            n = inp.shape[-1]
+            m = inp.numel() // n
+            # mean_dim_kernel writes one value per row, so its out is (M, 1)
+            # regardless of the input's rank.
+            out = torch.empty((m, 1), dtype=inp.dtype, device=inp.device)
+            grid = lambda meta: (cdiv(m, meta["BLOCK_M"]),)  # noqa: E731
+            with device_ctx(inp.device):
+                kernel[grid](inp, out, m, n)
+            out = out.view(list(inp.shape[:-1]) + [1])
+            return out if keepdim else out.squeeze(-1)
+        return original(inp, dim, keepdim, dtype=dtype)
+
+    mean_dim.__wrapped__ = original
+    mean_dim._torch_fl_tiled_row_mean = True
+    return mean_dim
+
+
+def _patch_flaggems_mean_last_dim():
+    """Send a short last-dim ``mean`` to FlagGems' tiled reduction kernel.
+
+    ``flag_gems.ops.mean.mean_dim_comm`` picks its kernel by ``K = numel/M/N``,
+    the length of the *unreduced* slice: ``K >= 1024`` gets the vectorised
+    kernel, ``K > 1`` the tiled one, and ``K == 1`` -- a reduction over the last
+    axis of a contiguous tensor -- gets ``mean_dim_kernel_inner``, which is one
+    CTA per row. On a short row that is a CTA per 512 bytes, and the launch cost
+    of 131904 of them swamps the reduction. Measured on a DCU bw1000, fp32
+    ``(1, 4122, 32, 128)`` (131904 rows of 128), the same event-pair split as
+    the pow patch:
+
+        mean_dim(z, -1, True)   [shipped]        host   77.7 us   device  443.5 us
+        mean_dim_kernel tiled                    host   47.8 us   device   59.8 us
+
+    and on bf16 the shipped kernel is the same 443.5 us. Both kernels sum in
+    fp32 and divide by N, so bf16 agrees bit for bit; fp32 differs by fp
+    reassociation only (max |delta| 1.5e-8 on unit-variance input, which is
+    below the bf16 rounding the model then applies). The tiled kernel is the
+    one ``mean_dim_comm`` already uses for multi-dim reductions and for
+    ``sum``/``amax``/``prod``, so this is a dispatch fix, not a new kernel.
+
+    Measured flat across M -- 46 us against 76 us at M=1 as well as at M=16384
+    -- so it needs no lower bound on the row count, only an upper bound on the
+    row width. Scoped to the configuration that was measured -- DCU, on a conf
+    that routes to FlagGems -- and gated on the route actually being FlagGems.
+    Best-effort, like ``_align_flaggems_device_identity``: an unpatched ``mean``
+    is slow here, not broken, so this must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+        import flag_gems
+        import flag_gems.ops as _gems_ops
+
+        # Resolve the way the bridge does -- off the top level -- so a backend
+        # that ships its own mean_dim is patched where it actually is, and take
+        # the kernel and helpers from whichever module defines that function.
+        original = getattr(flag_gems, "mean_dim", None)
+        if original is None:
+            original = getattr(_gems_ops, "mean_dim", None)
+        if original is None:
+            return
+        if getattr(original, "_torch_fl_tiled_row_mean", False):
+            return
+        _gems_module = sys.modules.get(getattr(original, "__module__", ""))
+        kernel = getattr(_gems_module, "mean_dim_kernel", None)
+        if kernel is None:
+            # Same re-export trap as the vector_norm patch: ``flag_gems.ops``
+            # binds the *function* under the submodule's name, so the defining
+            # module has to come out of sys.modules.
+            _gems_module = sys.modules.get("flag_gems.ops.mean")
+            kernel = getattr(_gems_module, "mean_dim_kernel", None)
+        if kernel is None:
+            return
+        # mean_dim_comm wraps its launches in this context; keep the same
+        # ordering against any pending device switch. cdiv comes off the same
+        # module so the wrapper does not need its own triton import.
+        device_ctx = getattr(_gems_module, "torch_device_fn", None)
+        device_ctx = getattr(device_ctx, "device", None) or contextlib.nullcontext
+        cdiv = getattr(getattr(_gems_module, "triton", None), "cdiv", None)
+        if cdiv is None:
+            import triton
+
+            cdiv = triton.cdiv
+        wrapper = _flaggems_mean_last_dim_wrapper(original, kernel, cdiv, device_ctx)
+        _rebind_flag_gems_name("mean_dim", original, wrapper)
+        if _gems_module is not None:
+            _gems_module.mean_dim = wrapper
+    except Exception:
+        pass
+
+
+# Dispatcher kernels registered from this module are held by the torch.library
+# Library object that registered them, so the objects are kept for the life of
+# the process rather than left to the garbage collector.
+_PATCH_LIBS = []
+
+
+def _flagos_index_put_roundtrip(self, indices, values, accumulate):
+    """What ``WrapperIndexPut_`` does: scatter on the CPU and copy back.
+
+    The C++ wrapper cannot be code-generated, because its index argument is
+    ``Tensor?[]`` and the FlagGems bridge's ``IValueToPython`` has no conversion
+    for that type -- so ``index_put_`` copies its operands to the CPU, runs the
+    CPU kernel there and copies ``self`` back. This is that path, kept as the
+    fallback for anything the FlagGems kernel does not serve: the two produce
+    the same tensor, so a fallback costs time and nothing else.
+
+    ``torch.ops.aten.index_put_`` rather than ``Tensor.index_put_``: the method
+    form rejects a ``None`` entry in the index list, and ``None`` is what the
+    ``x[:, mask] = v`` spelling the model uses produces.
+    """
+    self_cpu = self.cpu()
+    values_cpu = values.cpu()
+    indices_cpu = [i.cpu() if isinstance(i, torch.Tensor) else i for i in indices]
+    torch.ops.aten.index_put_(self_cpu, indices_cpu, values_cpu, accumulate)
+    self.copy_(self_cpu)
+    return self
+
+
+def _patch_flaggems_index_put():
+    """Run ``index_put_`` on FlagGems' Triton kernel, not on a CPU round-trip.
+
+    ``index_put_``/``_index_put_impl_`` are registered by hand in
+    ``csrc/aten/register.cc`` (``WrapperIndexPut_``) as ``self.cpu() -> CPU
+    index_put_ -> self.copy_(self_cpu)``, and they are in the codegen's
+    ``MANUAL_REGISTERED_OPS`` because the wrapper cannot be expressed otherwise:
+    a ``Tensor?[]`` index list has no ``IValueToPython`` conversion, so no
+    generated kernel can be handed to the bridge. FlagGems ships the op as a
+    Triton kernel, so the round-trip is a per-call cost with no coverage reason
+    behind it.
+
+    Measured on a DCU bw1000, in the Qwen-Image-2.1 denoise loop, where the op
+    is the largest exclusive entry in the steady-state census (24 calls over
+    four steps at 15501.54 us each, ahead of every FlagGems op), against
+    FlagGems' kernel on the same shapes with fresh operands:
+
+        shape                                       round-trip   FlagGems
+        (4122,) <- (4096,)              int            0.140 ms    0.155 ms
+        (4122,) <- (4096,)              bool mask      0.173 ms    0.507 ms
+        (4122,) <- scalar                              0.150 ms    0.153 ms
+        (1,4122) <- (26,)                              0.085 ms    0.180 ms
+        (1,4122,4096) [:, i] <- (4096,4096)      f32   68.583 ms    0.291 ms
+        (1,4122,4096) [:, m] <- (4096,4096)      f32   72.360 ms    0.638 ms
+        (1,4122,4096) [:, m] <- (4096,4096)      bf16  43.442 ms    0.578 ms
+
+    The census mean is over that bimodal set: the model issues six calls a step
+    -- five narrow ones that are a wash either way, and one wide
+    ``joint_hidden_states[:, image_pad_mask] = hidden_states`` that is 70 of
+    the step's ~93 ms. The win is on the wide shapes, and it is 75x-236x there.
+    All of them agree bitwise with the round-trip (``equal=True``,
+    ``max|delta|=0``, the same for ``accumulate=True``); the operand transfers
+    and the CPU scatter are each tens of microseconds when timed on their own,
+    so what the wide shapes cost is the round-trip, not the data.
+
+    End to end, on the same six-step driver, against the run that differs only
+    by this patch: the op falls from 15501.54 to 388.79 us per call on the
+    steady block and from 16720.84 to 381.17 on the last step, the steady step
+    wall from 1.272 to 1.180 s, and the last step's exclusive sum by 0.093 s --
+    against 0.098 s for the op alone, so nothing else moved. The rendered image
+    is byte-identical to the unpatched one (md5 6fc5c62c451ecf5772f11bb0e1652cfd,
+    1875231 bytes, both).
+
+    Measured again on an H100, same op, same shape: the round-trip is 7.96 ms
+    against FlagGems' 0.22 ms -- 36x -- on ``(1, 4160, 3072)`` bf16 assigned
+    through a ``(4160,)`` bool mask, which is the shape the 2.1 forward issues
+    before its block stack. The H100 figure for the same assignment on the
+    vendor route is 0.10 ms, so this is the round-trip's 26 MB host copy each
+    way and not a kernel difference.
+
+    Narrows to FlagGems rather than away from it: the op keeps Triton kernels
+    and never takes the CUDA-boxing route. Scoped by the shared
+    ``_flagos_launch_patches_apply`` gate -- see
+    ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- and installed through ``torch.library``
+    rather than in C++ because the route cannot be stated in the conf: the conf
+    enumerates the generated registration list, which this hand-registered op is
+    deliberately not in. Upstream workaround rather than a design; remove it once
+    the wrapper stops round-tripping. Best-effort, like
+    ``_align_flaggems_device_identity``: an unpatched ``index_put_`` is slow
+    here, not broken, so this must not be able to take down device init.
+    """
+    try:
+        if not _flagos_launch_patches_apply():
+            return
+        import flag_gems
+
+        gems_index_put = getattr(flag_gems, "index_put_", None)
+        if gems_index_put is None:
+            return
+
+        def _index_put_(self, indices, values, accumulate=False):
+            try:
+                gems_index_put(self, list(indices), values, accumulate)
+            except Exception:
+                # Narrowed to Exception, and only ever to a path that computes
+                # the same tensor: FlagGems' op is the fast path, the round-trip
+                # is the guaranteed one.
+                return _flagos_index_put_roundtrip(self, indices, values, accumulate)
+            return self
+
+        def _index_put_impl_(self, indices, values, accumulate=False, unsafe=False):
+            # FlagGems' index_put_ is the same scatter without the
+            # duplicate-index guard, so it is the implementation for both. Its
+            # _index_put_impl_ is not used: it takes a separate path for the
+            # single-bool-mask case that was never measured here.
+            return _index_put_(self, indices, values, accumulate)
+
+        lib = torch.library.Library("aten", "IMPL")
+        lib.impl("index_put_", _index_put_, "PrivateUse1")
+        lib.impl("_index_put_impl_", _index_put_impl_, "PrivateUse1")
+        _PATCH_LIBS.append(lib)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# FlagGems per-launch host cost
+#
+# The routed ops are limited by their host side, not by their kernels: on a DCU
+# bw1000 a bf16 ``where`` over ``(1, 4096, 1) x (1, 1, 4096)`` enqueues in
+# 11.5 us on the vendor build and 262.4 us through FlagGems, while the device
+# spends 124.2 and 74.0 us per call on the two -- so the vendor op is
+# device-bound and the FlagGems op is Python-bound. The patches below take
+# back the parts of that Python that are recomputed per launch without changing
+# anything a caller can observe; none of them moves an op off FlagGems.
+#
+# Measured again on an H100 in the Qwen-Image-2.1 denoise loop, where the same
+# reading holds and the kernels are not the difference either: the FlagGems
+# ``mul`` kernel launched directly on (1, 4160, 3072) bf16 runs at 28.2 us and
+# 2.72 TB/s, against the vendor's 28.7 us and 2.68 TB/s, while the *call*
+# through ``torch.mul`` on that shape takes 85.4 us -- the kernel is at the
+# memory roofline and 57 us of the call is Python around it. The patches below
+# are therefore not a DCU-specific workaround; they are the fix for the shape
+# of the FlagGems Python launch path, and every boxing build that routes to
+# FlagGems has it.
+# ---------------------------------------------------------------------------
+
+# The builds whose routed ops are FlagGems Python/Triton launches reached through
+# the generated bridge, which is the configuration these patches were written and
+# measured on. ``dcu`` was the first; ``cuda`` is the CUDA-boxing build, where the
+# same measurement was taken on an H100 (see the section header) -- an external
+# libtorch_cuda.so behind a CPU torch changes how the vendor kernels are reached,
+# not how FlagGems launches its own.
+_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("dcu", "cuda")
+
+
+def _flagos_launch_patches_apply():
+    """Whether the per-launch host patches below apply to this build and conf.
+
+    Both halves are load-bearing and are the two the individual functions used to
+    spell out separately: the build has to be one whose routed ops go through the
+    FlagGems Python launch path (a native or C++ vendor backend has its own, and
+    patching FlagGems' ``LibEntry`` there would be dead weight), and the conf has
+    to route to FlagGems at all -- a conf that does not has no launches to make
+    cheaper.
+    """
+    from .. import _build_accelerator, _conf_routes_to_flaggems
+
+    return (
+        _build_accelerator() in _FLAGGEMS_LAUNCH_PATCH_BUILDS
+        and _conf_routes_to_flaggems()
+    )
+
+
+# The keyword arguments Triton's ``KernelInterface.__getitem__`` passes down to
+# ``LibEntry.run``. A launch carrying anything else takes the stock path.
+_FLAGGEMS_RUN_KWARGS = frozenset(("grid", "warmup"))
+
+# Distinct from ``None``, so "this entry has no plan" and "no plan computed yet"
+# do not collide in the per-entry plan cache.
+_NO_PLAN = object()
+
+# Enough for every shape a model repeats across a denoise loop, small enough
+# that a cache keyed on shapes cannot grow without bound.
+_BROADCAST_SHAPES_LIMIT = 4096
+
+
+def _memoized_broadcast_shapes(original):
+    """``torch.broadcast_shapes`` computed once per set of shapes.
+
+    ``torch.broadcast_shapes`` is a Python wrapper: it asks
+    ``torch.jit.is_tracing()`` and then delegates to
+    ``torch._refs._broadcast_shapes``, which walks the shapes in Python.
+    Measured on a DCU bw1000, three rank-3 shape tuples cost 21.9 us per call --
+    and the same 21.9 us under this build's vendor torch, so it is a property of
+    the DTK build rather than of the plugin. The vendor path pays none of it
+    because its ``where`` never runs Python.
+
+    FlagGems' ``where_self_out`` calls it once per ``where``
+    (flag_gems/ops/where.py), and Qwen-Image-2.1 issues 130 ``where`` calls per
+    denoise step on shapes that do not change between steps, so 2.8 ms of every
+    step goes to recomputing one shape.
+
+    The function is pure, so the memo cannot change an answer; the cache is
+    dropped wholesale once it is large enough that a live model would have
+    stopped repeating itself.
+    """
+    cache = {}
+    limit = _BROADCAST_SHAPES_LIMIT
+
+    def broadcast_shapes(*shapes):
+        try:
+            hit = cache.get(shapes)
+        except TypeError:
+            # A shape spelled as a list rather than a tuple: hashable callers
+            # only, and this one is not.
+            return original(*shapes)
+        if hit is None:
+            hit = original(*shapes)
+            if len(cache) >= limit:
+                cache.clear()
+            cache[shapes] = hit
+        return hit
+
+    broadcast_shapes.__wrapped__ = original
+    return broadcast_shapes
+
+
+def _hoisted_descriptor_cache_key(descriptor_type):
+    """``flag_gems.utils.libentry._descriptor_cache_key`` without the re-import.
+
+    The stock function imports ``triton.tools.tensor_descriptor`` from inside
+    its own body on every call, and ``LibEntry.key`` calls it once per kernel
+    argument -- 37 times for a rank-3 pointwise kernel whose whole launch is
+    ~350 us of host time. Resolving that import costs a ``sys.modules`` lookup,
+    a ``getattr`` and a function frame each time, for a module that cannot have
+    changed since the last launch.
+
+    Behaviour is untouched: this is still a passthrough for everything that is
+    not a ``TensorDescriptor``.
+    """
+    if descriptor_type is None:
+
+        def descriptor_cache_key(arg):
+            return arg
+
+        return descriptor_cache_key
+
+    def descriptor_cache_key(arg):
+        if not isinstance(arg, descriptor_type):
+            return arg
+        return (
+            "TensorDescriptor",
+            tuple(arg.shape),
+            tuple(arg.strides),
+            tuple(arg.block_shape),
+            getattr(arg, "padding", None),
+        )
+
+    return descriptor_cache_key
+
+
+def _fast_libentry_key(entry, descriptor_cache_key, tensor_specialization):
+    """``LibEntry.key`` with the per-call work it can do once, done once.
+
+    The stock ``key`` defines ``spec_arg`` and ``dns_arg`` as nested functions,
+    so every call builds two closures and pays two Python frames per argument,
+    and ``spec_arg`` additionally re-resolves the vendor's
+    ``get_tensor_specialization`` for every tensor argument. All of that is
+    fixed when the kernel is constructed. What is left is one straight walk over
+    the three argument lists, which is what this is.
+
+    The key it produces is the stock key: same tuple, same order, same values.
+    """
+    divisibility = entry.divisibility
+    specializes = tensor_specialization is not None
+
+    def key(spec_args, dns_args, const_args):
+        spec_key = []
+        append = spec_key.append
+        for arg in spec_args:
+            arg = descriptor_cache_key(arg)
+            if hasattr(arg, "data_ptr"):
+                aligned = arg.data_ptr() % divisibility == 0
+                if specializes:
+                    append((arg.dtype, aligned, tensor_specialization(arg)))
+                else:
+                    append((arg.dtype, aligned))
+            else:
+                append((type(arg), arg))
+
+        dns_key = []
+        append = dns_key.append
+        for arg in dns_args:
+            arg = descriptor_cache_key(arg)
+            if hasattr(arg, "data_ptr"):
+                append(arg.dtype)
+            elif not isinstance(arg, int):
+                append(type(arg))
+            elif -(2**31) <= arg <= 2**31 - 1:
+                append("i32")
+            elif 2**63 <= arg <= 2**64 - 1:
+                append("u64")
+            else:
+                append("i64")
+
+        const_key = [descriptor_cache_key(arg) for arg in const_args]
+        return tuple(spec_key + dns_key + const_key)
+
+    return key
+
+
+def _libentry_run_plan(entry, n_args):
+    """Which of ``args[0:n_args]`` are specialised, not, or constexpr.
+
+    ``LibEntry.run`` decides this by walking ``signature.parameters`` and
+    testing each index against ``specialize_indices`` and
+    ``do_not_specialize_indices``, collecting the result into an
+    ``OrderedDict`` keyed by parameter name, and then walking the whole
+    signature a second time to read the arguments back out in order. Every input
+    to that walk is fixed when the kernel is constructed except ``len(args)``,
+    and every FlagGems pointwise wrapper passes all of its parameters
+    positionally.
+
+    Returns ``None`` for the call shapes this cannot express -- a launch that
+    passes fewer arguments than the kernel has parameters, or a kernel whose
+    constexpr values come from an ``Autotuner``/``Heuristics`` -- which sends
+    the caller back to the stock ``run``.
+    """
+    if n_args != len(entry.jit_function.params) or entry._has_flagtune_tuner:
+        return None
+    specialized = frozenset(entry.specialize_indices)
+    plain = frozenset(entry.do_not_specialize_indices)
+    spec_idx, dns_idx, const_idx = [], [], []
+    for i in range(n_args):
+        if i in specialized:
+            spec_idx.append(i)
+        elif i in plain:
+            dns_idx.append(i)
+        else:
+            const_idx.append(i)
+    return (tuple(spec_idx), tuple(dns_idx), tuple(const_idx))
+
+
+def _cached_libentry_key(entry, key_for_entry):
+    """The entry's fast key function, built on first use and kept on the entry."""
+    key_fn = entry.__dict__.get("_torch_fl_key_fn")
+    if key_fn is None:
+        key_fn = entry.__dict__["_torch_fl_key_fn"] = key_for_entry(entry)
+    return key_fn
+
+
+def _memoized_type_promotion(original):
+    """``pointwise_dynamic.type_promotion`` for the dtype tuples it has seen.
+
+    Every FlagGems pointwise op asks its ``prepare_args`` for the result dtype on
+    every call, and that runs ``torch._prims_common.elementwise_dtypes`` -- a
+    pure table over the operands' *dtypes*. The answer cannot depend on values,
+    shapes or device, so a process recomputes the same handful of keys for its
+    whole life. Profiled on an H100 in the Qwen-Image-2.1 denoise loop, with the
+    other patches in this section already applied, it is the largest single entry
+    left inside ``prepare_args``.
+
+    Keyed on each operand's dtype (or the argument itself when it is not a
+    tensor, so a scalar or ``None`` keys its own entry) plus the promotion kind.
+    A key that will not hash falls through to the original rather than raising.
+    Verified bitwise neutral against the unmemoized function over 81 cases --
+    nine ops across three shapes and three dtypes, outputs and dtypes compared.
+    """
+    cache = {}
+
+    def type_promotion(*args, type_promotion):
+        key = []
+        for arg in args:
+            key.append(arg.dtype if isinstance(arg, torch.Tensor) else arg)
+        try:
+            lookup = (tuple(key), type_promotion)
+            hit = cache.get(lookup)
+            if hit is None:
+                hit = cache[lookup] = original(*args, type_promotion=type_promotion)
+        except TypeError:
+            return original(*args, type_promotion=type_promotion)
+        return hit
+
+    return type_promotion
+
+
+def _flaggems_fast_run(key_for_entry, torch_device_fn, original_run):
+    """``LibEntry.run`` for the case where it has everything it needs cached.
+
+    See ``_patch_flaggems_pointwise_dispatch`` for why. The stock function
+    rebuilds its per-argument classification and its argument list on every
+    launch and then looks up a cache it will hit. This does the same lookup off
+    a classification computed once, and hands the kernel the argument tuple it
+    was given rather than a list reassembled from a name-keyed dict -- which for
+    an all-positional launch is the same list.
+
+    Anything unexpected -- a keyword launch, a callable grid, an entry whose
+    launch constants came from a tuner, a cache miss -- falls through to the
+    stock function, so the two cannot disagree about what a launch means.
+    """
+
+    def run(self, *args, **kwargs):
+        if kwargs.keys() > _FLAGGEMS_RUN_KWARGS:
+            return original_run(self, *args, **kwargs)
+
+        plans = self.__dict__.get("_torch_fl_run_plans")
+        if plans is None:
+            plans = self.__dict__["_torch_fl_run_plans"] = {}
+        n_args = len(args)
+        plan = plans.get(n_args, _NO_PLAN)
+        if plan is _NO_PLAN:
+            plan = plans[n_args] = _libentry_run_plan(self, n_args)
+        if plan is None:
+            return original_run(self, *args, **kwargs)
+
+        key_fn = _cached_libentry_key(self, key_for_entry)
+        spec_idx, dns_idx, const_idx = plan
+        entry_key = key_fn(
+            [args[i] for i in spec_idx],
+            [args[i] for i in dns_idx],
+            [args[i] for i in const_idx],
+        )
+        device = torch_device_fn.current_device()
+        # The stock function's two spellings of "which cache", kept because
+        # ``current_device()`` answers "cpu" on a platform with a single
+        # process-wide device.
+        cache = self._cpu_cache if device == "cpu" else self.kernel_cache[device]
+        cached = cache.get(entry_key)
+        if cached is None:
+            return original_run(self, *args, **kwargs)
+
+        kernel, constexprs, tune_constexprs, heur_constexprs, launch_hooks = cached
+        grid = kwargs["grid"]
+        # A tuner-produced constant, a launch hook and a callable grid all need
+        # the ``constexprs`` mapping this path does not rebuild, so any of them
+        # means the stock function.
+        if tune_constexprs or heur_constexprs or launch_hooks or callable(grid):
+            return original_run(self, *args, **kwargs)
+
+        kernel[(grid + (1, 1))[0:3]](*args)
+        return kernel, constexprs
+
+    return run
+
+
+def _hygon_tensor_specialization(gems_device):
+    """The vendor hook ``LibEntry.key`` folds into a tensor's key, or ``None``.
+
+    ``spec_arg`` resolves ``triton.backends.hcu.compiler.HIPBackend.get_tensor_specialization``
+    on every call on a hygon build and appends what it returns to that
+    argument's key, which is what turns ``(dtype, aligned)`` into
+    ``(dtype, aligned, 'S')``. The resolution is fixed for the life of the
+    process, so it is done once here instead -- under the stock function's own
+    conditions, the vendor test first so a non-hygon build keeps the
+    two-element key.
+    """
+    if getattr(gems_device, "vendor_name", None) != "hygon":
+        return None
+    try:
+        import triton
+
+        if not hasattr(triton.backends, "hcu"):
+            return None
+        from triton.backends.hcu.compiler import HIPBackend
+    except ImportError:
+        return None
+    specialization = getattr(HIPBackend, "get_tensor_specialization", None)
+    return specialization if callable(specialization) else None
+
+
+def _align_flagtree_autotuning_knobs():
+    """Give FlagGems back the FlagTree autotuning knob name 0.7.0 removed.
+
+    flag_gems 5.4.0's small-sequence flash-attention backward
+    (``flag_gems/ops/flash_attention_backward.py``,
+    ``_disable_aabs_for_small_seqlen``) saves and restores a FlagTree knob it
+    calls ``adjust_block_size``::
+
+        previous = _autotuning_knobs.adjust_block_size          # <-- :52
+        _autotuning_knobs.adjust_block_size = False
+        try: yield
+        finally: _autotuning_knobs.adjust_block_size = previous
+
+    Its only guard is ``if _autotuning_knobs is None`` -- a *module* presence
+    test, not an attribute one. FlagTree 0.7.0 still ships ``triton.knobs`` but
+    renamed the knob away (``autotuning_knobs`` now declares only ``cache``,
+    ``print`` and ``use_backend_autotuning``), so the import succeeds, the
+    ``None`` guard does not fire, and the first line raises ``AttributeError:
+    'autotuning_knobs' object has no attribute 'adjust_block_size'``. The
+    consumer is FlagGems' decoder path -- ``_scaled_dot_product_efficient_
+    attention_backward`` is routed to ``flaggems`` in backends_ascend.conf -- so
+    every attention backward with ``min(seqlen_q, seqlen_k) < 16`` dies here.
+    Measured on Ascend 910C (FlagTree 0.7.0+ascend3.5, flag_gems 5.4.0): a
+    standalone ``scaled_dot_product_attention`` backward at seqlen 8 raises
+    exactly this; the transformers BERT suite fails 24 tests on it.
+
+    The restoration the compiler can act on is already in effect on 0.7.0. The
+    knob FlagGems is reaching for is what FlagTree calls "adjust a tl.load-driven
+    BLOCK to next_power_of_2(seqlen)"; 0.7.0 split that behaviour out into
+    ``use_backend_autotuning`` (default False, i.e. FlagTree does not adjust)
+    plus the ``auto_blockify_size`` compile meta-parameter, and gates the
+    auto-blockify pass on the ``TRITON_ALL_BLOCKS_PARALLEL`` environment variable
+    (``triton/backends/ascend/utils.py::_is_auto_map_parallel_blocks_enabled``,
+    default false). FlagGems' intent -- do not let an adjustment run for a short
+    sequence -- is therefore the state 0.7.0 is already in, and an attribute
+    *alias* is a pure no-op that only stops the AttributeError. That was checked,
+    not assumed: ``adjust_block_size`` has no reader anywhere in the installed
+    triton (0 hits in ``libtriton.so``, 0 in its Python, absent from
+    ``knob_descriptors`` and ``knobs``), and the backward passes even when the
+    attribute is set to a non-boolean sentinel -- so the value is never consumed
+    and the alias does not change the code path a reader would select.
+
+    A knob-name restore is the minimal lever with a defined upstream owner. The
+    alternative -- moving ``_scaled_dot_product_efficient_attention_backward``
+    off the FlagGems route in the generated conf -- would trade a first-call
+    AttributeError for the ``ascend`` aclnn path that
+    ``docs/reference/operator-support.md`` records as never revalidated and
+    known to rebuild a non-square causal mask as ``{S, S}`` (ret=161001), so it
+    is a fresh correctness risk in place of a name-mediated crash.
+
+    Scoped to the build whose knob set this tests for, read from the attribute
+    (never a version string), and to an Ascend FlagTree with FlagGems routed.
+    Best-effort like its neighbours: the attribute is only ever added when it is
+    absent, so a build whose knob already exists is untouched.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "ascend" or not _conf_routes_to_flaggems():
+            return
+
+        triton_knobs = importlib.import_module("triton.knobs")
+        autotuning = getattr(triton_knobs, "autotuning", None)
+        if autotuning is None or hasattr(autotuning, "adjust_block_size"):
+            return
+
+        # False is the value FlagGems itself assigns inside the context manager,
+        # which it intends as "do not adjust". It matches 0.7.0's own default
+        # state (use_backend_autotuning and the auto-blockify gate both false),
+        # so making the restore a no-op leaves the code path FlagTree already
+        # selected. Any value would stop the AttributeError -- it is unread --
+        # but this is the one that would also be correct if a future FlagTree
+        # reintroduced a reader.
+        autotuning.adjust_block_size = False
+    except Exception:
+        pass
+
+
+def _enable_flaggems_autotune_cache():
+    """Stop Triton from re-benchmarking the same autotune configs every process.
+
+    FlagGems' ``layer_norm_persistent_kernel`` carries a three-way
+    ``@triton.autotune`` (``num_warps`` 4/8/16 from the vendor's
+    ``tune_configs.yaml``). Triton benchmarks all three on the first call for
+    each tuning key and keeps the winner in ``Autotuner.cache``, which is in
+    memory and therefore per process. The kernel itself is compiled once and
+    cached on disk, so a fresh process re-pays for a decision that cannot have
+    changed.
+
+    The knob gates the disk cache in both directions, not just the lookup.
+    ``triton/runtime/autotuner.py:262`` only reaches ``check_disk_cache`` when
+    ``self.cache_results`` was set at construction from
+    ``knobs.autotuning.cache``, and ``check_disk_cache`` is also what *writes*
+    the entry -- with the knob off the benchmarks run and nothing at all is
+    remembered between processes. This is therefore a prerequisite for the
+    cache existing, not a preference for reading it.
+
+    ``torch.native_layer_norm`` on ``(1, 4096, 4096)`` bf16, one fresh process
+    per arm, on a DCU bw1000:
+
+        arm 1  TRITON_CACHE_AUTOTUNING=0, no entry on disk
+               first call                                       454.2 ms
+               :236(run) -> :252(benchmark) -> :132(_bench) x3   0.452 s
+               (no ``check_disk_cache`` frame -- it is never called)
+        arm 2  cache enabled, still no entry on disk
+               first call                                       462.5 ms
+               :236(run) -> :194(check_disk_cache)               0.460 s
+                         -> :252(benchmark) -> :132(_bench) x3   0.446 s
+        arm 3  cache enabled, the entry arm 2 wrote now on disk
+               first call                                        33.6 ms
+               :236(run) 0.032 -> :194(check_disk_cache) 0.014
+               (no benchmark frame)
+        second call, every arm                                   0.3 ms
+
+    The disk lookup hashes the Triton build, the backend target, the tuning key,
+    the config list and the cache-invalidating environment variables, so a stale
+    entry cannot survive a compiler or configuration change.
+
+    Qwen-Image-2.1 issues exactly two tuning keys over a whole run --
+    ``(4122, 4096)`` and ``(4096, 4096)``, measured at 0.38 s and 0.47 s -- so
+    this is 0.85 s paid once per process, on a model whose steady-state denoise
+    step is 1.098 s on the vendor build and 1.173 s on this one. It is a startup
+    cost, not a per-step one: nothing here closes the 6.8% step gap, and the
+    arms above are the whole of the claim.
+
+    Set both ways on purpose. The environment variable is the knob Triton
+    documents and is what a user would set, but ``triton.knobs`` reads it once,
+    when the knob objects are constructed, which has already happened by the
+    time this runs; the constructed knob is therefore written directly as well.
+
+    An explicit ``TRITON_CACHE_AUTOTUNING=0`` -- a user who wants the benchmark
+    back, or who is chasing an autotune that settled on a config they disagree
+    with -- is left alone. It has to be read deliberately rather than left to
+    ``setdefault``: ``env_bool`` is a data descriptor whose ``__set__`` calls
+    ``knobs.setenv``, so assigning the knob *writes the variable*, and a
+    ``setdefault`` followed by that assignment overwrites the user's ``0`` with
+    the ``1`` it just wrote. The existing value is therefore parsed with the same
+    ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
+
+    Scoped to the builds and confs whose routed ops are FlagGems Python launches
+    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- like the patches around it. No op
+    changes route and no kernel changes: the config selected is the one
+    FlagGems' own tuner would have picked. Best-effort, like its neighbours: an
+    unset knob is slow here, not broken, so this must not be able to take down
+    device init.
+    """
+    try:
+        if not _flagos_launch_patches_apply():
+            return
+
+        triton_knobs = importlib.import_module("triton.knobs")
+
+        # Default True on purpose: unset is the state this exists to change, and
+        # anything a user did set that does not parse as truthy is a "no".
+        if not triton_knobs.getenv_bool("TRITON_CACHE_AUTOTUNING", True):
+            return
+
+        os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
+        triton_knobs.autotuning.cache = True
+    except Exception:
+        pass
+
+
+def _prewarm_triton_key():
+    """Hash Triton's own build on a thread instead of inside the first compile.
+
+    ``triton.runtime.cache.triton_key`` is ``functools.lru_cache``d and is the
+    first thing ``get_cache_key`` asks for, so it runs inside whichever kernel
+    compiles first -- for Qwen-Image-2.1 that is FlagGems' embedding, in the
+    text encoder, or the layer-norm autotune in the denoise loop, depending on
+    which side is reached first. It sha256s every file under ``triton/compiler``,
+    ``triton/backends`` and ``triton/language`` and then the whole of
+    ``libtriton.<ext>`` in 1 MiB chunks.
+
+    On the DTK 6.3 wheel that .so is 900,284,304 bytes. Measured with the venv's
+    own python, importing only ``triton.runtime.cache``:
+
+        import triton.runtime.cache    0.196 s
+        triton_key()                   1.013 s   (1694 characters later)
+
+    and the same second shows up inside the model: the loop's first step is
+    3030.0 ms of enqueue against 254.0 ms on the second, and ``get_cache_key``
+    accounts for 1.325 s of a first-step profile in which one ``triton_key``
+    call is 1.085 s. The lru_cache makes it a once-per-process cost, so it is
+    paid in full by every run.
+
+    Nothing about the value depends on this process -- it is a function of the
+    installed files and ``triton.__version__`` alone, with no environment term
+    in it -- so it can be computed at any point, and there is nothing to
+    invalidate if it is computed early. It is started here, at device init,
+    because the caller still has tens of seconds of work in front of it: the
+    pipeline materialises ~33 GB of weights before the first Triton kernel is
+    reached. ``hashlib`` releases the GIL for buffers this size and so do the
+    reads, so the thread overlaps that load rather than serialising with it.
+
+    Scoped like its neighbours -- DCU, on a conf that routes to FlagGems -- so
+    the only processes that start a thread are the ones that were measured.
+    Best-effort: an un-warmed cache is slow here, not broken, so a failure to
+    start the thread must not be able to take down device init.
+    """
+    try:
+        from .. import _build_accelerator, _conf_routes_to_flaggems
+
+        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+            return
+
+        import threading
+
+        from triton.runtime.cache import triton_key
+
+        def warm():
+            try:
+                triton_key()
+            except Exception:
+                pass
+
+        threading.Thread(target=warm, name="torch_fl-triton-key", daemon=True).start()
+    except Exception:
+        pass
+
+
+def _patch_flaggems_pointwise_dispatch():
+    """Take FlagGems' pointwise ops off the host and leave them on FlagGems.
+
+    Every FlagGems elementwise op is a generated wrapper around a Triton kernel
+    launched through ``flag_gems.utils.libentry.LibEntry``, and on a DCU bw1000
+    the host side of that, not the kernel, is what a launch costs. In the
+    Qwen-Image-2.1 denoise loop the FlagGems pointwise ops are 402 ms of the
+    837 ms of exclusive host time across four steady steps -- ``where`` 196 ms
+    over 520 calls, ``pow`` 61, ``tanh`` 58, ``rsqrt`` 56, ``silu`` 31 -- where
+    the vendor build spends 34.94 us on each ``where`` against FlagGems'
+    376.48. The kernels are not what differs: on that shape the FlagGems
+    ``where`` kernel is 74.0 us of device time against 62.1 for the vendor's,
+    while the enqueue is 262.4 us against 11.5 -- a launch cost, not a kernel
+    cost.
+
+    What is left is Python that recomputes per launch what the kernel fixed at
+    construction: ``LibEntry.run`` re-derives which arguments are specialised,
+    not-specialised and constexpr, builds a name-keyed ``OrderedDict`` from that
+    walk and then walks the signature a second time to put the arguments back in
+    order; ``LibEntry.key`` rebuilds two closures per call and re-resolves the
+    vendor's tensor-specialisation hook per argument; and
+    ``_descriptor_cache_key``, which ``key`` calls once per argument, re-imports
+    a module each time. None of it can observe anything that changed between two
+    launches of the same kernel on the same shapes.
+
+    The saving is not confined to the ops named above, because every FlagGems
+    launch in the loop goes through that same ``LibEntry``. The routed
+    composites drop with the elementwise ops -- ``native_layer_norm`` 204.31 to
+    169.88 us per call, ``tanh`` 226.51 to 212.80, ``rsqrt`` 216.23 to 202.41,
+    ``silu`` 220.45 to 204.89 -- and the steady block's exclusive sum with them,
+    0.837 s to 0.767 s.
+
+    That sum is host time, and the steady step on this model is device-bound, so
+    the four-step wall does not move with it (1.179 s to 1.178 s; the vendor
+    build is at 1.098 s). This is a host-budget change, and the host budget is
+    what bounds a launch-bound stretch of the run rather than one already
+    hidden behind the device queue.
+
+    Scoped to the builds and confs whose routed ops are FlagGems Python launches
+    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS``; installed the way the patches
+    around it are: by rebinding the functions in the FlagGems modules the C++
+    bridge and the generated wrappers reach them through. No op changes route;
+    the kernels, the grids and the cache keys stay the ones FlagGems computes.
+    Upstream workaround rather than a design; remove it once FlagGems stops
+    doing this work per launch. Best-effort, like its neighbours: an unpatched
+    dispatch is slow here, not broken, so this must not be able to take down
+    device init.
+    """
+    try:
+        if not _flagos_launch_patches_apply():
+            return
+
+        import importlib
+
+        libentry = importlib.import_module("flag_gems.utils.libentry")
+        gems_runtime = importlib.import_module("flag_gems.runtime")
+        gems_device = gems_runtime.device
+        torch_device_fn = gems_runtime.torch_device_fn
+
+        try:
+            from triton.tools.tensor_descriptor import TensorDescriptor
+        except ImportError:
+            TensorDescriptor = None
+
+        # Resolved once rather than per argument per launch; see the helper.
+        tensor_specialization = _hygon_tensor_specialization(gems_device)
+
+        descriptor_cache_key = _hoisted_descriptor_cache_key(TensorDescriptor)
+        if not getattr(libentry._descriptor_cache_key, "_torch_fl_hoisted", False):
+            descriptor_cache_key._torch_fl_hoisted = True
+            descriptor_cache_key.__wrapped__ = libentry._descriptor_cache_key
+            libentry._descriptor_cache_key = descriptor_cache_key
+
+        def key_for_entry(entry):
+            return _fast_libentry_key(
+                entry, descriptor_cache_key, tensor_specialization
+            )
+
+        original_key = libentry.LibEntry.key
+        if not getattr(original_key, "_torch_fl_fast", False):
+
+            def key(self, spec_args, dns_args, const_args):
+                return _cached_libentry_key(self, key_for_entry)(
+                    spec_args, dns_args, const_args
+                )
+
+            key._torch_fl_fast = True
+            key.__wrapped__ = original_key
+            libentry.LibEntry.key = key
+
+        # The result dtype is a pure function of the operand dtypes and the
+        # promotion kind, and every pointwise launch asks for it; see the helper.
+        pointwise = importlib.import_module("flag_gems.utils.pointwise_dynamic")
+        original_promotion = pointwise.type_promotion
+        if not getattr(original_promotion, "_torch_fl_memo", False):
+            memoized = _memoized_type_promotion(original_promotion)
+            memoized._torch_fl_memo = True
+            memoized.__wrapped__ = original_promotion
+            pointwise.type_promotion = memoized
+
+        original_run = libentry.LibEntry.run
+        if not getattr(original_run, "_torch_fl_fast", False):
+            fast_run = _flaggems_fast_run(key_for_entry, torch_device_fn, original_run)
+            fast_run._torch_fl_fast = True
+            fast_run.__wrapped__ = original_run
+            libentry.LibEntry.run = fast_run
+
+        # ``where_self_out`` asks for this through the ``torch`` module object,
+        # so rebinding it there is what reaches the call site.
+        if not getattr(torch.broadcast_shapes, "_torch_fl_memoized", False):
+            memo = _memoized_broadcast_shapes(torch.broadcast_shapes)
+            memo.__wrapped__ = torch.broadcast_shapes
+            memo._torch_fl_memoized = True
+            torch.broadcast_shapes = memo
+    except Exception:
+        pass
+
+
+_TUNE_SPACE_PATCHED = "_flagos_tune_space_fits_device"
+
+# Resolved on first use rather than at patch time: triton's driver only reports a
+# target once the device is up, and this is first read from a kernel launch.
+_MUSA_SMEM_LIMIT = None
+
+
+def _musa_shared_memory_limit():
+    """Static shared memory one MUSA kernel may ask for, in bytes, or None.
+
+    Read from the backend's own table rather than from torch: on this backend
+    ``torch.cuda.get_device_properties(0)`` leaves ``shared_memory_per_block``
+    and ``shared_memory_per_block_optin`` as ``None``, and the number the compiler
+    enforces its own check against is ``shared_memory_per_multiprocessor``
+    (196608 on an MTT S5000), which triton's mthreads backend derives from the
+    target's arch.
+    """
+    global _MUSA_SMEM_LIMIT
+    if _MUSA_SMEM_LIMIT is None:
+        try:
+            from triton.backends.mthreads.compiler import (
+                _max_static_shared_memory_from_arch,
+            )
+            from triton.runtime import driver as triton_driver
+
+            arch = triton_driver.active.get_current_target().arch
+            smem = _max_static_shared_memory_from_arch(arch)
+            if not smem:
+                return None
+            _MUSA_SMEM_LIMIT = int(smem)
+        except Exception:
+            return None
+    return _MUSA_SMEM_LIMIT
+
+
+def _dot_tile(config):
+    """``(BLOCK_M, BLOCK_N, BLOCK_K)`` of a ``tl.dot`` tune config, else None.
+
+    The shared-memory model below is the one a matmul pipeline asks for, and its
+    operand keys are what identifies such a config; anything else (a reduction,
+    a pointwise block, a config keyed differently) is left exactly as declared.
+    """
+    tile = tuple(config.kwargs.get(key) for key in ("BLOCK_M", "BLOCK_N", "BLOCK_K"))
+    if any(not isinstance(value, int) for value in tile):
+        return None
+    return tile
+
+
+def _pipeline_shared_memory(num_stages, tile, element_size):
+    """The shared memory a pipelined ``tl.dot`` config asks the compiler for.
+
+    Measured on the MTT S5000 host by inverting the relation with a stage count
+    large enough to trip the compiler's own check -- ``OutOfResources`` reports
+    the exact ask -- over fp32 and fp64 tiles at 64x64x64 and 32x64x64::
+
+        dtype  tile          stages  ask        outcome
+        fp32   64x64x64      8       229376     OutOfResources (Required 229376)
+        fp32   64x64x64      5       131072     runs, err 0.0e+00
+        fp64   64x64x64      5       262144     OutOfResources (Required 262144)
+        fp64   64x64x64      4       196608     Triton Error [MUSA]: invalid argument
+        fp64   64x64x64      3       131072     runs, err 7.1e-15
+        fp64   32x64x64      5       196608     Triton Error [MUSA]: invalid argument
+        fp64   32x64x64      4       147456     runs, err 3.6e-15
+
+    Two things follow, and both matter here. The ask is ``(num_stages - 1)`` times
+    the two tile operands at the element size, so it is the *element size* that
+    halves a tune space's budget on float64 -- nothing about the tile changes.
+    And a config is launchable only while the ask stays *strictly* under the
+    limit: an ask that lands exactly on it compiles and then fails at launch with
+    a bare ``RuntimeError`` from the MUSA toolchain, which is why comparing
+    against the limit with ``<=`` would keep handing out a config that cannot run.
+    """
+    block_m, block_n, block_k = tile
+    return (num_stages - 1) * (block_m * block_k + block_k * block_n) * element_size
+
+
+def _fitting_stages(config, tile, element_size, limit):
+    """The deepest pipeline that fits, never deeper than the config declared.
+
+    The ask is computed from the *declared* tile, which is the widest the tile can
+    ever be: FlagTree's AABS narrows a declared tile down to the extent before the
+    compiler sizes it, and the ask only shrinks with it. Sizing the declared tile
+    is therefore the conservative reading, and it is the one that is sound -- a
+    lower bound on the ask could let through a config that lands exactly on the
+    limit the way the float64 4-stage row of the table above does. What keeps that
+    conservatism cheap is *when* this is called: only after the device has refused
+    the declared space at the shape in hand, where the tile it refused is the one
+    the compiler saw (see ``_patch_flaggems_tune_space``). Sizing a space up front
+    instead would shrink stages at shapes AABS was about to narrow below the limit
+    on its own, and those shapes do not need it.
+    """
+    stages = config.num_stages
+    while stages > 1 and _pipeline_shared_memory(stages, tile, element_size) >= limit:
+        stages -= 1
+    return stages
+
+
+def _operand_element_size(args, kwargs):
+    """Bytes per element of the widest operand this launch will be given."""
+    sizes = [
+        tensor.element_size()
+        for tensor in list(args) + list(kwargs.values())
+        if isinstance(tensor, torch.Tensor)
+    ]
+    return max(sizes) if sizes else None
+
+
+def _fitted_tune_space(configs, args, kwargs, limit):
+    """``configs`` with every config's pipeline cut back to what fits, else None.
+
+    None means "nothing to change": either the space is not a ``tl.dot`` space,
+    no operand dtype is known, or every config already fits -- in which case the
+    caller hands the declared space to FlagGems untouched, so the platforms and
+    the op families that were never affected keep the exact tune space they have
+    today.
+    """
+    element_size = _operand_element_size(args, kwargs)
+    if element_size is None:
+        return None
+    import triton
+
+    fitted, changed, seen = [], False, set()
+    for config in configs:
+        tile = _dot_tile(config)
+        if tile is None:
+            return None
+        stages = _fitting_stages(config, tile, element_size, limit)
+        if stages == config.num_stages:
+            candidate = config
+        else:
+            changed = True
+            candidate = triton.Config(
+                config.kwargs,
+                num_warps=config.num_warps,
+                num_stages=stages,
+                num_ctas=config.num_ctas,
+                maxnreg=config.maxnreg,
+                pre_hook=config.pre_hook,
+                ir_override=config.ir_override,
+            )
+        key = (
+            tuple(sorted(candidate.kwargs.items())),
+            candidate.num_warps,
+            candidate.num_stages,
+            candidate.num_ctas,
+            candidate.maxnreg,
+        )
+        # Two declared configs differing only in num_stages collapse onto one
+        # here -- on float64 both 64x64x64 entries of the mthreads `mm` space
+        # become the same num_stages=3 config -- and a duplicate would only cost
+        # a benchmark.
+        if key in seen:
+            continue
+        seen.add(key)
+        fitted.append(candidate)
+    if not changed:
+        return None
+    return fitted or None
+
+
+def _launch_in_fitted_space(original_run, tuner, configs, args, kwargs):
+    """Run the tuner with a fitted space installed, and put FlagGems back.
+
+    FlagGems keeps the space on the tuner for the life of the process, so the
+    declared list has to be reinstated once the call returns. ``configs_hash`` and
+    ``kernel_hash`` are ``cached_property`` values computed from whichever list is
+    current, so they are dropped on both sides of the call: a value left behind by
+    a fitted launch names a launcher nothing declares, and one left behind after
+    the restore names the fitted space for the next call.
+    """
+    declared = tuner.configs
+    tuner.configs = configs
+    tuner.__dict__.pop("configs_hash", None)
+    tuner.__dict__.pop("kernel_hash", None)
+    try:
+        return original_run(tuner, *args, **kwargs)
+    finally:
+        tuner.configs = declared
+        tuner.__dict__.pop("configs_hash", None)
+        tuner.__dict__.pop("kernel_hash", None)
+
+
+def _patch_flaggems_tune_space():
+    """Repair a FlagGems tune space the MUSA device has refused, and only then.
+
+    ``mm`` on float64 fails on this hardware for every shape whose M, K and N all
+    exceed 32 -- ``OutOfResources: out of resource: shared memory, Required:
+    262144, Hardware limit: 196608`` -- and the tune space is why: the mthreads
+    backend ships one ``mm`` entry, two 64x64x64 tiles at ``num_stages`` 5 and 4,
+    and at 8 bytes per element those two ask 262144 B and 196608 B against a
+    196608 B limit. The element size is the whole difference; the same space on
+    float32 asks 131072 B and 98304 B and runs (measured, err 0.0e+00).
+
+    A shape with a dimension at or under 32 survives only because FlagTree's AABS
+    narrows the tile to the extent first, which shrinks the ask below the limit;
+    that is also why the defect looks shape-dependent rather than dtype-wide. A
+    refusal is not something the tuner can absorb: ``LibTuner.run``'s ``bench``
+    catches ``RuntimeError``, and the compiler's rejection is a ``TritonError``,
+    which is an ``Exception`` and not a ``RuntimeError`` -- so the first config
+    that cannot compile ends the whole tuning pass instead of being scored out.
+    The launch-time half of the defect is caught, and that is why the exact-limit
+    case is survivable at all: an ask that lands exactly on 196608 B compiles and
+    is then rejected at launch with a bare ``RuntimeError: Triton Error [MUSA]:
+    invalid argument``, which ``bench`` does catch, so at a narrowed shape the
+    tuner quietly moves on to the next config. Neither half can be fixed from the
+    error side, and both are the tune space asking for more than the device has.
+
+    So the space *is* replaced, but only for the call that was refused. Doing it
+    up front was measured to be wrong: AABS narrows a declared 64x64x64 tile to
+    the operand extents, and a fit that runs before the first launch sizes the
+    declared tile, takes the only remaining config down to ``num_stages`` 3, and
+    leaves a one-config space -- which never reaches the benchmark at all, so the
+    narrowing is lost with the stages. On float64 that costs 5.9x at
+    ``2048x2048x16`` (9.251 ms against 1.579 ms), 6.2x at ``4096x4096x16``
+    (32.212 against 5.211) and 1.8x at ``512x512x32`` (2.369 against 1.294), all
+    measured on S5000 with a synchronized timer, against errors that stay at
+    1e-13 either way. Repairing after the refusal leaves every one of those calls
+    alone -- same winning configuration, same median -- and still fixes
+    ``(64, 64, 64)`` float64, which raises on the unmodified tree and runs at
+    0.324 ms, err 7.1e-15, with the repair.
+
+    Fitting is arithmetic against the backend's own limit (see
+    ``_pipeline_shared_memory``) rather than trial compilation, which keeps it
+    deterministic and cache-stable. If the repaired space does not take either,
+    the caller is shown the refusal of the declared space rather than a
+    replacement's failure: the retry is a repair, not a redefinition of the call.
+
+    Best-effort, like the patches around it: this must not be able to take down
+    device init, and an unfitted tune space is the status quo, not a new failure.
+    """
+    try:
+        from .. import _build_accelerator
+
+        if _build_accelerator() != "musa":
+            return
+
+        libentry = importlib.import_module("flag_gems.utils.libentry")
+        libtuner = libentry.LibTuner
+        if getattr(libtuner, _TUNE_SPACE_PATCHED, False):
+            return
+        original_run = libtuner.run
+
+        def run(self, *args, **kwargs):
+            try:
+                return original_run(self, *args, **kwargs)
+            except Exception as refused:
+                limit = _musa_shared_memory_limit()
+                configs = (
+                    None
+                    if limit is None
+                    else _fitted_tune_space(
+                        getattr(self, "configs", None) or [], args, kwargs, limit
+                    )
+                )
+                if configs is None:
+                    raise
+                try:
+                    return _launch_in_fitted_space(
+                        original_run, self, configs, args, kwargs
+                    )
+                except Exception:
+                    raise refused from None
+
+        run.__wrapped__ = original_run
+        libtuner.run = run
+        setattr(libtuner, _TUNE_SPACE_PATCHED, True)
+    except Exception:
+        pass
+
+
+def _stand_down_foreign_triton_drivers():
+    """Make Triton's driver factory pick this accelerator, and only it.
+
+    Triton resolves its driver lazily, and refuses to resolve at all when more
+    than one installed backend reports itself active:
+
+        RuntimeError: 2 active drivers ([...NPUDriver, ...CudaDriver]).
+        There should only be one.
+
+    Which drivers exist is a property of the Triton *build*, not of the host.
+    FlagTree ships every backend it was built with in one wheel, so the Ascend
+    wheel also carries an ``nvidia`` backend whose ``is_active()`` is
+    ``torch.cuda.is_available() and torch.version.hip is None``
+    (triton/backends/nvidia/driver.py). On Ascend that expression is True only
+    because of ``torch_fl._alias_cuda_to_flagos``, which repoints
+    ``torch.cuda.is_available`` at the flagos device count so that ecosystem
+    code hardcoding ``"cuda"`` finds the accelerator that is actually present.
+    Triton reads the same attribute as its hardware probe, concludes a CUDA
+    device is present too, and then any FlagGems module that resolves a
+    benchmarker while being imported -- ``flag_gems.fused`` does -- dies inside
+    its own import.
+
+    The Ascend driver is left alone: it activates on its own, through
+    ``bishengir-compile -print-targets``. Only the stock-CUDA driver is stood
+    down, and only when the CUDA Triton sees is the alias rather than real
+    hardware, so a CUDA build never reaches the assignment. Idempotent.
+
+    Must run after ``import torch_fl`` -- importing the Ascend driver at all
+    reaches ``triton/backends/ascend/testing.py``, which imports ``torch_npu``
+    unconditionally and relies on the stub torch_fl publishes.
+    """
+    from torch_fl import _cuda_alias_active
+
+    if not _cuda_alias_active:
+        # torch.cuda is real here, so whatever it reports to Triton is true.
+        return
+    try:
+        import triton.backends
+    except ImportError:
+        return
+
+    backend = triton.backends.backends.get("nvidia")
+    if backend is None:
+        return
+    backend.driver.is_active = staticmethod(lambda: False)
+
+
+def _bind_kunlunxin_triton_stream():
+    """Give Kunlunxin's Triton backend a stream source that exists here.
+
+    Triton's ``GPUDriver.__init__`` binds its host-runtime accessors to
+    ``torch.cuda`` unconditionally::
+
+        try:
+            from torch._C import _cuda_getCurrentRawStream
+            self.get_current_stream = _cuda_getCurrentRawStream
+        except ImportError:
+            self.get_current_stream = lambda idx: torch.cuda.current_stream(idx).cuda_stream
+
+    FlagTree's XPU backend subclasses it and overrides the *device* pair only
+    (``XPUDriver.__init__``, under its ``FLAGTREE XPU SYNC MARK``); nothing under
+    ``triton/backends/xpu/`` assigns ``get_current_stream``. On the CPU-torch
+    wheel this backend runs on there is no ``_cuda_getCurrentRawStream``, so the
+    fallback lambda is installed and the first kernel launch dies with
+    ``AssertionError: Torch not compiled with CUDA enabled`` raised from
+    ``torch.cuda._lazy_init``.
+
+    The handle kernels must submit to is the one torch_fl's own stream carries,
+    ``flagos.current_stream(index).handle`` -- the same value
+    ``get_kunlunxin_current_raw_stream`` in ``torch_fl.compile.flagtree_shim``
+    already reports to inductor. Binding it here is what lets FlagGems, which
+    launches eagerly and long before any ``torch.compile`` shim exists, reach
+    the device at all.
+
+    Measured on a P800 (torch 2.10.0+cpu, triton 3.6.0): with the lambda in
+    place a plain ``tl.load``/``tl.store`` kernel raises in ``_lazy_init``; with
+    this binding it launches, synchronizes, and reads back correct values.
+
+    Wrapped at ``DriverConfig.active`` rather than applied once at import,
+    because the driver is created lazily on that property's first read and
+    resolving it during ``_lazy_init`` imports the backend compiler, which asks
+    torch_fl questions device init has not finished answering. Wrapping the
+    property catches the driver however late it is built; ``set_active`` (a test
+    hook) is wrapped too so a substituted driver is bound the same way.
+
+    Only replaces the parent class's fallback lambda, so a backend that grows a
+    real implementation keeps it. No-op off Kunlunxin and when Triton is absent.
+    Idempotent.
+    """
+    if _platform() != "kunlunxin":
+        return
+    try:
+        import triton.runtime.driver as triton_driver
+    except ImportError:
+        return
+
+    # ``import triton.runtime.driver as triton_driver`` yields the DriverConfig
+    # *instance*, not the module: ``triton/runtime/__init__.py`` rebinds the name
+    # to ``driver.driver``. Accept either shape.
+    config = None
+    if hasattr(triton_driver, "set_active"):
+        config = triton_driver
+    else:
+        for attribute in ("driver", "_driver"):
+            candidate = getattr(triton_driver, attribute, None)
+            if hasattr(candidate, "set_active"):
+                config = candidate
+                break
+    if config is None:
+        return
+
+    cls = type(config)
+    if getattr(cls, "_flagos_stream_bound", False):
+        return
+
+    # ``getattr`` rather than ``cls.__dict__``: a subclass that only inherits the
+    # property still has to be intercepted, and a test that substitutes the
+    # class (``instance.__class__ = Sub``) would otherwise slip past.
+    original_active = getattr(cls, "active", None)
+    if not isinstance(original_active, property):
+        return
+    get_active = original_active.fget
+
+    def active(self):
+        return _bind_stream_on_driver(get_active(self))
+
+    original_set = getattr(cls, "set_active")
+
+    def set_active(self, driver):
+        original_set(self, _bind_stream_on_driver(driver))
+
+    cls.active = property(active)
+    cls.set_active = set_active
+    cls._flagos_stream_bound = True
+
+
+def _bind_stream_on_driver(driver):
+    """Point one Triton driver's stream accessor at torch_fl's stream handle.
+
+    Split out of :func:`_bind_kunlunxin_triton_stream` so the lazy wrapper can
+    apply it to whichever driver object finally gets built. Replaces the parent
+    class's fallback lambda and nothing else; idempotent because the replacement
+    no longer matches.
+    """
+    if driver is None:
+        return driver
+    current = getattr(driver, "get_current_stream", None)
+    owner = getattr(current, "__qualname__", "")
+    if "GPUDriver.__init__" not in owner:
+        return driver
+
+    # ``current_stream`` is looked up on the driver's enclosing module at call
+    # time rather than imported: ``from torch_fl import flagos`` re-enters
+    # ``torch_fl/__init__`` and re-runs its phase claim, which fails while device
+    # init is still in progress. Binding it through the module the binder itself
+    # lives in keeps the two in step without that import.
+    import sys as _sys
+
+    module = _sys.modules[__name__]
+
+    def _current_raw_stream(index=0):
+        return int(module.current_stream(index).handle)
+
+    driver.get_current_stream = _current_raw_stream
+    return driver
+
+
+def _install_flagtree_ascend_policy():
+    """Point FlagTree's Ascend backend at torch_fl instead of at torch_npu.
+
+    FlagTree's Ascend backend answers its host-runtime questions -- the version
+    hash in the compile cache key, the JIT'd launcher's compiler flags and
+    includes, current device and current stream -- from a strategy registry
+    keyed by a "backend policy" string, and it selects that policy by trying
+    ``import torch_npu``. torch_fl publishes a torch_npu stub for FlagGems'
+    benefit, so the import succeeds, the ``torch_npu`` policy is selected, and
+    the first FlagGems kernel dies on the stub's missing surface
+    (``torch_npu.version``) -- or, one step further in, on
+    ``#include <torch_npu/...>`` and ``-ltorch_npu`` in the generated launcher,
+    neither of which exists without the real extension.
+
+    torch_fl carries a ``flagos`` policy for exactly this
+    (``torch_fl.compile.flagtree_ascend_policy``), but it was only installed on
+    the ``torch.compile`` path. FlagGems launches Triton kernels eagerly, so it
+    has to be installed here as well, before any kernel runs.
+
+    No-op unless the active Triton is FlagTree's Ascend build *and* FlagGems is
+    installed -- the policy exists only for FlagGems' kernels, and a build whose
+    registry no longer matches this shim must not take down device init for
+    someone who never imports FlagGems.
+
+    Raises:
+        RuntimeError: on a FlagTree Ascend build that has FlagGems but whose
+            backend cannot take the flagos policy. FlagGems could not run
+            there at all, and the message from ``install_policy`` names the
+            reason, unlike the torch_npu AttributeError it would otherwise
+            surface as, per op.
+    """
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("flag_gems") is None:
+            return
+    except (ImportError, ValueError):
+        return
+
+    from torch_fl.compile.flagtree_shim import flagtree_backend
+
+    if flagtree_backend() != "ascend":
+        return
+
+    from torch_fl.compile.flagtree_ascend_policy import install_policy
+
+    install_policy()
+
+
+def _aicore_count(_cache=[]):
+    """AICore count for this chip, queried once from the Ascend Triton backend."""
+    if not _cache:
+        try:
+            from triton.backends.ascend.driver import NPUUtils
+
+            _cache.append(int(NPUUtils().get_aicore_num()))
+        except Exception:
+            _cache.append(32)
+    return _cache[0]
+
+
+def _device_index(device):
+    """Resolve a device spec to an index, accepting what `torch.cuda` accepts.
+
+    `get_device_properties` is published as `torch.cuda.get_device_properties`
+    (and as `torch.musa`/`torch.npu`), so callers pass every form the CUDA
+    function documents: an index, a `torch.device`, a `"cuda:1"`/`"musa"` style
+    string, or nothing at all for the current device. FlagGems adds a fifth, its
+    own duck-typed device descriptor, and reaches the string form through
+    `flag_gems.ops.cumsum`'s module-level `device = device.name`.
+
+    Only the index matters here: the flagos backend has a single device type, so
+    the type portion of the spec carries no information beyond "not the CPU".
+    """
+    if device is None:
+        return current_device()
+    if isinstance(device, torch.device):
+        return current_device() if device.index is None else device.index
+    if isinstance(device, str):
+        # "flagos", "musa", "cuda", "flagos:1" -- only the suffix is meaningful.
+        return int(device.rpartition(":")[2]) if ":" in device else current_device()
+    if isinstance(device, int):
+        return device
+    # FlagGems' DeviceDetector and similar duck-typed specs.
+    index = getattr(device, "index", None)
+    if index is not None:
+        return int(index)
+    raise TypeError(
+        f"get_device_properties expects an int, str, torch.device or None, "
+        f"but got {type(device).__name__}"
+    )
+
+
+def get_device_properties(device=None):
+    """Return device properties for the given device.
+
+    Args:
+        device: device index, `torch.device`, `"<type>[:<index>]"` string, or
+            None for the current device. Matches `torch.cuda.get_device_properties`.
+    """
+    return _DeviceProperties(_device_index(device))
+
+
+__all__ = [
+    "device",
+    "device_count",
+    "current_device",
+    "set_device",
+    "synchronize",
+    "initial_seed",  # noqa: F405
+    "is_available",
+    "init",
+    "is_initialized",
+    "manual_seed",  # noqa: F405
+    "manual_seed_all",  # noqa: F405
+    "get_rng_state",  # noqa: F405
+    "set_rng_state",  # noqa: F405
+    "_is_in_bad_fork",  # noqa: F405  (torch.random._seed_custom_device probes it)
+    "get_amp_supported_dtype",
+    "Stream",
+    "Event",
+    "current_stream",
+    "stream",
+    "default_generators",
+    "empty_cache",
+    "memory_stats",
+    "memory_allocated",
+    "memory_reserved",
+    "reset_peak_memory_stats",
+    "get_device_properties",
+]
+
+# Kunlunxin's Triton backend inherits GPUDriver's torch.cuda stream accessor,
+# which cannot exist on the CPU-torch wheel that backend runs on, so its first
+# kernel launch dies in torch.cuda._lazy_init. Bound here, at import, rather
+# than in _lazy_init: torch_fl's device init is itself lazy and nothing in the
+# eager FlagGems path is guaranteed to have triggered it before the first
+# kernel, while this only needs the module objects. See the function for the
+# mechanism and the measurement.
+_bind_kunlunxin_triton_stream()

@@ -1,0 +1,282 @@
+{
+  "abs": {
+    "fn_type": "AbsFn",
+    "dispatcher_name": "abs_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "abs.h",
+    "cc_file": "abs.cc"
+  },
+  "acos": {
+    "fn_type": "AcosFn",
+    "dispatcher_name": "acos_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "acos.h",
+    "cc_file": "acos.cc"
+  },
+  "add.Tensor": {
+    "fn_type": "AddTensorFn",
+    "dispatcher_name": "add_tensor_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&, const at::Scalar&)",
+    "header_file": "add.h",
+    "cc_file": "add.cc"
+  },
+  "add_.Tensor": {
+    "fn_type": "AddInplaceTensorFn",
+    "dispatcher_name": "add_inplace_tensor_dispatcher",
+    "signature": "void (*)(at::Tensor&, const at::Tensor&, const at::Scalar&)",
+    "header_file": "add_inplace.h",
+    "cc_file": "add_inplace.cc"
+  },
+  "all": {
+    "fn_type": "AllFn",
+    "dispatcher_name": "all_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "all.h",
+    "cc_file": "all.cc"
+  },
+  "argmax": {
+    "fn_type": "ArgmaxFn",
+    "dispatcher_name": "argmax_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, std::optional<int64_t>, bool)",
+    "header_file": "argmax.h",
+    "cc_file": "argmax.cc"
+  },
+  "bitwise_and.Tensor": {
+    "fn_type": "BitwiseAndTensorFn",
+    "dispatcher_name": "bitwise_and_tensor_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&)",
+    "header_file": "bitwise_and.h",
+    "cc_file": "bitwise_and.cc"
+  },
+  "bmm": {
+    "fn_type": "BmmFn",
+    "dispatcher_name": "bmm_dispatcher",
+    "signature": "void (*)(const at::Tensor&, const at::Tensor&, at::Tensor&)",
+    "header_file": "bmm.h",
+    "cc_file": "bmm.cc"
+  },
+  "cat": {
+    "fn_type": "CatFn",
+    "dispatcher_name": "cat_dispatcher",
+    "signature": "at::Tensor (*)(const at::ITensorListRef&, int64_t)",
+    "header_file": "cat.h",
+    "cc_file": "cat.cc"
+  },
+  "constant_pad_nd": {
+    "fn_type": "ConstantPadNdFn",
+    "dispatcher_name": "constant_pad_nd_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, at::IntArrayRef, const at::Scalar&)",
+    "header_file": "constant_pad_nd.h",
+    "cc_file": "constant_pad_nd.cc"
+  },
+  "cos": {
+    "fn_type": "CosFn",
+    "dispatcher_name": "cos_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "cos.h",
+    "cc_file": "cos.cc"
+  },
+  "div.Scalar": {
+    "fn_type": "DivScalarFn",
+    "dispatcher_name": "div_scalar_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Scalar&)",
+    "header_file": "div_scalar.h",
+    "cc_file": "div_scalar.cc"
+  },
+  "embedding": {
+    "fn_type": "EmbeddingFn",
+    "dispatcher_name": "embedding_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&,\n                                     int64_t, bool, bool)",
+    "header_file": "embedding.h",
+    "cc_file": "embedding.cc"
+  },
+  "embedding_dense_backward": {
+    "fn_type": "EmbeddingDenseBackwardFn",
+    "dispatcher_name": "embedding_dense_backward_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&,\n                                                int64_t, int64_t, bool)",
+    "header_file": "embedding_dense_backward.h",
+    "cc_file": "embedding_dense_backward.cc"
+  },
+  "_foreach_mul_.Scalar": {
+    "fn_type": "ForeachMulScalarFn",
+    "dispatcher_name": "foreach_mul_scalar_dispatcher",
+    "signature": "void (*)(at::TensorList, const at::Scalar&)",
+    "header_file": "foreach_ops.h",
+    "cc_file": "foreach_ops.cc"
+  },
+  "index.Tensor": {
+    "fn_type": "IndexTensorFn",
+    "dispatcher_name": "index_tensor_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const c10::List<::std::optional<at::Tensor>>&)",
+    "header_file": "index.h",
+    "cc_file": "index.cc"
+  },
+  "le.Tensor": {
+    "fn_type": "LeTensorFn",
+    "dispatcher_name": "le_tensor_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&)",
+    "header_file": "le.h",
+    "cc_file": "le.cc"
+  },
+  "_log_softmax": {
+    "fn_type": "LogSoftmaxFn",
+    "dispatcher_name": "log_softmax_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, int64_t, bool)",
+    "header_file": "log_softmax.h",
+    "cc_file": "log_softmax.cc"
+  },
+  "mean.dim": {
+    "fn_type": "MeanDimFn",
+    "dispatcher_name": "mean_dim_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, at::OptionalIntArrayRef,\n                                  bool, std::optional<at::ScalarType>)",
+    "header_file": "mean.h",
+    "cc_file": "mean.cc"
+  },
+  "mm": {
+    "fn_type": "MmFn",
+    "dispatcher_name": "mm_dispatcher",
+    "signature": "void (*)(const at::Tensor&, const at::Tensor&, at::Tensor&)",
+    "header_file": "mm.h",
+    "cc_file": "mm.cc"
+  },
+  "mul.Tensor": {
+    "fn_type": "MulTensorFn",
+    "dispatcher_name": "mul_tensor_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&)",
+    "header_file": "mul.h",
+    "cc_file": "mul.cc"
+  },
+  "mul.Scalar": {
+    "fn_type": "MulScalarFn",
+    "dispatcher_name": "mul_scalar_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Scalar&)",
+    "header_file": "mul_scalar.h",
+    "cc_file": "mul_scalar.cc"
+  },
+  "multinomial": {
+    "fn_type": "MultinomialFn",
+    "dispatcher_name": "multinomial_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, int64_t, bool, ::std::optional<at::Generator>)",
+    "header_file": "multinomial.h",
+    "cc_file": "multinomial.cc"
+  },
+  "neg": {
+    "fn_type": "NegFn",
+    "dispatcher_name": "neg_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "neg.h",
+    "cc_file": "neg.cc"
+  },
+  "new_ones": {
+    "fn_type": "NewOnesFn",
+    "dispatcher_name": "new_ones_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, at::IntArrayRef,\n                                 std::optional<at::ScalarType>,\n                                 std::optional<at::Layout>,\n                                 std::optional<at::Device>,\n                                 std::optional<bool>)",
+    "header_file": "new_ones.h",
+    "cc_file": "new_ones.cc"
+  },
+  "nll_loss_forward": {
+    "fn_type": "NllLossForwardFn",
+    "dispatcher_name": "nll_loss_forward_dispatcher",
+    "signature": "std::tuple<at::Tensor, at::Tensor> (*)(const at::Tensor&, const at::Tensor&, const std::optional<at::Tensor>&,\n    int64_t, int64_t)",
+    "header_file": "nll_loss.h",
+    "cc_file": "nll_loss.cc"
+  },
+  "ones_like": {
+    "fn_type": "OnesLikeFn",
+    "dispatcher_name": "ones_like_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&,\n                                  std::optional<at::ScalarType>,\n                                  std::optional<at::Layout>,\n                                  std::optional<at::Device>,\n                                  std::optional<bool>,\n                                  std::optional<at::MemoryFormat>)",
+    "header_file": "ones_like.h",
+    "cc_file": "ones_like.cc"
+  },
+  "pow.Tensor_Scalar": {
+    "fn_type": "PowTensorScalarFn",
+    "dispatcher_name": "pow_tensor_scalar_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Scalar&)",
+    "header_file": "pow.h",
+    "cc_file": "pow.cc"
+  },
+  "rsqrt": {
+    "fn_type": "RsqrtFn",
+    "dispatcher_name": "rsqrt_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "rsqrt.h",
+    "cc_file": "rsqrt.cc"
+  },
+  "scalar_tensor": {
+    "fn_type": "ScalarTensorFn",
+    "dispatcher_name": "scalar_tensor_dispatcher",
+    "signature": "at::Tensor (*)(const at::Scalar&,\n                                      std::optional<at::ScalarType>,\n                                      std::optional<at::Layout>,\n                                      std::optional<at::Device>,\n                                      std::optional<bool>)",
+    "header_file": "scalar_tensor.h",
+    "cc_file": "scalar_tensor.cc"
+  },
+  "silu": {
+    "fn_type": "SiluFn",
+    "dispatcher_name": "silu_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "silu.h",
+    "cc_file": "silu.cc"
+  },
+  "silu_backward": {
+    "fn_type": "SiluBackwardFn",
+    "dispatcher_name": "silu_backward_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&)",
+    "header_file": "silu_backward.h",
+    "cc_file": "silu_backward.cc"
+  },
+  "sin": {
+    "fn_type": "SinFn",
+    "dispatcher_name": "sin_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&)",
+    "header_file": "sin.h",
+    "cc_file": "sin.cc"
+  },
+  "slice_backward": {
+    "fn_type": "SliceBackwardFn",
+    "dispatcher_name": "slice_backward_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, at::IntArrayRef,\n                                       int64_t, int64_t, int64_t, int64_t)",
+    "header_file": "slice_backward.h",
+    "cc_file": "slice_backward.cc"
+  },
+  "_softmax": {
+    "fn_type": "SoftmaxFn",
+    "dispatcher_name": "softmax_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, int64_t, bool)",
+    "header_file": "softmax.h",
+    "cc_file": "softmax.cc"
+  },
+  "sort": {
+    "fn_type": "SortFn",
+    "dispatcher_name": "sort_dispatcher",
+    "signature": "std::tuple<at::Tensor, at::Tensor> (*)(const at::Tensor&, int64_t, bool)",
+    "header_file": "sort.h",
+    "cc_file": "sort.cc"
+  },
+  "sum.dim_IntList": {
+    "fn_type": "SumDimFn",
+    "dispatcher_name": "sum_dim_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, at::OptionalIntArrayRef,\n                                bool, std::optional<at::ScalarType>)",
+    "header_file": "sum.h",
+    "cc_file": "sum.cc"
+  },
+  "topk": {
+    "fn_type": "TopkFn",
+    "dispatcher_name": "topk_dispatcher",
+    "signature": "std::tuple<at::Tensor, at::Tensor> (*)(const at::Tensor&, int64_t, int64_t, bool, bool)",
+    "header_file": "topk.h",
+    "cc_file": "topk.cc"
+  },
+  "where.self": {
+    "fn_type": "WhereSelfFn",
+    "dispatcher_name": "where_self_dispatcher",
+    "signature": "at::Tensor (*)(const at::Tensor&, const at::Tensor&, const at::Tensor&)",
+    "header_file": "where.h",
+    "cc_file": "where.cc"
+  },
+  "zeros": {
+    "fn_type": "ZerosFn",
+    "dispatcher_name": "zeros_dispatcher",
+    "signature": "at::Tensor (*)(at::IntArrayRef,\n                               std::optional<at::ScalarType>,\n                               std::optional<at::Layout>,\n                               std::optional<at::Device>,\n                               std::optional<bool>)",
+    "header_file": "zeros.h",
+    "cc_file": "zeros.cc"
+  }
+}

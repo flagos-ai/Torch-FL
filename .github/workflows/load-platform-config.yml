@@ -1,0 +1,308 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The single reader of .github/configs/<platform>.yml.
+#
+# Everything that differs between platforms lives in that one file: the runner
+# label, the container image with its options and mounts, the provisioning hook
+# with the stage it is invoked as, the timeouts, the environment its check
+# asserts, and the few commands an image is missing. This job is the only place
+# those keys are parsed. The integration pipeline (integration-tests.yml) and
+# the wheel build (build-wheel.yml) both call it and take their job shape from
+# its outputs, so adding a platform is adding a config file and nothing else --
+# there is no per-platform workflow to copy, and no second copy of the image or
+# the runner label to drift.
+#
+# The integration groups are NOT one of those per-platform keys any more. They
+# live in .github/integration-manifest.yml -- outside .github/configs/, because
+# every `*.yml` in that directory is a platform to schedule -- one ordered list
+# for every platform, and this job composes it against the config it just read
+# (compose_integration_manifest.py). A config that still carries a step list of
+# its own is refused rather than merged: that is the shape this job exists to
+# have removed.
+#
+# It runs on ubuntu-latest on purpose: `yq` and the parsing stay off the vendor
+# images, so no accelerator container needs a YAML dependency, and a config that
+# cannot be read fails in seconds rather than after a multi-minute hardware job.
+
+name: Load platform configuration
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: Config basename under .github/configs (without .yml)
+        required: true
+        type: string
+      checkout_repository:
+        description: Repository containing the source commit to inspect
+        required: false
+        type: string
+        default: ''
+      checkout_ref:
+        description: Immutable source commit to inspect
+        required: false
+        type: string
+        default: ''
+    outputs:
+      display_name:
+        description: Human-readable platform name, used in job and step names
+        value: ${{ jobs.configuration.outputs.display_name }}
+      setup_script:
+        description: Provisioning entrypoint the pipeline runs
+        value: ${{ jobs.configuration.outputs.setup_script }}
+      setup_platform:
+        description: Platform name handed to the provisioning entrypoint
+        value: ${{ jobs.configuration.outputs.setup_platform }}
+      setup_stage:
+        description: Stage the provisioning entrypoint is invoked as (CI_STAGE)
+        value: ${{ jobs.configuration.outputs.setup_stage }}
+      ci_image:
+        description: Container image the platform's jobs run in
+        value: ${{ jobs.configuration.outputs.ci_image }}
+      runner_labels:
+        description: Runner labels, as a JSON array
+        value: ${{ jobs.configuration.outputs.runner_labels }}
+      container_volumes:
+        description: Container volumes, as a JSON array
+        value: ${{ jobs.configuration.outputs.container_volumes }}
+      container_options:
+        description: Container options, as one command line
+        value: ${{ jobs.configuration.outputs.container_options }}
+      timeout_minutes:
+        description: Job timeout in minutes, as a string
+        value: ${{ jobs.configuration.outputs.timeout_minutes }}
+      integration_timeout_minutes:
+        description: Timeout for the combined build-and-test job, as a string
+        value: ${{ jobs.configuration.outputs.integration_timeout_minutes }}
+      wheel_artifact_name:
+        description: Artifact name the wheel build uploads under
+        value: ${{ jobs.configuration.outputs.wheel_artifact_name }}
+      integration_tests:
+        description: The integration test manifest, as JSON
+        value: ${{ jobs.configuration.outputs.integration_tests }}
+      integration_environment:
+        description: The manifest's shared environment, as JSON
+        value: ${{ jobs.configuration.outputs.integration_environment }}
+      integration_build_tools:
+        description: One shell command per line, run before the wheel build
+        value: ${{ jobs.configuration.outputs.integration_build_tools }}
+      integration_test_dependencies:
+        description: One shell command per line, run after the wheel install
+        value: ${{ jobs.configuration.outputs.integration_test_dependencies }}
+
+jobs:
+  configuration:
+    name: Load configuration (${{ inputs.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      display_name: ${{ steps.config.outputs.display_name }}
+      setup_script: ${{ steps.config.outputs.setup_script }}
+      setup_platform: ${{ steps.config.outputs.setup_platform }}
+      setup_stage: ${{ steps.config.outputs.setup_stage }}
+      ci_image: ${{ steps.config.outputs.ci_image }}
+      runner_labels: ${{ steps.config.outputs.runner_labels }}
+      container_volumes: ${{ steps.config.outputs.container_volumes }}
+      container_options: ${{ steps.config.outputs.container_options }}
+      timeout_minutes: ${{ steps.config.outputs.timeout_minutes }}
+      integration_timeout_minutes: ${{ steps.config.outputs.integration_timeout_minutes }}
+      wheel_artifact_name: ${{ steps.config.outputs.wheel_artifact_name }}
+      integration_tests: ${{ steps.config.outputs.integration_tests }}
+      integration_environment: ${{ steps.config.outputs.integration_environment }}
+      integration_build_tools: ${{ steps.config.outputs.integration_build_tools }}
+      integration_test_dependencies: ${{ steps.config.outputs.integration_test_dependencies }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Load and validate platform configuration
+        id: config
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+
+          CONFIG_FILE=".github/configs/${PLATFORM}.yml"
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "::error::Platform config not found: $CONFIG_FILE"
+            exit 1
+          fi
+          MANIFEST_FILE=".github/integration-manifest.yml"
+          if [[ ! -f "$MANIFEST_FILE" ]]; then
+            echo "::error::Integration manifest not found: $MANIFEST_FILE"
+            exit 1
+          fi
+
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          # The manifest and the config reach the composer as JSON, and `yq`
+          # is the YAML reader here for the reason the header states: this is
+          # the one job that parses YAML, and it runs off the vendor images.
+          MANIFEST_JSON="${RUNNER_TEMP:-/tmp}/integration-manifest.json"
+          CONFIG_JSON="${RUNNER_TEMP:-/tmp}/${PLATFORM}-config.json"
+          yq -o=json -I=0 '.' "$MANIFEST_FILE" > "$MANIFEST_JSON"
+          yq -o=json -I=0 '.' "$CONFIG_FILE" > "$CONFIG_JSON"
+
+          # A config that still defines its own step list would be silently
+          # ignored from here on -- the pipeline would run the shared manifest
+          # and the leftover list would read as if it were running too. Refuse
+          # it, so the migration is complete rather than half-done.
+          if [[ "$(yq -r '.integration_tests | type' "$CONFIG_FILE")" != '!!null' ]]; then
+            echo "::error::$CONFIG_FILE still defines its own integration_tests; the groups live in $MANIFEST_FILE"
+            exit 1
+          fi
+
+          DISPLAY_NAME=$(yq -r '.display_name' "$CONFIG_FILE")
+          SETUP_SCRIPT=$(yq -r '.setup_script' "$CONFIG_FILE")
+          SETUP_PLATFORM=$(yq -r '.setup_platform' "$CONFIG_FILE")
+          SETUP_STAGE=$(yq -r '.setup_stage // "integration"' "$CONFIG_FILE")
+          CI_IMAGE=$(yq -r '.ci_image' "$CONFIG_FILE")
+          RUNS_ON=$(yq -o=json -I=0 '.runner_labels' "$CONFIG_FILE")
+          VOLUMES=$(yq -o=json -I=0 '.container_volumes' "$CONFIG_FILE")
+          OPTIONS=$(yq -r '.container_options' "$CONFIG_FILE")
+          TIMEOUT_MINUTES=$(yq -r '.timeout_minutes' "$CONFIG_FILE")
+          INTEGRATION_TIMEOUT=$(yq -r '.integration_timeout_minutes // .timeout_minutes' "$CONFIG_FILE")
+          ARTIFACT_NAME=$(yq -r '.wheel_artifact_name' "$CONFIG_FILE")
+          INTEGRATION_ENVIRONMENT=$(yq -o=json -I=0 '.integration_environment // {}' "$CONFIG_FILE")
+          INTEGRATION_TESTS=$(python .github/scripts/compose_integration_manifest.py \
+            --platform "$PLATFORM" \
+            --manifest "$MANIFEST_JSON" \
+            --platform-config "$CONFIG_JSON" \
+            --config-dir .github/configs)
+
+          # The two command lists reach the hardware job as one line per
+          # command, so anything that is not a list of strings would be read as
+          # a single command. Refuse the shape here, where the message is
+          # readable, rather than on a vendor runner.
+          for key in integration_build_tools integration_test_dependencies; do
+            kind=$(yq -r ".${key} | type" "$CONFIG_FILE")
+            if [[ "$kind" != '!!null' && "$kind" != '!!seq' ]]; then
+              echo "::error::${key} in ${CONFIG_FILE} must be a list of shell commands, found ${kind}"
+              exit 1
+            fi
+          done
+          BUILD_TOOLS=$(yq -r '(.integration_build_tools // [])[]' "$CONFIG_FILE")
+          TEST_DEPENDENCIES=$(yq -r '(.integration_test_dependencies // [])[]' "$CONFIG_FILE")
+
+          # FromJson() on the consuming side turns these into `runs-on:` and
+          # `volumes:`; a string, a null or a non-string element would become a
+          # job that cannot be scheduled. Both keys are required -- an empty
+          # `container_volumes: []` is a value, a missing key is a mistake.
+          for key in runner_labels container_volumes; do
+            kind=$(yq -r ".${key} | type" "$CONFIG_FILE")
+            if [[ "$kind" != '!!seq' ]]; then
+              echo "::error::${key} in ${CONFIG_FILE} must be a list, found ${kind}"
+              exit 1
+            fi
+            non_strings=$(yq -r "[.${key}[] | select(type != \"!!str\")] | length" "$CONFIG_FILE")
+            if [[ "$non_strings" != '0' ]]; then
+              echo "::error::${key} in ${CONFIG_FILE} must contain only strings"
+              exit 1
+            fi
+          done
+          if [[ "$RUNS_ON" == '[]' ]]; then
+            echo "::error::runner_labels in ${CONFIG_FILE} must name at least one label"
+            exit 1
+          fi
+
+          if [[ -z "$DISPLAY_NAME" || "$DISPLAY_NAME" == "null" ]]; then
+            echo "::error::display_name is required in $CONFIG_FILE"
+            exit 1
+          fi
+          if [[ -z "$SETUP_SCRIPT" || "$SETUP_SCRIPT" == "null" || ! -f "$SETUP_SCRIPT" ]]; then
+            echo "::error::Invalid setup_script in $CONFIG_FILE: $SETUP_SCRIPT"
+            exit 1
+          fi
+          if [[ -z "$SETUP_PLATFORM" || "$SETUP_PLATFORM" == "null" ]]; then
+            echo "::error::setup_platform is required in $CONFIG_FILE"
+            exit 1
+          fi
+          # The value reaches set_env.sh as CI_STAGE, which accepts exactly two.
+          if [[ "$SETUP_STAGE" != 'build' && "$SETUP_STAGE" != 'integration' ]]; then
+            echo "::error::setup_stage in $CONFIG_FILE must be 'build' or 'integration', found: $SETUP_STAGE"
+            exit 1
+          fi
+          # Required to be stated and to be a string. An empty string tells
+          # consuming workflows to run directly on the runner, as MPS must on
+          # macOS. A null value means a missing image, while a non-string value
+          # cannot be passed to the container expression.
+          if [[ "$CI_IMAGE" == "null" || "$(yq -r '.ci_image | type' "$CONFIG_FILE")" != '!!str' ]]; then
+            echo "::error::ci_image must be a string in $CONFIG_FILE (empty means no container)"
+            exit 1
+          fi
+          if [[ ! "$TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::timeout_minutes must be a positive integer"
+            exit 1
+          fi
+          if [[ ! "$INTEGRATION_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::integration_timeout_minutes must be a positive integer"
+            exit 1
+          fi
+          # The wheel build derives the vendor lane from this name
+          # (build-wheel-common.yml strips `wheel-` and hands the rest to
+          # publish_wheels.py), so a name that is not `wheel-<platform>` would
+          # publish under a lane nobody chose.
+          if [[ ! "$ARTIFACT_NAME" =~ ^wheel-[a-z0-9]+$ ]]; then
+            echo "::error::wheel_artifact_name must be 'wheel-<platform>' in $CONFIG_FILE, found: $ARTIFACT_NAME"
+            exit 1
+          fi
+
+          # The composed list is validated here -- off the vendor image, before
+          # a hardware job is scheduled -- so a step renamed in the repo cannot
+          # survive as a command that no longer exists. The composer has
+          # already read the manifest and the config; this is the consumer's
+          # own reading of the same JSON.
+          INTEGRATION_TESTS="$INTEGRATION_TESTS" \
+          INTEGRATION_ENVIRONMENT="$INTEGRATION_ENVIRONMENT" \
+            python .github/scripts/run_integration_tests.py --validate-only
+
+          emit() {
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+          }
+          # A multi-line value needs the heredoc form; the value is written
+          # verbatim between the delimiters, and an empty list produces an empty
+          # value so the consumer can skip its step with a plain `!= ''` test.
+          emit_list() {
+            local name="$1" value="$2"
+            {
+              printf '%s<<__%s__\n' "$name" "$name"
+              if [[ -n "$value" ]]; then printf '%s\n' "$value"; fi
+              printf '__%s__\n' "$name"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          emit display_name "$DISPLAY_NAME"
+          emit setup_script "$SETUP_SCRIPT"
+          emit setup_platform "$SETUP_PLATFORM"
+          emit setup_stage "$SETUP_STAGE"
+          emit ci_image "$CI_IMAGE"
+          emit runner_labels "$RUNS_ON"
+          emit container_volumes "$VOLUMES"
+          emit container_options "$OPTIONS"
+          emit timeout_minutes "$TIMEOUT_MINUTES"
+          emit integration_timeout_minutes "$INTEGRATION_TIMEOUT"
+          emit wheel_artifact_name "$ARTIFACT_NAME"
+          emit integration_tests "$INTEGRATION_TESTS"
+          emit integration_environment "$INTEGRATION_ENVIRONMENT"
+          emit_list integration_build_tools "$BUILD_TOOLS"
+          emit_list integration_test_dependencies "$TEST_DEPENDENCIES"

@@ -1,0 +1,125 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: MPS
+
+# MPS is the one platform that does not run in a container: its accelerator is
+# the Metal GPU of the runner itself, and the GitHub-hosted macOS image is the
+# only environment that has one. The shared pipeline still drives it, through
+# the same manifest and the same loader, so this config states what the loader
+# needs rather than a bespoke workflow.
+setup_script: .github/scripts/set_env.sh
+setup_platform: mps
+
+# Empty on purpose: the empty value is what tells the two consuming workflows to
+# omit the `container:` key entirely, because a macOS runner cannot start a
+# container and this platform's accelerator is the runner's own Metal GPU. The
+# loader still requires the key to be *stated* and to be a string; see the
+# comment there. The setup hook asserts the runner's own toolchain (arm64, Xcode
+# command line tools, the macOS SDK) instead of an image.
+ci_image: ""
+
+# GitHub-hosted Apple Silicon. The arm64 label matters: an x86_64 macOS runner
+# has no Metal device and the environment check below would fail on
+# flagos_devices, which is the intended outcome rather than a silent skip.
+runner_labels:
+  - macos-15
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/mps/
+  - torch_fl/accelerator/_vendor_libtorch.py
+  - torch_fl/configs/backends_mps.conf
+  - csrc/aten/backends/mps/
+  - csrc/runtime/accelerator/mps/
+  - csrc/runtime/allocator/backends/mps_memory.h
+  - scripts/codegen/codegen_mps.py
+  - .github/scripts/hooks/set_env_mps.sh
+  - .github/scripts/set_env_mps.sh
+  # The per-op suites are `test_mps_<op>.py` rather than a `mps/` directory, so
+  # the glob is what keeps a new increment's tests inside this lane instead of
+  # routing them through "unknown code runs every platform".
+  - tests/integration/ops/test_mps_*.py
+  - tests/integration/test_mps_runtime.py
+  - tests/integration/runtime/
+  - tests/unit/test_runtime_conformance_report.py
+  - tests/integration/flaggems/flaggems_caps.py
+  # These enter through shared PrivateUse1 code rather than an MPS directory.
+  # Both suites run on every lane; the MPS membership here is what keeps a
+  # change to their path in this lane when no other file sends it the whole
+  # matrix. The module migration case in test_factory_ops.py exercises
+  # set_.source_Tensor through module-to-module migration.
+  - csrc/aten/set_ops.cc
+  - tests/integration/test_factory_ops.py
+
+container_volumes: []
+
+integration_environment: {}
+
+# No container options: this job runs directly on the runner. Left as an empty
+# scalar so the loader's `container_options` output is well-formed for the
+# workflow's `container.options` field, which is empty on this platform.
+container_options: ""
+
+# The `build` frontend has to be installed in the hook's own venv before the
+# wheel step, for the same reason Kunlunxin needs it and one more. The masked
+# failure is shared: the checkout's own CMake `build/` directory shadows a
+# missing `build` module as a namespace package, so `python -m build` resolves
+# to the checkout instead of the frontend and reports `No module named
+# build.__main__; 'build' is a package and cannot be directly executed`. The
+# extra reason is that this lane's venv is created from scratch by the hook, so
+# there is no prebuilt image that might already have carried it. Measured on the
+# third run of this lane, which is where the message above comes from.
+integration_build_tools:
+  - python -m pip install --upgrade build
+
+timeout_minutes: 60
+wheel_artifact_name: wheel-mps
+
+# What this platform's environment has to look like before any test runs, read
+# by the first step of .github/integration-manifest.yml through
+# .github/scripts/check_platform_environment.py.
+#
+# torch_version_base rather than torch_version_prefix: a macOS arm64 runner
+# installs the un-suffixed PyPI torch, which reports `2.10.0` and not the
+# `2.10.0+cpu` the Linux jobs install. cuda_version is null for the same reason
+# it is on MUSA and Ascend -- there is no CUDA build of torch in this
+# interpreter, and asserting otherwise would fail on the wrong fact.
+#
+# The wheel must carry no libtorch_cuda.so and no vendor bundle: MPS stays on
+# the native PrivateUse1 key and links only Metal and Foundation. A wheel that
+# shipped a CUDA bundle here would mean the accelerator was selected wrong, so
+# it is forbidden rather than merely unnecessary.
+#
+# flagos_devices asserts the Metal device is visible through torch_fl's own
+# device surface. This is the check that makes an arm64 runner or a missing
+# Metal SDK a failure instead of a suite that reports skips: every MPS test
+# self-skips when detect_platform() is not "mps".
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    at_least: 1
+  # The wheel must be the architecture the runner is. A universal2
+  # interpreter would otherwise tag and compile every setuptools extension
+  # for two architectures while CMake builds one, and the tag would be
+  # believed: the link to libtorch_bindings is dropped with a warning, the
+  # wheel installs everywhere and imports only here. See ARCHFLAGS in
+  # .github/scripts/hooks/set_env_mps.sh and assert_native_extensions_arch.
+  native_extensions_arch: arm64
