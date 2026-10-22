@@ -456,7 +456,7 @@ def test_conf_route_counts_are_stable():
         # the FlagTree 0.7.0 Ascend MLIR pipeline cannot lower the rank-2
         # copy_func kernel the FlagGems `_ascend` flip override builds.
         # The device contract needs the add out= overloads on the Ascend kernel.
-        "ascend": {"flaggems": 222, "none": 1657, "ascend": 158},
+        "ascend": {"flaggems": 221, "none": 1657, "ascend": 159},
         "bpu": {},
         # 24 ops moved from flaggems to cuda: the conf writer now excludes
         # flaggems_recursive_fallback | flaggems_runtime_broken, which it could
