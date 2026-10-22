@@ -217,16 +217,15 @@ MPS binary suite passed **166 cases**, including all three operators, both
 `alpha` values, zero-dimensional and one-element RHS operands, and a later
 larger-rank call. The adjacent MPS unary, softmax, layer-normalization,
 convolution and Qwen3.5 suites passed **238 cases**. The MPS route count remains
-**59 `mps` / 1978 `none`** because this change enriches an existing graph body
-rather than adding an exact ATen overload.
+**59 `mps` / 1978 `none`** because this change enriches an existing graph body.
 
-The JeV image-and-text checkpoint was run on the same physical M5 with this
-build; its final logits were on `flagos:0` and its probability was
-`0.032059233635663986`, against the checkpoint's `0.026759283617138863`
-reference. A one-element LHS with no repeatable axis, in-place tensor arithmetic
-over shared storage, and every other host fallback in the image model remain
-outside this route. Other MPS hardware, training and generation are **not
-revalidated**.
+The JeV image-and-text checkpoint was run on the same physical M5 with a
+boxing-off wheel built from this branch on the current `main`; its final logits
+were on `flagos:0` and its probability was `0.032059233635663986`, against the
+checkpoint's `0.026759283617138863` reference. A one-element LHS with no
+repeatable axis, in-place tensor arithmetic over shared storage, and every other
+host fallback in the image model remain outside this route. Other MPS hardware,
+training and generation are **not revalidated**.
 
 ### Apple Silicon M5: Qwen3.5 view metadata stays on the MPS backend (2026-10-22, physical M5)
 
