@@ -370,9 +370,9 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
                 "setup.sh",
                 "sentinel.txt",
             }
-        commands = root / "bin"
-        commands.mkdir()
-        curl = commands / "curl"
+        fixture = root / "fixture"
+        fixture.mkdir()
+        curl = fixture / "curl"
         curl.write_text(
             "#!/bin/sh\n"
             'while [ "$#" -gt 0 ]; do\n'
@@ -387,15 +387,26 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
             encoding="utf-8",
         )
         curl.chmod(0o755)
-        no_git = root / "no-git"
-        no_git.mkdir()
-        for command in ("python3", "tar", "cp", "rm", "mv", "mkdir", "true", "env"):
-            executable = shutil.which(command)
-            assert executable is not None
-            if command == "python3":
-                (no_git / command).symlink_to(sys.executable)
-            else:
-                (no_git / command).symlink_to(executable)
+        tools = root / "tools"
+        tools.mkdir()
+        archive_tools = (
+            "python3",
+            "tar",
+            "gzip",
+            "cp",
+            "rm",
+            "mv",
+            "mkdir",
+            "sleep",
+        )
+        for command in (*archive_tools, "true", "env"):
+            executable = Path(shutil.which(command)).resolve()
+            (tools / command).symlink_to(
+                sys.executable if command == "python3" else executable
+            )
+        commands = root / "commands"
+        commands.mkdir()
+        (commands / "curl").symlink_to(curl)
         runner_temp = root / "runner-temp"
         runner_temp.mkdir()
 
@@ -431,15 +442,18 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
             "GITHUB_OUTPUT": str(runner_temp / "source-output"),
             "BASH": bash,
         }
-        git_directory = Path(shutil.which("git")).resolve().parent
+        git = Path(shutil.which("git")).resolve()
         git_only = root / "git-only"
         git_only.mkdir()
-        (git_only / "git").symlink_to(git_directory / "git")
+        (git_only / "git").symlink_to(git)
+        shared_prefix = git.parent.parent / "libexec/git-core"
+        if shared_prefix.is_dir():
+            (git_only / "libexec").symlink_to(git.parent.parent / "libexec")
         git_environment = {
             **cache_environment,
-            "PATH": f"{commands}:{no_git}:{git_only}:/bin",
+            "PATH": f"{commands}:{git_only}:{tools}:/bin",
         }
-        environment = {**cache_environment, "PATH": f"{commands}:{no_git}:/bin"}
+        environment = {**cache_environment, "PATH": f"{commands}:{tools}:/bin"}
         cache_environment["PATH"] = environment["PATH"]
         config = root / "config"
         (config / "state").mkdir(parents=True)
@@ -489,21 +503,32 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
 
         output = runner_temp / "source-output"
         stale_files = _snapshot(workspace)
-        isolated_path = root / "no-git-path"
-        isolated_path.mkdir()
-        for command in ("python3", "tar", "cp", "rm", "mv", "mkdir", "sleep"):
-            executable = shutil.which(command)
-            assert executable is not None
-            (isolated_path / command).symlink_to(Path(executable).resolve())
-        (isolated_path / "curl").symlink_to(Path(shutil.which("curl")).resolve())
+        no_git_tools = root / "no-git-tools"
+        no_git_tools.mkdir()
+        for command in archive_tools:
+            (no_git_tools / command).symlink_to(tools / command)
+        (no_git_tools / "curl").symlink_to(curl)
         rewrite_archive(None)
-        unavailable = run(
-            selected_script=f'curl() {{ "$FIXTURE_CURL" "$@"; }}\n{script}',
-            selected_environment={
+        # Bash reloads BASH_ENV in its child shell, so remove Git from a fresh
+        # environment and keep the fixture and archive tools in separate dirs.
+        no_git_script = f'curl() {{ "$FIXTURE_CURL" "$@"; }}\n{script}'
+        unavailable = subprocess.run(
+            [
+                bash,
+                "--noprofile",
+                "--norc",
+                "-xc",
+                'exec "$BASH" --noprofile --norc -xc "$NO_GIT_SCRIPT"',
+            ],
+            env={
                 **cache_environment,
-                "PATH": str(isolated_path),
+                "PATH": str(no_git_tools),
+                "BASH": bash,
                 "FIXTURE_CURL": str(curl),
+                "NO_GIT_SCRIPT": no_git_script,
             },
+            capture_output=True,
+            text=True,
         )
         assert unavailable.returncode != 0
         assert "cannot compare it with Git" in unavailable.stderr
