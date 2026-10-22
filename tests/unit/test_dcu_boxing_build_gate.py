@@ -81,3 +81,20 @@ def test_cmake_feature_gate_is_dcu_and_boxing():
     assert "PUBLIC FLAGOS_DCU_VENDOR_STREAMS=1" in on
     assert "HEADER_FILE_ONLY TRUE" in off
     assert "FLAGOS_DCU_VENDOR_STREAMS" not in off
+
+
+def test_dcu_stream_includes_are_standalone():
+    """The provider declarations cannot depend on a translation unit's include order."""
+    for source, dependent_headers in (
+        ("csrc/aten/copy_ops.cc", ("contiguous_ops.h",)),
+        ("csrc/aten/contiguous_ops.cc", ("contiguous_ops.h",)),
+    ):
+        lines = (ROOT / source).read_text(encoding="utf-8").splitlines()
+        include = lines.index('#include "stream_copy.h"')
+        for header in dependent_headers:
+            assert include < lines.index(f'#include "{header}"'), source
+
+    text = (ROOT / "csrc/aten/stream_copy.h").read_text(encoding="utf-8")
+    dcu_include = text.index('#include "runtime/dcu_stream.h"')
+    dcu_namespace = text.index("namespace at::native::flagos")
+    assert dcu_include < dcu_namespace

@@ -4,9 +4,9 @@
 // Below is the original copyright:
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
-#include "contiguous_ops.h"
-#include "copy_ops.h"
 #include "stream_copy.h"
+#include "copy_ops.h"
+#include "contiguous_ops.h"
 
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
