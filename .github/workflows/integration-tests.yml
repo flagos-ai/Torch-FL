@@ -338,7 +338,8 @@ jobs:
                       if target.is_symlink() or not inside(staging, target.resolve()):
                           raise ValueError(f"source archive symlink leaves the tree: {relative!r}")
 
-                  metadata = staging / ".git_archival.txt"
+                  archive_metadata = pathlib.PurePosixPath(".git_archival.txt")
+                  metadata = staging / archive_metadata
                   if metadata.is_file():
                       fields = {}
                       for line in metadata.read_text(encoding="utf-8").splitlines():
@@ -353,7 +354,6 @@ jobs:
                           raise ValueError(
                               f"the source archive contains {fields['node']}, expected {revision}"
                           )
-                      archive_metadata = pathlib.PurePosixPath(".git_archival.txt")
                       metadata.unlink()
                       mode = "archival"
                   else:
