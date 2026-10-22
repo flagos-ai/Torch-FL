@@ -86,7 +86,8 @@ def test_views_preserve_offsets_and_reference_errors():
 
 @pytest.mark.parametrize("operation", ["squeeze", "squeeze_dim", "t", "unsqueeze"])
 def test_all_claimed_views_preserve_their_storage(operation):
-    host = torch.arange(1, 13, dtype=torch.float32).reshape(1, 3, 4)
+    shape = (3, 4) if operation == "t" else (1, 3, 4)
+    host = torch.arange(1, 13, dtype=torch.float32).reshape(shape)
     source = _to_device(host)
     operations = {
         "squeeze": lambda t: t.squeeze(),
