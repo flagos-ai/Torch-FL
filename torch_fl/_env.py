@@ -582,6 +582,22 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Caching device allocator. Set 0 to hand every allocation straight to "
         "the vendor runtime",
     ),
+    "FLAGOS_MEM_POISON": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "Fill every block the caching allocator hands out with a known value "
+        "before returning it. This separates 'a kernel never wrote part of its "
+        "output' from 'a kernel read memory it should not have': with poisoning "
+        "on, an unwritten element keeps the poison value (NaN or garbage) all "
+        "the way to the model output, and a read of stale memory sees the "
+        "previous tensor's contents instead of whatever the driver left. Costs "
+        "one extra fill per allocation, so it is a diagnostic, not a default. "
+        "Values: 1 = 0xFF bytes (NaN in every float dtype, -1 in every integer "
+        "dtype), 2 = 0x00, or any other integer 0-255 used as a byte value. "
+        "Only the caching allocator poisons; a build with "
+        "FLAGOS_USE_CACHING_ALLOCATOR=0 hands allocations to the vendor "
+        "runtime untouched",
+    ),
     # --- Compiler and feature backends -----------------------------------
     "FLAGOS_USE_FLAGTREE": (
         SCOPE_RUNTIME,

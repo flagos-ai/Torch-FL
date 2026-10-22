@@ -65,6 +65,11 @@ class FLAGOS_EXPORT CachingDeviceAllocator final : public at::Allocator {
   // Whether caching is enabled (controlled by env var).
   static bool is_enabled();
 
+  // The byte every block is filled with before it is handed out, or -1 when
+  // FLAGOS_MEM_POISON is off. Exposed so tests can assert the parse without
+  // allocating device memory.
+  static int poison_byte();
+
  private:
   // Per-device allocator state, each with its own lock.
   struct DeviceState {
