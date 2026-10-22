@@ -106,7 +106,7 @@ jobs:
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
     timeout-minutes: 30
     outputs:
-      root: ${{ steps.configure-model.outputs.root }}
+      HOST_MODEL_ROOT: ${{ steps.configure-model.outputs.root }}
       model_path: ${{ steps.configure-model.outputs.model_path }}
     steps:
       - uses: actions/checkout@v4
@@ -301,7 +301,7 @@ jobs:
           CI_IMAGE: ${{ needs.configuration.outputs.ci_image }}
           CONTAINER_VOLUMES: ${{ needs.configuration.outputs.container_volumes }}
           CONTAINER_OPTIONS: ${{ needs.configuration.outputs.container_options }}
-          HOST_MODEL_ROOT: ${{ needs.model-mount.outputs.root }}
+          HOST_MODEL_ROOT: ${{ needs.model-mount.outputs.HOST_MODEL_ROOT }}
           MODEL_PATH: ${{ needs.model-mount.outputs.model_path }}
           CHECKOUT_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           CHECKOUT_REF: ${{ inputs.checkout_ref || github.sha }}
