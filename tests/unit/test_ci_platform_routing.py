@@ -86,20 +86,41 @@ def test_platform_tests_and_manifest_use_the_resolved_source():
             if step.get("id") == "checkout"
             and step.get("uses", "").startswith("actions/checkout@")
         )
-        retry = next(
+        retries = [
             step
             for step in steps
             if step.get("name") == "Retry checkout source"
             and step.get("uses", "").startswith("actions/checkout@")
-        )
+        ]
+        assert len(retries) == 1
+        retry = retries[0]
         assert checkout["continue-on-error"] is True
-        assert retry["if"] == "${{ steps.checkout.outcome == 'failure' }}"
+        retry_outcome = (
+            steps[steps.index(retry) + 1]["if"]
+            if job_name == "integration-tests"
+            else retry["if"]
+        )
+        assert retry_outcome == "${{ steps.checkout.outcome == 'failure' }}"
         for step in (checkout, retry):
             assert step["with"]["repository"] == (
                 "${{ inputs.checkout_repository || github.repository }}"
             )
             assert step["with"]["ref"] == "${{ inputs.checkout_ref || github.ref }}"
             assert step["with"]["persist-credentials"] is False
+
+        if job_name == "integration-tests":
+            verify = steps[steps.index(retry) + 1]
+            assert "git rev-parse HEAD" in verify["run"]
+            assert verify["env"]["EXPECTED_REF"] == (
+                "${{ inputs.checkout_ref || github.sha }}"
+            )
+
+    outputs = workflow["jobs"]["model-mount"]["outputs"]
+    assert set(outputs) == {"host_model_root", "model_path"}
+    assert outputs["host_model_root"] == (
+        "${{ steps.configure-model.outputs.host_model_root }}"
+    )
+    assert outputs["model_path"] == "${{ steps.configure-model.outputs.model_path }}"
 
     config_workflow = _workflow("load-platform-config.yml")
     config_inputs = config_workflow[True]["workflow_call"]["inputs"]

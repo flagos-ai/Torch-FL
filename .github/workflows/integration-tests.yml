@@ -121,6 +121,7 @@ jobs:
       - name: Retry checkout source
         if: ${{ steps.checkout.outcome == 'failure' }}
         uses: actions/checkout@v4
+        id: checkout-retry
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || github.ref }}
@@ -137,6 +138,14 @@ jobs:
           mkdir -p "$root"
           echo "root=$root" >> "$GITHUB_OUTPUT"
           echo "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" >> "$GITHUB_ENV"
+
+      # Each dependent step writes to GITHUB_OUTPUT. Configure all job outputs
+      # before those steps so they cannot invalidate this step's output file.
+      - name: Configure the model job output
+        id: configure-model
+        run: |
+          echo "host_model_root=$TORCH_FL_MODEL_ROOT" >> "$GITHUB_OUTPUT"
+          echo "model_path=${{ needs.configuration.outputs.model_path }}" >> "$GITHUB_OUTPUT"
 
       # A timed-out cache lookup can return success without a matched key. A
       # failed matched transfer must not upload an incomplete checkpoint.
@@ -261,14 +270,6 @@ jobs:
             check-model --path "$MODEL_SOURCE" --verify-weights --verify-files
           echo "root=$MODEL_SOURCE" >> "$GITHUB_OUTPUT"
 
-      # Publish the directory containing the validated checkpoint. The
-      # integration job replaces the static mount with this job-specific path.
-      - name: Publish the verified model root
-        id: configure-model
-        run: |
-          echo "host_model_root=$TORCH_FL_MODEL_ROOT" >> "$GITHUB_OUTPUT"
-          echo "model_path=${{ needs.configuration.outputs.model_path }}" >> "$GITHUB_OUTPUT"
-
       # Save only a verified, exact cache miss. A present cache is left alone.
       - name: Save the pinned Qwen3 checkpoint
         if: ${{ !cancelled() && steps.model-cache-lookup.outcome == 'success' && steps.model-cache-lookup.outputs.cache-primary-key != '' && steps.model-cache-lookup.outputs.cache-hit != 'true' && steps.model-verified.outcome == 'success' }}
@@ -312,6 +313,17 @@ jobs:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || github.ref }}
           persist-credentials: false
+
+      - name: Verify the checkout retry
+        if: ${{ steps.checkout.outcome == 'failure' }}
+        env:
+          EXPECTED_REF: ${{ inputs.checkout_ref || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$EXPECTED_REF"
 
       # Copy before invoking setup. setup may install into the checked-out
       # tree, and tests still need a clean source workspace to execute.

@@ -291,11 +291,13 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in locate["run"]
     assert "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" in locate["run"]
     assert "root=$HOST_MODEL_ROOT" not in locate["run"]
-    publish = next(
+    configure = next(
         step for step in mount["steps"] if step.get("id") == "configure-model"
     )
-    assert "host_model_root=$TORCH_FL_MODEL_ROOT" in publish["run"]
-    assert "model_path=${{ needs.configuration.outputs.model_path }}" in publish["run"]
+    assert "host_model_root=$TORCH_FL_MODEL_ROOT" in configure["run"]
+    assert (
+        "model_path=${{ needs.configuration.outputs.model_path }}" in configure["run"]
+    )
     assert mount["outputs"]["model_path"] == (
         "${{ steps.configure-model.outputs.model_path }}"
     )
