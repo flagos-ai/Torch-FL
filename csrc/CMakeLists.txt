@@ -192,8 +192,9 @@ endif()
 
 # Vendor native kernels, gated by FLAGOS_BUILD_VENDOR and by FLAGOS_ACCELERATOR: only the
 # current accelerator's backend directory is ever compiled in (cuda/dcu/
-# tsingmicro/bpu/ppu ship no backend directory, so the switch is a no-op
-# there). This replaces the old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
+# bpu/ppu ship no backend directory, so the switch is a no-op there; tsingmicro
+# ships only the host-draw RNG kernels and pins the switch ON). This replaces the
+# old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
 # switches, which could never be meaningfully combined anyway -- exactly one
 # vendor is ever enabled per build.
 #
@@ -609,10 +610,10 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${MUDNN_LIB} ${MURAND_LIB})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
-  # Selects backends/bpu_memory.h and, like tsingmicro, skips the generated
-  # PrivateUse1 op registrations: the BPU executes whole compiled graphs, so
-  # there is no per-op kernel to register and every aten call reaches
-  # cpu_fallback. Acceleration comes from the torch.compile backend instead.
+  # Selects backends/bpu_memory.h and skips the generated PrivateUse1 op
+  # registrations: the BPU executes whole compiled graphs, so there is no per-op
+  # kernel to register and every aten call reaches cpu_fallback. Acceleration
+  # comes from the torch.compile backend instead.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
       PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)
