@@ -16,7 +16,9 @@ OFF; this change does not claim to add multistream support to that default.
 
 This change must remain draft until the exact candidate's ON/OFF wheel builds
 and device tests have completed. Local unit tests and syntax checks are not a
-substitute for those gates.
+substitute for those gates. The latest source-built ON fixture passed all 13
+device cases; a complete DCU wheel is still blocked by the separate
+`_flagos_nccl` extension build.
 
 ## Execution and lifetime contract
 
