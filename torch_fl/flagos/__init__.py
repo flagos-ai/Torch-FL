@@ -1635,18 +1635,29 @@ def _patch_flaggems_index_put():
     way and not a kernel difference.
 
     Narrows to FlagGems rather than away from it: the op keeps Triton kernels
-    and never takes the CUDA-boxing route. Scoped by the shared
-    ``_flagos_launch_patches_apply`` gate -- see
-    ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- and installed through ``torch.library``
+    and never takes the CUDA-boxing route. Installed through ``torch.library``
     rather than in C++ because the route cannot be stated in the conf: the conf
     enumerates the generated registration list, which this hand-registered op is
     deliberately not in. Upstream workaround rather than a design; remove it once
     the wrapper stops round-tripping. Best-effort, like
     ``_align_flaggems_device_identity``: an unpatched ``index_put_`` is slow
     here, not broken, so this must not be able to take down device init.
+
+    The gate is NOT ``_flagos_launch_patches_apply``. That gate exists to keep
+    the pointwise launch patches off builds whose ops do not go through
+    FlagGems, and it asks the conf whether any op is routed to FlagGems --
+    which ``index_put_`` is not in, on any platform, because it is not in the
+    generated registration list at all. Asking it here answered "no" everywhere
+    and silently left the round-trip in place; issue #633 is that outcome on
+    DCU. What this patch actually needs is narrower and is answerable directly:
+    does the thing it is about to call exist. ``flag_gems.index_put_`` is a
+    module attribute, not a conf route, so ``_patch_flaggems_index_put`` asks
+    for it, and the only remaining build condition is that the build has the
+    FlagGems Python launch path at all (``_flagos_on_flaggems_launch_path``:
+    not BPU, not MPS).
     """
     try:
-        if not _flagos_launch_patches_apply():
+        if not _flagos_on_flaggems_launch_path():
             return
         import flag_gems
 
@@ -1701,31 +1712,69 @@ def _patch_flaggems_index_put():
 # FlagGems has it.
 # ---------------------------------------------------------------------------
 
-# The builds whose routed ops are FlagGems Python/Triton launches reached through
-# the generated bridge, which is the configuration these patches were written and
-# measured on. ``dcu`` was the first; ``cuda`` is the CUDA-boxing build, where the
-# same measurement was taken on an H100 (see the section header) -- an external
-# libtorch_cuda.so behind a CPU torch changes how the vendor kernels are reached,
-# not how FlagGems launches its own.
-_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("dcu", "cuda")
+# The builds whose routed ops are NOT FlagGems Python/Triton launches, spelled as
+# a denylist rather than an allowlist.
+#
+# It was ``("dcu", "cuda")``, an allowlist of the two builds these patches were
+# first measured on (a DCU bw1000 and an H100; an external libtorch_cuda.so
+# behind a CPU torch changes how the vendor kernels are reached, not how
+# FlagGems launches its own). Eight other platforms -- iluvatar, metax, ppu,
+# musa, ascend, gcu, kunlunxin, tsingmicro -- are FlagGems-first by
+# construction (``scripts/codegen/gen_vendor_confs.py`` writes their confs with
+# FlagGems routes, and every one of them builds ``FLAGOS_BUILD_FLAGGEMS`` on),
+# so the allowlist excluded them from the host-side launch patches for no reason
+# the conf could see. Inverting it means a platform added later is treated
+# correctly without editing this tuple.
+#
+# Only the two platforms that build ``FLAGOS_BUILD_FLAGGEMS`` off are listed.
+_NO_FLAGGEMS_LAUNCH_BUILDS = ("bpu", "mps")
 
 
 def _flagos_launch_patches_apply():
     """Whether the per-launch host patches below apply to this build and conf.
 
-    Both halves are load-bearing and are the two the individual functions used to
-    spell out separately: the build has to be one whose routed ops go through the
-    FlagGems Python launch path (a native or C++ vendor backend has its own, and
-    patching FlagGems' ``LibEntry`` there would be dead weight), and the conf has
-    to route to FlagGems at all -- a conf that does not has no launches to make
-    cheaper.
-    """
-    from .. import _build_accelerator, _conf_routes_to_flaggems
+    The two halves are the two the individual functions used to spell out
+    separately: the build has to be one whose routed ops go through the FlagGems
+    Python launch path (a native or C++ vendor backend has its own, and patching
+    FlagGems' ``LibEntry`` there would be dead weight), and the conf has to route
+    to FlagGems at all -- a conf that does not has no launches to make cheaper.
 
-    return (
-        _build_accelerator() in _FLAGGEMS_LAUNCH_PATCH_BUILDS
-        and _conf_routes_to_flaggems()
-    )
+    The build half is deliberately NOT visible here. Every platform in
+    ``cmake/flagos_platforms.json`` builds ``FLAGOS_BUILD_FLAGGEMS`` on, and
+    every generated vendor conf is FlagGems-first, so "is this a FlagGems launch
+    path" is a question about the conf, which ``_conf_routes_to_flaggems``
+    answers. It used to be a two-name allowlist, which silently excluded the
+    nine other platforms the generator writes FlagGems routes for;
+    ``_flagos_on_flaggems_launch_path`` below is where a patch that really does
+    need a narrower build set says so.
+    """
+    from .. import _conf_routes_to_flaggems
+
+    return _flagos_on_flaggems_launch_path() and _conf_routes_to_flaggems()
+
+
+def _flagos_on_flaggems_launch_path() -> bool:
+    """Whether routed ops on this build are reached as FlagGems Python launches.
+
+    The build half of ``_flagos_launch_patches_apply``, kept separate so the
+    narrow cases can ask for it directly.
+
+    Every platform's kernel defaults build ``FLAGOS_BUILD_FLAGGEMS`` on except
+    BPU and MPS, which route nothing to FlagGems, so in practice this is the
+    "not bpu/mps" question. The accelerator name cannot answer it: a boxing
+    vendor (MetaX, DCU, PPU) has its own C++ kernels on some ops and FlagGems on
+    the rest of the same conf, and a native vendor (iluvatar, ascend, musa,
+    gcu, kunlunxin, tsingmicro) is FlagGems-first by construction. So the
+    allowlist is the list of builds that do NOT have FlagGems launches, and an
+    unrecorded accelerator (a source checkout) keeps the permissive answer --
+    the conf gate above still has to open for anything to happen.
+    """
+    from .. import _build_accelerator
+
+    accelerator = _build_accelerator()
+    if not accelerator:
+        return True
+    return accelerator not in _NO_FLAGGEMS_LAUNCH_BUILDS
 
 
 # The keyword arguments Triton's ``KernelInterface.__getitem__`` passes down to
@@ -2165,7 +2214,7 @@ def _enable_flaggems_autotune_cache():
     ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
 
     Scoped to the builds and confs whose routed ops are FlagGems Python launches
-    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- like the patches around it. No op
+    -- see ``_flagos_on_flaggems_launch_path`` -- like the patches around it. No op
     changes route and no kernel changes: the config selected is the one
     FlagGems' own tuner would have picked. Best-effort, like its neighbours: an
     unset knob is slow here, not broken, so this must not be able to take down
@@ -2285,7 +2334,7 @@ def _patch_flaggems_pointwise_dispatch():
     hidden behind the device queue.
 
     Scoped to the builds and confs whose routed ops are FlagGems Python launches
-    -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS``; installed the way the patches
+    -- see ``_flagos_on_flaggems_launch_path``; installed the way the patches
     around it are: by rebinding the functions in the FlagGems modules the C++
     bridge and the generated wrappers reach them through. No op changes route;
     the kernels, the grids and the cache keys stay the ones FlagGems computes.

@@ -214,6 +214,24 @@ at::Tensor WrapperToCopy(
       self, dtype, layout, device, pin_memory, non_blocking, memory_format);
 }
 
+// index_put_ / _index_put_impl_: scatter on the CPU and copy back.
+//
+// This is the last-resort path, not the intended one. `Tensor?[]` has no
+// IValueToPython conversion, so neither op can be code-generated, and they are
+// in the codegen's MANUAL_REGISTERED_OPS. What covers them is
+// `_patch_flaggems_index_put` in torch_fl/flagos/__init__.py, which claims
+// index_put_ on PrivateUse1 through torch.library and runs FlagGems' Triton
+// kernel in place of this round-trip -- see the measurements in its docstring
+// (68.6 ms -> 0.29 ms on one wide call) and docs/reference/operator-support.md.
+//
+// Two ways to land here anyway, and both are worth knowing about when a
+// profile shows host traffic on an indexed write:
+//   * no flag_gems, or a flag_gems without `index_put_` (the patch is
+//     best-effort and returns early), or
+//   * a FlagGems kernel call that raised, which the patch falls back to this
+//     function through `_flagos_index_put_roundtrip`.
+// The fallback is deliberate: both produce the same tensor, so the round-trip
+// costs time and nothing else, and a missing kernel must not be an error.
 at::Tensor& WrapperIndexPut_(
     at::Tensor& self,
     const c10::List<::std::optional<at::Tensor>>& indices,

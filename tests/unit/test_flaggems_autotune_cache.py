@@ -69,9 +69,9 @@ def test_noop_off_the_measured_configuration(monkeypatch):
     suite also runs on the hosts the number was measured on, where the real
     detector answers for this build.
 
-    ``ascend`` is the arm, not ``cuda``: the CUDA boxing build now shares the
-    patch (``flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS``), so it is no longer an
-    example of a configuration the gate closes on.
+    ``ascend`` is the arm, not ``cuda``: the gate is a denylist
+    (``flagos._NO_FLAGGEMS_LAUNCH_BUILDS``), so the arm has to be a platform
+    that builds ``FLAGOS_BUILD_FLAGGEMS`` off and is listed there.
     """
     monkeypatch.setattr("torch_fl._build_accelerator", lambda: "ascend")
     monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: True)
