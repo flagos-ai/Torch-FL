@@ -204,6 +204,20 @@ def test_shared_mps_runtime_changes_select_the_mps_lane():
         assert selected == ["mps"], path
 
 
+def test_mps_suites_with_shared_filenames_keep_the_mps_lane():
+    """An MPS-only change must not hide an MPS suite shared with other lanes."""
+    for path in (
+        "csrc/aten/strided_ops.cc",
+        "tests/integration/ops/backend_conf.py",
+        "tests/integration/ops/test_linear_dispatch.py",
+        "tests/integration/ops/test_mps_qwen35.py",
+        "tests/integration/ops/test_mps_rotary_and_compare.py",
+    ):
+        result, selected = _run(files=path)
+        assert result.returncode == 0, result.stderr
+        assert selected == ["mps"], path
+
+
 def test_git_diff_preserves_deleted_and_renamed_platform_paths(tmp_path, monkeypatch):
     def git(*args):
         return subprocess.check_output(

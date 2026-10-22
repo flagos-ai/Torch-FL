@@ -54,6 +54,10 @@ paths_watch:
   - tests/integration/ops/test_mps_*.py
   - tests/integration/test_mps_runtime.py
   - tests/integration/runtime/
+  - csrc/aten/strided_ops.cc
+  - tests/integration/ops/backend_conf.py
+  - tests/integration/ops/test_mps_rotary_and_compare.py
+  - tests/integration/ops/test_mps_qwen35.py
   - tests/unit/test_runtime_conformance_report.py
   - tests/integration/flaggems/flaggems_caps.py
   # These enter through shared PrivateUse1 code rather than an MPS directory.
@@ -63,6 +67,9 @@ paths_watch:
   # set_.source_Tensor through module-to-module migration.
   - csrc/aten/set_ops.cc
   - tests/integration/test_factory_ops.py
+  # This suite also runs on MPS, but its filename is shared with other lanes.
+  # Keeping it here prevents an MPS-only change from omitting the Apple job.
+  - tests/integration/ops/test_linear_dispatch.py
 
 container_volumes: []
 
