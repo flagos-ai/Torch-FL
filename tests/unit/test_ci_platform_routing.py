@@ -812,3 +812,61 @@ def test_tagged_image_can_use_a_tagless_repository_digest(tmp_path):
     assert json.loads(Path(settings["state"], "config.json").read_text())["digest"] == (
         digest
     )
+
+
+def test_container_start_uses_an_exact_digest_for_each_image_form(
+    tmp_path, monkeypatch
+):
+    """Tags use their resolved digest and tagless images keep their reference."""
+    workspace = _load_ci_script(
+        ".github/scripts/container_workspace.py", "ci_container_workspace"
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[:2] == ["docker", "create"]:
+            return subprocess.CompletedProcess(command, 0, "a" * 64 + "\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(workspace.subprocess, "run", run)
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("INTEGRATION_PLATFORM", "ascend")
+    settings = {
+        "state": str(tmp_path / "state"),
+        "environment": str(tmp_path / "environment"),
+        "volumes": [],
+        "options": "",
+        "cache": str(tmp_path / "cache"),
+        "workspace": str(tmp_path / "workspace"),
+        "runtime": str(tmp_path / "runtime"),
+        "profile_home": str(tmp_path / "home"),
+        "model_root": str(tmp_path / "models"),
+        "artifacts": str(tmp_path / "artifacts"),
+        "reports": {
+            name: str(tmp_path / name)
+            for name in ("test-workdir", "pytest", "coverage", "inventories", "junit")
+        },
+        "verdict": str(tmp_path / "verdict"),
+    }
+    digest = "registry/vendor/image@sha256:" + "a" * 64
+    for image in ("registry/vendor/image:tag", digest):
+        workspace.start({**settings, "image": image, "digest": digest})
+    creates = [command for command in calls if command[:2] == ["docker", "create"]]
+    starts = [command for command in calls if command[:2] == ["docker", "start"]]
+    assert len(creates) == 2
+    assert creates[0][creates[0].index("tail") - 1] == digest
+    assert creates[1][creates[1].index("tail") - 1] == digest
+    assert starts == [
+        ["docker", "start", "a" * 64],
+        ["docker", "start", "a" * 64],
+    ]
+
+    def volume_arguments(command):
+        return [
+            command[index + 1] for index, arg in enumerate(command) if arg == "--volume"
+        ]
+
+    assert volume_arguments(creates[0]) == volume_arguments(creates[1])
+    assert len(set(volume_arguments(creates[0]))) == len(volume_arguments(creates[0]))

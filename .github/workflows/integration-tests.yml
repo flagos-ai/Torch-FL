@@ -520,9 +520,10 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          name=$(python3 .github/scripts/container_workspace.py start --config "$CONTAINER_CONFIG")
+          container_id=$(python3 .github/scripts/container_workspace.py start --config "$CONTAINER_CONFIG")
           python3 .github/scripts/container_workspace.py configure \
-            --config "$CONTAINER_CONFIG" --container "$name"
+            --config "$CONTAINER_CONFIG" --container "$container_id"
+          name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["container_name"])' "$CONTAINER_CONFIG")
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
       # Setup, build, install, and tests execute inside the same vendor image.
@@ -546,6 +547,11 @@ jobs:
           setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"
           container_image=""
           container_workspace=""
+          # Save the runner checkout before the native profile can replace the
+          # workspace address. Setup scripts stay in the checkout until setup
+          # has finished; the prepared copy receives the tests afterwards.
+          container_workspace="$GITHUB_WORKSPACE"
+          runner_workspace="$GITHUB_WORKSPACE"
           if [[ -n "$CONTAINER_CONFIG" ]]; then
             read -r container_image container_workspace < <(
               python3 -c 'import json,sys; settings=json.load(open(sys.argv[1])); print(settings["image"], settings["workspace"])' "$CONTAINER_CONFIG"
@@ -560,16 +566,17 @@ jobs:
               --config "$CONTAINER_CONFIG" --command torch-fl-platform-setup.sh \
               --workspace "$container_workspace"
           else
-            container_workspace="$GITHUB_WORKSPACE"
             [[ "$INTEGRATION_PROFILE" = /* ]] && test -s "$INTEGRATION_PROFILE"
             selected_bash="$(env -u BASH_ENV /bin/bash -c \
-              'set -euo pipefail; source "$1" </dev/null; command -v bash' \
+              'set -euo pipefail; source "$1" </dev/null; command -v bash; printf "%s\n" "$GITHUB_WORKSPACE"' \
               -- "$INTEGRATION_PROFILE")"
+            read -r selected_bash container_workspace <<< "$selected_bash"
             [[ "$selected_bash" = /* ]] && test -x "$selected_bash"
+            [[ "$container_workspace" = /* ]] && test -d "$container_workspace"
             env -u BASH_ENV "$selected_bash" -c \
-              'set -euo pipefail; source "$1" </dev/null; source "$2"; create_setup_entry "$3" "$4"; exec bash -c "$(cat "$5")"' \
+              'set -euo pipefail; source "$1" </dev/null; source "$2"; create_setup_entry "$3" "$4"; unset CI_WORKSPACE; exec bash -c "$(cat "$5")"' \
               -- "$INTEGRATION_PROFILE" "$setup_helper" "$setup_path" \
-              "$container_workspace" "$temp/torch-fl-platform-setup.sh"
+              "$runner_workspace" "$temp/torch-fl-platform-setup.sh"
           fi
 
       - name: Install build tools

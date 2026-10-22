@@ -405,7 +405,10 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
     # GitHub's shell may expand the parameter assertion before this step runs.
     assert "${GITHUB_WORKSPACE:?}" not in workflow
     assert 'setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"' in workflow
-    assert 'create_setup_entry "$3" "$4"; exec bash -c "$(cat "$5")' in workflow
+    assert (
+        'create_setup_entry "$3" "$4"; unset CI_WORKSPACE; '
+        'exec bash -c "$(cat "$5")"' in workflow
+    )
     assert 'create_setup_entry "$setup_path" "$container_workspace"' in workflow
     assert (
         'local setup_bash="${SETUP_BASH:?}"'
@@ -414,6 +417,12 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
     assert 'setup_helper="$GITHUB_WORKSPACE/.github/scripts/setup_entry.sh"' in workflow
     assert "source .github/scripts/setup_entry.sh" in workflow
     assert 'source "$1" </dev/null; source "$2"' in workflow
+    assert (
+        'container_workspace="$GITHUB_WORKSPACE"\n'
+        'runner_workspace="$GITHUB_WORKSPACE"\n'
+        'if [[ -n "$CONTAINER_CONFIG" ]]' in workflow
+    )
+    assert '"$runner_workspace" "$temp/torch-fl-platform-setup.sh"' in workflow
     assert '--workspace "$container_workspace"' in workflow
     assert 'cp "$temp/torch-fl-platform-setup.sh" "$container_workspace/"' in workflow
     assert 'source "$1" </dev/null; command -v bash' in workflow
@@ -467,8 +476,14 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
             'if [[ -n "${PROFILE_MARKER:-}" ]]; then\n'
             '  printf setup > "$PROFILE_MARKER"\n'
             "fi\n"
-            'export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
+            'if [[ -n "${PROFILE_USES_CI_WORKSPACE:-}" ]]; then\n'
+            '  GITHUB_WORKSPACE="$CI_WORKSPACE"\n'
+            "fi\n"
+            'if [[ "${PROFILE_CHANGES_WORKSPACE:-}" == 1 ]]; then\n'
+            '  export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
+            "fi\n"
             'cd "$GITHUB_WORKSPACE"\n'
+            'export CI_WORKSPACE="$GITHUB_WORKSPACE"\n'
             'export BASH_ENV="$SETUP_READY"\n'
             'if [[ -f "$GITHUB_ENV" ]]; then\n'
             "  set -a\n"
@@ -503,6 +518,32 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
         )
         environment_values = root / "container-config.env"
         environment_values.write_text("image=\n")
+        common_environment = {
+            "CI_STAGE": "build",
+            "CI_WORKSPACE": str(checkout),
+            "CONTAINER_CONFIG": str(container_config),
+            "EXPECTED_WORKSPACE": str(expected_workspace),
+            "INTEGRATION_PROFILE": str(profile),
+            "GITHUB_ENV": str(environment_values),
+            "GITHUB_WORKSPACE": str(checkout),
+            "HOME": str(root / "home"),
+            "PATH": str(commands)
+            + os.pathsep
+            + str(Path(sys.executable).parent)
+            + os.pathsep
+            + os.defpath,
+            "PROFILE_COUNT": str(profile_count),
+            "PROFILE_MARKER": str(profile_marker),
+            "RUNNER_TEMP": str(runner_temp),
+            "RUNNER_CHECKOUT": str(checkout),
+            "RUNNER_CHECKOUT_PHYSICAL": str(checkout.resolve()),
+            "SETUP_BASH": str(selected_shell),
+            "SETUP_PLATFORM": "mps",
+            "SETUP_PATH": str(setup),
+            "SETUP_SCRIPT": ".github/scripts/set_env.sh",
+            "SELECTED_BASH": str(selected_shell),
+            "SHELL_MARKER": str(shell_marker),
+        }
         result = subprocess.run(
             [
                 bash,
@@ -510,31 +551,7 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
                 "SETUP_READY=$RUNNER_TEMP/setup-ready; export SETUP_READY\n" + workflow,
             ],
             cwd=checkout,
-            env={
-                "CI_STAGE": "build",
-                "CONTAINER_CONFIG": str(container_config),
-                "EXPECTED_WORKSPACE": str(expected_workspace),
-                "INTEGRATION_PROFILE": str(profile),
-                "GITHUB_ENV": str(environment_values),
-                "GITHUB_WORKSPACE": str(checkout),
-                "HOME": str(root / "home"),
-                "PATH": str(commands)
-                + os.pathsep
-                + str(Path(sys.executable).parent)
-                + os.pathsep
-                + os.defpath,
-                "PROFILE_COUNT": str(profile_count),
-                "PROFILE_MARKER": str(profile_marker),
-                "RUNNER_TEMP": str(runner_temp),
-                "RUNNER_CHECKOUT": str(checkout),
-                "RUNNER_CHECKOUT_PHYSICAL": str(checkout.resolve()),
-                "SETUP_BASH": str(selected_shell),
-                "SETUP_PLATFORM": "mps",
-                "SETUP_PATH": str(setup),
-                "SETUP_SCRIPT": ".github/scripts/set_env.sh",
-                "SELECTED_BASH": str(selected_shell),
-                "SHELL_MARKER": str(shell_marker),
-            },
+            env=common_environment,
             capture_output=True,
             text=True,
         )
@@ -557,6 +574,87 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
         )
         assert entrypoint.is_file()
         assert "$state/torch-fl-workspace" not in workflow
+
+
+def test_native_setup_ignores_a_profile_workspace_override(tmp_path):
+    """The runner checkout supplies setup even when a later profile pass resets it."""
+    workflow = _run_script_of_step(
+        (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8"),
+        "Prepare ${{ needs.configuration.outputs.display_name }} build environment",
+    )
+    assert workflow is not None
+    bash = shutil.which("bash")
+    assert bash is not None
+    checkout = tmp_path / "runner checkout"
+    prepared = tmp_path / "prepared workspace"
+    runner_temp = tmp_path / "runner-temp"
+    commands = tmp_path / "commands"
+    for directory in (checkout / ".github/scripts", prepared, runner_temp, commands):
+        directory.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        _REPO_ROOT / ".github/scripts/setup_entry.sh", checkout / ".github/scripts"
+    )
+    (checkout / ".github/scripts/set_env.sh").write_text(
+        'test "$PWD" = "$RUNNER_CHECKOUT"\n'
+        'test "$CI_WORKSPACE" = "$EXPECTED_WORKSPACE"\n'
+        "echo setup-ok\n"
+    )
+    profile = runner_temp / "profile.sh"
+    profile.write_text(
+        'export BASH_ENV="$RUNNER_TEMP/setup-ready"\n'
+        'if [[ -n "${PROFILE_CHANGES_WORKSPACE:-}" ]]; then\n'
+        '  export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
+        "fi\n"
+        'export CI_WORKSPACE="$GITHUB_WORKSPACE"\n'
+    )
+    config = runner_temp / "container-config.json"
+    config.write_text('{"image": "", "workspace": ""}\n')
+    shell = commands / "bash"
+    shell.write_text('#!/bin/bash\nexec /bin/bash "$@"\n')
+    shell.chmod(0o755)
+    environment = {
+        "CI_STAGE": "build",
+        "CONTAINER_CONFIG": str(config),
+        "EXPECTED_WORKSPACE": str(prepared),
+        "GITHUB_ENV": str(runner_temp / "environment"),
+        "GITHUB_WORKSPACE": str(checkout),
+        "HOME": str(tmp_path / "home"),
+        "INTEGRATION_PROFILE": str(profile),
+        "PATH": f"{commands}:{Path(sys.executable).parent}:{os.defpath}",
+        "PROFILE_CHANGES_WORKSPACE": "1",
+        "RUNNER_CHECKOUT": str(checkout),
+        "RUNNER_TEMP": str(runner_temp),
+        "SETUP_BASH": str(shell),
+        "SETUP_PLATFORM": "mps",
+        "SETUP_SCRIPT": ".github/scripts/set_env.sh",
+    }
+    environment["GITHUB_ENV"] = str(runner_temp / "environment")
+
+    def setup():
+        return subprocess.run(
+            [bash, "-c", workflow],
+            cwd=checkout,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+    first = setup()
+    assert first.returncode == 0, first.stderr
+    assert "setup-ok" in first.stdout
+    generation = runner_temp / "torch-fl-platform-setup.sh"
+    assert str(prepared) not in generation.read_text()
+
+    repeated = subprocess.run(
+        [bash, "-c", workflow],
+        cwd=checkout,
+        env={**environment, "CI_WORKSPACE": str(prepared)},
+        capture_output=True,
+        text=True,
+    )
+    assert repeated.returncode == 0, repeated.stderr
+    assert "setup-ok" in repeated.stdout
+    assert str(prepared) not in generation.read_text()
 
 
 def test_the_model_mount_is_prepared_on_its_platform_host():

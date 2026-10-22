@@ -132,7 +132,7 @@ def _volume(item):
 
 
 def _container_volumes(volumes, settings):
-    """Keep platform mounts and replace the model path with the prepared host path."""
+    """Mount every directory that the container commands read or write."""
     output = []
     for item in volumes:
         entry, _source, destination = _volume(item)
@@ -140,21 +140,19 @@ def _container_volumes(volumes, settings):
             continue
         if not destination.startswith(str(MODEL_ROOT) + "/"):
             output.append(entry)
-    output.append(f"{settings['model_root']}:{MODEL_ROOT}:ro")
-    output.extend(
-        (
-            f"{settings['workspace']}:{settings['workspace']}",
-            f"{settings['cache']}:{settings['cache']}",
-            f"{settings['state']}:{settings['state']}",
-            f"{settings['reports']['test-workdir']}:{settings['reports']['test-workdir']}",
-            f"{settings['reports']['pytest']}:{settings['reports']['pytest']}",
-            f"{settings['reports']['coverage']}:{settings['reports']['coverage']}",
-            f"{settings['reports']['inventories']}:{settings['reports']['inventories']}",
-            f"{settings['reports']['junit']}:{settings['reports']['junit']}",
-            f"{settings['verdict']}:{settings['verdict']}",
-            f"{settings['artifacts']}:{settings['artifacts']}",
-        )
+    storage = (
+        "workspace",
+        "cache",
+        "state",
+        "runtime",
+        "verdict",
+        "artifacts",
     )
+    for name in storage:
+        output.append(f"{settings[name]}:{settings[name]}")
+    output.extend(f"{path}:{path}" for path in settings["reports"].values())
+    output.append(f"{settings['profile_home']}:/github/home")
+    output.append(f"{settings['model_root']}:{MODEL_ROOT}:ro")
     return output
 
 
@@ -313,6 +311,16 @@ def configure(settings, container):
             + logs
         )
     settings["container"] = container
+    settings["container_name"] = (
+        subprocess.run(
+            ["docker", "inspect", "--format", "{{.Name}}", container],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        .stdout.strip()
+        .removeprefix("/")
+    )
     settings["environment"] = str(Path(settings["state"]) / "container-environment")
     _write_environment(settings["environment"], settings, native=False)
     Path(settings["state"], "config.json").write_text(
@@ -339,11 +347,10 @@ def start(settings):
         stderr=subprocess.DEVNULL,
     )
     volumes = _container_volumes(settings["volumes"], settings)
-    state = Path(settings["state"])
+    image_reference = image if "@" in image else digest
     command = [
         "docker",
-        "run",
-        "--detach",
+        "create",
         "--name",
         name,
         "--workdir",
@@ -354,21 +361,49 @@ def start(settings):
         "HOME=/tmp",
         *sum((["--volume", value] for value in volumes), []),
         *shlex.split(settings["options"]),
-        "--volume",
-        f"{state}:{state}",
-        "--volume",
-        f"{settings['runtime']}:{settings['runtime']}",
-        "--volume",
-        f"{settings['profile_home']}:/github/home",
         # This entrypoint works even when the vendor image has no init process
         # or a different default command.
-        digest,
+        # A configured tagless digest is already the exact image. Other
+        # references are started from their repository digest so a local tag
+        # and the backend's metadata lookup are not involved in startup.
+        image_reference,
         "tail",
         "-f",
         "/dev/null",
     ]
-    subprocess.run(command, check=True)
-    return name
+    # Resolve the image and volumes before startup. A backend with an explicit
+    # runtime may fail after creating the container, leaving docker run's name
+    # without a URL. Starting from the ID makes that failure name the container
+    # and lets the later probe report the container's state and logs.
+    resolved = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+    if resolved.returncode:
+        raise WorkspaceError(
+            "the vendor container could not be created:\n" + resolved.stderr.strip()
+        )
+    container_id = resolved.stdout.strip()
+    if not container_id:
+        raise WorkspaceError("docker container create returned no container ID")
+    started = subprocess.run(
+        ["docker", "start", container_id],
+        capture_output=True,
+        text=True,
+    )
+    if started.returncode:
+        logs = subprocess.run(
+            ["docker", "logs", container_id], capture_output=True, text=True
+        )
+        raise WorkspaceError(
+            "the vendor container could not start:\n"
+            + started.stderr.strip()
+            + "\n"
+            + logs.stdout
+            + logs.stderr
+        )
+    return container_id
 
 
 def _verify_image(image, digest, *, require_digest):
