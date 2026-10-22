@@ -199,6 +199,37 @@ record.
 
 ## Native Backend Route Changes
 
+### Apple Silicon M5: Qwen3.5 rotates positions and builds its mask predicates on MPSGraph (2026-10-22, physical M5)
+
+**`sin`, `cos`, `eq.Scalar`, `le.Tensor` and `ne.Scalar` now run on the `mps`
+route.** The trigonometric ops use MPSGraph's native selectors at float32,
+float16 and bfloat16; the three predicate forms use the corresponding
+MPSGraph comparison, with the stored scalar in the compiled graph key. Integral
+trigonometric operands retain aten's float32 promotion and float64 retains the
+CPU reference. Mixed-width tensor comparisons likewise take the reference path,
+which owns the promotion rule. No boxing or host value copy is used for a
+served call.
+
+The MPS conf moves from **46 `mps` / 1991 `none`**, after the independently
+measured `cumsum` and `softplus` routes, to **51 `mps` / 1986 `none`**. The
+dedicated suite passed **19 cases** on the physical M5, including
+all served widths, renderable edge values, composed trigonometry, scalar and
+tensor predicates, broadcasting, graph-cache reuse and MPS dispatch. The
+adjacent Qwen3.5 suites passed **74 cases**. Both code generators report their
+outputs current, and Ruff reports all files formatted.
+
+**Measured checkpoint result.** The five-token bfloat16 Qwen3.5 text
+classification checkpoint produced CPU logits `[[-0.21484375, 0.37109375]]`
+and `flagos:0` logits `[[-0.20703125, 0.373046875]]`, with maximum and mean
+absolute differences of **0.0078125** and **0.0048828125**. The full-model
+trace recorded **18 `softplus -> mps` calls**, 19 `cumsum -> mps` calls and one
+native call at each trigonometric and predicate overload. It still contains host
+fallbacks for views, padding, convolution and allocation ops. Float32
+ trigonometric results can differ by one ulp. The native node returns `nan` for
+an infinite trigonometric operand, matching aten under the default floating
+point mode. Training, generation, image inputs and other Apple Silicon
+ generations are **not revalidated**.
+
 ### Apple Silicon M5: Qwen3.5 reaches native `masked_fill`, and queued MPSGraph work retains its memory (2026-10-21, physical M5)
 
 **Two `masked_fill` spellings gain a native MPSGraph route, and the shared

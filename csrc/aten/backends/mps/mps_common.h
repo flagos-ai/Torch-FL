@@ -104,6 +104,13 @@ bool MpsDataTypeOf(at::ScalarType dtype, MPSDataType* out);
 // quantised types) fail the same test and round-trip too.
 bool MpsSupportsUnaryDtype(at::ScalarType dtype);
 
+// A reference call for `index.Tensor` whose host copies are already built.
+// `indices` contains every entry, including the null entries ATen uses for
+// full slices, so the result keeps the reference's indexing semantics.
+at::Tensor MpsIndexOnHost(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices);
+
 // A cumsum node treats its input and result as the same element type. The
 // accumulator dtype must therefore either equal the operand's width or be one
 // of the float widths this gate serves.
@@ -111,12 +118,19 @@ bool MpsSupportsCumsumDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype);
 
-// A reference call for `index.Tensor` whose host copies are already built.
-// `indices` contains every entry, including the null entries ATen uses for
-// full slices, so the result keeps the reference's indexing semantics.
-at::Tensor MpsIndexOnHost(
-    const at::Tensor& self,
-    const c10::List<std::optional<at::Tensor>>& indices);
+// Softplus computes the curved branch in MPSGraph. The linear branch delegates
+// ATen's identity below the threshold, and unsupported widths keep the full
+// reference result.
+bool MpsSupportsSoftplusDtype(
+    at::ScalarType dtype,
+    const at::Scalar& beta,
+    const at::Scalar& threshold);
+
+// The trigonometric float widths. Integral operands are accepted by the aten
+// reference and promoted to float32, while MPSGraph would retain the integral
+// element type and truncate the result. Float64 has no MPSGraph element type,
+// so both take the CPU reference.
+bool MpsSupportsTrigDtype(at::ScalarType dtype);
 
 // Gather source values at dense row-major int32 addresses and reshape the
 // flat graph result to the aten result. False means MPSGraph declined the
@@ -130,14 +144,6 @@ bool MpsGatherIndex(
 // Resolve aten's cumsum axis against the operand rank. False for a rank-zero
 // tensor or an axis outside the rank, where the reference reports the error.
 bool MpsCumsumAxis(const at::Tensor& self, int64_t dim, int64_t* out);
-
-// Softplus computes the curved branch in MPSGraph. The linear branch delegates
-// ATen's identity below the threshold, and unsupported widths keep the full
-// reference result.
-bool MpsSupportsSoftplusDtype(
-    at::ScalarType dtype,
-    const at::Scalar& beta,
-    const at::Scalar& threshold);
 
 // Whether MPSGraph can compare or reduce this width to a bool. Bool itself is
 // accepted by `all`; uint8 is compared only when this SDK maps it.
