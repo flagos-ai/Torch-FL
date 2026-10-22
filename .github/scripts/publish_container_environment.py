@@ -70,9 +70,11 @@ def _set_environment(settings, environment, additions, host):
     """Replace inline values and append the command's own environment additions."""
     current = Path(environment).read_text(encoding="utf-8").splitlines()
     inline = set(settings.get("inline_environment", []))
-    if not inline:
-        return
     names = {line.split("=", 1)[0] for line in current if "=" in line}
+    # This runs from the host and again inside the container. The inherited
+    # container file may leave out values that are only resolvable on the host.
+    if any(name in inline and name not in names for name in additions):
+        return
     replaced = [
         line for line in current if "=" in line and line.split("=", 1)[0] not in inline
     ]
@@ -80,7 +82,7 @@ def _set_environment(settings, environment, additions, host):
         if name in names:
             replaced.append(f"{name}={shlex.quote(additions[name])}")
     Path(environment).write_text("".join(f"{line}\n" for line in replaced))
-    host.write_text(Path(environment).read_text())
+    Path(host).write_text(Path(environment).read_text())
 
 
 def publish_inline(settings, values, command):
@@ -94,14 +96,36 @@ def publish_inline(settings, values, command):
         settings,
         settings["environment"],
         values,
-        Path(settings["host_files"]["GITHUB_ENV"]),
+        settings["host_files"]["GITHUB_ENV"],
     )
 
 
-def _run_in_container(settings, command_file):
+def _container_command(settings, environment):
+    """Pass inline values before the container name for ``docker exec``."""
+    return [
+        "docker",
+        "exec",
+        "--env",
+        "HOME=/tmp",
+        *(
+            argument
+            for name, value in environment.items()
+            for argument in ("--env", f"{name}={value}")
+        ),
+        settings["container"],
+        "bash",
+        settings["shell"],
+        "-c",
+    ]
+
+
+def _run_in_container(settings, command_file, **environment):
     """Run a hook from the inherited files and preserve its exit status."""
     files = _files(settings)
-    wrapper = Path(settings["runtime"]) / "container-command.sh"
+    wrapper = Path(settings["runtime"]) / (
+        f"container-command-{Path(command_file).stem}.sh"
+    )
+    environment.setdefault("GITHUB_WORKSPACE", settings["workspace"])
     wrapper.write_text(
         'cd "$GITHUB_WORKSPACE"\n'
         'source "$INTEGRATION_PROFILE"\n'
@@ -122,14 +146,7 @@ def _run_in_container(settings, command_file):
     try:
         return subprocess.run(
             [
-                "docker",
-                "exec",
-                settings["container"],
-                "--env",
-                "HOME=/tmp",
-                "bash",
-                settings["shell"],
-                "-c",
+                *_container_command(settings, environment),
                 f"bash {shlex.quote(str(wrapper))}",
             ],
             timeout=3600,
@@ -145,7 +162,7 @@ def _run_in_container(settings, command_file):
         return 1
 
 
-def hook(settings, command):
+def hook(settings, command, workspace=None):
     """Execute a script in the configured container and copy its files back."""
     if not command:
         raise EnvironmentHookError("--command is required")
@@ -153,7 +170,8 @@ def hook(settings, command):
         raise EnvironmentHookError("the hook needs a running vendor container")
     if Path(command).name != command or not command.endswith(".sh"):
         raise EnvironmentHookError("--command must name a shell script")
-    command_file = Path(settings["workspace"]) / command
+    execution_workspace = Path(workspace or settings["workspace"])
+    command_file = execution_workspace / command
     # Scripts are shared with the container through the mounted workspace.
     # Keep their edit after the step so a later host step cannot execute a
     # different copy.
@@ -166,7 +184,11 @@ def hook(settings, command):
             values["live"].read_bytes() if values["live"].is_file() else b""
         )
         values["command"].write_bytes(inherited[name])
-    status = _run_in_container(settings, command_file)
+    status = _run_in_container(
+        settings,
+        command_file,
+        GITHUB_WORKSPACE=str(execution_workspace),
+    )
     try:
         additions = {
             name: _additions(values["command"], inherited[name])
@@ -190,13 +212,14 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--command", required=True)
     parser.add_argument("--inline", default="{}")
+    parser.add_argument("--workspace")
     arguments = parser.parse_args(argv)
     try:
         settings = json.loads(Path(arguments.config).read_text(encoding="utf-8"))
         if arguments.command == "publish-inline":
             publish_inline(settings, json.loads(arguments.inline), arguments.command)
             return 0
-        return hook(settings, arguments.command)
+        return hook(settings, arguments.command, workspace=arguments.workspace)
     except (KeyError, OSError, TypeError, ValueError, EnvironmentHookError) as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1

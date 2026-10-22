@@ -69,6 +69,7 @@ import io
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -220,7 +221,9 @@ def _run_script_of_step(text: str, step_name: str) -> str | None:
     for index, line in enumerate(lines):
         if line.strip() != f"- name: {step_name}":
             continue
-        step = _block_after(lines, index, _indent(line))
+        # The step's fields are indented relative to the list marker, rather
+        # than to the marker's ``- name:`` text.
+        step = _block_after(lines, index, _indent(line) - 2)
         for offset, entry in enumerate(step):
             if not re.fullmatch(r"\s*run:\s*\|[-+]?\s*", entry):
                 continue
@@ -382,16 +385,13 @@ def _prepare_steps() -> list[tuple[str, str, str]]:
     return [(workflow.name, platform, script) for platform in _manifest_platforms()]
 
 
-def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
-    """Exercise the script that GitHub generates for a native setup lane.
+def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
+    """Run setup after a profile replaces workspace and exports BASH_ENV.
 
     The old heredoc wrote ``$${GITHUB_WORKSPACE:?}``. GitHub's shell rewrites
     ``$$`` to its own process ID, so MPS ran ``cd 1468{GITHUB_WORKSPACE:?}``
-    before it reached the platform setup. The generated script must use an
-    absolute script path and a workspace path that survives a profile that
-    changes the current directory. GitHub also sets BASH_ENV to the profile,
-    which runs again in every nested Bash. The setup script must not source the
-    platform hook during shell selection or before the workspace exists.
+    before it reached the platform setup. The setup entrypoint must keep the
+    runner checkout address while selecting Bash and loading the profile.
     """
     workflow = _run_script_of_step(
         (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8"),
@@ -399,8 +399,29 @@ def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
     )
     assert workflow is not None
     assert "$${" not in workflow
-    assert 'setup_workspace="$GITHUB_WORKSPACE"' in workflow
-    assert "exec $(printf '%q' \"$SETUP_BASH\")" in workflow
+    assert "read -r container_image container_workspace < <(" in workflow
+    assert ']] && [[ "$(python3 -c' not in workflow
+    assert 'container_workspace="$(python3 -c' not in workflow
+    assert "export PLATFORM_WORKSPACE=${GITHUB_WORKSPACE:?}" not in workflow
+    assert 'setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"' in workflow
+    assert 'create_setup_entry "$3" "$4"; exec bash -c "$(cat "$5")' in workflow
+    assert 'create_setup_entry "$setup_path" "$container_workspace"' in workflow
+    assert (
+        'local setup_bash="${SETUP_BASH:?}"'
+        in (_REPO_ROOT / ".github/scripts/setup_entry.sh").read_text()
+    )
+    assert 'setup_helper="$GITHUB_WORKSPACE/.github/scripts/setup_entry.sh"' in workflow
+    assert "source .github/scripts/setup_entry.sh" in workflow
+    assert 'source "$1" </dev/null; source "$2"' in workflow
+    assert '--workspace "$container_workspace"' in workflow
+    assert 'cp "$temp/torch-fl-platform-setup.sh" "$container_workspace/"' in workflow
+    assert 'source "$1" </dev/null; command -v bash' in workflow
+    bash = shutil.which("bash")
+    assert bash is not None
+    bash_major = int(
+        subprocess.check_output([bash, "-c", 'printf "%s" "$BASH_VERSINFO"']).decode()
+    )
+    assert bash_major >= 4, "this workflow test needs Bash 4 or newer"
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         runner_temp = root / "runner-temp"
@@ -408,12 +429,32 @@ def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
         checkout = root / "checkout with spaces"
         setup = checkout / ".github/scripts/set_env.sh"
         setup.parent.mkdir(parents=True)
+        shutil.copy2(_REPO_ROOT / ".github/scripts/setup_entry.sh", setup.parent)
+        syntax = subprocess.run(
+            [
+                bash,
+                "--noprofile",
+                "--norc",
+                "-e",
+                "-o",
+                "pipefail",
+                "-n",
+                "-c",
+                workflow,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
         setup.write_text(
             "#!/bin/bash\n"
+            '[[ -z "${BASH_ENV:-}" ]]\n'
             "set -euo pipefail\n"
-            '[[ "$CI_STAGE" == build ]]\n'
-            '[[ "$1" == --platform && "$2" == mps ]]\n'
-            '[[ "$PWD" == "$EXPECTED_WORKSPACE" ]]\n'
+            '[[ "$PWD" == "$GITHUB_WORKSPACE" ]]\n'
+            '[[ "$PWD" == "$RUNNER_CHECKOUT" ]]\n'
+            '[[ "$(command -v bash)" == "$SELECTED_BASH" ]] || { echo BASH >&2; exit 4; }\n'
+            '[[ "$(cat "$PROFILE_MARKER")" == setup ]]\n'
+            '[[ "$(cat "$SHELL_MARKER")" == selected ]]\n'
             'echo MPS_PROFILE=loaded >> "$GITHUB_ENV"\n'
             "echo setup-ok\n",
             encoding="utf-8",
@@ -421,39 +462,100 @@ def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
         setup.chmod(0o755)
         profile = root / "profile.sh"
         profile.write_text(
-            'if [[ -s "$GITHUB_ENV" ]]; then\n'
-            "  set -a\n"
-            '  source "$GITHUB_ENV"\n'
-            "  set +a\n"
+            'printf x >> "$PROFILE_COUNT"\n'
+            'if [[ -n "${PROFILE_MARKER:-}" ]]; then\n'
+            '  printf setup > "$PROFILE_MARKER"\n'
             "fi\n"
             'export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
-            'cd "$GITHUB_WORKSPACE"\n',
+            'cd "$GITHUB_WORKSPACE"\n'
+            'export BASH_ENV="$SETUP_READY"\n'
+            'if [[ -f "$GITHUB_ENV" ]]; then\n'
+            "  set -a\n"
+            '  . "$GITHUB_ENV"\n'
+            "  set +a\n"
+            "fi\n"
+            "export SETUP_ONLY=1\n"
+            'profile_bash() { printf "%s\\n" "$SELECTED_BASH"; }\n'
+            'export PATH="$(profile_bash):$PATH"\n'
+            "export PROFILE_LOADED=1\n",
             encoding="utf-8",
         )
         expected_workspace = root / "platform-profile-workspace"
         expected_workspace.mkdir()
+        profile_marker = root / "profile-marker"
+        profile_count = root / "profile-count"
+        shell_marker = root / "shell-marker"
+        container_config = root / "container-config.json"
+        commands = root / "bin"
+        commands.mkdir()
+        selected_shell = commands / "bash"
+        selected_shell.write_text(
+            "#!/bin/bash\n"
+            'printf "%s\\n" "${MARKER_VALUE:-selected}" > "$SHELL_MARKER"\n'
+            'exec /bin/bash "$@"\n',
+            encoding="utf-8",
+        )
+        selected_shell.chmod(0o755)
+        entrypoint = runner_temp / "torch-fl-platform-setup.sh"
+        container_config.write_text(
+            '{"image": "", "workspace": ""}\n', encoding="utf-8"
+        )
+        environment_values = root / "container-config.env"
+        environment_values.write_text("image=\n")
         result = subprocess.run(
-            ["/bin/bash", "-c", workflow],
-            cwd=root,
+            [
+                bash,
+                "-c",
+                "SETUP_READY=$RUNNER_TEMP/setup-ready; export SETUP_READY\n" + workflow,
+            ],
+            cwd=checkout,
             env={
-                "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
                 "CI_STAGE": "build",
-                "CONTAINER_CONFIG": "",
+                "CONTAINER_CONFIG": str(container_config),
                 "EXPECTED_WORKSPACE": str(expected_workspace),
                 "INTEGRATION_PROFILE": str(profile),
-                "GITHUB_ENV": str(root / "github-env"),
+                "GITHUB_ENV": str(environment_values),
                 "GITHUB_WORKSPACE": str(checkout),
+                "HOME": str(root / "home"),
+                "PATH": str(commands)
+                + os.pathsep
+                + str(Path(sys.executable).parent)
+                + os.pathsep
+                + os.defpath,
+                "PROFILE_COUNT": str(profile_count),
+                "PROFILE_MARKER": str(profile_marker),
                 "RUNNER_TEMP": str(runner_temp),
-                "SETUP_BASH": "/bin/bash",
+                "RUNNER_CHECKOUT": str(checkout),
+                "RUNNER_CHECKOUT_PHYSICAL": str(checkout.resolve()),
+                "SETUP_BASH": str(selected_shell),
                 "SETUP_PLATFORM": "mps",
+                "SETUP_PATH": str(setup),
                 "SETUP_SCRIPT": ".github/scripts/set_env.sh",
+                "SELECTED_BASH": str(selected_shell),
+                "SHELL_MARKER": str(shell_marker),
             },
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "setup-ok" in result.stdout
-        assert "MPS_PROFILE=loaded" in (root / "github-env").read_text()
+        assert "setup-ok" in result.stdout, result.stderr
+        assert "MPS_PROFILE=loaded" in environment_values.read_text()
+        assert shell_marker.read_text() == "selected\n"
+        generated = entrypoint.read_text()
+        assert generated.rstrip().endswith("--platform mps")
+        assert "unset BASH_ENV" in generated
+        assert generated.index("unset BASH_ENV") < generated.index("exec ")
+        assert (profile_count.read_text(), profile_marker.read_text()) == (
+            "xx",
+            "setup",
+        )
+        assert not (runner_temp / "setup-ready").exists()
+        assert "create_setup_entry()" not in generated
+        assert '"$GITHUB_WORKSPACE/.github/scripts/set_env.sh" --platform' in (
+            generated
+        )
+        assert entrypoint.is_file()
+        assert "$state/torch-fl-workspace" not in workflow
 
 
 def test_the_model_mount_is_prepared_on_its_platform_host():
@@ -508,9 +610,9 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert 'python3 - "$MODEL_CACHE"' in verify["run"]
     assert "hf_hub_download" not in verify["run"]
     setup = next(step for step in steps if step.get("id") == "setup")
-    assert 'setup_workspace="$GITHUB_WORKSPACE"' in setup["run"]
     assert "$${" not in setup["run"]
-    assert """$(printf '%q' "$setup_workspace/$SETUP_SCRIPT")""" in setup["run"]
+    assert 'setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"' in setup["run"]
+    assert '--workspace "$container_workspace"' in setup["run"]
     fallback = next(step for step in steps if step.get("id") == "source-archive")
     assert (
         "api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"

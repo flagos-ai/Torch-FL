@@ -254,7 +254,10 @@ def prepare(arguments):
     paths = os.environ.get("PATH", "").split(os.pathsep)
     native_path = os.pathsep.join(path for path in paths if Path(path).is_absolute())
     profile.write_text(
-        f"PATH={shlex.quote(native_path)}\n"
+        f"export PATH={shlex.quote(native_path)}\n"
+        # Source this profile once without BASH_ENV, then pass its final state
+        # to setup. Opening a script would execute BASH_ENV too early.
+        f"export BASH_ENV={shlex.quote(str(profile))}\n"
         'if [[ -s "$GITHUB_ENV" ]]; then\n'
         "  set -a\n"
         '  . "$GITHUB_ENV"\n'

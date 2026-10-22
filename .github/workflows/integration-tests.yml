@@ -494,34 +494,34 @@ jobs:
           set -euo pipefail
           temp="${RUNNER_TEMP:-/tmp}"
           state="$temp/torch-fl-preparation"
-          script="$temp/torch-fl-command-setup.sh"
-          setup_workspace="$GITHUB_WORKSPACE"
-          cat > "$script" <<EOF
-          set -euo pipefail
-          export CI_STAGE=$(printf '%q' "$CI_STAGE")
-          # Supplying this path here keeps the fallback shell usable even when
-          # the workspace profile replaces the directory.
-          export GITHUB_WORKSPACE=$(printf '%q' "$setup_workspace")
-          cd $(printf '%q' "$setup_workspace")
-          exec $(printf '%q' "$SETUP_BASH") $(printf '%q' "$setup_workspace/$SETUP_SCRIPT") --platform "$(printf '%q' "$SETUP_PLATFORM")"
-          EOF
-          if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
-            cp "$script" "$state/${script##*/}"
+          setup_helper="$GITHUB_WORKSPACE/.github/scripts/setup_entry.sh"
+          setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+          container_image=""
+          container_workspace=""
+          if [[ -n "$CONTAINER_CONFIG" ]]; then
+            read -r container_image container_workspace < <(
+              python3 -c 'import json,sys; settings=json.load(open(sys.argv[1])); print(settings["image"], settings["workspace"])' "$CONTAINER_CONFIG"
+            )
+          fi
+          if [[ -n "$container_image" ]]; then
+            [[ "$container_workspace" = /* ]] && test -d "$container_workspace"
+            source .github/scripts/setup_entry.sh
+            create_setup_entry "$setup_path" "$container_workspace"
+            cp "$temp/torch-fl-platform-setup.sh" "$container_workspace/"
             python3 .github/scripts/publish_container_environment.py hook \
-              --config "$CONTAINER_CONFIG" --command "${script##*/}"
+              --config "$CONTAINER_CONFIG" --command torch-fl-platform-setup.sh \
+              --workspace "$container_workspace"
           else
-            # The workspace changes GITHUB_ENV and GITHUB_PATH for later
-            # steps. Reapply its profile, then select an absolute shell that is
-            # available in the workspace profile. macOS runner images can
-            # provide a newer bash than the system's portable bash 3.2.
-            # A BASH_ENV profile runs before every nested non-interactive shell.
-            # Unset it while selecting and launching the setup shell.
+            container_workspace="$GITHUB_WORKSPACE"
             [[ "$INTEGRATION_PROFILE" = /* ]] && test -s "$INTEGRATION_PROFILE"
-            SETUP_BASH="$(env -u BASH_ENV /bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; command -v bash')"
-            [[ "$SETUP_BASH" = /* ]] && test -x "$SETUP_BASH"
-            export SETUP_BASH
-            env -u BASH_ENV /bin/bash -c 'set -euo pipefail; exec "$SETUP_BASH" "$1"' \
-              -- "$script"
+            selected_bash="$(env -u BASH_ENV /bin/bash -c \
+              'set -euo pipefail; source "$1" </dev/null; command -v bash' \
+              -- "$INTEGRATION_PROFILE")"
+            [[ "$selected_bash" = /* ]] && test -x "$selected_bash"
+            env -u BASH_ENV "$selected_bash" -c \
+              'set -euo pipefail; source "$1" </dev/null; source "$2"; create_setup_entry "$3" "$4"; exec bash -c "$(cat "$5")"' \
+              -- "$INTEGRATION_PROFILE" "$setup_helper" "$setup_path" \
+              "$container_workspace" "$temp/torch-fl-platform-setup.sh"
           fi
 
       - name: Install build tools

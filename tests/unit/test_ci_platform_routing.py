@@ -443,6 +443,7 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
         if "=" in line
     }
     assert workspace_script.INLINE_ENVIRONMENT <= inline
+    assert f"GITHUB_WORKSPACE={Path(config['workspace']).resolve()}" in environment
     assert (
         f"RUNNER_TEMP={tmp_path / 'runner'}" in Path(config["environment"]).read_text()
     )
@@ -470,10 +471,14 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
     )
     assert native["host_model_path"] == str(model_root / "Qwen3-0.6B")
     native_profile = Path(native["state"], "profile.sh").read_text()
-    native_path = shlex.split(
-        next(line for line in native_profile.splitlines() if line.startswith("PATH="))
-    )[0].removeprefix("PATH=")
-    assert all(Path(entry).is_absolute() for entry in native_path.split(os.pathsep))
+    native_path = next(
+        line for line in native_profile.splitlines() if line.startswith("export PATH=")
+    ).removeprefix("export PATH=")
+    native_path = "".join(native_path.splitlines())
+    assert all(
+        not entry or entry == "." or Path(entry).is_absolute()
+        for entry in native_path.split(os.pathsep)
+    )
     # The setup step must use the workspace profile's absolute shell even when
     # the host PATH has a relative entry or an incompatible system bash.
     setup = next(
@@ -483,7 +488,7 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
         ]
         if step.get("id") == "setup"
     )
-    assert 'source "$INTEGRATION_PROFILE"; command -v bash' in setup["run"]
+    assert 'source "$1" </dev/null; command -v bash' in setup["run"]
     assert "env -u BASH_ENV /bin/bash -c" in setup["run"]
     shell = tmp_path / "bin/bash"
     shell.parent.mkdir()
@@ -570,7 +575,8 @@ def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_pa
     state, workspace, runtime = (
         root / name for name in ("state", "workspace", "runtime")
     )
-    for directory in (state, workspace, runtime):
+    other_workspace = root / "prepared-workspace"
+    for directory in (state, workspace, runtime, other_workspace):
         directory.mkdir(parents=True)
     host_env, host_path = root / "host-env", root / "host-path"
     host_env.write_text("BASE=1\n")
@@ -588,6 +594,7 @@ def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_pa
         "image": "vendor/image",
         "container": "container",
         "shell": str(state / "shell.sh"),
+        "inline_environment": ["GITHUB_WORKSPACE"],
     }
     shell = state / "shell.sh"
     shell.write_text(
@@ -622,13 +629,18 @@ def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_pa
         "printf 'SECOND=1\\n' >> \"$GITHUB_ENV\"\n"
     )
     (workspace / "hook.sh").write_text(
-        "#!/bin/sh\n"
+        "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'test "$GITHUB_WORKSPACE" = ' + shlex.quote(str(workspace)) + "\n"
         'test "$INTEGRATION_PROFILE" = ' + shlex.quote(str(state / "profile.sh")) + "\n"
         "printf 'HOOKED=1\\nFIRST=1\\n' >> \"$GITHUB_ENV\"\n"
         "printf '/vendor/bin\\n' >> \"$GITHUB_PATH\"\n"
         "exit 7\n"
+    )
+    (other_workspace / "hook.sh").write_text(
+        (workspace / "hook.sh")
+        .read_text()
+        .replace(str(workspace), str(other_workspace))
     )
     environment = {
         "HOME": "/tmp",
@@ -659,9 +671,24 @@ def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_pa
             return original_run(command, **kwargs)
 
         assert command[:2] == ["docker", "exec"]
+        environment_values = {
+            item.split("=", 1)[0]: item.split("=", 1)[1]
+            for index, item in enumerate(command)
+            if index and command[index - 1] == "--env"
+        }
+        assert environment_values["GITHUB_WORKSPACE"] in {
+            str(workspace),
+            str(other_workspace),
+        }
         # Run the mapped command files exactly as the container shell would.
         entrypoint = [command[command.index("bash")], "--norc"]
         arguments = command[command.index("bash") + 2 :]
+        container_environment = {
+            **command_environment,
+            **environment_values,
+        }
+        # The container receives the explicit workspace even when the profile
+        # has already changed the inherited workspace.
         return original_run(
             [
                 *entrypoint,
@@ -672,18 +699,22 @@ def test_environment_hooks_keep_each_commands_additions_once_and_failures(tmp_pa
                 "pipefail",
                 *arguments,
             ],
+            env=container_environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            env=command_environment,
             check=False,
         )
 
     with mock.patch.object(hook_module.subprocess, "run", side_effect=execute):
-        assert hook_module.hook(settings, "hook.sh") == 7
+        assert (
+            hook_module.hook(settings, "hook.sh", workspace=str(other_workspace)) == 7
+        )
         assert hook_module.hook(settings, "second.sh") == 0
     assert len(commands) == 2
     assert all(command[:2] == ["docker", "exec"] for command in commands)
+    assert f"GITHUB_WORKSPACE={other_workspace}" in commands[0]
+    assert f"GITHUB_WORKSPACE={workspace}" in commands[1]
     assert host_env.read_text().splitlines() == [
         "BASE=1",
         "HOOKED=1",
