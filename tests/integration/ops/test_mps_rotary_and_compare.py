@@ -167,3 +167,10 @@ def test_fallback_to_the_cached_graph_reuses_parameters():
 @pytest.mark.parametrize("op", ["sin.out", "cos.out", "eq.Scalar_out", "le.Tensor_out"])
 def test_out_spellings_stay_on_the_reference(op):
     assert routed_backend_or_none(op) is None
+
+
+@pytest.mark.anyplatform
+def test_all_rotary_and_mask_routes_are_registered_together():
+    """The conf routes each spelling this test proves numerically on MPSGraph."""
+    for op in ("sin", "cos", "eq.Scalar", "le.Tensor", "ne.Scalar"):
+        assert routed_backend_or_none(op) == "mps", op
