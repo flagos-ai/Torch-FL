@@ -25,6 +25,11 @@ file(GLOB_RECURSE SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
 )
 
+# The TsingMicro rocprofiler tool is built as its own shared library (below)
+# and must never be linked into libtorch_fl.so: rocprofiler dlopens its tools
+# during its own initialization, and the main library pulls in libhpgr.so.
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_profiler_tool\\.cc$")
+
 # Apple Metal. The operator layer under aten/backends/mps/ is Objective-C++
 # (.mm) because MPSGraph is an Objective-C API, and the globs above only pick up
 # *.cc/*.cu. Objective-C++ is an Apple-only language, so this is gated on the
@@ -47,10 +52,13 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api
 # DCU uses ROCtracer, Ascend uses CANN MSPTI, and MUSA uses MUPTI. Iluvatar uses
 # the CUPTI-compatible tracer against corex's CUDA-shaped runtime
 # (libcupti.so.10.2 + cupti_activity.h; the shim dlopens CUPTI, so there is no
-# link-time dependency). Platforms without a supported activity API use the
-# unavailable implementation -- that includes Kunlunxin, whose native XPU backend
-# keeps its kernels off the CUDA dispatch key the CUPTI tracer reads, so the
-# tracer would report an empty device timeline rather than the XPU one.
+# link-time dependency). TsingMicro uses rocprofiler-sdk through a standalone
+# tool library (profiler/tsingmicro_profiler_tool.cc); the tracer half is
+# compiled only when the SDK headers are found. Platforms without a supported
+# activity API use the unavailable implementation -- that includes Kunlunxin,
+# whose native XPU backend keeps its kernels off the CUDA dispatch key the CUPTI
+# tracer reads, so the tracer would report an empty device timeline rather than
+# the XPU one.
 #
 # Each source defines the same factory.
 #
@@ -70,29 +78,41 @@ if(FLAGOS_ACCELERATOR STREQUAL "cuda"
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
 elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
 elseif(FLAGOS_ACCELERATOR STREQUAL "ascend")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
 elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
+elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
 else()
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
@@ -100,6 +120,7 @@ else()
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
 endif()
 
 # CANN's public MSPTI headers are optional. The tracer is still compiled with a
@@ -149,12 +170,31 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
   else()
     message(STATUS "topspti_activity.h NOT found; GCU profiler will be unavailable")
   endif()
+elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+  # rocprofiler-sdk headers (Kuiper's tsm8-profiler). The tracer reads only the
+  # kernel dispatch record layout from them; every rocprofiler function is
+  # called inside the separate tool library, so libtorch_fl.so does not link
+  # the SDK. When the headers are absent the tracer compiles its unavailable
+  # form and no tool library is built.
+  find_path(TSMPROFILER_INCLUDE_DIR
+    NAMES rocprofiler-sdk/buffer_tracing.h
+    PATHS
+      "${KUIPER_ROOT}/tsm8-profiler/include"
+      /usr/local/kuiper/tsm8-profiler/include)
+  if(TSMPROFILER_INCLUDE_DIR)
+    include_directories(${TSMPROFILER_INCLUDE_DIR})
+    add_compile_definitions(FLAGOS_HAVE_TSMPROFILER=1)
+    message(STATUS "rocprofiler-sdk found: ${TSMPROFILER_INCLUDE_DIR}")
+  else()
+    message(STATUS "rocprofiler-sdk NOT found; TsingMicro profiler will be unavailable")
+  endif()
 endif()
 
 # Vendor native kernels, gated by FLAGOS_BUILD_VENDOR and by FLAGOS_ACCELERATOR: only the
 # current accelerator's backend directory is ever compiled in (cuda/dcu/
-# tsingmicro/bpu/ppu ship no backend directory, so the switch is a no-op
-# there). This replaces the old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
+# bpu/ppu ship no backend directory, so the switch is a no-op there; tsingmicro
+# ships only the host-draw RNG kernels and pins the switch ON). This replaces the
+# old per-vendor METAX/ASCEND/GCU/MUSA_KERNEL
 # switches, which could never be meaningfully combined anyway -- exactly one
 # vendor is ever enabled per build.
 #
@@ -602,10 +642,10 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${MUDNN_LIB} ${MURAND_LIB})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
-  # Selects backends/bpu_memory.h and, like tsingmicro, skips the generated
-  # PrivateUse1 op registrations: the BPU executes whole compiled graphs, so
-  # there is no per-op kernel to register and every aten call reaches
-  # cpu_fallback. Acceleration comes from the torch.compile backend instead.
+  # Selects backends/bpu_memory.h and skips the generated PrivateUse1 op
+  # registrations: the BPU executes whole compiled graphs, so there is no per-op
+  # kernel to register and every aten call reaches cpu_fallback. Acceleration
+  # comes from the torch.compile backend instead.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
       PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)
@@ -684,6 +724,40 @@ install(TARGETS ${LIBRARY_NAME}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(FLAGOS_ACCELERATOR STREQUAL "tsingmicro" AND TSMPROFILER_INCLUDE_DIR)
+  # The rocprofiler tool is a separate library on purpose: rocprofiler dlopens
+  # its tools, and libtorch_fl.so depends on libflagos.so -> libhpgr.so, so a
+  # tool living in the main library would make rocprofiler pull the runtime in
+  # while it is still initializing -- and the tool would never get a client
+  # id. This library therefore links rocprofiler-sdk and nothing else.
+  #
+  # Installed next to libtorch_fl.so, where the tracer's dlopen finds it, and
+  # named in ROCP_TOOL_LIBRARIES by the user (see
+  # docs/vendors/tsingmicro/installation.md).
+  add_library(torch_fl_profiler SHARED
+      "${CMAKE_CURRENT_SOURCE_DIR}/profiler/tsingmicro_profiler_tool.cc"
+  )
+  target_include_directories(torch_fl_profiler PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${TSMPROFILER_INCLUDE_DIR}"
+      # rocprofiler-sdk's tsm/api_args.h pulls in tx_runtime.h. Header only --
+      # nothing from the runtime is linked.
+      "${KUIPER_ROOT}/include"
+  )
+  target_link_directories(torch_fl_profiler PRIVATE
+      "${KUIPER_ROOT}/tsm8-profiler/lib"
+  )
+  target_link_libraries(torch_fl_profiler PRIVATE tsmprofiler-sdk)
+  set_target_properties(torch_fl_profiler PROPERTIES
+      BUILD_RPATH "${KUIPER_ROOT}/tsm8-profiler/lib"
+      INSTALL_RPATH "${KUIPER_ROOT}/tsm8-profiler/lib"
+  )
+  install(TARGETS torch_fl_profiler
+      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+endif()
 
 if(FLAGOS_PLATFORM_WRITES_MARKER)
   # Which platforms land here is the `writes_platform_marker` flag in

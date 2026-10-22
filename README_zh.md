@@ -100,7 +100,7 @@ torch-fl 在项目层面提供以下能力：
 | 燧原 GCU | 原生 topsaten 后端，未路由及 int64 算子使用 CPU 回退 | Eager | **实验性** | [GCU](docs/vendors/gcu/installation.md) |
 | 摩尔线程 MUSA | FlagGems 优先的 Triton 内核，原生 mudnn 回退，未路由算子使用 CPU 回退 | Eager、FP16/BF16 AMP | **实验性** | [MUSA](docs/vendors/musa/installation.md) |
 | 地平线 BPU | 无 eager 内核；通过 hbdk4 使用 `torch.compile` 图执行路径 | 仅图编译 | **仅运行时** | [BPU](docs/vendors/bpu/installation.md) |
-| 清微智能 | 已提供运行时构建选择器 | 尚无安装文档 | **仅运行时** | — |
+| 清微智能 | 基于 Kuiper TX 运行时的 FlagGems-primary；无厂商原生算子库 | Eager（FlagGems 路由）、RNG（主机抽样内核）、Qwen-Image-2.1 旋转位置编码 | **实验性** | [TsingMicro](docs/vendors/tsingmicro/installation.md) |
 
 **状态定义：**
 

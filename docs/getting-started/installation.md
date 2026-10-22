@@ -14,7 +14,7 @@
 | Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | FlagGems-first Triton kernels, native `mudnn` backend as fallback, with CPU fallback for unrouted ops | [MUSA Installation](../vendors/musa/installation.md) |
 | D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | [BPU Installation](../vendors/bpu/installation.md) |
 | Apple Silicon (M-series) | `FLAGOS_ACCELERATOR=mps` | Runtime floor only: native Metal device memory, streams and events; no aten op is claimed yet, so eager ops run on CPU | [MPS Installation](../vendors/mps/installation.md) |
-| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | Runtime/build selector present; no per-op kernel set documented | The runtime build branch exists, but a current end-to-end installation and validation procedure is not documented. |
+| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | FlagGems-primary over the Kuiper TX runtime; host-draw RNG kernels; no vendor-native operator library | [TsingMicro Installation](../vendors/tsingmicro/installation.md) |
 
 ## Common Requirements
 

@@ -286,11 +286,15 @@
 
     "tsingmicro": {
       "_comment": [
-        "TsingMicro Kuiper: no vendor backend directory exists, so FLAGOS_BUILD_VENDOR",
-        "is a no-op. FlagGems Python is the operator path; boxing is an explicit opt-in,",
-        "so the default wheel compiles no CUDA boxing kernels. Nothing routes to them",
-        "anyway -- backends_tsingmicro.conf names no `cuda` entry -- but the switch no",
-        "longer compiles kernels the conf never selects.",
+        "TsingMicro Kuiper: FlagGems Python is the operator path; boxing is an explicit",
+        "opt-in, so the default wheel compiles no CUDA boxing kernels. Nothing routes to",
+        "them anyway -- backends_tsingmicro.conf names no `cuda` entry -- but the switch",
+        "no longer compiles kernels the conf never selects.",
+        "FLAGOS_BUILD_VENDOR is NOT a no-op: aten/backends/tsingmicro/rng.cc holds the",
+        "host-draw RNG kernels (rand/randn/uniform_/normal_/randint/randperm), and",
+        "register.cc claims them unconditionally on USE_TSINGMICRO. Excluding that",
+        "directory leaves the m.impl() references unresolved, so the switch is pinned ON",
+        "rather than left as a default an explicit =0 could override into a link error.",
         "FlagGems C++ is OFF, unlike cuda: it links liboperators.so, and no FlagGems",
         "wheel carries one (flag_gems ships py3-none-any). CMakeLists.txt makes a",
         "missing FlagGems_DIR a FATAL_ERROR, so leaving it on turns `pip install` for",
@@ -313,7 +317,12 @@
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
-      "pins": {}
+      "pins": {
+        "FLAGOS_BUILD_VENDOR": {
+          "value": true,
+          "reason": "aten/backends/tsingmicro/rng.cc holds the host-draw RNG kernels register.cc claims unconditionally; without it the build does not link"
+        }
+      }
     },
 
     "dcu": {

@@ -31,10 +31,12 @@
 #include "flagos_kineto_profiler.h"
 #include "device_tracer.h"
 #include <flagos_env.h>
+#include <runtime/functions.h>  // c10::flagos::CurrentDevice()
 
 #include <kineto/ActivityType.h>
 #include <kineto/ILoggerObserver.h>
 #include <kineto/libkineto.h>
+#include <kineto/output_base.h>  // libkineto::kExceedMaxPid
 
 #include <atomic>
 #include <cstdint>
@@ -54,6 +56,33 @@ namespace {
 inline bool flagos_kineto_debug() {
   static const bool on = flagos_env::EnvFlag("FLAGOS_TRACE");
   return on;
+}
+
+// Device type for the trace viewer's device row, per platform. The build
+// compiles exactly one accelerator (FLAGOS_ACCEL_<NAME>, csrc/CMakeLists.txt),
+// so this is a compile-time constant. Kineto's CUPTI profiler labels its device
+// rows "<TYPE> <id>" ("GPU 0", "GPU 1", ...) under the process name, and the
+// viewer is read by people comparing against a CUDA trace, so keep that shape.
+constexpr const char* kDeviceType =
+#if defined(FLAGOS_ACCEL_ASCEND) || defined(FLAGOS_ACCEL_TSINGMICRO)
+    "NPU";
+#elif defined(FLAGOS_ACCEL_KUNLUNXIN)
+    "XPU";
+#elif defined(FLAGOS_ACCEL_GCU)
+    "GCU";
+#elif defined(FLAGOS_ACCEL_MUSA)
+    "MUSA";
+#elif defined(FLAGOS_ACCEL_BPU)
+    "BPU";
+#elif defined(FLAGOS_ACCEL_MPS)
+    "MPS";
+#else
+    // cuda, ppu, metax, iluvatar: CUDA-shaped devices.
+    "GPU";
+#endif
+
+std::string deviceTraceLabel(int32_t device_id) {
+  return std::string(kDeviceType) + " " + std::to_string(device_id);
 }
 }  // namespace
 #define FLAGOS_KINETO_LOG(expr) \
@@ -221,6 +250,10 @@ FlagosKinetoProfilerSession::FlagosKinetoProfilerSession()
 
 void FlagosKinetoProfilerSession::start() {
   events_.clear();
+  // Sample the device once, here: the device row's id/label and every kernel
+  // event have to agree on it, and the current device can change under us while
+  // the window is open.
+  device_id_ = static_cast<int32_t>(CurrentDevice());
   if (tracer_ && tracer_->available()) {
     tracer_->start();
   }
@@ -417,6 +450,18 @@ void FlagosKinetoProfilerSession::processTrace(
       }
     }
 
+    // A runtime slice is the CPU side of a launch (the txLaunchKernel /
+    // cudaLaunchKernel window), not device work. Put it on the CPU op's own
+    // process/thread row -- where CUDA's launch records sit, and where the ac2g
+    // arrow has to start for the CPU side of the timeline to make sense.
+    // toActivity() places every event on the device, which parked launch
+    // windows in the device column of the trace.
+    if (ev.kind == profiler::EventKind::Runtime && activity.linked != nullptr) {
+      activity.device = static_cast<int32_t>(activity.linked->deviceId());
+      activity.resource = static_cast<int32_t>(activity.linked->resourceId());
+      activity.threadId = activity.linked->getThreadId();
+    }
+
     // Flow arrow ("ac2g"): kineto's chrome writer emits one half per activity --
     // 's' when flowStart is set, 'f' otherwise -- and pairs them by flow id. So
     // BOTH halves have to come from us, and both must carry the SAME id, which
@@ -447,11 +492,15 @@ void FlagosKinetoProfilerSession::processTrace(
 }
 
 std::unique_ptr<libkineto::DeviceInfo> FlagosKinetoProfilerSession::getDeviceInfo() {
+  // Same shape as Kineto's CUPTI profiler: one device row per device, named
+  // after the process, labelled "<TYPE> <id>", and sorted past kExceedMaxPid so
+  // it sits below the CPU process rows (CPU tracks sort by pid). The id is the
+  // device the window ran on, which is also the pid every kernel event carries.
   return std::make_unique<libkineto::DeviceInfo>(
-      /*id=*/0,
-      /*sortIndex=*/0,
-      /*name=*/"flagos:GPU",
-      /*label=*/"GPU");
+      /*id=*/device_id_,
+      /*sortIndex=*/libkineto::kExceedMaxPid + device_id_,
+      /*name=*/libkineto::processName(libkineto::processId()),
+      /*label=*/deviceTraceLabel(device_id_));
 }
 
 std::vector<libkineto::ResourceInfo> FlagosKinetoProfilerSession::getResourceInfos() {
@@ -459,7 +508,7 @@ std::vector<libkineto::ResourceInfo> FlagosKinetoProfilerSession::getResourceInf
   // Report up to 32 streams (will only show streams that actually had activity)
   for (int i = 0; i < 32; ++i) {
     resources.emplace_back(
-        /*deviceId=*/0,
+        /*deviceId=*/device_id_,
         /*id=*/i,
         /*sortIndex=*/i,
         /*name=*/std::string("Stream ") + std::to_string(i));
@@ -532,7 +581,7 @@ namespace {
 struct KinetoProfilerRegistrar {
   KinetoProfilerRegistrar() {
 #if defined(FLAGOS_HAVE_MSPTI) || defined(FLAGOS_HAVE_MUPTI) || \
-    defined(FLAGOS_HAVE_TOPSPTI)
+    defined(FLAGOS_HAVE_TOPSPTI) || defined(FLAGOS_HAVE_TSMPROFILER)
     // Do not construct a vendor profiler shim during shared-library
     // initialization. Its handle is intentionally session-scoped and ordinary
     // operator processes must not touch the vendor profiler at import time.

@@ -80,7 +80,7 @@ the command fails if any artifact lacks its required provenance.
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64/float64 ops | Beta (operator, RNG, factory, and AMP suites CI-guarded on S60) | Not validated | Not validated | Runtime only (TOPSPTI collects activities; no device events on a CPU-only Kineto build) | Experimental (Python dispatch, requires vendor Triton) | Beta |
 | Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | Native `mudnn` operator backend, with CPU fallback for unrouted ops | Experimental (including FP16/BF16 autocast and GradScaler measured on MTT S5000) | Experimental (MThreads FlagTree forward/backward measured on MTT S5000; vendor runtime required) | Not validated | Experimental (MUPTI device timeline measured on MTT S5000; CPU-Kineto linkage is environment-dependent) | Experimental (Python dispatch, requires vendor Triton) | Experimental |
 | D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | Runtime only (CPU fallback for eager) | Experimental (`torch.compile(backend="bpu")` graph path via hbdk4) | Not applicable | Not validated | Not applicable (no per-op kernel build) | Runtime only |
-| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | FlagGems-only through a vendor FlagTree/Triton build; no vendor-native kernel fallback | Experimental (matmul and reduction routes measured on TX8; pointwise routes blocked by the `empty_like` registration gap) | Not validated | Not validated | Not validated | Experimental (Python dispatch via the `torch.txda` shim; no CI) | Experimental |
+| TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | FlagGems-primary through the Kuiper TX runtime; the only native kernels are the host-draw RNG ops; no CUDA boxing | Experimental (FlagGems routes, RNG and metadata-only views measured on TX8110; no CI) | Not validated | Not validated | Not validated | Experimental (Python dispatch via the `torch.txda` shim; no CI) | Experimental |
 
 ## Platform Notes
 
@@ -402,9 +402,11 @@ eager operator path:
 [`torch_fl/configs/backends_tsingmicro.conf`](../../torch_fl/configs/backends_tsingmicro.conf)
 routes its ops to FlagGems, and the `#else` branch of
 [`csrc/aten/register.cc`](../../csrc/aten/register.cc) claims them. There is no
-vendor-native kernel set to fall back to — TsingMicro's compute path is FlagGems through a
-vendor FlagTree/Triton build, and a build that cannot reach FlagGems has nothing behind
-it.
+vendor-native operator library to fall back to — TsingMicro's compute path is FlagGems
+through a vendor Triton build (there is no FlagTree wheel for this platform), and a build
+that cannot reach FlagGems has nothing behind it. The exception is the host-draw RNG family
+in [`csrc/aten/backends/tsingmicro/rng.cc`](../../csrc/aten/backends/tsingmicro/rng.cc),
+which `register.cc` claims directly because TX8 has no random-number unit.
 
 The 2026-Q3 TX8 measurement below was taken with `FLAGOS_BUILD_BOXING=ON`, when the `#else`
 arm compiled the full generated `register.inc`. Because that list was claimed on
@@ -420,13 +422,17 @@ matmul family and the reductions that allocate differently (`mm`, `bmm`, `sum`, 
 the measurement called for — a `register_flaggems_tsingmicro.inc`, as MUSA uses — is now
 what the default FlagGems-primary build compiles (`FLAGOS_BUILD_BOXING=OFF`,
 `scripts/codegen/codegen_boxing_flaggems_register.py`), so `empty_like`, `cat` and
-`rms_norm` are expected to fall through to `cpu_fallback` instead of raising; **that
-default build is not re-measured on a TX8**, and the split above remains the last
-on-hardware record. See the TsingMicro row in
+`rms_norm` fall through to `cpu_fallback` instead of resolving to CUDA. The default build
+was re-measured on a TX8110 on 2026-10-21 (`torch 2.10.0+cpu`, `flag_gems 5.4.0`,
+`triton 3.6.0`): `import torch_fl`, device enumeration, `randn`, `mean`, `unsqueeze`,
+`erfc` and `cat` all succeed, and the RNG family is served by the host-draw kernels. That
+run was a smoke test, not the per-overload survey the 2026-Q3 split above came from, so
+that split remains the last per-operator correctness record. See the TsingMicro row in
 [`docs/reference/operator-support.md`](operator-support.md).
 
-This was measured on a TX8 host, not in CI. There is no CI manifest, and no current
-installation or test guide, for this platform.
+This was measured on a TX8 host, not in CI. There is no CI manifest for this platform;
+installation and verification steps are in
+[the TsingMicro guide](../vendors/tsingmicro/installation.md).
 
 ## Reading the Matrix
 

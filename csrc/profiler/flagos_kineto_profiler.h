@@ -63,6 +63,10 @@ class FlagosKinetoProfilerSession : public libkineto::IActivityProfilerSession {
   // Drained from the tracer in stop(); converted to kineto activities in
   // processTrace so both overloads see the same data.
   std::vector<profiler::DeviceEvent> events_;
+  // Device the window was recorded on, sampled in start(). It identifies the
+  // device row (id, sort index and the "<TYPE> <id>" label) the way Kineto's
+  // CUPTI profiler names one row per GPU.
+  int32_t device_id_{0};
 };
 
 /**

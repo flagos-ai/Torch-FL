@@ -314,9 +314,11 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         SCOPE_BUILD,
         "ON, OFF on metax",
         "Compile the accelerator vendor's native kernels (a no-op where the "
-        "vendor ships none: cuda, dcu, ppu, tsingmicro, bpu). MetaX defaults OFF "
-        "because its native path is retired -- that platform's accelerated ops "
-        "are its FlagGems routes, with the rest on cpu_fallback",
+        "vendor ships none: cuda, dcu, ppu, bpu). TsingMicro builds its host-draw "
+        "RNG kernels here and pins the switch ON: register.cc claims those "
+        "symbols unconditionally. MetaX defaults OFF because its native path is "
+        "retired -- that platform's accelerated ops are its FlagGems routes, with "
+        "the rest on cpu_fallback",
     ),
     "FLAGOS_BUILD_FLAGGEMS": (
         SCOPE_BUILD,
