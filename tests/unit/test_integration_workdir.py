@@ -389,7 +389,9 @@ def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
     ``$$`` to its own process ID, so MPS ran ``cd 1468{GITHUB_WORKSPACE:?}``
     before it reached the platform setup. The generated script must use an
     absolute script path and a workspace path that survives a profile that
-    changes the current directory.
+    changes the current directory. GitHub also sets BASH_ENV to the profile,
+    which runs again in every nested Bash. The setup script must not source the
+    platform hook during shell selection or before the workspace exists.
     """
     workflow = _run_script_of_step(
         (_WORKFLOW_DIR / "integration-tests.yml").read_text(encoding="utf-8"),
@@ -397,7 +399,8 @@ def test_the_setup_script_keeps_the_runner_workspace_through_the_profile():
     )
     assert workflow is not None
     assert "$${" not in workflow
-    assert 'cd "\\$GITHUB_WORKSPACE"' in workflow
+    assert 'setup_workspace="$GITHUB_WORKSPACE"' in workflow
+    assert "exec $(printf '%q' \"$SETUP_BASH\")" in workflow
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         runner_temp = root / "runner-temp"
@@ -505,12 +508,9 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert 'python3 - "$MODEL_CACHE"' in verify["run"]
     assert "hf_hub_download" not in verify["run"]
     setup = next(step for step in steps if step.get("id") == "setup")
-    assert (
-        "export GITHUB_WORKSPACE=$(printf '%q' \"$GITHUB_WORKSPACE\")" in (setup["run"])
-    )
-    assert 'cd "\\$GITHUB_WORKSPACE"' in setup["run"]
+    assert 'setup_workspace="$GITHUB_WORKSPACE"' in setup["run"]
     assert "$${" not in setup["run"]
-    assert """$(printf '%q' "$GITHUB_WORKSPACE/$SETUP_SCRIPT")""" in setup["run"]
+    assert """$(printf '%q' "$setup_workspace/$SETUP_SCRIPT")""" in setup["run"]
     fallback = next(step for step in steps if step.get("id") == "source-archive")
     assert (
         "api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"

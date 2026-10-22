@@ -106,12 +106,15 @@ def test_the_parameterized_workflow_provisions_every_platform():
     """
     text = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
     assert "SETUP_BASH: ${{ env.bash || '/bin/bash' }}" in text
-    assert '"$SETUP_BASH" $(printf' in text
+    assert "exec $(printf '%q' \"$SETUP_BASH\")" in text
     assert '--platform "$(printf' in text
-    assert "export GITHUB_WORKSPACE=$(printf '%q' \"$GITHUB_WORKSPACE\")" in text
-    assert 'cd "\\$GITHUB_WORKSPACE"' in text
-    assert 'export GITHUB_WORKSPACE; source "$INTEGRATION_PROFILE"' in text
-    assert "$GITHUB_WORKSPACE/$SETUP_SCRIPT" in text
+    assert 'setup_workspace="$GITHUB_WORKSPACE"' in text
+    assert "exec $(printf '%q' \"$SETUP_BASH\")" in text
+    assert "env -u BASH_ENV /bin/bash -c" in text
+    assert 'source "$INTEGRATION_PROFILE"; command -v bash' in text
+    assert 'exec "$SETUP_BASH" "$1"' in text
+    assert "export SETUP_BASH" in text
+    assert "$setup_workspace/$SETUP_SCRIPT" in text
     assert "SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}" in text
     assert "command -v bash" in text
     assert '[[ "$SETUP_BASH" = /* ]] && test -x "$SETUP_BASH"' in text

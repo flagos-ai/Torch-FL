@@ -495,14 +495,15 @@ jobs:
           temp="${RUNNER_TEMP:-/tmp}"
           state="$temp/torch-fl-preparation"
           script="$temp/torch-fl-command-setup.sh"
+          setup_workspace="$GITHUB_WORKSPACE"
           cat > "$script" <<EOF
           set -euo pipefail
           export CI_STAGE=$(printf '%q' "$CI_STAGE")
           # Supplying this path here keeps the fallback shell usable even when
           # the workspace profile replaces the directory.
-          export GITHUB_WORKSPACE=$(printf '%q' "$GITHUB_WORKSPACE")
-          cd "\$GITHUB_WORKSPACE"
-          "$SETUP_BASH" $(printf '%q' "$GITHUB_WORKSPACE/$SETUP_SCRIPT") --platform "$(printf '%q' "$SETUP_PLATFORM")"
+          export GITHUB_WORKSPACE=$(printf '%q' "$setup_workspace")
+          cd $(printf '%q' "$setup_workspace")
+          exec $(printf '%q' "$SETUP_BASH") $(printf '%q' "$setup_workspace/$SETUP_SCRIPT") --platform "$(printf '%q' "$SETUP_PLATFORM")"
           EOF
           if [[ -n "$CONTAINER_CONFIG" ]] && [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")" != "" ]]; then
             cp "$script" "$state/${script##*/}"
@@ -513,11 +514,13 @@ jobs:
             # steps. Reapply its profile, then select an absolute shell that is
             # available in the workspace profile. macOS runner images can
             # provide a newer bash than the system's portable bash 3.2.
+            # A BASH_ENV profile runs before every nested non-interactive shell.
+            # Unset it while selecting and launching the setup shell.
             [[ "$INTEGRATION_PROFILE" = /* ]] && test -s "$INTEGRATION_PROFILE"
-            SETUP_BASH="$(/bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; command -v bash')"
+            SETUP_BASH="$(env -u BASH_ENV /bin/bash -c 'set -euo pipefail; source "$INTEGRATION_PROFILE"; command -v bash')"
             [[ "$SETUP_BASH" = /* ]] && test -x "$SETUP_BASH"
             export SETUP_BASH
-            /bin/bash -c 'set -euo pipefail; export GITHUB_WORKSPACE; source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"' \
+            env -u BASH_ENV /bin/bash -c 'set -euo pipefail; exec "$SETUP_BASH" "$1"' \
               -- "$script"
           fi
 

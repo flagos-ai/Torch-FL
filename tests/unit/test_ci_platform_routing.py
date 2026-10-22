@@ -483,7 +483,8 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
         ]
         if step.get("id") == "setup"
     )
-    assert 'source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"' in setup["run"]
+    assert 'source "$INTEGRATION_PROFILE"; command -v bash' in setup["run"]
+    assert "env -u BASH_ENV /bin/bash -c" in setup["run"]
     shell = tmp_path / "bin/bash"
     shell.parent.mkdir()
     shell.write_text('#!/bin/sh\nexec /bin/bash "$@"\n', encoding="utf-8")
@@ -513,13 +514,7 @@ def test_workspace_copies_the_checkout_and_replaces_the_model_mount(
     }
     Path(setup_environment["WORKSPACE_TEMP"]).mkdir()
     launched = subprocess.run(
-        [
-            "/bin/bash",
-            "-c",
-            'set -euo pipefail; source "$INTEGRATION_PROFILE"; exec "$SETUP_BASH" "$1"',
-            "--",
-            str(helper),
-        ],
+        ["/bin/bash", str(helper)],
         env=setup_environment,
         capture_output=True,
         text=True,
