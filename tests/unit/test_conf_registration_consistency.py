@@ -468,15 +468,13 @@ def test_conf_route_counts_are_stable():
         # copy_func kernel the FlagGems `_ascend` flip override builds.
         "ascend": {"flaggems": 221, "none": 1659, "ascend": 157},
         "bpu": {},
-        # 24 ops moved from flaggems to cuda: the conf writer now excludes
-        # flaggems_recursive_fallback | flaggems_runtime_broken, which it could
-        # not see before the sets were moved above the emitter. On a boxing-off
-        # wheel -- the default -- GetFn(kCuda) degrades to the FlagGems Python
-        # path, so this is a no-op there; on a FLAGOS_BUILD_BOXING=ON wheel the
-        # ops now reach their boxing kernel instead of the FlagGems route.
-        # `_unsafe_view`, `unsqueeze`, `unsqueeze_` and `transpose.int` were
-        # separately kept off the FlagGems route for view semantics and cost.
-        "cuda": {"flaggems": 390, "cuda": 1644},
+        # PLACEHOLDER -- recomputed on H100 after rebasing onto the main that
+        # carries #340 (which added cuda_route_exceptions /
+        # measured_flaggems_rollback / metadata_route_overrides and moved cuda to
+        # 390/1644). This branch additionally widens the FlagGems ceiling so ops
+        # that had a kFlagGems kernel but were never listed -- mul.Tensor above
+        # all -- reach the FlagGems route instead of cpu_fallback.
+        "cuda": {"flaggems": 551, "cuda": 1483},
         "dcu": {"flaggems": 454, "cuda": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
@@ -502,7 +500,23 @@ def test_conf_route_counts_are_stable():
         # cannot steer -- the two failures the CI lane reported.
         "kunlunxin": {"kunlunxin": 57, "none": 1980},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
-        "metax": {"flaggems": 594, "cuda": 1433, "flaggems_cpp": 10},
+        # 8 ops moved flaggems -> cuda (594 -> 586 / 1433 -> 1441) because
+        # route_boxing now consults codegen_ops.py's FlagGems holds. These were
+        # ops the metax conf routed to the Python path while
+        # flaggems_runtime_broken listed them as broken -- a route the hold list
+        # has always said not to take, which the generator could not see until
+        # the sets moved to module scope. They are the `out=`-contract group
+        # (_softmax.out, _log_softmax.out and their backward_data forms),
+        # _cdist_backward (gems asserts a real CUDA tensor), and
+        # _native_batch_norm_legit_functional.
+        #
+        # NOT REVALIDATED on MetaX hardware: the re-route is the hold list's
+        # doing, applied uniformly, and was measured only on H100. MetaX needs
+        # the differential survey run before this row can claim that moving
+        # these 8 ops to `cuda` costs nothing there. If it does cost something,
+        # the per-platform answer is NATIVE_TRITON_GAPS["metax"], not a
+        # deletion from the shared holds.
+        "metax": {"flaggems": 586, "cuda": 1441, "flaggems_cpp": 10},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
         "ppu": {"flaggems": 592, "cuda": 1445},

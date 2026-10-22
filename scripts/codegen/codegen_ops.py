@@ -2307,6 +2307,181 @@ def api_headers(op_info: Dict) -> List[str]:
 # ============================================================================
 
 
+# ---------------------------------------------------------------------------
+# Ops held OFF the FlagGems route.
+#
+# Module level rather than locals inside main(): gen_vendor_confs.py builds the
+# per-vendor confs and needs the same holds. They used to live in main() only, so
+# widening the FlagGems ceiling routed known-broken ops to FlagGems on every
+# vendor that was regenerated -- index_select (issue #120 stream ordering),
+# _cdist_backward, nanmedian and smooth_l1_loss went onto the Python path on
+# ascend/gcu/musa/ppu when FLAGGEMS_PYTHON_OPS grew. A hold is a statement about
+# the installed flag_gems, not about one platform, so both generators must read
+# it from the same place.
+#
+# Codegen imports this module for these names; keep them importable at module
+# scope rather than rebuilding them.
+# ---------------------------------------------------------------------------
+
+
+# Ops the auto-discovery routes to flagos_python but whose gems call
+# fails or returns wrong numerics at runtime. Discovery only checks
+# arity/type statically, so these get caught by execution, not by the
+# gates. Kernel stays generated (reachable via
+# FLAGOS_OP_<op>=flagos_python) and only the default route goes to cuda.
+#
+# Established by running every newly routed op against its CPU reference
+# on Hygon DCU (flag_gems 5.4.0dev, triton 3.6.0) and re-checking each
+# failure on the cuda route: all 26 pass as cuda and fail as
+# flagos_python, so each entry is a genuine route regression.
+#
+# Grouped by cause:
+#  1. gems declares `out` as a REQUIRED keyword-only arg, but the
+#     out_variant caller passed only the non-out args and copy_'d the
+#     result -> TypeError: missing keyword-only argument 'out'.
+#     FIXED at the source: discover_flaggems_ops now routes these
+#     through out_variant_gemskwout (out forwarded by name) or, for the
+#     `out=None`-but-raises signatures like logit_out, through
+#     out_variant_gemsout (out passed positionally). The entries stay
+#     listed until the DCU re-test confirms them, so this group is a
+#     conservative hold, not a known breakage -- drop an op from here
+#     once it passes on hardware.
+#  2. gems asserts the input is a real CUDA tensor (device.type ==
+#     "cuda"); a flagos PrivateUse1 tensor trips the assert.
+#  3. DTK triton (hcu backend) fails to compile the gems kernel.
+#  4. wrong numerics on the gems path (verified correct via cuda).
+# Ops the auto-discovery routes to flagos_python but whose gems call either
+# re-enters torch.<op> or lands somewhere with no kernel. Kept generated but
+# held off the default route. See the per-entry notes in the runtime-broken
+# block below for the sibling case that shares the same guard.
+FLAGGEMS_RECURSIVE_FALLBACK: set[str] = set()
+
+FLAGGEMS_RUNTIME_BROKEN = {
+    # (1) gems `out` is required keyword-only -- codegen fixed, pending
+    # a DCU re-test before these come off the list.
+    "addcdiv.out",
+    "addcmul.out",
+    "as_strided_copy.out",
+    "baddbmm.out",
+    "logit.out",
+    "_log_softmax.out",
+    "_log_softmax_backward_data.out",
+    "median.dim_values",
+    "median.out",
+    "nanmedian.dim_values",
+    "nanmedian.out",
+    "smooth_l1_loss.out",
+    "_softmax.out",
+    "_softmax_backward_data.out",
+    # (2) gems asserts a real CUDA tensor
+    "_cdist_backward",
+    "im2col",
+    "smooth_l1_loss",
+    "smooth_l1_loss_backward",
+    "special_i1.out",
+    "_upsample_bilinear2d_aa",
+    "_upsample_nearest_exact2d_backward",
+    "upsample_trilinear3d",
+    # (2) same cause, confirmed by differential testing on MetaX C550
+    # (flag_gems 5.4.0rc2.post1+g5a58df410, flagtree 0.6.1+metax3.6).
+    # Inputs were built once on CPU and moved with .to("flagos"), so both
+    # arms see identical values; the cuda route passes every one of them.
+    # Each guard is a literal device-type test, which no PrivateUse1
+    # tensor can satisfy, so these fail identically on every flagos
+    # platform -- they are not MetaX-specific.
+    #   binary_cross_entropy(-.out): ops/binary_cross_entropy.py:177
+    #     `if not (input.is_cuda and target.is_cuda): raise` ->
+    #     AssertionError "...must be CUDA tensors for Triton kernel."
+    #   hardtanh_backward: ops/hardtanh_backward.py:54
+    #     `assert grad_output.is_cuda and self.is_cuda` -> bare
+    #     AssertionError.
+    #   igammac(.out): "igammac: first input tensor must be on cuda
+    #     device" (ValueError).
+    #   special_modified_bessel_i0(.out): "input tensor must be on CUDA
+    #     device" / "input and output tensors must be on CUDA device".
+    #   _fake_quantize_learnable_per_tensor_affine_backward:
+    #     ops/_fake_quantize_learnable_per_tensor_affine_backward.py:90
+    #     `if grad.device.type != "cuda" or self.device.type != "cuda":
+    #     raise ValueError("Inputs must be on a CUDA device.")`; reached
+    #     both directly and through the forward's autograd.
+    #   upsample_bilinear2d: ops/upsample_bilinear2d.py:154
+    #     `assert input.device.type == runtime.device.name`. On MetaX
+    #     runtime.device.name is "cuda" (the _metax VendorDescriptor
+    #     declares device_name="cuda"), so a flagos tensor fails the
+    #     assert. _upsample_bilinear2d_aa (below) shares the aa-variant
+    #     code and was measured CORRECT on hardware -- only the plain
+    #     variant is listed here.
+    "binary_cross_entropy",
+    "binary_cross_entropy.out",
+    "hardtanh_backward",
+    "igammac",
+    "igammac.out",
+    "special_modified_bessel_i0",
+    "special_modified_bessel_i0.out",
+    "_fake_quantize_learnable_per_tensor_affine_backward",
+    "upsample_bilinear2d",
+    # (3) DTK triton cannot compile the gems kernel
+    "gcd",
+    "gcd.out",
+    # (4) wrong numerics or memory safety on the gems path
+    "adaptive_max_pool3d_backward",
+    "leaky_relu_",
+    # layer_norm_backward assumes a 2-D input and computes M from
+    # input.shape[0] instead of normalized_shape. For 3-D transformer
+    # inputs this makes the weight/bias gradient kernel write past its
+    # outputs; keep the operation on the CUDA boxing path until the
+    # upstream FlagGems fix lands.
+    "native_layer_norm_backward",
+    # The gems index_select triton launch is not stream-ordered against
+    # the flagos (PrivateUse1) stream that produced the index tensor.
+    # In HF cached beam search (DynamicCache.reorder_cache ->
+    # index_select(0, beam_idx)) the kernel can read a stale index
+    # entry, fail its indices < N validity mask, and leave the output
+    # column unwritten (recycled torch.empty bytes), poisoning the KV
+    # cache with garbage/NaN. The kernel math itself is correct
+    # standalone; the missing happens-before is in the flagos <->
+    # flag_gems launch integration. Keep on the CUDA boxing path until
+    # launches are ordered with the flagos current stream.
+    "index_select",
+    # (5) the recorded qualname names a gems callable that no longer
+    # exists. Discovery freezes `flag_gems.<fn.__name__>` into the
+    # generated kernel, so a config is only valid against the exact
+    # FlagGems cohort it was generated from -- these 10 were present in
+    # the 7fb49bad cohort but not in 5.3.5. PythonOpCache::GetFunc then
+    # fails the package lookup and the op raises AttributeError on first
+    # call rather than degrading.
+    # `unsqueeze` is the worst of these: plain `x[None]` breaks.
+    "_embedding_bag_per_sample_weights_backward",
+    "_native_batch_norm_legit_functional",
+    "binary_cross_entropy_with_logits",
+    "cudnn_batch_norm_backward",
+    "igammac_",
+    "linalg_ldl_solve",
+    "max_unpool3d",
+    "special_bessel_j1",
+    "unsqueeze",
+    "unsqueeze_",
+    # (6) gems takes the `device.type != _DEVICE_NAME` guard and the
+    # branch it lands in has nowhere to go. ops/mul.py:579
+    # mul_broadcast_func selects the device of its inputs and, for a
+    # flagos tensor, calls
+    # `torch.ops.aten.mul.out.redispatch(_FALLBACK_KEYSET, a, b, out=out)`
+    # with _FALLBACK_KEYSET = {CompositeExplicitAutograd}. mul.out has no
+    # kernel registered under that key, so the redispatch raises
+    # `NotImplementedError: There were no tensor arguments to this
+    # function ..., but no fallback function is registered for schema
+    # aten::mul.out`. mul_ is the only caller that always passes out=,
+    # which is why mul.Tensor (routed via flaggems_recursive_fallback)
+    # behaves differently. Measured on MetaX C550: both
+    # torch.ops.aten.mul_.Tensor(a, 0.5) and (a, b) raise, while
+    # mul_broadcast_func(a, b) without out= returns correct values.
+    # Tensor.mul_(python_float) is the shape the optimizer tests use --
+    # Tensor.mul_ dispatches to aten.mul_.Tensor, not mul_.Scalar -- so
+    # this route breaks adamw-style foreach/param updates.
+    "mul_.Tensor",
+}
+
+
 def main():
     repo_root = Path(__file__).parent.parent.parent
     conf_path = repo_root / "torch_fl/configs/backends_cuda.conf"
@@ -2658,168 +2833,36 @@ def main():
         #
         # Verified against flag_gems v5.3.1 by scanning every routed op for a
         # `device.type != "cuda"` guard whose body re-enters torch.<same op>:
-        # mul is the only one. as_strided_copy / conv_transpose2d / scaled_mm
+        # mul was the only one. as_strided_copy / conv_transpose2d / scaled_mm
         # have the same guard but return a clone / None / False, so they degrade
         # safely.
         #
-        # mul_.Tensor carries the same guard but is NOT safe, and is routed
-        # through flaggems_runtime_broken instead: it reaches the guard with
-        # out=A, and the fallback branch for `out is not None` redispatching to
-        # aten.mul.out has no kernel to land on (see the entry there).
-        flaggems_recursive_fallback = {
-            "mul.Tensor",
-        }
-
-        # Ops the auto-discovery routes to flagos_python but whose gems call
-        # fails or returns wrong numerics at runtime. Discovery only checks
-        # arity/type statically, so these get caught by execution, not by the
-        # gates. Kernel stays generated (reachable via
-        # FLAGOS_OP_<op>=flagos_python) and only the default route goes to cuda.
+        # mul.Tensor is no longer held here. The guard it was held for compares
+        # `device.type` against flag_gems' `_DEVICE_NAME`, and on this stack that
+        # constant is "flagos", not "cuda" -- measured on nvidia-155 with
+        # flag_gems 5.4.0: `_DEVICE_NAME == 'flagos'` while a flagos tensor's
+        # `device.type == 'flagos'`. The comparison is therefore equal and the
+        # guard does not fire, so the op runs flag_gems' kernel instead of
+        # redispatching into the fallback. Confirmed by measurement: on
+        # [640, 1024] bf16, `flag_gems.mul(a, b)` issues 0 Memcpy and agrees with
+        # the CPU reference at rtol 1e-2, against 8 Memcpy for the cpu_fallback
+        # route this op used to take. At 1522 calls per forward on the OCR-RM
+        # value head it was the largest single source of host round trips there.
         #
-        # Established by running every newly routed op against its CPU reference
-        # on Hygon DCU (flag_gems 5.4.0dev, triton 3.6.0) and re-checking each
-        # failure on the cuda route: all 26 pass as cuda and fail as
-        # flagos_python, so each entry is a genuine route regression.
+        # The hold was correct when the guard's right-hand side was "cuda": a
+        # flagos tensor then failed it and redispatch was the only outcome. It is
+        # the constant moving, not the guard, that retired the hold -- so if a
+        # future flag_gems names its device anything other than what flagos
+        # reports, this op must be held again. The differential test for it is
+        # tests/integration/ops/test_flaggems_mul_route.py.
         #
-        # Grouped by cause:
-        #  1. gems declares `out` as a REQUIRED keyword-only arg, but the
-        #     out_variant caller passed only the non-out args and copy_'d the
-        #     result -> TypeError: missing keyword-only argument 'out'.
-        #     FIXED at the source: discover_flaggems_ops now routes these
-        #     through out_variant_gemskwout (out forwarded by name) or, for the
-        #     `out=None`-but-raises signatures like logit_out, through
-        #     out_variant_gemsout (out passed positionally). The entries stay
-        #     listed until the DCU re-test confirms them, so this group is a
-        #     conservative hold, not a known breakage -- drop an op from here
-        #     once it passes on hardware.
-        #  2. gems asserts the input is a real CUDA tensor (device.type ==
-        #     "cuda"); a flagos PrivateUse1 tensor trips the assert.
-        #  3. DTK triton (hcu backend) fails to compile the gems kernel.
-        #  4. wrong numerics on the gems path (verified correct via cuda).
-        flaggems_runtime_broken = {
-            # (1) gems `out` is required keyword-only -- codegen fixed, pending
-            # a DCU re-test before these come off the list.
-            "addcdiv.out",
-            "addcmul.out",
-            "as_strided_copy.out",
-            "baddbmm.out",
-            "logit.out",
-            "_log_softmax.out",
-            "_log_softmax_backward_data.out",
-            "median.dim_values",
-            "median.out",
-            "nanmedian.dim_values",
-            "nanmedian.out",
-            "smooth_l1_loss.out",
-            "_softmax.out",
-            "_softmax_backward_data.out",
-            # (2) gems asserts a real CUDA tensor
-            "_cdist_backward",
-            "im2col",
-            "smooth_l1_loss",
-            "smooth_l1_loss_backward",
-            "special_i1.out",
-            "_upsample_bilinear2d_aa",
-            "_upsample_nearest_exact2d_backward",
-            "upsample_trilinear3d",
-            # (2) same cause, confirmed by differential testing on MetaX C550
-            # (flag_gems 5.4.0rc2.post1+g5a58df410, flagtree 0.6.1+metax3.6).
-            # Inputs were built once on CPU and moved with .to("flagos"), so both
-            # arms see identical values; the cuda route passes every one of them.
-            # Each guard is a literal device-type test, which no PrivateUse1
-            # tensor can satisfy, so these fail identically on every flagos
-            # platform -- they are not MetaX-specific.
-            #   binary_cross_entropy(-.out): ops/binary_cross_entropy.py:177
-            #     `if not (input.is_cuda and target.is_cuda): raise` ->
-            #     AssertionError "...must be CUDA tensors for Triton kernel."
-            #   hardtanh_backward: ops/hardtanh_backward.py:54
-            #     `assert grad_output.is_cuda and self.is_cuda` -> bare
-            #     AssertionError.
-            #   igammac(.out): "igammac: first input tensor must be on cuda
-            #     device" (ValueError).
-            #   special_modified_bessel_i0(.out): "input tensor must be on CUDA
-            #     device" / "input and output tensors must be on CUDA device".
-            #   _fake_quantize_learnable_per_tensor_affine_backward:
-            #     ops/_fake_quantize_learnable_per_tensor_affine_backward.py:90
-            #     `if grad.device.type != "cuda" or self.device.type != "cuda":
-            #     raise ValueError("Inputs must be on a CUDA device.")`; reached
-            #     both directly and through the forward's autograd.
-            #   upsample_bilinear2d: ops/upsample_bilinear2d.py:154
-            #     `assert input.device.type == runtime.device.name`. On MetaX
-            #     runtime.device.name is "cuda" (the _metax VendorDescriptor
-            #     declares device_name="cuda"), so a flagos tensor fails the
-            #     assert. _upsample_bilinear2d_aa (below) shares the aa-variant
-            #     code and was measured CORRECT on hardware -- only the plain
-            #     variant is listed here.
-            "binary_cross_entropy",
-            "binary_cross_entropy.out",
-            "hardtanh_backward",
-            "igammac",
-            "igammac.out",
-            "special_modified_bessel_i0",
-            "special_modified_bessel_i0.out",
-            "_fake_quantize_learnable_per_tensor_affine_backward",
-            "upsample_bilinear2d",
-            # (3) DTK triton cannot compile the gems kernel
-            "gcd",
-            "gcd.out",
-            # (4) wrong numerics or memory safety on the gems path
-            "adaptive_max_pool3d_backward",
-            "leaky_relu_",
-            # layer_norm_backward assumes a 2-D input and computes M from
-            # input.shape[0] instead of normalized_shape. For 3-D transformer
-            # inputs this makes the weight/bias gradient kernel write past its
-            # outputs; keep the operation on the CUDA boxing path until the
-            # upstream FlagGems fix lands.
-            "native_layer_norm_backward",
-            # The gems index_select triton launch is not stream-ordered against
-            # the flagos (PrivateUse1) stream that produced the index tensor.
-            # In HF cached beam search (DynamicCache.reorder_cache ->
-            # index_select(0, beam_idx)) the kernel can read a stale index
-            # entry, fail its indices < N validity mask, and leave the output
-            # column unwritten (recycled torch.empty bytes), poisoning the KV
-            # cache with garbage/NaN. The kernel math itself is correct
-            # standalone; the missing happens-before is in the flagos <->
-            # flag_gems launch integration. Keep on the CUDA boxing path until
-            # launches are ordered with the flagos current stream.
-            "index_select",
-            # (5) the recorded qualname names a gems callable that no longer
-            # exists. Discovery freezes `flag_gems.<fn.__name__>` into the
-            # generated kernel, so a config is only valid against the exact
-            # FlagGems cohort it was generated from -- these 10 were present in
-            # the 7fb49bad cohort but not in 5.3.5. PythonOpCache::GetFunc then
-            # fails the package lookup and the op raises AttributeError on first
-            # call rather than degrading.
-            # `unsqueeze` is the worst of these: plain `x[None]` breaks.
-            "_embedding_bag_per_sample_weights_backward",
-            "_native_batch_norm_legit_functional",
-            "binary_cross_entropy_with_logits",
-            "cudnn_batch_norm_backward",
-            "igammac_",
-            "linalg_ldl_solve",
-            "max_unpool3d",
-            "special_bessel_j1",
-            "unsqueeze",
-            "unsqueeze_",
-            # (6) gems takes the `device.type != _DEVICE_NAME` guard and the
-            # branch it lands in has nowhere to go. ops/mul.py:579
-            # mul_broadcast_func selects the device of its inputs and, for a
-            # flagos tensor, calls
-            # `torch.ops.aten.mul.out.redispatch(_FALLBACK_KEYSET, a, b, out=out)`
-            # with _FALLBACK_KEYSET = {CompositeExplicitAutograd}. mul.out has no
-            # kernel registered under that key, so the redispatch raises
-            # `NotImplementedError: There were no tensor arguments to this
-            # function ..., but no fallback function is registered for schema
-            # aten::mul.out`. mul_ is the only caller that always passes out=,
-            # which is why mul.Tensor (routed via flaggems_recursive_fallback)
-            # behaves differently. Measured on MetaX C550: both
-            # torch.ops.aten.mul_.Tensor(a, 0.5) and (a, b) raise, while
-            # mul_broadcast_func(a, b) without out= returns correct values.
-            # Tensor.mul_(python_float) is the shape the optimizer tests use --
-            # Tensor.mul_ dispatches to aten.mul_.Tensor, not mul_.Scalar -- so
-            # this route breaks adamw-style foreach/param updates.
-            "mul_.Tensor",
-        }
+        # mul_.Tensor keeps its hold in flaggems_runtime_broken below. It reaches
+        # the same guard with out=A, where the `out is not None` branch
+        # redispatches to aten.mul.out and has no kernel to land on; that is an
+        # independent defect and is not retired by the constant changing.
+        # Defined at module scope so gen_vendor_confs.py reads the same holds.
+        flaggems_recursive_fallback = FLAGGEMS_RECURSIVE_FALLBACK
+        flaggems_runtime_broken = FLAGGEMS_RUNTIME_BROKEN
 
         # Both sets force a route back to cuda, for different reasons; the conf
         # writers and the coverage ceiling only need the union. Defined here,

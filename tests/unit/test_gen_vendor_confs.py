@@ -243,7 +243,9 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     """
     routes = g.build_all(CONF_DIR)["musa"][1]
     native = g.vendor_native_ops("musa")
-    flaggems_py = g.flaggems_python_ops()
+    # The ceiling this platform's conf was actually built from: cuda reads the
+    # measured package set, every other vendor the frozen pre-2026-10-22 one.
+    flaggems_py = g.flaggems_python_ops_for("musa")
     registered = g.vendor_registered_ops("musa")
     gaps = g.NATIVE_TRITON_GAPS.get("musa", set())
 

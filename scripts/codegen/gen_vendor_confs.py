@@ -101,6 +101,7 @@ GENERATED_REGISTER_INC = REPO_ROOT / "csrc/aten/generated/register.inc"
 from backend_coverage import (  # noqa: E402
     FLAGGEMS_CPP_OPS,
     FLAGGEMS_PYTHON_OPS,
+    FLAGGEMS_PYTHON_OPS_FROZEN,
     TILEOPS_OPS,
 )
 
@@ -297,6 +298,8 @@ ESCAPE_NATIVE = {
 # regeneration silently reverted the pins the diff had recovered. PPU's
 # is a literal (BOXING_TRITON_GAPS) because it is vendor-first no longer, and the
 # diff cannot tell a gap from a policy exception on a flaggems-first platform.
+_FLAGGEMS_HOLDS = None
+
 BOXING_PLATFORMS = {
     "metax": "backends_metax.conf",
     "dcu": "backends_dcu.conf",
@@ -2445,6 +2448,26 @@ def flaggems_python_ops(conf_dir: Path = None) -> set:
     return set(FLAGGEMS_PYTHON_OPS)
 
 
+def flaggems_python_ops_for(platform: str) -> set:
+    """The FlagGems ceiling one platform's conf may be built from.
+
+    cuda reads the measured package contents. Every other platform reads the
+    frozen pre-2026-10-22 set, because the 458 ops FlagGems gained since then have
+    never been measured on that hardware: routing them there would move ops onto
+    the Python path, and the differential survey that clears an op is per
+    platform (see ``boxing_triton_gaps`` and ``BOXING_TRITON_GAPS`` for the shape
+    that evidence takes).
+
+    A platform graduates by having the survey run on it and its result landed;
+    until then the frozen ceiling is what keeps an unrelated cuda fix from
+    re-routing six vendors. See ``FLAGGEMS_PYTHON_OPS_FROZEN`` in
+    backend_coverage.py.
+    """
+    if platform == "cuda":
+        return set(FLAGGEMS_PYTHON_OPS)
+    return set(FLAGGEMS_PYTHON_OPS_FROZEN)
+
+
 def flaggems_cpp_ops(conf_dir: Path = None) -> set:
     """Ops FlagGems covers through its C++ runtime (liboperators.so, kFlagGemsCpp).
 
@@ -2540,10 +2563,37 @@ def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -
       codegen_ops.py). This branch reads the file it later rewrites, so the gap
       set has to survive the round trip; it does, because a gap stays spelled
       `cuda` in the generated conf.
+
+    * The cuda conf returns the empty set and never reaches the diff -- its
+      `cuda` routes are a boxing-era residue, not measured gaps. See the comment
+      at that branch.
     """
     measured = BOXING_TRITON_GAPS.get(_platform_from_conf(filename))
     if measured is not None:
         return measured & (fg_py | fg_cpp)
+    if _platform_from_conf(filename) == "cuda":
+        # The cuda conf is not in BOXING_TRITON_GAPS and must not fall through to
+        # the diff below.
+        #
+        # The diff reads the file this function is generating, so on a platform
+        # that has never been re-routed it re-derives every FlagGems-covered op
+        # the current conf sends to `cuda` as a "deliberate triton gap" -- which
+        # is true for MetaX and DCU (their gaps were diagnosed per op) and false
+        # for cuda, whose 1630 `cuda` routes are not gaps but the residue of a
+        # conf written for a boxing build. Feeding those back in makes the
+        # routing self-confirming: an op stays on `cuda` because it was on `cuda`.
+        #
+        # It costs real time when it happens. `backends_cuda.conf` carried 1642
+        # `cuda` routes against 392 flaggems, of which 248 were FlagGems-covered
+        # ops pinned to the empty slot this way; FlagGems-primary builds compiled
+        # no kernel behind that name, so each fell to cpu_fallback. On the OCR-RM
+        # value head that was 49.3% of the forward spent in cudaMemcpy.
+        #
+        # An empty set is the honest statement: cuda has no measured triton gap.
+        # If one is found, it belongs in BOXING_TRITON_GAPS with its diagnosis,
+        # the same way PPU's mm/bmm family is recorded -- explicit, measured, and
+        # not inferred from whatever the last regeneration happened to write.
+        return set()
     table = parse_conf(conf_dir / filename)
     covered = fg_py | fg_cpp
     return {op for op, backend in table.items() if backend == "cuda" and op in covered}
@@ -2592,6 +2642,30 @@ def boxing_measured_python_ops(filename: str) -> set:
     return set()
 
 
+def flaggems_holds() -> set:
+    """Ops codegen_ops.py holds off the FlagGems route for every platform.
+
+    Imported lazily: codegen_ops.py imports torchgen and the aten schema, which
+    gen_vendor_confs.py otherwise does not need, and a conf regeneration has to
+    work on a host where those are present but are not the point of the run. The
+    import cost is paid once per process.
+
+    Returns an empty set if codegen_ops cannot be imported, matching the previous
+    behaviour rather than failing the whole generation over a hold list.
+    """
+    global _FLAGGEMS_HOLDS
+    if _FLAGGEMS_HOLDS is None:
+        try:
+            import codegen_ops
+
+            _FLAGGEMS_HOLDS = set(codegen_ops.FLAGGEMS_RUNTIME_BROKEN) | set(
+                codegen_ops.FLAGGEMS_RECURSIVE_FALLBACK
+            )
+        except Exception:
+            _FLAGGEMS_HOLDS = set()
+    return _FLAGGEMS_HOLDS
+
+
 def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ()) -> str:
     """Pick the backend key for one op on a CUDA-boxing platform.
 
@@ -2604,6 +2678,23 @@ def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ())
     and the TileOps shims are Triton-generated too.
     """
     if op in gaps:
+        return BOXING_FALLBACK
+    # A FlagGems hold outranks the coverage sets. codegen_ops.py's runtime-broken
+    # and recursive-fallback groups name ops whose gems kernel is itself the
+    # defect -- index_select's Triton launch is not stream-ordered against the
+    # flagos stream (issue #120, KV-cache NaN in HF beam search), and the others
+    # fail their own listed ways. Covering them says a kernel exists, not that it
+    # is safe to route to, and only codegen_ops.py carries that distinction.
+    #
+    # Without this term, widening FLAGGEMS_PYTHON_OPS routes those ops to
+    # FlagGems on every platform regenerated afterwards. That is not hypothetical:
+    # it is what happened when the ceiling grew from 640 to 1098 entries, and why
+    # the generated confs for ascend, gcu, musa and ppu had index_select,
+    # _cdist_backward, nanmedian and smooth_l1_loss pointed at the Python path.
+    # A per-platform measurement that clears one of them belongs in
+    # boxing_measured_python_ops (METAX_FLAGGEMS_MEASURED), which is added to
+    # fg_py by the caller, not deleted from the shared holds.
+    if op in flaggems_holds():
         return BOXING_FALLBACK
     if op in fg_cpp:
         return "flaggems_cpp"
@@ -2648,6 +2739,10 @@ def route(
     """
     if op not in registered:
         return "none"
+    # Same hold rule as route_boxing: a FlagGems hold outranks the coverage
+    # sets. The op keeps its vendor kernel (or `none`), never the Python path.
+    if op in flaggems_holds():
+        return vendor if op in native else "none"
     if op in fg_cpp:
         return f"flaggems_cpp  # {vendor}" if op in native else "flaggems_cpp"
     if op in fg_py:
@@ -2802,7 +2897,9 @@ def build_all(conf_dir: Path) -> dict:
                     "entry from VENDORS."
                 )
 
-    fg_py = flaggems_python_ops(conf_dir)
+    # No shared fg_py here: each platform's ceiling is resolved per platform
+    # (flaggems_python_ops_for), because cuda reads the measured package set and
+    # every other vendor the frozen one.
     fg_cpp = flaggems_cpp_ops(conf_dir)
     tileops = tileops_ops(conf_dir)
 
@@ -2833,7 +2930,14 @@ def build_all(conf_dir: Path) -> dict:
         # A vendor build is FLAGOS_BUILD_FLAGGEMS=OFF, so the flaggems_cpp slot has no
         # kernel -- withhold the key and let those ops take the Python path.
         cpp_here = fg_cpp if vendor in FLAGGEMS_CPP_PLATFORMS else set()
-        py_here = fg_py if vendor in FLAGGEMS_PYTHON_PLATFORMS else set()
+        # Per-platform ceiling: cuda reads the measured set, every other
+        # vendor the frozen one (see flaggems_python_ops_for).
+        fg_py_here = (
+            flaggems_python_ops_for(vendor)
+            if vendor in FLAGGEMS_PYTHON_PLATFORMS
+            else set()
+        )
+        py_here = fg_py_here
         py_here = py_here - NATIVE_TRITON_GAPS.get(vendor, set())
         # Coverage the shared ceiling gained since this vendor's last FlagGems
         # run stays on the vendor kernel; see FLAGGEMS_PENDING_NATIVE_OPS.
@@ -2848,7 +2952,7 @@ def build_all(conf_dir: Path) -> dict:
         # holds are heuristics about cohorts. See NATIVE_FLAGGEMS_MEASURED.
         # Intersected with fg_py so an op dropped from the FlagGems set cannot
         # linger here, the same guard boxing_cpp_ops() applies.
-        py_here |= NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & fg_py
+        py_here |= NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & fg_py_here
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(
@@ -2874,7 +2978,8 @@ def build_all(conf_dir: Path) -> dict:
         )
 
     for platform, sparse_conf in BOXING_PLATFORMS.items():
-        gaps = boxing_triton_gaps(conf_dir, sparse_conf, fg_py, fg_cpp)
+        fg_py_here = flaggems_python_ops_for(platform)
+        gaps = boxing_triton_gaps(conf_dir, sparse_conf, fg_py_here, fg_cpp)
         # A measured FlagGems route outranks the gap this file's own `cuda`
         # entries would otherwise recover: the op is spelled `cuda` today
         # because the shared coverage set holds it, not because this platform
@@ -2889,7 +2994,9 @@ def build_all(conf_dir: Path) -> dict:
         # today (metax/dcu/ppu, all in the set); it exists so that a new boxing
         # platform can join without claiming FlagGems coverage it has not run.
         # Routing the shared ceiling here instead would claim exactly that.
-        py_here = (fg_py if platform in FLAGGEMS_PYTHON_PLATFORMS else set()) | measured
+        py_here = (
+            fg_py_here if platform in FLAGGEMS_PYTHON_PLATFORMS else set()
+        ) | measured
         # Only the C++-runtime conf routes to flaggems_cpp; elsewhere the slot is
         # unused and every C++ op is reached through the Python path instead.
         cpp_here = (
