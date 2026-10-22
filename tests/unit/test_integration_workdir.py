@@ -493,7 +493,7 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
             executable = shutil.which(command)
             assert executable is not None
             (isolated_path / command).symlink_to(Path(executable).resolve())
-        (isolated_path / "curl").symlink_to(commands / "curl")
+        (isolated_path / "curl").symlink_to(curl)
         rewrite_archive(None)
         unavailable = run(
             selected_environment={**cache_environment, "PATH": str(isolated_path)}
