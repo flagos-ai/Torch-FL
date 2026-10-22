@@ -615,6 +615,10 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   // scripts/codegen/gen_vendor_confs.py). Leaving mm on the vendor route keeps
   // the float failure; leaving every dtype of it on FlagGems turns working
   // integral matmul into a compile error.
+  struct OpDtypeGap {
+    at::ScalarType dtype;
+    const char* op_name;
+  };
   static constexpr OpDtypeGap kGaps[] = {
       // Integral matmul: the four dtypes the Ascend dot intrinsic refuses.
       // "mm.out" is its own conf key, so it needs its own entries.

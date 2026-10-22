@@ -36,7 +36,7 @@ import pytest
 from device_init import torch, torch_fl
 
 
-pytestmark = pytest.mark.main_ops
+pytestmark = [pytest.mark.main_ops, pytest.mark.dcu]
 
 
 def _require_dcu() -> None:

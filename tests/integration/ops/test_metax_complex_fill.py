@@ -24,7 +24,7 @@ from device_init import torch, torch_fl
 from platform_support import detect_platform
 
 
-pytestmark = pytest.mark.main_ops
+pytestmark = [pytest.mark.main_ops, pytest.mark.metax]
 
 
 def _require_metax() -> bool:

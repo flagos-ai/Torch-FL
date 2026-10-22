@@ -184,13 +184,10 @@ def pytest_collection_modifyitems(
     """Apply build-record gates to every ops case before collection finishes."""
     platform = _platform.detect_platform()
     markers_to_skip = list(_PLATFORM_SKIP_MARKERS.get(platform, ()))
-    # MetaX builds are boxing-only: the hand-written mxcc backend is NOT
-    # compiled, so ops run through the CUDA boxing kernels (and optionally the
-    # FlagGems Python path). Tests asserting a `-> metax` dispatch (mark.metax)
-    # cannot pass, so skip them. No mode variable to consult -- the platform
-    # name already says it.
-    if platform == "metax":
-        markers_to_skip.append("metax")
+    # The table gates `metax` to the MetaX lane. The CI wheel does not compile
+    # the MXCC route, so dispatch cases asserting `-> metax` opt out of this
+    # lane through their runtime backend check; the platform mark must stay
+    # usable for MetaX regression cases that test the shipped FlagGems routes.
     flaggems_cpp_on = _flaggems_cpp_enabled()
     # The `cuda` mark asserts a `-> cuda` dispatch, and on a CUDA-ABI platform
     # that route is served by the generated boxing kernels. A FlagGems-primary
@@ -258,7 +255,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "tileops: requires the generated TileOPs kernels"
     )
-    config.addinivalue_line("markers", "metax: requires MetaX platform")
+    config.addinivalue_line(
+        "markers", "metax: runs only on MetaX (not a native MXCC route assertion)"
+    )
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
     config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")

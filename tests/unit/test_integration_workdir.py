@@ -1224,6 +1224,41 @@ def test_boxing_cases_reach_a_vendor_sweep_and_skip_a_default_cuda_wheel():
     assert relative not in _KNOWN_UNREACHABLE
 
 
+@pytest.mark.parametrize(
+    "relative,platform",
+    (
+        ("tests/integration/ops/test_metax_complex_fill.py", "metax"),
+        ("tests/integration/ops/test_dcu_complex.py", "dcu"),
+    ),
+)
+def test_vendor_ops_files_are_gated_by_their_source_marker(relative, platform):
+    """A runtime platform check cannot replace the marker the shared sweep uses.
+
+    Both files run in the shared main-ops group and check their platform inside
+    each case. The collection hook only sees source-declared marks, so a missing
+    vendor mark leaves the case selected on every other platform.
+    """
+    marks = _source_mark_sets(_REPO_ROOT / relative)
+    assert marks and all(platform in case_marks for case_marks in marks)
+    assert all("main_ops" in case_marks for case_marks in marks), (
+        f"{relative} left the shared main-ops selection"
+    )
+    assert platform in _OPS_CONFTEST._PLATFORM_SKIP_MARKERS["kunlunxin"]
+    assert all(
+        _conftest_outcome(relative, case_marks, "kunlunxin") == platform
+        for case_marks in marks
+    )
+    assert all(
+        _conftest_outcome(relative, case_marks, platform) is None
+        for case_marks in marks
+    )
+    other = "cuda" if platform == "metax" else "metax"
+    assert all(
+        _conftest_outcome(relative, case_marks, other) == platform
+        for case_marks in marks
+    )
+
+
 def test_unmarked_operator_file_still_reaches_the_directory_sweep(tmp_path):
     """A bare helper must not make every ordinary operator file disappear."""
     relative = "tests/integration/ops/test_unmarked_example.py"

@@ -28,7 +28,7 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 | `main_ops` | Representative operator in the CI smoke subset | Applied to frequently-used ops (add, matmul, conv, etc.) for fast feedback |
 | `anyplatform` | Runs on any accelerator backend | Device-agnostic tests (operator registration, dispatch routing) |
 | `cuda` | Requires a CUDA boxing build (`FLAGOS_BUILD_BOXING=1`); the default FlagGems-primary wheel has no `cuda` route, so the CUDA lane skips these | Tests asserting `-> cuda` backend routing |
-| `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped on MetaX (its lane builds the boxing wheel) |
+| `metax` | Runs only on the MetaX platform | MetaX regression tests, including those exercising the FlagGems and CUDA boxing routes in its CI wheel |
 | `ascend` | Requires Ascend ACL backend | Tests asserting `-> ascend` backend routing |
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
 | `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |

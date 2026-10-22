@@ -242,10 +242,9 @@ def test_no_platform_skips_the_plain_flaggems_mark():
         assert "flaggems" not in markers, platform
 
 
-# Each vendor marker from `vendor_ops` may run only on the platform whose native
-# route it asserts. The two exceptions are enforced outside this table: MetaX
-# adds `metax` in the collection hook, and the build record removes `cuda` when
-# boxing kernels are absent. That absence is the only state this CPU can read.
+# Each platform marker may run only on the platform it names. The build record
+# additionally removes `cuda` when boxing kernels are absent; that is the only
+# wheel state this CPU can read.
 _NATIVE_PLATFORMS = frozenset(
     {"ascend", "dcu", "gcu", "iluvatar", "kunlunxin", "musa", "ppu"}
 )
@@ -259,15 +258,8 @@ def test_shared_selection_gates_each_vendor_route():
     )
     assert "cuda" not in ops_conftest._PLATFORM_SKIP_MARKERS["cuda"]
     for platform, skip_markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
-        if platform == "metax":
-            # The collection hook adds the metax marker after this table.
-            assert "metax" not in skip_markers
-            assert _NATIVE_PLATFORMS <= set(skip_markers)
-            continue
         for marker in _NATIVE_PLATFORMS:
-            if marker == "cuda":
-                assert marker in skip_markers or platform in {"cuda", "dcu", "ppu"}
-            elif platform != marker:
+            if platform != marker:
                 assert marker in skip_markers, f"{platform} / {marker}"
 
 
