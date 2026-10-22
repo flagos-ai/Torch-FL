@@ -2933,6 +2933,72 @@ __all__ = [
     "get_device_properties",
 ]
 
+
+def _preload_xcudart_for_kunlunxin():
+    """Load the vendor's CUDA-compat runtime before Triton's launcher does.
+
+    FlagTree's XPU launcher is a shared object that resolves `cudaMemcpy` at
+    dlopen time:
+
+        liblaunch_shared.so: undefined symbol: cudaMemcpy
+
+    The symbol lives in `/usr/local/xcudart/lib/libcudart.so.12` as a *versioned*
+    definition (`cudaMemcpy@@libcudart.so.12`), so it is only findable by a
+    later dlopen if that library was already loaded into the global scope.
+    Triton loads its launcher lazily on the first kernel, by which point nothing
+    has pulled libcudart in, and the launcher ends up half-resolved: the kernel
+    is accepted but `xpu_wait(NULL)` never returns. Measured on a P800
+    (torch 2.10.0+cpu): without this, every kernel -- vendor, FlagGems and a
+    hand-written `@triton.jit` one alike -- hangs on the subsequent sync; with
+    it, the same kernels complete and return correct values.
+
+    A hang rather than an error is why this is worth doing at import: the
+    dlopen failure is reported once, to stderr, by the launcher's own debug
+    path, and nothing downstream looks.
+
+    No-op off Kunlunxin, when `libcudart.so.12` is already loaded, or when the
+    file is absent. Idempotent.
+    """
+    if _platform() != "kunlunxin":
+        return
+    import ctypes
+    import os
+
+    target = "libcudart.so.12"
+    for line in _loaded_shared_objects():
+        if os.path.basename(line) == target:
+            return
+
+    root = os.environ.get("XPYTORCH_XCUDART_PATH") or os.environ.get("XPU_CUDART_PATH")
+    candidates = []
+    if root:
+        candidates.append(os.path.join(root, "lib", "libcudart.so.12"))
+        candidates.append(os.path.join(root, "libcudart.so.12"))
+    # The vendor package's default layout; xcudart is what supplies the
+    # CUDA-compatible surface the launcher and libxdnn_pytorch both link.
+    candidates.append("/usr/local/xcudart/lib/libcudart.so.12")
+    candidates.append("/usr/local/xpu/so/libcudart.so.12")
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            continue
+        return
+
+
+def _loaded_shared_objects():
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                parts = line.split()
+                if len(parts) >= 6:
+                    yield parts[5]
+    except OSError:
+        return
+
+
 # Kunlunxin's Triton backend inherits GPUDriver's torch.cuda stream accessor,
 # which cannot exist on the CPU-torch wheel that backend runs on, so its first
 # kernel launch dies in torch.cuda._lazy_init. Bound here, at import, rather
@@ -2940,4 +3006,7 @@ __all__ = [
 # eager FlagGems path is guaranteed to have triggered it before the first
 # kernel, while this only needs the module objects. See the function for the
 # mechanism and the measurement.
+# The launcher needs this before it is dlopen'd, and it is dlopen'd on the
+# first kernel -- so it has to happen here, not inside a kernel path.
+_preload_xcudart_for_kunlunxin()
 _bind_kunlunxin_triton_stream()
