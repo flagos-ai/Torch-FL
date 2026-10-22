@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import torch_fl  # noqa: F401  -- importing resolves the conf torch_fl routes by
 
@@ -145,9 +146,25 @@ def dispatched_to_mps(source: str) -> int:
         text=True,
     )
     assert result.returncode == 0, result.stderr
+    stderr = result.stderr
+    # A test can redirect its own Python stderr into a temporary buffer to
+    # retain a trace. The integration coverage plugin also redirects the file
+    # descriptor, so that child sees an empty subprocess pipe unless the trace
+    # is read back explicitly. Accept both capture modes.
+    marker = "FLAGOS_DISPATCH_TRACE="
+    trace_path = next(
+        (
+            line[len(marker) :]
+            for line in stderr.splitlines()
+            if line.startswith(marker)
+        ),
+        None,
+    )
+    if trace_path is not None:
+        stderr = Path(trace_path).read_text(encoding="utf-8", errors="replace")
     return sum(
         1
-        for line in result.stderr.splitlines()
+        for line in stderr.splitlines()
         if line.startswith("[flagos dispatch] ") and line.endswith(" -> mps")
     )
 

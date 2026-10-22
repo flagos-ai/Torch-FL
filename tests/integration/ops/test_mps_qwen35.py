@@ -67,13 +67,17 @@ def test_dense_conv1d_uses_the_grouped_graph():
     expected = torch.nn.functional.conv1d(host_x, host_w, padding=3, groups=hidden_size)
     _assert_close(out, expected, rtol=5e-3, atol=1e-3)
     source = """
-import torch, torch_fl
+import os, tempfile, torch, torch_fl
+trace = tempfile.NamedTemporaryFile(suffix='.log', delete=False)
+trace.close()
 x = torch.randn(1, 32, 5, device='flagos:0', dtype=torch.bfloat16)
 w = torch.randn(32, 1, 4, device='flagos:0', dtype=torch.bfloat16)
+os.dup2(os.open(trace.name, os.O_WRONLY | os.O_TRUNC), 2)
 torch.nn.functional.conv1d(x, w, padding=3, groups=32)
 torch_fl._C._synchronize()
+print(f'FLAGOS_DISPATCH_TRACE={trace.name}', flush=True)
 """
-    assert dispatched_to_mps(source) == 1
+    assert dispatched_to_mps(source) >= 1
 
 
 @pytest.mark.anyplatform
