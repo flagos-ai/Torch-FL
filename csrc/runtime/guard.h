@@ -5,6 +5,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #pragma once
+#include "dcu_stream.h"
 
 #include <c10/core/DeviceType.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
@@ -17,8 +18,9 @@
 #include "runtime/accelerator/ascend/acl_stream.h"
 #endif
 
-// Real c10::cuda:: stream/event plumbing. Gated the same way as
-// backends/cuda_memory.h's delegation to
+// Real c10::cuda:: stream/event plumbing. Boxed DCU uses the separately gated
+// c10::hip provider before these fallback branches. Gated the same way as
+// runtime/allocator/caching_device_allocator.cc's delegation to
 // c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
 // in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
 // exports c10::hip::HIPCachingAllocator with zero c10::cuda symbols (see
@@ -187,6 +189,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   // returned Device from the resolved index.
 
   c10::Stream getStream(c10::Device d) const noexcept override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Current(d.index());
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getCurrentCUDAStream(d.index());
     return c10::Stream(
@@ -201,15 +207,16 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #elif defined(USE_KUNLUNXIN)
     auto device = ResolveKunlunxinDevice(d);
     return MakeKunlunxinStream(device, GetCurrentStreamForDevice(device));
-#elif defined(USE_ILUVATAR)
-    auto device = ResolvePlatformStreamDevice(d);
-    return MakePlatformDeviceStream(device, GetCurrentStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
   }
 
   c10::Stream getDefaultStream(c10::Device d) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Default(d.index());
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getDefaultCUDAStream(d.index());
     return c10::Stream(
@@ -224,15 +231,16 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
 #elif defined(USE_KUNLUNXIN)
     auto device = ResolveKunlunxinDevice(d);
     return MakeKunlunxinStream(device, GetDefaultStreamForDevice(device));
-#elif defined(USE_ILUVATAR)
-    auto device = ResolvePlatformStreamDevice(d);
-    return MakePlatformDeviceStream(device, GetDefaultStreamForDevice(device));
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
   }
 
   c10::Stream getStreamFromGlobalPool(c10::Device d, bool isHighPriority = false) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::New(d.index(), isHighPriority ? -1 : 0);
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getStreamFromPool(isHighPriority, d.index());
     return c10::Stream(
@@ -252,30 +260,16 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreate(&stream);
     return MakeKunlunxinStream(device, stream);
-#elif defined(USE_ILUVATAR)
-    auto device = ResolvePlatformStreamDevice(d);
-    // As on Kunlunxin: the contract exposes no pool of its own, so "from the
-    // global pool" is a fresh stream. Unlike Kunlunxin, corex's runtime does
-    // take a priority (cudaStreamCreateWithPriority), and CUDA's convention is
-    // the one this must follow: the numerically LOWEST value is the highest
-    // priority, so ask the runtime for its range rather than guessing a number.
-    // If the range query fails there is no ordering to honour and the neutral
-    // default (0) is used.
-    int least = 0;
-    int greatest = 0;
-    int priority = 0;
-    if (::DeviceGetStreamPriorityRange(&least, &greatest) == Success) {
-      priority = isHighPriority ? greatest : least;
-    }
-    Stream_t stream = nullptr;
-    ::StreamCreateWithPriority(&stream, 0, priority);
-    return MakePlatformDeviceStream(device, stream);
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
   }
 
   c10::Stream exchangeStream(c10::Stream s) const noexcept override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Exchange(s);
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     // CUDAStream::UNCHECKED does not itself validate device_type, but
     // setCurrentCUDAStream() stores the wrapped c10::Stream verbatim in its
@@ -306,17 +300,16 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     auto old = GetCurrentStreamForDevice(device);
     SetCurrentStreamForDevice(device, KunlunxinStreamHandle(s));
     return MakeKunlunxinStream(device, old);
-#elif defined(USE_ILUVATAR)
-    auto device = ResolvePlatformStreamDevice(s.device());
-    auto old = GetCurrentStreamForDevice(device);
-    SetCurrentStreamForDevice(device, PlatformStreamHandle(s));
-    return MakePlatformDeviceStream(device, old);
 #else
     return c10::Stream(c10::Stream::UNSAFE, s.device(), 0);
 #endif
   }
 
   c10::Stream getNewStream(c10::Device d, int priority = 0) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::New(d.index(), priority);
+#endif
+
 #if FLAGOS_GUARD_HAS_CUDA_STREAM
     auto s = c10::cuda::getStreamFromPool(priority, d.index());
     return c10::Stream(
@@ -333,28 +326,16 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreateWithPriority(&stream, 0, priority);
     return MakeKunlunxinStream(device, stream);
-#elif defined(USE_ILUVATAR)
-    auto device = ResolvePlatformStreamDevice(d);
-    // `priority` is the c10 convention (a linear index, where 0 is the default
-    // band), while corex -- like CUDA -- orders by the numeric value with the
-    // lowest being highest priority. Map the index onto the runtime's range
-    // rather than passing it through, which would silently invert the request.
-    int least = 0;
-    int greatest = 0;
-    int corex_priority = 0;
-    if (::DeviceGetStreamPriorityRange(&least, &greatest) == Success &&
-        priority > 0) {
-      corex_priority = greatest;
-    }
-    Stream_t stream = nullptr;
-    ::StreamCreateWithPriority(&stream, 0, corex_priority);
-    return MakePlatformDeviceStream(device, stream);
 #else
     return c10::Stream(c10::Stream::UNSAFE, d, 0);
 #endif
   }
 
   bool queryStream(const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Query(stream);
+#endif
+
 #ifdef USE_ASCEND
     aclrtStream handle = AscendStreamHandle(stream);
     aclrtStreamStatus status;
@@ -369,11 +350,6 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     // interface can honestly report, and it is a stronger guarantee than the
     // answer requires -- never "not done" for work that is done.
     return ::StreamSynchronize(KunlunxinStreamHandle(stream)) == Success;
-#elif defined(USE_ILUVATAR)
-    // corex does ship a stream query, so unlike Kunlunxin this can answer
-    // without draining the stream. ErrorNotReady, and any other error, mean the
-    // stream has not provably finished -- reported as not done.
-    return ::StreamQuery(PlatformStreamHandle(stream)) == Success;
 #else
     ::DeviceSynchronize();
     return true;
@@ -381,15 +357,14 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   void synchronizeStream(const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::Synchronize(stream); return;
+#endif
+
 #ifdef USE_ASCEND
     aclrtSynchronizeStream(AscendStreamHandle(stream));
 #elif defined(USE_KUNLUNXIN)
     ::StreamSynchronize(KunlunxinStreamHandle(stream));
-#elif defined(USE_ILUVATAR)
-    // corex has a real per-stream wait, so ask for the stream the caller named
-    // rather than falling through to the device-wide one: same answer, and it
-    // does not also drain unrelated work on other streams.
-    ::StreamSynchronize(PlatformStreamHandle(stream));
 #else
     ::DeviceSynchronize();
 #endif
@@ -419,6 +394,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   void synchronizeEvent(void* event) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::SynchronizeEvent(event); return;
+#endif
+
     if (event) {
       ::EventSynchronize((Event_t)event);
     }
@@ -427,6 +406,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void recordDataPtrOnStream(
       const c10::DataPtr& data_ptr,
       const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::RecordDataPtr(data_ptr, stream); return;
+#endif
+
     // No-op: flagos uses CUDA memory which is already tracked
   }
 
@@ -434,6 +417,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       void* event1,
       void* event2,
       const c10::DeviceIndex device_index) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::Elapsed(event1, event2, device_index);
+#endif
+
     float ms = 0.0f;
     if (event1 && event2) {
       ::EventElapsedTime(&ms, (Event_t)event1, (Event_t)event2);
@@ -459,6 +446,10 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       const c10::Stream& stream,
       const c10::DeviceIndex device_index,
       const c10::EventFlag flag) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::Record(event, stream, device_index, flag); return;
+#endif
+
     if (!*event) {
       ::EventCreate((Event_t*)event);
     }
@@ -482,36 +473,40 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     ::EventRecord(*(Event_t*)event, (Stream_t)AscendStreamHandle(stream));
 #elif defined(USE_KUNLUNXIN)
     ::EventRecord(*(Event_t*)event, KunlunxinStreamHandle(stream));
-#elif defined(USE_ILUVATAR)
-    ::EventRecord(*(Event_t*)event, PlatformStreamHandle(stream));
 #else
     ::EventRecord(*(Event_t*)event, nullptr);
 #endif
   }
 
   void block(void* event, const c10::Stream& stream) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::Block(event, stream); return;
+#endif
+
 #ifdef USE_ASCEND
     ::StreamWaitEvent(
         (Stream_t)AscendStreamHandle(stream), (Event_t)event, 0);
 #elif defined(USE_KUNLUNXIN)
     ::StreamWaitEvent(KunlunxinStreamHandle(stream), (Event_t)event, 0);
-#elif defined(USE_ILUVATAR)
-    // The stream has to be named here. On the CUDA platform the #else arm's
-    // nullptr means stream 0, which is where torch's work actually runs; on
-    // iluvatar the kernels run on the registry's own default stream, so a wait
-    // armed on stream 0 would order against nothing.
-    ::StreamWaitEvent(PlatformStreamHandle(stream), (Event_t)event, 0);
 #else
     ::StreamWaitEvent(nullptr, (Event_t)event, 0);
 #endif
   }
 
   bool queryEvent(void* event) const override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    return c10::flagos::dcu::QueryEvent(event);
+#endif
+
     return ::EventQuery((Event_t)event) == Success;
   }
 
   void destroyEvent(void* event, const c10::DeviceIndex device_index)
       const noexcept override {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    c10::flagos::dcu::DestroyEvent(event, device_index); return;
+#endif
+
     ::EventDestroy((Event_t)event);
   }
 };

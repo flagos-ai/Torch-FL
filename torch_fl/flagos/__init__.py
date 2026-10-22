@@ -2941,3 +2941,19 @@ __all__ = [
 # kernel, while this only needs the module objects. See the function for the
 # mechanism and the measurement.
 _bind_kunlunxin_triton_stream()
+
+
+# The optional boxed DCU provider shares the vendor HIP registry. In the OFF
+# wheel these symbols do not exist; preserve its existing compatibility API.
+if hasattr(_C, "_dcu_stream_info"):
+    from torch_fl.accelerator.dcu.dcu_stream import (
+        DcuEvent as Event,
+        DcuExternalStream as ExternalStream,
+        DcuStream as Stream,
+        current_stream,
+        default_stream,
+        set_stream,
+        stream_context as stream,
+    )
+
+    __all__ += ["ExternalStream", "default_stream", "set_stream"]
