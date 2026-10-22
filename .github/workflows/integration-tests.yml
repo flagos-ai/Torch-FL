@@ -124,19 +124,21 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         continue-on-error: true
+        timeout-minutes: 12
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           persist-credentials: false
-          # The source API is reachable through the proxy on the self-hosted
-          # runners. The archive host has returned cancelled requests there;
-          # use a bounded git fetch when a git binary is available. The next
-          # step supplies an archive fallback with the same source commit.
+          # Leave enough time for a fresh checkout and the source archive when
+          # this transfer is cancelled.
           fetch-depth: 1
 
       - name: Retry checkout source
+        id: checkout-retry
         if: ${{ steps.checkout.outcome == 'failure' }}
         uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 12
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
@@ -144,7 +146,7 @@ jobs:
           fetch-depth: 1
 
       - name: Fetch the source archive if checkout failed
-        if: ${{ steps.checkout.outcome == 'failure' }}
+        if: ${{ steps.checkout.outcome == 'failure' && steps.checkout-retry.outcome != 'success' }}
         id: source-archive
         env:
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
@@ -1050,6 +1052,21 @@ jobs:
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}
+
+      # The test copy is shared with the vendor container, whose files carry
+      # the image's uid. Finish with a cleanup process in that image before
+      # removing it, so a failed or interrupted run cannot leave unreadable
+      # files for the next checkout. This is the job's final step because later
+      # actions and cache saves need the runner's live environment files.
+      - name: Close the platform command environment
+        if: ${{ !cancelled() && steps.container.outcome == 'success' && steps.container.outputs.name != '' }}
+        env:
+          CONTAINER_NAME: ${{ steps.container.outputs.name }}
+        run: |
+          set -euo pipefail
+          docker exec "$CONTAINER_NAME" --env HOME=/tmp bash -e -c \
+            'find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" -xdev -depth -mindepth 1 -delete 2>/dev/null || true'
+          docker rm --force "$CONTAINER_NAME"
 
   flagcicd-report:
     name: FlagCICD outcome (${{ inputs.platform }})

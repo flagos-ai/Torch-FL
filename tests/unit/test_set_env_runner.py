@@ -99,16 +99,19 @@ def test_the_parameterized_workflow_provisions_every_platform():
     """One workflow provisions every platform, from that platform's config.
 
     There used to be a file per platform under `integration-test-<p>.yml`, each
-    repeating `bash .github/scripts/set_env.sh --platform <p>` and hard-coding
-    its stage. The pipeline reads setup_script/setup_platform/setup_stage from
-    the config now, so a platform that needs the `build` stage (Ascend,
-    Kunlunxin) is no longer the only shape the file can express.
+    hard-coding a shell and a platform. The pipeline reads setup_script,
+    setup_platform and setup_stage from the config now. It also resolves Bash
+    after loading the runner profile: the MPS runner has no `bash` on its
+    default PATH, although its profile exports an absolute interpreter path.
     """
     text = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
-    assert (
-        'bash "${{ needs.configuration.outputs.setup_script }}" '
-        '--platform "${{ needs.configuration.outputs.setup_platform }}"' in text
-    )
+    assert "SETUP_BASH: ${{ env.bash || '/bin/bash' }}" in text
+    assert '"$SETUP_BASH" $(printf' in text
+    assert '--platform "$(printf' in text
+    assert "$GITHUB_WORKSPACE/$SETUP_SCRIPT" in text
+    assert "SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}" in text
+    assert "command -v bash" in text
+    assert '[[ "$SETUP_BASH" = /* ]] && test -x "$SETUP_BASH"' in text
     assert "CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}" in text
 
 

@@ -448,6 +448,20 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     test_step = next(step for step in steps if step.get("id") == "integration-tests")
     container = next(step for step in steps if step.get("id") == "container")
     assert "container_workspace.py start" in container["run"]
+    cleanup = next(
+        step
+        for step in steps
+        if step.get("name") == "Close the platform command environment"
+    )
+    assert "!cancelled()" in cleanup["if"]
+    assert cleanup["env"]["CONTAINER_NAME"] == "${{ steps.container.outputs.name }}"
+    assert 'find "$GITHUB_WORKSPACE" "$RUNNER_TEMP"' in cleanup["run"]
+    assert 'docker rm --force "$CONTAINER_NAME"' in cleanup["run"]
+    names = [step.get("name", "") for step in steps]
+    assert names.index("Close the platform command environment") > names.index(
+        "Retain Python coverage"
+    )
+    assert steps[-1]["name"] == "Close the platform command environment"
     assert "docker run" not in test_step["run"]
     assert "docker exec" in test_step["run"]
 

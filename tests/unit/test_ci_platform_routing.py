@@ -98,6 +98,13 @@ def test_platform_tests_and_manifest_use_the_resolved_source():
         and step.get("uses", "").startswith("actions/checkout@")
     )
     assert retry["if"] == "${{ steps.checkout.outcome == 'failure' }}"
+    assert retry["id"] == "checkout-retry"
+    assert retry["continue-on-error"] is True
+    fallback = next(step for step in steps if step.get("id") == "source-archive")
+    assert fallback["if"] == (
+        "${{ steps.checkout.outcome == 'failure' && "
+        "steps.checkout-retry.outcome != 'success' }}"
+    )
     for step in (checkout, retry):
         assert checkout["continue-on-error"] is True
         assert step["with"]["repository"] == (
