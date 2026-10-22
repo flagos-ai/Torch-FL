@@ -65,13 +65,19 @@ that environment already carries PyYAML for ``test_ci_pip_cache.py`` and for
 FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_dcu.sh``).
 """
 
+import argparse
+import hashlib
+import importlib.util
 import io
+import json
 import os
+import pathlib
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import tokenize
@@ -79,6 +85,7 @@ import types
 from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -234,6 +241,40 @@ def _run_script_of_step(text: str, step_name: str) -> str | None:
     return None
 
 
+def _load_workspace_script():
+    spec = importlib.util.spec_from_file_location(
+        "archive_fallback_workspace",
+        _REPO_ROOT / ".github/scripts/container_workspace.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _prepare_archive_workspace(module, workspace, config):
+    return module.prepare(
+        argparse.Namespace(
+            checkout=str(workspace),
+            runner_temp=str(config / "prepared-runner"),
+            model_root=str(config / "model"),
+            model_path="/var/lib/torch-fl-ci/models/Qwen3-0.6B",
+            image="",
+            digest="",
+            volumes="[]",
+            options="",
+        )
+    )
+
+
+def _snapshot(directory):
+    return {
+        path.relative_to(directory): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_the_archive_fallback_replaces_a_stale_workspace():
     """Exercise the fallback that runs when both checkout attempts fail."""
     workflow = _run_script_of_step(
@@ -253,11 +294,17 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
     )
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        bash = shutil.which("bash")
+        assert bash is not None
         source = root / "source"
         source.mkdir()
         (source / "setup.sh").write_text("echo verified\n", encoding="utf-8")
+        (source / "sentinel.txt").write_text("source sentinel\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(source)], check=True)
-        subprocess.run(["git", "-C", str(source), "add", "setup.sh"], check=True)
+        subprocess.run(
+            ["git", "-C", str(source), "add", "setup.sh", "sentinel.txt"],
+            check=True,
+        )
         subprocess.run(
             [
                 "git",
@@ -305,6 +352,24 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
         workspace = root / "workspace"
         workspace.mkdir()
         (workspace / "stale.txt").write_text("stale\n", encoding="utf-8")
+        archive_root = pathlib.PurePosixPath(outer.name)
+        with tarfile.open(archive) as stream:
+            original_files = {}
+            for entry in stream.getmembers():
+                relative = pathlib.PurePosixPath(entry.name)
+                if (
+                    not entry.isfile()
+                    or ".." in relative.parts
+                    or relative.name.startswith("._")
+                ):
+                    continue
+                source_file = stream.extractfile(entry)
+                assert source_file is not None
+                original_files[relative.relative_to(archive_root)] = source_file.read()
+            assert {path.as_posix() for path in original_files} == {
+                "setup.sh",
+                "sentinel.txt",
+            }
         commands = root / "bin"
         commands.mkdir()
         curl = commands / "curl"
@@ -320,32 +385,278 @@ def test_the_archive_fallback_replaces_a_stale_workspace():
             encoding="utf-8",
         )
         curl.chmod(0o755)
+        no_git = root / "no-git"
+        no_git.mkdir()
+        for command in ("python3", "tar", "cp", "rm", "mv", "mkdir", "true", "env"):
+            executable = shutil.which(command)
+            assert executable is not None
+            if command == "python3":
+                (no_git / command).symlink_to(sys.executable)
+            else:
+                (no_git / command).symlink_to(executable)
         runner_temp = root / "runner-temp"
         runner_temp.mkdir()
-        environment = {
+
+        def rewrite_archive(metadata: bytes | None, *, damaged: bool = False) -> None:
+            replacement = root / "replacement.tar.gz"
+            with tarfile.open(replacement, mode="w:gz") as output:
+                for name, payload in original_files.items():
+                    if damaged and name == pathlib.PurePosixPath("sentinel.txt"):
+                        payload = b"damaged sentinel\n"
+                    info = tarfile.TarInfo(f"{archive_root}/{name}")
+                    info.mode = 0o644
+                    info.size = len(payload)
+                    output.addfile(info, io.BytesIO(payload))
+                if metadata is not None:
+                    info = tarfile.TarInfo(f"{archive_root}/.git_archival.txt")
+                    info.mode = 0o644
+                    info.size = len(metadata)
+                    output.addfile(info, io.BytesIO(metadata))
+            replacement.replace(archive)
+
+        cache_environment = {
             **os.environ,
-            "PATH": f"{commands}:{os.defpath}",
-            "GIT_CEILING_DIRECTORIES": str(root),
+            "GIT_CEILING_DIRECTORIES": str(runner_temp),
             "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
             "GIT_DIR": "",
             "SOURCE_REPOSITORY": "flagos-ai/Torch-FL",
-            "SOURCE_REF": revision,
+            "SOURCE_REPOSITORY_PATH": str(source),
             "RUNNER_TEMP": str(runner_temp),
+            "SOURCE_REF": revision,
             "GITHUB_WORKSPACE": str(workspace),
             "GH_TOKEN": "test-token",
             "SOURCE_ARCHIVE": str(archive),
+            "GITHUB_OUTPUT": str(runner_temp / "source-output"),
+            "BASH": bash,
         }
-        result = subprocess.run(
-            ["bash", "-xc", script],
-            env=environment,
-            capture_output=True,
-            text=True,
+        git_directory = Path(shutil.which("git")).resolve().parent
+        git_only = root / "git-only"
+        git_only.mkdir()
+        (git_only / "git").symlink_to(git_directory / "git")
+        git_environment = {
+            **cache_environment,
+            "PATH": f"{commands}:{no_git}:{git_only}:/bin",
+        }
+        environment = {**cache_environment, "PATH": f"{commands}:{no_git}:/bin"}
+        cache_environment["PATH"] = environment["PATH"]
+        config = root / "config"
+        (config / "state").mkdir(parents=True)
+        (config / "workspace").mkdir()
+        (config / "model/Qwen3-0.6B").mkdir(parents=True)
+        workspace_script = _load_workspace_script()
+        platform = patch.dict(
+            os.environ,
+            {
+                "INTEGRATION_PLATFORM": "ascend",
+                "GITHUB_ENV": str(config / "host-env"),
+                "GITHUB_OUTPUT": str(config / "host-output"),
+                "GITHUB_PATH": str(config / "host-path"),
+                "CHECKOUT_REPOSITORY": "flagos-ai/Torch-FL",
+                "CHECKOUT_REF": revision,
+            },
         )
+        platform.start()
+        try:
+            prepared_settings = _prepare_archive_workspace(
+                workspace_script, workspace, config
+            )
+        finally:
+            platform.stop()
+        (config / "host-env").touch()
+        (config / "host-output").touch()
+        (config / "host-path").touch()
+        settings = {
+            **prepared_settings,
+            "container": "",
+            "container_name": "",
+            "shell": str(bash),
+        }
+
+        def configured(container):
+            settings["container"] = ""
+            settings["container_name"] = ""
+            return workspace_script.configure(settings, container)
+
+        def run(selected_script=script, selected_environment=environment):
+            return subprocess.run(
+                [bash, "-xc", selected_script],
+                env=selected_environment,
+                capture_output=True,
+                text=True,
+            )
+
+        output = runner_temp / "source-output"
+        stale_files = _snapshot(workspace)
+        rewrite_archive(None)
+        unavailable = run()
+        assert unavailable.returncode != 0
+        assert "cannot compare it with Git" in unavailable.stderr
+        assert _snapshot(workspace) == stale_files
+        assert not output.exists()
+
+        rewrite_archive(f"node: {'0' * 40}\n".encode())
+        mismatched = run()
+        assert mismatched.returncode != 0
+        assert "source archive contains" in mismatched.stderr
+        assert _snapshot(workspace) == stale_files
+        assert not output.exists()
+
+        unusable = root / "unusable.tar.gz"
+        unusable.write_bytes(b"not a tarball\n")
+        invalid = run(
+            selected_environment={**environment, "SOURCE_ARCHIVE": str(unusable)}
+        )
+        assert invalid.returncode != 0
+        assert "could not download" in invalid.stderr
+        assert _snapshot(workspace) == stale_files
+        assert not output.exists()
+
+        rewrite_archive(f"node: {revision}\n".encode())
+        result = run()
         assert result.returncode == 0, result.stderr
-        assert (workspace / "setup.sh").read_text(encoding="utf-8") == (
-            "echo verified\n"
+        verified_files = _snapshot(workspace)
+        assert verified_files == {
+            Path("sentinel.txt"): b"source sentinel\n",
+            Path("setup.sh"): b"echo verified\n",
+        }
+        expected_output = {
+            "archive_path": str(workspace.resolve()),
+            "source_mode": "archival",
+            "ref": revision,
+        }
+        published = {
+            name: value
+            for name, _, value in (
+                line.partition("=") for line in output.read_text().splitlines()
+            )
+        }
+        assert (
+            published.pop("archive_sha256")
+            == hashlib.sha256(archive.read_bytes()).hexdigest()
         )
-        assert not (workspace / "stale.txt").exists()
+        assert published == expected_output
+        assert (
+            runner_temp / f"torch-fl-source-mode-{revision}"
+        ).read_text().strip() == ("archival")
+
+        rewrite_archive(f"node: {revision}\n".encode(), damaged=True)
+        output.unlink()
+        damaged = run(selected_environment=git_environment)
+        assert damaged.returncode != 0
+        assert "source archive differs" in damaged.stderr
+        assert _snapshot(workspace) == verified_files
+        assert not output.exists()
+
+        rewrite_archive(f"node: {revision}\n".encode())
+        repeated = run()
+        assert repeated.returncode == 0, repeated.stderr
+        assert _snapshot(workspace) == verified_files
+        assert not list(workspace.parent.glob(f".{workspace.name}-*"))
+        assert not list(runner_temp.glob(f"torch-fl-source-{revision}.tar.gz.*"))
+
+        path = prepared_settings["workspace"]
+        assert Path(path, ".torch-fl-revision").is_file()
+        Path(path, ".torch-fl-revision").unlink()
+        revision_probe_failed = False
+        calls = []
+
+        def docker(command, *arguments, **options):
+            calls.append(command)
+            if command[:2] == ["docker", "exec"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    1
+                    if command[-1] == "workspace-revision" and revision_probe_failed
+                    else 0,
+                    "command=workspace-revision\n" if revision_probe_failed else "",
+                    "",
+                )
+            if command[:2] == ["docker", "inspect"]:
+                if ".Mounts" in command[-1]:
+                    return subprocess.CompletedProcess(
+                        command, 0, '[{"Destination": "/workspace"}]\n', ""
+                    )
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "RUNNER_PIP_DIR" if "RepoDigests" in command[-1] else "vendor\n",
+                    "",
+                )
+            if command[:2] == ["docker", "create"]:
+                container = root / "container"
+                if container.exists():
+                    shutil.rmtree(container)
+                container.mkdir()
+                shutil.copytree(path, container, symlinks=True)
+                return subprocess.CompletedProcess(command, 0, "container-id\n", "")
+            if command[:3] == ["docker", "image", "inspect"]:
+                image = command[-1]
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps([image.partition("@")[0] + "@sha256:" + "a" * 64])
+                    + "\n",
+                    "",
+                )
+            if command[:2] == ["docker", "logs"]:
+                return subprocess.CompletedProcess(command, 0, "container logs\n", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(
+            workspace_script.subprocess, "run", side_effect=docker
+        ), platform:
+            successful = configured("valid-container")
+        assert successful["container_name"] == "vendor"
+        assert not (root / "container/.torch-fl-revision").exists()
+        prepared_settings["shell"] = successful["shell"]
+        verification = runner_temp / "stale-workspace.tar.gz"
+        subprocess.run(
+            [
+                "tar",
+                "-czf",
+                str(verification),
+                "-C",
+                str(Path(path).parent),
+                Path(path).name,
+            ],
+            check=True,
+        )
+        Path(successful["state"], "config.json").write_text(
+            json.dumps(prepared_settings)
+        )
+        revision_probe_failed = True
+        platform.start()
+        try:
+            with mock.patch.object(
+                workspace_script.subprocess, "run", side_effect=docker
+            ):
+                with pytest.raises(
+                    workspace_script.WorkspaceError, match="workspace-revision"
+                ) as stale:
+                    configured("stale-container")
+        finally:
+            platform.stop()
+        subprocess.run(
+            [
+                "tar",
+                "-xzf",
+                str(verification),
+                "-C",
+                str(Path(path).parent),
+                Path(path).name,
+            ],
+            check=True,
+        )
+        assert "workspace-revision: exit 1" in str(stale.value)
+        assert "mounts: exit 0" in str(stale.value)
+        revision_probe = str(stale.value).split("workspace-revision: exit 1", 1)[1]
+        assert "command=workspace-revision" in revision_probe.split("\nmounts:")[0]
+        assert not (root / "container/.torch-fl-revision").exists()
+        assert len(calls) > 6
+        assert prepared_settings["source_revision"]
+        assert any(
+            call[-2:] == ["workspace-revision", "workspace-revision"] for call in calls
+        )
 
 
 def _manifest_platforms() -> list[str]:
@@ -399,30 +710,32 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
     )
     assert workflow is not None
     assert "$${" not in workflow
-    assert "read -r container_image container_workspace < <(" in workflow
+    assert "container_image=$(python3 -c" in workflow
+    assert "container_workspace=$(python3 -c" in workflow
     assert ']] && [[ "$(python3 -c' not in workflow
     assert 'container_workspace="$(python3 -c' not in workflow
     # GitHub's shell may expand the parameter assertion before this step runs.
     assert "${GITHUB_WORKSPACE:?}" not in workflow
-    assert 'setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"' in workflow
+    assert 'setup_path="$PWD/$SETUP_SCRIPT"' in workflow
     assert (
-        'create_setup_entry "$3" "$4"; unset CI_WORKSPACE; '
-        'exec bash -c "$(cat "$5")"' in workflow
+        'unset CI_WORKSPACE; create_setup_entry "$5" "$3"; '
+        'entry=$(cat "$5"); exec env -u BASH_ENV bash -c "$entry" "$6"' in workflow
     )
     assert 'create_setup_entry "$setup_path" "$container_workspace"' in workflow
     assert (
         'local setup_bash="${SETUP_BASH:?}"'
         in (_REPO_ROOT / ".github/scripts/setup_entry.sh").read_text()
     )
-    assert 'setup_helper="$GITHUB_WORKSPACE/.github/scripts/setup_entry.sh"' in workflow
+    assert (
+        'mkdir -p "$RUNNER_TEMP"'
+        in (_REPO_ROOT / ".github/scripts/setup_entry.sh").read_text()
+    )
+    assert 'setup_helper="$PWD/.github/scripts/setup_entry.sh"' in workflow
+    assert 'setup_path="$PWD/$SETUP_SCRIPT"' in workflow
     assert "source .github/scripts/setup_entry.sh" in workflow
     assert 'source "$1" </dev/null; source "$2"' in workflow
-    assert (
-        'container_workspace="$GITHUB_WORKSPACE"\n'
-        'runner_workspace="$GITHUB_WORKSPACE"\n'
-        'if [[ -n "$CONTAINER_CONFIG" ]]' in workflow
-    )
-    assert '"$runner_workspace" "$temp/torch-fl-platform-setup.sh"' in workflow
+    assert 'runner_workspace="$GITHUB_WORKSPACE"\n' in workflow
+    assert 'container_workspace="$runner_workspace"' in workflow
     assert '--workspace "$container_workspace"' in workflow
     assert 'cp "$temp/torch-fl-platform-setup.sh" "$container_workspace/"' in workflow
     assert 'source "$1" </dev/null; command -v bash' in workflow
@@ -551,7 +864,7 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
                 "SETUP_READY=$RUNNER_TEMP/setup-ready; export SETUP_READY\n" + workflow,
             ],
             cwd=checkout,
-            env=common_environment,
+            env={**common_environment, "SETUP_READY": str(runner_temp / "setup-ready")},
             capture_output=True,
             text=True,
         )
@@ -568,11 +881,6 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
             "setup",
         )
         assert not (runner_temp / "setup-ready").exists()
-        assert "create_setup_entry()" not in generated
-        assert '"$GITHUB_WORKSPACE/.github/scripts/set_env.sh" --platform' in (
-            generated
-        )
-        assert entrypoint.is_file()
         assert "$state/torch-fl-workspace" not in workflow
 
 
@@ -602,6 +910,7 @@ def test_native_setup_ignores_a_profile_workspace_override(tmp_path):
     profile = runner_temp / "profile.sh"
     profile.write_text(
         'export BASH_ENV="$RUNNER_TEMP/setup-ready"\n'
+        'export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
         'if [[ -n "${PROFILE_CHANGES_WORKSPACE:-}" ]]; then\n'
         '  export GITHUB_WORKSPACE="$EXPECTED_WORKSPACE"\n'
         "fi\n"
@@ -657,6 +966,58 @@ def test_native_setup_ignores_a_profile_workspace_override(tmp_path):
     assert str(prepared) not in generation.read_text()
 
 
+@pytest.mark.parametrize("variable", ("CI_STAGE", "INTEGRATION_PROFILE", "PATH"))
+def test_setup_entry_names_a_profile_variable_it_did_not_export(tmp_path, variable):
+    """Setup stops before its child shell when a profile loses a required value."""
+    bash = shutil.which("bash")
+    assert bash is not None
+    bash_major = int(
+        subprocess.check_output([bash, "-c", 'printf "%s" "$BASH_VERSINFO"'])
+    )
+    assert bash_major >= 4, "this workflow test needs Bash 4 or newer"
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    platform_workspace = runner_temp / "workspace"
+    platform_workspace.mkdir()
+    setup = tmp_path / "set_env.sh"
+    setup.write_text("#!/bin/bash\nexit 99\n", encoding="utf-8")
+    setup.chmod(0o755)
+    environment = {
+        "CI_STAGE": "build",
+        "INTEGRATION_PROFILE": str(tmp_path / "profile.sh"),
+        "PATH": os.defpath,
+        "RUNNER_TEMP": str(runner_temp),
+        "SETUP_BASH": bash,
+        "SETUP_PLATFORM": "mps",
+        "SETUP_SCRIPT": str(setup),
+    }
+    if variable != "PATH":
+        environment.pop(variable)
+    environment["BASH"] = bash
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            (
+                'if [[ "$1" = PATH ]]; then\n'
+                "  unset PATH\n"
+                "fi\n"
+                'source "$2"; create_setup_entry "$3" "$4"'
+            ),
+            "--",
+            variable,
+            str(_REPO_ROOT / ".github/scripts/setup_entry.sh"),
+            "unused",
+            str(platform_workspace),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert f"the profile did not export a non-empty {variable}" in result.stderr
+
+
 def test_the_model_mount_is_prepared_on_its_platform_host():
     """Restore the checkpoint on the runner that will start the vendor image."""
     workflow = yaml.safe_load(
@@ -710,14 +1071,16 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert "hf_hub_download" not in verify["run"]
     setup = next(step for step in steps if step.get("id") == "setup")
     assert "$${" not in setup["run"]
-    assert 'setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"' in setup["run"]
+    assert 'setup_path="$PWD/$SETUP_SCRIPT"' in setup["run"]
     assert '--workspace "$container_workspace"' in setup["run"]
     fallback = next(step for step in steps if step.get("id") == "source-archive")
     assert (
         "api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"
         in (fallback["run"])
     )
-    assert 'archive="${RUNNER_TEMP:-/tmp}/torch-fl-source.tar.gz"' in fallback["run"]
+    assert (
+        'archive="$RUNNER_TEMP/torch-fl-source-${SOURCE_REF}.tar.gz"' in fallback["run"]
+    )
     for step in steps:
         if step.get("id") in {"merge-report", "merge-coverage"}:
             assert step["env"]["SOURCE_REF"] == "${{ steps.source.outputs.ref }}"

@@ -106,15 +106,19 @@ def test_the_parameterized_workflow_provisions_every_platform():
     """
     text = (WORKFLOWS / "integration-tests.yml").read_text(encoding="utf-8")
     assert "SETUP_BASH: ${{ env.bash || '/bin/bash' }}" in text
-    assert "read -r container_image container_workspace < <(" in text
+    assert "container_image=$(python3 -c" in text
+    assert "container_workspace=$(python3 -c" in text
     assert "env -u BASH_ENV /bin/bash -c" in text
     assert 'source "$INTEGRATION_PROFILE"' in text
-    assert 'exec bash -c "$(cat "$5")"' in text
+    assert (
+        'unset CI_WORKSPACE; create_setup_entry "$5" "$3"; '
+        'entry=$(cat "$5"); exec env -u BASH_ENV bash -c "$entry" "$6"' in text
+    )
     assert 'source "$1" </dev/null; source "$2"' in text
     assert "create_setup_entry" in text
     assert "SETUP_PLATFORM: ${{ needs.configuration.outputs.setup_platform }}" in text
     assert "command -v bash" in text
-    assert '[[ "$selected_bash" = /* ]] && test -x "$selected_bash"' in text
+    assert '[[ "$selected_bash" = /* ]]' in text
     assert "CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}" in text
 
 

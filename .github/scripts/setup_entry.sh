@@ -19,23 +19,49 @@ create_setup_entry() {
   local setup_path="$1"
   local platform_workspace="$2"
   local setup_script="${SETUP_SCRIPT:?}"
-  local name=torch-fl-platform-setup.sh
-  local entry="${RUNNER_TEMP:?}/$name"
+  local entry="${RUNNER_TEMP:?}/torch-fl-platform-setup.sh"
   local setup_bash="${SETUP_BASH:?}"
-  [[ "$platform_workspace" = /* ]] && test -d "$platform_workspace"
-  if [[ "$setup_script" == */* ]]; then
-    [[ "$setup_script" = /* ]] && test -f "$setup_script"
+  local stage_value="${CI_STAGE-}"
+  local profile_value="${INTEGRATION_PROFILE-}"
+  local path_value="${PATH-}"
+  local path_defined="${PATH+x}"
+  mkdir -p "$RUNNER_TEMP"
+  if [[ "$platform_workspace" != /* || ! -d "$platform_workspace" ]]; then
+    echo "::error::the integration workspace is not an absolute directory: $platform_workspace" >&2
+    return 1
   fi
-  if [[ "$setup_bash" == */* ]]; then
-    [[ "$setup_bash" = /* ]] && test -x "$setup_bash"
+
+  if [[ "$setup_bash" == */* ]] &&
+    { [[ "$setup_bash" != /* ]] || [[ ! -x "$setup_bash" ]]; }; then
+    echo "::error::the selected Bash is not an absolute executable: $setup_bash" >&2
+    return 1
   fi
   # Capture the profile's final exported state and remove BASH_ENV before
   # setup. Reloading the profile could repeat its side effects.
   printf 'set -euo pipefail\nunset BASH_ENV\n' > "$entry"
-  printf '%s\n' "$(declare -p -x CI_STAGE INTEGRATION_PROFILE PATH)" \
-    >> "$entry"
+  if [[ -z "$stage_value" ]]; then
+    echo "::error::the profile did not export a non-empty CI_STAGE" >&2
+    return 1
+  fi
+  if [[ -z "$profile_value" ]]; then
+    echo "::error::the profile did not export a non-empty INTEGRATION_PROFILE" >&2
+    return 1
+  fi
+  if [[ -z "$path_defined" || -z "$path_value" ]]; then
+    echo "::error::the profile did not export a non-empty PATH" >&2
+    return 1
+  fi
+  local variable value
+  for variable in CI_STAGE INTEGRATION_PROFILE PATH; do
+    if [[ -z "${!variable:-}" ]]; then
+      echo "::error::the profile did not export a non-empty $variable" >&2
+      return 1
+    fi
+    printf -v value '%q' "${!variable}"
+    printf 'export %s=%s\n' "$variable" "$value" >> "$entry"
+  done
   printf 'export GITHUB_WORKSPACE=%q\n' "$platform_workspace" >> "$entry"
   printf 'cd %q\n' "$platform_workspace" >> "$entry"
-  printf 'exec %q "$GITHUB_WORKSPACE/%s" --platform %q\n' \
+  printf 'exec env -u BASH_ENV %q "$GITHUB_WORKSPACE/%s" --platform %q\n' \
     "$setup_bash" "$setup_script" "$SETUP_PLATFORM" >> "$entry"
 }

@@ -115,7 +115,14 @@ def test_platform_tests_and_manifest_use_the_resolved_source():
         )
         assert step["with"]["persist-credentials"] is False
     verify = next(step for step in steps if step.get("id") == "source")
-    assert "git rev-parse HEAD" in verify["run"]
+    assert 'git -C "$GITHUB_WORKSPACE" rev-parse HEAD' in verify["run"]
+    assert 'if [[ -z "$SOURCE_MODE" ]]' in verify["run"]
+    assert (
+        verify["env"]["SOURCE_MODE"]
+        == "${{ steps.source-archive.outputs.source_mode }}"
+    )
+    assert "neither Git nor a verified archive" in verify["run"]
+    assert "the downloaded archive changed after it was verified" in verify["run"]
     assert verify["env"]["EXPECTED_CHECKOUT_REF"] == (
         "${{ inputs.expected_checkout_ref }}"
     )

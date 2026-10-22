@@ -152,8 +152,12 @@ jobs:
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           SOURCE_REF: ${{ inputs.checkout_ref || inputs.expected_checkout_ref || github.sha }}
           GH_TOKEN: ${{ github.token }}
+          RUNNER_TEMP: ${{ runner.temp }}
+          SOURCE_REPOSITORY_PATH: ${{ env.source_repository_path || '' }}
+          GIT_AUTHORIZATION_HEADER: ${{ env.git_authorization_header || '' }}
         run: |
           set -euo pipefail
+          export RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
           if [[ ! "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
             echo "::error::invalid checkout repository: $SOURCE_REPOSITORY"
             exit 1
@@ -162,42 +166,397 @@ jobs:
             echo "::error::the archive fallback requires a full commit SHA"
             exit 1
           fi
-          archive="${RUNNER_TEMP:-/tmp}/torch-fl-source.tar.gz"
-          cached_archive="${RUNNER_TEMP:-/tmp}/torch-fl-source-cached.tar.gz"
-          partial="${archive}.partial"
-          archive_root="${RUNNER_TEMP:-/tmp}/torch-fl-source-archive"
-          rm -rf "$archive_root"
-          if [[ -s "$cached_archive" ]] &&
-            ! tar -tzf "$cached_archive" >/dev/null 2>&1; then
-            mv -f "$cached_archive" "$archive"
-          fi
-          if ! [[ -s "$archive" ]] || ! tar -tzf "$archive" >/dev/null 2>&1; then
-            for attempt in 1 2 3; do
-              for endpoint in "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REF}" \
-                "https://api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"; do
-                rm -f "$partial"
-                if curl --fail --silent --show-error --location \
-                  --retry 2 --connect-timeout 20 --max-time 600 \
-                  --header "Authorization: Bearer $GH_TOKEN" \
-                  --header "Accept: application/vnd.github+json" \
-                  --output "$partial" \
-                  "$endpoint" && tar -tzf "$partial" >/dev/null 2>&1; then
-                  mv "$partial" "$archive"
-                  break 2
-                fi
-              done
-              if [[ "$attempt" == 3 ]]; then
-                echo "::error::could not download the source archive for $SOURCE_REF"
-                exit 1
+          archive="$RUNNER_TEMP/torch-fl-source-${SOURCE_REF}.tar.gz"
+          cached_archive="$RUNNER_TEMP/torch-fl-source-cached-${SOURCE_REF}.tar.gz"
+          partial="$archive.partial"
+          mode_file="$RUNNER_TEMP/torch-fl-source-mode-${SOURCE_REF}"
+          rm -f "$archive" "$cached_archive" "$partial" "$mode_file"
+          # Git writes FETCH_HEAD without a lock. Remove a lock left by an
+          # interrupted source verification before probing the checkout.
+          rm -f "$GITHUB_WORKSPACE"/.git/FETCH_HEAD.lock
+          object_fetch="$RUNNER_TEMP/torch-fl-object-fetch-${SOURCE_REF}"
+          rm -rf "$object_fetch"
+          downloaded=0
+          for attempt in 1 2 3; do
+            for endpoint in "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REF}" \
+              "https://api.github.com/repos/${SOURCE_REPOSITORY}/tarball/${SOURCE_REF}"; do
+              rm -f "$partial"
+              if curl --fail --silent --show-error --location \
+                --retry 2 --connect-timeout 20 --max-time 600 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                --output "$partial" \
+                "$endpoint" && tar -tzf "$partial" >/dev/null 2>&1; then
+                mv "$partial" "$archive"
+                downloaded=1
+                break 2
               fi
-              echo '::warning::source archive transfer failed; retrying on this runner'
-              sleep 5
             done
+            if [[ "$attempt" == 3 ]]; then
+              echo "::error::could not download the source archive for $SOURCE_REF"
+              exit 1
+            fi
+            echo '::warning::source archive transfer failed; retrying on this runner'
+            sleep 5
+          done
+          if [[ "$downloaded" != 1 || ! -s "$archive" ]]; then
+            echo "::error::the source archive download did not produce a file"
+            exit 1
           fi
-          mkdir -p "$archive_root"
-          tar -xzf "$archive" -C "$archive_root" --strip-components=1
-          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          cp -a "$archive_root/." "$GITHUB_WORKSPACE/"
+          # Validate and unpack through one Python process. Tar
+          # implementations differ in how they select members, reject links,
+          # and handle an interrupted extraction. Stage the entire tree first
+          # so a rejected archive cannot leave the existing source half deleted.
+          archive_path=$(python3 - "$archive" "$GITHUB_WORKSPACE" "$SOURCE_REF" "$mode_file" <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
+
+          archive, destination, revision, mode_file = sys.argv[1:]
+          archive = pathlib.Path(archive)
+          destination = pathlib.Path(destination).resolve()
+          parent = destination.parent
+          staging = pathlib.Path(
+              tempfile.mkdtemp(prefix=f".{destination.name}-extract-", dir=parent)
+          )
+          old_workspace = None
+          source_root = None
+
+          def inside(root, path):
+              try:
+                  path.relative_to(root)
+              except ValueError:
+                  return False
+              return True
+
+          def copy_file(source, target, mode):
+              if target.is_symlink() or target.is_file():
+                  target.unlink()
+              elif target.exists():
+                  shutil.rmtree(target)
+              with source, target.open("xb") as output:
+                  shutil.copyfileobj(source, output)
+              os.chmod(target, mode)
+
+          def remove(path):
+              if path.is_symlink() or path.is_file():
+                  path.unlink()
+              elif path.exists():
+                  shutil.rmtree(path)
+
+          try:
+              with tarfile.open(archive, "r:*") as stream:
+                  root = None
+                  entries = []
+                  seen = set()
+                  for entry in stream.getmembers():
+                      path = pathlib.PurePosixPath(entry.name)
+                      if (
+                          path.is_absolute()
+                          or not path.parts
+                          or ".." in path.parts
+                          or "" in path.parts
+                          or "." in path.parts
+                      ):
+                          raise ValueError(f"unsafe source archive entry: {entry.name!r}")
+                      if root is None:
+                          root = path.parts[0]
+                      elif path.parts[0] != root:
+                          raise ValueError(
+                              f"source archive has several roots: {root!r}, {path.parts[0]!r}"
+                          )
+                      relative = pathlib.PurePosixPath(*path.parts[1:])
+                      if not relative.parts or any(part == ".git" for part in relative.parts):
+                          continue
+                      if not entry.isdir() and not entry.isfile() and not entry.issym():
+                          raise ValueError(f"unsupported source archive entry: {entry.name!r}")
+                      key = relative.as_posix()
+                      if key in seen:
+                          raise ValueError(f"duplicate source archive entry: {key!r}")
+                      seen.add(key)
+                      entries.append((entry, relative))
+                  if not entries:
+                      raise ValueError("the source archive is empty")
+
+                  by_name = {relative.as_posix(): entry for entry, relative in entries}
+                  # Only a directory can contain another entry. Refuse a file
+                  # or symlink used as a prefix, even when that prefix is not
+                  # repeated later in the archive.
+                  for entry, relative in entries:
+                      parent = relative.parent
+                      while parent != pathlib.PurePosixPath("."):
+                          ancestor = by_name.get(parent.as_posix())
+                          if ancestor is not None and not ancestor.isdir():
+                              raise ValueError(
+                                  f"the archive entry {parent.as_posix()!r} contains another entry"
+                              )
+                          parent = parent.parent
+
+                  staging = staging.resolve()
+                  for entry, relative in entries:
+                      target = staging / relative
+                      if not inside(staging, target.parent.resolve()):
+                          raise ValueError(f"unsafe source archive target: {relative}")
+                      if entry.isdir():
+                          if target.is_symlink() or (target.exists() and not target.is_dir()):
+                              raise ValueError(f"conflicting source archive entry: {relative}")
+                          target.mkdir(parents=True, exist_ok=True)
+                          os.chmod(target, entry.mode & 0o777)
+                      elif entry.issym():
+                          link = pathlib.PurePosixPath(entry.linkname)
+                          if (
+                              not link.parts
+                              or link.is_absolute()
+                              or ".." in link.parts
+                              or "" in link.parts
+                          ):
+                              raise ValueError(
+                                  f"unsafe source archive symlink {relative}: {entry.linkname!r}"
+                              )
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          if target.exists() or target.is_symlink():
+                              raise ValueError(f"conflicting source archive entry: {relative}")
+                          target.symlink_to(entry.linkname)
+                      else:
+                          source = stream.extractfile(entry)
+                          if source is None:
+                              raise ValueError(f"cannot read source archive entry: {relative}")
+                          copy_file(source, target, entry.mode & 0o777)
+
+                  for entry, relative in entries:
+                      target = staging / relative
+                      if entry.isdir() and not target.is_dir():
+                          raise ValueError(f"conflicting source archive directory: {relative}")
+                      if not inside(staging, target.resolve()):
+                          raise ValueError(f"source archive symlink leaves the tree: {relative}")
+                  for relative in ("", *by_name):
+                      target = staging / relative
+                      if target.is_symlink() or not inside(staging, target.resolve()):
+                          raise ValueError(f"source archive symlink leaves the tree: {relative!r}")
+
+                  metadata = staging / ".git_archival.txt"
+                  if metadata.is_file():
+                      fields = {}
+                      for line in metadata.read_text(encoding="utf-8").splitlines():
+                          name, separator, value = line.partition(":")
+                          if separator:
+                              fields[name.strip()] = value.strip()
+                      if not fields.get("node"):
+                          raise ValueError(
+                              "the source archive has archival metadata without a commit"
+                          )
+                      if fields["node"] != revision:
+                          raise ValueError(
+                              f"the source archive contains {fields['node']}, expected {revision}"
+                          )
+                      archive_metadata = pathlib.PurePosixPath(".git_archival.txt")
+                      metadata.unlink()
+                      mode = "archival"
+                  else:
+                      mode = "download"
+                  mode_file_path = pathlib.Path(mode_file)
+                  mode_file_path.unlink(missing_ok=True)
+                  # A metadata node proves which commit exported the archive,
+                  # while comparing the tree catches corrupted or tampered
+                  # content. Extraction stays staged until both checks pass.
+                  git = None
+                  for candidate in os.environ["PATH"].split(os.pathsep):
+                      path = pathlib.Path(candidate or ".") / "git"
+                      if path.is_file() and os.access(path, os.X_OK):
+                          git = str(path.resolve())
+                          break
+                  if git is None:
+                      if mode == "download":
+                          raise ValueError(
+                              "the source archive cannot name its commit and this "
+                              "runner cannot compare it with Git"
+                          )
+                  else:
+                      git_root = pathlib.Path(
+                          os.environ["RUNNER_TEMP"]
+                      ) / f"torch-fl-object-fetch-{revision}"
+                      remove(git_root)
+                      git_root.mkdir(parents=True)
+                      git_environment = dict(os.environ)
+                      git_environment["GIT_CONFIG_NOSYSTEM"] = "1"
+                      git_environment["GIT_CONFIG_GLOBAL"] = os.devnull
+                      for name in (
+                          "GIT_DIR",
+                          "GIT_WORK_TREE",
+                          "GIT_INDEX_FILE",
+                          "GIT_OBJECT_DIRECTORY",
+                          "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                          "GIT_COMMON_DIR",
+                          "GIT_NAMESPACE",
+                          "GIT_PREFIX",
+                          "GIT_GLOB_PATHSPECS",
+                          "GIT_NOGLOB_PATHSPECS",
+                          "GIT_CONFIG_PARAMETERS",
+                      ):
+                          git_environment.pop(name, None)
+                      git_environment.pop("GIT_CEILING_DIRECTORIES", None)
+                      git_environment.pop("GIT_DISCOVERY_ACROSS_FILESYSTEM", None)
+                      git_environment["GIT_TERMINAL_PROMPT"] = "0"
+                      subprocess.run(
+                          [git, "init", "-q", str(git_root)],
+                          check=True,
+                          env=git_environment,
+                      )
+                      subprocess.run(
+                          [
+                              git,
+                              "-C",
+                              str(git_root),
+                              "remote",
+                              "add",
+                              "origin",
+                              f"https://github.com/{os.environ['SOURCE_REPOSITORY']}.git",
+                          ],
+                          check=True,
+                          env=git_environment,
+                      )
+                      authorization = os.environ.get("GIT_AUTHORIZATION_HEADER")
+                      if authorization:
+                          subprocess.run(
+                              [
+                                  git,
+                                  "-C",
+                                  str(git_root),
+                                  "config",
+                                  "http.https://github.com/.extraheader",
+                                  authorization,
+                              ],
+                              check=True,
+                              env=git_environment,
+                          )
+                      repository_path = os.environ.get("SOURCE_REPOSITORY_PATH")
+                      if repository_path:
+                          local = pathlib.Path(repository_path).resolve()
+                          subprocess.run(
+                              [
+                                  git,
+                                  "-C",
+                                  str(git_root),
+                                  "config",
+                                  f"url.file://{local}/.insteadOf",
+                                  f"https://github.com/{os.environ['SOURCE_REPOSITORY']}.git",
+                              ],
+                              check=True,
+                              env=git_environment,
+                          )
+                      subprocess.run(
+                          [
+                              git,
+                              "-C",
+                              str(git_root),
+                              "fetch",
+                              "--no-tags",
+                              "--depth=1",
+                              "origin",
+                              revision,
+                          ],
+                          check=True,
+                          env=git_environment,
+                          timeout=300,
+                      )
+                      run = lambda *arguments, **options: subprocess.run(
+                          [git, "-C", str(git_root), *arguments],
+                          check=True,
+                          env=git_environment,
+                          **options,
+                      )
+                      run("checkout", "--detach", "FETCH_HEAD")
+                      remote = {}
+                      for path in git_root.rglob("*"):
+                          relative = path.relative_to(git_root)
+                          if relative.parts[0] == ".git" or not (
+                              path.is_file() or path.is_symlink()
+                          ):
+                              continue
+                          payload = (
+                              os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
+                          )
+                          remote[relative.as_posix()] = (payload, path.is_symlink())
+                      archive_files = set()
+                      for entry, relative in entries:
+                          if not entry.isfile():
+                              continue
+                          if relative == archive_metadata:
+                              continue
+                          archive_files.add(relative.as_posix())
+                      archive_links = {
+                          relative.as_posix() for entry, relative in entries if entry.issym()
+                      }
+                      if set(remote) != archive_files | archive_links:
+                          raise ValueError(
+                              f"the source archive does not match the files at {revision}"
+                          )
+                      for relative in archive_files:
+                          if remote[relative] != ((staging / relative).read_bytes(), False):
+                              raise ValueError(
+                                  f"the source archive differs from {revision} at {relative}"
+                              )
+                      for relative in archive_links:
+                          if remote[relative] != (
+                              os.readlink(staging / relative).encode(),
+                              True,
+                          ):
+                              raise ValueError(
+                                  f"the source archive differs from {revision} at {relative}"
+                              )
+                      remove(git_root)
+                  mode_file_path.write_text(mode + "\n")
+
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  old_workspace = destination.with_name(
+                      f".{destination.name}-old-{os.getpid()}"
+                  )
+                  remove(old_workspace)
+                  if destination.exists() or destination.is_symlink():
+                      os.replace(destination, old_workspace)
+                  try:
+                      os.replace(staging, destination)
+                  except Exception:
+                      if old_workspace.exists() or old_workspace.is_symlink():
+                          os.replace(old_workspace, destination)
+                      raise
+                  remove(old_workspace)
+                  old_workspace = None
+                  mode_file_path.write_text(mode + "\n")
+          except (OSError, tarfile.TarError) as error:
+              raise SystemExit(f"cannot extract the source archive: {error}")
+          except (
+              ValueError,
+              subprocess.CalledProcessError,
+              subprocess.TimeoutExpired,
+          ) as error:
+              raise SystemExit(f"cannot validate the source archive: {error}")
+          finally:
+              remove(staging)
+              if old_workspace is not None:
+                  remove(old_workspace)
+          print(destination)
+          PY
+          )
+          archive_sha256=$(python3 - "$archive" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as stream:
+              for block in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                  digest.update(block)
+          print(digest.hexdigest())
+          PY
+          )
+          echo "archive_path=$archive_path" >> "$GITHUB_OUTPUT"
+          echo "source_mode=$(cat "$mode_file")" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
+          echo "ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
 
       - name: Verify the checked-out source
         id: source
@@ -206,8 +565,12 @@ jobs:
           CHECKOUT_REF: ${{ inputs.checkout_ref }}
           EXPECTED_CHECKOUT_REF: ${{ inputs.expected_checkout_ref }}
           EVENT_SHA: ${{ github.sha }}
+          SOURCE_MODE: ${{ steps.source-archive.outputs.source_mode }}
+          ARCHIVE_PATH: ${{ steps.source-archive.outputs.archive_path }}
+          ARCHIVE_SHA256: ${{ steps.source-archive.outputs.archive_sha256 }}
         run: |
           set -euo pipefail
+          export RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
           EXPECTED_REF="$CHECKOUT_REF"
           if [[ -z "$EXPECTED_REF" ]]; then
             EXPECTED_REF="$EVENT_SHA"
@@ -219,8 +582,15 @@ jobs:
           if [[ ! "$EXPECTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
             exit 1
           fi
-          export GIT_TERMINAL_PROMPT=0
-          if ! git rev-parse --git-dir >/dev/null 2>&1; then
+          git_available=0
+          if command -v git >/dev/null 2>&1; then
+            git_available=1
+          fi
+          # An archive checkout has already selected EXPECTED_REF. Running git
+          # here would replace the checked source with whatever branch the
+          # unauthenticated refresh can reach.
+          if [[ -z "$SOURCE_MODE" ]] && [[ "$git_available" == 1 ]] &&
+            git -C "$GITHUB_WORKSPACE" rev-parse --show-toplevel >/dev/null 2>&1; then
             git init -q "$GITHUB_WORKSPACE"
             git -C "$GITHUB_WORKSPACE" remote add origin \
               "https://github.com/${CHECKOUT_REPOSITORY}.git"
@@ -228,25 +598,16 @@ jobs:
               origin "$EXPECTED_REF"
             git -C "$GITHUB_WORKSPACE" checkout --detach FETCH_HEAD
           fi
-          test "$(git rev-parse HEAD)" = "$EXPECTED_REF"
-          echo "ref=$EXPECTED_REF" >> "$GITHUB_OUTPUT"
-          archive="${RUNNER_TEMP:-/tmp}/torch-fl-source.tar.gz"
-          # Compare directory contents rather than metadata. A cached archive
-          # from the same commit confirms that the fallback extracted every
-          # entry before Git creates a checkout that can report the commit.
-          if [[ -s "$archive" ]] && tar -tzf "$archive" >/dev/null 2>&1; then
-            archive_root="${RUNNER_TEMP:-/tmp}/torch-fl-source-check"
-            rm -rf "$archive_root"
-            mkdir -p "$archive_root"
-            tar -xzf "$archive" -C "$archive_root" --strip-components=1
-            if ! diff -r "$archive_root" "$GITHUB_WORKSPACE"; then
-              echo "::error::the extracted source archive differs from the checkout"
+          if [[ -n "$SOURCE_MODE" ]]; then
+            if [[ "$ARCHIVE_PATH" != /* || ! -s "$ARCHIVE_PATH" ]]; then
+              echo "::error::the verified source archive is unavailable"
               exit 1
             fi
-            rm -rf "$archive_root"
-          fi
-          git archive --format=tar.gz --output "$archive" "$EXPECTED_REF"
-          echo "archive_sha256=$(python3 - "$archive" <<'PY'
+            if [[ ! "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::the source archive has no SHA-256 digest"
+              exit 1
+            fi
+            actual_sha256=$(python3 - "$ARCHIVE_PATH" <<'PY'
           import hashlib
           import sys
 
@@ -256,7 +617,44 @@ jobs:
                   digest.update(block)
           print(digest.hexdigest())
           PY
-          )" >> "$GITHUB_OUTPUT"
+            )
+            if [[ "$actual_sha256" != "$ARCHIVE_SHA256" ]]; then
+              echo "::error::the downloaded archive changed after it was verified"
+              exit 1
+            fi
+          else
+            repository_root=$(git -C "$GITHUB_WORKSPACE" rev-parse --show-toplevel 2>/dev/null || true)
+            if [[ "$(cd "$repository_root" 2>/dev/null && pwd || true)" != "$GITHUB_WORKSPACE" ]]; then
+              if [[ "$git_available" == 0 ]]; then
+                echo "::error::the source checkout has neither Git nor a verified archive"
+                exit 1
+              fi
+              git init -q "$GITHUB_WORKSPACE"
+              git -C "$GITHUB_WORKSPACE" remote add origin \
+                "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 \
+                origin "$EXPECTED_REF"
+              git -C "$GITHUB_WORKSPACE" checkout --detach FETCH_HEAD
+            fi
+            test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_REF"
+            test -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain --untracked-files=no)"
+            archive="${RUNNER_TEMP:-/tmp}/torch-fl-source-${EXPECTED_REF}.tar.gz"
+            rm -f "$archive"
+            git archive --format=tar.gz --output "$archive" "$EXPECTED_REF"
+            actual_sha256=$(python3 - "$archive" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as stream:
+              for block in iter(lambda: stream.read(16 * 1024 * 1024), b""):
+                  digest.update(block)
+          print(digest.hexdigest())
+          PY
+            )
+          fi
+          echo "ref=$EXPECTED_REF" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$actual_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Prepare the fixed model bind root
         id: model-storage
@@ -543,19 +941,28 @@ jobs:
           set -euo pipefail
           temp="${RUNNER_TEMP:-/tmp}"
           state="$temp/torch-fl-preparation"
-          setup_helper="$GITHUB_WORKSPACE/.github/scripts/setup_entry.sh"
-          setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+          # The step runs from the checkout, but hosted runners without Git
+          # still need a fixed source directory before any profile changes
+          # GITHUB_WORKSPACE.
+          setup_helper="$PWD/.github/scripts/setup_entry.sh"
+          setup_path="$PWD/$SETUP_SCRIPT"
           container_image=""
           container_workspace=""
           # Save the runner checkout before the native profile can replace the
           # workspace address. Setup scripts stay in the checkout until setup
           # has finished; the prepared copy receives the tests afterwards.
-          container_workspace="$GITHUB_WORKSPACE"
+          # The step can start with the prepared workspace, so retain both
+          # addresses and let the profile replace only the workspace it owns.
           runner_workspace="$GITHUB_WORKSPACE"
           if [[ -n "$CONTAINER_CONFIG" ]]; then
-            read -r container_image container_workspace < <(
-              python3 -c 'import json,sys; settings=json.load(open(sys.argv[1])); print(settings["image"], settings["workspace"])' "$CONTAINER_CONFIG"
-            )
+            container_image=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$CONTAINER_CONFIG")
+            if [[ -n "$container_image" ]]; then
+              container_workspace=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace"])' "$CONTAINER_CONFIG")
+            else
+              container_workspace="$runner_workspace"
+            fi
+          else
+            container_workspace="$runner_workspace"
           fi
           if [[ -n "$container_image" ]]; then
             [[ "$container_workspace" = /* ]] && test -d "$container_workspace"
@@ -567,16 +974,22 @@ jobs:
               --workspace "$container_workspace"
           else
             [[ "$INTEGRATION_PROFILE" = /* ]] && test -s "$INTEGRATION_PROFILE"
-            selected_bash="$(env -u BASH_ENV /bin/bash -c \
+            selected_bash=$(env -u BASH_ENV /bin/bash -c \
               'set -euo pipefail; source "$1" </dev/null; command -v bash; printf "%s\n" "$GITHUB_WORKSPACE"' \
-              -- "$INTEGRATION_PROFILE")"
-            read -r selected_bash container_workspace <<< "$selected_bash"
+              -- "$INTEGRATION_PROFILE")
+            container_workspace="${selected_bash#*$'\n'}"
+            selected_bash="${selected_bash%%$'\n'*}"
+            [[ -n "$selected_bash" && -n "$container_workspace" ]]
             [[ "$selected_bash" = /* ]] && test -x "$selected_bash"
             [[ "$container_workspace" = /* ]] && test -d "$container_workspace"
-            env -u BASH_ENV "$selected_bash" -c \
-              'set -euo pipefail; source "$1" </dev/null; source "$2"; create_setup_entry "$3" "$4"; unset CI_WORKSPACE; exec bash -c "$(cat "$5")"' \
-              -- "$INTEGRATION_PROFILE" "$setup_helper" "$setup_path" \
-              "$runner_workspace" "$temp/torch-fl-platform-setup.sh"
+            # Keep profile loading in a parent that does not read BASH_ENV.
+            # Its exported GITHUB_WORKSPACE must not replace the checkout
+            # address while the platform Bash command line is expanded.
+            setup_entry="$temp/torch-fl-platform-setup.sh"
+            env -u BASH_ENV /bin/bash -c \
+              'set -euo pipefail; source "$1" </dev/null; source "$2"; unset CI_WORKSPACE; create_setup_entry "$5" "$3"; entry=$(cat "$5"); exec env -u BASH_ENV bash -c "$entry" "$6"' \
+              -- "$INTEGRATION_PROFILE" "$setup_helper" "$runner_workspace" \
+              "$setup_entry" "$setup_path" "$selected_bash"
           fi
 
       - name: Install build tools

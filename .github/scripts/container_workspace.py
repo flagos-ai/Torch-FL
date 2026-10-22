@@ -15,6 +15,7 @@
 """Prepare the host paths and the single vendor container for integration."""
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -39,6 +40,7 @@ INLINE_ENVIRONMENT = {
     "RUNNER_TEMP",
 }
 REPORT_DIRS = ("test-workdir", "pytest", "coverage", "inventories", "junit")
+SOURCE_REVISION = Path(".torch-fl-revision")
 
 
 class WorkspaceError(Exception):
@@ -156,6 +158,29 @@ def _container_volumes(volumes, settings):
     return output
 
 
+def _source_revision(workspace):
+    """Digest a checkout so the container cannot run a different bind mount."""
+    digest = hashlib.sha256()
+    root = Path(workspace)
+    for path in sorted(
+        item for item in root.rglob("*") if item.is_file() and ".git" not in item.parts
+    ):
+        relative = path.relative_to(root).as_posix()
+        if relative == str(SOURCE_REVISION):
+            continue
+        digest.update(relative.encode() + b"\0")
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def _write_revision(settings):
+    revision = _source_revision(settings["workspace"])
+    Path(settings["state"], SOURCE_REVISION.name).write_text(revision + "\n")
+    return revision
+
+
 def prepare(arguments):
     """Copy the checkout and prepare paths shared by the host and container."""
     checkout = Path(arguments.checkout).resolve()
@@ -245,6 +270,10 @@ def prepare(arguments):
         symlinks=True,
         ignore=shutil.ignore_patterns(".git", "build", "dist", ".ci"),
     )
+    settings["source_revision"] = _write_revision(settings)
+    Path(settings["workspace"], SOURCE_REVISION).write_text(
+        settings["source_revision"] + "\n", encoding="utf-8"
+    )
     profile = Path(settings["state"]) / "profile.sh"
     # Hosted macOS prepends the current directory to PATH. A native lane must
     # still find its own tools, but a relative entry would make the same
@@ -284,32 +313,83 @@ def configure(settings, container):
     """Persist the address of an already-running container."""
     if settings.get("container") or not container:
         raise WorkspaceError("configuration needs one new container")
-    probe = subprocess.run(
-        [
-            "docker",
-            "exec",
-            container,
-            "--env",
-            "HOME=/tmp",
-            "bash",
-            settings["shell"],
-            "-c",
-            'test -d "$PIP_CACHE_DIR" && test -w "$GITHUB_WORKSPACE" && '
-            'test -d "$INTEGRATION_MODEL" && test -d "$MODEL_PATH"',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=45,
+    revision = _source_revision(settings["workspace"])
+    checks = (
+        ("cache-dir", '[[ -d "$PIP_CACHE_DIR" ]]'),
+        (
+            "cache-write",
+            '[[ -w "$PIP_CACHE_DIR" ]] && '
+            'path="$PIP_CACHE_DIR/.torch-fl-probe-$$"; '
+            ': > "$path" && rm -f "$path"',
+        ),
+        ("workspace", '[[ -d "$GITHUB_WORKSPACE" ]]'),
+        (
+            "workspace-revision",
+            f'[[ "$(cat "$GITHUB_WORKSPACE/{SOURCE_REVISION}")" = {shlex.quote(revision)} ]]',
+        ),
+        ("integration-model", '[[ -d "$INTEGRATION_MODEL" ]]'),
+        ("host-model", '[[ -d "$MODEL_PATH" ]]'),
     )
-    if probe.returncode:
-        logs = subprocess.run(
-            ["docker", "logs", container], capture_output=True, text=True
-        ).stdout
+    failures = []
+    for name, check in checks:
+        probe = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container,
+                "--env",
+                "HOME=/tmp",
+                "bash",
+                settings["shell"],
+                "-c",
+                'printf "command=%s\\nworkspace=%s\\nintegration-model=%s\\n" "$1" "$GITHUB_WORKSPACE" "$INTEGRATION_MODEL"\n'
+                'case "$1" in\n'
+                '  cache-dir|cache-write) printf "path=%s\\n" "$PIP_CACHE_DIR" ;;\n'
+                '  integration-model) printf "path=%s\\n" "$INTEGRATION_MODEL" ;;\n'
+                '  host-model) printf "path=%s\\n" "$MODEL_PATH" ;;\n'
+                "esac\n" + check,
+                name,
+                name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if probe.returncode:
+            failures.append(
+                f"{name}: exit {probe.returncode}\n"
+                + probe.stdout.strip()
+                + "\n"
+                + probe.stderr.strip()
+            )
+    if failures:
+        diagnostics = []
+        for title, command in (
+            (
+                "mounts",
+                ["docker", "inspect", "--format", "{{json .Mounts}}", container],
+            ),
+            (
+                "state",
+                ["docker", "inspect", "--format", "{{.State.Status}}", container],
+            ),
+            ("logs", ["docker", "logs", container]),
+        ):
+            checked = subprocess.run(command, capture_output=True, text=True)
+            diagnostics.append(
+                title
+                + ": exit "
+                + str(checked.returncode)
+                + "\n"
+                + checked.stdout.strip()
+                + "\n"
+                + checked.stderr.strip()
+            )
         raise WorkspaceError(
             "the vendor container cannot use the integration mount:\n"
-            + probe.stderr
-            + logs
+            + "\n\n".join([*failures, *diagnostics])
         )
+    settings["source_revision"] = revision
     settings["container"] = container
     settings["container_name"] = (
         subprocess.run(
