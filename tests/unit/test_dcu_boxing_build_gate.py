@@ -98,3 +98,22 @@ def test_dcu_stream_includes_are_standalone():
     dcu_include = text.index('#include "runtime/dcu_stream.h"')
     dcu_namespace = text.index("namespace at::native::flagos")
     assert dcu_include < dcu_namespace
+
+
+def test_dcu_allocator_and_record_stream_keep_the_provider_identity():
+    allocator = (ROOT / "csrc/runtime/allocator/caching_device_allocator.cc").read_text(
+        encoding="utf-8"
+    )
+    allocation = allocator.split("auto dcu_ptr = c10::flagos::dcu::Allocate", 1)[1]
+    allocation = allocation.split("#endif", 1)[0]
+    assert "unsafe_set_device" not in allocation
+
+    recording = allocator.split("void CachingDeviceAllocator::record_stream", 1)[1]
+    recording = recording.split("backend_->caching_record_stream", 1)[0]
+    assert "c10::flagos::dcu::RecordDataPtr" in recording
+
+    provider = (ROOT / "csrc/runtime/dcu_stream.cc").read_text(encoding="utf-8")
+    allocation = provider.split("c10::DataPtr Allocate(size_t size)", 1)[1]
+    allocation = allocation.split("c10::DeleterFnPtr RawDeleter", 1)[0]
+    assert "c10::DeviceType::PrivateUse1" in allocation
+    assert "ptr.get()" in allocation

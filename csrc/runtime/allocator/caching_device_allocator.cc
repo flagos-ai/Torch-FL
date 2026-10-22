@@ -155,7 +155,6 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
   if (backend_->provides_caching()) {
 #ifdef FLAGOS_DCU_VENDOR_STREAMS
     auto dcu_ptr = c10::flagos::dcu::Allocate(nbytes);
-    dcu_ptr.unsafe_set_device(c10::Device(c10::DeviceType::PrivateUse1, device));
     return dcu_ptr;
 #endif
 
@@ -537,6 +536,13 @@ void CachingDeviceAllocator::record_stream(
   }
 
   if (backend_->provides_caching()) {
+#ifdef FLAGOS_DCU_VENDOR_STREAMS
+    // The provider owns the selected flagos stream and its vendor allocator
+    // identity. Passing the opaque id to the CUDA allocator would lose it.
+    c10::flagos::dcu::RecordDataPtr(
+        ptr, c10::flagos::dcu::External(stream, ptr.device().index()));
+    return;
+#endif
     backend_->caching_record_stream(ptr.get(), stream);
     return;
   }

@@ -166,7 +166,14 @@ c10::DataPtr Allocate(size_t size) {
   // Use the same device-generic lazy init as DcuDeviceMemory::allocator().
   // Context serializes init; do not swap official Torch core DSOs for DAS ones.
   at::globalContext().lazyInitDevice(c10::DeviceType::CUDA);
-  return c10::getDeviceAllocator(c10::DeviceType::CUDA)->allocate(size);
+  auto ptr = c10::getDeviceAllocator(c10::DeviceType::CUDA)->allocate(size);
+  // A vendor allocation retains its DataPtr context and deleter; only the
+  // public type is changed so the resulting tensor reports flagos:N.
+  if (ptr.get()) {
+    ptr.unsafe_set_device(c10::Device(
+        c10::DeviceType::PrivateUse1, ptr.device().index()));
+  }
+  return ptr;
 }
 
 c10::DeleterFnPtr RawDeleter() {
