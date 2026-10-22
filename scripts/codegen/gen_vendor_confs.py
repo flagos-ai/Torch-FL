@@ -2652,6 +2652,13 @@ def flaggems_holds() -> set:
 
     Returns an empty set if codegen_ops cannot be imported, matching the previous
     behaviour rather than failing the whole generation over a hold list.
+
+    ``SystemExit`` is caught as well as ``Exception`` on purpose. codegen_ops.py
+    ends in ``sys.exit(1)`` when torchgen is missing, and ``SystemExit`` derives
+    from ``BaseException``, so an ``except Exception`` here would let it escape and
+    kill every caller -- which is exactly what happened: the route unit tests
+    build confs on a host with the CPU torchgen present but the module import
+    failing, and they died with ``SystemExit: 1`` instead of exercising routing.
     """
     global _FLAGGEMS_HOLDS
     if _FLAGGEMS_HOLDS is None:
@@ -2661,7 +2668,7 @@ def flaggems_holds() -> set:
             _FLAGGEMS_HOLDS = set(codegen_ops.FLAGGEMS_RUNTIME_BROKEN) | set(
                 codegen_ops.FLAGGEMS_RECURSIVE_FALLBACK
             )
-        except Exception:
+        except (Exception, SystemExit):
             _FLAGGEMS_HOLDS = set()
     return _FLAGGEMS_HOLDS
 
