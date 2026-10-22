@@ -106,9 +106,11 @@ jobs:
             tests/unit/test_ai_reviewer.py \
             tests/unit/test_backend_autoload_contract.py \
             tests/unit/test_ci_pip_cache.py \
-            tests/unit/test_ci_platform_routing.py \
-            tests/unit/test_ci_matrix.py \
             tests/unit/test_ci_commands.py \
+            tests/unit/test_ci_concurrency.py \
+            tests/unit/test_ci_matrix.py \
+            tests/unit/test_ci_notifications.py \
+            tests/unit/test_ci_platform_routing.py \
             tests/unit/test_ci_resolution.py \
             tests/unit/test_flagcicd_reports.py \
             tests/unit/test_flagcicd_coverage.py \
