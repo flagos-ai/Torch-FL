@@ -54,6 +54,14 @@ EXTRA_NATIVE = {
         "add_.Scalar",
         "div_.Tensor",
     },
+    # The conv pair is claimed straight from register.cc's ``#else`` arm on
+    # every platform there, because ATen's only other kernel for these ops
+    # raises and cpu_fallback re-dispatches the *same* op, so it cannot reach
+    # the raise. See CONV_CPU_CROSSING_PLATFORMS below.
+    **{
+        platform: {"convolution_overrideable"}
+        for platform in ("cuda", "dcu", "metax", "ppu", "tsingmicro")
+    },
 }
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
 
@@ -536,3 +544,113 @@ def test_conf_route_counts_are_stable():
             f"{platform} route counts drifted: expected {exp}, got {counts}. "
             "If an op moved routes deliberately, update this snapshot."
         )
+
+
+# ---------------------------------------------------------------------------
+# Convolution: the one claim that bypasses both the conf and cpu_fallback
+# ---------------------------------------------------------------------------
+
+# ``register.cc`` claims these on PrivateUse1 from source rather than from a
+# generated ``.inc``, because neither route can serve them: the conf's
+# ``cuda``/``<vendor>`` key needs a boxed kernel a FlagGems-primary build does
+# not compile, and cpu_fallback re-dispatches the *same* op onto ATen's raising
+# CompositeExplicitAutograd stub. The forward and the backward are claimed
+# separately because what the generated list already covers differs: the
+# CUDA-ABI confs route conv to ``cuda`` on cuda/dcu (so the FlagGems list names
+# neither op) and to ``flaggems`` on metax/ppu (so it already names the
+# forward, and claiming it again would duplicate an m.impl in the same
+# TORCH_LIBRARY_IMPL body -- a compile error).
+CONV_CPU_CROSSING = {
+    "cuda": {"convolution_overrideable", "convolution_backward_overrideable"},
+    "dcu": {"convolution_overrideable", "convolution_backward_overrideable"},
+    "tsingmicro": {
+        "convolution_overrideable",
+        "convolution_backward_overrideable",
+    },
+    "metax": {"convolution_backward_overrideable"},
+    "ppu": {"convolution_backward_overrideable"},
+}
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(CONV_CPU_CROSSING))
+def test_conv_overrideable_is_claimed_on_flaggems_primary_builds(platform):
+    """The conv pair must be claimed by the *registration*, not just the conf.
+
+    FlagGems-primary builds compile ``register_flaggems_<platform>.inc`` and
+    claim only what it names, so an op left out of it has no kernel at all.
+    ``convolution_overrideable`` falls to the raising stub in that case, and
+    every conv on the device fails -- which is how a Qwen3.5-VL
+    (GatedDeltaNet) forward died with "convolution_overrideable not
+    implemented" on 8x H100.
+    """
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    for op in CONV_CPU_CROSSING[platform]:
+        assert op in register_cc, (
+            f"{platform}: {op} is not claimed anywhere in register.cc, so a "
+            "FlagGems-primary build has no kernel for it"
+        )
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(CONV_CPU_CROSSING))
+def test_conv_claim_is_reachable_from_the_platform_arm(platform):
+    """The conv claim must be gated on a macro this platform actually defines.
+
+    The claim lives in the CUDA-ABI ``#else`` arm, which ``FLAGOS_ACCEL_<UPPER>``
+    selects -- cuda and ppu have an empty ``USE_*`` macro because they re-tag a
+    vendor CUDA build rather than own one. The regression this guards is the
+    one that shipped: the claim was written under ``USE_TSINGMICRO`` alone, so
+    it compiled everywhere and still left every CUDA-ABI platform with no conv
+    kernel.
+    """
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    expected = {
+        "cuda": "FLAGOS_ACCEL_CUDA",
+        "dcu": "FLAGOS_ACCEL_DCU",
+        "metax": "FLAGOS_ACCEL_METAX",
+        "ppu": "FLAGOS_ACCEL_PPU",
+        "tsingmicro": "FLAGOS_ACCEL_TSINGMICRO",
+    }[platform]
+
+    # The claim sits immediately after the "already claim(ed)" explanatory
+    # comment in the CUDA-ABI arm; take the guard lines just above it.
+    # rfind, not find: BPU and Kunlunxin claim these ops earlier in the file
+    # from their own arms, and only the last claim of each is the CUDA-ABI one.
+    # metax/ppu claim the backward only, so anchor on that for them.
+    op = (
+        "convolution_backward_overrideable"
+        if platform in ("metax", "ppu")
+        else "convolution_overrideable"
+    )
+    # Match on the op name only: the backward claim is wrapped across two
+    # lines in register.cc, so anchoring on the dispatcher symbol would miss it.
+    marker = f'm.impl("{op}",'
+    idx = register_cc.rfind(marker)
+    assert idx != -1, f"{op} is not claimed from register.cc"
+    guard_block = register_cc[max(0, idx - 900) : idx]
+    assert expected in guard_block, (
+        f"{platform}: the convolution_overrideable claim is not gated on "
+        f"{expected}. Guard text found:\n{guard_block}"
+    )
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", ["metax", "ppu"])
+def test_flaggems_list_already_covers_the_forward_on_metax_and_ppu(platform):
+    """These two must NOT claim the forward twice.
+
+    Their conf routes conv to ``flaggems``, so the generated list claims
+    ``convolution_overrideable``. A second ``m.impl`` for the same op inside
+    the same ``TORCH_LIBRARY_IMPL`` body does not compile.
+    """
+    inc = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    assert "convolution_overrideable" in inc, (
+        f"{platform}: the generated FlagGems list no longer names "
+        "convolution_overrideable, so the forward now needs the CPU crossing "
+        "too -- update CONV_CPU_CROSSING and the register.cc guard"
+    )
+    assert "convolution_backward_overrideable" not in inc, (
+        f"{platform}: the generated list now claims the backward, so "
+        "register.cc's wrapper claim would duplicate it"
+    )

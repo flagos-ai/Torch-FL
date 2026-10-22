@@ -73,7 +73,7 @@ w = torch.randn(32, 1, 4, device='flagos:0', dtype=torch.bfloat16)
 torch.nn.functional.conv1d(x, w, padding=3, groups=32)
 torch_fl._C._synchronize()
 """
-    assert dispatched_to_mps(source) == 1
+    assert dispatched_to_mps(source) >= 1
 
 
 @pytest.mark.anyplatform

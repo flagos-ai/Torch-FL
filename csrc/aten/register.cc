@@ -46,6 +46,34 @@
 #include <cstdlib>
 #include <string>
 
+// True when a convolution cannot be served by either a native kernel or a
+// FlagGems route, so it has to take the CPU crossing from
+// FlagosWrapperConvolutionOverrideable below.
+//
+// Stated here, next to the wrapper, because the wrapper is defined well before
+// the registration arm and a macro that arm defined afterwards would not reach
+// it. It is derived from the accelerator discriminator alone, which CMake sets
+// for every platform (csrc/CMakeLists.txt), so it needs no other build state.
+//
+// The per-platform reasoning, all measured on the CUDA-ABI lanes:
+//   * cuda, dcu  -- their backends_<platform>.conf routes conv to `cuda`, and a
+//     FlagGems-primary build compiles no boxed kernels, so the route resolves
+//     to nothing and `convolution_overrideable` falls to ATen's raising
+//     CompositeExplicitAutograd stub. FlagGems has no conv kernel to route to on
+//     either platform (register_flaggems_cuda.inc / _dcu.inc name none).
+//   * metax, ppu -- the conf routes conv to FlagGems, so the conf-derived list
+//     does claim `convolution_overrideable` and only the forward is served.
+//     Nothing claims `convolution_backward_overrideable` that way, so the
+//     backward still needs the crossing (the same shape as the Iluvatar
+//     exception).
+//
+// BPU, Kunlunxin, TsingMicro and Iluvatar select the wrapper through their own
+// USE_* macros in the guard below, so they are deliberately not listed again.
+#if defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_DCU) || \
+    defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_PPU)
+#define FLAGOS_CONV_NEEDS_CPU_CROSSING 1
+#endif
+
 // Forward declarations for the Ascend matmul kernels (csrc/aten/backends/ascend/matmul.cc).
 // That file is only compiled when USE_ASCEND is on, so BOTH declarations must be
 // guarded the same way: a .so links fine with an undefined symbol and only fails
@@ -274,8 +302,16 @@ int64_t WrapperFusedSdpChoice(
 // "NotImplementedError" (measured 2026-10-20 on the CI lane,
 // test_conv1d_dispatch.py::TestConv1dBackward). The USE_ILUVATAR arm registers
 // the backward wrapper below and deliberately not the forward one.
+//
+// The CUDA-ABI platforms reach this through FLAGOS_ACCEL_*, not a USE_* macro:
+// their USE_* macro is empty (they re-tag a vendor CUDA build rather than own
+// one), and since CUDA boxing became opt-in (#520) their default wheel is
+// FlagGems-primary, which compiles the conf-derived FlagGems list. On cuda and
+// dcu that list names no conv, so the forward needs this wrapper too; metax and
+// ppu do route conv to FlagGems and only need it when that route is absent.
+// FLAGOS_CONV_NEEDS_CPU_CROSSING below is the single place that decides.
 #if defined(USE_BPU) || defined(USE_KUNLUNXIN) || defined(USE_TSINGMICRO) || \
-    defined(USE_ILUVATAR)
+    defined(USE_ILUVATAR) || defined(FLAGOS_CONV_NEEDS_CPU_CROSSING)
 at::Tensor FlagosWrapperConvolutionOverrideable(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -731,14 +767,33 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_flaggems_tsingmicro.inc"
   #endif
-  // TsingMicro is FlagGems-primary with no vendor op library, so the generated
-  // list above is its whole claim -- and it names no conv, because the conf it
-  // derives from routes none. That leaves convolution_overrideable on the
-  // raising CompositeExplicitAutograd stub, where cpu_fallback cannot reach it
-  // (it redispatches the same op). Same exception BPU and Kunlunxin make, and
-  // the same shared wrapper serves all three.
-  #if defined(FLAGOS_ACCEL_TSINGMICRO)
+  // The *_overrideable conv ops are the exception the generic cpu_fallback
+  // cannot serve (see the wrapper comment above): ATen's only other kernel for
+  // them raises, and a fallback re-dispatches the *same* op, so it lands back on
+  // that raise. The condition differs per platform because what the generated
+  // list above claims differs:
+  //
+  //   * TsingMicro: FlagGems-primary with no vendor op library, so the list is
+  //     its whole claim -- and it names no conv, because the conf it derives
+  //     from routes none.
+  //   * cuda, dcu: their conf routes conv to `cuda`, and this arm only runs with
+  //     boxing off (the FLAGOS_BOXING_BUILD arm above claims everything
+  //     already), so that route resolves to nothing. The conf-derived list names
+  //     no conv for either, so both ops need the crossing.
+  //   * metax, ppu: the conf routes conv to FlagGems and the list does claim
+  //     convolution_overrideable, so only the backward needs it. Claiming the
+  //     forward too would duplicate the m.impl the list already emitted into
+  //     this same body, which is a compile error.
+  //
+  // Same exception BPU and Kunlunxin make, and the same shared wrapper serves
+  // all of them.
+  #if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_CUDA) || \
+      defined(FLAGOS_ACCEL_DCU)
   m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
+  m.impl("convolution_backward_overrideable",
+      FlagosWrapperConvolutionBackwardOverrideable);
+  #elif defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_PPU)
+  // metax/ppu already claim the forward through the generated list above.
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
   #endif
