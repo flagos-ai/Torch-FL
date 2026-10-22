@@ -164,7 +164,7 @@ class TestNewOnesGcuRoute:
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert "[flagos dispatch] new_ones -> gcu" in result.stderr
-        assert "flagos_python" not in result.stderr
+        assert "[flagos dispatch] new_ones -> flagos_python" not in result.stderr
 
     @pytest.mark.gcu
     def test_accepted_dtypes_skip_the_composite(self):

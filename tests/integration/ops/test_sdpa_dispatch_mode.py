@@ -154,7 +154,10 @@ def test_sdpa_gradients_survive_a_mode_across_the_training_step():
     before = model.weight.detach().clone()
 
     with Passthrough():
-        q = model(x)
+        projected = model(x)
+        # The projection preserves (2, 4, 32); SDPA needs a separate head
+        # dimension, so split that last axis into four heads of width eight.
+        q = projected.reshape(2, 4, 4, 8)
         loss = F.scaled_dot_product_attention(q, q, q).sum()
         loss.backward()
 
