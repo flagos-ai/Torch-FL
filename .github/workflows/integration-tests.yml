@@ -333,7 +333,16 @@ jobs:
         run: |
           set -euo pipefail
           cache="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
-          rm -rf "$cache"
+          python3 - "$cache" <<'PY'
+          import shutil
+          import sys
+          from pathlib import Path
+
+          cache = Path(sys.argv[1]).resolve()
+          if cache.name != "torch-fl-pip":
+              raise SystemExit(f"refusing to reset an unexpected cache: {cache}")
+          shutil.rmtree(cache, ignore_errors=True)
+          PY
           mkdir -p "$cache"
           echo "PIP_CACHE_DIR=$cache" >> "$GITHUB_ENV"
 

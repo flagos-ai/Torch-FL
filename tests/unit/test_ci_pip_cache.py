@@ -364,24 +364,24 @@ def test_cache_cleanup_actions_and_setup_share_one_directory(
         expected = Path(env["RUNNER_TEMP"]) / "torch-fl-pip"
         temporary = expected
     else:
-        temporary = Path(tmp_path / "default-tmp/torch-fl-pip")
+        temporary = Path("/tmp/torch-fl-pip")
         binaries = tmp_path / "default-tmp/bin"
         binaries.mkdir(parents=True)
-        for executable in ("bash", "python3", "rm", "mkdir", "echo", "dirname"):
+        for executable in ("bash", "python3", "mkdir", "echo", "dirname"):
             path = shutil.which(executable)
             if path:
                 (binaries / executable).symlink_to(path)
         env["PATH"] = str(binaries)
         env["TMPDIR"] = str(tmp_path / "default-tmp")
-        expected = Path("/tmp/torch-fl-pip")
-    temporary.mkdir(parents=True)
+        expected = temporary
+    expected.mkdir(parents=True, exist_ok=True)
     expected = expected.resolve()
     (expected / "stale").write_text("leftover")
     steps = _steps(workflow)
     reset = next(step for step in steps if step.get("name") == "Reset pip cache dir")
     subprocess.run(["bash", "-e", "-c", reset["run"]], env=env, check=True)
     assert expected.is_dir()
-    assert not (temporary / "stale").exists()
+    assert not (expected / "stale").exists()
     assert github_env.read_text().splitlines() == [
         f"PIP_CACHE_DIR={expected if runner_temp else '/tmp/torch-fl-pip'}"
     ]

@@ -111,10 +111,19 @@ jobs:
       - name: Reset pip cache dir
         shell: bash
         run: |
-          PIP_CACHE_DIR="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
-          rm -rf "$PIP_CACHE_DIR"
-          mkdir -p "$PIP_CACHE_DIR"
-          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+          cache="${RUNNER_TEMP:-/tmp}/torch-fl-pip"
+          python3 - "$cache" <<'PY'
+          import shutil
+          import sys
+          from pathlib import Path
+
+          cache = Path(sys.argv[1]).resolve()
+          if cache.name != "torch-fl-pip":
+              raise SystemExit(f"refusing to reset an unexpected cache: {cache}")
+          shutil.rmtree(cache, ignore_errors=True)
+          PY
+          mkdir -p "$cache"
+          printf 'PIP_CACHE_DIR=%s\n' "$cache" >> "$GITHUB_ENV"
 
       # Look up first: a transfer timeout can return success with no matched key.
       # A cold miss may save later; a failed matched transfer must not upload.
