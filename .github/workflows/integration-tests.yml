@@ -106,10 +106,21 @@ jobs:
     runs-on: ${{ fromJson(needs.configuration.outputs.runner_labels) }}
     timeout-minutes: 30
     outputs:
-      host_model_root: ${{ steps.configure-model.outputs.root }}
+      host_model_root: ${{ steps.configure-model.outputs.host_model_root }}
       model_path: ${{ steps.configure-model.outputs.model_path }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Retry checkout source
+        if: ${{ steps.checkout.outcome == 'failure' }}
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || github.ref }}
@@ -125,7 +136,7 @@ jobs:
           root="$HOST_MODEL_ROOT/Qwen3-0.6B"
           mkdir -p "$root"
           echo "root=$root" >> "$GITHUB_OUTPUT"
-          echo "root=$HOST_MODEL_ROOT" >> "$GITHUB_ENV"
+          echo "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" >> "$GITHUB_ENV"
 
       # A timed-out cache lookup can return success without a matched key. A
       # failed matched transfer must not upload an incomplete checkpoint.
@@ -255,7 +266,7 @@ jobs:
       - name: Publish the verified model root
         id: configure-model
         run: |
-          echo "root=$HOST_MODEL_ROOT" >> "$GITHUB_OUTPUT"
+          echo "host_model_root=$TORCH_FL_MODEL_ROOT" >> "$GITHUB_OUTPUT"
           echo "model_path=${{ needs.configuration.outputs.model_path }}" >> "$GITHUB_OUTPUT"
 
       # Save only a verified, exact cache miss. A present cache is left alone.
@@ -285,7 +296,18 @@ jobs:
     env:
       INTEGRATION_PLATFORM: ${{ inputs.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Retry checkout source
+        if: ${{ steps.checkout.outcome == 'failure' }}
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || github.ref }}

@@ -159,7 +159,18 @@ jobs:
       flag_gems_requirement: ${{ steps.config.outputs.flag_gems_requirement }}
       torch_fl_package_root: ${{ steps.config.outputs.torch_fl_package_root }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+
+      - name: Retry checkout source
+        if: ${{ steps.checkout.outcome == 'failure' }}
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.checkout_repository || github.repository }}
           ref: ${{ inputs.checkout_ref || github.ref }}

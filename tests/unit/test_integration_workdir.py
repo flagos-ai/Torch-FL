@@ -289,9 +289,12 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
     assert "HOST_MODEL_ROOT" not in locate["env"]
     assert 'HOST_MODEL_ROOT="${RUNNER_TEMP:?}/torch-fl-models"' in locate["run"]
     assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in locate["run"]
+    assert "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" in locate["run"]
+    assert "root=$HOST_MODEL_ROOT" not in locate["run"]
     publish = next(
         step for step in mount["steps"] if step.get("id") == "configure-model"
     )
+    assert "host_model_root=$TORCH_FL_MODEL_ROOT" in publish["run"]
     assert "model_path=${{ needs.configuration.outputs.model_path }}" in publish["run"]
     assert mount["outputs"]["model_path"] == (
         "${{ steps.configure-model.outputs.model_path }}"
@@ -300,7 +303,7 @@ def test_the_model_mount_is_prepared_on_its_platform_host():
         step for step in integration["steps"] if step.get("id") == "workspace"
     )
     assert mount["outputs"]["host_model_root"] == (
-        "${{ steps.configure-model.outputs.root }}"
+        "${{ steps.configure-model.outputs.host_model_root }}"
     )
     assert "root" not in mount["outputs"]
     assert workspace["env"]["HOST_MODEL_ROOT"] == (
@@ -349,6 +352,8 @@ def test_every_platform_restores_the_model_to_the_mount_path():
     assert "HOST_MODEL_ROOT" not in step["env"]
     assert 'HOST_MODEL_ROOT="${RUNNER_TEMP:?}/torch-fl-models"' in step["run"]
     assert 'root="$HOST_MODEL_ROOT/Qwen3-0.6B"' in step["run"]
+    assert "TORCH_FL_MODEL_ROOT=$HOST_MODEL_ROOT" in step["run"]
+    assert "root=$HOST_MODEL_ROOT" not in step["run"]
     assert "NETS" not in step["run"]
 
 

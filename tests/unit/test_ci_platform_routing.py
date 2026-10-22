@@ -78,29 +78,52 @@ def test_platform_tests_and_manifest_use_the_resolved_source():
     config_call = workflow["jobs"]["configuration"]["with"]
     assert config_call["checkout_repository"] == "${{ inputs.checkout_repository }}"
     assert config_call["checkout_ref"] == "${{ inputs.checkout_ref }}"
-    checkout = next(
-        step
-        for step in workflow["jobs"]["integration-tests"]["steps"]
-        if step.get("uses", "").startswith("actions/checkout@")
-    )["with"]
-    assert checkout["repository"] == (
-        "${{ inputs.checkout_repository || github.repository }}"
-    )
-    assert checkout["ref"] == "${{ inputs.checkout_ref || github.ref }}"
-    assert checkout["persist-credentials"] is False
+    for job_name in ("model-mount", "integration-tests"):
+        steps = workflow["jobs"][job_name]["steps"]
+        checkout = next(
+            step
+            for step in steps
+            if step.get("id") == "checkout"
+            and step.get("uses", "").startswith("actions/checkout@")
+        )
+        retry = next(
+            step
+            for step in steps
+            if step.get("name") == "Retry checkout source"
+            and step.get("uses", "").startswith("actions/checkout@")
+        )
+        assert checkout["continue-on-error"] is True
+        assert retry["if"] == "${{ steps.checkout.outcome == 'failure' }}"
+        for step in (checkout, retry):
+            assert step["with"]["repository"] == (
+                "${{ inputs.checkout_repository || github.repository }}"
+            )
+            assert step["with"]["ref"] == "${{ inputs.checkout_ref || github.ref }}"
+            assert step["with"]["persist-credentials"] is False
 
     config_workflow = _workflow("load-platform-config.yml")
     config_inputs = config_workflow[True]["workflow_call"]["inputs"]
     assert {"checkout_repository", "checkout_ref"} <= config_inputs.keys()
+    config_steps = config_workflow["jobs"]["configuration"]["steps"]
     config_checkout = next(
         step
-        for step in config_workflow["jobs"]["configuration"]["steps"]
-        if step.get("uses", "").startswith("actions/checkout@")
-    )["with"]
-    assert config_checkout["repository"] == (
-        "${{ inputs.checkout_repository || github.repository }}"
+        for step in config_steps
+        if step.get("id") == "checkout"
+        and step.get("uses", "").startswith("actions/checkout@")
     )
-    assert config_checkout["ref"] == "${{ inputs.checkout_ref || github.ref }}"
+    config_retry = next(
+        step
+        for step in config_steps
+        if step.get("name") == "Retry checkout source"
+        and step.get("uses", "").startswith("actions/checkout@")
+    )
+    assert config_checkout["continue-on-error"] is True
+    assert config_retry["if"] == "${{ steps.checkout.outcome == 'failure' }}"
+    for step in (config_checkout, config_retry):
+        assert step["with"]["repository"] == (
+            "${{ inputs.checkout_repository || github.repository }}"
+        )
+        assert step["with"]["ref"] == "${{ inputs.checkout_ref || github.ref }}"
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
