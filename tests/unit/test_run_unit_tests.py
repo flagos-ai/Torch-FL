@@ -142,7 +142,9 @@ def test_tolerated_teardown_crash_does_not_fail_the_run(
     """
     (tmp_path / "test_one.py").write_text("")
     monkeypatch.setattr(
-        _RUNNER, "run_file", lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False)
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False, False),
     )
     monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
     assert _RUNNER.main() == 0
@@ -151,7 +153,9 @@ def test_tolerated_teardown_crash_does_not_fail_the_run(
 def test_a_real_failure_still_fails_the_run(monkeypatch, tmp_path):
     (tmp_path / "test_one.py").write_text("")
     monkeypatch.setattr(
-        _RUNNER, "run_file", lambda *args, **kwargs: (1, _WITH_FAILURE, False)
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (1, _WITH_FAILURE, False, False),
     )
     monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
     assert _RUNNER.main() == 1
@@ -197,7 +201,7 @@ def test_the_inventory_group_reaches_every_child_report(monkeypatch, tmp_path):
 
     def run_file(python, test_file, timeout, report_dir="", **_kwargs):
         captured.append((os.environ.get("FLAGCICD_TEST_GROUP"), report_dir))
-        return 0, "1 passed in 0.01s\n", False
+        return 0, "1 passed in 0.01s\n", False, False
 
     monkeypatch.setattr(_RUNNER, "run_file", run_file)
     assert _RUNNER.main() == 0
@@ -274,10 +278,11 @@ exec(compile(
     Path({str(Path(".github/scripts/run_unit_tests.py").resolve())!r}).read_text(),
     {str(Path(".github/scripts/run_unit_tests.py").resolve())!r}, 'exec',
 ), environment)
-status, output, timed_out = environment['run_file'](
+status, output, timed_out, exit_timed_out = environment['run_file'](
     sys.executable, test_file, 30, wheel_package_root=package_root,
 )
 assert not timed_out
+assert not exit_timed_out
 print(output)
 assert status == 0, output
 """)
@@ -331,7 +336,7 @@ def test_main_only_preloads_a_package_with_a_native_extension(monkeypatch, tmp_p
         "run_file",
         lambda *args, **kwargs: (
             roots.append(kwargs["wheel_package_root"]),
-            (0, "1 passed in 0.01s\n", False),
+            (0, "1 passed in 0.01s\n", False, False),
         )[1],
     )
     monkeypatch.setattr(
@@ -370,7 +375,7 @@ def test_a_standalone_run_uses_its_supplied_inventory_group(monkeypatch, tmp_pat
 
     def run_file(python, test_file, timeout, report_dir="", **_kwargs):
         captured.append(os.environ.get("FLAGCICD_TEST_GROUP"))
-        return 0, "1 passed in 0.01s\n", False
+        return 0, "1 passed in 0.01s\n", False, False
 
     monkeypatch.setattr(_RUNNER, "run_file", run_file)
     assert _RUNNER.main() == 0
@@ -537,14 +542,127 @@ def test_a_unit_child_never_uses_the_python_p_switch(monkeypatch, tmp_path):
         def communicate(self, timeout=None):
             return "1 passed in 0.01s\n", None
 
+        def poll(self):
+            return 0
+
+        stdout = None
+
     monkeypatch.setattr(
         _RUNNER.subprocess,
         "Popen",
         lambda command, **_kwargs: (created.append(command), Finished())[1],
     )
-    returncode, _output, timed_out = _RUNNER.run_file(sys.executable, test_file, 30)
-    assert (returncode, timed_out) == (0, False)
+    returncode, _output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 30
+    )
+    assert (returncode, timed_out, exit_timed_out) == (0, False, False)
     assert created and "-P" not in created[0]
+
+
+def test_a_completed_session_does_not_wait_for_python_atexit(monkeypatch, tmp_path):
+    """Vendor destructors can keep the interpreter alive after pytest reports."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text(
+        "import atexit\n"
+        "import time\n"
+        "def pause_exit():\n"
+        "    time.sleep(30)\n"
+        "atexit.register(pause_exit)\n"
+        "def test_one():\n"
+        "    assert True\n"
+    )
+    monkeypatch.setattr(_RUNNER, "_SESSION_EXIT_GRACE_SECONDS", 0.3)
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+
+    returncode, output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 10
+    )
+
+    assert (returncode, timed_out, exit_timed_out) == (0, False, True), output
+    assert output.startswith("."), output
+
+
+def test_a_completed_session_removes_processes_left_by_teardown(monkeypatch, tmp_path):
+    """A child process started after the session must not outlive the runner."""
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "child = None\n"
+        "def start_child():\n"
+        "    global child\n"
+        "    child = subprocess.Popen(\n"
+        "        [sys.executable, '-c', 'import time; time.sleep(30)']\n"
+        "    )\n"
+        "    Path(FLAGCICD_TEST_GROUP).write_text(str(child.pid))\n"
+        "    time.sleep(30)\n"
+        "def test_one():\n"
+        "    assert True\n"
+    )
+    pid_file = tmp_path / "child.pid"
+    source = test_file.read_text().replace(
+        "def test_one():\n    assert True\n",
+        "def test_one():\n"
+        "    import atexit\n"
+        "    atexit.register(start_child)\n"
+        "    assert True\n",
+    )
+    source = source.replace("Path(FLAGCICD_TEST_GROUP)", f"Path({str(pid_file)!r})")
+    test_file.write_text(source)
+    monkeypatch.setattr(_RUNNER, "_SESSION_EXIT_GRACE_SECONDS", 0.3)
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+
+    returncode, output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 10
+    )
+
+    assert (returncode, timed_out) == (0, False), output
+    pid = int(pid_file.read_text())
+    try:
+        state = _process_state(pid)
+    except ProcessLookupError:
+        state = None
+    assert state in {None, "Z"}
+
+
+def _process_state(pid):
+    """Read a process state on macOS and Linux without reaping the child."""
+    completed = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ProcessLookupError(pid)
+    return completed.stdout.strip()[:1]
+
+
+def test_a_crash_before_the_session_ends_keeps_its_failure_status(
+    monkeypatch, tmp_path
+):
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text(
+        "import os\n"
+        "import signal\n"
+        "def test_one():\n"
+        "    os.kill(os.getpid(), signal.SIGSEGV)\n"
+    )
+    monkeypatch.setattr(_RUNNER, "_SESSION_EXIT_GRACE_SECONDS", 0.3)
+    monkeypatch.delenv("FLAGCICD_REPORT_DIR", raising=False)
+    monkeypatch.delenv("FLAGCICD_PYTHON_NO_LAUNCHER", raising=False)
+
+    returncode, output, timed_out, exit_timed_out = _RUNNER.run_file(
+        sys.executable, test_file, 10
+    )
+
+    assert returncode == -signal.SIGSEGV, output
+    assert (timed_out, exit_timed_out) == (False, False)
+    assert _RUNNER.classify(returncode, output)[0] == "CRASH"
 
 
 def test_a_unit_directory_outside_the_checkout_writes_a_report(monkeypatch, tmp_path):
@@ -591,7 +709,9 @@ def test_a_failing_report_is_not_marked_complete_by_a_passing_runner_status(
         )
     )
     monkeypatch.setattr(
-        _RUNNER, "run_file", lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False)
+        _RUNNER,
+        "run_file",
+        lambda *args, **kwargs: (-signal.SIGSEGV, _CLEAN, False, False),
     )
     monkeypatch.setattr(_RUNNER, "_ALLOW_TEARDOWN_CRASH", True)
     monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
@@ -636,7 +756,7 @@ def test_a_clean_report_is_marked_complete_after_a_tolerated_crash(
                     }
                 )
             ),
-            (-signal.SIGSEGV, _CLEAN, False),
+            (-signal.SIGSEGV, _CLEAN, False, False),
         )[-1],
     )
     monkeypatch.setattr(_RUNNER, "_ALLOW_TEARDOWN_CRASH", True)

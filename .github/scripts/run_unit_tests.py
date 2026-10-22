@@ -33,6 +33,9 @@ fault is not something this script can assume either way, which is why the
 tolerance is opt-in. Without the variable the crash is a failure, which is the
 right reading for a signal that arrives before the summary: nothing proved the
 tests themselves were fine.
+The runner also records pytest's session finish and bounds the interpreter's
+subsequent exit. A vendor library can leave the process alive after the tests
+have reported; that teardown wait became a per-file timeout on MPS.
 
 Usage:
     python .github/scripts/run_unit_tests.py [--test-dir tests/unit] [--timeout 300]
@@ -48,6 +51,9 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -65,6 +71,7 @@ _SUMMARY_FAILURE_RE = re.compile(
 # Signals that mean the interpreter died rather than exited: SIGABRT from an
 # uncaught C++ exception in a static initializer, SIGSEGV from a bad address.
 _FATAL_SIGNALS = {signal.SIGABRT, signal.SIGSEGV, signal.SIGBUS, signal.SIGILL}
+_SESSION_EXIT_GRACE_SECONDS = 10
 _ALLOW_TEARDOWN_CRASH = os.environ.get(
     "UNIT_TESTS_ALLOW_TEARDOWN_CRASH", ""
 ).lower() not in (
@@ -292,7 +299,7 @@ def _start_selected_package(wheel_root, env):
 
 
 def run_file(python, test_file, timeout, report_dir="", wheel_package_root=""):
-    """Run one test file; return (returncode, output, timed_out)."""
+    """Run one test file; return (returncode, output, timed_out, exit_timed_out)."""
     # The runner exports a shell wrapper for deliberate group commands; a
     # nested sample can donate its wrapper, so invoke the real executable. The
     # parent selects the installed package explicitly. pytest's pythonpath
@@ -301,6 +308,9 @@ def run_file(python, test_file, timeout, report_dir="", wheel_package_root=""):
     python = os.environ.get("FLAGCICD_PYTHON_NO_LAUNCHER", python)
     env = _start_vendor_runtime(test_file, wheel_package_root)
     startup = Path(__file__).with_name("_torch_fl_test_site.py")
+    session = tempfile.TemporaryDirectory(prefix="flagos-unit-exit-")
+    session_marker = Path(session.name) / "session-finished"
+    env["FLAGOS_UNIT_SESSION_MARKER"] = str(session_marker)
     command = [
         python,
         "-c",
@@ -312,12 +322,37 @@ def run_file(python, test_file, timeout, report_dir="", wheel_package_root=""):
             "spec.loader.exec_module(site)\n"
             "site.install()\n"
             "import pytest\n"
+            "from pathlib import Path\n"
+            "session_marker = Path(__import__('os').environ['FLAGOS_UNIT_SESSION_MARKER'])\n"
+            "class FinishMarker:\n"
+            "    def __init__(self, marker):\n"
+            "        self.marker = marker\n"
+            "        self.finished = False\n"
+            "    @pytest.hookimpl(trylast=True)\n"
+            "    def pytest_sessionfinish(self, session, exitstatus):\n"
+            "        self.marker.write_text(f'{int(exitstatus)}\\n0\\n', encoding='utf-8')\n"
+            "    @pytest.hookimpl(trylast=True)\n"
+            "    def pytest_unconfigure(self, config):\n"
+            "        if self.finished:\n"
+            "            return\n"
+            "        self.finished = True\n"
+            "        lines = self.marker.read_text(encoding='utf-8').splitlines()\n"
+            "        self.marker.write_text(f'{lines[0]}\\n1\\n', encoding='utf-8')\n"
             "original = pytest.Config._configure_python_path\n"
             "def configure_python_path(config):\n"
             "    original(config)\n"
             "    site.install()\n"
             "pytest.Config._configure_python_path = configure_python_path\n"
-            "raise SystemExit(pytest.main())"
+            "original_collect = pytest.Session.perform_collect\n"
+            "def perform_collect(session):\n"
+            "    try:\n"
+            "        return original_collect(session)\n"
+            "    finally:\n"
+            "        session.config.pluginmanager.register(\n"
+            "            FinishMarker(session_marker), '_flagos_finish_marker')\n"
+            "pytest.Session.perform_collect = perform_collect\n"
+            "result = pytest.main()\n"
+            "raise SystemExit(result)"
         ),
         str(test_file.resolve()),
         "-q",
@@ -326,7 +361,7 @@ def run_file(python, test_file, timeout, report_dir="", wheel_package_root=""):
     ]
     # Reasons carry the test path and message needed to fix a shared case that
     # is skipped on one platform. The path stays absolute: a unit file can live
-    # outside the checkout, and the JSON report lives in the CI temp directory.
+    # outside the checkout, and the JSON report lives in CI's temp directory.
     if report_dir:
         command.extend(
             [
@@ -336,22 +371,155 @@ def run_file(python, test_file, timeout, report_dir="", wheel_package_root=""):
                 str(Path(report_dir) / f"unit-{uuid.uuid4().hex}.json"),
             ]
         )
+    try:
+        process = _start_file(command, env, session_marker, session)
+    except BaseException:
+        session.cleanup()
+        raise
+    return _wait_for_file(process, timeout, session_marker)
+
+
+def _start_file(command, env, session_marker, session):
+    """Start pytest so this runner owns the end of its session."""
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         env=env,
-        # Own process group so a runaway test cannot outlive the timeout.
+        bufsize=1,
+        # Own process group so a runaway test or teardown cannot outlive the
+        # timeout or the post-session grace period.
         start_new_session=True,
     )
+    process.session_directory = session
+    process.session_marker = session_marker
+    process.stdout_buffer = []
+    process.stdout_reader = threading.Thread(
+        target=_consume_output, args=(process,), daemon=True
+    )
+    process.stdout_reader.start()
+    return process
+
+
+def _consume_output(process):
+    """Drain output while waiting; an early summary must not block the child."""
+    if process.stdout is None:
+        return
+    for line in process.stdout:
+        process.stdout_buffer.append(line)
+
+
+def _collected_output(process):
+    """Return everything the child has written so far."""
+    return "".join(process.stdout_buffer)
+
+
+def _finish_plugins(process):
+    """A second line says every pytest finish and unconfigure hook returned."""
     try:
-        output, _ = process.communicate(timeout=timeout)
-        return process.returncode, output, False
-    except subprocess.TimeoutExpired:
+        phase = process.session_marker.read_text(encoding="utf-8").splitlines()
+        int(phase[0])
+        return bool(int(phase[1]))
+    except (OSError, IndexError):
+        return False
+
+
+def _release_session(process):
+    """Delete the temp directory after all output has been collected."""
+    while process.stdout_reader.is_alive() and process.stdout.readable():
+        # The child's descendants may keep the pipe open after the child exits.
+        # Releasing the read end lets this thread finish without waiting for
+        # them to close their inherited copies.
+        process.stdout.close()
+        break
+    process.stdout_reader.join(timeout=1)
+    process.session_directory.cleanup()
+
+
+def _wait_for_file(process, timeout, session_marker):
+    """Wait for pytest and then bound its interpreter teardown."""
+    deadline = time.monotonic() + timeout
+    try:
+        while process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _stop_file(process, 124, timed_out=True)
+            if session_marker.is_file():
+                return _wait_after_session(process, session_marker)
+            output = _collected_output(process)
+            summary = clean_summary(output)
+            if summary is not None:
+                process.wait(timeout=max(0.1, deadline - time.monotonic()))
+                process.stdout_reader.join()
+                output = _collected_output(process)
+                _release_session(process)
+                return process.returncode, output, False, False
+            try:
+                process.wait(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+        process.stdout_reader.join()
+        output = _collected_output(process)
+        _release_session(process)
+        return process.returncode, output, False, False
+    except BaseException:
+        _kill_process_group(process)
+        process.wait()
+        raise
+
+
+def _wait_after_session(process, session_marker):
+    """Let plugins finish, then kill only a process that remains alive."""
+    try:
+        phase = session_marker.read_text(encoding="utf-8").splitlines()
+        exitstatus = int(phase[0])
+    except (OSError, IndexError, ValueError):
+        exitstatus = 0
+    deadline = time.monotonic() + _SESSION_EXIT_GRACE_SECONDS
+    while process.poll() is None:
+        if time.monotonic() >= deadline:
+            if not _finish_plugins(process):
+                # A later plugin is still saving a report or stopping hardware;
+                # that work is part of teardown, so do not interrupt it.
+                time.sleep(0.1)
+                continue
+            returncode, output, _timed_out, _exit_timed_out = _stop_file(
+                process, exitstatus, timed_out=False
+            )
+            return returncode, output, False, True
+        try:
+            process.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            continue
+    process.stdout_reader.join()
+    output = _collected_output(process)
+    _release_session(process)
+    return process.returncode, output, False, False
+
+
+def _stop_file(process, returncode, timed_out):
+    """Kill one child process group and collect whatever it printed."""
+    _kill_process_group(process)
+    process.wait()
+    process.stdout_reader.join(timeout=1)
+    output = _collected_output(process)
+    _release_session(process)
+    if not timed_out:
+        print(
+            "completed pytest session; interpreter did not exit within "
+            f"{_SESSION_EXIT_GRACE_SECONDS}s and its process group was killed",
+            file=sys.stderr,
+            flush=True,
+        )
+    return returncode, output, timed_out, not timed_out
+
+
+def _kill_process_group(process):
+    try:
         os.killpg(process.pid, signal.SIGKILL)
-        output, _ = process.communicate()
-        return 124, output, True
+    except ProcessLookupError:
+        pass
 
 
 def _report_belongs_to_file(document, test_file):
@@ -605,7 +773,7 @@ def main():
     for test_file in files:
         print(f"FILE {test_file}", flush=True)
         print(f"::group::{test_file}", flush=True)
-        returncode, output, timed_out = run_file(
+        returncode, output, timed_out, exit_timed_out = run_file(
             args.python,
             test_file,
             args.timeout,
@@ -616,6 +784,12 @@ def main():
         status, tolerated = classify(returncode, output)
         if timed_out:
             print(f"::error::{test_file} did not finish within {args.timeout}s")
+        elif exit_timed_out:
+            print(
+                f"::warning::{test_file} finished its pytest session; the "
+                f"interpreter did not exit within {_SESSION_EXIT_GRACE_SECONDS}s "
+                "and its process group was killed"
+            )
         elif tolerated:
             print(
                 f"::warning::{test_file} passed, then the interpreter died with "
