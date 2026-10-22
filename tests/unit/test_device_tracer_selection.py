@@ -61,7 +61,7 @@ EXPECTED_TRACER = {
     "ascend": "cann_device_tracer",
     "gcu": "gcu_topspti_device_tracer",
     "musa": "musa_mupti_device_tracer",
-    "tsingmicro": "unavailable_device_tracer",
+    "tsingmicro": "tsingmicro_device_tracer",
     "bpu": "unavailable_device_tracer",
     "mps": "unavailable_device_tracer",
 }

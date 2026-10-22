@@ -299,6 +299,8 @@ project's own spelling.
 | `TOPSATEN_LIB` | Enflame | Read | Enflame topsaten library override; otherwise discovered under `$TOPS_HOME` |
 | `MUDNN_LIB` | Moore Threads | Read | MUSA kernel-library override; otherwise discovered under `$MUSA_HOME/lib` |
 | `TRITON_GCU_PATH` | Enflame Triton | Read | Vendor Triton/compiler root for GCU (`/opt/triton_gcu`) |
+| `TSM_PROFILER_EN` | Kuiper hpgr | Read by hpgr | Enables `tx*` runtime API interception. Without it rocprofiler sees no launches and the TsingMicro profiler tool receives no kernel dispatches |
+| `ROCP_TOOL_LIBRARIES` | rocprofiler-sdk | Read by rocprofiler | Names the tool library rocprofiler loads. On TsingMicro this is `torch_fl/lib/libtorch_fl_profiler.so`; the tracer `dlopen`s the same library by name |
 
 Each SDK name is the vendor's own — the one the vendor's `set_env` script writes.
 There are no `FLAGOS_`/`METAX_`-style aliases; one name per vendor. Only the
