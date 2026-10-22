@@ -41,6 +41,37 @@ def _read(path):
     return path.read_text(encoding="utf-8")
 
 
+def test_metadata_ops_survive_registration_regeneration():
+    """Ascend's aliases stay in the exact kernel coverage set.
+
+    The generic register.inc owns the wrapper symbols, but its ops are not all
+    Ascend kernels. A generator that derives the coverage set from the
+    hand-written REGISTER_IMPL_TO_DISPATCHER lines alone drops these entries,
+    leaving ATen's CPU metadata kernels attached to flagos tensors.
+    """
+    register = _read(REPO_ROOT / "csrc/aten/backends/ascend/generated/ascend_register.inc")
+    registered = set(re.findall(r'm\.impl\("([^"]+)"', register))
+    expected = {
+        "_conj",
+        "_neg_view",
+        "_unsafe_view",
+        "alias",
+        "detach",
+        "permute",
+        "select.int",
+        "slice.Tensor",
+        "squeeze",
+        "squeeze.dim",
+        "t",
+        "transpose.int",
+        "unbind.int",
+        "unsqueeze",
+    }
+    assert expected <= registered
+    generator = _read(CODEGEN)
+    assert "REGISTER_CC_METADATA_OPS" in generator
+
+
 @pytest.mark.parametrize(
     "soc",
     [

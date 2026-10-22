@@ -94,6 +94,32 @@ HANDWRITTEN_DIRS = (
     REPO / "csrc/aten",
 )
 
+# These aliases and views are published by the Ascend-specific arm of
+# register.cc, rather than by a REGISTER_IMPL_TO_DISPATCHER in a backend source
+# file. Keep them explicit: the generic register.inc is not the Ascend coverage
+# list, and scanning it for every wrapper would claim ops that have no Ascend
+# implementation. Removing these entries changes the device of an ordinary
+# operation on a FlagGems-primary Ascend wheel; adding them to OPS would run
+# them on a CPU device and register them a second time.
+REGISTER_CC_METADATA_OPS = frozenset(
+    {
+        "_conj",
+        "_neg_view",
+        "_unsafe_view",
+        "alias",
+        "detach",
+        "permute",
+        "select.int",
+        "slice.Tensor",
+        "squeeze",
+        "squeeze.dim",
+        "t",
+        "transpose.int",
+        "unbind.int",
+        "unsqueeze",
+    }
+)
+
 # --------------------------------------------------------------------------
 # Op registry: schema op name -> (category, aclnn-name override or None).
 #
@@ -820,8 +846,16 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
 
-  ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  // Comparisons use ATen's result_type(self, other). Passing self's dtype to
+  // AclScalarWrapper truncates a float scalar into an integral bound, so
+  // int32 <= -0.5 would answer True at zero instead of False.
+  auto result_dtype = at::result_type(self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+
+  ascend::AclTensorWrapper acl_self(self_c);
+  ascend::AclScalarWrapper acl_other(other, result_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_other.get(), acl_out.get());
@@ -4706,6 +4740,7 @@ FILE_HEADER = """\
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/result_type.h>
 #include <ATen/ops/_amp_foreach_non_finite_check_and_unscale.h>
 #include <ATen/ops/abs.h>
 #include <ATen/ops/acos.h>
@@ -4936,7 +4971,13 @@ def emit_register_inc(covered: list) -> int:
         _, disp = schema_to_cpp_name(op)
         disp_to_op[disp[: -len("_dispatcher")]] = op
 
-    ops = {op for op, _, _ in covered}
+    ops = {op for op, _, _ in covered} | REGISTER_CC_METADATA_OPS
+    missing_metadata = sorted(REGISTER_CC_METADATA_OPS - wrappers.keys())
+    if missing_metadata:
+        raise RuntimeError(
+            "Ascend metadata registrations are missing from generated/register.inc: "
+            + ", ".join(missing_metadata)
+        )
     missing = []
     for stem in _handwritten_dispatchers():
         if stem in disp_to_op:

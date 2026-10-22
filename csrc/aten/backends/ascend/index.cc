@@ -117,6 +117,15 @@ at::Tensor IndexTensorKernelAscend(const at::Tensor& self,
 
   TORCH_CHECK(!defined_indices.empty(), "index: expected at least one index tensor");
 
+  // ATen permits a CPU index for a device tensor. The native kernel has no
+  // TensorIterator migration, so copy it before wrapping it as device storage.
+  const auto index_device = self.device();
+  for (auto& idx : defined_indices) {
+    if (idx.device() != index_device) {
+      idx = idx.to(index_device);
+    }
+  }
+
   size_t bool_index_count = 0;
   size_t bool_index_offset = 0;
   for (size_t i = 0; i < defined_indices.size(); ++i) {
