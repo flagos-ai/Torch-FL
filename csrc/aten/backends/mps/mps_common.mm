@@ -170,6 +170,15 @@ bool MpsSupportsUnaryDtype(at::ScalarType dtype) {
   return dtype != at::kBool && MpsDataTypeOf(dtype, &ignored);
 }
 
+bool MpsSupportsSoftplusDtype(
+    at::ScalarType dtype,
+    const at::Scalar& beta,
+    const at::Scalar& threshold) {
+  return (dtype == at::kFloat || dtype == at::kHalf ||
+          dtype == at::kBFloat16) &&
+      MpsConstantExact(beta, dtype) && MpsConstantExact(threshold, dtype);
+}
+
 bool MpsSupportsTrigDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
