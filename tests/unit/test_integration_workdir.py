@@ -402,7 +402,8 @@ def test_setup_runs_from_the_runner_checkout_with_a_native_profile():
     assert "read -r container_image container_workspace < <(" in workflow
     assert ']] && [[ "$(python3 -c' not in workflow
     assert 'container_workspace="$(python3 -c' not in workflow
-    assert "export PLATFORM_WORKSPACE=${GITHUB_WORKSPACE:?}" not in workflow
+    # GitHub's shell may expand the parameter assertion before this step runs.
+    assert "${GITHUB_WORKSPACE:?}" not in workflow
     assert 'setup_path="$GITHUB_WORKSPACE/$SETUP_SCRIPT"' in workflow
     assert 'create_setup_entry "$3" "$4"; exec bash -c "$(cat "$5")' in workflow
     assert 'create_setup_entry "$setup_path" "$container_workspace"' in workflow

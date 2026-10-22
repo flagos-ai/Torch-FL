@@ -23,12 +23,14 @@ create_setup_entry() {
   local entry="${RUNNER_TEMP:?}/$name"
   local setup_bash="${SETUP_BASH:?}"
   [[ "$platform_workspace" = /* ]] && test -d "$platform_workspace"
-  [[ "$setup_script" != */* ]] || { [[ "$setup_script" = /* ]] && test -f "$setup_script"; }
+  if [[ "$setup_script" == */* ]]; then
+    [[ "$setup_script" = /* ]] && test -f "$setup_script"
+  fi
   if [[ "$setup_bash" == */* ]]; then
     [[ "$setup_bash" = /* ]] && test -x "$setup_bash"
   fi
   # Capture the profile's final exported state and remove BASH_ENV before
-  # setup. Reloading the profile could repeat side effects recursively.
+  # setup. Reloading the profile could repeat its side effects.
   printf 'set -euo pipefail\nunset BASH_ENV\n' > "$entry"
   printf '%s\n' "$(declare -p -x CI_STAGE INTEGRATION_PROFILE PATH)" \
     >> "$entry"
