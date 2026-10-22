@@ -38,7 +38,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gen_vendor_confs as g  # noqa: E402
-from backend_coverage import FLAGGEMS_PYTHON_OPS  # noqa: E402
 from codegen_mudnn import REGISTER_INC, wrapper_map  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -86,7 +85,10 @@ def target_ops() -> list:
         else frozenset()
     )
 
-    wanted = (set(FLAGGEMS_PYTHON_OPS) - gaps) - native - pending
+    # This platform's ceiling, not the shared one: only cuda reads the widened
+    # set, so anything else here asks for wrappers register.inc does not have.
+    flaggems_py = g.flaggems_python_ops_for("musa")
+    wanted = (set(flaggems_py) - gaps) - native - pending
     unknown = sorted(wanted - set(wrappers))
     if unknown:
         raise SystemExit(
@@ -97,7 +99,7 @@ def target_ops() -> list:
 
     return (
         sorted(wanted),
-        sorted((native & set(FLAGGEMS_PYTHON_OPS)) - pending),
+        sorted((native & set(flaggems_py)) - pending),
         sorted(gaps),
     )
 

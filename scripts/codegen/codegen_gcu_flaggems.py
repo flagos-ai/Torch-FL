@@ -38,7 +38,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gen_vendor_confs as g  # noqa: E402
-from backend_coverage import FLAGGEMS_PYTHON_OPS  # noqa: E402
 from codegen_mudnn import REGISTER_INC, wrapper_map  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -86,7 +85,12 @@ def target_ops() -> list:
         else frozenset()
     )
 
-    wanted = (set(FLAGGEMS_PYTHON_OPS) - gaps) - native - pending
+    # The platform's own ceiling, not the shared one: gcu is not cuda, so it
+    # reads the frozen pre-2026-10-22 set (gen_vendor_confs.flaggems_python_ops_for).
+    # Using the widened set here asked for wrappers that register.inc does not
+    # have, because gcu's conf never routes those ops either.
+    flaggems_py = g.flaggems_python_ops_for("gcu")
+    wanted = (set(flaggems_py) - gaps) - native - pending
     unknown = sorted(wanted - set(wrappers))
     if unknown:
         raise SystemExit(
@@ -97,7 +101,7 @@ def target_ops() -> list:
 
     return (
         sorted(wanted),
-        sorted((native & set(FLAGGEMS_PYTHON_OPS)) - pending),
+        sorted((native & set(flaggems_py)) - pending),
         sorted(gaps),
     )
 
