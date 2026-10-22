@@ -32,7 +32,7 @@ The on-hardware measurements are in ``docs/reference/operator-support.md``.
 import pytest
 import torch
 
-from torch_fl import _build_accelerator, flagos
+from torch_fl import flagos
 
 
 def _roundtrip(x, indices, values, accumulate=False):
@@ -144,30 +144,108 @@ class TestFallbackReturnsSelf:
         assert got is x
 
 
-class TestGate:
-    """The patch is scoped to the builds and confs it was measured on."""
+class TestLaunchPathGate:
+    """``_flagos_on_flaggems_launch_path`` is the build half of the gate.
 
-    def test_does_not_register_off_the_measured_builds(self):
-        if _build_accelerator() in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
-            pytest.skip("a build the gate opens on")
+    It is asked of ``index_put_`` directly now, because ``index_put_`` is in no
+    conf (it is hand-registered, not generated), so the conf half could never
+    open for it. That made the patch dead on every platform, which is what
+    issue #633 reports on DCU.
+    """
+
+    def test_only_bpu_and_mps_lack_the_launch_path(self):
+        assert set(flagos._NO_FLAGGEMS_LAUNCH_BUILDS) == {"bpu", "mps"}
+
+    @pytest.mark.parametrize(
+        "accelerator, expected",
+        [
+            ("", True),  # a source checkout: the conf gate still applies
+            ("cuda", True),
+            ("dcu", True),
+            ("metax", True),
+            ("ppu", True),
+            ("iluvatar", True),
+            ("ascend", True),
+            ("musa", True),
+            ("gcu", True),
+            ("kunlunxin", True),
+            ("tsingmicro", True),
+            ("bpu", False),
+            ("mps", False),
+        ],
+    )
+    def test_answers_for_every_platform(self, monkeypatch, accelerator, expected):
+        import torch_fl
+
+        monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: accelerator)
+        assert flagos._flagos_on_flaggems_launch_path() is expected
+
+    def test_index_put_is_not_gated_on_the_conf(self):
+        """Regression for #633: the conf gate never opened for this op.
+
+        No generated conf lists ``index_put_``/``_index_put_impl_`` -- they are
+        in the codegen's ``MANUAL_REGISTERED_OPS`` -- so routing the patch
+        through ``_flagos_launch_patches_apply`` left the CPU round-trip in
+        place even where ``flag_gems.index_put_`` exists.
+        """
+        from pathlib import Path
+
+        configs = Path(flagos.__file__).parent.parent / "configs"
+        offenders = [
+            path.name
+            for path in sorted(configs.glob("backends_*.conf"))
+            if any(
+                line.split("#")[0].partition("=")[0].strip()
+                in ("index_put_", "_index_put_impl_")
+                for line in path.read_text().splitlines()
+            )
+        ]
+        assert offenders == []
+
+
+class TestGate:
+    """The patch installs exactly where it can do something."""
+
+    def test_does_not_register_without_the_launch_path(self, monkeypatch):
+        import torch_fl
+
+        monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "bpu")
         before = len(flagos._PATCH_LIBS)
         flagos._patch_flaggems_index_put()
         assert len(flagos._PATCH_LIBS) == before
 
-    def test_registers_on_a_measured_build(self):
-        if _build_accelerator() not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
-            pytest.skip("not a build the gate opens on")
-        flag_gems = pytest.importorskip("flag_gems")
-        if getattr(flag_gems, "index_put_", None) is None:
-            pytest.skip("this flag_gems has no index_put_")
-        # The function's own second gate, out here rather than inside the call,
-        # so a skip says which of the two conditions was not met.
-        conf_routes = flagos.__dict__.get("_conf_routes_to_flaggems")
-        if conf_routes is None:
-            from torch_fl import _conf_routes_to_flaggems as conf_routes
-        if not conf_routes():
-            pytest.skip("the selected conf routes nothing to FlagGems")
-        # Registering needs no device: torch.library only touches the dispatcher.
+    def test_registers_when_flag_gems_ships_the_kernel(self, monkeypatch):
+        """The only remaining condition is that ``flag_gems.index_put_`` exists.
+
+        Registering needs no device: ``torch.library`` only touches the
+        dispatcher. A stub module stands in for flag_gems' attribute so this
+        runs on a host with no flag_gems installed -- which is where the
+        per-platform CI for every non-accelerator job is.
+        """
+        import sys
+        import types
+
+        if not flagos._flagos_on_flaggems_launch_path():
+            pytest.skip("this build has no FlagGems launch path")
+
+        stub = types.ModuleType("flag_gems")
+        stub.index_put_ = lambda self, indices, values, accumulate=False: self
+        monkeypatch.setitem(sys.modules, "flag_gems", stub)
+
         before = len(flagos._PATCH_LIBS)
         flagos._patch_flaggems_index_put()
-        assert len(flagos._PATCH_LIBS) == before + 1
+        try:
+            assert len(flagos._PATCH_LIBS) == before + 1
+        finally:
+            flagos._PATCH_LIBS.pop()._destroy(0)
+
+    def test_a_flag_gems_without_the_kernel_is_left_alone(self, monkeypatch):
+        import sys
+        import types
+
+        stub = types.ModuleType("flag_gems")
+        monkeypatch.setitem(sys.modules, "flag_gems", stub)
+
+        before = len(flagos._PATCH_LIBS)
+        flagos._patch_flaggems_index_put()
+        assert len(flagos._PATCH_LIBS) == before
