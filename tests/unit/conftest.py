@@ -54,3 +54,23 @@ def _restore_backend_config_path():
     finally:
         if saved is not None:
             torch_fl._BACKEND_CONFIG_PATH = saved
+
+
+@pytest.fixture(autouse=True)
+def _restore_build_record():
+    """Clear the cached build record after every test that loaded a scratch one.
+
+    torch_fl._env._build_record() is an lru_cache over the _build_config.py that
+    sits beside _env.py. A test that points _env.__file__ at a scratch tree
+    (tests/unit/test_ascend_platform_marker.py) loads that tree's record into the
+    cache, and monkeypatch cannot put a cached_value back -- so the real record
+    is re-read here instead. Without it, the next test in the process sees the
+    scratch platform as this wheel's build.
+    """
+    torch_fl = sys.modules.get("torch_fl")
+    env_module = getattr(torch_fl, "_env", None) if torch_fl else None
+    try:
+        yield
+    finally:
+        if env_module is not None and hasattr(env_module._build_record, "cache_clear"):
+            env_module._build_record.cache_clear()

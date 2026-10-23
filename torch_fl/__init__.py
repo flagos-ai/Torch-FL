@@ -85,76 +85,43 @@ def _select_backend_config() -> None:
     """Pick the op-routing config file for this build.
 
     Every conf is backends_<vendor>.conf -- one file per platform, no per-mode
-    suffix -- so the selection is a property of the build, not of an env var:
+    suffix -- so the selection is a property of the build, not of an env var.
+    The platform is read from the build record setup.py writes
+    (torch_fl/_build_config.py): the wheel records the platform it resolved
+    FLAGOS_ACCELERATOR to, and that record, not the environment and not a file
+    in the install directory, is what this reads.
 
-      * a native-kernel vendor marker -> backends_<that platform>.conf
-      * otherwise                     -> backends_<vendor>.conf, the vendor the
-                                         build record resolves to (a MetaX build
-                                         -> backends_metax.conf, a PPU wheel ->
-                                         backends_thead.conf, an unrecognised
-                                         build -> backends_nvidia.conf)
+    It used to read lib/flagos_platform first. That file is an install()
+    artifact in torch_fl/lib/, a directory no build cleans in a source tree
+    (and one the marker tests write "ascend"/"mps" into), so whichever platform
+    built there last decided the conf for every later build: a MetaX build that
+    inherited an "mps" marker read the empty backends_apple.conf and raised
+    "routed to 'none'" for every op that conf does not list. It is no longer
+    consulted, and builds that write no marker now remove a stale one.
 
-    There is no FlagGems opt-in left to apply. FLAGOS_USE_FLAGGEMS,
-    FLAGOS_USE_FLAGGEMS_CPP and FLAGOS_USE_TILEOPS each used to name a conf of
-    their own; every one of those files was the platform's own conf with one
-    backend column rewritten, which is why they could -- and did -- drift from it.
-    Each conf now states all five keys per op directly
-    (flaggems_cpp > flaggems > tileops > <vendor> > none), so the routing those
-    flags used to select is already in the file the platform reads.
+    What the build compiled in does not decide the file, only which entry
+    point an op takes once dispatched: flaggems_cpp is Backend::kFlagGemsCpp and
+    needs FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor);
+    tileops is Backend::kTileOps and needs FLAGOS_BUILD_TILEOPS=ON plus an SM90
+    device. Where the slot is empty Dispatcher::GetFn degrades to the boxing
+    kernel rather than raising, so one file stays correct across both builds.
+    FLAGOS_FORCE_BACKEND survives as a table transform in common.cc
+    (ApplyForcedBackend): the tileops mode repins every op the conf annotates
+    `# tileops` onto that path, the same op set backends_tileops.conf used to
+    carry.
 
-    Which entry point an op actually takes is then decided by what got compiled
-    in, not by which file was read. flaggems_cpp is Backend::kFlagGemsCpp and needs
-    FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor); tileops is
-    Backend::kTileOps and needs FLAGOS_BUILD_TILEOPS=ON plus an SM90 device. Where the
-    slot is empty Dispatcher::GetFn degrades to the boxing kernel rather than
-    raising, so one file stays correct across both builds. FLAGOS_FORCE_BACKEND
-    survives as a table transform in common.cc (ApplyForcedBackend): the tileops
-    mode repins every op the conf annotates `# tileops` onto that path, which is
-    the same op set backends_tileops.conf used to carry.
+    Every conf states all five keys per op directly
+    (flaggems_cpp > flaggems > tileops > <vendor> > none), and the generated
+    ones are full-coverage: backends_metax.conf routes 10 ops to flaggems_cpp
+    (the 15 in METAX_CPP_MEASURED minus the five that also sit in MetaX's triton
+    gap set, which the dispatcher checks first) and the rest to flaggems or
+    cpu_fallback; a conf whose routes a build cannot serve degrades at dispatch
+    rather than being swapped for another file.
 
-    backends_metax.conf routes 10 ops to flaggems_cpp: the 15 in
-    METAX_CPP_MEASURED minus the five that also sit in MetaX's triton gap set,
-    which the dispatcher checks first. `mm` and `_softmax`/`embedding` are left
-    out of the measured set deliberately -- `mm` because flag_gems' C++ mm kernel
-    passes a SPLIT_K kwarg triton-metax rejects, the other two because the
-    FlagGems build the MetaX lane installs ships no C++ half, so those routes
-    could not be served, and both ops reach the flaggems Python path instead.
-    Those 10 need a FlagGems built for MACA (cpp/ -DFLAGGEMS_BACKEND=MACA) linked
-    in; without it Dispatcher::GetFn sees an empty kFlagGemsCpp slot and boxes
-    them, which is why one file is safe for both builds.
-
-    Native-kernel vendors (musa, ascend, gcu, tsingmicro) do not take part in that
-    choice; each takes backends_<platform>.conf directly. For musa, ascend and gcu
-    that conf is generated full-coverage: every routable op appears exactly once,
-    already resolved by the priority flaggems_cpp > flaggems > tileops > <vendor>
-    > none, so operator support is countable from the file alone. tsingmicro stays
-    hand-written and sparse because it registers the full generated op list rather
-    than a subset -- a `none` entry there would reach the dispatcher and raise on
-    an empty slot instead of boxing to cpu_fallback, so the whole-list shape is
-    not available to it. Such a build is detected via lib/flagos_platform, or for
-    Ascend via /dev/davinci* device nodes. To collapse that table onto a single
-    backend family for A/B measurement, set FLAGOS_FORCE_BACKEND to flaggems,
-    vendor or tileops -- one name, so "two of them at once" is unrepresentable.
-    Every mode is applied in common.cc over the parsed table: an op only moves
-    if the target backend actually implements it, known from the routed value
-    plus its `# <backend>` annotation. Ops with no such implementation are
-    listed on stderr and stay on their configured backend -- the vendor mode is
-    therefore partial by nature, since a vendor implements far fewer ops than
-    FlagGems.
-
-    The two boxing confs (metax, dcu) are generated by the same script and have
-    the same full-coverage shape as the vendor ones; only the fallback key
-    differs, spelled `cuda` because a CUDA-compatible platform can box every op
-    (which is why they have no `none` entries). Each routes the ops its own triton
-    backend cannot run back to that boxing kernel instead of to flaggems:
-    mm/bmm/mean.dim and friends on MetaX (maca libtorch_cuda), slice_backward
-    (hardware VMFault) and silu_backward (missing div_rn lowering) on DCU under
-    DTK's hcu triton. Those per-platform gap sets are measured on hardware, so the
-    generator recovers them from the confs rather than restating them. An explicit
-    FLAGOS_BACKEND_CONFIG always wins (advanced/testing use), and the per-op
-    FLAGOS_OP_<name> overrides in common.cc still apply on top. This must run
-    before the first op dispatch triggers BackendTable() init; setting it at
-    import time (before any flagos tensor op) is well before that.
+    An explicit FLAGOS_BACKEND_CONFIG always wins (advanced/testing use), and
+    the per-op FLAGOS_OP_<name> overrides in common.cc still apply on top. This
+    must run before the first op dispatch triggers BackendTable() init; setting
+    it at import time (before any flagos tensor op) is well before that.
 
     The choice is handed to the C++ reader through
     _C._set_backend_config_path(), not written to os.environ. It used to be an
@@ -207,57 +174,12 @@ def _select_backend_config() -> None:
         _BACKEND_CONFIG_PATH = resolved
         return
 
-    # A vendor build whose kernels are native (no CUDA boxing) records its
-    # platform in lib/flagos_platform. backends_<vendor>.conf is generated by
-    # scripts/codegen/gen_vendor_confs.py and already lists every routable op with its
-    # final backend (flaggems_cpp > flaggems > tileops > <vendor> > none), so
-    # there is no FlagGems opt-in to apply here -- the conf is FlagGems-first by
-    # construction. FLAGOS_FORCE_BACKEND narrows it afterwards.
-    #
-    # The marker holds the platform id (CMake writes FLAGOS_ACCELERATOR), so it is
-    # mapped to its vendor before naming the file. For every platform that writes
-    # a marker the two are the same word.
-    marker = os.path.join(os.path.dirname(__file__), "lib", "flagos_platform")
-    if os.path.exists(marker):
-        with open(marker) as f:
-            platform = f.read().strip().lower()
-        vendor = _platform.vendor_for(platform) or platform
-        platform_conf = os.path.join(
-            os.path.dirname(__file__), "configs", f"backends_{vendor}.conf"
-        )
-        if os.path.exists(platform_conf):
-            _BACKEND_CONFIG_PATH = platform_conf
-            return
-
-    conf_dir = os.path.join(os.path.dirname(__file__), "configs")
-
-    # Ascend builds compile the ACL C++ backend (Backend::kAscend), not the CUDA
-    # boxing kernels, so the cuda/flaggems confs (which route ops to `cuda`) can
-    # never apply. Since every wheel ships all backends*.conf files, the conf set
-    # can't distinguish the build; use the runtime hardware signal instead. An
-    # Ascend NPU exposes /dev/davinci* device nodes -- their presence means this
-    # is an Ascend box, where the only usable routing is the ascend conf. (A CUDA
-    # build could not run here anyway, so this never mis-fires on a CUDA host.)
-    ascend_default = os.path.join(conf_dir, "backends_ascend.conf")
-    try:
-        is_ascend_build = os.path.exists(ascend_default) and any(
-            name.startswith("davinci") for name in os.listdir("/dev")
-        )
-    except OSError:
-        is_ascend_build = False
-
-    if is_ascend_build:
-        _BACKEND_CONFIG_PATH = ascend_default
-        return
-
     # The conf follows from the build itself, not from a runtime mode switch: the
-    # accelerator (plus the lib/flagos_platform marker above) is what the wheel
-    # was built for, and a conf is named after the same vendor the accelerator
-    # resolves to. Two wheels predate their own record value and are recognised
-    # by what they bundle instead of by name: an older PPU wheel reports cuda and
-    # ships lib_thead/, and an older MetaX wheel reports maca. Both resolve to
-    # their vendor's conf below, so the branch is the fallback for a wheel whose
-    # record names neither a known platform nor a known vendor.
+    # recorded accelerator says what the wheel was built for, and the conf is
+    # named after the vendor it resolves to. The record is the answer; the two
+    # wheels that predate their record value still resolve: an older PPU wheel
+    # reports cuda and is recognised by lib_thead/, an older MetaX wheel
+    # reports maca.
     platform = _platform.platform_for(_build_accelerator())
     if _is_ppu_build():
         platform = "ppu"
