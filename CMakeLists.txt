@@ -728,10 +728,17 @@ elseif(_flagos_is_metax)
     target_link_directories(cuda_runtime_compat INTERFACE "${MACA_PATH}/lib")
     target_link_libraries(cuda_runtime_compat INTERFACE runtime_cu)
   else()
-    # FlagGems-only: the runtime sources call the CUDA runtime, which the CUDA
-    # toolkit provides; the image this builds on holds the driver, not MACA.
-    find_package(CUDAToolkit REQUIRED)
-    target_link_libraries(cuda_runtime_compat INTERFACE CUDA::cudart)
+    # FlagGems-only: the runtime sources include cuda_runtime.h, which cu-bridge
+    # provides (a CUDA-compatible runtime API on top of MACA), and the MACA
+    # driver supplies the symbols at run time. A CUDA toolkit is used only when
+    # the build was given one; requiring it would fail every MetaX image that
+    # has MACA and no CUDA.
+    if(CUDAToolkit_ROOT)
+      find_package(CUDAToolkit REQUIRED)
+      target_link_libraries(cuda_runtime_compat INTERFACE CUDA::cudart)
+    else()
+      message(STATUS "MetaX without MACA: no CUDA toolkit either, no runtime lib added")
+    endif()
   endif()
 
   set(CUDA_RUNTIME_LIB cuda_runtime_compat)
