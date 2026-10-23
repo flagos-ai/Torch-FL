@@ -95,4 +95,5 @@ x = torch.arange(64., device='flagos:0').reshape(1, 16, 1, 4)
 x.cumsum(3)
 torch_fl._C._synchronize()
 """
-    assert dispatched_to_mps(source) == 1
+    # `arange` creates the operand natively on MPS, then cumsum does the work.
+    assert dispatched_to_mps(source) == 2

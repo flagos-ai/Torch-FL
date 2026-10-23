@@ -21,9 +21,13 @@
   m.impl("all", WrapperAll);
   m.impl("all.dim", WrapperAllDim);
   m.impl("all.dims", WrapperAllDims);
+  m.impl("arange", WrapperArange);
+  m.impl("arange.start", WrapperArangeStart);
+  m.impl("arange.start_step", WrapperArangeStartStep);
   m.impl("argmax", WrapperArgmax);
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
+  m.impl("clamp", WrapperClamp);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
   m.impl("cumsum", WrapperCumsum);
@@ -34,10 +38,12 @@
   m.impl("erf", WrapperErf);
   m.impl("exp", WrapperExp);
   m.impl("gather", WrapperGather);
+  m.impl("gelu", WrapperGelu);
   m.impl("index.Tensor", WrapperIndexTensor);
   m.impl("index_select", WrapperIndexSelect);
   m.impl("le.Tensor", WrapperLeTensor);
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
+  m.impl("linspace", WrapperLinspace);
   m.impl("log", WrapperLog);
   m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
   m.impl("masked_fill.Tensor", WrapperMaskedFillTensor);
@@ -52,6 +58,7 @@
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("reciprocal", WrapperReciprocal);
   m.impl("rsqrt", WrapperRsqrt);
+  m.impl("rsub.Scalar", WrapperRsubScalar);
   m.impl("select.int", WrapperSelectInt);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("silu", WrapperSilu);

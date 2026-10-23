@@ -255,6 +255,38 @@ bool MpsSupportsBinaryDtype(at::ScalarType self_dtype, at::ScalarType other_dtyp
   return self_dtype == other_dtype && MpsSupportsUnaryDtype(self_dtype);
 }
 
+bool MpsSupportsFactoryDtype(at::ScalarType dtype) {
+  MPSDataType ignored;
+  return dtype != at::kBool && MpsDataTypeOf(dtype, &ignored);
+}
+
+bool MpsSupportsGeluDtype(
+    at::ScalarType dtype,
+    c10::string_view approximate) {
+  const bool exact = approximate == "none";
+  const bool tanh = approximate == "tanh";
+  return (exact || tanh) &&
+      (dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16);
+}
+
+bool MpsSupportsClampDtype(
+    at::ScalarType dtype,
+    const std::optional<at::Scalar>& min,
+    const std::optional<at::Scalar>& max) {
+  if (!MpsSupportsUnaryDtype(dtype)) {
+    return false;
+  }
+  for (const auto& bound : {min, max}) {
+    if (bound.has_value() &&
+        (bound->isComplex() ||
+         (c10::isIntegralType(dtype, /*includeBool=*/false) &&
+          !c10::isIntegralType(bound->type(), /*includeBool=*/false)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool MpsSupportsScalarDtype(at::ScalarType self_dtype, const at::Scalar& other) {
   if (!MpsSupportsUnaryDtype(self_dtype) || other.isComplex()) {
     return false;
@@ -728,6 +760,16 @@ bool MpsSupportsSiluDtype(at::ScalarType dtype) {
   // See the note in mps_common.h: aten's `silu` is not `x * sigmoid(x)`, so this
   // list is a measurement rather than the identity it looks like.
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsScalarAlpha(
+    at::ScalarType dtype,
+    const at::Scalar& alpha) {
+  // `sub` and `add` carry their scale through a graph constant. A scale such as
+  // `1 - 1/_float16(32)` is not exactly one, but is not representable in
+  // float16 or bfloat16, and handing its nil constant to the arithmetic selector
+  // aborts MPSGraph. Those calls retain the reference result.
+  return alpha.equal(1.0) || MpsConstantExact(alpha, dtype);
 }
 
 bool MpsSupportsSiluBackwardDtype(
@@ -2222,6 +2264,13 @@ void MpsKeyAppend(std::string& key, bool value) {
 void MpsKeyAppend(std::string& key, const char* value) {
   key += "|t";
   key += (value == nullptr ? "" : value);
+}
+
+void MpsKeyAppend(std::string& key, c10::string_view value) {
+  key += "|v";
+  key += std::to_string(value.size());
+  key.push_back(':');
+  key += value;
 }
 
 namespace {

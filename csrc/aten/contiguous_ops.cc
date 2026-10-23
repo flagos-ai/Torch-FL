@@ -158,6 +158,15 @@ void copy_strided_via_host(
 #if defined(USE_MPS)
 namespace {
 
+// Clone's contiguous fast path needs an allocation without dispatching the
+// like-factory, which has no PrivateUse1 kernel on MPS. Keeping this helper
+// on the device preserves the semantics of clone: a fresh dense allocation.
+at::Tensor empty_like_dense(const at::Tensor& self) {
+  const auto sizes = self.sizes().vec();
+  const auto strides = self.strides().vec();
+  return at::empty_strided(sizes, strides, self.options());
+}
+
 void finish_strided_copy(
     const at::Tensor& self,
     const at::Tensor& result,
@@ -258,7 +267,11 @@ at::Tensor clone(
 
   if (memory_format == c10::MemoryFormat::Preserve) {
     if (self.is_contiguous()) {
+#if defined(USE_MPS)
+      auto result = empty_like_dense(self);
+#else
       auto result = at::empty_like(self);
+#endif
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0 && self.is_privateuseone()) {
         // Blocking, and against `self`'s device rather than whichever device is

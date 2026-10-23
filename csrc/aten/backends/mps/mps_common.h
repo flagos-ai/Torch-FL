@@ -87,7 +87,14 @@
 #include <string>
 #include <vector>
 
+#include "runtime/functions.h"
+
 namespace at::native::flagos::mps {
+
+// The current flagos device, for factory overloads that omit device=.
+inline at::Device MpsCurrentDevice() {
+  return at::Device(at::kPrivateUse1, c10::flagos::CurrentDevice());
+}
 
 // c10 scalar type -> MPSGraph element type. Returns false, leaving *out
 // untouched, for a dtype MPSGraph has no element type for (float64 and the
@@ -155,6 +162,26 @@ bool MpsSupportsCompareDtype(at::ScalarType dtype);
 // whereas aten promotes (int32 + int64 -> int64, half + float -> float), so a
 // mixed pair takes the CPU round-trip and keeps the reference's result dtype.
 bool MpsSupportsBinaryDtype(at::ScalarType self_dtype, at::ScalarType other_dtype);
+bool MpsSupportsScalarAlpha(at::ScalarType dtype, const at::Scalar& alpha);
+
+// Factory results are built into a caller-requested flagos allocation. The
+// graph can express their floating and integral element types; bool and
+// float64 take the reference.
+bool MpsSupportsFactoryDtype(at::ScalarType dtype);
+
+// Clamp runs at the operand's width only. A bound that promotes the result
+// or an integral bound in a floating width takes the reference result.
+bool MpsSupportsClampDtype(
+    at::ScalarType dtype,
+    const std::optional<at::Scalar>& min,
+    const std::optional<at::Scalar>& max);
+
+// GELU is composed from the erf node and host constants in the operand's own
+// width. The two functional approximations differ over their whole range, so
+// the gate reads the spelling as well as the element type.
+bool MpsSupportsGeluDtype(
+    at::ScalarType dtype,
+    c10::string_view approximate);
 
 // Whether a `where.self` computes exactly on the MPSGraph path. The two branch
 // widths take MpsSupportsBinaryDtype's rule for that predicate's reason -- the
@@ -1167,6 +1194,7 @@ void MpsKeyAppend(std::string& key, int64_t value);
 void MpsKeyAppend(std::string& key, double value);
 void MpsKeyAppend(std::string& key, bool value);
 void MpsKeyAppend(std::string& key, const char* value);
+void MpsKeyAppend(std::string& key, c10::string_view value);
 
 template <typename... Parts>
 std::string MpsGraphKey(const char* op, const Parts&... parts) {

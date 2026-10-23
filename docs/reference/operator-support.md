@@ -22,7 +22,7 @@ full-coverage conf.
 | Enflame GCU | `gcu` | 251 | 183 | 434 / 2037 | 21.3% |
 | Moore Threads MUSA | `musa` | 466 | 53 | 519 / 2037 | 25.5% |
 | Iluvatar | `iluvatar` | 585 | 11 | 596 / 2037 | 29.3% |
-| Apple MPS | `mps` | 0 | 63 | 63 / 2037 | 3.1% |
+| Apple MPS | `mps` | 0 | 66 | 66 / 2037 | 3.2% |
 | TsingMicro | `tsingmicro` | 67 | 14 | 81 / 81 | 100.0% |
 | D-Robotics BPU | `bpu` | 0 | 0 | 0 | no per-op kernels |
 
@@ -62,3 +62,31 @@ on that hardware. Correctness is measured per platform by
 resulting verdicts are recorded in that run's evidence, not here. The
 [Compatibility Matrix](compatibility.md) records the platform-level validation
 status.
+
+## Native Backend Route Changes
+
+### Apple Silicon M5: Qwen3.5 vision interpolation keeps scalar subtraction on MPS (2026-10-23, physical M5)
+
+**`rsub.Scalar` now has an MPSGraph route.** Transformers 5.10.4 computes
+Qwen3.5's bilinear weights as `(1 - h_frac)` and `(1 - w_frac)`. The scalar
+subtraction previously took the checked CPU reference, which copied the weight
+tensors off the device before multiplication. The generated MPS kernel evaluates
+`other - self * alpha` in one graph; both host constants are part of the compiled
+graph key. Float32, float16 and bfloat16 run natively, while unsupported widths
+and empty results take the reference path. The call remains on `PrivateUse1` and
+does not use boxing.
+
+The MPS conf is now **66 `mps` / 1971 `none`**, after the preceding 59 routes.
+The physical M5 run passed **12 rsub cases** and **29 Qwen3.5 vision cases**,
+including the check that bilinear indices and weights remain on `flagos:0`. The
+vision dispatch trace ran every operation in its factory/`rsub` probe through
+the `mps` kernel. The full-precision Qwen3.5/JeV image-text inference returned
+logits and input tensors on `flagos:0`, with `prob_1 = 0.03205976262688637`
+against a CPU demo manifest value of `0.026759283617138863`. Other Apple
+Silicon generations, bfloat16 inference of the full model, training, generation
+and other platforms are **not revalidated**.
+
+The trace still contains host fallbacks, including `fill_`, `addmm`, `where`,
+`tril`, `zero_`, `eye`, `floor_divide`, `repeat_interleave`, `slow_conv3d_forward`,
+`prod`, `masked_scatter_` and `max`. This record claims native coverage for the
+listed overloads only.

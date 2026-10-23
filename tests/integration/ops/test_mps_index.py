@@ -166,7 +166,8 @@ out = x[:, a, b]
 out.sum()
 torch_fl._C._synchronize()
 """
-    assert dispatched_to_mps(source) == 2
+    # `arange` creates the input before the index and sum kernels run.
+    assert dispatched_to_mps(source) == 3
 
 
 @pytest.mark.anyplatform
@@ -179,4 +180,5 @@ b = torch.tensor([[1, 2, 0]], device='flagos:0')
 x[a, :, b]
 torch_fl._C._synchronize()
 """
-    assert dispatched_to_mps(source) == 1
+    # `arange` creates the input before the index kernel runs.
+    assert dispatched_to_mps(source) == 2

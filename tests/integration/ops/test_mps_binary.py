@@ -223,6 +223,18 @@ class TestBinaryTensorCorrectness:
         assert out.dtype == torch.int64
         torch.testing.assert_close(out.cpu(), torch.add(a, b, alpha=3))
 
+    @pytest.mark.parametrize("shape", [(32,), (4, 5), (2, 3, 4)])
+    @pytest.mark.parametrize("other", [-3.0, 1.0, 2.0])
+    @pytest.mark.parametrize("alpha", [0.5, 1.0, 2.0, -1.0])
+    @pytest.mark.anyplatform
+    def test_rsub_scalar_matches_cpu(self, shape, other, alpha):
+        source = torch.arange(int(torch.tensor(shape).prod()), dtype=torch.float32)
+        source = source.reshape(shape)
+        actual = torch.ops.aten.rsub.Scalar(_to_device(source), other, alpha)
+        expected = torch.ops.aten.rsub.Scalar(source, other, alpha)
+        assert actual.device.type == "flagos"
+        torch.testing.assert_close(actual.cpu(), expected)
+
     @pytest.mark.parametrize("op_name,op", BINARY_OPS)
     @pytest.mark.anyplatform
     def test_strided_operands_are_materialised(self, op_name, op):
