@@ -151,6 +151,22 @@ def build_accelerator() -> str:
     return str(getattr(module, "ACCELERATOR", "")).strip().lower()
 
 
+def _alias_record(package: Path) -> str:
+    """``torch_fl/_platform_alias.py``'s platform id ("" when unreadable)."""
+    path = package / "_platform_alias.py"
+    try:
+        loader = importlib.machinery.SourceFileLoader(
+            "_flagos_platform_alias", str(path)
+        )
+        module = importlib.util.module_from_spec(
+            importlib.util.spec_from_loader(loader.name, loader)
+        )
+        loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError):
+        return ""
+    return str(getattr(module, "ACCELERATOR", "")).strip().lower()
+
+
 def platform_for(name: str) -> str:
     """The platform a ``FLAGOS_ACCELERATOR`` (or build record) value names.
 
@@ -202,6 +218,11 @@ def detect_platform() -> str:
 
     package = _torch_fl_package_dir()
     if package is not None:
+        # The build record's twin: the row this wheel was built for, in the
+        # table's spelling whatever name the build was told (`metax` is both a
+        # row and its vendor, and the row is `metax`).
+        if (package / "_platform_alias.py").is_file():
+            return _alias_record(package) or DEFAULT_PLATFORM
         try:
             marker = (package / "lib" / "flagos_platform").read_text().strip().lower()
         except OSError:

@@ -97,6 +97,21 @@ if(_flagos_accel_err)
     "${_flagos_known_str}.")
 endif()
 
+# The table row this build belongs to, and every other name for it that an
+# environment may carry. setup.py records them (torch_fl/_platform_alias.py) and
+# passes them here; this is their CMake-side twin, so a wheel built for a
+# platform enters that platform's arms whichever half of the name it was told.
+# `_flagos_is_<name>` below is what the target must match, and for the row whose
+# vendor is also its id that is the vendor's own name.
+set(FLAGOS_PLATFORM_ID "${FLAGOS_ACCELERATOR}")
+if(DEFINED FLAGOS_ACCELERATOR_ALIASES)
+  list(FIND FLAGOS_ACCELERATOR_ALIASES "${FLAGOS_ACCELERATOR}" _alias_index)
+  if(NOT _alias_index EQUAL -1)
+    list(GET FLAGOS_ACCELERATOR_ALIASES -1 _alias_target)
+    set(FLAGOS_ACCELERATOR "${_alias_target}")
+  endif()
+endif()
+
 flagos_json_list(FLAGOS_KERNEL_SWITCHES "${_flagos_platforms}" kernel_switches)
 flagos_json_list(FLAGOS_PLATFORM_LANGUAGES "${_flagos_platforms}"
     accelerators "${FLAGOS_ACCELERATOR}" project_languages)

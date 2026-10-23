@@ -276,6 +276,52 @@ def test_default_kernel_set_per_accelerator(
     assert {names[switch] for switch, on in resolved.items() if on} == expected
 
 
+@pytest.mark.parametrize(
+    "told, platform, aliases",
+    [
+        # The wheels named for a vendor whose row is keyed by another id have to
+        # recognise the vendor spelling; a row whose vendor and id are one word
+        # (`metax`, and `cuda`, whose vendor is `nvidia`) has nothing else to
+        # recognise. `metax` is read on Linux only: loading setup.py for it
+        # builds the libcudart shim, and macOS's ld has no `--version-script`.
+        pytest.param(
+            "metax",
+            "metax",
+            [],
+            marks=pytest.mark.skipif(
+                sys.platform == "darwin",
+                reason="metax setup.py builds its shim with GNU ld",
+            ),
+        ),
+        ("mthreads", "musa", ["mthreads", "musa"]),
+        ("apple", "mps", ["apple", "mps"]),
+        ("hygon", "dcu", ["dcu", "hygon"]),
+        ("nvidia", "cuda", ["cuda", "nvidia"]),
+    ],
+)
+def test_each_build_records_every_spelling_of_its_platform(
+    monkeypatch, tmp_path, clean_kernel_env, told, platform, aliases
+):
+    """A wheel recognises the accelerator name its environment may carry.
+
+    The build is told either half of the name, and a vendor-named build has to
+    accept that name or it falls to the default platform's arms.
+    """
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", told)
+    namespace, _ = _load_setup(monkeypatch)
+    monkeypatch.setitem(
+        namespace["_write_environment_platform_alias"].__globals__,
+        "BASE_DIR",
+        str(tmp_path),
+    )
+    namespace["_write_environment_platform_alias"]()
+    record = {}
+    text = (tmp_path / "torch_fl" / "_platform_alias.py").read_text()
+    exec(text, record)
+    assert record["ACCELERATOR"] == platform
+    assert record["ALIASES"] == aliases
+
+
 def test_explicit_kernel_switch_overrides_the_vendor_default(
     monkeypatch, clean_kernel_env
 ):
