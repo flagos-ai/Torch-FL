@@ -20,6 +20,9 @@
 #
 #   FLAGOS_KERNEL_SWITCHES            the five FLAGOS_BUILD_* names, in order
 #   FLAGOS_PLATFORM_LANGUAGES         project() language list
+#   FLAGOS_PLATFORM_VENDOR            the platform's vendor (apple, nvidia, ...)
+#   FLAGOS_ATEN_VENDOR_DIRS           accelerator keys owning an
+#                                     aten/backends/<key>/ kernel tree
 #   FLAGOS_PLATFORM_RUNTIME_DIR       csrc/runtime/accelerator source subdir
 #   FLAGOS_PLATFORM_USE_MACRO         the platform's USE_* define ("" if none)
 #   FLAGOS_PLATFORM_WRITES_MARKER     ON/OFF: install the flagos_platform file
@@ -57,8 +60,29 @@ endfunction()
 
 # Reject an unknown accelerator here, the way setup.py does, instead of falling
 # through to the CUDA toolchain. The list in the message is the table's own.
+#
+# A vendor name is a legal value even though only the platform id keys a row
+# (`FLAGOS_ACCELERATOR=apple` is the mps build); setup.py resolves it before
+# configuring, and a direct cmake invocation resolves it here, so every read
+# below can stay keyed on the row.
 string(JSON _flagos_accel ERROR_VARIABLE _flagos_accel_err
        GET "${_flagos_platforms}" accelerators "${FLAGOS_ACCELERATOR}")
+if(_flagos_accel_err)
+  string(JSON _flagos_accel_count LENGTH "${_flagos_platforms}" accelerators)
+  math(EXPR _flagos_accel_last "${_flagos_accel_count} - 1")
+  set(_flagos_accel_by_vendor "")
+  foreach(_i RANGE ${_flagos_accel_last})
+    string(JSON _name MEMBER "${_flagos_platforms}" accelerators ${_i})
+    string(JSON _name_vendor GET "${_flagos_platforms}" accelerators "${_name}" vendor)
+    if(_name_vendor STREQUAL "${FLAGOS_ACCELERATOR}")
+      set(_flagos_accel_by_vendor "${_name}")
+    endif()
+  endforeach()
+  if(NOT _flagos_accel_by_vendor STREQUAL "")
+    set(FLAGOS_ACCELERATOR "${_flagos_accel_by_vendor}")
+    set(_flagos_accel_err "")
+  endif()
+endif()
 if(_flagos_accel_err)
   string(JSON _flagos_accel_count LENGTH "${_flagos_platforms}" accelerators)
   math(EXPR _flagos_accel_last "${_flagos_accel_count} - 1")
@@ -76,6 +100,18 @@ endif()
 flagos_json_list(FLAGOS_KERNEL_SWITCHES "${_flagos_platforms}" kernel_switches)
 flagos_json_list(FLAGOS_PLATFORM_LANGUAGES "${_flagos_platforms}"
     accelerators "${FLAGOS_ACCELERATOR}" project_languages)
+
+string(JSON FLAGOS_PLATFORM_VENDOR GET "${_flagos_platforms}"
+       accelerators "${FLAGOS_ACCELERATOR}" vendor)
+
+# The accelerator keys whose aten/backends/<key>/ tree this build keeps: every
+# key that has one, so a source filter can drop the other vendors' kernels
+# whichever spelling FLAGOS_ACCELERATOR was given. The filter used to compare
+# FLAGOS_ACCELERATOR against these names directly, which holds only while a lane
+# passes the table id -- and it compared an unquoted string (`STREQUAL
+# _vendor_dir`), which is the literal "_vendor_dir" and never a key, so the
+# filter excluded nothing and an apple build compiled every vendor's .cc.
+set(FLAGOS_ATEN_VENDOR_DIRS ascend;enflame;iluvatar;kunlunxin;mthreads;apple;tsingmicro)
 
 string(JSON FLAGOS_PLATFORM_RUNTIME_DIR GET "${_flagos_platforms}"
        accelerators "${FLAGOS_ACCELERATOR}" runtime_dir)
