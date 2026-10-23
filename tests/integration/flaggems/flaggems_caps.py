@@ -176,7 +176,9 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "iluvatar": 585,
     "kunlunxin": 0,
     "metax": 594,
-    "mps": 0,
+    # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
+    # kernels serve what it accelerates and the rest reaches cpu_fallback.
+    "apple": 0,
     "musa": 466,
     "ppu": 592,
 }
@@ -200,7 +202,7 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "iluvatar": "none",
     "kunlunxin": "none",
     "metax": "flaggems",
-    "mps": "none",
+    "apple": "none",
     "musa": "none",
     "ppu": "cuda",
 }
