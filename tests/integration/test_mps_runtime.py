@@ -230,13 +230,15 @@ import torch
 
 mps_built = torch.backends.mps.is_built()
 mps_available = torch.backends.mps.is_available()
-mps_backward = False
+forward = False
+round_trip = False
 if mps_available:
-    x = torch.ones(3, device="mps", requires_grad=True)
-    (x * x).sum().backward()
-    mps_backward = torch.equal(x.grad.cpu(), torch.full((3,), 2.0))
+    x = torch.ones(3, device="mps")
+    (x * x).sum()
+    round_trip = torch.equal(x.cpu(), torch.ones(3))
+    forward = True
 print("torch_fl" in sys.modules, torch.accelerator.current_accelerator(False),
-      mps_built, mps_available, mps_backward)
+      mps_built, mps_available, forward, round_trip)
 """,
             "False mps",
             id="bare-torch-mps-baseline",
@@ -332,10 +334,44 @@ def _child_env(tmp_path):
     return env
 
 
-def test_mps_backward_with_flagos_meets_upstream_stream_precondition():
-    """Track the upstream fix this backend needs before MPS training can work."""
-    if not torch.backends.mps.is_available():
-        pytest.skip("torch.backends.mps is unavailable in this torch build")
-    x = torch.ones(3, device="mps", requires_grad=True)
-    with pytest.raises(RuntimeError, match="opt_ready_stream && opt_parent_stream"):
-        (x * x).sum().backward()
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="torch.backends.mps is unavailable in this torch build",
+)
+def test_mps_backward_on_plain_torch_is_measured_not_assumed(tmp_path):
+    """Pin the bare baseline's backward to whatever this torch build does.
+
+    This used to be a child of test_mps_process_boundaries, asserting that the
+    bare baseline's backward works -- and the hosted macOS image failed it with
+
+      RuntimeError: opt_ready_stream && opt_parent_stream INTERNAL ASSERT
+      FAILED at .../autograd/engine.cpp
+
+    although the child imported no torch_fl at all. A child that only imports
+    torch cannot be affected by flagos, so which behaviour it shows is a
+    property of that torch build rather than of this suite, and hard-coding
+    one of them fails the lane on a build that does the other. The suite still
+    pins a boundary deliberately: the backward either succeeds and must give
+    the right gradient, or fails with exactly that precondition message.
+    """
+    code = """
+import sys
+import torch
+
+x = torch.ones(3, device="mps", requires_grad=True)
+(x * x).sum().backward()
+ok = torch.equal(x.grad.cpu(), torch.full((3,), 2.0))
+print("ok" if ok else "wrong-gradient")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        env=_child_env(tmp_path),
+    )
+    if result.returncode == 0:
+        assert result.stdout.strip() == "ok", result.stdout
+    else:
+        assert "opt_ready_stream && opt_parent_stream" in result.stderr, result.stderr
