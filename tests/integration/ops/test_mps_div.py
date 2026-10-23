@@ -149,8 +149,21 @@ def _graph_flushes_subnormals() -> bool:
     return torch.ops.aten.div.Tensor(operand, divisor).cpu().item() == 0.0
 
 
-# Measured once, at import, on whatever GPU this process is running on.
-GRAPH_FLUSHES_SUBNORMALS = _graph_flushes_subnormals()
+#: The probe's answer, measured once on the first MPS case that asks.
+_GRAPH_FLUSHES_SUBNORMALS: list[bool] = []
+
+
+def graph_flushes_subnormals() -> bool:
+    """``_graph_flushes_subnormals()``, measured at most once per process.
+
+    Called from the test bodies rather than at import: the suites share a
+    default platform mark, so another platform's lane collects this module
+    too, and the op it runs is not routed there -- the probe would turn a
+    collection into an error on a machine that never runs a case here.
+    """
+    if not _GRAPH_FLUSHES_SUBNORMALS:
+        _GRAPH_FLUSHES_SUBNORMALS.append(_graph_flushes_subnormals())
+    return _GRAPH_FLUSHES_SUBNORMALS[0]
 
 
 def _assert_subnormal_policy(got: torch.Tensor, expected: torch.Tensor) -> None:
@@ -164,7 +177,7 @@ def _assert_subnormal_policy(got: torch.Tensor, expected: torch.Tensor) -> None:
     """
     assert expected.item() < torch.finfo(expected.dtype).tiny
     assert expected.item() != 0.0
-    if GRAPH_FLUSHES_SUBNORMALS:
+    if graph_flushes_subnormals():
         assert got.item() == 0.0
     else:
         assert got.item() == expected.item()
@@ -533,7 +546,8 @@ class TestSubnormalBoundaryIsDocumented:
     as a boundary a reader meets deliberately -- rather than quietly tolerated
     by a loose tolerance.
 
-    ``GRAPH_FLUSHES_SUBNORMALS`` is measured once at import and the cases below
+    ``graph_flushes_subnormals()`` measures once, on the first case that asks,
+    and the cases below
     assert the documented outcome for whichever policy is present, so each
     machine's behaviour is pinned rather than one machine's being hard-coded.
     The boundary is the result rather than either operand, and it holds through
@@ -593,7 +607,7 @@ class TestSubnormalBoundaryIsDocumented:
         # rather than to the dtype. On a graph that keeps the subnormal there is
         # no difference to see, and both spellings agree with the reference.
         opaque = torch.ops.aten.mul.Scalar(operand.to(DEVICE), 0.5).cpu()
-        if GRAPH_FLUSHES_SUBNORMALS:
+        if graph_flushes_subnormals():
             assert opaque.item() == 0.0
         else:
             assert opaque.item() == expected.item()
@@ -624,7 +638,7 @@ class TestSubnormalBoundaryIsDocumented:
         assert (on_device / 2.0).cpu().item() == expected
         assert torch.ops.aten.div.Tensor(on_device, 2.0).cpu().item() == expected
         # The kernel-level spellings build the graph, so they follow its policy.
-        graph_expected = 0.0 if GRAPH_FLUSHES_SUBNORMALS else expected
+        graph_expected = 0.0 if graph_flushes_subnormals() else expected
         assert torch.ops.aten.div.Scalar(on_device, 2.0).cpu().item() == graph_expected
         assert (
             torch.ops.aten.div.Tensor(on_device, torch.tensor([2.0]).to(DEVICE))
@@ -675,7 +689,7 @@ class TestSubnormalBoundaryIsDocumented:
         got = torch.reciprocal(_to_device(operand)).cpu()
         expected = torch.reciprocal(operand)
         assert expected.item() != float("inf")
-        if GRAPH_FLUSHES_SUBNORMALS:
+        if graph_flushes_subnormals():
             assert got.item() == float("inf")
         else:
             assert got.item() == expected.item()
@@ -683,7 +697,7 @@ class TestSubnormalBoundaryIsDocumented:
         via_div = _tensor_div(
             _to_device(torch.tensor([1.0])), _to_device(operand)
         ).cpu()
-        if GRAPH_FLUSHES_SUBNORMALS:
+        if graph_flushes_subnormals():
             assert via_div.item() == float("inf")
         else:
             assert via_div.item() == expected.item()
