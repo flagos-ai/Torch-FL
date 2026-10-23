@@ -183,8 +183,19 @@ def patch_iluvatar_masked_reductions() -> bool:
         # kernels resolve the package-level name, flag_gems' own ops call their
         # siblings through the module, and some modules import a sibling by
         # name, so identity is the only reliable way to catch every alias.
+        #
+        # ``*_out`` names are left alone. An ``out=`` entry point is not the
+        # same function: flag_gems' ``sum_dim_out`` keeps the caller's
+        # ``keepdim`` and casts a bool input to int64 regardless of the dtype
+        # argument, so writing through it is how ``torch.sum(bool, dim=1,
+        # out=int64_out)`` gets the result it asked for. The wrapper forces
+        # ``keepdim=False`` and returns a fresh tensor, which would leave the
+        # caller's buffer untouched and the dtype it derived from the input.
+        # Those calls keep the pre-existing behaviour of this workaround --
+        # unmasked, and therefore wrong on this backend -- which is the
+        # documented scope rather than a silent semantics change on top.
         for name, val in list(vars(flag_gems).items()):
-            if val is orig:
+            if val is orig and not name.endswith("_out"):
                 setattr(flag_gems, name, wrapped)
         for mod in list(sys.modules.values()):
             if not getattr(mod, "__name__", "").startswith("flag_gems"):
@@ -194,7 +205,7 @@ def patch_iluvatar_masked_reductions() -> bool:
             except Exception:
                 continue
             for name, val in list(namespace.items()):
-                if val is orig:
+                if val is orig and not name.endswith("_out"):
                     try:
                         setattr(mod, name, wrapped)
                     except Exception:

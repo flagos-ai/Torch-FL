@@ -36,12 +36,44 @@ The host round-trip is detected by counting `cudaMemcpy` in a profiler window,
 which is device-agnostic and needs no weight file.
 """
 
+from pathlib import Path
+
 import pytest
 import torch
 
 import torch_fl  # noqa: F401  -- registers the device
 
 CUDA_ABI_PLATFORMS = ("cuda", "dcu", "metax", "ppu")
+
+# `csrc/aten/copy_ops.cc`, when the tree is the one under test. CI's hardware
+# lanes run these files from a wheel-only workspace, which has no source tree;
+# the source-reading case below skips there rather than erroring on a missing
+# file it was never going to find.
+_COPY_OPS_SOURCE = Path(__file__).resolve().parents[3] / "csrc/aten/copy_ops.cc"
+
+
+def _build_platform() -> str:
+    """The accelerator this wheel was built for ("" when unrecorded)."""
+    return torch_fl._build_accelerator()
+
+
+# Builds with no on-device dtype cast at all: copy_ops.cc puts them in the
+# same-device flagos->flagos branch's "Fallback: CPU round-trip when no
+# on-device cast is available". The CUDA-ABI platforms reach the native
+# TensorIterator cast through the boxed arm, and Ascend / GCU / Kunlunxin /
+# MUSA each compile a vendor cast (`aclnnCast`, `topsatenToCopy`, `cast`,
+# `MudnnCopy`); these four do not, so a host round trip is the design there and
+# the transfer count below cannot be zero.
+_NO_ON_DEVICE_CAST = ("bpu", "iluvatar", "mps", "tsingmicro")
+
+
+def _has_on_device_cast() -> bool:
+    """Whether `.to(dtype)` can stay on the device on this build.
+
+    See `csrc/aten/copy_ops.cc`, the same-device flagos->flagos dtype branch;
+    the USE_ILUVATAR group there has no `DtypeCast` implementation.
+    """
+    return _build_platform() not in _NO_ON_DEVICE_CAST
 
 
 def _flagos_available():
@@ -131,9 +163,13 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     `strided_copy_cast_via_cpu` unconditionally, so the shipped wheel for the
     CUDA-ABI platforms paid a host round trip for every dtype cast.
     """
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parents[3] / "csrc/aten/copy_ops.cc").read_text()
+    if not _COPY_OPS_SOURCE.is_file():
+        pytest.skip(
+            f"no {_COPY_OPS_SOURCE.name} in this workspace: the check reads the "
+            "source rather than a runtime property, so it cannot run from a "
+            "wheel-only checkout"
+        )
+    src = _COPY_OPS_SOURCE.read_text()
     # The non-boxing arm is the second `#else` of the FLAGOS_BOXING_BUILD pair
     # inside the same-device flagos->flagos branch.
     # Anchor on the _to_copy dtype branch specifically: the file also has a
@@ -157,6 +193,14 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     )
 
 
+@pytest.mark.skipif(
+    not _has_on_device_cast(),
+    reason=(
+        "this build has no on-device dtype cast: copy_ops.cc takes the documented "
+        "'Fallback: CPU round-trip when no on-device cast is available' branch, "
+        "so the transfer count below is the design and not a regression"
+    ),
+)
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
