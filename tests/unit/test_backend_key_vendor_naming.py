@@ -114,3 +114,16 @@ def test_the_old_spellings_still_parse():
     parse = parse[: parse.index("const char* BackendName")]
     for legacy in ('"cuda"', '"gcu"', '"musa"', '"mps"', '"flagos_python"'):
         assert legacy in parse, f"{legacy} must stay accepted"
+    # `nvidia` is the emitted key the other tests require; the parser has to
+    # accept it too, or the conf is read as an unknown backend and every op it
+    # routes that way silently takes the FlagGems default. A vendor no conf
+    # routes to (drobotics) needs no arm of its own.
+    shipped = set()
+    for conf in (REPO_ROOT / "torch_fl" / "configs").glob("backends_*.conf"):
+        for line in conf.read_text(encoding="utf-8").splitlines():
+            body = line.split("#", 1)[0]
+            if "=" in body:
+                shipped.add(body.partition("=")[2].strip())
+    for vendor in sorted({row["vendor"] for row in _platforms().values()}):
+        if vendor in shipped:
+            assert f'"{vendor}"' in parse, f"{vendor} must stay accepted"

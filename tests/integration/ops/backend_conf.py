@@ -27,7 +27,8 @@ The two sides do not share one vocabulary. The conf names the FlagGems Python
 path ``flaggems`` while the log prints ``flagos_python``, and the C++ path is
 ``flaggems_cpp`` in the conf against ``flagos`` in the log -- both log names are
 retained deliberately for test compatibility
-(``csrc/aten/dispatcher.h``, ``LogDispatch``). This module owns that mapping so
+(``csrc/aten/dispatcher.h``, ``LogDispatch``), as does Apple's kernel row
+(``apple`` against ``mps``). This module owns that mapping so
 the test files do not each restate it.
 """
 
@@ -47,6 +48,9 @@ _LOG_NAME = {
     "flaggems_python": "flagos_python",
     "flagos_python": "flagos_python",
     "flaggems_cpp": "flagos",
+    # The conf row for Apple's kernels is spelled with the vendor name (it is
+    # what setup.py and CMake call that platform); the log prints the id.
+    "apple": "mps",
 }
 
 
@@ -115,7 +119,7 @@ def routed_backend_or_none(op: str) -> str | None:
 
 
 def dispatched_to_mps(source: str) -> int:
-    """How many times ``source`` logged ``-> apple``, run in a fresh interpreter.
+    """How many times ``source`` logged ``-> mps``, run in a fresh interpreter.
 
     A cost test wants to know that a call was *served* rather than round-tripped,
     and the dispatch log already answers exactly that: ``LogDispatch`` writes one
@@ -165,7 +169,7 @@ def dispatched_to_mps(source: str) -> int:
     return sum(
         1
         for line in stderr.splitlines()
-        if line.startswith("[flagos dispatch] ") and line.endswith(" -> apple")
+        if line.startswith("[flagos dispatch] ") and line.endswith(" -> mps")
     )
 
 

@@ -110,7 +110,11 @@ std::string LowerStr(std::string s) {
 // out-of-tree conf or a pinned script keeps working.
 bool ParseBackendName(const std::string& raw, Backend* out) {
   const std::string val = LowerStr(raw);
-  if (val == "boxing") {
+  if (val == "boxing" || val == "nvidia") {
+    // `nvidia` is the key the generator emits for the NVIDIA kernel set: on a
+    // CUDA wheel the boxing kernels are that vendor's own kernels, routed
+    // through kBoxing. Without this arm the conf is read as an unknown backend
+    // for every op it routes that way, and they silently take FlagGems.
     *out = Backend::kBoxing;
   } else if (val == "cuda") {
     // Legacy spelling: the boxing kernel used to be named for the CUDA runtime

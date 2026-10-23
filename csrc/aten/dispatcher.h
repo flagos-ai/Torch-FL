@@ -215,8 +215,15 @@ class Dispatcher {
 
   // The build's own native kernel slot, with the backend name that selects it.
   // Exactly one is ever populated: a build registers its native kernels into
-  // its own slot (kAscend on Ascend, kMusa on MUSA, ...) and, on the
-  // CUDA-compatible platforms, boxing kernels into kBoxing. Ordered
+  // its own slot (kAscend on Ascend, kMthreads on MUSA, ...) and, on the
+  // CUDA-compatible platforms, boxing kernels into kBoxing -- which this does
+  // not offer. The boxing kernels are not this build's own (a CPU-torch shim or
+  // another vendor's runtime can host them), and the conf's own degradation
+  // path already reads a FlagGems route with no FlagGems kernel as
+  // `cuda_fn_ ? cuda_fn_ : flaggems_fn_`. Offering the slot when both exist
+  // made FlagGems a second runtime route: NVIDIA's conf leaves index_select off
+  // FlagGems for a broken kernel, and a FlagGems route could still land on the
+  // boxing kernel. Ordered
   // most-specific-first so a build that somehow populated two still prefers
   // the vendor's own kernels.
   std::pair<FnPtr, Backend> VendorSlot() const {
@@ -228,7 +235,6 @@ class Dispatcher {
     if (iluvatar_fn_)    return {iluvatar_fn_,    Backend::kIluvatar};
     if (tsingmicro_fn_)  return {tsingmicro_fn_,  Backend::kTsingMicro};
     if (apple_fn_)       return {apple_fn_,       Backend::kApple};
-    if (cuda_fn_)        return {cuda_fn_,        Backend::kBoxing};
     return {nullptr, Backend::kNone};
   }
 
@@ -384,6 +390,11 @@ class Dispatcher {
     return nullptr;
   }
 
+  // The names the dispatch log prints. Several are what the SDK-era conf spelled
+  // the same kernel (`musa`, `gcu`, `mps`, `flagos`, `flagos_python`) and are kept
+  // for the tests and logs that read them. tests/unit/test_ops_conf_log_names.py
+  // holds this list against the shipped confs: a conf key the log cannot print
+  // has no dispatch line to assert against.
   static void LogDispatch(const std::string& op_name, Backend backend) {
     static const bool enabled = LogEnabled("dispatch");
     if (!enabled) return;
