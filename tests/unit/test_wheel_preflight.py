@@ -326,6 +326,21 @@ def test_wheel_name_names_the_platform_id(tmp_path, manifest, capsys):
         preflight.main(["--wheel", str(mps_wheel), "--platform", "mps", "--wheel-name"])
         == 0
     )
+    capsys.readouterr()
+    # A lane that names its platform by the vendor spelling still finds the
+    # segment through the table, and another platform's still does not.
+    assert (
+        preflight.main(
+            ["--wheel", str(mps_wheel), "--platform", "apple", "--wheel-name"]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as raised:
+        preflight.main(
+            ["--wheel", str(mps_wheel), "--platform", "nvidia", "--wheel-name"]
+        )
+    assert raised.value.code == 2
 
 
 def test_cli_reports_mismatch_before_import(tmp_path, manifest, capsys):

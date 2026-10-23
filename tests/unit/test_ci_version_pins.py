@@ -336,13 +336,24 @@ def test_cuda_runtime_wheels_still_follow_boxing(monkeypatch):
     assert [r for r in globals_["_install_requires"]() if r.startswith("nvidia-")]
 
 
-def test_every_platform_with_a_wheel_segment_has_an_interpreter_pin():
-    """The two travel together: both describe the one published artifact."""
+def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
+    """The two travel together: both describe the one published artifact.
+
+    An SDK segment (``+cuda13.3``) names the FlagTree build the wheel links, so
+    it must come with that build's interpreter. A platform-id segment (``+mps``)
+    names the wheel's platform and nothing else -- MPS links no FlagTree -- so it
+    must not borrow a pin it does not have; ``Requires-Python`` then falls back
+    to the base builds' range.
+    """
     pins = _pins()
     for platform in _platforms_in_the_table():
-        assert bool(_wheel_local(platform)) == bool(
-            pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-        ), platform
+        segment = _wheel_local(platform)
+        if segment == platform:
+            assert f"FLAGTREE_PYTHON_VERSION_{platform}" not in pins, platform
+        else:
+            assert bool(segment) == bool(
+                pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
+            ), platform
 
 
 def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():

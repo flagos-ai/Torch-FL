@@ -110,8 +110,26 @@ def _accelerator_from_environment():
         str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
     )
     if "platform_for" in detector:
+        # ``platform_for`` answers "" for anything it does not know, so an
+        # unrecognised value keeps its own spelling rather than becoming "".
         return detector["platform_for"](value) or value
     return value
+
+
+def _accelerator_recorded_by_the_install():
+    """The build record's value in the table's vocabulary.
+
+    setup.py writes the record in the vendor spelling (``apple`` for an MPS
+    build), which `import torch_fl` itself compares against -- so this is what
+    the install says about its wheel, not how a test would name the platform.
+    """
+    if not _build_accelerator():
+        return ""
+    detector = runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
+    )
+    recorded = detector["build_accelerator"]()
+    return detector["platform_for"](recorded) or recorded
 
 
 def _require_declared_entry_point():
@@ -125,7 +143,9 @@ def _require_declared_entry_point():
     """
     if _entry_point_hooks():
         return
-    accelerator = _build_accelerator() or _accelerator_from_environment()
+    accelerator = _accelerator_recorded_by_the_install() or (
+        _accelerator_from_environment()
+    )
     if accelerator in _NO_AUTOLOAD:
         pytest.skip(
             f"the {accelerator} wheel has no autoload hook: {_NO_AUTOLOAD[accelerator]}"

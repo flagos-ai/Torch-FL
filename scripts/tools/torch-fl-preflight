@@ -57,6 +57,27 @@ def platform_vendor(name):
     return None
 
 
+def _names_segment(name, segment):
+    """Whether ``--platform name`` names a wheel file's local segment.
+
+    The segment is the SDK where the platform has one (`cuda13.3` for cuda, a
+    prefix of it) and the table id where it has none (`mps`). ``name`` may be
+    any spelling of the platform, so the segment is compared with it directly
+    and, when the table pairs a name, with both halves: `apple` names the
+    `mps` segment, and `mps` names a `cuda13.3` one no more than `nvidia` does.
+    """
+    if not segment:
+        return False
+    if segment.startswith(name):
+        return True
+    paired = set()
+    for half in (name, platform_vendor(name) or ""):
+        if half:
+            paired.add(half)
+            paired.add(platform_vendor(half) or half)
+    return any(segment.startswith(half) for half in paired if half)
+
+
 def _same_platform(requested, recorded):
     if requested == recorded:
         return True
@@ -387,11 +408,12 @@ def main(argv=None):
         if args.wheel_name:
             if not args.wheel or not args.platform:
                 parser.error("--wheel-name needs --wheel and --platform")
-            # The SDK segment names the wheel's SDK (cuda13.3 for a cuda wheel,
-            # mps for the MPS build, which has no SDK), so the platform asked
-            # for is matched as the segment's prefix.
+            # The segment names the wheel's build variant: its SDK (cuda13.3
+            # for a cuda wheel) or, where there is no SDK, the platform id
+            # (mps). A caller may name either spelling, so the request is
+            # matched against the segment as given and paired through the table.
             segment = args.wheel[0].name.split("-")[1].partition("+")[2]
-            if not segment.startswith(args.platform):
+            if not _names_segment(args.platform, segment):
                 parser.exit(
                     2,
                     f"torch-fl-preflight: {args.wheel[0].name} is not a "

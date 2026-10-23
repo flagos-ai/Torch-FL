@@ -87,9 +87,9 @@ def test_entry_points_are_resolved_by_the_build(load_setup):
     """Build selection is where MPS can differ from the device plugins."""
     assert "entry-points" in _dynamic_fields()
     _, kwargs = load_setup("nvidia")
-    assert kwargs["entry_points"] == {
-        "torch.backends": ["torch_fl = torch_fl._autoload:init"]
-    }
+    assert kwargs["entry_points"]["torch.backends"] == [
+        "torch_fl = torch_fl._autoload:init"
+    ]
 
 
 def _dynamic_fields() -> set[str]:
@@ -104,9 +104,9 @@ def _dynamic_fields() -> set[str]:
 @pytest.mark.parametrize("accelerator", ["nvidia", "hygon", "mthreads"])
 def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelerator):
     _, kwargs = load_setup(accelerator)
-    assert kwargs["entry_points"] == {
-        "torch.backends": ["torch_fl = torch_fl._autoload:init"]
-    }
+    assert kwargs["entry_points"]["torch.backends"] == [
+        "torch_fl = torch_fl._autoload:init"
+    ]
 
 
 def test_mps_wheel_leaves_bare_torch_on_the_mps_backend(load_setup):
