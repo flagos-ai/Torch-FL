@@ -8,8 +8,8 @@ has a kernel for, so without this file most FlagGems routes have no registered
 slot: the call does not box to CPU, it reaches the dispatcher's empty
 ``kFlagGems`` slot and raises "backend not registered".
 
-The list is ``FLAGGEMS_PYTHON_OPS`` minus ``NATIVE_TRITON_GAPS['gcu']``, minus
-``FLAGGEMS_PENDING_NATIVE_OPS`` (for as long as ``gcu`` is in
+The list is ``FLAGGEMS_PYTHON_OPS`` minus ``NATIVE_TRITON_GAPS['enflame']``, minus
+``FLAGGEMS_PENDING_NATIVE_OPS`` (for as long as ``enflame`` is in
 ``FLAGGEMS_PENDING_NATIVE_VENDORS``), minus whatever ``gcu_register.inc``
 already claims. Each op is emitted with the
 wrapper symbol read back from the CUDA codegen's ``generated/register.inc``
@@ -60,7 +60,7 @@ INC_HEADER = """\
 // Ops already claimed by gcu_register.inc are omitted here: a second m.impl()
 // for the same op and dispatch key only overrides the first and warns at import.
 //
-// Excluded below NATIVE_TRITON_GAPS['gcu'] (scripts/codegen/gen_vendor_confs.py), each
+// Excluded below NATIVE_TRITON_GAPS['enflame'] (scripts/codegen/gen_vendor_confs.py), each
 // one measured failing on the S60 rather than assumed; see the comment on that
 // set for the diagnosis behind every entry.
 """
@@ -78,10 +78,10 @@ def target_ops() -> list:
     native = g.registered_impls(
         REPO / "csrc/aten/backends/enflame/generated/gcu_register.inc"
     )
-    gaps = g.NATIVE_TRITON_GAPS.get("gcu", set())
+    gaps = g.NATIVE_TRITON_GAPS.get("enflame", set())
     pending = (
         g.FLAGGEMS_PENDING_NATIVE_OPS
-        if "gcu" in g.FLAGGEMS_PENDING_NATIVE_VENDORS
+        if "enflame" in g.FLAGGEMS_PENDING_NATIVE_VENDORS
         else frozenset()
     )
 
@@ -89,7 +89,7 @@ def target_ops() -> list:
     # reads the frozen pre-2026-10-22 set (gen_vendor_confs.flaggems_python_ops_for).
     # Using the widened set here asked for wrappers that register.inc does not
     # have, because gcu's conf never routes those ops either.
-    flaggems_py = g.flaggems_python_ops_for("gcu")
+    flaggems_py = g.flaggems_python_ops_for("enflame")
     wanted = (set(flaggems_py) - gaps) - native - pending
     unknown = sorted(wanted - set(wrappers))
     if unknown:

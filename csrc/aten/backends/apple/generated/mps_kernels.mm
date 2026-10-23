@@ -70,7 +70,7 @@
 #include <string_view>
 #include <vector>
 #include "../mps_common.h"
-#include "runtime/accelerator/mps/mps_runtime.h"
+#include "runtime/accelerator/apple/mps_runtime.h"
 
 namespace at::native::flagos {
 // The helpers live in the nested at::native::flagos::mps namespace, so an
