@@ -846,15 +846,34 @@ def _platform_aliases(accelerator: str) -> list[str]:
     CMake's per-platform enters are one spelling per platform -- `_flagos_is_<id>`
     for most, `_flagos_is_metax` for the row whose vendor is also its id -- so a
     build told the vendor of a row whose id differs (`mthreads`, `hygon`,
-    `apple`, `nvidia`) was left on the default arms. Both sides resolve any
-    name in this list to the id; a row whose vendor and id are one word
-    (`metax`) needs no list at all. Takes its argument rather than reading the
+    `apple`, `nvidia`) was left on the default arms, and a build told the row
+    that shares `metax`'s vendor stayed there rather than entering the CUDA
+    arms its toolkit answers. Both sides resolve any name in this list to its
+    last item, which is the row. Takes its argument rather than reading the
     build's: a later read of setup.py must answer for this build only.
     """
-    vendor = _PLATFORM_TO_VENDOR.get(accelerator)
-    if vendor is None or vendor == accelerator:
-        return []
-    return sorted([vendor, accelerator])
+    target = _alias_target(accelerator)
+    return [] if target is None else [accelerator, target]
+
+
+def _alias_target(platform: str) -> str | None:
+    """The row `platform` resolves to, when that is not itself.
+
+    The vendor, when it differs from the id; for a row that is its own vendor
+    (`metax`) the id of the platform it shares a vendor with, because its
+    toolkit answers that platform's arms. No other row shares a vendor, so the
+    answer is a fact of the table rather than a lookup here.
+    """
+    vendor = _PLATFORM_TO_VENDOR.get(platform)
+    if vendor is None:
+        return None
+    if vendor != platform:
+        return vendor
+    return _SHARED_VENDOR.get(platform)
+
+
+#: A row whose vendor is also its id, and the row it shares that vendor with.
+_SHARED_VENDOR = {"metax": "cuda"}
 
 
 def _write_environment_platform_alias() -> None:

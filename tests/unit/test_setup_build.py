@@ -16,12 +16,18 @@ import importlib.metadata
 import json
 import re
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import setuptools
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, the DCU/MUSA interpreter
+    tomllib = None
 from setuptools import Distribution, Extension
 from setuptools.command.build_ext import build_ext
 
@@ -35,6 +41,50 @@ KERNEL_SWITCHES = (
     "FLAGOS_BUILD_FLAGGEMS_CPP",
     "FLAGOS_BUILD_TILEOPS",
 )
+
+
+def _gnu_ld_linker() -> str | None:
+    """``gcc``, made to link with GNU ``ld`` -- what the MetaX shim is built with."""
+    import os
+    import shutil
+    import tempfile
+
+    gcc = shutil.which("gcc")
+    if gcc is None or not sys.platform.startswith("linux"):
+        return None
+    ld = shutil.which("ld")
+    if ld is not None:
+        with open(ld, "rb") as handle:
+            if b"GNU ld" in handle.read(4096):
+                return gcc
+    homebrew_ld = "/opt/homebrew/opt/binutils/bin/ld"
+    if os.path.exists(homebrew_ld):
+        return gcc
+    # A bare `ld` resolved by gcc is not necessarily the one `which` found.
+    with tempfile.TemporaryDirectory() as scratch:
+        probe = os.path.join(scratch, "probe.c")
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write("int _shim(int x) { return x; }\n")
+        script = os.path.join(scratch, "probe.map")
+        with open(script, "w", encoding="utf-8") as handle:
+            handle.write("SHIM_1 { global: _shim; local: *; };\n")
+        try:
+            subprocess.run(
+                [
+                    gcc,
+                    "-shared",
+                    "-fPIC",
+                    "-o",
+                    os.path.join(scratch, "libprobe.so"),
+                    probe,
+                    f"-Wl,--version-script={script}",
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+    return gcc
 
 
 def _load_setup(monkeypatch):
@@ -280,21 +330,25 @@ def test_default_kernel_set_per_accelerator(
     "told, platform, aliases",
     [
         # The wheels named for a vendor whose row is keyed by another id have to
-        # recognise the vendor spelling; a row whose vendor and id are one word
-        # (`metax`, and `cuda`, whose vendor is `nvidia`) has nothing else to
-        # recognise. `metax` is read on Linux only: loading setup.py for it
-        # builds the libcudart shim, and macOS's ld has no `--version-script`.
+        # recognise the vendor spelling; a row whose vendor is also its id
+        # (`metax`) names the row it shares that vendor with, whose arms MetaX's
+        # toolkit answers. The row comes last, which is the entry CMake resolves
+        # any of the names to. `metax` is read on Linux only: loading setup.py
+        # for it builds the libcudart shim, and macOS's ld has no
+        # `--version-script`. The GNU-ld gate asks for the linker the shim
+        # actually needs, not for Linux: a darwin host with GNU binutils named
+        # alongside Homebrew's ld can run it, and would otherwise skip.
         pytest.param(
             "metax",
             "metax",
-            [],
+            ["metax", "cuda"],
             marks=pytest.mark.skipif(
-                sys.platform == "darwin",
+                _gnu_ld_linker() is None,
                 reason="metax setup.py builds its shim with GNU ld",
             ),
         ),
-        ("mthreads", "musa", ["mthreads", "musa"]),
-        ("apple", "mps", ["apple", "mps"]),
+        ("mthreads", "musa", ["musa", "mthreads"]),
+        ("apple", "mps", ["mps", "apple"]),
         ("hygon", "dcu", ["dcu", "hygon"]),
         ("nvidia", "cuda", ["cuda", "nvidia"]),
     ],

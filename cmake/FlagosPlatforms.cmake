@@ -23,6 +23,7 @@
 #   FLAGOS_PLATFORM_VENDOR            the platform's vendor (apple, nvidia, ...)
 #   FLAGOS_ATEN_VENDOR_DIRS           accelerator keys owning an
 #                                     aten/backends/<key>/ kernel tree
+#   FLAGOS_PLATFORM_ATEN_DIRS         the ones this platform's kernels are in
 #   FLAGOS_PLATFORM_RUNTIME_DIR       csrc/runtime/accelerator source subdir
 #   FLAGOS_PLATFORM_USE_MACRO         the platform's USE_* define ("" if none)
 #   FLAGOS_PLATFORM_WRITES_MARKER     ON/OFF: install the flagos_platform file
@@ -103,14 +104,22 @@ endif()
 # platform enters that platform's arms whichever half of the name it was told.
 # `_flagos_is_<name>` below is what the target must match, and for the row whose
 # vendor is also its id that is the vendor's own name.
+#
+# FLAGOS_ACCELERATOR itself is read by the branches further down -- the MetaX
+# target name, the per-SDK messages -- so it keeps the name the build was given
+# and the row is resolved into FLAGOS_PLATFORM_ID beneath it.
 set(FLAGOS_PLATFORM_ID "${FLAGOS_ACCELERATOR}")
 if(DEFINED FLAGOS_ACCELERATOR_ALIASES)
   list(FIND FLAGOS_ACCELERATOR_ALIASES "${FLAGOS_ACCELERATOR}" _alias_index)
   if(NOT _alias_index EQUAL -1)
-    list(GET FLAGOS_ACCELERATOR_ALIASES -1 _alias_target)
-    set(FLAGOS_ACCELERATOR "${_alias_target}")
+    list(GET FLAGOS_ACCELERATOR_ALIASES -1 FLAGOS_PLATFORM_ID)
   endif()
 endif()
+
+# Every accelerator key that owns an aten/backends/<key>/ kernel tree, whatever
+# spelling this build was given, as one alternation: the vendor-kernel filter
+# below builds a single regex out of it, and a `;`-joined list inside a quoted
+# regex matches nothing.
 
 flagos_json_list(FLAGOS_KERNEL_SWITCHES "${_flagos_platforms}" kernel_switches)
 flagos_json_list(FLAGOS_PLATFORM_LANGUAGES "${_flagos_platforms}"
@@ -127,6 +136,30 @@ string(JSON FLAGOS_PLATFORM_VENDOR GET "${_flagos_platforms}"
 # _vendor_dir`), which is the literal "_vendor_dir" and never a key, so the
 # filter excluded nothing and an apple build compiled every vendor's .cc.
 set(FLAGOS_ATEN_VENDOR_DIRS ascend;enflame;iluvatar;kunlunxin;mthreads;apple;tsingmicro)
+
+# The aten/backends trees this platform's own op wrappers live in. Not always a
+# name the build was given: a row whose kernels are another platform's names
+# that one in `aten_backends` (MetaX: `metax` and `cuda`, runtime_dir `nvidia`).
+# Elsewhere the name itself is the tree when it is one of the keys above, and
+# MetaX keeps `metax` as the fallback because it is the row known to borrow --
+# so a build named after it cannot silently compile every vendor's tree.
+string(JSON _flagos_aten_dirs ERROR_VARIABLE _flagos_aten_dirs_err GET
+       "${_flagos_platforms}" accelerators "${FLAGOS_ACCELERATOR}" aten_backends)
+if(_flagos_aten_dirs_err)
+  set(FLAGOS_PLATFORM_ATEN_DIRS "")
+else()
+  set(FLAGOS_PLATFORM_ATEN_DIRS ${_flagos_aten_dirs})
+endif()
+if(NOT FLAGOS_PLATFORM_ATEN_DIRS)
+  set(FLAGOS_PLATFORM_ATEN_DIRS metax)
+  foreach(_name ${FLAGOS_ACCELERATOR};${FLAGOS_PLATFORM_ID};${FLAGOS_PLATFORM_VENDOR})
+    foreach(_dir ${FLAGOS_ATEN_VENDOR_DIRS})
+      if(_name STREQUAL "${_dir}")
+        set(FLAGOS_PLATFORM_ATEN_DIRS "${_name}")
+      endif()
+    endforeach()
+  endforeach()
+endif()
 
 string(JSON FLAGOS_PLATFORM_RUNTIME_DIR GET "${_flagos_platforms}"
        accelerators "${FLAGOS_ACCELERATOR}" runtime_dir)

@@ -32,9 +32,10 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FlagosPlatforms.cmake)
 
 # Which platform this build is, asked once: both spellings are accepted, because
 # FLAGOS_ACCELERATOR carries whichever the build was invoked with (`cuda` or its
-# vendor `nvidia`, `mps` or `apple`). Every gate below reads these instead of
-# comparing the raw variable, which held for one spelling only -- a lane on the
-# vendor name fell through to the CUDA branch, or skipped its own.
+# vendor `nvidia`, `mps` or `apple`, or a vendor that is another platform's id
+# alias, `metax`). Every gate below reads these instead of comparing the raw
+# variable, which held for one spelling only -- a lane on the vendor name fell
+# through to the CUDA branch, or skipped its own.
 macro(_flagos_resolve_platforms)
   foreach(_name ascend metax enflame tsingmicro dcu kunlunxin iluvatar mps cuda ppu
                mthreads musa gcu bpu hygon nvidia thead apple)
@@ -46,6 +47,7 @@ macro(_flagos_resolve_platforms)
     endif()
     set(_flagos_is_${_name} FALSE)
     if(FLAGOS_ACCELERATOR STREQUAL "${_name}"
+       OR FLAGOS_PLATFORM_ID STREQUAL "${_name}"
        OR (NOT _name_vendor STREQUAL ""
            AND FLAGOS_PLATFORM_VENDOR STREQUAL "${_name_vendor}"))
       set(_flagos_is_${_name} TRUE)
@@ -126,9 +128,18 @@ flagos_apply_platform_kernel_policy()
 # before it runs nvcc, plus MetaX's MACA_PATH (reported in the SDK block below).
 if(_flagos_is_metax)
   flagos_resolve_sdk_root(MACA_PATH "/opt/maca" MACA_PATH MACA_HOME)
+  # A MetaX image may carry only the driver: then there is no MACA toolkit to
+  # compile the vendor kernels against, and the FlagGems-only build falls back
+  # to the CUDA toolkit for the runtime sources. The image's CUDA_HOME is that
+  # toolkit. A MACA install keeps its own cu-bridge path untouched.
+  if(NOT EXISTS "${MACA_PATH}/tools/cu-bridge/include"
+     AND DEFINED ENV{CUDA_HOME}
+     AND EXISTS "$ENV{CUDA_HOME}/include/cuda_runtime.h")
+    set(CUDAToolkit_ROOT "$ENV{CUDA_HOME}")
+  endif()
 endif()
 
-if(_flagos_is_cuda OR _flagos_is_ppu)
+if(_flagos_is_cuda OR _flagos_is_ppu OR (_flagos_is_metax AND CUDAToolkit_ROOT))
   # PPU builds against PPU_SDK/CUDA_SDK, so it rides the CUDA toolchain (CUDA
   # boxing kernels, project(CUDA)); it differs only in the libtorch it bundles
   # -- a local PPU build, not upstream's (FLAGOS_BUNDLE_LIBDIR from the table).
@@ -684,12 +695,44 @@ elseif(_flagos_is_metax)
   set(FLAGOS_VENDOR_RPATH_DIRS
       "${MACA_PATH}/lib" "${MACA_PATH}/lib64" "/opt/maca/lib" "/opt/maca/lib64")
 
+  # The MACA SDK itself is only needed when vendor kernels are built: they are
+  # the CUDA tree compiled against its cu-bridge headers. Without them the
+  # build still compiles -- the NVIDIA CUDA toolkit the runtime sources include
+  # is enough -- and pointing the compat target at an SDK root that is not
+  # installed fails configure, which is what a Linux image holding only the
+  # driver does.
+  # An INTERFACE target may only name directories that exist, so each one is
+  # added when it is there rather than listed and reported missing at
+  # generate time.
+  set(_metax_compat_include "")
+  foreach(_dir "${MACA_PATH}/tools/cu-bridge/include" "${MACA_PATH}/include"
+               "${MACA_PATH}/include/mcr")
+    if(EXISTS "${_dir}")
+      list(APPEND _metax_compat_include "${_dir}")
+    endif()
+  endforeach()
+
   add_library(cuda_runtime_compat INTERFACE IMPORTED)
   set_target_properties(cuda_runtime_compat PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${MACA_PATH}/tools/cu-bridge/include;${MACA_PATH}/include;${MACA_PATH}/include/mcr"
+    INTERFACE_INCLUDE_DIRECTORIES "${_metax_compat_include}"
   )
-  target_link_directories(cuda_runtime_compat INTERFACE "${MACA_PATH}/lib")
-  target_link_libraries(cuda_runtime_compat INTERFACE runtime_cu)
+  if(FLAGOS_BUILD_VENDOR)
+    # The vendor kernels are the CUDA tree built against cu-bridge, which is
+    # what runtime_cu names; no SDK root means nothing to build them with.
+    if(NOT EXISTS "${MACA_PATH}/tools/cu-bridge/include")
+      message(FATAL_ERROR
+          "FLAGOS_BUILD_VENDOR=ON but the MetaX cu-bridge headers were not "
+          "found (${MACA_PATH}/tools/cu-bridge/include). Install the MACA "
+          "toolkit and set MACA_PATH, or build with -DFLAGOS_BUILD_VENDOR=OFF.")
+    endif()
+    target_link_directories(cuda_runtime_compat INTERFACE "${MACA_PATH}/lib")
+    target_link_libraries(cuda_runtime_compat INTERFACE runtime_cu)
+  else()
+    # FlagGems-only: the runtime sources call the CUDA runtime, which the CUDA
+    # toolkit provides; the image this builds on holds the driver, not MACA.
+    find_package(CUDAToolkit REQUIRED)
+    target_link_libraries(cuda_runtime_compat INTERFACE CUDA::cudart)
+  endif()
 
   set(CUDA_RUNTIME_LIB cuda_runtime_compat)
 
@@ -846,6 +889,15 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
   list(APPEND CMAKE_INSTALL_RPATH "${_flaggems_libdir}")
 elseif(_flagos_is_metax)
   message(STATUS "MetaX build: CUDA boxing kernels + bundled maca libtorch (no native mxcc)")
+  if(FLAGOS_BUILD_VENDOR)
+    # The vendor kernels are the CUDA tree built against cu-bridge; MACA's
+    # compat layer is what they call, so its include and lib dirs are needed
+    # on the compile and link lines. Without FLAGOS_BUILD_VENDOR nothing here
+    # refers to MACA and none of these is added.
+    include_directories("${MACA_PATH}/tools/cu-bridge/include"
+                        "${MACA_PATH}/include" "${MACA_PATH}/include/mcr")
+    link_directories("${MACA_PATH}/lib")
+  endif()
 endif()
 
 if(DEFINED PYTHON_INCLUDE_DIR)

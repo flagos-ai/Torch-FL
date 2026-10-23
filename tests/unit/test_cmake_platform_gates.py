@@ -132,3 +132,26 @@ def test_gates_name_platforms_that_exist_in_the_table():
             f"{path.relative_to(REPO_ROOT)} gates on {sorted(unknown)}, which is "
             "neither a platform id nor a vendor in the table"
         )
+
+
+def test_the_kernel_filter_reads_the_tree_the_table_names():
+    """A row may keep kernels in a tree its own names do not spell.
+
+    MetaX's kernels are the CUDA ones, while its vendor and its runtime dir are
+    both `metax`. The filter keeps the platform's own trees and drops the rest,
+    and the alternation it builds must exclude something: inside a quoted regex
+    a `;`-joined list matches no name after the first.
+    """
+    platforms = _code(REPO_ROOT / "cmake" / "FlagosPlatforms.cmake")
+    filter_ = _code(REPO_ROOT / "csrc" / "CMakeLists.txt")
+    assert "FLAGOS_PLATFORM_ATEN_DIRS" in platforms, (
+        "the filter needs the platform's own trees, resolved once"
+    )
+    assert "IN_LIST FLAGOS_PLATFORM_ATEN_DIRS" in filter_
+    assert 'string(REPLACE ";" "|"' in filter_, (
+        "the off arm must turn the list into an alternation"
+    )
+    for row in ("metax", "cuda"):
+        assert row in _table()["accelerators"]["metax"].get("aten_backends", []), (
+            f"the MetaX row must name {row} as one of its kernel trees"
+        )

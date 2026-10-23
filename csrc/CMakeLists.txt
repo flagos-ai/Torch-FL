@@ -211,19 +211,23 @@ endif()
 # aten/backends/iluvatar/ wraps corex's CUDA-named C ABI (ixdnn/ixblas)
 # directly, with FlagGems still owning the ops it covers.
 #
-# Two spellings select the same platform -- the table id (`cuda`, `mps`) and its
-# vendor (`nvidia`, `apple`) -- and FLAGOS_ACCELERATOR carries whichever one the
-# build was given, so BOTH are compared against the directory name. (The loop
-# used to compare an unquoted string, `STREQUAL _vendor_dir`, the literal name
-# of the variable and never equal: the filter excluded nothing, so every build
-# compiled every vendor's kernel tree.)
+# Which trees are the platform's own comes from the table and the platform's
+# names (cmake/FlagosPlatforms.cmake), not from FLAGOS_ACCELERATOR alone: a lane
+# names its platform either way, and a row may keep kernels another row names.
+#
+# The off arm excludes them all at once, and the alternation is built here:
+# inside a quoted regex a `;`-joined list is three literal semicolons after the
+# first name, which matches nothing, so it dropped no tree at all.
 if(NOT FLAGOS_BUILD_VENDOR)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(${FLAGOS_ATEN_VENDOR_DIRS})/.*")
+  string(REPLACE ";" "|" _flagos_vendor_dirs "${FLAGOS_ATEN_VENDOR_DIRS}")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(${_flagos_vendor_dirs})/.*")
   message(STATUS "FLAGOS_BUILD_VENDOR=OFF: no vendor native kernels")
 else()
+  # The platform's own trees are kept (the table says which: the platform's
+  # kernels are not in a directory its id or vendor names when it borrows
+  # another's); every other vendor's goes.
   foreach(_vendor_dir ${FLAGOS_ATEN_VENDOR_DIRS})
-    if(NOT (FLAGOS_ACCELERATOR STREQUAL "${_vendor_dir}"
-            OR FLAGOS_PLATFORM_VENDOR STREQUAL "${_vendor_dir}"))
+    if(NOT _vendor_dir IN_LIST FLAGOS_PLATFORM_ATEN_DIRS)
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
   endforeach()

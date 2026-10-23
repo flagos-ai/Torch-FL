@@ -161,6 +161,7 @@
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "metax",
+      "aten_backends": ["metax", "cuda"],
       "bundle_libdir": "lib_metax",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
