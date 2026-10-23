@@ -58,14 +58,66 @@ def _require_torch_first_supported():
         pytest.skip("Vendor libtorch overlays require torch_fl before torch")
 
 
-def _require_autoload():
-    if _build_accelerator() == "mps":
-        pytest.skip("MPS deliberately leaves bare import torch on the MPS backend")
+def _entry_point_hooks():
+    """Whether the wheel registers a ``torch.backends`` entry point for torch_fl.
+
+    A fresh interpreter in this process's environment, because a package
+    installed after this one started is invisible to the parent's
+    ``importlib.metadata`` cache. ``resolve()`` rather than ``load()``: the
+    test is about whether the hook is *registered*, not whether calling it (and
+    so importing the backend) works.
+    """
+    probe = (
+        "import sys\n"
+        "from importlib.metadata import entry_points\n"
+        "sys.exit(0 if [ep.resolve() for ep in entry_points(group='torch.backends')"
+        " if ep.name == 'torch_fl'] else 1)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode in (0, 1), result.stderr
+    return result.returncode == 0
+
+
+def _require_declared_entry_point():
+    """Skip a wheel that declares no autoload hook, and say whether it should.
+
+    pyproject.toml keeps the entry-points table dynamic so the MPS wheel can
+    omit it (setup.py: a bare ``import torch`` must stay on the MPS backend).
+    The omission is a property of that wheel, not of the platform -- but an
+    apple-built wheel that *declares* the hook and then hides it never exercises
+    the autoload path at all, which is what makes this a check and not a skip.
+    """
+    if _entry_point_hooks():
+        return
+    accelerator = _build_accelerator()
+    if not accelerator:
+        # Not a wheel build (a source checkout), so `setup.py` has no value.
+        pytest.skip("this install is not an accelerator wheel")
+    setup = (Path(__file__).resolve().parents[2] / "setup.py").read_text()
+    declares = (
+        f'FLAGOS_ACCELERATOR == "{accelerator}"' in setup
+        and "entry_points = {}" in setup
+    )
+    assert declares, (
+        f"the {accelerator} wheel declares no torch.backends entry point, but "
+        "setup.py has no branch that omits it"
+    )
+    pytest.skip(
+        f"the {accelerator} wheel omits the autoload entry point by design "
+        "(setup.py), so a bare import torch stays on its own backend"
+    )
 
 
 def test_minimal_import_and_explicit_repeated_activation():
     _require_torch()
-    _require_autoload()
+    _require_declared_entry_point()
     _run(
         """
 import torch_fl
@@ -96,7 +148,7 @@ assert first_status == 'active' or first_status.startswith('failed:'), first_sta
 
 def test_full_profile_activates_framework_hooks_during_import():
     _require_torch()
-    _require_autoload()
+    _require_declared_entry_point()
     _run(
         """
 import torch_fl
