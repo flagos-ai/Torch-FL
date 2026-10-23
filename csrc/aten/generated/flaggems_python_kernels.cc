@@ -643,11 +643,6 @@ at::Tensor AliasKernelPython(const at::Tensor & self) {
   return result;
 }
 
-at::Tensor & AliasCopyOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.alias_copy_out", {self, out});
-  return out;
-}
-
 at::Tensor AllKernelPython(const at::Tensor & self) {
   auto result = CallPythonOp_Generic("flag_gems.all", {self});
   UnboxToFlagos(result);
@@ -4292,7 +4287,6 @@ REGISTER_IMPL_TO_DISPATCHER(AddrFn, addr_dispatcher, Backend::kFlagGems, AddrKer
 REGISTER_IMPL_TO_DISPATCHER(AddrInplaceFn, addr_inplace_dispatcher, Backend::kFlagGems, AddrInplaceKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(AffineGridGeneratorFn, affine_grid_generator_dispatcher, Backend::kFlagGems, AffineGridGeneratorKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(AliasFn, alias_dispatcher, Backend::kFlagGems, AliasKernelPython)
-REGISTER_IMPL_TO_DISPATCHER(AliasCopyOutFn, alias_copy_out_dispatcher, Backend::kFlagGems, AliasCopyOutKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kFlagGems, AllKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(AllDimFn, all_dim_dispatcher, Backend::kFlagGems, AllDimKernelPython)
 REGISTER_IMPL_TO_DISPATCHER(AllDimsFn, all_dims_dispatcher, Backend::kFlagGems, AllDimsKernelPython)

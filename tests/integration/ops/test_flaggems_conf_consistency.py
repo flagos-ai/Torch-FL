@@ -89,16 +89,30 @@ def _module_op_set(module_path: Path, name: str) -> set[str]:
     """
     module = ast.parse(_read(module_path))
     for node in ast.walk(module):
-        if not isinstance(node, ast.Assign):
+        # AnnAssign as well as Assign: the hold sets are declared
+        # `NAME: set[str] = {...}`, and a bare `isinstance(node, ast.Assign)`
+        # test walks straight past them.
+        if isinstance(node, ast.AnnAssign):
+            if not (isinstance(node.target, ast.Name) and node.target.id == name):
+                continue
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            if not any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets
+            ):
+                continue
+            value = node.value
+        else:
             continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == name
-            for target in node.targets
-        ):
+        if value is None:
             continue
-        value = node.value
         if isinstance(value, ast.Call):  # frozenset({...}) / set([...])
-            assert value.args, f"{name} is a bare call, not a set literal"
+            # An empty set()/frozenset() is a legitimate empty set, and one of
+            # the hold sets is spelled that way. Only a call carrying a single
+            # set/list argument is a literal to unpack.
+            if not value.args:
+                return set()
             value = value.args[0]
         ops = set(ast.literal_eval(value))
         assert all(isinstance(op, str) for op in ops)
@@ -121,11 +135,11 @@ def _override_only_ops() -> set[str]:
 
     Two sets in codegen_ops.py force a route back to the cuda boxing kernel:
 
-    ``flaggems_recursive_fallback`` -- gems re-enters ``torch.<op>`` for non-cuda
+    ``FLAGGEMS_RECURSIVE_FALLBACK`` -- gems re-enters ``torch.<op>`` for non-cuda
     device types, which on a PrivateUse1 (flagos) tensor lands back on the same
     flagos_python kernel and recurses forever.
 
-    ``flaggems_runtime_broken`` -- the gems call raises (required keyword-only
+    ``FLAGGEMS_RUNTIME_BROKEN`` -- the gems call raises (required keyword-only
     ``out``, a hard ``device.type == "cuda"`` assert, a DTK triton compile
     failure) or returns wrong numerics on the flagos device.
 
@@ -133,8 +147,8 @@ def _override_only_ops() -> set[str]:
     ``FLAGOS_OP_<op>=flagos_python``, so it is a legitimate orphan on the
     kernels side.
     """
-    return _codegen_op_set("flaggems_recursive_fallback") | _codegen_op_set(
-        "flaggems_runtime_broken"
+    return _codegen_op_set("FLAGGEMS_RECURSIVE_FALLBACK") | _codegen_op_set(
+        "FLAGGEMS_RUNTIME_BROKEN"
     )
 
 
