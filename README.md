@@ -144,7 +144,7 @@ For device queries, synchronization, and multi-device usage patterns, see the [Q
 ### Reference
 
 - [Compatibility Matrix](docs/reference/compatibility.md) — Per-platform capability validation and status
-- [Operator Support](docs/reference/operator-support.md) — Measured per-hardware FlagGems overload coverage
+- [Operator Support](docs/reference/operator-support.md) — Per-platform routed-operator support counts
 - [Environment Variables](docs/reference/environment-variables.md) — Build and runtime configuration
 
 ### Architecture
