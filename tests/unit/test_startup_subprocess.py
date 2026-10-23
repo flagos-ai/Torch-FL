@@ -85,33 +85,58 @@ def _entry_point_hooks():
     return result.returncode == 0
 
 
+#: Accelerators whose wheel deliberately omits the autoload entry point, and
+#: why, from setup.py's ``kwargs["entry_points"] = {}`` branch. The record has
+#: to live here because it cannot be read from the install: the contract group
+#: runs on the wheel's *installed* files, which hold no setup.py, and a source
+#: path relative to this file points into a temporary copy of the tree.
+#: tests/unit/test_autoload_omission.py keeps this list equal to setup.py's.
+_NO_AUTOLOAD = {
+    "mps": "setup.py omits it for MPS so a bare import torch stays on the MPS backend",
+}
+
+
+def _accelerator_from_environment():
+    """What this install was built for, where it records no accelerator.
+
+    A wheel that ships no build record was built from source; what setup.py was
+    told (``FLAGOS_ACCELERATOR``, id or vendor name) is then the only answer
+    left. ``""`` when that is unset too.
+    """
+    value = os.environ.get("FLAGOS_ACCELERATOR", "").strip().lower()
+    if not value:
+        return ""
+    detector = runpy.run_path(
+        str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
+    )
+    if "platform_for" in detector:
+        return detector["platform_for"](value) or value
+    return value
+
+
 def _require_declared_entry_point():
     """Skip a wheel that declares no autoload hook, and say whether it should.
 
     pyproject.toml keeps the entry-points table dynamic so the MPS wheel can
-    omit it (setup.py: a bare ``import torch`` must stay on the MPS backend).
-    The omission is a property of that wheel, not of the platform -- but an
-    apple-built wheel that *declares* the hook and then hides it never exercises
-    the autoload path at all, which is what makes this a check and not a skip.
+    omit it. The omission is a property of that wheel, not of the platform --
+    but a wheel built for any other accelerator that lacks the hook never
+    exercises the autoload path at all, which is what makes this a check and
+    not a skip.
     """
     if _entry_point_hooks():
         return
-    accelerator = _build_accelerator()
-    if not accelerator:
-        # Not a wheel build (a source checkout), so `setup.py` has no value.
-        pytest.skip("this install is not an accelerator wheel")
-    setup = (Path(__file__).resolve().parents[2] / "setup.py").read_text()
-    declares = (
-        f'FLAGOS_ACCELERATOR == "{accelerator}"' in setup
-        and "entry_points = {}" in setup
-    )
-    assert declares, (
-        f"the {accelerator} wheel declares no torch.backends entry point, but "
-        "setup.py has no branch that omits it"
-    )
-    pytest.skip(
-        f"the {accelerator} wheel omits the autoload entry point by design "
-        "(setup.py), so a bare import torch stays on its own backend"
+    accelerator = _build_accelerator() or _accelerator_from_environment()
+    if accelerator in _NO_AUTOLOAD:
+        pytest.skip(
+            f"the {accelerator} wheel has no autoload hook: {_NO_AUTOLOAD[accelerator]}"
+        )
+    if not accelerator and not (os.environ.get("FLAGOS_ACCELERATOR") or "").strip():
+        # Nothing says what this install is: a source checkout that was never
+        # built for an accelerator. The test is about that wheel, not this tree.
+        pytest.skip("this install records no accelerator")
+    assert False, (
+        f"the {accelerator or 'installed'} wheel declares no torch.backends "
+        f"entry point, and only {sorted(_NO_AUTOLOAD)} omit it by design"
     )
 
 
