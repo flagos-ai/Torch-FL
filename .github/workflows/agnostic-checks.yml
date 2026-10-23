@@ -105,6 +105,11 @@ jobs:
           python -m pytest \
             tests/unit/test_ai_reviewer.py \
             tests/unit/test_backend_autoload_contract.py \
+            tests/unit/test_ci_functional_profiles.py \
+            tests/unit/test_conf_matches_codegen_routes.py \
+            tests/unit/test_backend_enum_naming.py \
+            tests/unit/test_backend_key_vendor_naming.py \
+            tests/unit/test_platform_vendor_naming.py \
             tests/unit/test_ci_pip_cache.py \
             tests/unit/test_ci_platform_routing.py \
             tests/unit/test_ci_matrix.py \

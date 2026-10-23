@@ -91,6 +91,9 @@ export ASCEND_HOME
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
+# FlagCX's torch entrypoint imports torch_fl, whose native extension is not
+# built during setup. Explicit imports still work once the extension is built.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 # FlagTree's task queue launches through at_npu::native::OpCommand, a torch_npu
 # symbol this environment does not have (and must not have). torch_fl's FlagTree
 # backend policy turns the task queue off itself when it is installed; setting it
@@ -262,6 +265,11 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple}"
 install_flag_gems
 
+# The isolated venv cannot see FlagCX installed in the image's system Python.
+# Install it in both stages; the candidate wheel is later installed --no-deps.
+FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}"
+install_flagcx
+
 # FlagGems' own runtime deps, installed one at a time to avoid IncompleteRead
 # failing the whole batch. numpy stays <2: 2.x breaks the stock +cpu torch C
 # extensions at import, and the Ascend test groups import both.
@@ -324,7 +332,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGCX_TORCH_BACKEND TORCH_DEVICE_BACKEND_AUTOLOAD TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
 fi
 
 cd "$REPO_ROOT"

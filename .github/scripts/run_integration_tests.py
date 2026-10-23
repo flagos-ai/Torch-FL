@@ -17,6 +17,8 @@ import json
 import os
 import re
 import signal
+import threading
+import time
 import shlex
 import subprocess
 import sys
@@ -194,14 +196,53 @@ def required_mpirun(command, test_environment):
     )
 
 
-def run_command(command, test_environment, workdir):
-    """Run one group command, streaming its output live while capturing it.
+def descendant_pids(root_pid):
+    """Return descendants using procfs, with a portable ps fallback."""
+    children = {}
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for task in proc_root.glob("*/task/*/children"):
+            try:
+                parent = int(task.parts[2])
+                values = task.read_text().split()
+                children.setdefault(parent, []).extend(int(value) for value in values)
+            except (OSError, ValueError):
+                continue
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,ppid="],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            result = None
+        if result and result.returncode == 0:
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) == 2:
+                    try:
+                        children.setdefault(int(fields[1]), []).append(int(fields[0]))
+                    except ValueError:
+                        continue
+    found = []
+    pending = list(children.get(root_pid, ()))
+    while pending:
+        pid = pending.pop()
+        if pid in found:
+            continue
+        found.append(pid)
+        pending.extend(children.get(pid, ()))
+    return found
 
-    Streaming (not print-at-end) keeps long hardware groups observable and
-    leaves the log behind if the runner itself is killed; the captured copy
-    feeds the teardown-crash check.
-    """
+
+def run_command(command, test_environment, workdir):
+    """Stream one command; timeout and cancellation also kill its descendants."""
     required_mpirun(command, test_environment)
+    timeout = int(test_environment.get("FLAGCICD_CASE_TIMEOUT", "1800"))
+    if not 1 <= timeout <= 43200:
+        raise ValueError("FLAGCICD_CASE_TIMEOUT must be between 1 and 43200 seconds")
     process = subprocess.Popen(
         ["bash", "-c", f"set -euo pipefail\n{command}"],
         stdout=subprocess.PIPE,
@@ -209,7 +250,33 @@ def run_command(command, test_environment, workdir):
         text=True,
         env=test_environment,
         cwd=workdir,
+        start_new_session=True,
     )
+    timed_out = threading.Event()
+
+    def kill_group():
+        descendants = set(descendant_pids(process.pid))
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        # Vendor launchers may escape the process group with setsid().
+        descendants.update(descendant_pids(process.pid))
+        for pid in descendants:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if process.stdout and not process.stdout.closed:
+            process.stdout.close()
+
+    def expire():
+        timed_out.set()
+        kill_group()
+
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    timer.start()
     assert process.stdout is not None
     try:
         lines = []
@@ -218,13 +285,20 @@ def run_command(command, test_environment, workdir):
             lines.append(line)
         sys.stdout.flush()
         returncode = process.wait()
-    except KeyboardInterrupt:
-        # A cancelled runner must not leave a pytest process writing to the
-        # report directory or to a retry's workspace.
-        process.kill()
+    except (OSError, ValueError):
+        if not timed_out.is_set():
+            kill_group()
+            process.wait()
+            raise
+        returncode = process.wait()
+    except BaseException:
+        kill_group()
         process.wait()
         raise
-    return returncode, "".join(lines)
+    finally:
+        timer.cancel()
+        process.stdout.close()
+    return (124 if timed_out.is_set() else returncode), "".join(lines)
 
 
 def main():
@@ -239,6 +313,31 @@ def main():
     workdir = os.environ.get("INTEGRATION_WORKDIR")
     if workdir and not os.path.isdir(workdir):
         raise SystemExit(f"INTEGRATION_WORKDIR does not exist: {workdir}")
+    records = [
+        {
+            "name": test["name"],
+            "command": test["command"],
+            "status": "not_run",
+            "requires_pytest": any(
+                Path(word).name in ("pytest", "run_unit_tests.py")
+                for word in shlex.split(test["command"])
+            ),
+            "min_passed": test.get("min_passed", 0),
+        }
+        for test in tests
+    ]
+    report_dir = command_environment.get("FLAGCICD_REPORT_DIR")
+
+    def save_execution():
+        if report_dir:
+            Path(report_dir).mkdir(parents=True, exist_ok=True)
+            Path(report_dir, "groups.json").write_text(
+                json.dumps(
+                    {"expected": [r["name"] for r in records], "groups": records}
+                )
+            )
+
+    save_execution()
     for index, test in enumerate(tests, start=1):
         print(
             f"===== [{index}/{len(tests)}] {test['name']} =====",
@@ -249,10 +348,33 @@ def main():
             test_environment[key] = os.path.expandvars(value)
         if test_environment.get("FLAGCICD_REPORT_DIR"):
             test_environment["FLAGCICD_TEST_GROUP"] = test["name"]
+        record = records[index - 1]
+        record.update(status="running", started_at=time.time())
+        save_execution()
         allow_crash = teardown_crash_allowed(test_environment)
-        returncode, output = run_command(test["command"], test_environment, workdir)
+        try:
+            returncode, output = run_command(test["command"], test_environment, workdir)
+        except BaseException as error:
+            record.update(
+                status="cancelled"
+                if isinstance(error, KeyboardInterrupt)
+                else "failed",
+                error=str(error),
+                finished_at=time.time(),
+            )
+            save_execution()
+            raise
         ok, tolerated = classify_command_result(returncode, output, allow_crash)
-        if tolerated:
+        if ok and test.get("min_passed", 0):
+            passed = sum(int(n) for n in re.findall(r"\b(\d+) passed\b", output))
+            ok = passed >= test["min_passed"]
+        record.update(
+            status="passed" if ok else "failed",
+            returncode=returncode,
+            finished_at=time.time(),
+        )
+        save_execution()
+        if tolerated and ok:
             print(
                 f"Integration test '{test['name']}' passed "
                 f"({clean_summary(output)}), then the command died with "
@@ -267,9 +389,14 @@ def main():
                 f"Integration test '{test['name']}' failed with exit code {returncode}",
                 flush=True,
             )
-            raise SystemExit(returncode)
+            raise SystemExit(returncode or 1)
     return 0
 
 
 if __name__ == "__main__":
+
+    def cancel(signum, frame):
+        raise KeyboardInterrupt("integration runner cancelled")
+
+    signal.signal(signal.SIGTERM, cancel)
     raise SystemExit(main())

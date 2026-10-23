@@ -79,6 +79,8 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    "cuda_flaggems_mul": tuple(p for p in _PLATFORMS if p != "nvidia"),
+    "cuda_dtype_cast_performance": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "iluvatar_runtime": (
         "apple",
         "ascend",
@@ -630,6 +632,8 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
     assert (
         composer.main(
             [
+                "--profile",
+                "nightly",
                 "--platform",
                 "nvidia",
                 "--manifest",
@@ -659,6 +663,8 @@ def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
     assert (
         composer.main(
             [
+                "--profile",
+                "nightly",
                 "--platform",
                 "nvidia_h100",
                 "--manifest",

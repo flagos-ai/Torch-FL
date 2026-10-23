@@ -17,8 +17,8 @@ test groups come from the shared integration manifest.
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
 Routing labels take precedence over file filtering. Adding or removing labels
-reruns PR CI. Supported platform names are `ascend`, `cuda`, `dcu`, `gcu`,
-`iluvatar`, `kunlunxin`, `metax`, `mps`, `musa` and `ppu`.
+reruns PR CI. Supported platform names are `apple`, `ascend`, `enflame`, `hygon`,
+`iluvatar`, `kunlunxin`, `metax`, `mthreads`, `nvidia` and `thead`.
 
 Each `.github/configs/<platform>.yml` declares `paths_watch`: exact file names,
 directory prefixes ending in `/`, or shell-style globs. Its own configuration
@@ -33,6 +33,15 @@ CUDA runtime sources affect CUDA, DCU and PPU, while the CUDA allocator header
 also affects MetaX. Keep these relationships aligned with
 `cmake/flagos_platforms.json` and the runtime build configuration when adding or
 changing a platform.
+
+## Functional profiles
+
+The default `pr` profile preserves the platform selection above. The daily
+`nightly` profile runs every configured platform and all applicable existing
+functional groups, including the dedicated CUDA transfer regressions. Manual
+nightly requests require `platforms=all`. `weekly` is reserved and rejected
+before hardware dispatch. Both CI and FlagCICD Entry expose these profile names.
+See [Functional CI profiles](ci-test-tiers.md) for execution and evidence rules.
 
 ## One required check
 

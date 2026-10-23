@@ -298,6 +298,24 @@ steps:
       python -m pytest tests/integration/ops/ -m "flaggems and main_ops"
       -v -s --tb=short
 
+  # CUDA-only route regression: the profiler must own the device, and the
+  # default FlagGems-primary wheel does not require CUDA boxing kernels.
+  - id: cuda_flaggems_mul
+    name: CUDA FlagGems multiplication route regression
+    platforms: [nvidia]
+    profiles: [nightly]
+    min_passed: 1
+    command: python -m pytest tests/integration/ops/test_flaggems_mul_route.py -v -s --tb=short
+
+  # A measured CUDA performance contract, separate from portable cast correctness.
+  # Profiling runs serially in nightly and never in the PR vendor sweep.
+  - id: cuda_dtype_cast_performance
+    name: CUDA dtype cast transfer regression
+    platforms: [nvidia]
+    profiles: [nightly]
+    min_passed: 1
+    command: python -m pytest tests/integration/ops/test_dtype_cast_performance.py -v -s --tb=short
+
   # The MUSA hybrid group is a file, not a marker: the MUSA vendor sweep above
   # deselects `-m flaggems`, and ops/test_musa_flaggems.py is the MUSA hardware
   # behaviour of that route rather than one more generically-selected case. It

@@ -29,11 +29,16 @@ cases pin, because the hold is one constant away from being needed again:
 
 The first case is skipped rather than failed when the two names disagree, since
 that is a statement about the installed flag_gems and not about this repository;
-the second case is not skipped anywhere a flagos device exists.
+the second case is not skipped on a CUDA platform with a flagos device.
 """
 
 import pytest
 import torch
+
+from torch_fl._platform import detect_platform
+
+if detect_platform() != "cuda":
+    pytest.skip("CUDA FlagGems route regression", allow_module_level=True)
 
 DEVICE = "flagos:0"
 
@@ -59,7 +64,7 @@ def _device_available():
 
 
 pytestmark = [
-    pytest.mark.anyplatform,
+    pytest.mark.flaggems,
     pytest.mark.skipif(not _device_available(), reason="no flagos device"),
 ]
 

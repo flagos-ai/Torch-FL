@@ -51,6 +51,8 @@ _ENTRY_KEYS = {
     "platforms",
     "environment",
     "environment_from_config",
+    "profiles",
+    "min_passed",
 }
 
 
@@ -129,6 +131,18 @@ def validate_manifest(manifest, known):
         _require_string(entry.get("name"), f"steps[{index}].name")
         _require_string(entry.get("command"), f"steps[{index}].command")
         platforms = _entry_platforms(entry, known)
+        minimum = entry.get("min_passed", 0)
+        if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
+            raise ManifestError(
+                f"step {step_id!r}: min_passed must be a nonnegative integer"
+            )
+        profiles = entry.get("profiles", ["pr", "nightly"])
+        if (
+            not isinstance(profiles, list)
+            or not profiles
+            or any(profile not in ("pr", "nightly") for profile in profiles)
+        ):
+            raise ManifestError(f"step {step_id!r}: profiles must name pr or nightly")
 
         if entry.get("environment") is not None:
             _environment(entry, f"steps[{index}].environment")
@@ -181,12 +195,14 @@ def _environment(entry, field):
     return {str(key): str(value) for key, value in environment.items()}
 
 
-def compose(manifest, config, platform, known):
+def compose(manifest, config, platform, known, profile="nightly"):
     """The `integration_tests` list for one platform.
 
     Order is the manifest's, never the config's, so two platforms that run the
     same steps run them in the same sequence.
     """
+    if profile not in ("pr", "nightly"):
+        raise ManifestError("weekly is reserved; supported profiles are pr and nightly")
     steps, _ids, _assigned = validate_manifest(manifest, known)
     if platform not in known:
         raise ManifestError(
@@ -204,6 +220,8 @@ def compose(manifest, config, platform, known):
 
     composed = []
     for entry in steps:
+        if profile not in entry.get("profiles", ["pr", "nightly"]):
+            continue
         if platform not in _entry_platforms(entry, known):
             continue
         environment = _environment(entry, f"step {entry['id']}.environment")
@@ -228,6 +246,8 @@ def compose(manifest, config, platform, known):
             "name": entry["name"].replace(DISPLAY_NAME_TOKEN, display_name),
             "command": entry["command"],
         }
+        if entry.get("min_passed"):
+            step["min_passed"] = entry["min_passed"]
         if environment:
             step["environment"] = environment
         composed.append(step)
@@ -267,6 +287,7 @@ def coverage_report(assigned, known):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", required=True)
+    parser.add_argument("--profile", default="pr")
     parser.add_argument("--manifest", required=True, help="manifest as JSON")
     parser.add_argument("--platform-config", required=True, help="config as JSON")
     parser.add_argument(
@@ -281,7 +302,7 @@ def main(argv=None):
         config = json.loads(Path(args.platform_config).read_text())
         known = known_platforms(args.config_dir)
         steps, _ids, assigned = validate_manifest(manifest, known)
-        composed = compose(manifest, config, args.platform, known)
+        composed = compose(manifest, config, args.platform, known, args.profile)
     except ManifestError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1

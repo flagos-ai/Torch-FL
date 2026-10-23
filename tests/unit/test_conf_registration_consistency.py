@@ -31,6 +31,7 @@ Run: pytest tests/unit/test_conf_registration_consistency.py -v
 from __future__ import annotations
 
 import re
+import runpy
 from collections import Counter
 from pathlib import Path
 
@@ -688,3 +689,56 @@ def test_flaggems_list_already_covers_the_forward_on_metax_and_ppu(platform):
         f"{platform}: the generated list now claims the backward, so "
         "register.cc's wrapper claim would duplicate it"
     )
+
+
+def test_default_cuda_cast_keeps_native_and_unsigned_fallback_paths():
+    """Pin the arm itself, not a runtime property.
+
+    A cast that goes through host memory costs three blocking `cudaMemcpy`
+    calls; the on-device arm costs none, because the native copy kernel is a
+    kernel. This asserts on the source so it runs on any host -- the runtime
+    check runs separately on CUDA hardware.
+
+    The regression this guards: the default (non-boxing) arm called
+    `strided_copy_cast_via_cpu` unconditionally, so the shipped wheel for the
+    CUDA-ABI platforms paid a host round trip for every dtype cast.
+    """
+    src = (ATEN_DIR / "copy_ops.cc").read_text()
+    # The non-boxing arm is the second `#else` of the FLAGOS_BOXING_BUILD pair
+    # inside the same-device flagos->flagos branch.
+    # Anchor on the _to_copy dtype branch specifically: the file also has a
+    # "CUDA platform without the boxing kernels" comment on the _copy_from
+    # path, which takes a different (host) route by design.
+    marker = "if (src_is_flagos && dst_is_flagos) {"
+    branch = src.find(marker)
+    assert branch != -1, "the same-device flagos copy branch is gone"
+    start = src.find("// CUDA platform without the boxing kernels", branch)
+    assert start != -1, (
+        "the non-boxing CUDA cast arm is gone; decouple this test from the source "
+        "if the arm was deliberately removed"
+    )
+    arm = src[start : start + 1400]
+    assert "DeviceBoxingGuard" in arm, (
+        "the non-boxing CUDA cast arm no longer boxes to CUDA, so a "
+        "dtype cast is a host round trip again"
+    )
+    assert "strided_copy_cast_via_cpu(self_contig, result);" in arm, (
+        "the unsigned-dtype escape hatch is missing from the arm"
+    )
+
+
+_CAPS = runpy.run_path(str(REPO_ROOT / "tests/integration/flaggems/flaggems_caps.py"))
+
+
+@pytest.mark.parametrize("platform", sorted(_CAPS["EXPECTED_FLAGGEMS_ROUTES"]))
+def test_recorded_flaggems_routes_match_committed_conf(platform):
+    """Catch stale routing snapshots in L1, before an accelerator is allocated."""
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    count = sum(value == "flaggems" for value in routes.values())
+    assert count == _CAPS["EXPECTED_FLAGGEMS_ROUTES"][platform], (
+        f"{platform}: FlagGems route snapshot is stale ({count} in committed conf)"
+    )
+    assert (
+        routes.get("scaled_dot_product_attention")
+        == _CAPS["EXPECTED_SDPA_ROUTE"][platform]
+    ), f"{platform}: SDPA route snapshot is stale"

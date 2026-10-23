@@ -101,6 +101,10 @@ def platform_report(plan, platform, jobs, raw, attempt):
         errors.append("the platform did not successfully complete all required stages")
     metrics = {"coverage": {"available": False}}
     try:
+        metrics["hardware"] = one_report(raw / "pytest", f"hardware-{platform}.json")
+    except (OSError, ValueError, TypeError):
+        metrics["hardware"] = {"available": False}
+    try:
         pytest = one_report(raw / "pytest", f"pytest-{platform}.json")
         metadata = pytest["flagcicd"]
         if (

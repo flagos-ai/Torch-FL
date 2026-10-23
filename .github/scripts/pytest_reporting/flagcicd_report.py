@@ -51,6 +51,16 @@ def pytest_configure(config):
         json.dumps({"group": group, "args": config.invocation_params.args}),
         encoding="utf-8",
     )
+    config._flagcicd_marker = report.with_suffix(".pending")
     # Run before pytest-json-report's configure hook, retaining its native schema.
     config.option.json_report = True
     config.option.json_report_file = str(report)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session):
+    marker = getattr(session.config, "_flagcicd_marker", None)
+    if marker:
+        data = json.loads(marker.read_text())
+        data["selected_nodeids"] = [item.nodeid for item in session.items]
+        marker.write_text(json.dumps(data), encoding="utf-8")

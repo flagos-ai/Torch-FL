@@ -81,13 +81,20 @@ def build_plan(request, contract, source, changed):
         raise ValueError(
             "platforms must be all, a comma-separated list, or a JSON array"
         )
+    profile = request.get("profile", "pr")
+    if profile not in ("pr", "nightly"):
+        raise ValueError("weekly is reserved; supported profiles are pr and nightly")
+    if profile == "nightly" and selection.strip() != "all":
+        raise ValueError("nightly requires platforms=all")
     selected = _platforms_from_dispatch(selection, known)
-    if selection.strip() == "all" and changed is not None:
+    if profile == "pr" and selection.strip() == "all" and changed is not None:
         selected = _platforms_from_files(changed, known, configs)
     inferred, risk, matched, diff_status = infer_level(changed, contract)
     level = max(
         (inferred, "L0" if requested == "auto" else requested), key=LEVELS.__getitem__
     )
+    if profile == "nightly":
+        level = "L2"
     if contract["levels"][level]["support"] != "supported":
         raise ValueError(f"test level {level} is not supported")
     # An explicit hardware request must not become an empty, passing matrix.
@@ -99,13 +106,15 @@ def build_plan(request, contract, source, changed):
     for platform in selected or known:
         path = configs / f"{platform}.yml"
         config = yaml.safe_load(path.read_text())
-        compose(manifest, config, platform, known)
+        compose(manifest, config, platform, known, profile)
         fingerprint.update(platform.encode())
         fingerprint.update(path.read_bytes())
     fingerprint.update(json.dumps(contract, sort_keys=True).encode())
+    fingerprint.update(profile.encode())
     return {
         "schema_version": "flagcicd.plan/v1",
         **request,
+        "profile": profile,
         "test_level": level,
         "scope": contract["levels"][level]["scope"],
         "risk_level": risk,
@@ -129,6 +138,7 @@ def report_context(plan):
         "base_sha",
         "test_level",
         "scope",
+        "profile",
         "risk_level",
         "risk_rule_version",
         "config_hash",
@@ -170,6 +180,7 @@ def main():
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write("context=" + report_context(plan) + "\n")
         output.write(f"test_level={plan['test_level']}\n")
+        output.write(f"profile={plan['profile']}\n")
         output.write("platforms=" + json.dumps(plan["expected_platforms"]) + "\n")
         output.write(
             "validated_platforms=" + json.dumps(plan["validated_platforms"]) + "\n"
