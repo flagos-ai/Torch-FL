@@ -101,6 +101,7 @@ GENERATED_REGISTER_INC = REPO_ROOT / "csrc/aten/generated/register.inc"
 from backend_coverage import (  # noqa: E402
     FLAGGEMS_CPP_OPS,
     FLAGGEMS_PYTHON_OPS,
+    FLAGGEMS_HOLDS,
     FLAGGEMS_PYTHON_OPS_FROZEN,
     TILEOPS_OPS,
 )
@@ -298,8 +299,6 @@ ESCAPE_NATIVE = {
 # regeneration silently reverted the pins the diff had recovered. PPU's
 # is a literal (BOXING_TRITON_GAPS) because it is vendor-first no longer, and the
 # diff cannot tell a gap from a policy exception on a flaggems-first platform.
-_FLAGGEMS_HOLDS = None
-
 BOXING_PLATFORMS = {
     "metax": "backends_metax.conf",
     "dcu": "backends_dcu.conf",
@@ -2643,34 +2642,20 @@ def boxing_measured_python_ops(filename: str) -> set:
 
 
 def flaggems_holds() -> set:
-    """Ops codegen_ops.py holds off the FlagGems route for every platform.
+    """Ops held off the FlagGems route on every platform.
 
-    Imported lazily: codegen_ops.py imports torchgen and the aten schema, which
-    gen_vendor_confs.py otherwise does not need, and a conf regeneration has to
-    work on a host where those are present but are not the point of the run. The
-    import cost is paid once per process.
+    Read from ``backend_coverage.FLAGGEMS_HOLDS``, which is data, rather than
+    imported from ``codegen_ops``. The import looked harmless and was not:
+    ``codegen_ops`` exits from module import when torchgen is absent, so on a host
+    without it the hold list came back empty and the generated confs changed shape
+    -- ``backends_metax.conf`` came out 593/1434 against the repository's
+    586/1441, and ``--check`` called a correct file stale. A conf generation must
+    not depend on which packages the host happens to have.
 
-    Returns an empty set if codegen_ops cannot be imported, matching the previous
-    behaviour rather than failing the whole generation over a hold list.
-
-    ``SystemExit`` is caught as well as ``Exception`` on purpose. codegen_ops.py
-    ends in ``sys.exit(1)`` when torchgen is missing, and ``SystemExit`` derives
-    from ``BaseException``, so an ``except Exception`` here would let it escape and
-    kill every caller -- which is exactly what happened: the route unit tests
-    build confs on a host with the CPU torchgen present but the module import
-    failing, and they died with ``SystemExit: 1`` instead of exercising routing.
+    ``codegen_ops.py`` still owns the per-op diagnosis; the data module carries
+    the routing consequence, and a test keeps the two equal.
     """
-    global _FLAGGEMS_HOLDS
-    if _FLAGGEMS_HOLDS is None:
-        try:
-            import codegen_ops
-
-            _FLAGGEMS_HOLDS = set(codegen_ops.FLAGGEMS_RUNTIME_BROKEN) | set(
-                codegen_ops.FLAGGEMS_RECURSIVE_FALLBACK
-            )
-        except (Exception, SystemExit):
-            _FLAGGEMS_HOLDS = set()
-    return _FLAGGEMS_HOLDS
+    return set(FLAGGEMS_HOLDS)
 
 
 def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ()) -> str:
