@@ -23,8 +23,6 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 
 def _run(code, profile, *, autoload=None):
     env = os.environ.copy()
@@ -156,7 +154,7 @@ def _require_declared_entry_point():
         return
     spec = importlib.util.find_spec("torch_fl")
     installed = Path(spec.origin).resolve().parent if spec and spec.origin else None
-    if installed is None or (REPO_ROOT / "torch_fl" / "_build_config.py").is_file():
+    if installed is None or (installed / "_build_config.py").is_file():
         # torch_fl resolves to this checkout: a source tree, not a wheel.
         pytest.skip("this install is not a built wheel")
     accelerator = _accelerator_recorded_by_the_install()

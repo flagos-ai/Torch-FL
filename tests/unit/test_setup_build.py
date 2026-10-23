@@ -109,7 +109,7 @@ def test_build_ext_stages_generated_build_config(
     # version segment.
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "mthreads")
     _, setup_kwargs = _load_setup(monkeypatch)
-    assert "scripts/tools/torch-fl-preflight" in setup_kwargs["scripts"]
+    assert "scripts" not in setup_kwargs
     source_root = tmp_path / "source"
     package_root = source_root / "torch_fl"
     package_root.mkdir(parents=True)

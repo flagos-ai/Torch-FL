@@ -179,16 +179,26 @@ jobs:
         run: |
           python -m pip install --no-deps dist/*.whl
           python - <<'PY'
+          import os
           from importlib.metadata import files, metadata
+          from pathlib import Path
 
           package_metadata = metadata("torch_fl")
           package_files = [str(path) for path in files("torch_fl")]
           assert any("torch_fl" in path for path in package_files), (
               "torch_fl module not found in wheel"
           )
-          assert any(path.endswith("torch-fl-preflight") for path in package_files), (
-              "Installed wheel is missing the preflight script"
+          # The preflight console script is named for the platform built; the
+          # `torch-fl-<id>` name lives in the packaged table, which is the only
+          # place it can (pyproject.toml's entry points are static).
+          table = Path("torch_fl/entry_points.txt").read_text()
+          accelerator = os.environ["FLAGOS_ACCELERATOR"]
+          assert f"torch-fl-{accelerator} = " in table, (
+              f"packaged entry points have no torch-fl-{accelerator} script: {table}"
           )
+          assert any(
+              path.endswith(f"torch-fl-{accelerator}") for path in package_files
+          ), "Installed wheel is missing the preflight console script"
           print(f"Package: {package_metadata['Name']} {package_metadata['Version']}")
           print(f"Installed files: {len(package_files)}")
           PY

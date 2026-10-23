@@ -1293,7 +1293,6 @@ def _get_setup_kwargs():
         packages=find_packages(
             include=["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]
         ),
-        scripts=["scripts/tools/torch-fl-preflight"],
         package_dir={"": "."},
         package_data=package_data,
         ext_modules=ext_modules,
@@ -1313,29 +1312,6 @@ def _get_setup_kwargs():
         # (_install_requires), and `pip install torch_fl[cuda]` is unaffected --
         # it never resolved to anything.
     )
-    kwargs["entry_points"] = {
-        "torch.backends": [
-            "torch_fl = torch_fl._autoload:init",
-        ],
-        # The wheel is named for its platform's SDK segment (torch_fl-2.10.0
-        # +cuda13.3), and the MPS build's segment is its platform id (`+mps`)
-        # where the base builds have none -- an artifact called
-        # torch_fl-2.10.0.whl could not be told from a CUDA-free CPU build.
-        # Every such build gets the preflight as a console script named for its
-        # id: `torch-fl-cuda ... --platform cuda`.
-        #
-        # An MPS wheel carried no entry points for a while, so that a bare
-        # `import torch` on that build stays on torch.backends.mps. The cost
-        # was the whole table: setuptools ignores ``scripts=`` beside a dynamic
-        # entry-points table (``_MissingDynamic``), so the MPS wheel also lost
-        # ``torch-fl-preflight``, and an install that autoloads flagos only when
-        # asked already has its switch -- ``TORCH_DEVICE_BACKEND_AUTOLOAD=0``,
-        # which is what tests/unit/test_backend_autoload_contract.py pins for
-        # every wheel. pyproject.toml therefore keeps ``entry-points`` static.
-        "console_scripts": [
-            f"torch-fl-{FLAGOS_ACCELERATOR} = torch_fl._preflight_main:main",
-        ],
-    }
     return kwargs
 
 

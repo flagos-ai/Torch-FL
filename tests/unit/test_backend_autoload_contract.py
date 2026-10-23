@@ -42,8 +42,8 @@ def load_setup(monkeypatch):
     return load
 
 
-def _pyproject_table(table: str) -> dict:
-    """Read one ``[table]`` of pyproject.toml without a TOML parser.
+def _pyproject_entry_points(group: str) -> dict:
+    """One ``[project.entry-points."<group>"]`` table of pyproject.toml.
 
     ``tomllib`` is Python 3.11+, and the accelerator CI interpreters are 3.10:
     DCU and GCU build against the image's cp310 Python, and the DCU unit group
@@ -54,7 +54,7 @@ def _pyproject_table(table: str) -> dict:
     scanned directly instead.
     """
     lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
-    header = f"[{table}]"
+    header = f'[project.entry-points."{group}"]'
     if header not in lines:
         raise AssertionError(f"pyproject.toml has no {header} table")
     entries = {}
@@ -83,55 +83,45 @@ def _function(name):
     return namespace[name]
 
 
-def test_entry_points_are_resolved_by_the_build(load_setup):
-    """The table comes from setup.py, which reads it at build time."""
-    assert "entry-points" not in _dynamic_fields(), (
-        "a dynamic entry-points table makes setuptools drop the `scripts=` the "
-        "same build passes (it says so: `_MissingDynamic`), so no wheel could "
-        "carry both the autoload hook and the preflight console script"
-    )
-    _, kwargs = load_setup("nvidia")
-    assert kwargs["entry_points"]["torch.backends"] == [
-        "torch_fl = torch_fl._autoload:init"
-    ]
+def test_entry_points_are_resolved_by_the_build():
+    """The hook is declared in pyproject.toml, not passed from setup().
+
+    setuptools ignores a table that exists only in setup() as soon as [project]
+    is present (`_MissingDynamic`), so a setup()-side table reaches no wheel.
+    """
+    assert _pyproject_entry_points("torch.backends") == {
+        "torch_fl": "torch_fl._autoload:init"
+    }
 
 
-def _dynamic_fields() -> set[str]:
+def test_entry_points_stay_out_of_the_dynamic_list():
+    """A table that is declared dynamic has nothing to be filled from here."""
     lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
-    for line in lines:
-        key, _, value = line.partition("=")
-        if key.strip() == "dynamic":
-            return {item.strip().strip('"') for item in value.strip(" []").split(",")}
-    raise AssertionError("pyproject.toml has no project.dynamic list")
+    dynamic = next(line for line in lines if line.startswith("dynamic ="))
+    assert "entry-points" not in dynamic
 
 
 @pytest.mark.parametrize(
     "accelerator", ["nvidia", "hygon", "mthreads", "iluvatar", "apple"]
 )
-def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelerator):
-    _, kwargs = load_setup(accelerator)
-    assert kwargs["entry_points"]["torch.backends"] == [
-        "torch_fl = torch_fl._autoload:init"
-    ]
+def test_every_build_declares_only_what_a_wheel_can_carry(load_setup, accelerator):
+    """No `scripts=` and no setup()-side table: both are dropped by setuptools.
 
-
-def test_mps_wheel_declares_the_hook_and_says_how_to_keep_it_off(load_setup):
-    """An MPS wheel keeps the hook; a bare torch import is switched off instead.
-
-    The MPS wheel used to omit the table so a program that only wanted
-    torch.backends.mps never registered flagos. What that cost was the table
-    itself -- setuptools ignores the build's ``scripts=`` beside a dynamic
-    entry-points table, so the wheel lost ``torch-fl-preflight`` too. torch
-    already provides the switch for the same job
-    (``TORCH_DEVICE_BACKEND_AUTOLOAD=0``), and the autoload group pins it.
+    The `torch-fl-<platform>` preflight that `scripts=` used to install is a
+    console script, which needs a static name in pyproject.toml; it is not
+    declared, so a wheel installs the tool from `scripts/tools/` instead.
     """
-    _, kwargs = load_setup("apple")
-    assert kwargs["entry_points"]["torch.backends"] == [
-        "torch_fl = torch_fl._autoload:init"
-    ]
-    assert kwargs["entry_points"]["console_scripts"] == [
-        "torch-fl-mps = torch_fl._preflight_main:main"
-    ]
+    _, kwargs = load_setup(accelerator)
+    assert "scripts" not in kwargs
+    assert "entry_points" not in kwargs
+
+
+def test_the_packaged_hook_resolves_to_the_autoload_module():
+    """The label the wheel carries names a function that exists."""
+    hook = _pyproject_entry_points("torch.backends")["torch_fl"]
+    module, _, attribute = hook.partition(":")
+    loaded = runpy.run_path(str(ROOT.joinpath(*module.split(".")).with_suffix(".py")))
+    assert callable(loaded[attribute])
 
 
 def test_mps_editable_install_rejects_another_accelerators_egg_info(

@@ -5,7 +5,8 @@
 
 Development tooling: operator code generation, vendor build helpers, the
 Transformers triage pipeline, and standalone checks. These are host-side tools;
-`tools/torch-fl-preflight` is also installed as a wheel script.
+`tools/torch-fl-preflight` runs on the host and inspects wheel files; it is not
+installed as a console script.
 
 ## Layout
 
@@ -82,7 +83,7 @@ in this directory.
 
 | Script | Purpose |
 |---|---|
-| `torch-fl-preflight` | Validate an artifact's compatibility manifest before importing `torch_fl`. `python scripts/tools/torch-fl-preflight --wheel dist/*.whl --check-build-env`; installed as `torch-fl-preflight`. |
+| `torch-fl-preflight` | Validate an artifact's compatibility manifest before importing `torch_fl`. `python scripts/tools/torch-fl-preflight --wheel dist/*.whl --check-build-env`; inspects a wheel file, not an installed package. |
 | `validate_ai_pr.py` | Validate an AI-authored PR body against the repository's requirements. `python scripts/tools/validate_ai_pr.py --pr-body pr_description.md` |
 | `verify_flaggems_ascend.py` | Per-op check of whether the FlagGems Triton path is numerically correct on Ascend. Slow (Triton JIT dominates, hours for a full sweep), supports `--shard i/n` and `--ops`. |
 | `record_musa_flaggems_failures.py` | Record MUSA FlagGems ops that fail CI so they move into `NATIVE_TRITON_GAPS`, then regenerate the confs. |
