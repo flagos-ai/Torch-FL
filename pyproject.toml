@@ -56,10 +56,12 @@ classifiers = [
 # Declared dynamic so setup.py can drop flag_gems/triton on platforms built in
 # pure-boxing mode (FLAGOS_ACCELERATOR=dcu), where PyPI's NVIDIA-targeted triton wheel
 # is the wrong artifact — DTK ships its own. See _install_requires() in setup.py.
-# entry-points is dynamic so setup.py can omit it from the MPS wheel. PyTorch's
-# device-backend autoload runs at the end of `import torch`; on macOS that would
-# register flagos before a program that only wants torch.backends.mps says so.
-dynamic = ["version", "dependencies", "requires-python", "entry-points"]
+# entry-points stays static: every wheel, MPS included, declares the
+# `torch.backends` hook and the preflight console script. PyTorch's
+# device-backend autoload runs at the end of `import torch`; a program on macOS
+# that only wants torch.backends.mps sets TORCH_DEVICE_BACKEND_AUTOLOAD=0, which
+# is the switch torch itself provides for that.
+dynamic = ["version", "dependencies", "requires-python"]
 
 [project.optional-dependencies]
 dev = [

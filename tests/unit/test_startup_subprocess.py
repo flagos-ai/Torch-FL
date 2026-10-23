@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _run(code, profile, *, autoload=None):
     env = os.environ.copy()
@@ -81,29 +83,38 @@ def _entry_point_hooks():
     return result.returncode == 0
 
 
-#: Accelerators whose wheel deliberately omits the autoload entry point, and
-#: why, from setup.py's ``kwargs["entry_points"] = {}`` branch. The record has
-#: to live here because it cannot be read from the install: the contract group
-#: runs on the wheel's *installed* files, which hold no setup.py, and a source
-#: path relative to this file points into a temporary copy of the tree.
-#: tests/unit/test_autoload_omission.py keeps this list equal to setup.py's.
-_NO_AUTOLOAD = {
-    "mps": "setup.py omits it for MPS so a bare import torch stays on the MPS backend",
-}
-
-
 def _installed_platform_module():
-    """The installed package's ``_platform.py``, loaded without importing it.
+    """The package's own ``_platform.py``, loaded without importing it.
 
     ``import torch_fl`` runs backend selection, which this test must observe
-    rather than pre-empt. A path relative to this file is not an option: the
-    contract group runs on the wheel's installed files, so ``parents[2]`` is a
-    temporary copy of the tree, not the package that is installed.
+    rather than pre-empt, so the file is read by path. The package is the one
+    ``import torch_fl`` would load -- the wheel's when it is installed, this
+    checkout when it is not -- because a path relative to this file is not the
+    contract group's package: it runs on a temporary copy of the tree.
     """
     _require_torch()
     spec = importlib.util.find_spec("torch_fl")
-    assert spec is not None and spec.origin, "torch_fl package is not installed"
-    return runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
+    assert spec is not None and spec.submodule_search_locations, (
+        "torch_fl package is not installed"
+    )
+    return runpy.run_path(
+        str(Path(next(iter(spec.submodule_search_locations))) / "_platform.py")
+    )
+
+
+def _entry_point_metadata_exists():
+    """Whether ``importlib.metadata`` could answer for torch_fl at all.
+
+    An installed distribution -- wheel, editable or egg-info -- registers one;
+    a tree with none of them answers "no entry points" for every group, which is
+    not the wheel-omits-the-hook case this guard is about.
+    """
+    from importlib.metadata import distributions
+
+    return any(
+        dist.metadata["Name"].replace("-", "_").lower() == "torch_fl"
+        for dist in distributions()
+    )
 
 
 def _resolved(name):
@@ -111,8 +122,8 @@ def _resolved(name):
 
     Every accelerator reader here answers in its own spelling -- the build
     record carries the vendor setup.py chose (``apple``), ``FLAGOS_ACCELERATOR``
-    carries what the build was told, and either may be a table id already --
-    while ``_NO_AUTOLOAD`` is keyed by table id.
+    carries what the build was told, and either may be a table id already.
+    Resolving them here keeps every answer in the table's vocabulary.
     """
     if not name:
         return ""
@@ -134,29 +145,26 @@ def _accelerator_recorded_by_the_install():
 
 
 def _require_declared_entry_point():
-    """Skip a wheel that declares no autoload hook, and say whether it should.
+    """Skip an install that is not an accelerator wheel, and fail one without hook.
 
-    pyproject.toml keeps the entry-points table dynamic so the MPS wheel can
-    omit it. The omission is a property of that wheel, not of the platform --
-    but a wheel built for any other accelerator that lacks the hook never
-    exercises the autoload path at all, which is what makes this a check and
-    not a skip.
+    Every accelerator wheel declares the ``torch.backends`` hook, MPS included
+    (see ``test_backend_autoload_contract.py``); the MPS build keeps flagos off
+    a bare ``import torch`` through ``TORCH_DEVICE_BACKEND_AUTOLOAD``, which the
+    autoload group's cases pin.
     """
     if _entry_point_hooks():
         return
+    spec = importlib.util.find_spec("torch_fl")
+    installed = Path(spec.origin).resolve().parent if spec and spec.origin else None
+    if installed is None or (REPO_ROOT / "torch_fl" / "_build_config.py").is_file():
+        # torch_fl resolves to this checkout: a source tree, not a wheel.
+        pytest.skip("this install is not a built wheel")
     accelerator = _accelerator_recorded_by_the_install()
-    if accelerator in _NO_AUTOLOAD:
-        pytest.skip(
-            f"the {accelerator} wheel has no autoload hook: {_NO_AUTOLOAD[accelerator]}"
-        )
     if not accelerator:
         # Nothing says what this install is: a source checkout that was never
         # built for an accelerator. The test is about that wheel, not this tree.
         pytest.skip("this install records no accelerator")
-    pytest.fail(
-        f"the {accelerator} wheel declares no torch.backends entry point, and "
-        f"only {sorted(_NO_AUTOLOAD)} omit it by design"
-    )
+    pytest.fail(f"the {accelerator} wheel declares no torch.backends entry point")
 
 
 def test_minimal_import_and_explicit_repeated_activation():

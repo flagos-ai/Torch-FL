@@ -84,8 +84,12 @@ def _function(name):
 
 
 def test_entry_points_are_resolved_by_the_build(load_setup):
-    """Build selection is where MPS can differ from the device plugins."""
-    assert "entry-points" in _dynamic_fields()
+    """The table comes from setup.py, which reads it at build time."""
+    assert "entry-points" not in _dynamic_fields(), (
+        "a dynamic entry-points table makes setuptools drop the `scripts=` the "
+        "same build passes (it says so: `_MissingDynamic`), so no wheel could "
+        "carry both the autoload hook and the preflight console script"
+    )
     _, kwargs = load_setup("nvidia")
     assert kwargs["entry_points"]["torch.backends"] == [
         "torch_fl = torch_fl._autoload:init"
@@ -101,7 +105,9 @@ def _dynamic_fields() -> set[str]:
     raise AssertionError("pyproject.toml has no project.dynamic list")
 
 
-@pytest.mark.parametrize("accelerator", ["nvidia", "hygon", "mthreads"])
+@pytest.mark.parametrize(
+    "accelerator", ["nvidia", "hygon", "mthreads", "iluvatar", "apple"]
+)
 def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelerator):
     _, kwargs = load_setup(accelerator)
     assert kwargs["entry_points"]["torch.backends"] == [
@@ -109,24 +115,22 @@ def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelera
     ]
 
 
-def test_mps_wheel_leaves_bare_torch_on_the_mps_backend(load_setup):
-    """Only an explicit import may claim PrivateUse1 in an MPS installation.
+def test_mps_wheel_declares_the_hook_and_says_how_to_keep_it_off(load_setup):
+    """An MPS wheel keeps the hook; a bare torch import is switched off instead.
 
-    ``setup()`` passes ``scripts=``, which setuptools ignores beside a dynamic
-    entry-points table, so the wheel could declare no entry point without
-    losing anything -- and did, which cost the iluvatar lane its console script
-    and the autoload contract the hook it was checking. The MPS wheel therefore
-    keeps the hook for that shape of build, and omits it only when there is
-    nothing to lose (``scripts=`` dropped with the entry points), which a build
-    that has no preflight to install can choose.
+    The MPS wheel used to omit the table so a program that only wanted
+    torch.backends.mps never registered flagos. What that cost was the table
+    itself -- setuptools ignores the build's ``scripts=`` beside a dynamic
+    entry-points table, so the wheel lost ``torch-fl-preflight`` too. torch
+    already provides the switch for the same job
+    (``TORCH_DEVICE_BACKEND_AUTOLOAD=0``), and the autoload group pins it.
     """
-    namespace, kwargs = load_setup("apple")
-    omits = namespace["_wheel_omits_entry_points"]
-    # The build itself answers False: this checkout passes ``scripts=``.
-    assert omits(install_scripts=True) is False
-    assert omits(install_scripts=False) is True
+    _, kwargs = load_setup("apple")
     assert kwargs["entry_points"]["torch.backends"] == [
         "torch_fl = torch_fl._autoload:init"
+    ]
+    assert kwargs["entry_points"]["console_scripts"] == [
+        "torch-fl-mps = torch_fl._preflight_main:main"
     ]
 
 

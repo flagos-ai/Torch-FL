@@ -1181,40 +1181,6 @@ def _extension_compile_args():
     return extra_link_args, extra_compile_args
 
 
-def _wheel_omits_entry_points(*, install_scripts: bool) -> bool:
-    """Whether this wheel's metadata carries no ``torch.backends`` hook.
-
-    The MPS wheel omits the entry-points table (see the branch in
-    ``_get_setup_kwargs``), and ``pyproject.toml`` declares ``scripts``
-    dynamically so that table, when present, also installs the preflight as
-    ``torch-fl-<platform>``. Setuptools ignores ``scripts`` in ``setup()`` while
-    ``[project]`` declares it dynamic -- it says so on every build
-    (``_MissingDynamic: `scripts` defined outside of ``pyproject.toml`` is
-    ignored``) and then installs no console script, so a wheel with no entry
-    points loses the tool the preflight is run through. Whether this build
-    passes ``scripts`` is therefore what decides the omission, not the
-    accelerator name.
-
-    Answering without the entry points is not a defect worth stopping a build
-    for -- ``scripts`` is deprecated in favour of the entry-point table, and
-    the iluvatar container sets ``FLAGOS_ACCELERATOR`` to a vendor the table
-    spells differently -- so the build warns and keeps the hook, which is the
-    metadata the autoload contract expects.
-    """
-    # The resolved id, not the environment: a build told `apple` is the MPS one.
-    if FLAGOS_ACCELERATOR != "mps":
-        return False
-    if not install_scripts:
-        return True
-    print(
-        "[setup] torch_fl for MPS: scripts= is ignored beside a dynamic "
-        "entry-points table, so the wheel keeps its torch.backends hook "
-        "instead of installing the preflight as a script",
-        flush=True,
-    )
-    return False
-
-
 def _get_setup_kwargs():
     extra_link_args, extra_compile_args = _extension_compile_args()
     ext_modules = [
@@ -1347,35 +1313,29 @@ def _get_setup_kwargs():
         # (_install_requires), and `pip install torch_fl[cuda]` is unaffected --
         # it never resolved to anything.
     )
-    if _wheel_omits_entry_points(install_scripts=True):
-        # A bare import of PyTorch must leave torch.backends.mps as the active
-        # accelerator. The MPS build has no device-backend autoload consumer:
-        # it uses no FlagTree compile workers, and every user of the native
-        # flagos backend imports torch_fl explicitly. Omitting the entry point
-        # also keeps the two PrivateUse1 backends independent in a process that
-        # only asks for MPS. pyproject.toml lists entry-points as dynamic, so
-        # this omission is part of the wheel metadata rather than a runtime
-        # check.
-        kwargs["entry_points"] = {}
-    else:
-        # pyproject.toml must declare entry-points dynamic for the MPS branch
-        # above. An *empty* static table there still installs the `torch_fl`
-        # console script; restore the source's own table for every other wheel.
-        kwargs["entry_points"] = {
-            "torch.backends": [
-                "torch_fl = torch_fl._autoload:init",
-            ],
-            # The wheel is named for its platform's SDK segment (torch_fl-2.10.0
-            # +cuda13.3), and the MPS build's segment is its platform id
-            # (`+mps`) where the base builds have none -- an artifact called
-            # torch_fl-2.10.0.whl could not be told from a CUDA-free CPU build.
-            # Every such build gets the preflight as a console script named for
-            # its id: `torch-fl-cuda ... --platform cuda`. The MPS wheel omits
-            # entry points, so it installs no script.
-            "console_scripts": [
-                f"torch-fl-{FLAGOS_ACCELERATOR} = torch_fl._preflight_main:main",
-            ],
-        }
+    kwargs["entry_points"] = {
+        "torch.backends": [
+            "torch_fl = torch_fl._autoload:init",
+        ],
+        # The wheel is named for its platform's SDK segment (torch_fl-2.10.0
+        # +cuda13.3), and the MPS build's segment is its platform id (`+mps`)
+        # where the base builds have none -- an artifact called
+        # torch_fl-2.10.0.whl could not be told from a CUDA-free CPU build.
+        # Every such build gets the preflight as a console script named for its
+        # id: `torch-fl-cuda ... --platform cuda`.
+        #
+        # An MPS wheel carried no entry points for a while, so that a bare
+        # `import torch` on that build stays on torch.backends.mps. The cost
+        # was the whole table: setuptools ignores ``scripts=`` beside a dynamic
+        # entry-points table (``_MissingDynamic``), so the MPS wheel also lost
+        # ``torch-fl-preflight``, and an install that autoloads flagos only when
+        # asked already has its switch -- ``TORCH_DEVICE_BACKEND_AUTOLOAD=0``,
+        # which is what tests/unit/test_backend_autoload_contract.py pins for
+        # every wheel. pyproject.toml therefore keeps ``entry-points`` static.
+        "console_scripts": [
+            f"torch-fl-{FLAGOS_ACCELERATOR} = torch_fl._preflight_main:main",
+        ],
+    }
     return kwargs
 
 
