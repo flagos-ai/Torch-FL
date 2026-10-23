@@ -27,11 +27,12 @@ runner_labels:
 paths_watch:
   - torch_fl/accelerator/thead/
   - torch_fl/configs/backends_thead.conf
-  - csrc/aten/backends/thead/
-  - csrc/runtime/accelerator/thead/
+  # thead is a CUDA-ABI vendor: it ships no vendor kernel tree and no runtime of
+  # its own (FLAGOS_PLATFORM_RUNTIME_DIR is nvidia). The aten/backends/thead and
+  # runtime/accelerator/thead entries never matched a file; nvidia_memory.h is
+  # the allocator header it actually compiles.
   - csrc/runtime/accelerator/nvidia/
   - csrc/runtime/allocator/backends/nvidia_memory.h
-  - csrc/runtime/allocator/backends/thead_memory.h
   - .github/scripts/hooks/set_env_thead.sh
   - .github/scripts/set_env_thead.sh
   - scripts/vendor/bundle_thead_libtorch.sh

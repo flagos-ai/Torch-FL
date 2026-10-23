@@ -54,5 +54,8 @@ def test_ppu_contract_failures_are_regenerable_boxing_exceptions():
         if line and "=" in line:
             op, backend = (part.strip() for part in line.split("=", 1))
             routes[op] = backend
-    assert routes["_unsafe_view"] == "nvidia"
-    assert routes["slice.Tensor"] == "nvidia"
+    # thead is a boxing platform: these two are held off FlagGems by the gap
+    # set above, and a default conf spells a held op `none` (cpu_fallback), not
+    # `boxing` -- the day-0 variant is the file that routes them to the boxer.
+    assert routes["_unsafe_view"] == "none"
+    assert routes["slice.Tensor"] == "none"

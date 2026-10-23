@@ -14,7 +14,7 @@
 // Ops already claimed by gcu_register.inc are omitted here: a second m.impl()
 // for the same op and dispatch key only overrides the first and warns at import.
 //
-// Excluded below NATIVE_TRITON_GAPS['gcu'] (scripts/codegen/gen_vendor_confs.py), each
+// Excluded below NATIVE_TRITON_GAPS['enflame'] (scripts/codegen/gen_vendor_confs.py), each
 // one measured failing on the S60 rather than assumed; see the comment on that
 // set for the diagnosis behind every entry.
 // Excluded ops, routed back to topsaten or left to cpu_fallback:

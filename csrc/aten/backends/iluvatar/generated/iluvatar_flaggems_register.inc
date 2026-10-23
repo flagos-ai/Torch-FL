@@ -50,7 +50,7 @@
 // Re-measure and move entries in or out of that set only from BI-V150 results,
 // never by assumption -- and note the DCU precedent: most of the 37 are the
 // device-name mismatch that _ALIGNED_VENDORS
-// (torch_fl/accelerator/cuda/_cuda_compat.py) remediates, so an A/B survey after
+// (torch_fl/accelerator/nvidia/_cuda_compat.py) remediates, so an A/B survey after
 // adding iluvatar there is the way most of them come back.
 // Excluded ops, left to cpu_fallback:
 //   - _batch_norm_no_update

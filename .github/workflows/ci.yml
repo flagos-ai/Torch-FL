@@ -169,11 +169,18 @@ jobs:
 
   # One hardware pipeline per configured platform. The reusable workflow reads
   # runner, image, timeout, and test manifest values from that platform config.
+  #
+  # fail-fast: once one platform's build or tests fail, this PR is red whatever
+  # the others do, and the remaining hardware jobs would only burn accelerator
+  # time to confirm it. GitHub cancels them. That also means the first red is
+  # the only one you see: fix it, push, and the next run reports the next --
+  # which is why the platform set stays as narrow as the diff allows
+  # (paths_watch in .github/configs/<platform>.yml) rather than growing.
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: [resolve-checkout, discover-platforms]
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
     uses: ./.github/workflows/integration-tests.yml
@@ -199,11 +206,13 @@ jobs:
     steps:
       - name: Verify shared checks and selected platforms passed
         env:
+          GH_TOKEN: ${{ github.token }}
           RESULTS: ${{ toJSON(needs) }}
         run: |
           python3 - <<'PY'
           import json
           import os
+          import subprocess
           import sys
 
           jobs = json.loads(os.environ["RESULTS"])
@@ -225,6 +234,43 @@ jobs:
               errors.append(f"platform-pipeline: {platform_result}")
           elif not selected and platform_result not in ("success", "skipped"):
               errors.append(f"platform-pipeline: {platform_result}")
+
+          # With fail-fast, a failing platform cancels its siblings, so the
+          # matrix result alone does not name the lane that broke. Read the
+          # run's jobs back and report each one's conclusion. This is a
+          # nicety: wherever the API cannot answer (no token, no run id), the
+          # gate still decides on the results above.
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          try:
+              if not (run_id and repo and os.environ.get("GH_TOKEN")):
+                  raise ValueError("not in a GitHub run with a token")
+              listing = subprocess.run(
+                  [
+                      "gh", "api", "--paginate",
+                      f"repos/{repo}/actions/runs/{run_id}/jobs",
+                  ],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout
+              # --paginate joins the pages' objects; normalize either shape.
+              pages = json.loads(listing if listing.lstrip().startswith("[") else f"[{listing}]")
+              listed = [job for page in pages for job in page.get("jobs", [])]
+          except (subprocess.CalledProcessError, ValueError, AttributeError) as exc:
+              print(f"::warning::could not list job conclusions: {exc}")
+              listed = []
+
+          for job in listed:
+              name = job.get("name", "")
+              conclusion = job.get("conclusion")
+              if conclusion in ("failure", "timed_out"):
+                  print(f"::error::{name}: {conclusion}")
+              elif conclusion == "cancelled" and name.startswith("Platform pipeline ("):
+                  print(
+                      f"::notice::{name} was cancelled because another platform "
+                      "failed (fail-fast); see the failed job above"
+                  )
 
           for error in errors:
               print(f"::error::{error}")

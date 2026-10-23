@@ -31,8 +31,8 @@
 
 #include <flagos.h>
 
-#include "runtime/accelerator/mps/mps.h"
-#include "runtime/accelerator/mps/mps_runtime.h"
+#include "runtime/accelerator/apple/mps.h"
+#include "runtime/accelerator/apple/mps_runtime.h"
 #include "runtime/allocator/caching_device_allocator.h"
 
 namespace at::native::flagos::mps {

@@ -52,7 +52,7 @@ class TopsPointerDeviceGuard {
 // `topsMemcpyDeviceToDevice` returns an error and leaves the destination
 // untouched for every candidate current device, so routing one through it moves
 // no bytes and reports nothing to a caller that ignores the status.
-// csrc/runtime/accelerator/gcu/memory.cc carries the measurement and the
+// csrc/runtime/accelerator/enflame/memory.cc carries the measurement and the
 // reasoning; this is the same fix on the DeviceMemoryInterface path.
 bool TopsCrossDeviceEnds(
     const void* dst,

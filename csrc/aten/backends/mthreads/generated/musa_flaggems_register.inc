@@ -14,7 +14,7 @@
 // Ops already claimed by musa_register.inc are omitted here: a second m.impl()
 // for the same op and dispatch key only overrides the first and warns at import.
 //
-// Excluded below NATIVE_TRITON_GAPS['musa'] (scripts/codegen/gen_vendor_confs.py), each
+// Excluded below NATIVE_TRITON_GAPS['mthreads'] (scripts/codegen/gen_vendor_confs.py), each
 // one measured failing on MTT S5000 rather than assumed; see the comment on
 // that set for the diagnosis behind every entry.
 // Excluded ops, routed back to mudnn or left to cpu_fallback:

@@ -11,7 +11,7 @@
 
 #ifdef USE_GCU
 
-#include "runtime/accelerator/gcu/tops_stream.h"
+#include "runtime/accelerator/enflame/tops_stream.h"
 
 #include <ATen/ATen.h>
 #include <ATen/ops/full.h>

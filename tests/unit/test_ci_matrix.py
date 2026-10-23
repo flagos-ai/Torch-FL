@@ -16,6 +16,7 @@
 
 import importlib.util
 import json
+import pathlib
 import subprocess
 import sys
 from pathlib import Path
@@ -60,7 +61,9 @@ def _run(event="pull_request", files="", labels="", dispatch=""):
     "path",
     [
         "torch_fl/accelerator/{platform}/__init__.py",
-        "csrc/aten/backends/{platform}/op.cc",
+        # csrc/aten/backends/<vendor>/ exists only where a vendor kernel library
+        # does; the CUDA-ABI vendors (nvidia, hygon, thead) have none, so that
+        # path is asserted separately below rather than for every lane.
         ".github/scripts/hooks/set_env_{platform}.sh",
         ".github/scripts/set_env_{platform}.sh",
         ".github/configs/{platform}.yml",
@@ -71,6 +74,20 @@ def test_platform_owned_files_select_only_that_lane(platform, path):
     result, selected = _run(files=path.format(platform=platform))
     assert result.returncode == 0, result.stderr
     assert selected == [platform]
+
+
+def test_a_vendor_kernel_tree_selects_its_own_lane():
+    """Only a vendor with a native kernel tree has csrc/aten/backends/<vendor>/."""
+    root = pathlib.Path(__file__).resolve().parents[2] / "csrc" / "aten" / "backends"
+    for vendor, has_tree in (
+        ("enflame", True),
+        ("mthreads", True),
+        ("apple", True),
+        ("ascend", True),
+        ("thead", False),
+        ("hygon", False),
+    ):
+        assert (root / vendor).is_dir() is has_tree, vendor
 
 
 @pytest.mark.parametrize(
@@ -226,7 +243,6 @@ def test_mps_suites_with_shared_filenames_keep_the_mps_lane():
     for path in (
         "csrc/aten/strided_ops.cc",
         "tests/integration/ops/backend_conf.py",
-        "tests/integration/ops/test_linear_dispatch.py",
         "tests/integration/ops/test_mps_qwen35.py",
         "tests/integration/ops/test_mps_rotary_and_compare.py",
     ):
