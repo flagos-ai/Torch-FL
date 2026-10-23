@@ -29,17 +29,22 @@
 #include "backends/mthreads/mudnn_common.h"
 #endif
 
-// Whether the CUDA-platform arms of contiguous()/clone() below may hand the
-// strided gather to ATen's native CUDA copy kernel (DeviceBoxingGuard +
-// at::native::copy_). Those arms are a pure "do it on device" shortcut, and the
-// kernel they dispatch to -- plus the c10::cuda stream bookkeeping around it --
-// lives in libtorch_cuda.so. The default FlagGems-primary wheel does not ship
-// that library (it links the CPU-only pip torch), so on it the gather goes
-// through copy_strided_via_host instead, which is also what the de-boxed
-// backends (Ascend, GCU, Kunlunxin, MUSA, ...) always use. csrc/CMakeLists.txt
-// defines FLAGOS_BOXING_BUILD only for a wheel built with FLAGOS_BUILD_BOXING=ON
-// -- the same switch register.cc reads before claiming the generated CUDA
-// kernels -- and the USE_* exclusions match the ones on the arms.
+// Which backends are the CUDA ones, for the arms of contiguous()/clone() below.
+//
+// It used to also record whether those arms may hand the strided gather to
+// ATen's native CUDA copy kernel: the default FlagGems-primary wheel links the
+// CPU-only pip torch, so the reasoning went, libtorch_cuda.so -- and with it the
+// native copy kernel -- is absent, and the gather goes through
+// copy_strided_via_host instead. The premise is wrong. That wheel is shipped for
+// a CUDA device, links a real libtorch_cuda (the FlagGems-primary build reaches
+// the same CUDA TensorIterator kernels for its dtype casts), and
+// DeviceBoxingGuard is header-only and gated on nothing. Both CUDA builds now
+// take the on-device gather; FLAGOS_BOXING_BUILD no longer selects between them.
+// The de-boxed non-CUDA backends (Ascend, GCU, Kunlunxin, MUSA, ...) keep using
+// copy_strided_via_host, and the USE_* exclusions below match the ones on the
+// arms. csrc/CMakeLists.txt defines FLAGOS_BOXING_BUILD only for a wheel built
+// with FLAGOS_BUILD_BOXING=ON -- the switch register.cc reads before claiming the
+// generated CUDA kernels.
 #if defined(FLAGOS_BOXING_BUILD) && !defined(USE_ASCEND) && \
     !defined(USE_TSINGMICRO) && !defined(USE_GCU) && !defined(USE_MUSA) && \
     !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && !defined(USE_ILUVATAR) && \
@@ -217,16 +222,21 @@ at::Tensor contiguous(
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
-#if FLAGOS_CONTIGUOUS_CUDA_BOXING
-      // CUDA platform: use DeviceBoxingGuard to invoke native CUDA strided copy
-      // kernel on-device, avoiding expensive CPU round-trip.
+      // Both CUDA builds reach the native strided copy kernel. The boxing
+      // build has the generated boxing kernels registered in the CUDA slot;
+      // the FlagGems-primary build does not, but `DeviceBoxingGuard` does not
+      // need them -- it only rewrites device metadata to CUDA, and a build that
+      // gets here links a real libtorch_cuda, so the native TensorIterator copy
+      // kernel is reachable either way.
+      //
+      // The de-boxed build used to gather through host memory here, on the
+      // strength of "there is no native CUDA copy kernel in this wheel". That
+      // is true of the boxing kernels and false of the native copy kernel, and
+      // the cost was two blocking cudaMemcpy per call on the arm `_to_copy`
+      // hits for every non-contiguous source -- before it even reaches its
+      // dtype cast.
       DeviceBoxingGuard guard(self, result);
       at::native::copy_(result, self, false);
-#else
-      // CUDA platform without the boxing kernels: there is no native CUDA copy
-      // kernel in this wheel, so gather through host memory.
-      copy_strided_via_host(self, result, memory_format);
-#endif
 #elif defined(USE_MPS)
       const bool copied_on_device =
           copy_strided_to_contiguous(self, result, memory_format);
@@ -309,16 +319,12 @@ at::Tensor clone(
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
-#if FLAGOS_CONTIGUOUS_CUDA_BOXING
     // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
-    // instead of an expensive CPU round-trip.
+    // instead of an expensive CPU round-trip. Both CUDA builds have it: the
+    // boxing kernels are not required for the native TensorIterator copy, only
+    // for the generated ones (see the note above FLAGOS_CONTIGUOUS_CUDA_BOXING).
     DeviceBoxingGuard guard(self, result);
     at::native::copy_(result, self, false);
-#else
-    // Without the boxing kernels there is no native CUDA copy kernel to
-    // dispatch to; gather through host memory instead.
-    copy_strided_via_host(self, result, memory_format);
-#endif
 #else
     // MUSA joins the non-boxing group: copy_ reaches _copy_from, which
     // torch_musa implements for strided/dtype-casting copies on device.
