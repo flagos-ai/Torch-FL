@@ -533,6 +533,49 @@ def test_setup_resolves_the_table_defaults(monkeypatch, clean_kernel_env):
         )
 
 
+def test_a_build_without_a_marker_drops_an_inherited_one(monkeypatch, tmp_path):
+    """torch_fl/lib/ is never cleaned, so another build's marker must not survive.
+
+    A MetaX build whose tree still carried an "mps" marker (left by the marker
+    tests' copies, or by an earlier apple build) read the empty
+    backends_apple.conf and raised "routed to 'none'" on every op it does not
+    list. setup.py removes it for the platforms whose row writes no marker, and
+    keeps it where the row does.
+    """
+    # Not metax: importing setup.py with it compiles and loads the cu-bridge
+    # shim, which only a MetaX box can do. The removal is keyed on the row's
+    # writes_platform_marker flag, which metax and ppu both set to false.
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "ppu")
+    namespace, _ = _load_setup(monkeypatch)
+    root = tmp_path / "src"
+    marker = root / "torch_fl" / "lib_thead" / "flagos_platform"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("mps\n")
+    monkeypatch.setitem(
+        namespace["_drop_inherited_platform_marker"].__globals__,
+        "BASE_DIR",
+        str(root),
+    )
+    namespace["_drop_inherited_platform_marker"]()
+    assert not marker.exists()
+
+
+def test_a_marker_writing_build_keeps_its_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "ascend")
+    namespace, _ = _load_setup(monkeypatch)
+    root = tmp_path / "src"
+    marker = root / "torch_fl" / "lib" / "flagos_platform"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("ascend\n")
+    monkeypatch.setitem(
+        namespace["_drop_inherited_platform_marker"].__globals__,
+        "BASE_DIR",
+        str(root),
+    )
+    namespace["_drop_inherited_platform_marker"]()
+    assert marker.read_text() == "ascend\n"
+
+
 def _make_minimal_dtk(root):
     """Just enough of a DTK tree for the DCU _flagos_nccl link set to resolve."""
     for relative in (

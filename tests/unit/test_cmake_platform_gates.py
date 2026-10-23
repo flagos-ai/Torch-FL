@@ -155,3 +155,23 @@ def test_the_kernel_filter_reads_the_tree_the_table_names():
         assert row in _table()["accelerators"]["metax"].get("aten_backends", []), (
             f"the MetaX row must name {row} as one of its kernel trees"
         )
+
+
+def test_a_build_without_a_marker_removes_an_inherited_one():
+    """The install directory persists between builds, so a stale marker wins.
+
+    torch_fl/lib/ is the source tree's own directory and is not cleaned between
+    builds; a marker left there by another platform's build (or by the marker
+    tests' copies) names a conf this build cannot route through. A MetaX build
+    that inherited an "mps" marker read the empty backends_apple.conf and raised
+    "routed to 'none'" on every op it does not list. The other arm of the same
+    gate must therefore remove it at install time, when the prefix is known.
+    """
+    text = _code(REPO_ROOT / "csrc" / "CMakeLists.txt")
+    assert "FLAGOS_PLATFORM_WRITES_MARKER" in text
+    assert re.search(
+        r"if\(FLAGOS_PLATFORM_WRITES_MARKER\).*?else\(\).*?"
+        r"install\(CODE .*?file\(REMOVE .*?flagos_platform",
+        text,
+        re.S,
+    ), "the no-marker arm must remove an inherited lib/flagos_platform"

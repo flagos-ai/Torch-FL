@@ -766,4 +766,16 @@ if(FLAGOS_PLATFORM_WRITES_MARKER)
   file(WRITE "${_flagos_platform_marker}" "${FLAGOS_ACCELERATOR}\n")
   install(FILES "${_flagos_platform_marker}"
       DESTINATION ${CMAKE_INSTALL_LIBDIR})
+else()
+  # Platforms that do not write a marker must also not inherit one. The install
+  # directory is the source tree's torch_fl/lib/, which is never cleaned between
+  # builds, and tests/unit/test_ascend_platform_marker.py leaves an "mps" marker
+  # there (its fake tree is a copy that keeps the real lib/). A MetaX build then
+  # kept that marker, torch_fl/__init__.py read backends_apple.conf from it, and
+  # every op the empty conf does not list raised "routed to 'none'" instead of
+  # taking its FlagGems route.
+  #
+  # file() would be a no-op: install time is the first moment that directory
+  # means anything, and CMAKE_INSTALL_PREFIX is only final then.
+  install(CODE "file(REMOVE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${FLAGOS_BUNDLE_LIBDIR}/flagos_platform\")")
 endif()

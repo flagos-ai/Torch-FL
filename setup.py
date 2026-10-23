@@ -230,6 +230,30 @@ def make_relative_rpath_args(path):
         return ["-Wl,-rpath,$ORIGIN/" + path]
 
 
+def _drop_inherited_platform_marker() -> None:
+    """Delete a lib/flagos_platform this build does not own.
+
+    The marker is what torch_fl/__init__.py names the conf after, so one left by
+    another platform's build in the same (never cleaned) source tree sends this
+    wheel to a conf it cannot route through: a MetaX build that inherited an
+    "mps" marker read the empty backends_apple.conf and raised "routed to
+    'none'" on every op that conf does not list. CMake removes it at install
+    time for these platforms too; this also covers a build whose CMake install
+    step did not run, and an in-place editable install.
+    """
+    writes_marker = _platform_entry(FLAGOS_ACCELERATOR)["writes_platform_marker"]
+    marker = os.path.join(BASE_DIR, "torch_fl", _BUNDLE_LIBDIR, "flagos_platform")
+    if not writes_marker and os.path.isfile(marker):
+        os.remove(marker)
+
+
+if RUN_BUILD_DEPS:
+    # Before CMake installs anything: the install step may leave an inherited
+    # marker in place until it runs, and a build that fails earlier must not
+    # leave the tree claiming another platform.
+    _drop_inherited_platform_marker()
+
+
 def get_pytorch_dir():
     import torch
 
@@ -695,6 +719,15 @@ def _torch_cxx11_abi() -> str:
 def build_deps():
     build_dir = os.path.join(BASE_DIR, "build")
     os.makedirs(build_dir, exist_ok=True)
+    # The MetaX cu-bridge shim, built at import and loaded RTLD_GLOBAL, has to be
+    # live in the process CMake runs as well: a rebuild also compiles the device
+    # sources against cu-bridge, and without the shim they fail at the first
+    # cuda* symbol. It is a separate process, so this is not the import-time load.
+    if FLAGOS_ACCELERATOR == "metax":
+        try:
+            _ensure_metax_cudart_shim()
+        except OSError as error:
+            print(f"[setup] no MetaX cudart shim for the CMake step: {error}")
 
     cmake_args = [
         "-DCMAKE_INSTALL_PREFIX="
