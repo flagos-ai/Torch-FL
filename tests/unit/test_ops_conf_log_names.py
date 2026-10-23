@@ -23,9 +23,9 @@ that platform alone -- and they only run on its hardware.
 
 Both sides are read here: every value the confs route to, and the name the log
 prints for the backend ``ParseBackendName`` reads that value as. The table is
-deliberate rather than derived from the SDK-era aliases in the parser, because
-the aliases are accepted for old confs and `nvidia`/`nvidia`-era keys do not all
-print their own spelling.
+written out rather than derived from the parser: the parser's SDK-era aliases
+(`gcu`, `musa`) are accepted for old confs, and the key `nvidia` prints
+`boxing`, so the conf spelling is not always the logged name.
 """
 
 import ast
