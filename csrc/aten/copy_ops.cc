@@ -508,11 +508,22 @@ at::Tensor _copy_from(
         at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
       }
 #else
-      // CUDA platform without the boxing kernels: the native CUDA strided copy
-      // kernel is not in this wheel (the CUDA DispatchStub is empty), so every
-      // strided or dtype-casting copy goes through host memory, which handles
-      // strides, storage offsets and dtype casts in one pass.
-      strided_copy_cast_via_cpu(self, dst);
+      // CUDA platform without the boxing kernels. `DeviceBoxingGuard` does not
+      // need them: it only rewrites a tensor's device metadata to CUDA, and a
+      // build that gets here links a real libtorch_cuda, so the native
+      // TensorIterator copy kernel is reachable. Sending these copies through
+      // host memory instead costs two blocking cudaMemcpy per call, and this is
+      // the arm a dtype cast or a strided copy lands on for every flagos
+      // `copy_` -- including the ones `_to_copy` performs internally after its
+      // `contiguous()`. Measured on the OCR-RM Qwen3.5-VL 2B value head
+      // (8x H100): 2409 Memcpy per forward at 894 ms of a 1926 ms device
+      // profile, against 2.48 ms of `copy_` device time on stock CUDA.
+      if (cast_needs_cpu_roundtrip(self.scalar_type(), dst.scalar_type())) {
+        strided_copy_cast_via_cpu(self, dst);
+      } else {
+        DeviceBoxingGuard guard(self, dst);
+        at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
+      }
 #endif
 #else
       // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy and
