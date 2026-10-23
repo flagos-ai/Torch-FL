@@ -550,6 +550,24 @@ steps:
       cd "$GITHUB_WORKSPACE" && UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
       python .github/scripts/run_unit_tests.py --timeout 300
 
+  # #644: the Iluvatar non-inner reduction workaround wraps flag_gems entry
+  # points in Python, so its contract -- which calls take the path at all, which
+  # axis moves, `keepdim` round-trip, and that `*_out` bindings are left alone --
+  # is checked with torch alone: no device, no FlagGems build, no weights. That
+  # is why it runs on every platform rather than only where the wrapper is
+  # installed; a drift in it would be silent everywhere.
+  #
+  # Not in .github/workflows/agnostic-checks.yml: that job installs no torch by
+  # design, so a torch-backed file listed there is collected and skipped, which
+  # is not evidence. Not in `unit_tests_per_file` either: that group now names
+  # only dcu, and running the whole of tests/unit on Iluvatar still has
+  # unrelated failures (test_profiler_privateuse1 crashes, the ascend/gcu
+  # qwenimage rope files fail), so widening it belongs to the PR that triages
+  # those, not to this one.
+  - id: iluvatar_reduction_contract
+    name: Iluvatar reduction workaround contract
+    command: python -m pytest tests/unit/test_iluvatar_masked_reductions.py -v --tb=short
+
   - id: runtime_conformance
     name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
