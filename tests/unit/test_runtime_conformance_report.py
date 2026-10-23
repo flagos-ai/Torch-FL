@@ -146,7 +146,7 @@ def test_effective_route_separates_an_unimplemented_op_from_a_missing_one(
         monkeypatch,
         {"add.Tensor": "apple", "cat": "none"},
     )
-    assert runtime_caps.effective_route("add.Tensor") == ("apple", "routed")
+    assert runtime_caps.effective_route("add.Tensor") == ("mps", "routed")
     assert runtime_caps.effective_route("cat") == (None, "unimplemented")
     with pytest.raises(AssertionError, match="embedding is not listed"):
         runtime_caps.effective_route("embedding")

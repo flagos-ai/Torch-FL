@@ -27,7 +27,7 @@ The two sides do not share one vocabulary. The conf names the FlagGems Python
 path ``flaggems`` while the log prints ``flagos_python``, and the C++ path is
 ``flaggems_cpp`` in the conf against ``flagos`` in the log -- both log names are
 retained deliberately for test compatibility
-(``csrc/aten/dispatcher.h``, ``LogDispatch``), as does Apple's kernel row
+(``csrc/aten/dispatcher.h``, ``LogDispatch``), as do the vendor-spelled rows
 (``apple`` against ``mps``). This module owns that mapping so
 the test files do not each restate it.
 """
@@ -48,9 +48,13 @@ _LOG_NAME = {
     "flaggems_python": "flagos_python",
     "flagos_python": "flagos_python",
     "flaggems_cpp": "flagos",
-    # The conf row for Apple's kernels is spelled with the vendor name (it is
-    # what setup.py and CMake call that platform); the log prints the id.
+    # Rows in the vendor spelling, against the name the log prints: the conf
+    # names Apple's kernels and the other vendors' by vendor; the log keeps
+    # `mps`/`musa`/`gcu`, and NVIDIA's kernels register into `boxing`.
     "apple": "mps",
+    "mthreads": "musa",
+    "enflame": "gcu",
+    "nvidia": "boxing",
 }
 
 

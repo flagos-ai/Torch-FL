@@ -62,6 +62,12 @@ _LOG_NAME = {
     "flaggems_python": "flagos_python",
     "flagos_python": "flagos_python",
     "flaggems_cpp": "flagos",
+    # A conf row in the vendor spelling, against the id the log prints. The
+    # NVIDIA rows print "boxing" (the slot they register into).
+    "apple": "mps",
+    "mthreads": "musa",
+    "enflame": "gcu",
+    "nvidia": "boxing",
 }
 
 
