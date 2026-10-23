@@ -717,3 +717,72 @@ def test_boxing_confs_have_no_none_entries(platform):
     routes = g.build_all(CONF_DIR)[platform][1]
     none_ops = [op for op, v in routes.items() if v.split("#", 1)[0].strip() == "none"]
     assert not none_ops, f"{platform} routes {none_ops[:5]} to none"
+
+
+# ---------------------------------------------------------------------------
+# Day-0 boxing-only variants (BOXING_VARIANT_PLATFORMS)
+# ---------------------------------------------------------------------------
+
+
+def test_boxing_variant_platforms_are_the_cuda_compatible_ones():
+    """NVIDIA, MetaX, DCU and PPU. The set is the platforms a boxing wheel exists
+    for -- an extra row here ships a conf nothing can serve."""
+    assert set(g.BOXING_VARIANT_PLATFORMS) == {"cuda", "metax", "dcu", "ppu"}
+
+
+def test_boxing_variants_are_routed_and_committed():
+    """Every variant is regenerable from the tree and up to date on disk."""
+    built = g.build_all(CONF_DIR)
+    variants = g.build_boxing_variants(CONF_DIR, built)
+    assert set(variants) == set(g.BOXING_VARIANT_PLATFORMS)
+    for platform, (text, _, _) in variants.items():
+        path = CONF_DIR / f"backends_{platform}_boxing.conf"
+        assert path.exists(), f"{path.name} is missing"
+        assert path.read_text() == text, (
+            f"{path.name} is stale; run scripts/codegen/gen_vendor_confs.py"
+        )
+
+
+@pytest.mark.parametrize("platform", sorted(g.BOXING_VARIANT_PLATFORMS))
+def test_boxing_variant_routes_only_flaggems_and_boxing(platform):
+    """The premise of the file: a day-0 model is not trusted to anything but the
+    vendor's own kernel, with FlagGems where this platform has measured it."""
+    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
+    keys = {v.split("#", 1)[0].strip() for v in routes.values()}
+    assert keys <= {"flaggems", "flaggems_cpp", "boxing"}, keys
+    assert "boxing" in keys
+
+
+def test_boxing_variant_leaves_unmeasured_ops_on_boxing():
+    """The whole-coverage platforms have no measured FlagGems route beyond the
+    shared ceiling, so their variants keep everything FlagGems does not cover on
+    the boxing kernel rather than claiming coverage they never ran."""
+    cuda_routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["cuda"][1]
+    assert set(cuda_routes.values()) == {"boxing"}
+
+
+def test_boxing_variant_does_not_apply_measured_composite_routes():
+    """DCU's measured scaled_dot_product_attention route belongs to the default
+    conf; the variant's premise is that FlagGems is not what it trusts."""
+    assert "scaled_dot_product_attention" in g.DCU_COMPOSITE_FLAGGEMS
+    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["dcu"][1]
+    assert routes["scaled_dot_product_attention"] == "boxing"
+
+
+@pytest.mark.parametrize("platform", ["metax", "dcu", "ppu"])
+def test_boxing_variant_keeps_the_platforms_triton_gaps(platform):
+    """A gap is an op FlagGems covers that this backend cannot compile. The
+    variant must not send it to flaggems just because boxing is the fallback."""
+    default = g.build_all(CONF_DIR)[platform][1]
+    variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
+    # Every op the default conf pins to the boxing kernel but FlagGems covers
+    # must still be on the boxing kernel in the variant.
+    fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
+    gaps = {
+        op
+        for op, v in default.items()
+        if v.split("#", 1)[0].strip() == "boxing" and op in fg
+    }
+    assert gaps, f"{platform} has no measured gaps to preserve"
+    for op in gaps:
+        assert variant[op] == "boxing", op

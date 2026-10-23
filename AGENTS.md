@@ -336,6 +336,43 @@ asks, using `gen_vendor_confs.py --stats` and the conf tally, never by copying
 old figures. Measured correctness evidence belongs in the PR and the survey
 output, not in that page.
 
+### Day-0 boxing confs
+
+`torch_fl/configs/backends_<platform>_boxing.conf` is a **temporary**,
+boxing-only routing table for a CUDA-compatible platform — one that can
+re-dispatch PrivateUse1 to CUDA through the vendor's own `libtorch` (via
+`DeviceBoxingGuard`). Today that is NVIDIA (`cuda`), MetaX (`metax`), Hygon DCU
+(`dcu`) and the T-Head PPU (`ppu`). Its only purpose is **day-0 model bring-up**: a
+model whose ops FlagGems does not cover yet runs on the vendor's real CUDA-ABI
+kernels instead of falling back to CPU per op, so bringing up a new model does
+not wait on a FlagGems or vendor-native kernel for every op in it.
+
+Rules for these files:
+
+- **They are not the default.** Each platform's default conf stays
+  `backends_<platform>.conf` (FlagGems-primary + measured gaps), and a wheel's
+  import-time selection never picks a `_boxing` file. The user opts in explicitly:
+  `FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_<platform>_boxing.conf`
+  on a boxing build (`FLAGOS_BUILD_BOXING=1`).
+- **Generated, never hand-edited.** They come from
+  `scripts/codegen/gen_vendor_confs.py` (`BOXING_VARIANT_PLATFORMS`), same as the
+  default confs; `--check` covers them. A hand edit is overwritten on the next
+  regeneration.
+- **FlagGems + boxing only.** The variant routes `flaggems` (and `flaggems_cpp`
+  where the platform compiles that slot) and puts `boxing` behind everything else.
+  Measured composite routes (for example `scaled_dot_product_attention` on DCU) are
+  deliberately *not* applied — the file's premise is that FlagGems is not what a
+  day-0 model is trusted to.
+- **Do not extend the platform list casually.** Adding a row is a statement that
+  the platform needs a day-0 escape hatch and a boxing wheel exists for it. It is
+  not a way to make an operator test pass, and it is not a substitute for
+  implementing the vendor or FlagGems route.
+- **They go away.** Once a platform's vendor-native + FlagGems routes cover the
+  day-0 models, its `_boxing` conf and its `BOXING_VARIANT_PLATFORMS` row are
+  deleted. Do not build anything on their continued existence: no CI lane, no
+  documentation, no test may depend on `backends_<platform>_boxing.conf` being
+  present.
+
 ### Dependency sources
 
 FlagTree, FlagGems, and FlagCX are consumed as published wheels from
