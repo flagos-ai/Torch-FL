@@ -48,7 +48,7 @@ library rather than assumed:
 
 Generates:
   - csrc/aten/backends/mthreads/generated/musa_kernels.cc
-      the kernels + REGISTER_IMPL_TO_DISPATCHER(..., Backend::kMusa, ...)
+      the kernels + REGISTER_IMPL_TO_DISPATCHER(..., Backend::kMthreads, ...)
   - csrc/aten/backends/mthreads/generated/musa_register.inc
       the m.impl() subset for register.cc. MUSA registers PrivateUse1 ONLY for
       ops it has a kernel for; everything else stays unregistered and reaches
@@ -394,7 +394,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # A unary aten op that mudnn only expresses as a mode plus a constant alpha
@@ -420,7 +420,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # Two mudnn passes for one aten op (expm1 = EXP then SUB alpha=1). The second
@@ -451,7 +451,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # Output dtype follows at::result_type, matching PyTorch's promotion.
@@ -534,7 +534,7 @@ _BINARY_TAIL = """\
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 T_BINARY = (
@@ -600,7 +600,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 )
 
@@ -692,7 +692,7 @@ _BINARY_INPLACE_BODY = """\
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 T_BINARY_INPLACE = (
@@ -783,7 +783,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 )
 
@@ -832,7 +832,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 )
 
@@ -864,7 +864,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 )
 
@@ -894,7 +894,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 )
 
@@ -930,7 +930,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 T_MATMUL_OUT = """\
@@ -960,7 +960,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor&
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # sum/mean over an optional dim list. An absent or empty list reduces every
@@ -1035,7 +1035,7 @@ at::Tensor {kernel}(
   return keepdim ? out.view(out_shape) : out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 T_REDUCE_ALL_DTYPE = """\
@@ -1085,7 +1085,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # aten spells the variant as a string; mudnn has separate modes for it.
@@ -1106,7 +1106,7 @@ at::Tensor {kernel}(const at::Tensor& self, c10::string_view approximate) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # `half_to_float` asks for a float output from a half input, which mudnn's
@@ -1141,7 +1141,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. Softmax/LogSoftmax backward. Probed on v3300: RunBwd's operands are
@@ -1188,7 +1188,7 @@ at::Tensor {kernel}(
   return grad_input;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. Reduce over a single dim with no dtype argument (amax/amin), and the
@@ -1239,7 +1239,7 @@ at::Tensor {kernel}(
   return keepdim ? out.view(out_shape) : out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. any.dim/all.dim: one int64 dim, bool output regardless of input dtype.
@@ -1274,7 +1274,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool keepdim) {{
   return keepdim ? out.view(out_shape) : out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. prod.dim_int -- single int64 dim plus an out dtype.
@@ -1320,7 +1320,7 @@ at::Tensor {kernel}(
   return keepdim ? out.view(out_shape) : out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. var/std with aten's `correction`. mudnn's VARIANCE/STD default to
@@ -1377,7 +1377,7 @@ at::Tensor {kernel}(
   return keepdim ? out.view(out_shape) : out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. linalg_vector_norm. Reduce::NORM with SetNormOrd; verified ord=2 over
@@ -1435,7 +1435,7 @@ at::Tensor {kernel}(
   return keepdim ? out.view(out_shape) : out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. native_layer_norm. mudnn's LayerNorm::Run emits (out, mean, inv_var) in
@@ -1508,7 +1508,7 @@ T_LAYER_NORM = """\
                            rstd.view(aten_stat_shape));
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # P2. native_layer_norm_backward. RunBwd emits (dX, dGamma, dBeta) from
@@ -1581,7 +1581,7 @@ T_LAYER_NORM_BWD = """\
                            output_mask[2] ? d_bias : at::Tensor());
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 #
@@ -1618,7 +1618,7 @@ at::Tensor {kernel}(const at::Tensor& grad_output, const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # gelu_backward: aten spells the variant as a string, mudnn as two modes.
@@ -1655,7 +1655,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # threshold_backward(grad_output, self, threshold). mudnn's THRESHOLD_BW takes
@@ -1697,7 +1697,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # leaky_relu_backward(grad_output, self, negative_slope, self_is_result).
@@ -1742,7 +1742,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # Ternary ops. Measured to map onto aten 1:1 with Run(out, self, t1, t2):
@@ -1790,7 +1790,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # where.self(condition, self, other) -> Ternary::SELECT(mask, x, y). The
@@ -1829,7 +1829,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # where.self_out is the out= variant. MUSA does not route it to FlagGems: that
@@ -1897,7 +1897,7 @@ at::Tensor& {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # addmm/baddbmm: out = beta*self + alpha*(mat1 @ mat2).
@@ -1982,7 +1982,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # A unary predicate: same call shape as T_UNARY but the output is bool
@@ -2001,7 +2001,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # A unary mode configured by two fixed constants rather than by aten arguments.
@@ -2024,7 +2024,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # leaky_relu(self, negative_slope): one aten Scalar straight into alpha.
@@ -2043,7 +2043,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& {param}) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # clamp_min / clamp_max map onto CLIP, whose alpha is the lower bound and beta
@@ -2065,7 +2065,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& {param}) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # clamp(self, min?, max?) -- both bounds optional; an absent bound becomes the
@@ -2093,7 +2093,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # softplus(self, beta, threshold). mudnn's setter names are inverted relative
@@ -2118,7 +2118,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # elu(self, alpha, scale, input_scale) computes
@@ -2146,7 +2146,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # ==========================================================================
@@ -2236,7 +2236,7 @@ at::Tensor {kernel}({list_type} tensors, int64_t dim) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # gather(self, dim, index, sparse_grad) -> GatherX::GATHER_ELEMENTS, which is
@@ -2272,7 +2272,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # index_select(self, dim, index) -> GatherX::GATHER: a 1-D index picks whole
@@ -2306,7 +2306,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # embedding(weight, indices, ...) is index_select along dim 0 with an
@@ -2351,7 +2351,7 @@ at::Tensor {kernel}(
   return out.view(out_shape);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # scatter.src / scatter_add: out = self with index/src scattered along dim.
@@ -2397,7 +2397,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # scatter.value: same as above with a scalar `src`, expanded to the index shape.
@@ -2432,7 +2432,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # fill_.Scalar / zero_: in-place, no input tensor. Fill::SetValue is overloaded
@@ -2460,7 +2460,7 @@ at::Tensor& {kernel}(at::Tensor& self{value_param}) {{
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # masked_fill.Scalar -> Fill's masked Run, which writes `value` only where the
@@ -2494,7 +2494,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # topk -> (values, indices). mudnn's TopK matches aten's argument set exactly
@@ -2540,7 +2540,7 @@ T_TOPK = """\
   return std::make_tuple(values, indices);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # sort / sort.stable -> (values, indices). aten's `stable` is an optional that
@@ -2581,7 +2581,7 @@ T_SORT = """\
   return std::make_tuple(values, indices);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # cumsum / cumprod -> Cum::ADD / Cum::MUL. mudnn's Cum has only these two modes,
@@ -2612,7 +2612,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # max.dim / min.dim -> Reduce::RunWithIndices, which fills the values and the
@@ -2659,7 +2659,7 @@ T_REDUCE_WITH_INDICES = """\
   return std::make_tuple(values, indices);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 # argmax / argmin -> Reduce::RunIndices, the indices-only form. aten allows a
@@ -2701,7 +2701,7 @@ at::Tensor {kernel}(
   return keepdim ? indices.view(out_shape) : indices;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 T_METADATA_VIEW = """\
@@ -2709,7 +2709,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return at::native::{mode}(self);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMusa, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMthreads, {kernel})
 """
 
 CATEGORIES = {
@@ -2914,7 +2914,7 @@ FILE_HEADER = """\
 // Each kernel describes its aten tensors as musa::dnn::Tensors, configures a
 // mudnn op object and issues one Run via EXEC_MUDNN_CMD. Dispatchers are
 // declared in generated/ops.h (shared with the CUDA codegen); here we only fill
-// the Backend::kMusa slot.
+// the Backend::kMthreads slot.
 //
 // mudnn links against musart only -- no torch symbols -- so unlike the previous
 // at::musa::* passthroughs these kernels are independent of the torch version.

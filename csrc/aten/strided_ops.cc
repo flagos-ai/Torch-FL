@@ -329,7 +329,7 @@ FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kTsingMicro)
 // only update sizes, strides and storage offsets, so their MPS route returns a
 // view of the shared Metal buffer rather than a CPU copy. The MPS registration
 // file claims the same metadata-only subset below.
-FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kMps)
+FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kApple)
 #endif
 
 #undef FLAGOS_REGISTER_METADATA_VIEW_OPS
@@ -341,13 +341,13 @@ FLAGOS_REGISTER_METADATA_VIEW_OPS(Backend::kMps)
 REGISTER_IMPL_TO_DISPATCHER(
     ViewAsRealFn,
     view_as_real_dispatcher,
-    Backend::kGcu,
+    Backend::kEnflame,
     view_as_real)
 
 REGISTER_IMPL_TO_DISPATCHER(
     ViewAsComplexFn,
     view_as_complex_dispatcher,
-    Backend::kGcu,
+    Backend::kEnflame,
     view_as_complex)
 
 } // namespace at::native::flagos

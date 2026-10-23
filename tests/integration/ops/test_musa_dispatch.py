@@ -118,7 +118,7 @@ class TestMusaDispatch:
         result = _run_dispatch_subprocess(
             "a @ b", {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "musa"}
         )
-        assert "[flagos dispatch] mm -> musa" in result.stderr, (
+        assert "[flagos dispatch] mm -> mthreads" in result.stderr, (
             f"Expected musa dispatch log, got:\n{result.stderr}"
         )
 
@@ -236,7 +236,7 @@ class TestMusaMatmulFp64:
             [sys.executable, "-c", code], capture_output=True, text=True, env=env
         )
         assert result.returncode == 0, result.stderr
-        assert f"[flagos dispatch] {op} -> musa" in result.stderr, (
+        assert f"[flagos dispatch] {op} -> mthreads" in result.stderr, (
             f"Expected musa dispatch for {op}, got:\n{result.stderr}"
         )
         status, _, detail = result.stdout.strip().splitlines()[-1].partition(" ")
@@ -1071,7 +1071,7 @@ def _assert_ran_on_musa(result: subprocess.CompletedProcess, ops: tuple) -> None
     assert result.returncode == 0, f"probe failed:\n{result.stdout}{result.stderr}"
     assert "PROBE OK" in result.stdout, result.stdout
     for op in ops:
-        assert f"[flagos dispatch] {op} -> musa" in result.stderr, (
+        assert f"[flagos dispatch] {op} -> mthreads" in result.stderr, (
             f"{op} did not reach the mudnn backend, so this proves nothing:\n"
             f"{result.stderr}"
         )

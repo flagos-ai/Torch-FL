@@ -1300,7 +1300,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_RSUB_SCALAR = """\
@@ -1342,7 +1342,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The elementwise body over two tensors. The graph builds each operand in its own
@@ -1439,7 +1439,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The elementwise body over a tensor and a host scalar. The scalar becomes a
@@ -1485,7 +1485,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other{alpha_param}
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The reduction body. `dim` is normalised once, on the host, into the axes the
@@ -1534,7 +1534,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `all` returns bool for every input width, so it cannot share T_REDUCE: the
@@ -1585,7 +1585,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_ALL_DIM = """\
@@ -1634,7 +1634,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_ALL_DIMS = """\
@@ -1685,7 +1685,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_TRIU = r"""at::Tensor {kernel}(const at::Tensor& self, int64_t diagonal) {{
@@ -1740,7 +1740,7 @@ T_TRIU = r"""at::Tensor {kernel}(const at::Tensor& self, int64_t diagonal) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # aten argmax takes the first maximum, with a later NaN replacing an earlier
@@ -1874,7 +1874,7 @@ at::Tensor {kernel}(
   return selected;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # aten's triangular solve computes X for AX = B (left=true) or XA = B
@@ -1994,7 +1994,7 @@ T_SOLVE_TRIANGULAR = r"""at::Tensor {kernel}(
   return graph_out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The matrix-multiply body. One MPSGraph selector serves both ops, because it
@@ -2087,7 +2087,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The softmax body. MPSGraph has the whole operation behind one selector, so the
@@ -2156,7 +2156,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The tensor-raised-to-a-scalar body. The exponent is a host value, so it becomes
@@ -2199,7 +2199,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The convolution body, over the one spelling a PrivateUse1 tensor reaches:
@@ -2417,7 +2417,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The SiLU activation, `x * sigmoid(x)`, which is what a SwiGLU MLP multiplies
@@ -2480,7 +2480,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The SiLU derivative, shared by autograd's `silu_backward` and a call to
@@ -2552,7 +2552,7 @@ at::Tensor {kernel}(const at::Tensor& grad_output, const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `embedding` is the first body here that has to decide whether the *graph* can
@@ -2629,7 +2629,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The one-node unary template for an op MPSGraph names directly -- `exp` today,
@@ -2664,7 +2664,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `rsqrt` -- `1 / sqrt(x)`, the tail of every normalisation, and the second body
@@ -2724,7 +2724,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_EMBEDDING = """\
@@ -2812,7 +2812,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `index_select` is the read the `embedding` body above performs, named
@@ -2959,7 +2959,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `take` is the third spelling of the embedding gather, and it is the one with
@@ -3103,7 +3103,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& index) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `gather` is the fourth and last of the read family, and the one whose contract
@@ -3364,7 +3364,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `div` closes the elementwise arithmetic set -- `add`, `sub` and `mul` have been
@@ -3449,7 +3449,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The elementwise body over a tensor and a host scalar, for `div.Scalar`: the
@@ -3491,7 +3491,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `reciprocal` is `1 / x`, and this body is the unary template with the division
@@ -3534,7 +3534,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `F.layer_norm` -- the normalisation a transformer calls once per block, right
@@ -3756,7 +3756,7 @@ T_LAYER_NORM = """\
   return {{out, mean, rstd}};
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `where.self(condition, self, other)` is MPSGraph's own ternary select node,
@@ -4013,7 +4013,7 @@ T_BATCH_NORM = """\
   return {{out, stat_mean, stat_var}};
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The ref and mask spellings Qwen3.5 reaches have direct MPSGraph comparison
@@ -4045,7 +4045,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_COMPARE_TENSOR = """\
@@ -4075,7 +4075,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_METADATA_VIEW = """\
@@ -4087,7 +4087,7 @@ at::Tensor {kernel}({args}) {{
   return at::native::flagos::{helper}({call_args});
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_WHERE = """\
@@ -4144,7 +4144,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `masked_fill(self, mask, value)` selects a stored scalar where a stored bool
@@ -4203,7 +4203,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The scalar-tensor spelling of the same select. The value must be a
@@ -4256,7 +4256,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # `cat(tensors, dim)` is MPSGraph's variadic `concatTensors:dimension:name:`, and
@@ -4431,7 +4431,7 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 # `tanh` is the activation a transformer block reaches for at both ends -- the
 # tanh approximation inside a GELU and the one inside a recurrent or attention
@@ -4504,7 +4504,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # aten's `index.Tensor` receives a list in which every unindexed axis is a full
@@ -4686,7 +4686,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # The cumulative sum is one axis node. Aten resolves an accumulator dtype from
@@ -4732,7 +4732,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 # Softplus is `x / beta` when `beta * x > threshold`, and
@@ -4811,7 +4811,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_LINSPACE = """\\
@@ -4842,7 +4842,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_ARANGE_STOP = """\\
@@ -4874,7 +4874,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_ARANGE_START = """\\
@@ -4905,7 +4905,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_ARANGE = """\\
@@ -4942,7 +4942,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_CLAMP = """\\
@@ -5003,7 +5003,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 T_GELU = """\
@@ -5094,7 +5094,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kMps, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 CATEGORIES = {
@@ -5181,7 +5181,7 @@ FILE_HEADER = """\
 // reused, so the per-call cost is a schedule rather than a graph construction;
 // the plan cache that does it is in mps_common.mm. Dispatchers are declared in
 // generated/ops.h (shared with the CUDA codegen); here we only fill the
-// Backend::kMps slot.
+// Backend::kApple slot.
 //
 // Nothing below re-tags a tensor onto DispatchKey::MPS or CUDA: the tensors stay
 // on PrivateUse1 and the runtime's shared MTLBuffers are described to MPSGraph

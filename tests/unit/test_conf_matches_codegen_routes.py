@@ -100,9 +100,10 @@ def test_every_exception_set_member_is_routed_to_cuda(codegen_sets):
     for name, ops in codegen_sets.items():
         for op in sorted(ops):
             assert op in routes, f"{op} ({name}) is not listed in {_CONF.name}"
-            assert routes[op] == "cuda", (
+            # The boxing route's conf key is the vendor whose kernel serves it.
+            assert routes[op] == "nvidia", (
                 f"{op} ({name}) is routed to {routes[op]!r} in {_CONF.name}, "
-                f"but {name} forces it to cuda"
+                f"but {name} forces it to nvidia (the boxing kernel)"
             )
 
 

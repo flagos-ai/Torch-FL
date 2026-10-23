@@ -115,7 +115,7 @@ def routed_backend_or_none(op: str) -> str | None:
 
 
 def dispatched_to_mps(source: str) -> int:
-    """How many times ``source`` logged ``-> mps``, run in a fresh interpreter.
+    """How many times ``source`` logged ``-> apple``, run in a fresh interpreter.
 
     A cost test wants to know that a call was *served* rather than round-tripped,
     and the dispatch log already answers exactly that: ``LogDispatch`` writes one
@@ -165,7 +165,7 @@ def dispatched_to_mps(source: str) -> int:
     return sum(
         1
         for line in stderr.splitlines()
-        if line.startswith("[flagos dispatch] ") and line.endswith(" -> mps")
+        if line.startswith("[flagos dispatch] ") and line.endswith(" -> apple")
     )
 
 

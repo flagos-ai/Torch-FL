@@ -468,7 +468,7 @@ class TestConv1dCorrectness:
         )
         assert result.returncode == 0, result.stderr
         assert (
-            result.stderr.count("[flagos dispatch] convolution_overrideable -> mps")
+            result.stderr.count("[flagos dispatch] convolution_overrideable -> apple")
             == 1
         )
 
@@ -649,4 +649,4 @@ class TestConvDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] convolution_overrideable -> mps" in result.stderr
+        assert "[flagos dispatch] convolution_overrideable -> apple" in result.stderr

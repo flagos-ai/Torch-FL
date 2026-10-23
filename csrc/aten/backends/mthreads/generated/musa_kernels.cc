@@ -6,7 +6,7 @@
 // Each kernel describes its aten tensors as musa::dnn::Tensors, configures a
 // mudnn op object and issues one Run via EXEC_MUDNN_CMD. Dispatchers are
 // declared in generated/ops.h (shared with the CUDA codegen); here we only fill
-// the Backend::kMusa slot.
+// the Backend::kMthreads slot.
 //
 // mudnn links against musart only -- no torch symbols -- so unlike the previous
 // at::musa::* passthroughs these kernels are independent of the torch version.
@@ -35,13 +35,13 @@ at::Tensor ViewAsComplexKernelMusa(const at::Tensor& self) {
   return at::native::view_as_complex(self);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ViewAsComplexFn, view_as_complex_dispatcher, Backend::kMusa, ViewAsComplexKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ViewAsComplexFn, view_as_complex_dispatcher, Backend::kMthreads, ViewAsComplexKernelMusa)
 
 at::Tensor ViewAsRealKernelMusa(const at::Tensor& self) {
   return at::native::view_as_real(self);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ViewAsRealFn, view_as_real_dispatcher, Backend::kMusa, ViewAsRealKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ViewAsRealFn, view_as_real_dispatcher, Backend::kMthreads, ViewAsRealKernelMusa)
 
 at::Tensor AbsKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -60,7 +60,7 @@ at::Tensor AbsKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kMusa, AbsKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kMthreads, AbsKernelMusa)
 
 at::Tensor SqrtKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -79,7 +79,7 @@ at::Tensor SqrtKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kMusa, SqrtKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kMthreads, SqrtKernelMusa)
 
 at::Tensor RsqrtKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -98,7 +98,7 @@ at::Tensor RsqrtKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kMusa, RsqrtKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kMthreads, RsqrtKernelMusa)
 
 at::Tensor ExpKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -117,7 +117,7 @@ at::Tensor ExpKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kMusa, ExpKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kMthreads, ExpKernelMusa)
 
 at::Tensor LogKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -136,7 +136,7 @@ at::Tensor LogKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kMusa, LogKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kMthreads, LogKernelMusa)
 
 at::Tensor Log2KernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -155,7 +155,7 @@ at::Tensor Log2KernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kMusa, Log2KernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kMthreads, Log2KernelMusa)
 
 at::Tensor Log10KernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -174,7 +174,7 @@ at::Tensor Log10KernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kMusa, Log10KernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kMthreads, Log10KernelMusa)
 
 at::Tensor Log1pKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -193,7 +193,7 @@ at::Tensor Log1pKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Log1pFn, log1p_dispatcher, Backend::kMusa, Log1pKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(Log1pFn, log1p_dispatcher, Backend::kMthreads, Log1pKernelMusa)
 
 at::Tensor SinKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -212,7 +212,7 @@ at::Tensor SinKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kMusa, SinKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kMthreads, SinKernelMusa)
 
 at::Tensor CosKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -231,7 +231,7 @@ at::Tensor CosKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kMusa, CosKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kMthreads, CosKernelMusa)
 
 at::Tensor AcosKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -250,7 +250,7 @@ at::Tensor AcosKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AcosFn, acos_dispatcher, Backend::kMusa, AcosKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AcosFn, acos_dispatcher, Backend::kMthreads, AcosKernelMusa)
 
 at::Tensor AtanKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -269,7 +269,7 @@ at::Tensor AtanKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AtanFn, atan_dispatcher, Backend::kMusa, AtanKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AtanFn, atan_dispatcher, Backend::kMthreads, AtanKernelMusa)
 
 at::Tensor TanhKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -288,7 +288,7 @@ at::Tensor TanhKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kMusa, TanhKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kMthreads, TanhKernelMusa)
 
 at::Tensor SigmoidKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -307,7 +307,7 @@ at::Tensor SigmoidKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kMusa, SigmoidKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kMthreads, SigmoidKernelMusa)
 
 at::Tensor SiluKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -326,7 +326,7 @@ at::Tensor SiluKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMusa, SiluKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMthreads, SiluKernelMusa)
 
 at::Tensor ReluKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -345,7 +345,7 @@ at::Tensor ReluKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ReluFn, relu_dispatcher, Backend::kMusa, ReluKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ReluFn, relu_dispatcher, Backend::kMthreads, ReluKernelMusa)
 
 at::Tensor ReciprocalKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -364,7 +364,7 @@ at::Tensor ReciprocalKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMusa, ReciprocalKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMthreads, ReciprocalKernelMusa)
 
 at::Tensor ErfKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -383,7 +383,7 @@ at::Tensor ErfKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kMusa, ErfKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kMthreads, ErfKernelMusa)
 
 at::Tensor FloorKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -402,7 +402,7 @@ at::Tensor FloorKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kMusa, FloorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kMthreads, FloorKernelMusa)
 
 at::Tensor CeilKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -421,7 +421,7 @@ at::Tensor CeilKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kMusa, CeilKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kMthreads, CeilKernelMusa)
 
 at::Tensor SignKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -440,7 +440,7 @@ at::Tensor SignKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kMusa, SignKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kMthreads, SignKernelMusa)
 
 at::Tensor NegKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -464,7 +464,7 @@ at::Tensor NegKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kMusa, NegKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kMthreads, NegKernelMusa)
 
 at::Tensor TruncKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -488,7 +488,7 @@ at::Tensor TruncKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kMusa, TruncKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kMthreads, TruncKernelMusa)
 
 at::Tensor Expm1KernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -519,7 +519,7 @@ at::Tensor Expm1KernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kMusa, Expm1KernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kMthreads, Expm1KernelMusa)
 
 at::Tensor MulTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -551,7 +551,7 @@ at::Tensor MulTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kMusa, MulTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kMthreads, MulTensorKernelMusa)
 
 at::Tensor DivTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -586,7 +586,7 @@ at::Tensor DivTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kMusa, DivTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kMthreads, DivTensorKernelMusa)
 
 at::Tensor MaximumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -618,7 +618,7 @@ at::Tensor MaximumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kMusa, MaximumKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kMthreads, MaximumKernelMusa)
 
 at::Tensor MinimumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -650,7 +650,7 @@ at::Tensor MinimumKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kMusa, MinimumKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kMthreads, MinimumKernelMusa)
 
 at::Tensor RemainderTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -682,7 +682,7 @@ at::Tensor RemainderTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Backend::kMusa, RemainderTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Backend::kMthreads, RemainderTensorKernelMusa)
 
 at::Tensor FmodTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -714,7 +714,7 @@ at::Tensor FmodTensorKernelMusa(const at::Tensor& self, const at::Tensor& other)
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kMusa, FmodTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kMthreads, FmodTensorKernelMusa)
 
 at::Tensor PowTensorTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -746,7 +746,7 @@ at::Tensor PowTensorTensorKernelMusa(const at::Tensor& self, const at::Tensor& o
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kMusa, PowTensorTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kMthreads, PowTensorTensorKernelMusa)
 
 at::Tensor AddTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -783,7 +783,7 @@ at::Tensor AddTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kMusa, AddTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kMthreads, AddTensorKernelMusa)
 
 at::Tensor SubTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -820,7 +820,7 @@ at::Tensor SubTensorKernelMusa(const at::Tensor& self, const at::Tensor& other, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kMusa, SubTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kMthreads, SubTensorKernelMusa)
 
 at::Tensor& AddInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other,
                     const at::Scalar& alpha) {
@@ -891,7 +891,7 @@ at::Tensor& AddInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kMusa, AddInplaceTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kMthreads, AddInplaceTensorKernelMusa)
 
 at::Tensor& SubInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other,
                     const at::Scalar& alpha) {
@@ -962,7 +962,7 @@ at::Tensor& SubInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubInplaceTensorFn, sub_inplace_tensor_dispatcher, Backend::kMusa, SubInplaceTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SubInplaceTensorFn, sub_inplace_tensor_dispatcher, Backend::kMthreads, SubInplaceTensorKernelMusa)
 
 at::Tensor& MulInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1024,7 +1024,7 @@ at::Tensor& MulInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulInplaceTensorFn, mul_inplace_tensor_dispatcher, Backend::kMusa, MulInplaceTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MulInplaceTensorFn, mul_inplace_tensor_dispatcher, Backend::kMthreads, MulInplaceTensorKernelMusa)
 
 at::Tensor& DivInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1089,7 +1089,7 @@ at::Tensor& DivInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivInplaceTensorFn, div_inplace_tensor_dispatcher, Backend::kMusa, DivInplaceTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(DivInplaceTensorFn, div_inplace_tensor_dispatcher, Backend::kMthreads, DivInplaceTensorKernelMusa)
 
 at::Tensor EqTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1121,7 +1121,7 @@ at::Tensor EqTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kMusa, EqTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kMthreads, EqTensorKernelMusa)
 
 at::Tensor NeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1153,7 +1153,7 @@ at::Tensor NeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kMusa, NeTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kMthreads, NeTensorKernelMusa)
 
 at::Tensor LtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1185,7 +1185,7 @@ at::Tensor LtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kMusa, LtTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kMthreads, LtTensorKernelMusa)
 
 at::Tensor GtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1217,7 +1217,7 @@ at::Tensor GtTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kMusa, GtTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kMthreads, GtTensorKernelMusa)
 
 at::Tensor LeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1249,7 +1249,7 @@ at::Tensor LeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kMusa, LeTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kMthreads, LeTensorKernelMusa)
 
 at::Tensor GeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1281,7 +1281,7 @@ at::Tensor GeTensorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kMusa, GeTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kMthreads, GeTensorKernelMusa)
 
 at::Tensor LogicalAndKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1313,7 +1313,7 @@ at::Tensor LogicalAndKernelMusa(const at::Tensor& self, const at::Tensor& other)
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kMusa, LogicalAndKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kMthreads, LogicalAndKernelMusa)
 
 at::Tensor LogicalOrKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1345,7 +1345,7 @@ at::Tensor LogicalOrKernelMusa(const at::Tensor& self, const at::Tensor& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogicalOrFn, logical_or_dispatcher, Backend::kMusa, LogicalOrKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LogicalOrFn, logical_or_dispatcher, Backend::kMthreads, LogicalOrKernelMusa)
 
 at::Tensor MulScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1373,7 +1373,7 @@ at::Tensor MulScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kMusa, MulScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kMthreads, MulScalarKernelMusa)
 
 at::Tensor DivScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1404,7 +1404,7 @@ at::Tensor DivScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kMusa, DivScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kMthreads, DivScalarKernelMusa)
 
 at::Tensor PowTensorScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1432,7 +1432,7 @@ at::Tensor PowTensorScalarKernelMusa(const at::Tensor& self, const at::Scalar& o
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kMusa, PowTensorScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kMthreads, PowTensorScalarKernelMusa)
 
 at::Tensor RemainderScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1460,7 +1460,7 @@ at::Tensor RemainderScalarKernelMusa(const at::Tensor& self, const at::Scalar& o
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RemainderScalarFn, remainder_scalar_dispatcher, Backend::kMusa, RemainderScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(RemainderScalarFn, remainder_scalar_dispatcher, Backend::kMthreads, RemainderScalarKernelMusa)
 
 at::Tensor FmodScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1488,7 +1488,7 @@ at::Tensor FmodScalarKernelMusa(const at::Tensor& self, const at::Scalar& other)
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FmodScalarFn, fmod_scalar_dispatcher, Backend::kMusa, FmodScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(FmodScalarFn, fmod_scalar_dispatcher, Backend::kMthreads, FmodScalarKernelMusa)
 
 at::Tensor AddScalarKernelMusa(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1516,7 +1516,7 @@ at::Tensor AddScalarKernelMusa(const at::Tensor& self, const at::Scalar& other, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kMusa, AddScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kMthreads, AddScalarKernelMusa)
 
 at::Tensor SubScalarKernelMusa(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -1544,7 +1544,7 @@ at::Tensor SubScalarKernelMusa(const at::Tensor& self, const at::Scalar& other, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kMusa, SubScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kMthreads, SubScalarKernelMusa)
 
 at::Tensor EqScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1572,7 +1572,7 @@ at::Tensor EqScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kMusa, EqScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kMthreads, EqScalarKernelMusa)
 
 at::Tensor NeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1600,7 +1600,7 @@ at::Tensor NeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kMusa, NeScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kMthreads, NeScalarKernelMusa)
 
 at::Tensor LtScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1628,7 +1628,7 @@ at::Tensor LtScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kMusa, LtScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kMthreads, LtScalarKernelMusa)
 
 at::Tensor GtScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1656,7 +1656,7 @@ at::Tensor GtScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kMusa, GtScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kMthreads, GtScalarKernelMusa)
 
 at::Tensor LeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1684,7 +1684,7 @@ at::Tensor LeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kMusa, LeScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kMthreads, LeScalarKernelMusa)
 
 at::Tensor GeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -1712,7 +1712,7 @@ at::Tensor GeScalarKernelMusa(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeScalarFn, ge_scalar_dispatcher, Backend::kMusa, GeScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GeScalarFn, ge_scalar_dispatcher, Backend::kMthreads, GeScalarKernelMusa)
 
 at::Tensor MmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   if (!musa_ops::MudnnSupportsMatmulDtype(self.scalar_type())) {
@@ -1742,7 +1742,7 @@ at::Tensor MmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kMusa, MmKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kMthreads, MmKernelMusa)
 
 at::Tensor BmmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   if (!musa_ops::MudnnSupportsMatmulDtype(self.scalar_type())) {
@@ -1772,7 +1772,7 @@ at::Tensor BmmKernelMusa(const at::Tensor& self, const at::Tensor& mat2) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kMusa, BmmKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kMthreads, BmmKernelMusa)
 
 at::Tensor& MmOutKernelMusa(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
   if (!musa_ops::MudnnSupportsMatmulDtype(self.scalar_type())) {
@@ -1800,7 +1800,7 @@ at::Tensor& MmOutKernelMusa(const at::Tensor& self, const at::Tensor& mat2, at::
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MmOutFn, mm_out_dispatcher, Backend::kMusa, MmOutKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MmOutFn, mm_out_dispatcher, Backend::kMthreads, MmOutKernelMusa)
 
 at::Tensor& BmmOutKernelMusa(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
   if (!musa_ops::MudnnSupportsMatmulDtype(self.scalar_type())) {
@@ -1828,7 +1828,7 @@ at::Tensor& BmmOutKernelMusa(const at::Tensor& self, const at::Tensor& mat2, at:
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(BmmOutFn, bmm_out_dispatcher, Backend::kMusa, BmmOutKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(BmmOutFn, bmm_out_dispatcher, Backend::kMthreads, BmmOutKernelMusa)
 
 at::Tensor SumDimIntlistKernelMusa(
     const at::Tensor& self,
@@ -1899,7 +1899,7 @@ at::Tensor SumDimIntlistKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kMusa, SumDimIntlistKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kMthreads, SumDimIntlistKernelMusa)
 
 at::Tensor MeanDimKernelMusa(
     const at::Tensor& self,
@@ -1970,7 +1970,7 @@ at::Tensor MeanDimKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kMusa, MeanDimKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kMthreads, MeanDimKernelMusa)
 
 at::Tensor SumKernelMusa(
     const at::Tensor& self, ::std::optional<at::ScalarType> dtype) {
@@ -2022,7 +2022,7 @@ at::Tensor SumKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SumFn, sum_dispatcher, Backend::kMusa, SumKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SumFn, sum_dispatcher, Backend::kMthreads, SumKernelMusa)
 
 at::Tensor MeanKernelMusa(
     const at::Tensor& self, ::std::optional<at::ScalarType> dtype) {
@@ -2074,7 +2074,7 @@ at::Tensor MeanKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MeanFn, mean_dispatcher, Backend::kMusa, MeanKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MeanFn, mean_dispatcher, Backend::kMthreads, MeanKernelMusa)
 
 at::Tensor GeluKernelMusa(const at::Tensor& self, c10::string_view approximate) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2096,7 +2096,7 @@ at::Tensor GeluKernelMusa(const at::Tensor& self, c10::string_view approximate) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kMusa, GeluKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kMthreads, GeluKernelMusa)
 
 at::Tensor PrivSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool half_to_float) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) || half_to_float) {
@@ -2120,7 +2120,7 @@ at::Tensor PrivSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool half_
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kMusa, PrivSoftmaxKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kMthreads, PrivSoftmaxKernelMusa)
 
 at::Tensor TanKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2139,7 +2139,7 @@ at::Tensor TanKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TanFn, tan_dispatcher, Backend::kMusa, TanKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(TanFn, tan_dispatcher, Backend::kMthreads, TanKernelMusa)
 
 at::Tensor RoundKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2158,7 +2158,7 @@ at::Tensor RoundKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RoundFn, round_dispatcher, Backend::kMusa, RoundKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(RoundFn, round_dispatcher, Backend::kMthreads, RoundKernelMusa)
 
 at::Tensor MishKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2177,7 +2177,7 @@ at::Tensor MishKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MishFn, mish_dispatcher, Backend::kMusa, MishKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MishFn, mish_dispatcher, Backend::kMthreads, MishKernelMusa)
 
 at::Tensor HardswishKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2196,7 +2196,7 @@ at::Tensor HardswishKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(HardswishFn, hardswish_dispatcher, Backend::kMusa, HardswishKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(HardswishFn, hardswish_dispatcher, Backend::kMthreads, HardswishKernelMusa)
 
 at::Tensor IsnanKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type())) {
@@ -2215,7 +2215,7 @@ at::Tensor IsnanKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IsnanFn, isnan_dispatcher, Backend::kMusa, IsnanKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(IsnanFn, isnan_dispatcher, Backend::kMthreads, IsnanKernelMusa)
 
 at::Tensor IsinfKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type())) {
@@ -2234,7 +2234,7 @@ at::Tensor IsinfKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IsinfFn, isinf_dispatcher, Backend::kMusa, IsinfKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(IsinfFn, isinf_dispatcher, Backend::kMthreads, IsinfKernelMusa)
 
 at::Tensor HardsigmoidKernelMusa(const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2255,7 +2255,7 @@ at::Tensor HardsigmoidKernelMusa(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(HardsigmoidFn, hardsigmoid_dispatcher, Backend::kMusa, HardsigmoidKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(HardsigmoidFn, hardsigmoid_dispatcher, Backend::kMthreads, HardsigmoidKernelMusa)
 
 at::Tensor LeakyReluKernelMusa(const at::Tensor& self, const at::Scalar& negative_slope) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2275,7 +2275,7 @@ at::Tensor LeakyReluKernelMusa(const at::Tensor& self, const at::Scalar& negativ
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeakyReluFn, leaky_relu_dispatcher, Backend::kMusa, LeakyReluKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LeakyReluFn, leaky_relu_dispatcher, Backend::kMthreads, LeakyReluKernelMusa)
 
 at::Tensor EluKernelMusa(
     const at::Tensor& self,
@@ -2301,7 +2301,7 @@ at::Tensor EluKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EluFn, elu_dispatcher, Backend::kMusa, EluKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(EluFn, elu_dispatcher, Backend::kMthreads, EluKernelMusa)
 
 at::Tensor SoftplusKernelMusa(
     const at::Tensor& self,
@@ -2325,7 +2325,7 @@ at::Tensor SoftplusKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SoftplusFn, softplus_dispatcher, Backend::kMusa, SoftplusKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SoftplusFn, softplus_dispatcher, Backend::kMthreads, SoftplusKernelMusa)
 
 at::Tensor ClampKernelMusa(
     const at::Tensor& self,
@@ -2353,7 +2353,7 @@ at::Tensor ClampKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kMusa, ClampKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kMthreads, ClampKernelMusa)
 
 at::Tensor ClampMinKernelMusa(const at::Tensor& self, const at::Scalar& min) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2374,7 +2374,7 @@ at::Tensor ClampMinKernelMusa(const at::Tensor& self, const at::Scalar& min) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ClampMinFn, clamp_min_dispatcher, Backend::kMusa, ClampMinKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ClampMinFn, clamp_min_dispatcher, Backend::kMthreads, ClampMinKernelMusa)
 
 at::Tensor ClampMaxKernelMusa(const at::Tensor& self, const at::Scalar& max) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type())) {
@@ -2395,7 +2395,7 @@ at::Tensor ClampMaxKernelMusa(const at::Tensor& self, const at::Scalar& max) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ClampMaxFn, clamp_max_dispatcher, Backend::kMusa, ClampMaxKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ClampMaxFn, clamp_max_dispatcher, Backend::kMthreads, ClampMaxKernelMusa)
 
 at::Tensor LogicalXorKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) ||
@@ -2427,7 +2427,7 @@ at::Tensor LogicalXorKernelMusa(const at::Tensor& self, const at::Tensor& other)
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogicalXorFn, logical_xor_dispatcher, Backend::kMusa, LogicalXorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LogicalXorFn, logical_xor_dispatcher, Backend::kMthreads, LogicalXorKernelMusa)
 
 at::Tensor FloorDivideKernelMusa(const at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -2459,7 +2459,7 @@ at::Tensor FloorDivideKernelMusa(const at::Tensor& self, const at::Tensor& other
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FloorDivideFn, floor_divide_dispatcher, Backend::kMusa, FloorDivideKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(FloorDivideFn, floor_divide_dispatcher, Backend::kMthreads, FloorDivideKernelMusa)
 
 at::Tensor& FloorDivideInplaceTensorKernelMusa(at::Tensor& self, const at::Tensor& other) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) ||
@@ -2521,7 +2521,7 @@ at::Tensor& FloorDivideInplaceTensorKernelMusa(at::Tensor& self, const at::Tenso
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FloorDivideInplaceTensorFn, floor_divide_inplace_tensor_dispatcher, Backend::kMusa, FloorDivideInplaceTensorKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(FloorDivideInplaceTensorFn, floor_divide_inplace_tensor_dispatcher, Backend::kMthreads, FloorDivideInplaceTensorKernelMusa)
 
 at::Tensor DivTensorModeKernelMusa(const at::Tensor& self, const at::Tensor& other,
                    ::std::optional<c10::string_view> rounding_mode) {
@@ -2559,7 +2559,7 @@ at::Tensor DivTensorModeKernelMusa(const at::Tensor& self, const at::Tensor& oth
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivTensorModeFn, div_tensor_mode_dispatcher, Backend::kMusa, DivTensorModeKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(DivTensorModeFn, div_tensor_mode_dispatcher, Backend::kMthreads, DivTensorModeKernelMusa)
 
 at::Tensor& DivInplaceTensorModeKernelMusa(at::Tensor& self, const at::Tensor& other,
                     ::std::optional<c10::string_view> rounding_mode) {
@@ -2626,7 +2626,7 @@ at::Tensor& DivInplaceTensorModeKernelMusa(at::Tensor& self, const at::Tensor& o
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivInplaceTensorModeFn, div_inplace_tensor_mode_dispatcher, Backend::kMusa, DivInplaceTensorModeKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(DivInplaceTensorModeFn, div_inplace_tensor_mode_dispatcher, Backend::kMthreads, DivInplaceTensorModeKernelMusa)
 
 at::Tensor SigmoidBackwardKernelMusa(const at::Tensor& grad_output, const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(grad_output.scalar_type()) ||
@@ -2658,7 +2658,7 @@ at::Tensor SigmoidBackwardKernelMusa(const at::Tensor& grad_output, const at::Te
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SigmoidBackwardFn, sigmoid_backward_dispatcher, Backend::kMusa, SigmoidBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SigmoidBackwardFn, sigmoid_backward_dispatcher, Backend::kMthreads, SigmoidBackwardKernelMusa)
 
 at::Tensor TanhBackwardKernelMusa(const at::Tensor& grad_output, const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(grad_output.scalar_type()) ||
@@ -2690,7 +2690,7 @@ at::Tensor TanhBackwardKernelMusa(const at::Tensor& grad_output, const at::Tenso
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TanhBackwardFn, tanh_backward_dispatcher, Backend::kMusa, TanhBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(TanhBackwardFn, tanh_backward_dispatcher, Backend::kMthreads, TanhBackwardKernelMusa)
 
 at::Tensor SiluBackwardKernelMusa(const at::Tensor& grad_output, const at::Tensor& self) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(grad_output.scalar_type()) ||
@@ -2722,7 +2722,7 @@ at::Tensor SiluBackwardKernelMusa(const at::Tensor& grad_output, const at::Tenso
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kMusa, SiluBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kMthreads, SiluBackwardKernelMusa)
 
 at::Tensor GeluBackwardKernelMusa(
     const at::Tensor& grad_output,
@@ -2760,7 +2760,7 @@ at::Tensor GeluBackwardKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeluBackwardFn, gelu_backward_dispatcher, Backend::kMusa, GeluBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GeluBackwardFn, gelu_backward_dispatcher, Backend::kMthreads, GeluBackwardKernelMusa)
 
 at::Tensor ThresholdBackwardKernelMusa(
     const at::Tensor& grad_output,
@@ -2801,7 +2801,7 @@ at::Tensor ThresholdBackwardKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ThresholdBackwardFn, threshold_backward_dispatcher, Backend::kMusa, ThresholdBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ThresholdBackwardFn, threshold_backward_dispatcher, Backend::kMthreads, ThresholdBackwardKernelMusa)
 
 at::Tensor LeakyReluBackwardKernelMusa(
     const at::Tensor& grad_output,
@@ -2844,7 +2844,7 @@ at::Tensor LeakyReluBackwardKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeakyReluBackwardFn, leaky_relu_backward_dispatcher, Backend::kMusa, LeakyReluBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LeakyReluBackwardFn, leaky_relu_backward_dispatcher, Backend::kMthreads, LeakyReluBackwardKernelMusa)
 
 at::Tensor AddcmulKernelMusa(
     const at::Tensor& self,
@@ -2890,7 +2890,7 @@ at::Tensor AddcmulKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddcmulFn, addcmul_dispatcher, Backend::kMusa, AddcmulKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AddcmulFn, addcmul_dispatcher, Backend::kMthreads, AddcmulKernelMusa)
 
 at::Tensor AddcdivKernelMusa(
     const at::Tensor& self,
@@ -2936,7 +2936,7 @@ at::Tensor AddcdivKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddcdivFn, addcdiv_dispatcher, Backend::kMusa, AddcdivKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AddcdivFn, addcdiv_dispatcher, Backend::kMthreads, AddcdivKernelMusa)
 
 at::Tensor WhereSelfKernelMusa(
     const at::Tensor& condition,
@@ -2975,7 +2975,7 @@ at::Tensor WhereSelfKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kMusa, WhereSelfKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kMthreads, WhereSelfKernelMusa)
 
 at::Tensor& WhereSelfOutKernelMusa(
     const at::Tensor& condition,
@@ -3034,7 +3034,7 @@ at::Tensor& WhereSelfOutKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(WhereSelfOutFn, where_self_out_dispatcher, Backend::kMusa, WhereSelfOutKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfOutFn, where_self_out_dispatcher, Backend::kMthreads, WhereSelfOutKernelMusa)
 
 at::Tensor AddmmKernelMusa(
     const at::Tensor& self,
@@ -3107,7 +3107,7 @@ at::Tensor AddmmKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kMusa, AddmmKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kMthreads, AddmmKernelMusa)
 
 at::Tensor BaddbmmKernelMusa(
     const at::Tensor& self,
@@ -3180,7 +3180,7 @@ at::Tensor BaddbmmKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(BaddbmmFn, baddbmm_dispatcher, Backend::kMusa, BaddbmmKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(BaddbmmFn, baddbmm_dispatcher, Backend::kMthreads, BaddbmmKernelMusa)
 
 at::Tensor PrivLogSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool half_to_float) {
   if (!musa_ops::MudnnSupportsArithmeticDtype(self.scalar_type()) || half_to_float) {
@@ -3204,7 +3204,7 @@ at::Tensor PrivLogSoftmaxKernelMusa(const at::Tensor& self, int64_t dim, bool ha
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxFn, priv_log_softmax_dispatcher, Backend::kMusa, PrivLogSoftmaxKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxFn, priv_log_softmax_dispatcher, Backend::kMthreads, PrivLogSoftmaxKernelMusa)
 
 at::Tensor PrivSoftmaxBackwardDataKernelMusa(
     const at::Tensor& grad_output,
@@ -3236,7 +3236,7 @@ at::Tensor PrivSoftmaxBackwardDataKernelMusa(
   return grad_input;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kMusa, PrivSoftmaxBackwardDataKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kMthreads, PrivSoftmaxBackwardDataKernelMusa)
 
 at::Tensor PrivLogSoftmaxBackwardDataKernelMusa(
     const at::Tensor& grad_output,
@@ -3268,7 +3268,7 @@ at::Tensor PrivLogSoftmaxBackwardDataKernelMusa(
   return grad_input;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataFn, priv_log_softmax_backward_data_dispatcher, Backend::kMusa, PrivLogSoftmaxBackwardDataKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(PrivLogSoftmaxBackwardDataFn, priv_log_softmax_backward_data_dispatcher, Backend::kMthreads, PrivLogSoftmaxBackwardDataKernelMusa)
 
 at::Tensor AmaxKernelMusa(
     const at::Tensor& self, at::IntArrayRef dim, bool keepdim) {
@@ -3316,7 +3316,7 @@ at::Tensor AmaxKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kMusa, AmaxKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kMthreads, AmaxKernelMusa)
 
 at::Tensor AminKernelMusa(
     const at::Tensor& self, at::IntArrayRef dim, bool keepdim) {
@@ -3364,7 +3364,7 @@ at::Tensor AminKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kMusa, AminKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kMthreads, AminKernelMusa)
 
 at::Tensor ProdDimIntKernelMusa(
     const at::Tensor& self,
@@ -3406,7 +3406,7 @@ at::Tensor ProdDimIntKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ProdDimIntFn, prod_dim_int_dispatcher, Backend::kMusa, ProdDimIntKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ProdDimIntFn, prod_dim_int_dispatcher, Backend::kMthreads, ProdDimIntKernelMusa)
 
 at::Tensor AnyDimKernelMusa(const at::Tensor& self, int64_t dim, bool keepdim) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type())) {
@@ -3440,7 +3440,7 @@ at::Tensor AnyDimKernelMusa(const at::Tensor& self, int64_t dim, bool keepdim) {
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AnyDimFn, any_dim_dispatcher, Backend::kMusa, AnyDimKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AnyDimFn, any_dim_dispatcher, Backend::kMthreads, AnyDimKernelMusa)
 
 at::Tensor AllDimKernelMusa(const at::Tensor& self, int64_t dim, bool keepdim) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type())) {
@@ -3474,7 +3474,7 @@ at::Tensor AllDimKernelMusa(const at::Tensor& self, int64_t dim, bool keepdim) {
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AllDimFn, all_dim_dispatcher, Backend::kMusa, AllDimKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(AllDimFn, all_dim_dispatcher, Backend::kMthreads, AllDimKernelMusa)
 
 at::Tensor VarCorrectionKernelMusa(
     const at::Tensor& self,
@@ -3529,7 +3529,7 @@ at::Tensor VarCorrectionKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(VarCorrectionFn, var_correction_dispatcher, Backend::kMusa, VarCorrectionKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(VarCorrectionFn, var_correction_dispatcher, Backend::kMthreads, VarCorrectionKernelMusa)
 
 at::Tensor StdCorrectionKernelMusa(
     const at::Tensor& self,
@@ -3584,7 +3584,7 @@ at::Tensor StdCorrectionKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(StdCorrectionFn, std_correction_dispatcher, Backend::kMusa, StdCorrectionKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(StdCorrectionFn, std_correction_dispatcher, Backend::kMthreads, StdCorrectionKernelMusa)
 
 at::Tensor LinalgVectorNormKernelMusa(
     const at::Tensor& self,
@@ -3641,7 +3641,7 @@ at::Tensor LinalgVectorNormKernelMusa(
   return keepdim ? out.view(out_shape) : out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LinalgVectorNormFn, linalg_vector_norm_dispatcher, Backend::kMusa, LinalgVectorNormKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(LinalgVectorNormFn, linalg_vector_norm_dispatcher, Backend::kMthreads, LinalgVectorNormKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelMusa(
     const at::Tensor& input,
@@ -3704,7 +3704,7 @@ REGISTER_IMPL_TO_DISPATCHER(LinalgVectorNormFn, linalg_vector_norm_dispatcher, B
                            rstd.view(aten_stat_shape));
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kMusa, NativeLayerNormKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kMthreads, NativeLayerNormKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormBackwardKernelMusa(
     const at::Tensor& grad_out,
@@ -3767,7 +3767,7 @@ REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Bac
                            output_mask[2] ? d_bias : at::Tensor());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormBackwardFn, native_layer_norm_backward_dispatcher, Backend::kMusa, NativeLayerNormBackwardKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormBackwardFn, native_layer_norm_backward_dispatcher, Backend::kMthreads, NativeLayerNormBackwardKernelMusa)
 
 at::Tensor CatKernelMusa(const at::ITensorListRef& tensors, int64_t dim) {
   std::vector<at::Tensor> ins;
@@ -3836,7 +3836,7 @@ at::Tensor CatKernelMusa(const at::ITensorListRef& tensors, int64_t dim) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kMusa, CatKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kMthreads, CatKernelMusa)
 
 at::Tensor StackKernelMusa(at::TensorList tensors, int64_t dim) {
   std::vector<at::Tensor> ins;
@@ -3905,7 +3905,7 @@ at::Tensor StackKernelMusa(at::TensorList tensors, int64_t dim) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(StackFn, stack_dispatcher, Backend::kMusa, StackKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(StackFn, stack_dispatcher, Backend::kMthreads, StackKernelMusa)
 
 at::Tensor GatherKernelMusa(
     const at::Tensor& self,
@@ -3939,7 +3939,7 @@ at::Tensor GatherKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GatherFn, gather_dispatcher, Backend::kMusa, GatherKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(GatherFn, gather_dispatcher, Backend::kMthreads, GatherKernelMusa)
 
 at::Tensor IndexSelectKernelMusa(
     const at::Tensor& self, int64_t dim, const at::Tensor& index) {
@@ -3971,7 +3971,7 @@ at::Tensor IndexSelectKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kMusa, IndexSelectKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kMthreads, IndexSelectKernelMusa)
 
 at::Tensor EmbeddingKernelMusa(
     const at::Tensor& weight,
@@ -4014,7 +4014,7 @@ at::Tensor EmbeddingKernelMusa(
   return out.view(out_shape);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kMusa, EmbeddingKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kMthreads, EmbeddingKernelMusa)
 
 at::Tensor ScatterSrcKernelMusa(
     const at::Tensor& self,
@@ -4047,7 +4047,7 @@ at::Tensor ScatterSrcKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ScatterSrcFn, scatter_src_dispatcher, Backend::kMusa, ScatterSrcKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ScatterSrcFn, scatter_src_dispatcher, Backend::kMthreads, ScatterSrcKernelMusa)
 
 at::Tensor ScatterValueKernelMusa(
     const at::Tensor& self,
@@ -4077,7 +4077,7 @@ at::Tensor ScatterValueKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ScatterValueFn, scatter_value_dispatcher, Backend::kMusa, ScatterValueKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ScatterValueFn, scatter_value_dispatcher, Backend::kMthreads, ScatterValueKernelMusa)
 
 at::Tensor ScatterAddKernelMusa(
     const at::Tensor& self,
@@ -4110,7 +4110,7 @@ at::Tensor ScatterAddKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ScatterAddFn, scatter_add_dispatcher, Backend::kMusa, ScatterAddKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ScatterAddFn, scatter_add_dispatcher, Backend::kMthreads, ScatterAddKernelMusa)
 
 at::Tensor& FillInplaceScalarKernelMusa(at::Tensor& self, const at::Scalar& value) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) || !self.is_contiguous()) {
@@ -4133,7 +4133,7 @@ at::Tensor& FillInplaceScalarKernelMusa(at::Tensor& self, const at::Scalar& valu
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kMusa, FillInplaceScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kMthreads, FillInplaceScalarKernelMusa)
 
 at::Tensor& ZeroInplaceKernelMusa(at::Tensor& self) {
   if (!musa_ops::MudnnSupportsDtype(self.scalar_type()) || !self.is_contiguous()) {
@@ -4156,7 +4156,7 @@ at::Tensor& ZeroInplaceKernelMusa(at::Tensor& self) {
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kMusa, ZeroInplaceKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kMthreads, ZeroInplaceKernelMusa)
 
 at::Tensor MaskedFillScalarKernelMusa(
     const at::Tensor& self,
@@ -4184,7 +4184,7 @@ at::Tensor MaskedFillScalarKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, Backend::kMusa, MaskedFillScalarKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, Backend::kMthreads, MaskedFillScalarKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor> TopkKernelMusa(
     const at::Tensor& self,
@@ -4222,7 +4222,7 @@ REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, B
   return std::make_tuple(values, indices);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TopkFn, topk_dispatcher, Backend::kMusa, TopkKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(TopkFn, topk_dispatcher, Backend::kMthreads, TopkKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor> SortKernelMusa(
     const at::Tensor& self,
@@ -4252,7 +4252,7 @@ REGISTER_IMPL_TO_DISPATCHER(TopkFn, topk_dispatcher, Backend::kMusa, TopkKernelM
   return std::make_tuple(values, indices);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SortFn, sort_dispatcher, Backend::kMusa, SortKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SortFn, sort_dispatcher, Backend::kMthreads, SortKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor> SortStableKernelMusa(
     const at::Tensor& self,
@@ -4283,7 +4283,7 @@ REGISTER_IMPL_TO_DISPATCHER(SortFn, sort_dispatcher, Backend::kMusa, SortKernelM
   return std::make_tuple(values, indices);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SortStableFn, sort_stable_dispatcher, Backend::kMusa, SortStableKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(SortStableFn, sort_stable_dispatcher, Backend::kMthreads, SortStableKernelMusa)
 
 at::Tensor CumsumKernelMusa(
     const at::Tensor& self,
@@ -4314,7 +4314,7 @@ at::Tensor CumsumKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kMusa, CumsumKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kMthreads, CumsumKernelMusa)
 
 at::Tensor CumprodKernelMusa(
     const at::Tensor& self,
@@ -4345,7 +4345,7 @@ at::Tensor CumprodKernelMusa(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CumprodFn, cumprod_dispatcher, Backend::kMusa, CumprodKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(CumprodFn, cumprod_dispatcher, Backend::kMthreads, CumprodKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor> MaxDimKernelMusa(
     const at::Tensor& self, int64_t dim, bool keepdim) {
@@ -4386,7 +4386,7 @@ REGISTER_IMPL_TO_DISPATCHER(CumprodFn, cumprod_dispatcher, Backend::kMusa, Cumpr
   return std::make_tuple(values, indices);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kMusa, MaxDimKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kMthreads, MaxDimKernelMusa)
 
 ::std::tuple<at::Tensor, at::Tensor> MinDimKernelMusa(
     const at::Tensor& self, int64_t dim, bool keepdim) {
@@ -4427,7 +4427,7 @@ REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kMusa, MaxDim
   return std::make_tuple(values, indices);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MinDimFn, min_dim_dispatcher, Backend::kMusa, MinDimKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(MinDimFn, min_dim_dispatcher, Backend::kMthreads, MinDimKernelMusa)
 
 at::Tensor ArgmaxKernelMusa(
     const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim) {
@@ -4464,7 +4464,7 @@ at::Tensor ArgmaxKernelMusa(
   return keepdim ? indices.view(out_shape) : indices;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kMusa, ArgmaxKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kMthreads, ArgmaxKernelMusa)
 
 at::Tensor ArgminKernelMusa(
     const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim) {
@@ -4501,6 +4501,6 @@ at::Tensor ArgminKernelMusa(
   return keepdim ? indices.view(out_shape) : indices;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kMusa, ArgminKernelMusa)
+REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kMthreads, ArgminKernelMusa)
 
 } // namespace at::native::flagos

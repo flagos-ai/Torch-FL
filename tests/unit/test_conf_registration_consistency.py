@@ -226,9 +226,9 @@ def test_every_route_uses_an_allowed_backend_key(platform):
     ``Backend`` enum value at runtime.
     """
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
-    # NVIDIA's generated conf (codegen_ops.py, step 4b not yet applied there)
-    # still spells its vendorside key `cuda`.
-    vendor_key = "cuda" if platform == "nvidia" else platform
+    # A conf's route key is the vendor whose kernels serve it -- `nvidia` for
+    # the CUDA boxing kernel, like every other vendor key.
+    vendor_key = platform
     allowed = {
         "flaggems_cpp",
         "flaggems",
@@ -482,7 +482,7 @@ def test_conf_route_counts_are_stable():
         # kernel but were never listed -- mul.Tensor above all, 1522 host round
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. Both effects apply: 549/1485.
-        "nvidia": {"flaggems": 549, "cuda": 1485},
+        "nvidia": {"flaggems": 549, "nvidia": 1485},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each

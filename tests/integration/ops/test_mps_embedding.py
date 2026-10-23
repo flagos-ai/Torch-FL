@@ -368,7 +368,7 @@ class TestEmbeddingDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] embedding -> mps") == 2
+        assert result.stderr.count("[flagos dispatch] embedding -> apple") == 2
 
     @pytest.mark.main_ops
     def test_declined_dtype_does_not_reach_the_graph(self):
@@ -398,7 +398,7 @@ class TestEmbeddingDispatch:
         assert "torch.float64" in result.stdout
         # The kernel is still entered and logs once; the answer is the
         # reference's, which is what the round-trip is for.
-        assert "[flagos dispatch] embedding -> mps" in result.stderr
+        assert "[flagos dispatch] embedding -> apple" in result.stderr
 
 
 class TestEmbeddingCost:
@@ -417,7 +417,7 @@ class TestEmbeddingCost:
         What catches it is the dispatch log rather than the clock. The log line
         this model's ``--log`` census already relies on (see the dispatch tests
         above) names the backend this module routed to, and it is emitted once
-        per call, so ten reads that were all served log exactly ten ``-> mps``
+        per call, so ten reads that were all served log exactly ten ``-> apple``
         lines. A timing bound was tried first and is the wrong instrument: it
         measured 62 ms on CI against 0.7 ms locally *for calls that were being
         served*, so it fails on a paravirtualized runner for work the log count

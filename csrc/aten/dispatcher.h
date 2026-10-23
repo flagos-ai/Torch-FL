@@ -126,14 +126,14 @@ class Dispatcher {
       case Backend::kFlagGemsCpp:   flaggems_cpp_fn_ = fn;     break;
       case Backend::kFlagGems:      flaggems_fn_ = fn;         break;
       case Backend::kAscend:        ascend_fn_ = fn;           break;
-      case Backend::kMusa:          musa_fn_ = fn;             break;
+      case Backend::kMthreads:      mthreads_fn_ = fn;        break;
       case Backend::kMetax:         metax_fn_ = fn;            break;
       case Backend::kTsingMicro:    tsingmicro_fn_ = fn;       break;
-      case Backend::kGcu:           gcu_fn_ = fn;              break;
+      case Backend::kEnflame:       enflame_fn_ = fn;         break;
       case Backend::kKunlunxin:     kunlunxin_fn_ = fn;        break;
       case Backend::kIluvatar:      iluvatar_fn_ = fn;         break;
       case Backend::kTileOps:       tileops_fn_ = fn;          break;
-      case Backend::kMps:           mps_fn_ = fn;              break;
+      case Backend::kApple:         apple_fn_ = fn;           break;
       // Neither names a kernel set, so there is no slot to fill. kNone is the
       // conf's "no accelerated impl here" verdict; kUncached is the sentinel
       // operator() uses before it has resolved the op. Listed explicitly rather
@@ -221,13 +221,13 @@ class Dispatcher {
   // the vendor's own kernels.
   std::pair<FnPtr, Backend> VendorSlot() const {
     if (ascend_fn_)      return {ascend_fn_,      Backend::kAscend};
-    if (musa_fn_)        return {musa_fn_,        Backend::kMusa};
+    if (mthreads_fn_)    return {mthreads_fn_,    Backend::kMthreads};
     if (metax_fn_)       return {metax_fn_,       Backend::kMetax};
-    if (gcu_fn_)         return {gcu_fn_,         Backend::kGcu};
+    if (enflame_fn_)     return {enflame_fn_,     Backend::kEnflame};
     if (kunlunxin_fn_)   return {kunlunxin_fn_,   Backend::kKunlunxin};
     if (iluvatar_fn_)    return {iluvatar_fn_,    Backend::kIluvatar};
     if (tsingmicro_fn_)  return {tsingmicro_fn_,  Backend::kTsingMicro};
-    if (mps_fn_)         return {mps_fn_,         Backend::kMps};
+    if (apple_fn_)       return {apple_fn_,       Backend::kApple};
     if (cuda_fn_)        return {cuda_fn_,        Backend::kBoxing};
     return {nullptr, Backend::kNone};
   }
@@ -301,13 +301,13 @@ class Dispatcher {
         if (flaggems_fn_) return flaggems_fn_;
         return cuda_fn_ ? cuda_fn_ : flaggems_cpp_fn_;
       case Backend::kAscend:        return ascend_fn_;
-      case Backend::kMusa:          return musa_fn_;
+      case Backend::kMthreads:      return mthreads_fn_;
       case Backend::kMetax:         return metax_fn_;
       case Backend::kTsingMicro:    return tsingmicro_fn_;
-      case Backend::kGcu:           return gcu_fn_;
+      case Backend::kEnflame:       return enflame_fn_;
       case Backend::kKunlunxin:     return kunlunxin_fn_;
       case Backend::kIluvatar:      return iluvatar_fn_;
-      case Backend::kMps:           return mps_fn_;
+      case Backend::kApple:         return apple_fn_;
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
       // entry of "tileops" therefore only lands here when that registration did
@@ -371,13 +371,13 @@ class Dispatcher {
       // (ACLNN, mudnn, topsaten, ...), which the single FLAGOS_BUILD_VENDOR switch
       // compiles. There is one such library per build, never two.
       case Backend::kAscend:
-      case Backend::kMusa:
+      case Backend::kMthreads:
       case Backend::kMetax:
       case Backend::kTsingMicro:
-      case Backend::kGcu:         return "vendor";
+      case Backend::kEnflame:     return "vendor";
       case Backend::kKunlunxin:   return "vendor";
       case Backend::kIluvatar:    return "vendor";
-      case Backend::kMps:         return "vendor";
+      case Backend::kApple:       return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -393,14 +393,14 @@ class Dispatcher {
       case Backend::kFlagGemsCpp:   name = "flagos"; break;  // keep old name for test compat
       case Backend::kFlagGems:      name = "flagos_python"; break;  // keep old name for test compat
       case Backend::kAscend:        name = "ascend"; break;
-      case Backend::kMusa:          name = "musa"; break;
+      case Backend::kMthreads:      name = "musa"; break;
       case Backend::kMetax:         name = "metax"; break;
       case Backend::kTsingMicro:    name = "tsingmicro"; break;
-      case Backend::kGcu:           name = "gcu"; break;
+      case Backend::kEnflame:       name = "gcu"; break;
       case Backend::kKunlunxin:     name = "kunlunxin"; break;
       case Backend::kIluvatar:      name = "iluvatar"; break;
       case Backend::kTileOps:       name = "tileops"; break;
-      case Backend::kMps:           name = "mps"; break;
+      case Backend::kApple:         name = "mps"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }
@@ -416,14 +416,14 @@ class Dispatcher {
   FnPtr flaggems_cpp_fn_   = nullptr;
   FnPtr flaggems_fn_       = nullptr;
   FnPtr ascend_fn_         = nullptr;
-  FnPtr musa_fn_           = nullptr;
+  FnPtr mthreads_fn_       = nullptr;
   FnPtr metax_fn_          = nullptr;
   FnPtr tsingmicro_fn_     = nullptr;
-  FnPtr gcu_fn_            = nullptr;
+  FnPtr enflame_fn_        = nullptr;
   FnPtr kunlunxin_fn_      = nullptr;
   FnPtr iluvatar_fn_       = nullptr;
   FnPtr tileops_fn_        = nullptr;
-  FnPtr mps_fn_            = nullptr;
+  FnPtr apple_fn_          = nullptr;
 };
 
 namespace detail {

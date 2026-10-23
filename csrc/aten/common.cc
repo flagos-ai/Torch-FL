@@ -129,7 +129,7 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
   } else if (val == "tsingmicro") {
     *out = Backend::kTsingMicro;
   } else if (val == "enflame" || val == "gcu") {  // gcu: the SDK-era spelling
-    *out = Backend::kGcu;
+    *out = Backend::kEnflame;
   } else if (val == "kunlunxin") {
     *out = Backend::kKunlunxin;
   } else if (val == "iluvatar") {
@@ -137,11 +137,11 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
   } else if (val == "ascend") {
     *out = Backend::kAscend;
   } else if (val == "mthreads" || val == "musa") {  // musa: the SDK-era spelling
-    *out = Backend::kMusa;
+    *out = Backend::kMthreads;
   } else if (val == "tileops") {
     *out = Backend::kTileOps;
   } else if (val == "apple" || val == "mps") {  // mps: the SDK-era spelling
-    *out = Backend::kMps;
+    *out = Backend::kApple;
   } else if (val == "flaggems_cpp" || val == "flagos") {
     *out = Backend::kFlagGemsCpp;
   } else if (val == "flaggems" || val == "flaggems_python" ||
@@ -161,14 +161,14 @@ const char* BackendName(Backend b) {
     case Backend::kFlagGemsCpp:  return "flaggems_cpp";
     case Backend::kFlagGems:     return "flaggems";
     case Backend::kAscend:       return "ascend";
-    case Backend::kMusa:         return "musa";
+    case Backend::kMthreads:     return "mthreads";
     case Backend::kMetax:        return "metax";
     case Backend::kTsingMicro:   return "tsingmicro";
-    case Backend::kGcu:          return "gcu";
+    case Backend::kEnflame:      return "enflame";
     case Backend::kKunlunxin:    return "kunlunxin";
     case Backend::kIluvatar:     return "iluvatar";
     case Backend::kTileOps:      return "tileops";
-    case Backend::kMps:          return "mps";
+    case Backend::kApple:        return "apple";
     case Backend::kNone:         return "none";
     default:                     return "unknown";
   }

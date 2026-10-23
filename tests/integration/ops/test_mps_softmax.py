@@ -360,4 +360,4 @@ class TestSoftmaxDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] _softmax -> mps" in result.stderr
+        assert "[flagos dispatch] _softmax -> apple" in result.stderr

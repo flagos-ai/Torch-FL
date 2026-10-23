@@ -64,7 +64,9 @@ PLATFORMS = ("nvidia", "metax", "hygon", "thead", "tsingmicro")
 
 # Conf values that are not a FlagGems backend: `cuda` is the boxing kernel,
 # `none` is cpu_fallback, and the empty value is a malformed line.
-NON_FLAGGEMS_ROUTES = ("cuda", "none", "")
+# (`cuda` is the pre-rename spelling of the NVIDIA boxing key; a conf written
+# before that rename still routes to it, so both spellings are listed.)
+NON_FLAGGEMS_ROUTES = ("nvidia", "cuda", "boxing", "none", "")
 
 # Per-platform values that name the platform's own vendor backend rather than a
 # FlagGems one. TsingMicro's conf routes its metadata-only view ops to

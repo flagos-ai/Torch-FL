@@ -788,7 +788,7 @@ class TestErfDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] erf -> mps" in result.stderr
+        assert "[flagos dispatch] erf -> apple" in result.stderr
 
     @pytest.mark.main_ops
     @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])

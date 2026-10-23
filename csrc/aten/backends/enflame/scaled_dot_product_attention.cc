@@ -622,7 +622,7 @@ PrivScaledDotProductEfficientAttentionKernelGcu(
 REGISTER_IMPL_TO_DISPATCHER(
     PrivScaledDotProductEfficientAttentionFn,
     priv_scaled_dot_product_efficient_attention_dispatcher,
-    Backend::kGcu,
+    Backend::kEnflame,
     PrivScaledDotProductEfficientAttentionKernelGcu)
 
 } // namespace at::native::flagos::gcu

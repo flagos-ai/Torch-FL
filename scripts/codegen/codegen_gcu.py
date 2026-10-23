@@ -27,7 +27,7 @@ topsaten is simpler than aclnn: one direct call, no workspace/executor phase.
 
 Generates:
   - csrc/aten/backends/enflame/generated/gcu_kernels.cc
-      the kernels + REGISTER_IMPL_TO_DISPATCHER(..., Backend::kGcu, ...)
+      the kernels + REGISTER_IMPL_TO_DISPATCHER(..., Backend::kEnflame, ...)
   - csrc/aten/backends/enflame/generated/gcu_register.inc
       the m.impl() subset for register.cc. GCU registers PrivateUse1 ONLY for
       ops it has a kernel for; everything else stays unregistered and reaches
@@ -452,7 +452,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # The operands are brought to the common shape as *views*: topsaten broadcasts in
@@ -669,7 +669,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -690,7 +690,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -750,7 +750,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, at::Tensor
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -783,7 +783,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& other, const at::
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -803,7 +803,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -833,7 +833,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -856,7 +856,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -889,7 +889,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -912,7 +912,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -961,7 +961,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -982,7 +982,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::S
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -1007,7 +1007,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_MATMUL = """\
@@ -1027,7 +1027,7 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_MATMUL_OUT = (
@@ -1060,7 +1060,7 @@ at::Tensor& {kernel}(const at::Tensor& self, const at::Tensor& mat2, at::Tensor&
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -1111,7 +1111,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # linalg_vector_norm is the kernel under tensor.norm and F.normalize, which
@@ -1179,7 +1179,7 @@ at::Tensor {kernel}(
   return out.reshape(out_shape);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_REDUCE_ALL_DTYPE = """\
@@ -1205,7 +1205,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_GELU = """\
@@ -1222,7 +1222,7 @@ at::Tensor {kernel}(const at::Tensor& self, c10::string_view approximate) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_SOFTMAX_FWD = """\
@@ -1240,7 +1240,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # amax/amin: reduce over a required (non-optional, possibly empty) dim list, no
@@ -1280,7 +1280,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # tril/triu: same shape as the input plus one int64 (the diagonal).
@@ -1297,7 +1297,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t k) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # flip: same shape as the input plus a dim list. Negative dims are wrapped.
@@ -1319,7 +1319,7 @@ at::Tensor {kernel}(const at::Tensor& self, at::IntArrayRef dims) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # clamp: both bounds are optional. topsaten takes two required scalars, so an
@@ -1353,7 +1353,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # addmm: out = beta * self + alpha * (mat1 @ mat2). `self` (the bias) broadcasts
@@ -1436,7 +1436,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -1484,7 +1484,7 @@ at::Tensor& {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -1553,7 +1553,7 @@ at::Tensor {kernel}(const at::ITensorListRef& tensors, int64_t dim) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # zeros_like / ones_like: the dtype/layout/device/pin/memory_format options
@@ -1604,7 +1604,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # new_ones is the one factory a model reaches on an *int64* tensor:
@@ -1690,7 +1690,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # arange is the one creation op that takes scalars instead of a shape, and
@@ -1776,7 +1776,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # The three arange overloads, as T_ARANGE's per-overload parameters: the scalar
@@ -1834,7 +1834,7 @@ at::Tensor& {kernel}(at::Tensor& self) {{
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_FILL_INPLACE_SCALAR = """\
@@ -1856,7 +1856,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Scalar& value) {{
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # The Tensor overload is how a Python number reaches the op (PyTorch wraps the
@@ -1883,7 +1883,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& value) {{
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_MASKED_FILL_INPLACE_SCALAR = """\
@@ -1907,7 +1907,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& mask, const at::Scalar&
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_MASKED_FILL_INPLACE_TENSOR = """\
@@ -1933,7 +1933,7 @@ at::Tensor& {kernel}(at::Tensor& self, const at::Tensor& mask, const at::Tensor&
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # --------------------------------------------------------------------------
@@ -1995,7 +1995,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, const at::Tensor& index
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # ATen refuses an `out` whose dtype is not the result's, with this message.
@@ -2021,7 +2021,7 @@ at::Tensor& {kernel}(const at::Tensor& self, int64_t dim, const at::Tensor& inde
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -2079,7 +2079,7 @@ at::Tensor& {kernel}(at::Tensor& self, int64_t dim, const at::Tensor& index, con
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # The Tensor overload is how a Python number reaches this op when it is passed as
@@ -2123,7 +2123,7 @@ at::Tensor& {kernel}(at::Tensor& self, int64_t dim, const at::Tensor& index, con
   return self;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # The out-of-place index_fill is `self.clone(at::MemoryFormat::Preserve)
@@ -2138,7 +2138,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, const at::Tensor& index
   return result;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_INDEX_FILL_TENSOR = """\
@@ -2148,7 +2148,7 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, const at::Tensor& index
   return result;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # index_fill's out= writes through the caller's tensor, which is where it
@@ -2185,7 +2185,7 @@ at::Tensor& {kernel}(const at::Tensor& self, int64_t dim, const at::Tensor& inde
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -2209,7 +2209,7 @@ at::Tensor& {kernel}(const at::Tensor& self, int64_t dim, const at::Tensor& inde
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -2281,7 +2281,7 @@ at::Tensor {kernel}(const at::Tensor& weight, const at::Tensor& indices, int64_t
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_EMBEDDING_OUT = """\
@@ -2304,7 +2304,7 @@ at::Tensor& {kernel}(const at::Tensor& weight, const at::Tensor& indices, int64_
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # embedding_dense_backward: the gradient of an embedding lookup, one row of
@@ -2365,7 +2365,7 @@ at::Tensor {kernel}(const at::Tensor& grad, const at::Tensor& indices, int64_t n
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_EMBEDDING_DENSE_BACKWARD_OUT = """\
@@ -2389,7 +2389,7 @@ at::Tensor& {kernel}(const at::Tensor& grad, const at::Tensor& indices, int64_t 
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _upsample_nearest_exact2d: the nearest-neighbour resize the Qwen-Image VAE's
@@ -2428,7 +2428,7 @@ at::Tensor {kernel}(const at::Tensor& self, at::IntArrayRef output_size, ::std::
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_UPSAMPLE_NEAREST_EXACT2D_OUT = (
@@ -2452,7 +2452,7 @@ at::Tensor& {kernel}(const at::Tensor& self, at::IntArrayRef output_size, ::std:
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
@@ -2525,7 +2525,7 @@ T_LAYER_NORM = """\
   return {{out, mean.reshape(pt_stat), rstd.reshape(pt_stat)}};
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _softmax_backward_data(grad_output, output, dim, input_dtype)
@@ -2554,7 +2554,7 @@ at::Tensor {kernel}(
   return result;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # silu_backward(grad_output, self) -> grad_input, all the same shape.
@@ -2577,7 +2577,7 @@ at::Tensor {kernel}(
   return grad_input;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # mse_loss(self, target, reduction). reduction 0=none keeps the input shape;
@@ -2605,7 +2605,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # mse_loss_backward(grad_output, self, target, reduction) -> grad_input.
@@ -2639,7 +2639,7 @@ at::Tensor {kernel}(
   return grad_input;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # ---------------------------------------------------------------------------
@@ -2712,7 +2712,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # convolution_backward_overrideable: like the forward, autograd has no composite
@@ -2751,7 +2751,7 @@ T_CONVOLUTION_BACKWARD = """\
           to_dev(std::get<2>(r))}};
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_neg_ / (any in-place unary foreach): topsatenForeachX(out, in)
@@ -2789,7 +2789,7 @@ void {kernel}(at::TensorList self, at::Tensor& found_inf, const at::Tensor& inv_
   for (size_t i = 0; i < self.size(); ++i) self[i].copy_(out[i]);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_AMP_UNSCALE_OUT = """\
@@ -2836,7 +2836,7 @@ void {kernel}(at::TensorList self, at::Tensor& found_inf,
       t_inv_scale.get());
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 T_FOREACH_UNARY_INPLACE = """\
@@ -2850,7 +2850,7 @@ void {kernel}(at::TensorList self) {{
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get());
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_sqrt: out-of-place, returns a fresh list.
@@ -2873,7 +2873,7 @@ T_FOREACH_UNARY = """\
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_mul_.Scalar / _foreach_div_.Scalar: one scalar for the whole list.
@@ -2889,7 +2889,7 @@ void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get(), t_scalar);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_add_.Scalar: same as above but the overload takes a trailing alpha.
@@ -2905,7 +2905,7 @@ void {kernel}(at::TensorList self, const at::Scalar& scalar) {{
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get(), t_scalar);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_div_.ScalarList: one scalar per tensor.
@@ -2926,7 +2926,7 @@ void {kernel}(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {{
   EXEC_TOPSATEN_CMD({tops}, self[0], t_out.get(), t_self.get(), t_scalars);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_mul_.List / _foreach_div_.List: elementwise against a second list.
@@ -2944,7 +2944,7 @@ void {kernel}(at::TensorList self, at::TensorList other) {{
       {tops}, self[0], t_out.get(), t_self.get(), t_other.get());
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_add_.List: two lists plus alpha.
@@ -2968,7 +2968,7 @@ void {kernel}(
       {tops}, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_add_.Tensor: a single tensor broadcast across the whole list.
@@ -2996,7 +2996,7 @@ void {kernel}(
       {tops}, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_lerp_.Scalar: self + weight * (other - self), over two lists.
@@ -3020,7 +3020,7 @@ void {kernel}(
       {tops}, self[0], t_out.get(), t_self.get(), t_end.get(), t_weight);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_addcmul_.Scalar / _foreach_addcdiv_.Scalar:
@@ -3049,7 +3049,7 @@ void {kernel}(
       t_value);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # _foreach_addcdiv_.ScalarList / _foreach_addcmul_.ScalarList: per-tensor value.
@@ -3082,7 +3082,7 @@ void {kernel}(
       t_scalars);
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # where.self is the busiest of the five ops this file's last census still
@@ -3149,7 +3149,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # `where.self_out` is the same operation through the out= contract, and it is
@@ -3246,7 +3246,7 @@ at::Tensor& {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # The whole-tensor `all` -- `torch.all(t)`, no dim -- which is the spelling
@@ -3285,7 +3285,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # index.Tensor is ATen's advanced indexing, and it is one dispatch for several
@@ -3336,7 +3336,7 @@ at::Tensor {kernel}(
   return at::{at_op}(self.cpu(), indices_cpu).to(self.device());
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # nonzero / nonzero_static share one vendor chain, and it is three calls rather
@@ -3392,7 +3392,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 # nonzero_static is `nonzero` with the first dimension fixed by the caller: the
@@ -3467,7 +3467,7 @@ at::Tensor {kernel}(
   return out;
 }}
 
-REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 
 CATEGORIES = {
@@ -3557,7 +3557,7 @@ FILE_HEADER = """\
 // kernel wraps its aten tensors into topsatenTensors and issues one direct
 // topsaten call via EXEC_TOPSATEN_CMD. Dispatchers are declared in
 // generated/ops.h (shared with the CUDA codegen); here we only fill the
-// Backend::kGcu slot.
+// Backend::kEnflame slot.
 
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>

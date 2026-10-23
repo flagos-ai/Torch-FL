@@ -291,7 +291,7 @@ class TestAbsDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] abs -> mps" in result.stderr
+        assert "[flagos dispatch] abs -> apple" in result.stderr
 
 
 class TestNegCorrectness:
@@ -419,4 +419,4 @@ class TestNegDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] neg -> mps" in result.stderr
+        assert "[flagos dispatch] neg -> apple" in result.stderr

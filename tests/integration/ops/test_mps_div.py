@@ -115,7 +115,7 @@ def _scalar_div(self: torch.Tensor, other) -> torch.Tensor:
 
     ``a / 2.0`` decomposes to the *Tensor* overload before PrivateUse1 dispatch
     -- measured, not assumed: on this device ``FLAGOS_LOG=dispatch`` prints
-    ``div.Tensor -> mps`` for ``a / 2.0`` and ``div.Scalar -> mps`` only for the
+    ``div.Tensor -> apple`` for ``a / 2.0`` and ``div.Scalar -> apple`` only for the
     opaque spelling here. The two overloads are distinct kernels with distinct
     gates (the scalar one folds the divisor into a constant), so a test about the
     scalar kernel has to spell it out; the dispatch test names both, so the
@@ -977,9 +977,9 @@ class TestDivDispatch:
         )
         assert result.returncode == 0, result.stderr
         for line in (
-            "[flagos dispatch] div.Tensor -> mps",
-            "[flagos dispatch] div.Scalar -> mps",
-            "[flagos dispatch] reciprocal -> mps",
+            "[flagos dispatch] div.Tensor -> apple",
+            "[flagos dispatch] div.Scalar -> apple",
+            "[flagos dispatch] reciprocal -> apple",
         ):
             assert line in result.stderr, result.stderr
 
@@ -1014,8 +1014,8 @@ class TestDivDispatch:
         assert result.returncode == 0, result.stderr
         # `a / b` and `a / 2.0` are the two Tensor dispatches; the reciprocal is
         # reached three times (`2.0 / a`, `torch.reciprocal`, `.reciprocal()`).
-        assert result.stderr.count("[flagos dispatch] div.Tensor -> mps") == 2
-        assert result.stderr.count("[flagos dispatch] reciprocal -> mps") == 3
+        assert result.stderr.count("[flagos dispatch] div.Tensor -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] reciprocal -> apple") == 3
 
     @pytest.mark.main_ops
     def test_a_declined_dtype_keeps_the_reference_dtype(self):

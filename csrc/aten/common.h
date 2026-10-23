@@ -29,15 +29,18 @@ enum class Backend {
   kBoxing,
   kFlagGemsCpp,    // FlagGems C++ runtime (liboperators.so, conf key: flaggems_cpp)
   kFlagGems,       // FlagGems Python/Triton path (conf key: flaggems)
+  // One value per vendor, spelled the way its conf key is (see AGENTS.md,
+  // "Platform names"). These three used to be named after the SDK rather than
+  // the vendor.
   kAscend,
-  kMusa,
+  kMthreads,       // conf key: mthreads
   kMetax,
   kTsingMicro,
-  kGcu,
+  kEnflame,        // conf key: enflame
   kKunlunxin,
   kIluvatar,
   kTileOps,
-  kMps,            // Apple Metal / MPSGraph (conf key: mps)
+  kApple,          // Apple Metal / MPSGraph (conf key: apple)
   // No accelerated implementation on this platform. The op is deliberately not
   // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
   // arriving here with an empty kernel slot. Recorded explicitly (rather than

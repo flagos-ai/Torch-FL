@@ -603,10 +603,10 @@ class TestBinaryDispatch:
         )
         assert result.returncode == 0, result.stderr
         for line in (
-            "[flagos dispatch] add.Tensor -> mps",
-            "[flagos dispatch] sub.Tensor -> mps",
-            "[flagos dispatch] mul.Tensor -> mps",
-            "[flagos dispatch] add.Scalar -> mps",
-            "[flagos dispatch] mul.Scalar -> mps",
+            "[flagos dispatch] add.Tensor -> apple",
+            "[flagos dispatch] sub.Tensor -> apple",
+            "[flagos dispatch] mul.Tensor -> apple",
+            "[flagos dispatch] add.Scalar -> apple",
+            "[flagos dispatch] mul.Scalar -> apple",
         ):
             assert line in result.stderr, result.stderr

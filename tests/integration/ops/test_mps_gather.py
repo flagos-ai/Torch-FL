@@ -650,7 +650,7 @@ class TestGatherDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] gather -> mps") == 2
+        assert result.stderr.count("[flagos dispatch] gather -> apple") == 2
 
     @pytest.mark.main_ops
     def test_a_declined_index_does_not_reach_the_node(self):
@@ -686,7 +686,7 @@ class TestGatherDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "RuntimeError True" in result.stdout
-        assert "[flagos dispatch] gather -> mps" in result.stderr
+        assert "[flagos dispatch] gather -> apple" in result.stderr
 
 
 class TestGatherCost:
@@ -705,7 +705,7 @@ class TestGatherCost:
 
         What catches it is the dispatch log rather than the clock. The log line
         names the backend this module routed to and is emitted once per call, so
-        ten reads that were all served log exactly ten ``-> mps`` lines. The two
+        ten reads that were all served log exactly ten ``-> apple`` lines. The two
         timing cases that used to sit beside this one are the reason to say so:
         on CI they measured 54 ms for a served read and 115 ms against 74 ms for
         a copy the platform charges for anyway, so both failed on work the log

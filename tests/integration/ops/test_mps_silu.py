@@ -604,7 +604,7 @@ class TestSiluDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] silu -> mps") == 2
+        assert result.stderr.count("[flagos dispatch] silu -> apple") == 2
 
     @pytest.mark.main_ops
     def test_autograd_and_aten_backward_keep_their_reference_answer(self, tmp_path):
@@ -631,7 +631,7 @@ class TestSiluDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] silu_backward -> mps") == 2
+        assert result.stderr.count("[flagos dispatch] silu_backward -> apple") == 2
 
     @pytest.mark.main_ops
     def test_declined_dtype_does_not_reach_the_kernel(self):
@@ -658,4 +658,4 @@ class TestSiluDispatch:
         assert "torch.float64" in result.stdout
         # `silu` still logs once -- the kernel is entered and declines -- but the
         # answer comes back in float64 rather than being computed by the graph.
-        assert "[flagos dispatch] silu -> mps" in result.stderr
+        assert "[flagos dispatch] silu -> apple" in result.stderr

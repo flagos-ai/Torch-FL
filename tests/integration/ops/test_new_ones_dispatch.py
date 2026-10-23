@@ -164,7 +164,7 @@ class TestNewOnesGcuRoute:
             {"FLAGOS_LOG": "dispatch"},
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] new_ones -> gcu" in result.stderr
+        assert "[flagos dispatch] new_ones -> enflame" in result.stderr
         assert "flagos_python" not in result.stderr
 
     @pytest.mark.gcu
@@ -180,7 +180,7 @@ class TestNewOnesGcuRoute:
             {"FLAGOS_LOG": "dispatch"},
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] new_ones -> gcu" in result.stderr
+        assert "[flagos dispatch] new_ones -> enflame" in result.stderr
         # The vendor entry point writes the plane itself; nothing fills.
         assert "fill_.Scalar" not in result.stderr
 
@@ -200,7 +200,7 @@ class TestNewOnesGcuRoute:
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         # `fill_`, not `empty`-then-copy: the fallback must not round-trip the host.
-        assert "[flagos dispatch] fill_.Scalar -> gcu" in result.stderr
+        assert "[flagos dispatch] fill_.Scalar -> enflame" in result.stderr
         assert "cpu_fallback" not in result.stderr
 
     @pytest.mark.gcu

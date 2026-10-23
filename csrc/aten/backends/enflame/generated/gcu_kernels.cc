@@ -6,7 +6,7 @@
 // kernel wraps its aten tensors into topsatenTensors and issues one direct
 // topsaten call via EXEC_TOPSATEN_CMD. Dispatchers are declared in
 // generated/ops.h (shared with the CUDA codegen); here we only fill the
-// Backend::kGcu slot.
+// Backend::kEnflame slot.
 
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
@@ -59,7 +59,7 @@ at::Tensor AbsKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kGcu, AbsKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kEnflame, AbsKernelGcu)
 
 at::Tensor SqrtKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -72,7 +72,7 @@ at::Tensor SqrtKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kGcu, SqrtKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kEnflame, SqrtKernelGcu)
 
 at::Tensor RsqrtKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -85,7 +85,7 @@ at::Tensor RsqrtKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kGcu, RsqrtKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kEnflame, RsqrtKernelGcu)
 
 at::Tensor ExpKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -98,7 +98,7 @@ at::Tensor ExpKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kGcu, ExpKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kEnflame, ExpKernelGcu)
 
 at::Tensor Expm1KernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -111,7 +111,7 @@ at::Tensor Expm1KernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kGcu, Expm1KernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(Expm1Fn, expm1_dispatcher, Backend::kEnflame, Expm1KernelGcu)
 
 at::Tensor LogKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -124,7 +124,7 @@ at::Tensor LogKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kGcu, LogKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kEnflame, LogKernelGcu)
 
 at::Tensor Log2KernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -137,7 +137,7 @@ at::Tensor Log2KernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kGcu, Log2KernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kEnflame, Log2KernelGcu)
 
 at::Tensor Log10KernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -150,7 +150,7 @@ at::Tensor Log10KernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kGcu, Log10KernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kEnflame, Log10KernelGcu)
 
 at::Tensor Log1pKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -163,7 +163,7 @@ at::Tensor Log1pKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(Log1pFn, log1p_dispatcher, Backend::kGcu, Log1pKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(Log1pFn, log1p_dispatcher, Backend::kEnflame, Log1pKernelGcu)
 
 at::Tensor SinKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -176,7 +176,7 @@ at::Tensor SinKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kGcu, SinKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kEnflame, SinKernelGcu)
 
 at::Tensor CosKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -189,7 +189,7 @@ at::Tensor CosKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kGcu, CosKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kEnflame, CosKernelGcu)
 
 at::Tensor SinhKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -202,7 +202,7 @@ at::Tensor SinhKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SinhFn, sinh_dispatcher, Backend::kGcu, SinhKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SinhFn, sinh_dispatcher, Backend::kEnflame, SinhKernelGcu)
 
 at::Tensor CoshKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -215,7 +215,7 @@ at::Tensor CoshKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CoshFn, cosh_dispatcher, Backend::kGcu, CoshKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(CoshFn, cosh_dispatcher, Backend::kEnflame, CoshKernelGcu)
 
 at::Tensor AsinKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -228,7 +228,7 @@ at::Tensor AsinKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AsinFn, asin_dispatcher, Backend::kGcu, AsinKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AsinFn, asin_dispatcher, Backend::kEnflame, AsinKernelGcu)
 
 at::Tensor AcosKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -241,7 +241,7 @@ at::Tensor AcosKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AcosFn, acos_dispatcher, Backend::kGcu, AcosKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AcosFn, acos_dispatcher, Backend::kEnflame, AcosKernelGcu)
 
 at::Tensor AtanKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -254,7 +254,7 @@ at::Tensor AtanKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AtanFn, atan_dispatcher, Backend::kGcu, AtanKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AtanFn, atan_dispatcher, Backend::kEnflame, AtanKernelGcu)
 
 at::Tensor TanhKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -267,7 +267,7 @@ at::Tensor TanhKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kGcu, TanhKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kEnflame, TanhKernelGcu)
 
 at::Tensor SigmoidKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -280,7 +280,7 @@ at::Tensor SigmoidKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kGcu, SigmoidKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kEnflame, SigmoidKernelGcu)
 
 at::Tensor SiluKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -293,7 +293,7 @@ at::Tensor SiluKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kGcu, SiluKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kEnflame, SiluKernelGcu)
 
 at::Tensor ReluKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -306,7 +306,7 @@ at::Tensor ReluKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ReluFn, relu_dispatcher, Backend::kGcu, ReluKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ReluFn, relu_dispatcher, Backend::kEnflame, ReluKernelGcu)
 
 at::Tensor NegKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -319,7 +319,7 @@ at::Tensor NegKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kGcu, NegKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kEnflame, NegKernelGcu)
 
 at::Tensor ReciprocalKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -332,7 +332,7 @@ at::Tensor ReciprocalKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kGcu, ReciprocalKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kEnflame, ReciprocalKernelGcu)
 
 at::Tensor ErfKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -345,7 +345,7 @@ at::Tensor ErfKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kGcu, ErfKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kEnflame, ErfKernelGcu)
 
 at::Tensor FloorKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -358,7 +358,7 @@ at::Tensor FloorKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kGcu, FloorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kEnflame, FloorKernelGcu)
 
 at::Tensor CeilKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -371,7 +371,7 @@ at::Tensor CeilKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kGcu, CeilKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kEnflame, CeilKernelGcu)
 
 at::Tensor TruncKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -384,7 +384,7 @@ at::Tensor TruncKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kGcu, TruncKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kEnflame, TruncKernelGcu)
 
 at::Tensor SignKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -397,7 +397,7 @@ at::Tensor SignKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kGcu, SignKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kEnflame, SignKernelGcu)
 
 at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -435,7 +435,7 @@ at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kGcu, MulTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kEnflame, MulTensorKernelGcu)
 
 at::Tensor DivTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -457,7 +457,7 @@ at::Tensor DivTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kGcu, DivTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kEnflame, DivTensorKernelGcu)
 
 at::Tensor MaximumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -479,7 +479,7 @@ at::Tensor MaximumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kGcu, MaximumKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kEnflame, MaximumKernelGcu)
 
 at::Tensor MinimumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -501,7 +501,7 @@ at::Tensor MinimumKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kGcu, MinimumKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kEnflame, MinimumKernelGcu)
 
 at::Tensor RemainderTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -523,7 +523,7 @@ at::Tensor RemainderTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Backend::kGcu, RemainderTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Backend::kEnflame, RemainderTensorKernelGcu)
 
 at::Tensor FmodTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -545,7 +545,7 @@ at::Tensor FmodTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kGcu, FmodTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(FmodTensorFn, fmod_tensor_dispatcher, Backend::kEnflame, FmodTensorKernelGcu)
 
 at::Tensor PowTensorTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -567,7 +567,7 @@ at::Tensor PowTensorTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kGcu, PowTensorTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kEnflame, PowTensorTensorKernelGcu)
 
 at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   auto result_dtype = at::result_type(self, other);
@@ -590,7 +590,7 @@ at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kGcu, AddTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kEnflame, AddTensorKernelGcu)
 
 at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   auto result_dtype = at::result_type(self, other);
@@ -613,7 +613,7 @@ at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kGcu, SubTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kEnflame, SubTensorKernelGcu)
 
 at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -657,7 +657,7 @@ at::Tensor& MulOutKernelGcu(const at::Tensor& self, const at::Tensor& other, at:
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kGcu, MulOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kEnflame, MulOutKernelGcu)
 
 at::Tensor& AddOutKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -702,7 +702,7 @@ at::Tensor& AddOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kGcu, AddOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kEnflame, AddOutKernelGcu)
 
 at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -747,7 +747,7 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kGcu, SubOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kEnflame, SubOutKernelGcu)
 
 at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -769,7 +769,7 @@ at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kGcu, EqTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kEnflame, EqTensorKernelGcu)
 
 at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -791,7 +791,7 @@ at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kGcu, NeTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kEnflame, NeTensorKernelGcu)
 
 at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -813,7 +813,7 @@ at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kGcu, LtTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kEnflame, LtTensorKernelGcu)
 
 at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -835,7 +835,7 @@ at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kGcu, GtTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kEnflame, GtTensorKernelGcu)
 
 at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -857,7 +857,7 @@ at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kGcu, LeTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kEnflame, LeTensorKernelGcu)
 
 at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -879,7 +879,7 @@ at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kGcu, GeTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kEnflame, GeTensorKernelGcu)
 
 at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -901,7 +901,7 @@ at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kGcu, LogicalAndKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kEnflame, LogicalAndKernelGcu)
 
 at::Tensor LogicalOrKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   auto result_dtype = at::result_type(self, other);
@@ -923,7 +923,7 @@ at::Tensor LogicalOrKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogicalOrFn, logical_or_dispatcher, Backend::kGcu, LogicalOrKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LogicalOrFn, logical_or_dispatcher, Backend::kEnflame, LogicalOrKernelGcu)
 
 at::Tensor PowTensorScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -941,7 +941,7 @@ at::Tensor PowTensorScalarKernelGcu(const at::Tensor& self, const at::Scalar& ot
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kGcu, PowTensorScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kEnflame, PowTensorScalarKernelGcu)
 
 at::Tensor RemainderScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -959,7 +959,7 @@ at::Tensor RemainderScalarKernelGcu(const at::Tensor& self, const at::Scalar& ot
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RemainderScalarFn, remainder_scalar_dispatcher, Backend::kGcu, RemainderScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(RemainderScalarFn, remainder_scalar_dispatcher, Backend::kEnflame, RemainderScalarKernelGcu)
 
 at::Tensor FmodScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -977,7 +977,7 @@ at::Tensor FmodScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FmodScalarFn, fmod_scalar_dispatcher, Backend::kGcu, FmodScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(FmodScalarFn, fmod_scalar_dispatcher, Backend::kEnflame, FmodScalarKernelGcu)
 
 at::Tensor MulScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -997,7 +997,7 @@ at::Tensor MulScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kGcu, MulScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kEnflame, MulScalarKernelGcu)
 
 at::Tensor DivScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1017,7 +1017,7 @@ at::Tensor DivScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kGcu, DivScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kEnflame, DivScalarKernelGcu)
 
 at::Tensor AddScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1039,7 +1039,7 @@ at::Tensor AddScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kGcu, AddScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kEnflame, AddScalarKernelGcu)
 
 at::Tensor SubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1061,7 +1061,7 @@ at::Tensor SubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kGcu, SubScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kEnflame, SubScalarKernelGcu)
 
 at::Tensor RsubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1083,7 +1083,7 @@ at::Tensor RsubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RsubScalarFn, rsub_scalar_dispatcher, Backend::kGcu, RsubScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(RsubScalarFn, rsub_scalar_dispatcher, Backend::kEnflame, RsubScalarKernelGcu)
 
 at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
   auto result_dtype = at::result_type(self, other);
@@ -1106,7 +1106,7 @@ at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RsubTensorFn, rsub_tensor_dispatcher, Backend::kGcu, RsubTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(RsubTensorFn, rsub_tensor_dispatcher, Backend::kEnflame, RsubTensorKernelGcu)
 
 at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
@@ -1128,7 +1128,7 @@ at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kGcu, EqScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kEnflame, EqScalarKernelGcu)
 
 at::Tensor NeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
@@ -1150,7 +1150,7 @@ at::Tensor NeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kGcu, NeScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kEnflame, NeScalarKernelGcu)
 
 at::Tensor LtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
@@ -1172,7 +1172,7 @@ at::Tensor LtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kGcu, LtScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kEnflame, LtScalarKernelGcu)
 
 at::Tensor GtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
@@ -1194,7 +1194,7 @@ at::Tensor GtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kGcu, GtScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kEnflame, GtScalarKernelGcu)
 
 at::Tensor LeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
@@ -1216,7 +1216,7 @@ at::Tensor LeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kGcu, LeScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kEnflame, LeScalarKernelGcu)
 
 at::Tensor GeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   auto result_dtype = at::result_type(self, other);
@@ -1238,7 +1238,7 @@ at::Tensor GeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeScalarFn, ge_scalar_dispatcher, Backend::kGcu, GeScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(GeScalarFn, ge_scalar_dispatcher, Backend::kEnflame, GeScalarKernelGcu)
 
 at::Tensor MmKernelGcu(const at::Tensor& self, const at::Tensor& mat2) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1256,7 +1256,7 @@ at::Tensor MmKernelGcu(const at::Tensor& self, const at::Tensor& mat2) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kGcu, MmKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kEnflame, MmKernelGcu)
 
 at::Tensor BmmKernelGcu(const at::Tensor& self, const at::Tensor& mat2) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
@@ -1274,7 +1274,7 @@ at::Tensor BmmKernelGcu(const at::Tensor& self, const at::Tensor& mat2) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kGcu, BmmKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kEnflame, BmmKernelGcu)
 
 at::Tensor& MmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -1308,7 +1308,7 @@ at::Tensor& MmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::T
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MmOutFn, mm_out_dispatcher, Backend::kGcu, MmOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MmOutFn, mm_out_dispatcher, Backend::kEnflame, MmOutKernelGcu)
 
 at::Tensor& BmmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -1342,7 +1342,7 @@ at::Tensor& BmmOutKernelGcu(const at::Tensor& self, const at::Tensor& mat2, at::
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(BmmOutFn, bmm_out_dispatcher, Backend::kGcu, BmmOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(BmmOutFn, bmm_out_dispatcher, Backend::kEnflame, BmmOutKernelGcu)
 
 at::Tensor SumDimIntlistKernelGcu(
     const at::Tensor& self,
@@ -1386,7 +1386,7 @@ at::Tensor SumDimIntlistKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kGcu, SumDimIntlistKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kEnflame, SumDimIntlistKernelGcu)
 
 at::Tensor MeanDimKernelGcu(
     const at::Tensor& self,
@@ -1430,7 +1430,7 @@ at::Tensor MeanDimKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kGcu, MeanDimKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kEnflame, MeanDimKernelGcu)
 
 at::Tensor SumKernelGcu(
     const at::Tensor& self, ::std::optional<at::ScalarType> dtype) {
@@ -1454,7 +1454,7 @@ at::Tensor SumKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SumFn, sum_dispatcher, Backend::kGcu, SumKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SumFn, sum_dispatcher, Backend::kEnflame, SumKernelGcu)
 
 at::Tensor MeanKernelGcu(
     const at::Tensor& self, ::std::optional<at::ScalarType> dtype) {
@@ -1478,7 +1478,7 @@ at::Tensor MeanKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MeanFn, mean_dispatcher, Backend::kGcu, MeanKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MeanFn, mean_dispatcher, Backend::kEnflame, MeanKernelGcu)
 
 at::Tensor AmaxKernelGcu(
     const at::Tensor& self,
@@ -1514,7 +1514,7 @@ at::Tensor AmaxKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kGcu, AmaxKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kEnflame, AmaxKernelGcu)
 
 at::Tensor AminKernelGcu(
     const at::Tensor& self,
@@ -1550,7 +1550,7 @@ at::Tensor AminKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kGcu, AminKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kEnflame, AminKernelGcu)
 
 at::Tensor LinalgVectorNormKernelGcu(
     const at::Tensor& self,
@@ -1598,7 +1598,7 @@ at::Tensor LinalgVectorNormKernelGcu(
   return out.reshape(out_shape);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LinalgVectorNormFn, linalg_vector_norm_dispatcher, Backend::kGcu, LinalgVectorNormKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(LinalgVectorNormFn, linalg_vector_norm_dispatcher, Backend::kEnflame, LinalgVectorNormKernelGcu)
 
 at::Tensor TrilKernelGcu(const at::Tensor& self, int64_t k) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -1612,7 +1612,7 @@ at::Tensor TrilKernelGcu(const at::Tensor& self, int64_t k) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TrilFn, tril_dispatcher, Backend::kGcu, TrilKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(TrilFn, tril_dispatcher, Backend::kEnflame, TrilKernelGcu)
 
 at::Tensor TriuKernelGcu(const at::Tensor& self, int64_t k) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -1626,7 +1626,7 @@ at::Tensor TriuKernelGcu(const at::Tensor& self, int64_t k) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kGcu, TriuKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kEnflame, TriuKernelGcu)
 
 at::Tensor FlipKernelGcu(const at::Tensor& self, at::IntArrayRef dims) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -1645,7 +1645,7 @@ at::Tensor FlipKernelGcu(const at::Tensor& self, at::IntArrayRef dims) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FlipFn, flip_dispatcher, Backend::kGcu, FlipKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(FlipFn, flip_dispatcher, Backend::kEnflame, FlipKernelGcu)
 
 at::Tensor GeluKernelGcu(const at::Tensor& self, c10::string_view approximate) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -1660,7 +1660,7 @@ at::Tensor GeluKernelGcu(const at::Tensor& self, c10::string_view approximate) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kGcu, GeluKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kEnflame, GeluKernelGcu)
 
 at::Tensor PrivSoftmaxKernelGcu(const at::Tensor& self, int64_t dim, bool half_to_float) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -1676,7 +1676,7 @@ at::Tensor PrivSoftmaxKernelGcu(const at::Tensor& self, int64_t dim, bool half_t
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kGcu, PrivSoftmaxKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kEnflame, PrivSoftmaxKernelGcu)
 
 at::Tensor ClampKernelGcu(
     const at::Tensor& self,
@@ -1703,7 +1703,7 @@ at::Tensor ClampKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kGcu, ClampKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kEnflame, ClampKernelGcu)
 
 at::Tensor AddmmKernelGcu(
     const at::Tensor& self,
@@ -1742,7 +1742,7 @@ at::Tensor AddmmKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kGcu, AddmmKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kEnflame, AddmmKernelGcu)
 
 at::Tensor& AddmmOutKernelGcu(
     const at::Tensor& self,
@@ -1797,7 +1797,7 @@ at::Tensor& AddmmOutKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddmmOutFn, addmm_out_dispatcher, Backend::kGcu, AddmmOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AddmmOutFn, addmm_out_dispatcher, Backend::kEnflame, AddmmOutKernelGcu)
 
 at::Tensor CatKernelGcu(const at::ITensorListRef& tensors, int64_t dim) {
   std::vector<at::Tensor> inputs;
@@ -1845,7 +1845,7 @@ at::Tensor CatKernelGcu(const at::ITensorListRef& tensors, int64_t dim) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kGcu, CatKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kEnflame, CatKernelGcu)
 
 at::Tensor ZerosLikeKernelGcu(
     const at::Tensor& self,
@@ -1891,7 +1891,7 @@ at::Tensor ZerosLikeKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kGcu, ZerosLikeKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kEnflame, ZerosLikeKernelGcu)
 
 at::Tensor OnesLikeKernelGcu(
     const at::Tensor& self,
@@ -1937,7 +1937,7 @@ at::Tensor OnesLikeKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(OnesLikeFn, ones_like_dispatcher, Backend::kGcu, OnesLikeKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(OnesLikeFn, ones_like_dispatcher, Backend::kEnflame, OnesLikeKernelGcu)
 
 at::Tensor NewOnesKernelGcu(
     const at::Tensor& self,
@@ -1972,7 +1972,7 @@ at::Tensor NewOnesKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NewOnesFn, new_ones_dispatcher, Backend::kGcu, NewOnesKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NewOnesFn, new_ones_dispatcher, Backend::kEnflame, NewOnesKernelGcu)
 
 at::Tensor ArangeKernelGcu(
     const at::Scalar& end,
@@ -2021,7 +2021,7 @@ at::Tensor ArangeKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArangeFn, arange_dispatcher, Backend::kGcu, ArangeKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ArangeFn, arange_dispatcher, Backend::kEnflame, ArangeKernelGcu)
 
 at::Tensor ArangeStartKernelGcu(
     const at::Scalar& start, const at::Scalar& end,
@@ -2070,7 +2070,7 @@ at::Tensor ArangeStartKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArangeStartFn, arange_start_dispatcher, Backend::kGcu, ArangeStartKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ArangeStartFn, arange_start_dispatcher, Backend::kEnflame, ArangeStartKernelGcu)
 
 at::Tensor ArangeStartStepKernelGcu(
     const at::Scalar& start, const at::Scalar& end, const at::Scalar& step,
@@ -2119,7 +2119,7 @@ at::Tensor ArangeStartStepKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArangeStartStepFn, arange_start_step_dispatcher, Backend::kGcu, ArangeStartStepKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ArangeStartStepFn, arange_start_step_dispatcher, Backend::kEnflame, ArangeStartStepKernelGcu)
 
 at::Tensor& ZeroInplaceKernelGcu(at::Tensor& self) {
   if (self.numel() == 0) {
@@ -2137,7 +2137,7 @@ at::Tensor& ZeroInplaceKernelGcu(at::Tensor& self) {
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kGcu, ZeroInplaceKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kEnflame, ZeroInplaceKernelGcu)
 
 at::Tensor& FillInplaceScalarKernelGcu(at::Tensor& self, const at::Scalar& value) {
   if (self.numel() == 0) {
@@ -2157,7 +2157,7 @@ at::Tensor& FillInplaceScalarKernelGcu(at::Tensor& self, const at::Scalar& value
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kGcu, FillInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kEnflame, FillInplaceScalarKernelGcu)
 
 at::Tensor& FillInplaceTensorKernelGcu(at::Tensor& self, const at::Tensor& value) {
   if (self.numel() == 0) {
@@ -2178,7 +2178,7 @@ at::Tensor& FillInplaceTensorKernelGcu(at::Tensor& self, const at::Tensor& value
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(FillInplaceTensorFn, fill_inplace_tensor_dispatcher, Backend::kGcu, FillInplaceTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(FillInplaceTensorFn, fill_inplace_tensor_dispatcher, Backend::kEnflame, FillInplaceTensorKernelGcu)
 
 at::Tensor& MaskedFillInplaceScalarKernelGcu(at::Tensor& self, const at::Tensor& mask, const at::Scalar& value) {
   if (self.numel() == 0) {
@@ -2200,7 +2200,7 @@ at::Tensor& MaskedFillInplaceScalarKernelGcu(at::Tensor& self, const at::Tensor&
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceScalarFn, masked_fill_inplace_scalar_dispatcher, Backend::kGcu, MaskedFillInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceScalarFn, masked_fill_inplace_scalar_dispatcher, Backend::kEnflame, MaskedFillInplaceScalarKernelGcu)
 
 at::Tensor& MaskedFillInplaceTensorKernelGcu(at::Tensor& self, const at::Tensor& mask, const at::Tensor& value) {
   if (self.numel() == 0) {
@@ -2224,7 +2224,7 @@ at::Tensor& MaskedFillInplaceTensorKernelGcu(at::Tensor& self, const at::Tensor&
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tensor_dispatcher, Backend::kGcu, MaskedFillInplaceTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tensor_dispatcher, Backend::kEnflame, MaskedFillInplaceTensorKernelGcu)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelGcu(
     const at::Tensor& input,
@@ -2289,7 +2289,7 @@ REGISTER_IMPL_TO_DISPATCHER(MaskedFillInplaceTensorFn, masked_fill_inplace_tenso
   return {out, mean.reshape(pt_stat), rstd.reshape(pt_stat)};
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kGcu, NativeLayerNormKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kEnflame, NativeLayerNormKernelGcu)
 
 at::Tensor PrivSoftmaxBackwardDataKernelGcu(
     const at::Tensor& grad_output,
@@ -2315,7 +2315,7 @@ at::Tensor PrivSoftmaxBackwardDataKernelGcu(
   return result;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kGcu, PrivSoftmaxBackwardDataKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kEnflame, PrivSoftmaxBackwardDataKernelGcu)
 
 at::Tensor SiluBackwardKernelGcu(
     const at::Tensor& grad_output,
@@ -2335,7 +2335,7 @@ at::Tensor SiluBackwardKernelGcu(
   return grad_input;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kGcu, SiluBackwardKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kEnflame, SiluBackwardKernelGcu)
 
 at::Tensor MseLossKernelGcu(
     const at::Tensor& self,
@@ -2359,7 +2359,7 @@ at::Tensor MseLossKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MseLossFn, mse_loss_dispatcher, Backend::kGcu, MseLossKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MseLossFn, mse_loss_dispatcher, Backend::kEnflame, MseLossKernelGcu)
 
 at::Tensor MseLossBackwardKernelGcu(
     const at::Tensor& grad_output,
@@ -2390,7 +2390,7 @@ at::Tensor MseLossBackwardKernelGcu(
   return grad_input;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MseLossBackwardFn, mse_loss_backward_dispatcher, Backend::kGcu, MseLossBackwardKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(MseLossBackwardFn, mse_loss_backward_dispatcher, Backend::kEnflame, MseLossBackwardKernelGcu)
 
 void PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelGcu(at::TensorList self, at::Tensor& found_inf, const at::Tensor& inv_scale) {
   if (self.empty() || !gcu::IsForeachEligible(self) ||
@@ -2425,7 +2425,7 @@ void PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelGcu(at::TensorList self,
   for (size_t i = 0; i < self.size(); ++i) self[i].copy_(out[i]);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleInplaceFn, priv_amp_foreach_non_finite_check_and_unscale_inplace_dispatcher, Backend::kGcu, PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleInplaceFn, priv_amp_foreach_non_finite_check_and_unscale_inplace_dispatcher, Backend::kEnflame, PrivAmpForeachNonFiniteCheckAndUnscaleInplaceKernelGcu)
 
 void PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelGcu(at::TensorList self, at::Tensor& found_inf,
              const at::Tensor& inv_scale, at::TensorList out) {
@@ -2470,7 +2470,7 @@ void PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelGcu(at::TensorList self, at:
       t_inv_scale.get());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleOutFn, priv_amp_foreach_non_finite_check_and_unscale_out_dispatcher, Backend::kGcu, PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PrivAmpForeachNonFiniteCheckAndUnscaleOutFn, priv_amp_foreach_non_finite_check_and_unscale_out_dispatcher, Backend::kEnflame, PrivAmpForeachNonFiniteCheckAndUnscaleOutKernelGcu)
 
 at::Tensor ConvolutionOverrideableKernelGcu(
     const at::Tensor& input,
@@ -2523,7 +2523,7 @@ at::Tensor ConvolutionOverrideableKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kGcu, ConvolutionOverrideableKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kEnflame, ConvolutionOverrideableKernelGcu)
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> ConvolutionBackwardOverrideableKernelGcu(
     const at::Tensor& grad_output,
@@ -2549,7 +2549,7 @@ REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_
           to_dev(std::get<2>(r))};
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ConvolutionBackwardOverrideableFn, convolution_backward_overrideable_dispatcher, Backend::kGcu, ConvolutionBackwardOverrideableKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionBackwardOverrideableFn, convolution_backward_overrideable_dispatcher, Backend::kEnflame, ConvolutionBackwardOverrideableKernelGcu)
 
 at::Tensor IndexSelectKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index) {
   // ATen raises IndexError for an out-of-range dim and for an index that is not
@@ -2584,7 +2584,7 @@ at::Tensor IndexSelectKernelGcu(const at::Tensor& self, int64_t dim, const at::T
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kGcu, IndexSelectKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kEnflame, IndexSelectKernelGcu)
 
 at::Tensor& IndexSelectOutKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -2601,7 +2601,7 @@ at::Tensor& IndexSelectOutKernelGcu(const at::Tensor& self, int64_t dim, const a
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexSelectOutFn, index_select_out_dispatcher, Backend::kGcu, IndexSelectOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectOutFn, index_select_out_dispatcher, Backend::kEnflame, IndexSelectOutKernelGcu)
 
 at::Tensor& IndexFillInplaceIntScalarKernelGcu(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value) {
   // Each way ATen rejects this call has a message worth keeping, and only the
@@ -2639,7 +2639,7 @@ at::Tensor& IndexFillInplaceIntScalarKernelGcu(at::Tensor& self, int64_t dim, co
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexFillInplaceIntScalarFn, index_fill_inplace_int_scalar_dispatcher, Backend::kGcu, IndexFillInplaceIntScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexFillInplaceIntScalarFn, index_fill_inplace_int_scalar_dispatcher, Backend::kEnflame, IndexFillInplaceIntScalarKernelGcu)
 
 at::Tensor& IndexFillInplaceIntTensorKernelGcu(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value) {
   const bool dim_ok =
@@ -2671,7 +2671,7 @@ at::Tensor& IndexFillInplaceIntTensorKernelGcu(at::Tensor& self, int64_t dim, co
   return self;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexFillInplaceIntTensorFn, index_fill_inplace_int_tensor_dispatcher, Backend::kGcu, IndexFillInplaceIntTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexFillInplaceIntTensorFn, index_fill_inplace_int_tensor_dispatcher, Backend::kEnflame, IndexFillInplaceIntTensorKernelGcu)
 
 at::Tensor IndexFillIntScalarKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value) {
   auto result = self.clone();
@@ -2679,7 +2679,7 @@ at::Tensor IndexFillIntScalarKernelGcu(const at::Tensor& self, int64_t dim, cons
   return result;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexFillIntScalarFn, index_fill_int_scalar_dispatcher, Backend::kGcu, IndexFillIntScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntScalarFn, index_fill_int_scalar_dispatcher, Backend::kEnflame, IndexFillIntScalarKernelGcu)
 
 at::Tensor& IndexFillIntScalarOutKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -2697,7 +2697,7 @@ at::Tensor& IndexFillIntScalarOutKernelGcu(const at::Tensor& self, int64_t dim, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexFillIntScalarOutFn, index_fill_int_scalar_out_dispatcher, Backend::kGcu, IndexFillIntScalarOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntScalarOutFn, index_fill_int_scalar_out_dispatcher, Backend::kEnflame, IndexFillIntScalarOutKernelGcu)
 
 at::Tensor IndexFillIntTensorKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value) {
   auto result = self.clone();
@@ -2705,7 +2705,7 @@ at::Tensor IndexFillIntTensorKernelGcu(const at::Tensor& self, int64_t dim, cons
   return result;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorFn, index_fill_int_tensor_dispatcher, Backend::kGcu, IndexFillIntTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorFn, index_fill_int_tensor_dispatcher, Backend::kEnflame, IndexFillIntTensorKernelGcu)
 
 at::Tensor& IndexFillIntTensorOutKernelGcu(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -2723,7 +2723,7 @@ at::Tensor& IndexFillIntTensorOutKernelGcu(const at::Tensor& self, int64_t dim, 
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorOutFn, index_fill_int_tensor_out_dispatcher, Backend::kGcu, IndexFillIntTensorOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexFillIntTensorOutFn, index_fill_int_tensor_out_dispatcher, Backend::kEnflame, IndexFillIntTensorOutKernelGcu)
 
 at::Tensor EmbeddingKernelGcu(const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
   // padding_idx, scale_grad_by_freq and sparse are gradient-only arguments in
@@ -2764,7 +2764,7 @@ at::Tensor EmbeddingKernelGcu(const at::Tensor& weight, const at::Tensor& indice
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kGcu, EmbeddingKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kEnflame, EmbeddingKernelGcu)
 
 // The same guard _OUT_DEVICE_GUARD installs, spelled out because that snippet
 // names `self` and this kernel's first parameter is `weight`. See its comment
@@ -2785,7 +2785,7 @@ at::Tensor& EmbeddingOutKernelGcu(const at::Tensor& weight, const at::Tensor& in
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EmbeddingOutFn, embedding_out_dispatcher, Backend::kGcu, EmbeddingOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingOutFn, embedding_out_dispatcher, Backend::kEnflame, EmbeddingOutKernelGcu)
 
 at::Tensor EmbeddingDenseBackwardKernelGcu(const at::Tensor& grad, const at::Tensor& indices, int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq) {
   // A padding_idx outside [-1, num_weights) has no vendor equivalent to lean
@@ -2832,7 +2832,7 @@ at::Tensor EmbeddingDenseBackwardKernelGcu(const at::Tensor& grad, const at::Ten
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kGcu, EmbeddingDenseBackwardKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardFn, embedding_dense_backward_dispatcher, Backend::kEnflame, EmbeddingDenseBackwardKernelGcu)
 
 // The same guard _OUT_DEVICE_GUARD installs, spelled out because that snippet
 // names `self` and this kernel's first parameter is `grad`. See its comment for
@@ -2854,7 +2854,7 @@ at::Tensor& EmbeddingDenseBackwardOutKernelGcu(const at::Tensor& grad, const at:
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardOutFn, embedding_dense_backward_out_dispatcher, Backend::kGcu, EmbeddingDenseBackwardOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingDenseBackwardOutFn, embedding_dense_backward_out_dispatcher, Backend::kEnflame, EmbeddingDenseBackwardOutKernelGcu)
 
 at::Tensor PrivUpsampleNearestExact2dKernelGcu(const at::Tensor& self, at::IntArrayRef output_size, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
   if (self.dim() != 4 || output_size.size() != 2 || !scales_h.has_value() ||
@@ -2879,7 +2879,7 @@ at::Tensor PrivUpsampleNearestExact2dKernelGcu(const at::Tensor& self, at::IntAr
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact2dFn, priv_upsample_nearest_exact2d_dispatcher, Backend::kGcu, PrivUpsampleNearestExact2dKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact2dFn, priv_upsample_nearest_exact2d_dispatcher, Backend::kEnflame, PrivUpsampleNearestExact2dKernelGcu)
 
 at::Tensor& PrivUpsampleNearestExact2dOutKernelGcu(const at::Tensor& self, at::IntArrayRef output_size, ::std::optional<double> scales_h, ::std::optional<double> scales_w, at::Tensor& out) {
   gcu::TopsDeviceGuard out_guard(self);
@@ -2898,7 +2898,7 @@ at::Tensor& PrivUpsampleNearestExact2dOutKernelGcu(const at::Tensor& self, at::I
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact2dOutFn, priv_upsample_nearest_exact2d_out_dispatcher, Backend::kGcu, PrivUpsampleNearestExact2dOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(PrivUpsampleNearestExact2dOutFn, priv_upsample_nearest_exact2d_out_dispatcher, Backend::kEnflame, PrivUpsampleNearestExact2dOutKernelGcu)
 
 void ForeachAddInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& scalar) {
   if (!gcu::IsForeachEligible(self)) {
@@ -2911,7 +2911,7 @@ void ForeachAddInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   EXEC_TOPSATEN_CMD(topsatenForeachAdd, self[0], t_out.get(), t_self.get(), t_scalar);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceScalarFn, foreach_add_inplace_scalar_dispatcher, Backend::kGcu, ForeachAddInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceScalarFn, foreach_add_inplace_scalar_dispatcher, Backend::kEnflame, ForeachAddInplaceScalarKernelGcu)
 
 void ForeachAddInplaceListKernelGcu(
     at::TensorList self,
@@ -2932,7 +2932,7 @@ void ForeachAddInplaceListKernelGcu(
       topsatenForeachAdd, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceListFn, foreach_add_inplace_list_dispatcher, Backend::kGcu, ForeachAddInplaceListKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceListFn, foreach_add_inplace_list_dispatcher, Backend::kEnflame, ForeachAddInplaceListKernelGcu)
 
 void ForeachAddInplaceTensorKernelGcu(
     at::TensorList self,
@@ -2957,7 +2957,7 @@ void ForeachAddInplaceTensorKernelGcu(
       topsatenForeachAdd, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceTensorFn, foreach_add_inplace_tensor_dispatcher, Backend::kGcu, ForeachAddInplaceTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddInplaceTensorFn, foreach_add_inplace_tensor_dispatcher, Backend::kEnflame, ForeachAddInplaceTensorKernelGcu)
 
 void ForeachSubInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& scalar) {
   if (!gcu::IsForeachEligible(self)) {
@@ -2970,7 +2970,7 @@ void ForeachSubInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   EXEC_TOPSATEN_CMD(topsatenForeachSub, self[0], t_out.get(), t_self.get(), t_scalar);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachSubInplaceScalarFn, foreach_sub_inplace_scalar_dispatcher, Backend::kGcu, ForeachSubInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachSubInplaceScalarFn, foreach_sub_inplace_scalar_dispatcher, Backend::kEnflame, ForeachSubInplaceScalarKernelGcu)
 
 void ForeachSubInplaceListKernelGcu(
     at::TensorList self,
@@ -2991,7 +2991,7 @@ void ForeachSubInplaceListKernelGcu(
       topsatenForeachSub, self[0], t_out.get(), t_self.get(), t_other.get(), t_alpha);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachSubInplaceListFn, foreach_sub_inplace_list_dispatcher, Backend::kGcu, ForeachSubInplaceListKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachSubInplaceListFn, foreach_sub_inplace_list_dispatcher, Backend::kEnflame, ForeachSubInplaceListKernelGcu)
 
 void ForeachMulInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& scalar) {
   if (!gcu::IsForeachEligible(self)) {
@@ -3004,7 +3004,7 @@ void ForeachMulInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   EXEC_TOPSATEN_CMD(topsatenForeachMul, self[0], t_out.get(), t_self.get(), t_scalar);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceScalarFn, foreach_mul_inplace_scalar_dispatcher, Backend::kGcu, ForeachMulInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceScalarFn, foreach_mul_inplace_scalar_dispatcher, Backend::kEnflame, ForeachMulInplaceScalarKernelGcu)
 
 void ForeachMulInplaceListKernelGcu(at::TensorList self, at::TensorList other) {
   if (!gcu::IsForeachEligible(self) || !gcu::IsForeachEligible(other) ||
@@ -3019,7 +3019,7 @@ void ForeachMulInplaceListKernelGcu(at::TensorList self, at::TensorList other) {
       topsatenForeachMul, self[0], t_out.get(), t_self.get(), t_other.get());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceListFn, foreach_mul_inplace_list_dispatcher, Backend::kGcu, ForeachMulInplaceListKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachMulInplaceListFn, foreach_mul_inplace_list_dispatcher, Backend::kEnflame, ForeachMulInplaceListKernelGcu)
 
 void ForeachDivInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& scalar) {
   if (!gcu::IsForeachEligible(self)) {
@@ -3032,7 +3032,7 @@ void ForeachDivInplaceScalarKernelGcu(at::TensorList self, const at::Scalar& sca
   EXEC_TOPSATEN_CMD(topsatenForeachDiv, self[0], t_out.get(), t_self.get(), t_scalar);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarFn, foreach_div_inplace_scalar_dispatcher, Backend::kGcu, ForeachDivInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarFn, foreach_div_inplace_scalar_dispatcher, Backend::kEnflame, ForeachDivInplaceScalarKernelGcu)
 
 void ForeachDivInplaceListKernelGcu(at::TensorList self, at::TensorList other) {
   if (!gcu::IsForeachEligible(self) || !gcu::IsForeachEligible(other) ||
@@ -3047,7 +3047,7 @@ void ForeachDivInplaceListKernelGcu(at::TensorList self, at::TensorList other) {
       topsatenForeachDiv, self[0], t_out.get(), t_self.get(), t_other.get());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceListFn, foreach_div_inplace_list_dispatcher, Backend::kGcu, ForeachDivInplaceListKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceListFn, foreach_div_inplace_list_dispatcher, Backend::kEnflame, ForeachDivInplaceListKernelGcu)
 
 void ForeachDivInplaceScalarlistKernelGcu(at::TensorList self, at::ArrayRef<at::Scalar> scalars) {
   if (!gcu::IsForeachEligible(self) || scalars.size() != self.size()) {
@@ -3065,7 +3065,7 @@ void ForeachDivInplaceScalarlistKernelGcu(at::TensorList self, at::ArrayRef<at::
   EXEC_TOPSATEN_CMD(topsatenForeachDiv, self[0], t_out.get(), t_self.get(), t_scalars);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarlistFn, foreach_div_inplace_scalarlist_dispatcher, Backend::kGcu, ForeachDivInplaceScalarlistKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachDivInplaceScalarlistFn, foreach_div_inplace_scalarlist_dispatcher, Backend::kEnflame, ForeachDivInplaceScalarlistKernelGcu)
 
 void ForeachNegInplaceKernelGcu(at::TensorList self) {
   if (!gcu::IsForeachEligible(self)) {
@@ -3077,7 +3077,7 @@ void ForeachNegInplaceKernelGcu(at::TensorList self) {
   EXEC_TOPSATEN_CMD(topsatenForeachNeg, self[0], t_out.get(), t_self.get());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachNegInplaceFn, foreach_neg_inplace_dispatcher, Backend::kGcu, ForeachNegInplaceKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachNegInplaceFn, foreach_neg_inplace_dispatcher, Backend::kEnflame, ForeachNegInplaceKernelGcu)
 
 void ForeachSqrtInplaceKernelGcu(at::TensorList self) {
   if (!gcu::IsForeachEligible(self)) {
@@ -3089,7 +3089,7 @@ void ForeachSqrtInplaceKernelGcu(at::TensorList self) {
   EXEC_TOPSATEN_CMD(topsatenForeachSqrt, self[0], t_out.get(), t_self.get());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachSqrtInplaceFn, foreach_sqrt_inplace_dispatcher, Backend::kGcu, ForeachSqrtInplaceKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachSqrtInplaceFn, foreach_sqrt_inplace_dispatcher, Backend::kEnflame, ForeachSqrtInplaceKernelGcu)
 
 ::std::vector<at::Tensor> ForeachSqrtKernelGcu(at::TensorList self) {
   if (!gcu::IsForeachEligible(self)) {
@@ -3109,7 +3109,7 @@ REGISTER_IMPL_TO_DISPATCHER(ForeachSqrtInplaceFn, foreach_sqrt_inplace_dispatche
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachSqrtFn, foreach_sqrt_dispatcher, Backend::kGcu, ForeachSqrtKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachSqrtFn, foreach_sqrt_dispatcher, Backend::kEnflame, ForeachSqrtKernelGcu)
 
 void ForeachLerpInplaceScalarKernelGcu(
     at::TensorList self,
@@ -3130,7 +3130,7 @@ void ForeachLerpInplaceScalarKernelGcu(
       topsatenForeachLerp, self[0], t_out.get(), t_self.get(), t_end.get(), t_weight);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachLerpInplaceScalarFn, foreach_lerp_inplace_scalar_dispatcher, Backend::kGcu, ForeachLerpInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachLerpInplaceScalarFn, foreach_lerp_inplace_scalar_dispatcher, Backend::kEnflame, ForeachLerpInplaceScalarKernelGcu)
 
 void ForeachAddcmulInplaceScalarKernelGcu(
     at::TensorList self,
@@ -3155,7 +3155,7 @@ void ForeachAddcmulInplaceScalarKernelGcu(
       t_value);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarFn, foreach_addcmul_inplace_scalar_dispatcher, Backend::kGcu, ForeachAddcmulInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarFn, foreach_addcmul_inplace_scalar_dispatcher, Backend::kEnflame, ForeachAddcmulInplaceScalarKernelGcu)
 
 void ForeachAddcmulInplaceScalarlistKernelGcu(
     at::TensorList self,
@@ -3185,7 +3185,7 @@ void ForeachAddcmulInplaceScalarlistKernelGcu(
       t_scalars);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarlistFn, foreach_addcmul_inplace_scalarlist_dispatcher, Backend::kGcu, ForeachAddcmulInplaceScalarlistKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddcmulInplaceScalarlistFn, foreach_addcmul_inplace_scalarlist_dispatcher, Backend::kEnflame, ForeachAddcmulInplaceScalarlistKernelGcu)
 
 void ForeachAddcdivInplaceScalarKernelGcu(
     at::TensorList self,
@@ -3210,7 +3210,7 @@ void ForeachAddcdivInplaceScalarKernelGcu(
       t_value);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarFn, foreach_addcdiv_inplace_scalar_dispatcher, Backend::kGcu, ForeachAddcdivInplaceScalarKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarFn, foreach_addcdiv_inplace_scalar_dispatcher, Backend::kEnflame, ForeachAddcdivInplaceScalarKernelGcu)
 
 void ForeachAddcdivInplaceScalarlistKernelGcu(
     at::TensorList self,
@@ -3240,7 +3240,7 @@ void ForeachAddcdivInplaceScalarlistKernelGcu(
       t_scalars);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_inplace_scalarlist_dispatcher, Backend::kGcu, ForeachAddcdivInplaceScalarlistKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(ForeachAddcdivInplaceScalarlistFn, foreach_addcdiv_inplace_scalarlist_dispatcher, Backend::kEnflame, ForeachAddcdivInplaceScalarlistKernelGcu)
 
 at::Tensor WhereSelfKernelGcu(
     const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other) {
@@ -3287,7 +3287,7 @@ at::Tensor WhereSelfKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kGcu, WhereSelfKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kEnflame, WhereSelfKernelGcu)
 
 at::Tensor& WhereSelfOutKernelGcu(
     const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other,
@@ -3349,7 +3349,7 @@ at::Tensor& WhereSelfOutKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(WhereSelfOutFn, where_self_out_dispatcher, Backend::kGcu, WhereSelfOutKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfOutFn, where_self_out_dispatcher, Backend::kEnflame, WhereSelfOutKernelGcu)
 
 at::Tensor AllKernelGcu(const at::Tensor& self) {
   auto operand = gcu::TopsatenAllOperand(self);
@@ -3371,7 +3371,7 @@ at::Tensor AllKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kGcu, AllKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kEnflame, AllKernelGcu)
 
 at::Tensor IndexTensorKernelGcu(
     const at::Tensor& self,
@@ -3404,7 +3404,7 @@ at::Tensor IndexTensorKernelGcu(
   return at::index(self.cpu(), indices_cpu).to(self.device());
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexTensorFn, index_tensor_dispatcher, Backend::kGcu, IndexTensorKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(IndexTensorFn, index_tensor_dispatcher, Backend::kEnflame, IndexTensorKernelGcu)
 
 at::Tensor NonzeroKernelGcu(const at::Tensor& self) {
   auto operand = gcu::TopsatenNonzeroOperand(self);
@@ -3441,7 +3441,7 @@ at::Tensor NonzeroKernelGcu(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NonzeroFn, nonzero_dispatcher, Backend::kGcu, NonzeroKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NonzeroFn, nonzero_dispatcher, Backend::kEnflame, NonzeroKernelGcu)
 
 at::Tensor NonzeroStaticKernelGcu(
     const at::Tensor& self, int64_t size, int64_t fill_value) {
@@ -3502,6 +3502,6 @@ at::Tensor NonzeroStaticKernelGcu(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NonzeroStaticFn, nonzero_static_dispatcher, Backend::kGcu, NonzeroStaticKernelGcu)
+REGISTER_IMPL_TO_DISPATCHER(NonzeroStaticFn, nonzero_static_dispatcher, Backend::kEnflame, NonzeroStaticKernelGcu)
 
 } // namespace at::native::flagos

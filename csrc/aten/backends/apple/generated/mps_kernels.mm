@@ -11,7 +11,7 @@
 // reused, so the per-call cost is a schedule rather than a graph construction;
 // the plan cache that does it is in mps_common.mm. Dispatchers are declared in
 // generated/ops.h (shared with the CUDA codegen); here we only fill the
-// Backend::kMps slot.
+// Backend::kApple slot.
 //
 // Nothing below re-tags a tensor onto DispatchKey::MPS or CUDA: the tensors stay
 // on PrivateUse1 and the runtime's shared MTLBuffers are described to MPSGraph
@@ -99,7 +99,7 @@ at::Tensor AbsKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kMps, AbsKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(AbsFn, abs_dispatcher, Backend::kApple, AbsKernelMps)
 
 
 at::Tensor AddTensorKernelMps(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
@@ -183,7 +183,7 @@ at::Tensor AddTensorKernelMps(const at::Tensor& self, const at::Tensor& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kMps, AddTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kApple, AddTensorKernelMps)
 
 
 at::Tensor SubTensorKernelMps(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
@@ -267,7 +267,7 @@ at::Tensor SubTensorKernelMps(const at::Tensor& self, const at::Tensor& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kMps, SubTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kApple, SubTensorKernelMps)
 
 
 at::Tensor MulTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
@@ -351,7 +351,7 @@ at::Tensor MulTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kMps, MulTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kApple, MulTensorKernelMps)
 
 
 at::Tensor RsubScalarKernelMps(
@@ -392,7 +392,7 @@ at::Tensor RsubScalarKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RsubScalarFn, rsub_scalar_dispatcher, Backend::kMps, RsubScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(RsubScalarFn, rsub_scalar_dispatcher, Backend::kApple, RsubScalarKernelMps)
 
 
 at::Tensor AddScalarKernelMps(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
@@ -427,7 +427,7 @@ at::Tensor AddScalarKernelMps(const at::Tensor& self, const at::Scalar& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kMps, AddScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kApple, AddScalarKernelMps)
 
 
 at::Tensor SubScalarKernelMps(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
@@ -462,7 +462,7 @@ at::Tensor SubScalarKernelMps(const at::Tensor& self, const at::Scalar& other, c
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kMps, SubScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SubScalarFn, sub_scalar_dispatcher, Backend::kApple, SubScalarKernelMps)
 
 
 at::Tensor MulScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
@@ -497,7 +497,7 @@ at::Tensor MulScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kMps, MulScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(MulScalarFn, mul_scalar_dispatcher, Backend::kApple, MulScalarKernelMps)
 
 
 at::Tensor SumDimIntlistKernelMps(
@@ -536,7 +536,7 @@ at::Tensor SumDimIntlistKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kMps, SumDimIntlistKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kApple, SumDimIntlistKernelMps)
 
 
 at::Tensor MeanDimKernelMps(
@@ -591,7 +591,7 @@ at::Tensor MeanDimKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kMps, MeanDimKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kApple, MeanDimKernelMps)
 
 
 at::Tensor AllKernelMps(const at::Tensor& self) {
@@ -637,7 +637,7 @@ at::Tensor AllKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kMps, AllKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(AllFn, all_dispatcher, Backend::kApple, AllKernelMps)
 
 
 at::Tensor AllDimKernelMps(
@@ -685,7 +685,7 @@ at::Tensor AllDimKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AllDimFn, all_dim_dispatcher, Backend::kMps, AllDimKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(AllDimFn, all_dim_dispatcher, Backend::kApple, AllDimKernelMps)
 
 
 at::Tensor AllDimsKernelMps(
@@ -735,7 +735,7 @@ at::Tensor AllDimsKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(AllDimsFn, all_dims_dispatcher, Backend::kMps, AllDimsKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(AllDimsFn, all_dims_dispatcher, Backend::kApple, AllDimsKernelMps)
 
 
 at::Tensor TriuKernelMps(const at::Tensor& self, int64_t diagonal) {
@@ -790,7 +790,7 @@ at::Tensor TriuKernelMps(const at::Tensor& self, int64_t diagonal) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kMps, TriuKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kApple, TriuKernelMps)
 
 
 at::Tensor ArgmaxKernelMps(
@@ -919,7 +919,7 @@ at::Tensor ArgmaxKernelMps(
   return selected;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kMps, ArgmaxKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kApple, ArgmaxKernelMps)
 
 
 at::Tensor LinalgSolveTriangularKernelMps(
@@ -1023,7 +1023,7 @@ at::Tensor LinalgSolveTriangularKernelMps(
   return graph_out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LinalgSolveTriangularFn, linalg_solve_triangular_dispatcher, Backend::kMps, LinalgSolveTriangularKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(LinalgSolveTriangularFn, linalg_solve_triangular_dispatcher, Backend::kApple, LinalgSolveTriangularKernelMps)
 
 
 at::Tensor IndexTensorKernelMps(
@@ -1191,7 +1191,7 @@ at::Tensor IndexTensorKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexTensorFn, index_tensor_dispatcher, Backend::kMps, IndexTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(IndexTensorFn, index_tensor_dispatcher, Backend::kApple, IndexTensorKernelMps)
 
 
 at::Tensor CumsumKernelMps(
@@ -1232,7 +1232,7 @@ at::Tensor CumsumKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kMps, CumsumKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kApple, CumsumKernelMps)
 
 
 at::Tensor SoftplusKernelMps(
@@ -1302,7 +1302,7 @@ at::Tensor SoftplusKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SoftplusFn, softplus_dispatcher, Backend::kMps, SoftplusKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SoftplusFn, softplus_dispatcher, Backend::kApple, SoftplusKernelMps)
 
 
 at::Tensor PrivSoftmaxKernelMps(
@@ -1333,7 +1333,7 @@ at::Tensor PrivSoftmaxKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kMps, PrivSoftmaxKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kApple, PrivSoftmaxKernelMps)
 
 
 at::Tensor NegKernelMps(const at::Tensor& self) {
@@ -1358,7 +1358,7 @@ at::Tensor NegKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kMps, NegKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(NegFn, neg_dispatcher, Backend::kApple, NegKernelMps)
 
 
 at::Tensor SinKernelMps(const at::Tensor& self) {
@@ -1383,7 +1383,7 @@ at::Tensor SinKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kMps, SinKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SinFn, sin_dispatcher, Backend::kApple, SinKernelMps)
 
 
 at::Tensor CosKernelMps(const at::Tensor& self) {
@@ -1408,7 +1408,7 @@ at::Tensor CosKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kMps, CosKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kApple, CosKernelMps)
 
 
 at::Tensor PowTensorScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
@@ -1434,7 +1434,7 @@ at::Tensor PowTensorScalarKernelMps(const at::Tensor& self, const at::Scalar& ot
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kMps, PowTensorScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(PowTensorScalarFn, pow_tensor_scalar_dispatcher, Backend::kApple, PowTensorScalarKernelMps)
 
 
 at::Tensor MmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
@@ -1497,7 +1497,7 @@ at::Tensor MmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kMps, MmKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kApple, MmKernelMps)
 
 
 at::Tensor BmmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
@@ -1560,7 +1560,7 @@ at::Tensor BmmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kMps, BmmKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kApple, BmmKernelMps)
 
 
 at::Tensor ConvolutionOverrideableKernelMps(
@@ -1727,7 +1727,7 @@ at::Tensor ConvolutionOverrideableKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kMps, ConvolutionOverrideableKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kApple, ConvolutionOverrideableKernelMps)
 
 
 at::Tensor SiluKernelMps(const at::Tensor& self) {
@@ -1758,7 +1758,7 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kMps, SiluKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kApple, SiluKernelMps)
 
 
 at::Tensor SiluBackwardKernelMps(const at::Tensor& grad_output, const at::Tensor& self) {
@@ -1816,7 +1816,7 @@ at::Tensor SiluBackwardKernelMps(const at::Tensor& grad_output, const at::Tensor
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kMps, SiluBackwardKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kApple, SiluBackwardKernelMps)
 
 
 at::Tensor SigmoidKernelMps(const at::Tensor& self) {
@@ -1841,7 +1841,7 @@ at::Tensor SigmoidKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kMps, SigmoidKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SigmoidFn, sigmoid_dispatcher, Backend::kApple, SigmoidKernelMps)
 
 
 at::Tensor ExpKernelMps(const at::Tensor& self) {
@@ -1866,7 +1866,7 @@ at::Tensor ExpKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kMps, ExpKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kApple, ExpKernelMps)
 
 
 at::Tensor LogKernelMps(const at::Tensor& self) {
@@ -1891,7 +1891,7 @@ at::Tensor LogKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kMps, LogKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(LogFn, log_dispatcher, Backend::kApple, LogKernelMps)
 
 
 at::Tensor RsqrtKernelMps(const at::Tensor& self) {
@@ -1920,7 +1920,7 @@ at::Tensor RsqrtKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kMps, RsqrtKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(RsqrtFn, rsqrt_dispatcher, Backend::kApple, RsqrtKernelMps)
 
 
 at::Tensor SqrtKernelMps(const at::Tensor& self) {
@@ -1945,7 +1945,7 @@ at::Tensor SqrtKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kMps, SqrtKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kApple, SqrtKernelMps)
 
 
 at::Tensor TanhKernelMps(const at::Tensor& self) {
@@ -1988,7 +1988,7 @@ at::Tensor TanhKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kMps, TanhKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(TanhFn, tanh_dispatcher, Backend::kApple, TanhKernelMps)
 
 
 at::Tensor ErfKernelMps(const at::Tensor& self) {
@@ -2013,7 +2013,7 @@ at::Tensor ErfKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kMps, ErfKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ErfFn, erf_dispatcher, Backend::kApple, ErfKernelMps)
 
 
 at::Tensor EmbeddingKernelMps(
@@ -2100,7 +2100,7 @@ at::Tensor EmbeddingKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kMps, EmbeddingKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(EmbeddingFn, embedding_dispatcher, Backend::kApple, EmbeddingKernelMps)
 
 
 at::Tensor IndexSelectKernelMps(
@@ -2203,7 +2203,7 @@ at::Tensor IndexSelectKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kMps, IndexSelectKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(IndexSelectFn, index_select_dispatcher, Backend::kApple, IndexSelectKernelMps)
 
 
 at::Tensor TakeKernelMps(const at::Tensor& self, const at::Tensor& index) {
@@ -2310,7 +2310,7 @@ at::Tensor TakeKernelMps(const at::Tensor& self, const at::Tensor& index) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TakeFn, take_dispatcher, Backend::kMps, TakeKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(TakeFn, take_dispatcher, Backend::kApple, TakeKernelMps)
 
 
 at::Tensor GatherKernelMps(
@@ -2463,7 +2463,7 @@ at::Tensor GatherKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GatherFn, gather_dispatcher, Backend::kMps, GatherKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(GatherFn, gather_dispatcher, Backend::kApple, GatherKernelMps)
 
 
 at::Tensor DivTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
@@ -2495,7 +2495,7 @@ at::Tensor DivTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kMps, DivTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(DivTensorFn, div_tensor_dispatcher, Backend::kApple, DivTensorKernelMps)
 
 
 at::Tensor DivScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
@@ -2525,7 +2525,7 @@ at::Tensor DivScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kMps, DivScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kApple, DivScalarKernelMps)
 
 
 at::Tensor ReciprocalKernelMps(const at::Tensor& self) {
@@ -2550,7 +2550,7 @@ at::Tensor ReciprocalKernelMps(const at::Tensor& self) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, ReciprocalKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kApple, ReciprocalKernelMps)
 
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeLayerNormKernelMps(
@@ -2717,7 +2717,7 @@ REGISTER_IMPL_TO_DISPATCHER(ReciprocalFn, reciprocal_dispatcher, Backend::kMps, 
   return {out, mean, rstd};
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kMps, NativeLayerNormKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(NativeLayerNormFn, native_layer_norm_dispatcher, Backend::kApple, NativeLayerNormKernelMps)
 
 
 at::Tensor WhereSelfKernelMps(
@@ -2773,7 +2773,7 @@ at::Tensor WhereSelfKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kMps, WhereSelfKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kApple, WhereSelfKernelMps)
 
 
 at::Tensor MaskedFillScalarKernelMps(
@@ -2822,7 +2822,7 @@ at::Tensor MaskedFillScalarKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, Backend::kMps, MaskedFillScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillScalarFn, masked_fill_scalar_dispatcher, Backend::kApple, MaskedFillScalarKernelMps)
 
 
 at::Tensor MaskedFillTensorKernelMps(
@@ -2870,7 +2870,7 @@ at::Tensor MaskedFillTensorKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(MaskedFillTensorFn, masked_fill_tensor_dispatcher, Backend::kMps, MaskedFillTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(MaskedFillTensorFn, masked_fill_tensor_dispatcher, Backend::kApple, MaskedFillTensorKernelMps)
 
 
 at::Tensor EqScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
@@ -2897,7 +2897,7 @@ at::Tensor EqScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kMps, EqScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kApple, EqScalarKernelMps)
 
 
 at::Tensor LeTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
@@ -2926,7 +2926,7 @@ at::Tensor LeTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kMps, LeTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kApple, LeTensorKernelMps)
 
 
 at::Tensor NeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
@@ -2953,7 +2953,7 @@ at::Tensor NeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kMps, NeScalarKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kApple, NeScalarKernelMps)
 
 
 at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
@@ -3098,7 +3098,7 @@ at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kMps, CatKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(CatFn, cat_dispatcher, Backend::kApple, CatKernelMps)
 
 
 \
@@ -3129,7 +3129,7 @@ at::Tensor LinspaceKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(LinspaceFn, linspace_dispatcher, Backend::kMps, LinspaceKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(LinspaceFn, linspace_dispatcher, Backend::kApple, LinspaceKernelMps)
 
 
 \
@@ -3161,7 +3161,7 @@ at::Tensor ArangeKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArangeFn, arange_dispatcher, Backend::kMps, ArangeKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ArangeFn, arange_dispatcher, Backend::kApple, ArangeKernelMps)
 
 
 \
@@ -3192,7 +3192,7 @@ at::Tensor ArangeStartKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArangeStartFn, arange_start_dispatcher, Backend::kMps, ArangeStartKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ArangeStartFn, arange_start_dispatcher, Backend::kApple, ArangeStartKernelMps)
 
 
 \
@@ -3229,7 +3229,7 @@ at::Tensor ArangeStartStepKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ArangeStartStepFn, arange_start_step_dispatcher, Backend::kMps, ArangeStartStepKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ArangeStartStepFn, arange_start_step_dispatcher, Backend::kApple, ArangeStartStepKernelMps)
 
 
 \
@@ -3290,7 +3290,7 @@ at::Tensor ClampKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kMps, ClampKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(ClampFn, clamp_dispatcher, Backend::kApple, ClampKernelMps)
 
 
 at::Tensor GeluKernelMps(
@@ -3380,7 +3380,7 @@ at::Tensor GeluKernelMps(
   return out;
 }
 
-REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kMps, GeluKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kApple, GeluKernelMps)
 
 
 ::std::tuple<at::Tensor, at::Tensor, at::Tensor> NativeBatchNormKernelMps(
@@ -3547,7 +3547,7 @@ REGISTER_IMPL_TO_DISPATCHER(GeluFn, gelu_dispatcher, Backend::kMps, GeluKernelMp
   return {out, stat_mean, stat_var};
 }
 
-REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Backend::kMps, NativeBatchNormKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(NativeBatchNormFn, native_batch_norm_dispatcher, Backend::kApple, NativeBatchNormKernelMps)
 
 
 at::Tensor PrivUnsafeViewKernelMps(const at::Tensor & self, at::IntArrayRef size) {
@@ -3558,7 +3558,7 @@ at::Tensor PrivUnsafeViewKernelMps(const at::Tensor & self, at::IntArrayRef size
   return at::native::flagos::unsafe_view(self, size);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(PrivUnsafeViewFn, priv_unsafe_view_dispatcher, Backend::kMps, PrivUnsafeViewKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(PrivUnsafeViewFn, priv_unsafe_view_dispatcher, Backend::kApple, PrivUnsafeViewKernelMps)
 
 
 at::Tensor SelectIntKernelMps(const at::Tensor & self, int64_t dim, int64_t index) {
@@ -3569,7 +3569,7 @@ at::Tensor SelectIntKernelMps(const at::Tensor & self, int64_t dim, int64_t inde
   return at::native::flagos::select_int(self, dim, index);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SelectIntFn, select_int_dispatcher, Backend::kMps, SelectIntKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SelectIntFn, select_int_dispatcher, Backend::kApple, SelectIntKernelMps)
 
 
 at::Tensor SliceTensorKernelMps(const at::Tensor & self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
@@ -3580,7 +3580,7 @@ at::Tensor SliceTensorKernelMps(const at::Tensor & self, int64_t dim, ::std::opt
   return at::native::flagos::slice_tensor(self, dim, start, end, step);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SliceTensorFn, slice_tensor_dispatcher, Backend::kMps, SliceTensorKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SliceTensorFn, slice_tensor_dispatcher, Backend::kApple, SliceTensorKernelMps)
 
 
 at::Tensor SqueezeKernelMps(const at::Tensor & self) {
@@ -3591,7 +3591,7 @@ at::Tensor SqueezeKernelMps(const at::Tensor & self) {
   return at::native::flagos::squeeze(self);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SqueezeFn, squeeze_dispatcher, Backend::kMps, SqueezeKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SqueezeFn, squeeze_dispatcher, Backend::kApple, SqueezeKernelMps)
 
 
 at::Tensor SqueezeDimKernelMps(const at::Tensor & self, int64_t dim) {
@@ -3602,7 +3602,7 @@ at::Tensor SqueezeDimKernelMps(const at::Tensor & self, int64_t dim) {
   return at::native::flagos::squeeze_dim(self, dim);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(SqueezeDimFn, squeeze_dim_dispatcher, Backend::kMps, SqueezeDimKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(SqueezeDimFn, squeeze_dim_dispatcher, Backend::kApple, SqueezeDimKernelMps)
 
 
 at::Tensor TKernelMps(const at::Tensor & self) {
@@ -3613,7 +3613,7 @@ at::Tensor TKernelMps(const at::Tensor & self) {
   return at::native::flagos::t(self);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TFn, t_dispatcher, Backend::kMps, TKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(TFn, t_dispatcher, Backend::kApple, TKernelMps)
 
 
 at::Tensor TransposeIntKernelMps(const at::Tensor & self, int64_t dim0, int64_t dim1) {
@@ -3624,7 +3624,7 @@ at::Tensor TransposeIntKernelMps(const at::Tensor & self, int64_t dim0, int64_t 
   return at::native::flagos::transpose_int(self, dim0, dim1);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(TransposeIntFn, transpose_int_dispatcher, Backend::kMps, TransposeIntKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(TransposeIntFn, transpose_int_dispatcher, Backend::kApple, TransposeIntKernelMps)
 
 
 at::Tensor UnsqueezeKernelMps(const at::Tensor & self, int64_t dim) {
@@ -3635,5 +3635,5 @@ at::Tensor UnsqueezeKernelMps(const at::Tensor & self, int64_t dim) {
   return at::native::flagos::unsqueeze(self, dim);
 }
 
-REGISTER_IMPL_TO_DISPATCHER(UnsqueezeFn, unsqueeze_dispatcher, Backend::kMps, UnsqueezeKernelMps)
+REGISTER_IMPL_TO_DISPATCHER(UnsqueezeFn, unsqueeze_dispatcher, Backend::kApple, UnsqueezeKernelMps)
 } // namespace at::native::flagos

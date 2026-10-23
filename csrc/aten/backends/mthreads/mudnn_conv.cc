@@ -378,7 +378,7 @@ at::Tensor ConvolutionOverrideableKernelMusa(
 REGISTER_IMPL_TO_DISPATCHER(
     ConvolutionOverrideableFn,
     convolution_overrideable_dispatcher,
-    Backend::kMusa,
+    Backend::kMthreads,
     ConvolutionOverrideableKernelMusa)
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
@@ -499,7 +499,7 @@ ConvolutionBackwardOverrideableKernelMusa(
 REGISTER_IMPL_TO_DISPATCHER(
     ConvolutionBackwardOverrideableFn,
     convolution_backward_overrideable_dispatcher,
-    Backend::kMusa,
+    Backend::kMthreads,
     ConvolutionBackwardOverrideableKernelMusa)
 
 } // namespace at::native::flagos

@@ -2531,7 +2531,9 @@ def main():
             if not line or "=" not in line:
                 continue
             op, backend = line.split("=", 1)
-            if backend.strip() == "cuda":
+            # Both spellings: a conf written before the vendor rename says
+            # `cuda` for this route.
+            if backend.strip() in ("nvidia", "cuda"):
                 ops.append(op.strip())
         print(f"Found {len(ops)} ops in backends_nvidia.conf")
 
@@ -3183,7 +3185,7 @@ def main():
             "# The annotation replaces the former backends_tileops.conf, which was a",
             "# 2060-line copy of this file differing only in those 60 lines.",
             "#",
-            "# Format: op_name = backend   (backend: flaggems | flagos_python | cuda)",
+            "# Format: op_name = backend   (backend: flaggems | flagos_python | nvidia)",
             "",
         ]
         # Every op held off the FlagGems route by codegen_ops' own exclusion
@@ -3209,12 +3211,17 @@ def main():
         # (issue #120). That residue has no correct route on this build today;
         # the enumerated per-op list and the wheel-level decision are tracked in
         # the follow-up issue.
+        # The fallback key this conf spells is the vendor's name for the boxing
+        # kernel. `cuda` was that spelling when the route was named for the
+        # runtime; it is now `nvidia` like every other vendor key, and the C++
+        # parser still accepts `cuda` for a conf written before the rename.
+        boxing_key = "nvidia"
         n_flaggems_routes = 0
         n_cuda_fallback = 0
         n_metadata_override = 0
         for op in sorted(op_info):
             if op in metadata_route_overrides:
-                backend = "cuda"
+                backend = boxing_key
                 if op in flaggems_py:
                     n_metadata_override += 1
             elif (
@@ -3222,14 +3229,11 @@ def main():
                 or op in measured_flaggems_rollback
                 or op in flaggems_forced_cuda
             ):
-                backend = "cuda"
-                if op in flaggems_py:
-                    n_cuda_fallback += 1
-                backend = "cuda"
+                backend = boxing_key
                 if op in flaggems_py:
                     n_cuda_fallback += 1
             else:
-                backend = "flaggems" if op in flaggems_py else "cuda"
+                backend = "flaggems" if op in flaggems_py else boxing_key
             if backend == "flaggems":
                 n_flaggems_routes += 1
             suffix = "  # tileops" if op in TILEOPS_OPS else ""
@@ -3238,9 +3242,9 @@ def main():
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
-            f"and {len(op_info) - n_flaggems_routes} cuda routes "
+            f"and {len(op_info) - n_flaggems_routes} boxing routes "
             f"({tileops_annotated} annotated # tileops, "
-            f"{n_cuda_fallback} flaggems ops forced back to cuda)"
+            f"{n_cuda_fallback} flaggems ops forced back to {boxing_key})"
         )
         if n_metadata_override:
             print(
