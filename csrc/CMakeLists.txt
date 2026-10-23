@@ -35,7 +35,13 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_profiler_tool\\.c
 # *.cc/*.cu. Objective-C++ is an Apple-only language, so this is gated on the
 # platform rather than run for every build -- exactly as the runtime's own .mm
 # glob is (csrc/runtime/accelerator/CMakeLists.txt).
-if(FLAGOS_ACCELERATOR STREQUAL "mps")
+#
+# Keyed on the vendor, not on FLAGOS_ACCELERATOR: that variable holds whichever
+# spelling the build was invoked with (`FLAGOS_ACCELERATOR=apple` is the vendor
+# name, `mps` its alias), and setup.py passes the vendor whenever it was given
+# one. Comparing against the id here silently dropped these .mm files from an
+# apple build, leaving libtorch_fl with undefined MpsGraph symbols.
+if(FLAGOS_PLATFORM_VENDOR STREQUAL "apple")
   file(GLOB_RECURSE MPS_ATEN_OBJCXX_SOURCES
       "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/apple/*.mm"
   )
@@ -69,45 +75,45 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api
 # by the bare soname `libcupti.so`, which corex provides. Measured on a BI-V150
 # (ub22): the shim binds and cuptiActivityRegisterCallbacks resolves, so the CUPTI
 # arm is the correct one for iluvatar.
-if(FLAGOS_ACCELERATOR STREQUAL "cuda"
-   OR FLAGOS_ACCELERATOR STREQUAL "metax"
-   OR FLAGOS_ACCELERATOR STREQUAL "ppu"
-   OR FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+if(_flagos_is_cuda
+   OR _flagos_is_metax
+   OR _flagos_is_ppu
+   OR _flagos_is_iluvatar)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+elseif(_flagos_is_dcu)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
-elseif(FLAGOS_ACCELERATOR STREQUAL "ascend")
+elseif(_flagos_is_ascend)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+elseif(_flagos_is_musa)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/gcu_topspti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+elseif(_flagos_is_gcu)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/musa_mupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/unavailable_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_device_tracer\\.cc$")
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+elseif(_flagos_is_tsingmicro)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cupti_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/roctracer_device_tracer\\.cc$")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/cann_device_tracer\\.cc$")
@@ -126,7 +132,7 @@ endif()
 # CANN's public MSPTI headers are optional. The tracer is still compiled with a
 # small unavailable implementation when a CPU-only build has no toolkit, while
 # the Python import path likewise treats libmspti.so as optional.
-if(FLAGOS_ACCELERATOR STREQUAL "ascend")
+if(_flagos_is_ascend)
   find_path(MSPTI_INCLUDE_DIR
     NAMES mspti.h
     PATHS
@@ -141,7 +147,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
   else()
     message(STATUS "mspti.h NOT found; Ascend profiler will be unavailable")
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+elseif(_flagos_is_musa)
   find_path(MUPTI_INCLUDE_DIR
     NAMES mupti_activity.h
     PATHS
@@ -155,7 +161,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   else()
     message(STATUS "mupti_activity.h NOT found; MUSA profiler will be unavailable")
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+elseif(_flagos_is_gcu)
   find_path(TOPSPTI_INCLUDE_DIR
     NAMES topspti_activity.h
     PATHS
@@ -170,7 +176,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
   else()
     message(STATUS "topspti_activity.h NOT found; GCU profiler will be unavailable")
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+elseif(_flagos_is_tsingmicro)
   # rocprofiler-sdk headers (Kuiper's tsm8-profiler). The tracer reads only the
   # kernel dispatch record layout from them; every rocprofiler function is
   # called inside the separate tool library, so libtorch_fl.so does not link
@@ -204,16 +210,24 @@ endif()
 # directly instead of boxing onto CUDA. Iluvatar is native too:
 # aten/backends/iluvatar/ wraps corex's CUDA-named C ABI (ixdnn/ixblas)
 # directly, with FlagGems still owning the ops it covers.
+#
+# Two spellings select the same platform -- the table id (`cuda`, `mps`) and its
+# vendor (`nvidia`, `apple`) -- and FLAGOS_ACCELERATOR carries whichever one the
+# build was given, so BOTH are compared against the directory name. (The loop
+# used to compare an unquoted string, `STREQUAL _vendor_dir`, the literal name
+# of the variable and never equal: the filter excluded nothing, so every build
+# compiled every vendor's kernel tree.)
 if(NOT FLAGOS_BUILD_VENDOR)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|enflame|iluvatar|kunlunxin|mthreads|apple|tsingmicro)/.*")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(${FLAGOS_ATEN_VENDOR_DIRS})/.*")
   message(STATUS "FLAGOS_BUILD_VENDOR=OFF: no vendor native kernels")
 else()
-  foreach(_vendor_dir ascend enflame iluvatar kunlunxin mthreads apple tsingmicro)
-    if(NOT FLAGOS_ACCELERATOR STREQUAL _vendor_dir)
+  foreach(_vendor_dir ${FLAGOS_ATEN_VENDOR_DIRS})
+    if(NOT (FLAGOS_ACCELERATOR STREQUAL "${_vendor_dir}"
+            OR FLAGOS_PLATFORM_VENDOR STREQUAL "${_vendor_dir}"))
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
   endforeach()
-  message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR}")
+  message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR} (vendor ${FLAGOS_PLATFORM_VENDOR})")
 endif()
 
 # Generated CUDA boxing kernels (CUDA-ABI vendor path: the wheel bundles the
@@ -255,10 +269,10 @@ set(_needs_python_op_caller OFF)
 if(FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_TILEOPS)
   set(_needs_python_op_caller ON)
 endif()
-if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
+if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR)
   set(_needs_python_op_caller ON)
 endif()
-if(FLAGOS_ACCELERATOR STREQUAL "gcu")
+if(_flagos_is_gcu)
   set(_needs_python_op_caller ON)
 endif()
 foreach(_src IN LISTS SOURCE_FILES)
@@ -324,7 +338,7 @@ set(CUDA_OCCUPANCY_SEARCH_PATHS
   /usr/local/cuda/include
   /usr/local/cuda/targets/x86_64-linux/include
   /usr/local/cuda-13.0/targets/x86_64-linux/include)
-if(FLAGOS_ACCELERATOR STREQUAL "metax")
+if(_flagos_is_metax)
   list(APPEND CUDA_OCCUPANCY_SEARCH_PATHS
     "${MACA_PATH}/tools/cu-bridge/include")
 endif()
@@ -344,7 +358,7 @@ endif()
 # ROCtracer ships with the DTK (DCU ToolKit) at /opt/dtk. The headers live in
 # /opt/dtk/roctracer/include, and the library is at /opt/dtk/lib/libroctracer64.so.
 # Unlike CUPTI's version-sensitivity, ROCtracer 4.1 is stable across DTK releases.
-if(FLAGOS_ACCELERATOR STREQUAL "dcu")
+if(_flagos_is_dcu)
   find_path(ROCTRACER_INCLUDE_DIR
     NAMES roctracer.h
     PATHS
@@ -391,7 +405,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "dcu")
 endif()
 
 # Build stream_api as a standalone shared lib so liboperators.so can resolve it at runtime
-if(FLAGOS_BUILD_FLAGGEMS_CPP AND FLAGOS_ACCELERATOR STREQUAL "ascend")
+if(FLAGOS_BUILD_FLAGGEMS_CPP AND _flagos_is_ascend)
   add_library(stream_api SHARED "${CMAKE_CURRENT_SOURCE_DIR}/runtime/accelerator/ascend/stream_api.cc")
   target_compile_definitions(stream_api PRIVATE USE_ASCEND=1)
   target_include_directories(stream_api PRIVATE
@@ -495,14 +509,14 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
     FLAGOS_ACCEL_${_FLAGOS_ACCEL_UPPER}=1
 )
 
-if(FLAGOS_ACCELERATOR STREQUAL "metax")
+if(_flagos_is_metax)
   # maca's torch headers are a hard fork gated on USE_MACA (e.g. C10_WARP_SIZE,
   # Context.h allow_tf32_cudnn). Without it the headers hit static_assert(0).
   # MCPTI callback ids use a different namespace from NVIDIA CUPTI ids.
   target_compile_definitions(${LIBRARY_NAME} PRIVATE
     FLAGOS_METAX_MCPTI=1
     FLAGOS_SOFT_LOWP=1)
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+elseif(_flagos_is_dcu)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_SOFT_LOWP=1)
   # DTK's libtorch_hip.so carries no index-value bounds check: index.Tensor,
   # index_select, index_fill, index_add, index_copy and index_reduce all accept
@@ -523,7 +537,7 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
   endif()
 endif()
 
-if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
+if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR)
   # The CPU TorchConfig used for the isolated Python environment does not
   # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
   # symbols are resolved by ELF instead of being left to process-global lookup.
@@ -537,7 +551,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_VENDOR)
   endif()
 endif()
 
-if(FLAGOS_ACCELERATOR STREQUAL "ascend")
+if(_flagos_is_ascend)
   find_library(OPAPI_LIB opapi
       PATHS $ENV{ASCEND_HOME}/lib64
             /usr/local/Ascend/ascend-toolkit/latest/lib64)
@@ -551,9 +565,9 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
   if(NNOPBASE_LIB)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${NNOPBASE_LIB})
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+elseif(_flagos_is_tsingmicro)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+elseif(_flagos_is_dcu)
   # Selects backends/hygon_memory.h (CUDA-compat runtime, no c10::cuda caching
   # delegation -- the DCU wheel exports c10::hip, not c10::cuda).
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
@@ -561,7 +575,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   if(ROCTRACER_LIBRARY)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${ROCTRACER_LIBRARY})
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+elseif(_flagos_is_kunlunxin)
   # Kunlunxin is native, not CUDA-boxing: aten/backends/kunlunxin/ wraps the
   # vendor xdnn op library directly, so no tensor reaches the CUDA dispatch key
   # and the generated boxing kernels are not built. The runtime dependency is
@@ -577,7 +591,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
         ${XDNN_PYTORCH_INCLUDE_DIRS})
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${XDNN_PYTORCH_LIB})
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+elseif(_flagos_is_iluvatar)
   # Iluvatar owns its runtime: backends/iluvatar_memory.h (no c10::cuda caching
   # delegation) and runtime/accelerator/iluvatar/ (its own stream registry). The
   # corex CUDA runtime shim rides ${CUDA_RUNTIME_LIB} inside
@@ -596,7 +610,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
     target_link_libraries(${LIBRARY_NAME} PRIVATE
         ${FLAGOS_ILUVATAR_CUDNN_LIB} ${FLAGOS_ILUVATAR_CUBLAS_LIB})
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+elseif(_flagos_is_musa)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
     # FLAGOS_MUSA_KERNEL gates the m.impl subset in register.cc, mirroring
@@ -609,7 +623,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
     # vendor's torch version).
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${MUDNN_LIB} ${MURAND_LIB})
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
+elseif(_flagos_is_bpu)
   # Selects backends/bpu_memory.h and skips the generated PrivateUse1 op
   # registrations: the BPU executes whole compiled graphs, so there is no per-op
   # kernel to register and every aten call reaches cpu_fallback. Acceleration
@@ -621,7 +635,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
     target_include_directories(${LIBRARY_NAME} PRIVATE
         ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+elseif(_flagos_is_gcu)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
     # FLAGOS_GCU_KERNEL gates the m.impl subset in register.cc: without the
@@ -631,7 +645,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
         ${TOPSATEN_INCLUDE_DIRS})
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${TOPSATEN_LIB})
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
+elseif(_flagos_is_mps)
   # Apple Metal. The operator layer (backends/apple/, an MPSGraph-first wrapper
   # set) is Objective-C++ and links the Metal frameworks on top of the
   # Metal/Foundation pair the runtime already links: MPSNDArray (the
@@ -658,7 +672,7 @@ endif()
 
 target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-if(FLAGOS_ACCELERATOR STREQUAL "metax")
+if(_flagos_is_metax)
   target_include_directories(${LIBRARY_NAME} PRIVATE
     "${MACA_PATH}/tools/cu-bridge/include"
     "${MACA_PATH}/include"
@@ -693,7 +707,7 @@ install(TARGETS ${LIBRARY_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-if(FLAGOS_ACCELERATOR STREQUAL "tsingmicro" AND TSMPROFILER_INCLUDE_DIR)
+if(_flagos_is_tsingmicro AND TSMPROFILER_INCLUDE_DIR)
   # The rocprofiler tool is a separate library on purpose: rocprofiler dlopens
   # its tools, and libtorch_fl.so depends on libflagos.so -> libhpgr.so, so a
   # tool living in the main library would make rocprofiler pull the runtime in
