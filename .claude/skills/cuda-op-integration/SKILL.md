@@ -65,7 +65,7 @@ docs/vendors/cuda/external-libtorch-cuda.md
 ```
 
 Then **delete the hand-written kernels** that codegen replaces (they will collide at
-registration): `csrc/aten/backends/cuda/*.{cu,cc}` and the per-op `csrc/aten/*.{cc,h}`
+registration): `csrc/aten/backends/nvidia/*.{cu,cc}` and the per-op `csrc/aten/*.{cc,h}`
 that have generated equivalents, plus `structured_ops.cc`. Keep the core runtime:
 `empty.*`, `strided_ops.*`, `copy_*`, `set_ops.*`, `contiguous_ops.*`, `fallback.*`,
 `common.*`, and everything under `runtime/`. Update `csrc/CMakeLists.txt` if needed

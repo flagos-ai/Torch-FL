@@ -1218,7 +1218,7 @@ def _get_setup_kwargs():
             # The DTK-private symbol manifest that libflagos_dtk_core_compat.so
             # must export, shipped so an installed wheel can be re-audited with
             # scripts/vendor/check_dcu_core_abi.py against a different DTK release.
-            "accelerator/dcu/dtk_core_compat_symbols.txt",
+            "accelerator/hygon/dtk_core_compat_symbols.txt",
             # All backend configs, not just the default: per-op routing tables
             # read by torch_fl at import (backends_cuda.conf /
             # backends_metax.conf, ...). Now consolidated under configs/.

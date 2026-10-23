@@ -60,7 +60,6 @@ def _run(event="pull_request", files="", labels="", dispatch=""):
     "path",
     [
         "torch_fl/accelerator/{platform}/__init__.py",
-        "torch_fl/configs/backends_{platform}.conf",
         "csrc/aten/backends/{platform}/op.cc",
         ".github/scripts/hooks/set_env_{platform}.sh",
         ".github/scripts/set_env_{platform}.sh",
@@ -88,6 +87,19 @@ def test_documentation_needs_no_hardware(files):
     assert _run(files=files)[1] == []
 
 
+def test_a_conf_is_still_named_for_its_platform_id():
+    """Step 4 renames the confs; until then each one selects only its own lane."""
+    for lane, conf in (
+        ("nvidia", "cuda"),
+        ("hygon", "dcu"),
+        ("mthreads", "musa"),
+        ("enflame", "gcu"),
+        ("thead", "ppu"),
+        ("apple", "mps"),
+    ):
+        assert _run(files=f"torch_fl/configs/backends_{conf}.conf")[1] == [lane], lane
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -112,20 +124,20 @@ def test_shared_or_unknown_code_runs_every_lane_even_with_vendor_changes(path):
 
 def test_multiple_vendors_select_the_union():
     assert _run(
-        files="torch_fl/accelerator/ascend/op.py\ncsrc/aten/backends/musa/op.cc"
-    )[1] == ["ascend", "musa"]
+        files="torch_fl/accelerator/ascend/op.py\ncsrc/aten/backends/mthreads/op.cc"
+    )[1] == ["ascend", "mthreads"]
 
 
 def test_shared_cuda_runtime_selects_all_consumers():
-    assert _run(files="csrc/runtime/accelerator/cuda/device.cc")[1] == [
-        "cuda",
-        "dcu",
-        "ppu",
+    assert _run(files="csrc/runtime/accelerator/nvidia/device.cc")[1] == [
+        "hygon",
+        "nvidia",
+        "thead",
     ]
-    assert _run(files="csrc/runtime/allocator/backends/cuda_memory.h")[1] == [
-        "cuda",
+    assert _run(files="csrc/runtime/allocator/backends/nvidia_memory.h")[1] == [
         "metax",
-        "ppu",
+        "nvidia",
+        "thead",
     ]
 
 
@@ -142,8 +154,13 @@ def test_independent_iluvatar_runtime_selects_only_iluvatar(path):
 
 @pytest.mark.parametrize("platform", PLATFORMS)
 def test_runtime_watch_paths_cover_the_build_tables_actual_source_directory(platform):
+    """`runtime_dir` is the directory the runtime sources live in; the lane name is
+    the vendor. A CUDA-ABI vendor's runtime directory is shared with the platform
+    that defines it, so the lane must be in the selected set rather than equal to
+    the only one."""
     table = json.loads((ROOT / "cmake/flagos_platforms.json").read_text())
-    runtime = table["accelerators"][platform]["runtime_dir"]
+    row = next(r for r in table["accelerators"].values() if r["vendor"] == platform)
+    runtime = row["runtime_dir"]
     assert platform in _run(files=f"csrc/runtime/accelerator/{runtime}/device.cc")[1]
 
 
@@ -157,7 +174,7 @@ def test_non_pr_events_default_to_every_lane(event):
 @pytest.mark.parametrize(
     "labels, expected",
     [
-        ("platform:musa,platform:ascend,platform:musa", ["ascend", "musa"]),
+        ("platform:mthreads,platform:ascend,platform:mthreads", ["ascend", "mthreads"]),
         ("platform:ascend,platform:all", PLATFORMS),
         ("platform:unknown", PLATFORMS),
         ("platform:ascend,platform:unknown", PLATFORMS),
@@ -172,7 +189,7 @@ def test_routing_labels_override_file_filters_without_duplicates(labels, expecte
     [
         ("", PLATFORMS),
         ("all", PLATFORMS),
-        ("musa,ascend,musa", ["ascend", "musa"]),
+        ("mthreads,ascend,mthreads", ["ascend", "mthreads"]),
     ],
 )
 def test_manual_selection(requested, expected):
@@ -188,7 +205,7 @@ def test_invalid_manual_selection_fails(requested):
 
 def test_missing_watch_metadata_falls_back_to_all(tmp_path):
     (tmp_path / "cuda.yml").write_text("display_name: CUDA\n")
-    assert MATRIX._platforms_from_files(["op.cc"], ["cuda"], tmp_path) == ["cuda"]
+    assert MATRIX._platforms_from_files(["op.cc"], ["nvidia"], tmp_path) == ["nvidia"]
     assert MATRIX._platforms_from_files(None, PLATFORMS, CONFIGS) == PLATFORMS
 
 
@@ -201,7 +218,7 @@ def test_shared_mps_runtime_changes_select_the_mps_lane():
     ):
         result, selected = _run(files=path)
         assert result.returncode == 0, result.stderr
-        assert selected == ["mps"], path
+        assert selected == ["apple"], path
 
 
 def test_mps_suites_with_shared_filenames_keep_the_mps_lane():
@@ -215,7 +232,7 @@ def test_mps_suites_with_shared_filenames_keep_the_mps_lane():
     ):
         result, selected = _run(files=path)
         assert result.returncode == 0, result.stderr
-        assert selected == ["mps"], path
+        assert selected == ["apple"], path
 
 
 def test_git_diff_preserves_deleted_and_renamed_platform_paths(tmp_path, monkeypatch):

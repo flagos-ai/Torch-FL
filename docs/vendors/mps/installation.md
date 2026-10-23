@@ -57,13 +57,13 @@ and are not per-build choices:
 
 | Switch | Value | Why |
 |---|---|---|
-| `FLAGOS_BUILD_VENDOR` | on | The native operator tree lives in `csrc/aten/backends/mps/` and links `-framework MetalPerformanceShadersGraph` for the MPSGraph kernels. |
+| `FLAGOS_BUILD_VENDOR` | on | The native operator tree lives in `csrc/aten/backends/apple/` and links `-framework MetalPerformanceShadersGraph` for the MPSGraph kernels. |
 | `FLAGOS_BUILD_BOXING` | **off** | This is a native backend. It never re-tags a `flagos` tensor onto `DispatchKey::MPS` or `DispatchKey::CUDA` and never builds the CUDA boxing kernels. |
 | `FLAGOS_BUILD_FLAGGEMS` | **off** | No FlagGems/Triton line targets Metal. |
 | `FLAGOS_BUILD_FLAGGEMS_CPP` | **off** | No `liboperators.so` exists for the Metal stack. |
 | `FLAGOS_BUILD_TILEOPS` | **off** | No TileOps line for Metal. |
 
-The device runtime is Objective-C++ (`csrc/runtime/accelerator/mps/*.mm`)
+The device runtime is Objective-C++ (`csrc/runtime/accelerator/apple/*.mm`)
 because Metal is an Objective-C API; the runtime links `-framework Metal` and
 `-framework Foundation`. Metal is also why the `mps` entry is the only platform
 whose `project_languages` includes `OBJCXX`.
@@ -151,9 +151,9 @@ Those thirty-seven are claimed on the `PrivateUse1` `mps` slot by
 `csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
-are generated from `csrc/aten/backends/mps/generated/mps_register.inc`, so the
+are generated from `csrc/aten/backends/apple/generated/mps_register.inc`, so the
 conf cannot name an op the operator library does not register.
-`torch_fl/accelerator/mps/` holds `mps_stream.py`, the stream/event wrappers
+`torch_fl/accelerator/apple/` holds `mps_stream.py`, the stream/event wrappers
 `torch.flagos.Stream` dispatches to.
 
 Results are correct on every op: the accelerated thirty-seven are compared

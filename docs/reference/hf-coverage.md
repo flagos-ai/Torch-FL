@@ -127,7 +127,7 @@ FSDP2's stream setup instead.
   platform without a CUDA runtime to the Ascend ACL stream. That is the
   `torch.flagos.Stream()` row of #451, not the collective path this row tracks. Fixed
   by PR #467 over `6b69999`: MUSA has its own stream class
-  (`torch_fl/accelerator/musa/musa_stream.py`, a handle to the one stream
+  (`torch_fl/accelerator/mthreads/musa_stream.py`, a handle to the one stream
   `GetDefaultMusaStream` hands out, which is the queue mudnn and Triton already share),
   and the four vendor dispatches name their arms instead of ending in an `else` that
   meant Ascend, so an unlisted accelerator now raises instead of importing another

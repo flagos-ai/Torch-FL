@@ -143,7 +143,7 @@ DCU `torch.compile` is validated with FlagTree's HCU backend on the Hygon
 time, so install it into the environment that will run the kernels rather than
 trying to import a `flagtree` module at runtime.
 
-`.github/scripts/set_env_dcu.sh` installs the vendor wheel for both CI stages,
+`.github/scripts/set_env_hygon.sh` installs the vendor wheel for both CI stages,
 from the FlagOS resource index:
 
 ```bash
@@ -218,7 +218,7 @@ vendor declares `device_name="cuda"` — exactly what the boxing route expects. 
 kernel path is Python (Triton), not the C++ wrapped FlagGems library, so
 `FLAGOS_BUILD_FLAGGEMS_CPP=0` and `FLAGOS_BUILD_FLAGGEMS=1` are the build switches.
 
-`.github/scripts/set_env_dcu.sh` performs all of the following; routing comes from
+`.github/scripts/set_env_hygon.sh` performs all of the following; routing comes from
 `backends_dcu.conf` itself, so a CI job runs the FlagGems path with no switch
 involved. The steps below are what that script does, for a local install.
 
@@ -337,7 +337,7 @@ The RCCL tier needs `ProcessGroupNCCL`, which the CPU-only `torch==2.10.0+cpu` c
 python -m pytest tests/integration/test_comm_native_bridge.py -v
 ```
 
-That file is what CI runs for this tier (`.github/configs/dcu.yml`, the `Native comm bridge` group) in its wheel-only workspace, so a released wheel cannot silently lose the tier again. It asserts two things: the factory loads from inside the installed `torch_fl`, and a world-size-1 `flagos` group resolves its inner backend to `nccl` — with neither the FlagCX nor the staged-gloo skip reason set — and completes a collective. `torch.distributed.ProcessGroupNCCL` being absent from the CPU-only torch is expected and is the reason the bridge exists; the test does not assert it either way. FlagCX is tried first when `flagcx` is importable, so this tier is what remains when it is not.
+That file is what CI runs for this tier (`.github/configs/hygon.yml`, the `Native comm bridge` group) in its wheel-only workspace, so a released wheel cannot silently lose the tier again. It asserts two things: the factory loads from inside the installed `torch_fl`, and a world-size-1 `flagos` group resolves its inner backend to `nccl` — with neither the FlagCX nor the staged-gloo skip reason set — and completes a collective. `torch.distributed.ProcessGroupNCCL` being absent from the CPU-only torch is expected and is the reason the bridge exists; the test does not assert it either way. FlagCX is tried first when `flagcx` is importable, so this tier is what remains when it is not.
 
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1  # RCCL warns when unset; affects
@@ -353,7 +353,7 @@ python tests/manual/test_flagos_dist_live.py --world-size 2
 
 ### Memory Pool
 
-flagos tensors and boxed kernels' outputs share one pool. `dcu_memory.h` delegates caching to torch's own allocator through the device-generic registry (`c10::getDeviceAllocator(kCUDA)`) rather than the `c10::cuda::` namespace — the DCU wheel exports `c10::hip::HIPCachingAllocator` and has zero `c10::cuda` symbols, and `cuda_runtime.h` cannot share a translation unit with `hip/hip_runtime.h`. So `memory_allocated()` / `memory_reserved()` / `empty_cache()` report and act on real usage.
+flagos tensors and boxed kernels' outputs share one pool. `hygon_memory.h` delegates caching to torch's own allocator through the device-generic registry (`c10::getDeviceAllocator(kCUDA)`) rather than the `c10::cuda::` namespace — the DCU wheel exports `c10::hip::HIPCachingAllocator` and has zero `c10::cuda` symbols, and `cuda_runtime.h` cannot share a translation unit with `hip/hip_runtime.h`. So `memory_allocated()` / `memory_reserved()` / `empty_cache()` report and act on real usage.
 
 ### `.cuda()` Autograd and torch_fl Cannot Share a Process
 

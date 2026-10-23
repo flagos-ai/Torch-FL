@@ -27,4 +27,4 @@
 # failing to link. See docs/vendors/musa/installation.md.
 
 # Thin wrapper: the parameterized entrypoint is set_env.sh.
-exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set_env.sh" --platform musa
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set_env.sh" --platform mthreads

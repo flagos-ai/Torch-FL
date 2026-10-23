@@ -58,9 +58,9 @@ before writing anything. The choice matters more than it looks:
 
 | If the SDK … | Read | Because |
 |---|---|---|
-| ships a `libcudart` shim (`cuda_runtime.h` works) | `accelerator/cuda/*.cc` — and reuse it verbatim via CMake, like `dcu` does | zero new runtime code; DCU adds no `dcu/` directory at all |
-| is CUDA-shaped but renamed (`xxxMalloc`, `xxxStream_t`) | `accelerator/musa/*.cc` | a mechanical 1:1 port of the CUDA sources onto a renamed C API |
-| is a different model entirely (two-stage, context objects) | `accelerator/ascend/*.cc` + `accelerator/gcu/*.cc` | shows how to keep a shared default stream and drain it before host-visible memcpy |
+| ships a `libcudart` shim (`cuda_runtime.h` works) | `accelerator/nvidia/*.cc` — and reuse it verbatim via CMake, like `dcu` does | zero new runtime code; DCU adds no `dcu/` directory at all |
+| is CUDA-shaped but renamed (`xxxMalloc`, `xxxStream_t`) | `accelerator/mthreads/*.cc` | a mechanical 1:1 port of the CUDA sources onto a renamed C API |
+| is a different model entirely (two-stage, context objects) | `accelerator/ascend/*.cc` + `accelerator/enflame/*.cc` | shows how to keep a shared default stream and drain it before host-visible memcpy |
 | has no stream concept | `accelerator/bpu/*.cc` | the degenerate case: streams emulated, `Event*` mostly no-ops |
 
 Kunlun XPU (XRE) is a *renamed-CUDA-shape* SDK (`xpu_malloc` / `XPUStream`), so
@@ -138,7 +138,7 @@ ships a mature caching allocator that does **not** claim the PrivateUse1
 allocator slot torch_fl registers. Getting this wrong is a known trap:
 
 - DCU returns `true` and delegates through the device-generic registry (c10::hip
-  underneath, no c10::cuda symbols) — see `backends/dcu_memory.h`.
+  underneath, no c10::cuda symbols) — see `backends/hygon_memory.h`.
 - MUSA deliberately returns `false` even though a `MUSACachingAllocator` exists,
   because it claims the same PrivateUse1 slot flagos registers — see the comment
   at `caching_device_allocator.cc:551`.
@@ -185,12 +185,12 @@ condition listing every non-CUDA vendor:
 ```cpp
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
     !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU)
-#include "backends/cuda_memory.h"
+#include "backends/nvidia_memory.h"
 #endif
 ```
 
 **Add your `USE_<VENDOR>` to that negative list.** Forgetting it is the single
-most likely mistake in this whole skill: both `cuda_memory.h` and your header get
+most likely mistake in this whole skill: both `nvidia_memory.h` and your header get
 included, and you get a duplicate-definition or wrong-backend selection that
 points nowhere near the real cause.
 

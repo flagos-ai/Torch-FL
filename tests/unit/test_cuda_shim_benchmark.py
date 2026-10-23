@@ -30,7 +30,7 @@ import pytest
 import torch
 import triton
 
-from torch_fl.accelerator.cuda import _cuda_compat
+from torch_fl.accelerator.nvidia import _cuda_compat
 
 
 class _FakeGraphBase:

@@ -74,7 +74,7 @@ def _aligned_device_detector():
         from flag_gems.runtime.backend.device import DeviceDetector
 
     try:
-        from torch_fl.accelerator.cuda._cuda_compat import _ALIGNED_VENDORS
+        from torch_fl.accelerator.nvidia._cuda_compat import _ALIGNED_VENDORS
     except ImportError:  # pragma: no cover - non CUDA-compatible platform
         pytest.skip("torch_fl has no CUDA-compatible accelerator on this platform")
 

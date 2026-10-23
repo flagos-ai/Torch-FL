@@ -62,7 +62,7 @@ DEVICE_TYPE = "flagos"
 # MUSA reaches Triton through MThreads FlagTree; GCU reaches it through
 # FlagTree's enflame backend (or Enflame's older triton_gcu plugin), already
 # redirected onto flagos by
-# torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos(). Kunlunxin
+# torch_fl.accelerator.enflame._gcu_compat.patch_gcu_triton_for_flagos(). Kunlunxin
 # reaches it through FlagTree's XPU backend and, like the other two, runs with no
 # CUDA runtime at all. Iluvatar links the CPU torch wheel and answers streams
 # from its own registry, and TsingMicro reaches Triton through FlagTree's TXDA
@@ -285,7 +285,7 @@ def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> No
         )
         return
     if profile.vendor == "gcu":
-        from torch_fl.accelerator.gcu.tops_stream import TopsStream
+        from torch_fl.accelerator.enflame.tops_stream import TopsStream
 
         TopsStream.borrowed(stream_id, device=device_index).set_current()
         return
@@ -615,7 +615,7 @@ def _patch_device_properties() -> None:
             # A CUDA-like platform can still link the CPU-only pip torch -- the
             # default FlagGems-primary wheel does. `torch.cuda` answers nothing
             # there while still looking available (torch_fl aliases the probe to
-            # the flagos device count, see accelerator/cuda/_cuda_compat.py), so
+            # the flagos device count, see accelerator/nvidia/_cuda_compat.py), so
             # the translation below sends inductor into `torch.cuda`'s own
             # property path. That path only ever works on a CUDA-enabled torch:
             # `_lazy_init` raises "Torch not compiled with CUDA enabled" before
@@ -753,7 +753,7 @@ def _repair_stock_cuda_interface() -> None:
     The two repairs are gated differently, because the underlying probes differ.
     The raw-stream getter is missing on *every* flagos build, the CUDA lane
     included: torch_fl ships the CPU torch wheel and installs its own
-    `torch._C._cuda_getCurrentRawStream` from `accelerator/cuda/_cuda_compat.py`,
+    `torch._C._cuda_getCurrentRawStream` from `accelerator/nvidia/_cuda_compat.py`,
     but `torch._dynamo.device_interface` binds `get_raw_stream` from the
     torch.cuda probe at import time -- before that shim lands -- so it is left at
     None even where a CUDA runtime exists. It is therefore repaired
@@ -871,7 +871,7 @@ def _torch_has_cuda_kernels() -> bool:
     can still link the CPU-only pip wheel -- the default FlagGems-primary build
     does, on the cuda platform -- and there `aten::empty` has no CUDA kernel at
     all, while `torch.cuda.is_available()` still answers True from torch_fl's own
-    shim (accelerator/cuda/_cuda_compat.py) because FlagGems' Triton kernels never
+    shim (accelerator/nvidia/_cuda_compat.py) because FlagGems' Triton kernels never
     go through torch's CUDA layer and the probe has to report a real device for
     them.
 

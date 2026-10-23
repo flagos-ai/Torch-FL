@@ -12,20 +12,20 @@ when a platform gains or loses one.
 
 ## Matrix
 
-| `FLAGOS_ACCELERATOR` | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
+| lane (`FLAGOS_ACCELERATOR` id) | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
-| `cuda` | native CUDA (FlagGems-primary; CUDA boxing opt-in) | `cuda` | — (C++ / FlagGems / CUDA) | `cuda` | 2034 | yes |
-| `ppu` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `cuda` (+ `lib_ppu/` bundle) | — (FlagGems / boxing opt-in) | `ppu` | 2037 | yes |
+| `nvidia` | native CUDA (FlagGems-primary; CUDA boxing opt-in) | `nvidia` | — (C++ / FlagGems / CUDA) | `nvidia` | 2034 | yes |
+| `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_ppu/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2037 | yes |
 | `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2037 | yes |
-| `dcu` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `cuda` (+ `dcu` DTK-core shim) | — (FlagGems / boxing opt-in) | `dcu` | 2037 | yes |
+| `hygon` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `nvidia` (+ `hygon` DTK-core shim) | — (FlagGems / boxing opt-in) | `hygon` | 2037 | yes |
 | `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | yes |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
-| `gcu` | vendor-native (topsaten) | `gcu` | `gcu` | `gcu` | 2037 | yes |
-| `musa` | vendor-native (mudnn) | `musa` | `musa` | `musa` (stream/event only) | 2037 | yes |
+| `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2037 | yes |
+| `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
-| `bpu` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
+| `drobotics` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
-| `mps` | vendor-native (Metal / MPSGraph) | `mps` | `mps` (MPSGraph-first: 37 native routes) | `mps` (stream/event only) | 2037 | yes |
+| `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2037 | yes |
 
 Column notes:
 
@@ -109,11 +109,11 @@ build opts into boxing.
   `docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`). It is
   native — no dispatch re-tag onto `DispatchKey::MPS`/`CUDA` and no CUDA boxing
   kernels (`FLAGOS_BUILD_BOXING` is pinned off). It has a
-  `torch_fl/accelerator/mps/` directory holding only `mps_stream.py` (the
+  `torch_fl/accelerator/apple/` directory holding only `mps_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to), so the Python
   compat column reads "stream/event only". Its CI job runs on the free
   GitHub-hosted Apple Silicon `macos-15` runner
-  ([`.github/configs/mps.yml`](../../.github/configs/mps.yml)) rather than a
+  ([`.github/configs/apple.yml`](../../.github/configs/apple.yml)) rather than a
   vendor image, with no container so the Metal device is visible. The lane runs
   the native operator suite (`pytest tests/integration/ops -m mps`) and the MPS
   runtime contract, including fresh-process boundaries. MPS backward through
@@ -124,14 +124,14 @@ build opts into boxing.
   `torch_fl/accelerator/tsingmicro/` directory holds only the Qwen-Image-2.1
   rotation shim, not a device compat layer.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
-  `torch_fl/accelerator/musa/` directory, but it holds only `musa_stream.py` (the
+  `torch_fl/accelerator/mthreads/` directory, but it holds only `musa_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to) — not a
   `_musa_compat.py`, so the "Python compat" column below reads "stream/event only"
   rather than naming a module.
 - **PPU** profiles through the CUPTI tracer but emits no `gpu_memset` activity, which is the
   capability `tests/integration/profiler_support.py` declares for it: a measured 512x512
   matmul trace carries the `kernel`, `gpu_memcpy` and `privateuse1_runtime` categories and no
-  `gpu_memset`. That keeps the CUDA-baseline parity group off in `.github/configs/ppu.yml` —
+  `gpu_memset`. That keeps the CUDA-baseline parity group off in `.github/configs/thead.yml` —
   two of its tests need the memset category and one needs a `::`-qualified kernel name, which
   the vendor's `gemm_ktype0_*`/`sum_kernel_*` kernel set does not produce. It also ships no
   `lib/flagos_platform` marker (it uses the `lib_ppu/` bundle).
@@ -174,6 +174,6 @@ build opts into boxing.
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, kunlunxin, metax, mps, musa, tsingmicro
-- `csrc/aten/backends/`: ascend, flagos, gcu, iluvatar, kunlunxin, mps, musa, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu, tsingmicro
+- `csrc/runtime/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
+- `csrc/aten/backends/`: apple, ascend, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
+- `torch_fl/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro

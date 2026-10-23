@@ -213,7 +213,7 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # packaging, yaml (PyYAML), sqlalchemy and numpy at or shortly after import.
   # Use --no-deps to protect the torch ABI (same rationale as test-dependencies).
   # numpy<2 because numpy 2.x breaks the stock +cpu torch C extensions at import
-  # (documented in set_env_musa.sh:176-178).
+  # (documented in set_env_mthreads.sh:176-178).
   python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
 
   # --- FlagTree: the Triton build carrying the "metax" backend ----------------
@@ -325,7 +325,7 @@ bash scripts/vendor/bundle_maca_libtorch.sh
 #
 # This runs after the native build, and not with the FlagGems install above,
 # because on MetaX flag_gems cannot be imported by a process that has not
-# imported torch_fl first -- set_env_musa.sh documents the same ordering for
+# imported torch_fl first -- set_env_mthreads.sh documents the same ordering for
 # MThreads, for a different reason. Both halves are load-bearing:
 #
 #   * the venv's torch is the stock +cpu wheel, and a stock +cpu torch/lib has no
@@ -357,7 +357,7 @@ bash scripts/vendor/bundle_maca_libtorch.sh
 #     processes select it independently when they import torch_fl first.
 #
 # torch_fl._C is what makes torch_fl importable at all, and build_ext has just
-# built it. The gate mirrors set_env_musa.sh's `import torch_fl._C` guard: on a
+# built it. The gate mirrors set_env_mthreads.sh's `import torch_fl._C` guard: on a
 # tree without the extension there is nothing to probe, and that is not a
 # FlagGems failure. The probe is skipped with a warning rather than failing the
 # job for a state this script has not reached yet.

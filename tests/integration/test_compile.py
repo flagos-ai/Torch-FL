@@ -1051,7 +1051,7 @@ def _skip_unless_gcu(*, needs_triton: bool = True):
 
     Compiling anything on GCU needs a vendor Triton backend for the GCU, which
     the CI image installs as FlagTree (see the FlagTree/FlagGems block in
-    set_env_gcu.sh). Checking the accelerator alone would turn a missing vendor
+    set_env_enflame.sh). Checking the accelerator alone would turn a missing vendor
     Triton stack into a test failure rather than a skip, which matters for a
     build that has no FlagTree -- the native topsaten backend does not need one.
     ``needs_triton=False`` is for the checks that only read torch_fl's own
@@ -1062,7 +1062,7 @@ def _skip_unless_gcu(*, needs_triton: bool = True):
     if ACCELERATOR != "gcu":
         pytest.skip("GCU build required")
     if needs_triton:
-        from torch_fl.accelerator.gcu._gcu_compat import is_gcu_triton_available
+        from torch_fl.accelerator.enflame._gcu_compat import is_gcu_triton_available
 
         if not is_gcu_triton_available():
             pytest.skip("vendor Triton backend required (not installed)")

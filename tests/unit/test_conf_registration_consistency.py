@@ -71,12 +71,12 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 PLATFORM_REGISTRATION = {
     "ascend": ["backends/ascend/generated/ascend_register.inc"],
     "gcu": [
-        "backends/gcu/generated/gcu_register.inc",
-        "backends/gcu/generated/gcu_flaggems_register.inc",
+        "backends/enflame/generated/gcu_register.inc",
+        "backends/enflame/generated/gcu_flaggems_register.inc",
     ],
     "musa": [
-        "backends/musa/generated/musa_register.inc",
-        "backends/musa/generated/musa_flaggems_register.inc",
+        "backends/mthreads/generated/musa_register.inc",
+        "backends/mthreads/generated/musa_flaggems_register.inc",
     ],
     "bpu": [],  # BPU registers no compute ops (register.cc:591-613)
     # Kunlunxin is a native vendor backend like musa/gcu/ascend: it compiles its
@@ -116,7 +116,7 @@ PLATFORM_REGISTRATION = {
     # kernel (the `unary`, `binary`, `binary_scalar` and `reduce` categories so
     # far).  Note this is a PrivateUse1-dispatched include, not built-in MPS --
     # so the conf routes those ops to ``mps``, and the rest to ``none``.
-    "mps": ["backends/mps/generated/mps_register.inc"],
+    "mps": ["backends/apple/generated/mps_register.inc"],
 }
 
 # CUDA-boxing platforms spell the fallback key ``cuda`` (BOXING_FALLBACK in

@@ -20,11 +20,11 @@
 # isolated environment: this backend builds against stock CPU PyTorch and
 # links TopsRider's libtopsrt/libtopsaten libraries instead.
 #
-# The FlagGems Python path is provisioned here the same way set_env_musa.sh
+# The FlagGems Python path is provisioned here the same way set_env_mthreads.sh
 # provisions it: the generated configs/backends_gcu.conf routes most overloads
 # to a FlagGems Triton kernel and the rest to the native topsaten kernel, so the
 # isolated venv needs a Triton build carrying the "enflame" backend (flagtree)
 # plus FlagGems itself. See docs/vendors/gcu/flaggems-setup.md.
 
 # Thin wrapper: the parameterized entrypoint is set_env.sh.
-exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set_env.sh" --platform gcu
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set_env.sh" --platform enflame

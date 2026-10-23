@@ -16,7 +16,7 @@ display_name: Enflame GCU
 
 # GCU-specific environment preparation stays outside the common workflow.
 setup_script: .github/scripts/set_env.sh
-setup_platform: gcu
+setup_platform: enflame
 
 # Pinned TopsRider image used for the manual wheel validation. The setup script
 # can install python3.12-venv when this base image is used directly; a derived
@@ -30,13 +30,13 @@ runner_labels:
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
-  - torch_fl/accelerator/gcu/
+  - torch_fl/accelerator/enflame/
   - torch_fl/configs/backends_gcu.conf
-  - csrc/aten/backends/gcu/
-  - csrc/runtime/accelerator/gcu/
-  - csrc/runtime/allocator/backends/gcu_memory.h
-  - .github/scripts/hooks/set_env_gcu.sh
-  - .github/scripts/set_env_gcu.sh
+  - csrc/aten/backends/enflame/
+  - csrc/runtime/accelerator/enflame/
+  - csrc/runtime/allocator/backends/enflame_memory.h
+  - .github/scripts/hooks/set_env_enflame.sh
+  - .github/scripts/set_env_enflame.sh
   - scripts/codegen/codegen_gcu.py
   - scripts/codegen/codegen_gcu_flaggems.py
 

@@ -84,7 +84,7 @@ def test_the_cuda_script_still_selects_its_interpreter_per_call():
     need a different one, so every call has to name it or the wrong interpreter
     is used silently.
     """
-    text = (HOOKS_DIR / "set_env_cuda.sh").read_text(encoding="utf-8")
+    text = (HOOKS_DIR / "set_env_nvidia.sh").read_text(encoding="utf-8")
     calls = re.findall(r"pip_retry ", text)
     prefixed = re.findall(r'PIP_RETRY_PYTHON="\$[A-Za-z_]+" pip_retry ', text)
     assert calls and len(calls) == len(prefixed), (len(calls), len(prefixed))
@@ -119,7 +119,7 @@ def test_every_script_calls_the_common_phases():
         assert re.search(r"^[ \t]*export_ci_env\b", text, re.M), (
             f"{script.name}: export_ci_env"
         )
-        if script.name == "set_env_mps.sh":
+        if script.name == "set_env_apple.sh":
             assert not re.search(r"^[ \t]*install_flagtree\b", text, re.M)
             assert re.search(
                 r'^if \[\[ "\$CI_STAGE" == "build" \]\]; then\n'
@@ -127,7 +127,7 @@ def test_every_script_calls_the_common_phases():
                 r"build_flagos_inplace\nfi$",
                 text,
                 re.M,
-            ), "set_env_mps.sh: build_flagos_inplace must be gated on build"
+            ), "set_env_apple.sh: build_flagos_inplace must be gated on build"
         elif script.name == "set_env_iluvatar.sh":
             assert not re.search(r"^[ \t]*install_cpu_torch\b", text, re.M)
             for phase in ("install_flagtree", "build_flagos_inplace"):

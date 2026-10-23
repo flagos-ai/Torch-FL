@@ -137,12 +137,12 @@ from backend_coverage import (  # noqa: E402
 # derived from the same artifact the compiler sees.
 VENDORS = {
     "musa": (
-        "backends/musa/generated/musa_register.inc",
-        ("backends/musa/generated/musa_flaggems_register.inc",),
+        "backends/mthreads/generated/musa_register.inc",
+        ("backends/mthreads/generated/musa_flaggems_register.inc",),
     ),
     "gcu": (
-        "backends/gcu/generated/gcu_register.inc",
-        ("backends/gcu/generated/gcu_flaggems_register.inc",),
+        "backends/enflame/generated/gcu_register.inc",
+        ("backends/enflame/generated/gcu_flaggems_register.inc",),
     ),
     "ascend": ("backends/ascend/generated/ascend_register.inc", ()),
     # Kunlunxin has no FlagGems .inc to fold in yet: the vendor torch shim on
@@ -155,11 +155,11 @@ VENDORS = {
     # Apple Silicon (Metal). Like kunlunxin this is a native backend with a
     # single registration .inc and no FlagGems file to fold in: no Metal
     # FlagTree/Triton line exists, so backends_mps.conf routes the ops
-    # backends/mps/generated/mps_register.inc claims to the `mps` kernel and
+    # backends/apple/generated/mps_register.inc claims to the `mps` kernel and
     # everything else to `none` (cpu_fallback). After stage 2 that is the
     # `unary`, `binary`, `binary_scalar` and `reduce` categories; see
     # scripts/codegen/codegen_mps.py.
-    "mps": ("backends/mps/generated/mps_register.inc", ()),
+    "mps": ("backends/apple/generated/mps_register.inc", ()),
     # Iluvatar is still FlagGems-primary, but it now has a native (non-boxing)
     # .inc for the first cohort of corex ixdnn/ixblas kernels, so the native slot
     # is no longer empty. backends_iluvatar.conf routes an op to `flaggems` where
@@ -685,7 +685,7 @@ BOXING_TRITON_GAPS = {
         # the failure is the guard and not the kernel. See
         # docs/reference/operator-support.md: the name comes from the `_thead`
         # vendor descriptor (device_name="cuda"), and
-        # torch_fl.accelerator.cuda._cuda_compat.patch_flaggems_device_name,
+        # torch_fl.accelerator.nvidia._cuda_compat.patch_flaggems_device_name,
         # which realigns it on the NVIDIA path, returns immediately for any
         # vendor but nvidia. reflection_pad1d and reflection_pad3d_backward
         # carry no such guard and stay on flaggems. --
@@ -1030,7 +1030,7 @@ FLAGGEMS_CPP_PLATFORMS = {"metax"}
 # through a dispatcher slot its wheel does not compile. Boxing platforms
 # compile the Python caller and may use the measured FlagGems coverage --
 # including PPU, whose FlagTree install (triton with the `ppu` backend) is
-# what set_env_ppu.sh provisions.
+# what set_env_thead.sh provisions.
 #
 # Kunlunxin is deliberately absent, and a native vendor rather than a boxing
 # one: libxpuapi.so (baidu::xpu::api) has the operator surface, and there is no
@@ -2585,7 +2585,7 @@ DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 # Python route dies at its first op regardless of what a conf claims, and no
 # FlagGems liboperators.so exists for the XPU SDK either (see
 # FLAGGEMS_CPP_PLATFORMS). Both are stated on the vendor side of the fleet
-# already -- see torch_fl/accelerator/cuda/_cuda_compat.py's _ALIGNED_VENDORS
+# already -- see torch_fl/accelerator/nvidia/_cuda_compat.py's _ALIGNED_VENDORS
 # and the platform table's FLAGOS_BUILD_FLAGGEMS_CPP pin.
 #
 # Spelled out rather than left implicit so the extension point is obvious when

@@ -46,7 +46,7 @@ def test_ppu_contract_failures_are_regenerable_boxing_exceptions():
         break
 
     assert gaps is not None
-    assert {"_unsafe_view", "slice.Tensor"} <= gaps["ppu"]
+    assert {"_unsafe_view", "slice.Tensor"} <= gaps["thead"]
 
     routes = {}
     for raw in _CONFIG.read_text().splitlines():

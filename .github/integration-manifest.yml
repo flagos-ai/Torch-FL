@@ -127,7 +127,7 @@ steps:
   # green run of this group is evidence the suites below measured something.
   - id: musa_runtime
     name: Check MUSA FlagTree and FlagGems runtime
-    platforms: [musa]
+    platforms: [mthreads]
     command: >-
       python -m pytest tests/integration/test_musa_runtime.py
       -v -s --tb=short
@@ -165,7 +165,7 @@ steps:
   # the lane's follow-up re-wires to a vendor or FlagGems route.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
-    platforms: [cuda]
+    platforms: [nvidia]
     command: >-
       python -m pytest tests/integration/ops/
       -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -179,7 +179,7 @@ steps:
   # the old expression did not.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
-    platforms: [dcu]
+    platforms: [hygon]
     command: >-
       python -m pytest tests/integration/ops/
       -m "(dcu or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -193,7 +193,7 @@ steps:
   # operator added after it.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
-    platforms: [gcu]
+    platforms: [enflame]
     command: >-
       python -m pytest tests/integration/ops/
       -m "(anyplatform or main_ops or gcu) and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -237,7 +237,7 @@ steps:
   # on S5000 on the unmodified tree as well.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
-    platforms: [musa]
+    platforms: [mthreads]
     command: >-
       python -m pytest tests/integration/ops/
       --ignore=tests/integration/ops/test_rng_dispatch.py
@@ -251,7 +251,7 @@ steps:
   # 1059 deselected, 1 xpassed.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
-    platforms: [metax, ppu]
+    platforms: [metax, thead]
     command: >-
       python -m pytest tests/integration/ops/
       -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -312,7 +312,7 @@ steps:
   # wheel carries no FlagGems kernels or the runtime has no mthreads backend.
   - id: musa_flaggems_hybrid
     name: Run MUSA FlagGems hybrid tests
-    platforms: [musa]
+    platforms: [mthreads]
     command: >-
       python -m pytest tests/integration/ops/test_musa_flaggems.py
       -m musa -v -s --tb=short
@@ -329,7 +329,7 @@ steps:
   # already measures -- the multinomial case among them.
   - id: rng
     name: Run unified RNG tests
-    platforms: [ascend, cuda, dcu, gcu, iluvatar, kunlunxin, metax]
+    platforms: [ascend, nvidia, hygon, enflame, iluvatar, kunlunxin, metax]
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
       -m "main_ops and not flaggems" -v -s --tb=short
@@ -346,7 +346,7 @@ steps:
   # is fixed; --tb=line stays to cap any future randperm assert diff.
   - id: rng
     name: Run unified RNG tests
-    platforms: [musa]
+    platforms: [mthreads]
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
       -m "main_ops and not flaggems"
@@ -361,7 +361,7 @@ steps:
   # Measured on the eight-device C550 host on 2026-09-15: 30 passed, 7 deselected.
   - id: soft_lowp_matrix
     name: Run low-precision matrix tests
-    platforms: [dcu, metax]
+    platforms: [hygon, metax]
     command: >-
       python -m pytest tests/integration/ops/test_soft_lowp_gate_dispatch.py
       -m "soft_lowp" -v -s --tb=short
@@ -380,7 +380,7 @@ steps:
   # docs/vendors/kunlunxin/installation.md.
   - id: amp_contract
     name: Unified AMP contract
-    platforms: [ascend, cuda, dcu, gcu, iluvatar, metax, musa]
+    platforms: [ascend, nvidia, hygon, enflame, iluvatar, metax, mthreads]
     command: python -m pytest tests/integration/test_amp_contract.py -v -m amp --tb=short
 
   # Lazy Conjugate/Negative bits are a dispatcher-level property, so every
@@ -437,7 +437,7 @@ steps:
   # validates environment values as strings.
   - id: profiler_contract
     name: Unified profiler contract
-    platforms: [cuda, dcu, iluvatar, metax, musa, ppu]
+    platforms: [nvidia, hygon, iluvatar, metax, mthreads, thead]
     command: python -m pytest tests/integration/test_profiler_contract.py -v -m profiler --tb=short
   - id: profiler_contract
     name: Unified profiler contract
@@ -462,7 +462,7 @@ steps:
   # in the test, not another tracer fix.
   - id: profiler_parity
     name: Profiler parity test
-    platforms: [cuda, dcu, iluvatar]
+    platforms: [nvidia, hygon, iluvatar]
     command: python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops --tb=short
 
   # torch.compile styles differ by platform, and the difference is the vendor
@@ -481,7 +481,7 @@ steps:
   #
   # MUSA withholds the group, and it is an image gap rather than a code one:
   # torch.compile needs the vendor flagtree (flagtree-0.5.0+mthreads3.1, Triton
-  # 3.1, backend "mthreads"), set_env_musa.sh deliberately does not link one, and
+  # 3.1, backend "mthreads"), set_env_mthreads.sh deliberately does not link one, and
   # stock PyPI triton is not a substitute -- it ships no mthreads backend and
   # cannot compile a MUSA kernel at all. The suite itself is green on the MTT
   # S5000 with that runtime on PYTHONPATH (2026-08-29: 25 passed, 19 skipped, 1
@@ -490,13 +490,13 @@ steps:
   # passed, 21 skipped, 1 failed on the same entry-point case.
   - id: torch_compile
     name: Run torch.compile tests
-    platforms: [cuda, iluvatar]
+    platforms: [nvidia, iluvatar]
     command: >-
       FLAGOS_USE_FLAGTREE=1 python -m pytest tests/integration/test_compile.py
       -v -s --tb=short
   - id: torch_compile
     name: Run torch.compile tests
-    platforms: [gcu, kunlunxin, metax]
+    platforms: [enflame, kunlunxin, metax]
     command: python -m pytest tests/integration/test_compile.py -v --tb=short
 
   # The Qwen3 smoke groups need a mounted checkpoint, which is why they are the
@@ -506,14 +506,14 @@ steps:
   # has the mount and the first CI run confirms the card count.
   - id: inference
     name: Run inference tests
-    platforms: [cuda, ppu]
+    platforms: [nvidia, thead]
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py --model "$MODEL_PATH"
       -v -s --tb=short
 
   - id: training
     name: Run training tests
-    platforms: [cuda, ppu]
+    platforms: [nvidia, thead]
     command: >-
       python -m pytest tests/integration/test_qwen3_train.py --model "$MODEL_PATH"
       -v -s --tb=short
@@ -528,12 +528,12 @@ steps:
   # gets wrong, are in the test.
   - id: native_comm_bridge
     name: Native comm bridge
-    platforms: [dcu]
+    platforms: [hygon]
     command: python -m pytest tests/integration/test_comm_native_bridge.py -v -s --tb=short
 
   - id: musa_dispatch
     name: Run MUSA dispatch tests
-    platforms: [musa]
+    platforms: [mthreads]
     command: python -m pytest tests/integration/ops/test_musa_dispatch.py -m musa -v -s --tb=short
 
   # tests/unit is a source-tree suite: seven of its files read scripts/, csrc/,
@@ -545,7 +545,7 @@ steps:
   # the same reading INTEGRATION_ALLOW_TEARDOWN_CRASH asks for above.
   - id: unit_tests_per_file
     name: Run unit tests (per file)
-    platforms: [dcu]
+    platforms: [hygon]
     command: >-
       cd "$GITHUB_WORKSPACE" && UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
       python .github/scripts/run_unit_tests.py --timeout 300
@@ -578,7 +578,7 @@ steps:
   # environment check asserts the device count.
   - id: backend_ops
     name: Run {{display_name}} backend operator tests
-    platforms: [mps]
+    platforms: [apple]
     command: python -m pytest tests/integration/ops -m mps -v --tb=short
 
   # The second addition is the MPS runtime contract: device and stream lookup,
@@ -587,5 +587,5 @@ steps:
   # Metal and PyTorch's MPS stream code that an operator-only sweep cannot.
   - id: mps_runtime
     name: Run {{display_name}} runtime tests
-    platforms: [mps]
+    platforms: [apple]
     command: python -m pytest tests/integration/test_mps_runtime.py -v --tb=short

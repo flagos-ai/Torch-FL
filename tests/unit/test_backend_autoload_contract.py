@@ -101,7 +101,7 @@ def _dynamic_fields() -> set[str]:
     raise AssertionError("pyproject.toml has no project.dynamic list")
 
 
-@pytest.mark.parametrize("accelerator", ["cuda", "dcu", "musa"])
+@pytest.mark.parametrize("accelerator", ["cuda", "dcu", "mthreads"])
 def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelerator):
     _, kwargs = load_setup(accelerator)
     assert kwargs["entry_points"] == {

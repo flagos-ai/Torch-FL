@@ -38,7 +38,7 @@ Verified environment facts (conda env `torch-fl-211`, torch 2.11.0+cpu, 2× A100
    `nvidia/cuda_cupti/lib/libcupti.so.12` are available.
 6. **The flagos event/stream ABI is ready**: `EventCreate` / `EventRecord` / `EventElapsedTime` /
    … in `csrc/include/flagos.h` are 1:1 wrappers around `cudaEvent*` for the CUDA vendor
-   (`csrc/runtime/accelerator/cuda/stream.cc`). `GuardImpl` (`csrc/runtime/guard.h`) already wires
+   (`csrc/runtime/accelerator/nvidia/stream.cc`). `GuardImpl` (`csrc/runtime/guard.h`) already wires
    these into `DeviceGuardImplInterface`'s event methods.
 7. **The guard stream is a gap**: every stream accessor in `guard.h:58-77` returns a synthetic
    `Stream(UNSAFE,d,0)`, and `record` (:125) hardcodes recording on the `nullptr` null stream. →

@@ -250,7 +250,7 @@ def test_strict_tested_rejects_optional_build_version_changes(manifest, monkeypa
 def test_cli_reports_mismatch_before_import(tmp_path, manifest, capsys):
     wheel = _wheel(tmp_path, manifest)
     before = _snapshot_modules()
-    assert preflight.main(["--wheel", str(wheel), "--platform", "musa"]) == 1
+    assert preflight.main(["--wheel", str(wheel), "--platform", "mthreads"]) == 1
     assert "Wheel platform is cuda" in capsys.readouterr().err
     _assert_imported_no_torch_fl(before)
 

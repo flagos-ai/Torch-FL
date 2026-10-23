@@ -15,4 +15,4 @@
 
 
 # Thin wrapper: the parameterized entrypoint is set_env.sh.
-exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set_env.sh" --platform dcu
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set_env.sh" --platform hygon

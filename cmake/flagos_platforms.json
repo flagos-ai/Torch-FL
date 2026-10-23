@@ -92,7 +92,7 @@
         "FLAGOS_BUILD_BOXING=1), which is what a boxing wheel is built with."
       ],
       "project_languages": ["CUDA", "CXX", "C"],
-      "runtime_dir": "cuda",
+      "runtime_dir": "nvidia",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
@@ -121,7 +121,7 @@
         "(cpu_fallback for the rest). A boxing wheel is an explicit opt-in."
       ],
       "project_languages": ["CUDA", "CXX", "C"],
-      "runtime_dir": "cuda",
+      "runtime_dir": "nvidia",
       "bundle_libdir": "lib_ppu",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
@@ -360,7 +360,7 @@
         "for the rest). A boxing wheel is an explicit opt-in."
       ],
       "project_languages": ["CXX", "C"],
-      "runtime_dir": "cuda",
+      "runtime_dir": "hygon",
       "bundle_libdir": "lib_dcu",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
@@ -393,7 +393,7 @@
         "FlagGems Python shares the same dispatcher; boxing is off."
       ],
       "project_languages": ["CXX", "C"],
-      "runtime_dir": "gcu",
+      "runtime_dir": "enflame",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
       "wheel_local": "tops1.9.10",
@@ -420,7 +420,7 @@
         "for the hybrid path."
       ],
       "project_languages": ["CXX", "C"],
-      "runtime_dir": "musa",
+      "runtime_dir": "mthreads",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
       "wheel_local": "musa5.2.0",
@@ -489,14 +489,14 @@
         "Apple Silicon (M-series) via Metal. A native backend, not a boxing one:",
         "no CUDA runtime exists and none is faked, so boxing, FlagGems and FlagTree",
         "are all off (there is no Metal Triton line to build against).",
-        "csrc/runtime/accelerator/mps/ is Objective-C++ (OBJCXX) because Metal is an",
+        "csrc/runtime/accelerator/apple/ is Objective-C++ (OBJCXX) because Metal is an",
         "Objective-C API; the runtime links -framework Metal/-framework Foundation.",
-        "FLAGOS_BUILD_VENDOR is ON so the operator tree (backends/mps/, an",
+        "FLAGOS_BUILD_VENDOR is ON so the operator tree (backends/apple/, an",
         "MPSGraph-first wrapper set) compiles; it is Objective-C++ and links",
         "MetalPerformanceShadersGraph on top of the runtime's Metal/Foundation."
       ],
       "project_languages": ["OBJCXX", "CXX", "C"],
-      "runtime_dir": "mps",
+      "runtime_dir": "apple",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
       "wheel_local": "",

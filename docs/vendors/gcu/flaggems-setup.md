@@ -74,7 +74,7 @@ routes operators to dispatcher slots that were never compiled in.
 Install FlagGems **without** its dependencies so FlagTree's Triton survives;
 FlagGems' `triton` requirement otherwise pulls the NVIDIA wheel back in.
 
-FlagGems moves faster than the FlagTree Triton it needs, so `set_env_gcu.sh`
+FlagGems moves faster than the FlagTree Triton it needs, so `set_env_enflame.sh`
 pins the revision rather than tracking master. The pin that was validated on the
 S60 is `3c6f7537d2d5d3aa680c55bbee5c70f2100c5b85`; see
 [flaggems-test-results.md](flaggems-test-results.md) for the measured routing it
@@ -127,7 +127,7 @@ export LD_LIBRARY_PATH=$TOPS_HOME/lib:$(dirname "$(readlink -f $TOPSATEN_LIB)"):
 `torch_fl` must be imported before `flag_gems`. FlagGems 5.x resolves its vendor
 from the `torch_fl` device surface, so a bare `import flag_gems` against stock
 CPU PyTorch raises `No device were detected on your machine !`. That is why
-`set_env_gcu.sh` only asserts `importlib.util.find_spec("flag_gems")` and leaves
+`set_env_enflame.sh` only asserts `importlib.util.find_spec("flag_gems")` and leaves
 the real import to the integration job, which runs after the wheel is installed.
 
 ```bash
@@ -151,7 +151,7 @@ device the generator picks the first available backend in the order
 in `NATIVE_TRITON_GAPS["gcu"]` to the native `topsaten` kernel or to `none`.
 
 The `flaggems` routes need a matching entry in
-`csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`, which
+`csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc`, which
 `scripts/codegen/codegen_gcu_flaggems.py` writes from the same gap set:
 `FLAGGEMS_PYTHON_OPS - NATIVE_TRITON_GAPS["gcu"] - <native GCU ops>`. A `flaggems`
 route without a registration raises
@@ -183,7 +183,7 @@ pytest tests/unit/test_gen_vendor_confs.py -v
 pytest tests/integration/ops/test_flaggems_conf_consistency.py -v
 ```
 
-The `flaggems`-marked cases are collected unconditionally; routing comes from `backends_gcu.conf`, so no environment variable is needed. See the note in `.github/configs/gcu.yml`.
+The `flaggems`-marked cases are collected unconditionally; routing comes from `backends_gcu.conf`, so no environment variable is needed. See the note in `.github/configs/enflame.yml`.
 
 ## Troubleshooting
 

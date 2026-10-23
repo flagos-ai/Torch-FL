@@ -73,7 +73,7 @@ Three shapes exist, in increasing order of work:
 
 | Shape | Example | Runtime dir | Operator work |
 |---|---|---|---|
-| SDK ships a `libcudart` shim, `cuda_runtime.h` compiles | Hygon DCU (DTK) | **reuses `accelerator/cuda/*.cc` verbatim** — no vendor dir | none |
+| SDK ships a `libcudart` shim, `cuda_runtime.h` compiles | Hygon DCU (DTK) | **reuses `accelerator/nvidia/*.cc` verbatim** — no vendor dir | none |
 | CUDA-compatible SDK, own detection | PPU | reuses `cuda` sources, `FLAGOS_ACCELERATOR=cuda` + `PPU_SDK` detection | none |
 | CUDA-compatible but needs a shim layer | MetaX (cu-bridge) | `accelerator/metax/` incl. `cudart_shim.c` + a `.version` script | none |
 

@@ -28,10 +28,10 @@
 #     skipped op.
 #
 # The generated file is Objective-C++ (.mm) and builds WITHOUT ARC, like the
-# runtime under csrc/runtime/accelerator/mps/: every object this file creates is
+# runtime under csrc/runtime/accelerator/apple/: every object this file creates is
 # released explicitly through mps::MpsRelease.
 #
-# Run it to (re)generate csrc/aten/backends/mps/generated/; `--check` verifies the
+# Run it to (re)generate csrc/aten/backends/apple/generated/; `--check` verifies the
 # committed artifacts are current without writing, which is the mode CI uses.
 
 import argparse
@@ -49,8 +49,8 @@ from codegen_ops import unified_sig
 from torchgen import local
 
 REPO = Path(__file__).resolve().parent.parent.parent
-OUT_MM = REPO / "csrc/aten/backends/mps/generated/mps_kernels.mm"
-OUT_INC = REPO / "csrc/aten/backends/mps/generated/mps_register.inc"
+OUT_MM = REPO / "csrc/aten/backends/apple/generated/mps_kernels.mm"
+OUT_INC = REPO / "csrc/aten/backends/apple/generated/mps_register.inc"
 REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
 
 # ---------------------------------------------------------------------------
@@ -5240,7 +5240,7 @@ FILE_HEADER = """\
 #include <string_view>
 #include <vector>
 #include "../mps_common.h"
-#include "runtime/accelerator/mps/mps_runtime.h"
+#include "runtime/accelerator/apple/mps_runtime.h"
 
 namespace at::native::flagos {
 // The helpers live in the nested at::native::flagos::mps namespace, so an

@@ -17,16 +17,16 @@
 // Kunlunxin header is native like them but has no such fallback, so it is
 // guarded and only pulled in for the platform that defines USE_KUNLUNXIN.
 #include "backends/ascend/ascend_copy.h"
-#include "backends/gcu/gcu_copy.h"
+#include "backends/enflame/gcu_copy.h"
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
 #if defined(USE_MPS)
-#include "backends/mps/mps_copy.h"
+#include "backends/apple/mps_copy.h"
 #endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
-#include "backends/musa/mudnn_common.h"
+#include "backends/mthreads/mudnn_common.h"
 #endif
 
 // Whether the CUDA-platform arms of contiguous()/clone() below may hand the

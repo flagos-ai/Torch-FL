@@ -283,7 +283,7 @@ at::Tensor view_as_complex(const at::Tensor& self) {
 //     `#elif defined(USE_ASCEND)`. That claim is what makes the kAscend slots
 //     here reachable.
 //   * MPS claims only the eight views in
-//     csrc/aten/backends/mps/generated/mps_register.inc; the remaining kMps
+//     csrc/aten/backends/apple/generated/mps_register.inc; the remaining kMps
 //     slots stay unreachable because their routes remain `none`.
 //   * TsingMicro has NO equivalent .inc. It takes register.cc's `#else` arm:
 //     with FLAGOS_BUILD_BOXING=ON the generated/register.inc claims these ops

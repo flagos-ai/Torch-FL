@@ -79,7 +79,7 @@ def _has_cuda_runtime() -> bool:
     if hasattr(torch._C, "_cuda_getCurrentStream"):
         return True
     try:
-        from torch_fl.accelerator.cuda._cuda_compat import cuda_shim_active
+        from torch_fl.accelerator.nvidia._cuda_compat import cuda_shim_active
     except Exception:
         return False
     return cuda_shim_active()
@@ -91,7 +91,7 @@ def _cuda_stream_shim(device):
     Same object ``torch.cuda.current_stream`` returns on such a build, so both
     spellings denote the same (null) stream the boxing kernels submit to.
     """
-    from torch_fl.accelerator.cuda._cuda_compat import _StreamShim, _device_index
+    from torch_fl.accelerator.nvidia._cuda_compat import _StreamShim, _device_index
 
     return _StreamShim(_device_index(device))
 
@@ -407,11 +407,11 @@ class Stream(torch.cuda.Stream):
         if not _has_cuda_runtime():
             vendor = _platform()
             if vendor == "gcu":
-                from torch_fl.accelerator.gcu.tops_stream import TopsStream
+                from torch_fl.accelerator.enflame.tops_stream import TopsStream
 
                 self._stream = TopsStream(device, priority)
             elif vendor == "musa":
-                from torch_fl.accelerator.musa.musa_stream import MusaStream
+                from torch_fl.accelerator.mthreads.musa_stream import MusaStream
 
                 self._stream = MusaStream(device, priority)
             elif vendor == "ascend":
@@ -421,8 +421,8 @@ class Stream(torch.cuda.Stream):
             elif vendor == "mps":
                 # Apple Silicon (M-series). Metal has real command queues, so
                 # this is an owning stream rather than the handle-0 stand-in the
-                # unnamed arms below get -- see torch_fl/accelerator/mps/.
-                from torch_fl.accelerator.mps.mps_stream import MpsStream
+                # unnamed arms below get -- see torch_fl/accelerator/apple/.
+                from torch_fl.accelerator.apple.mps_stream import MpsStream
 
                 self._stream = MpsStream(device, priority)
             elif vendor == "iluvatar":
@@ -672,7 +672,7 @@ def _real_current_stream(device=None):
         return _DefaultStreamHandle(idx)
     if not _has_cuda_runtime():
         if _platform() == "gcu":
-            from torch_fl.accelerator.gcu.tops_stream import current_tops_stream
+            from torch_fl.accelerator.enflame.tops_stream import current_tops_stream
 
             return current_tops_stream(idx)
         if _platform() == "ascend":
@@ -683,7 +683,7 @@ def _real_current_stream(device=None):
             except RuntimeError:
                 return _DefaultStreamHandle(idx)
         if _platform() == "mps":
-            from torch_fl.accelerator.mps.mps_stream import current_mps_stream
+            from torch_fl.accelerator.apple.mps_stream import current_mps_stream
 
             return current_mps_stream(idx)
         if _platform() == "iluvatar":
@@ -775,7 +775,7 @@ class Event(torch.cuda.Event):
             )
             if _platform() == "gcu":
                 try:
-                    from torch_fl.accelerator.gcu.tops_stream import TopsEvent
+                    from torch_fl.accelerator.enflame.tops_stream import TopsEvent
 
                     obj = object.__new__(cls)
                     obj._event = TopsEvent(**host_timed)
@@ -798,7 +798,7 @@ class Event(torch.cuda.Event):
             if _platform() == "mps":
                 # Apple Silicon: MTLSharedEvent is a real device event, so timing
                 # is measured on the queue rather than on the host clock.
-                from torch_fl.accelerator.mps.mps_stream import MpsEvent
+                from torch_fl.accelerator.apple.mps_stream import MpsEvent
 
                 obj = object.__new__(cls)
                 obj._event = MpsEvent(**host_timed)
@@ -816,7 +816,7 @@ class Event(torch.cuda.Event):
             # flags are not musa_runtime's, so there is nothing here to wrap and
             # the host clock is the clock that is left. Any other accelerator with
             # no event class takes the same answer, rather than being sent to
-            # Ascend for one. See torch_fl/accelerator/musa/musa_stream.py.
+            # Ascend for one. See torch_fl/accelerator/mthreads/musa_stream.py.
             return _HostTimedEvent(**host_timed)
         if not hasattr(torch._C, "_cuda_getCurrentStream"):
             # CPU torch wheel over a real CUDA runtime: torch.cuda.Event is the
@@ -902,7 +902,7 @@ def stream(s):
         native = getattr(s, "_stream", s)
         vendor = _platform()
         if vendor == "gcu":
-            from torch_fl.accelerator.gcu.tops_stream import TopsStream
+            from torch_fl.accelerator.enflame.tops_stream import TopsStream
 
             native_type = TopsStream
         elif vendor == "ascend":
@@ -912,8 +912,8 @@ def stream(s):
         elif vendor == "mps":
             # Apple Silicon: Metal command queues and a thread-local current
             # stream, so this really switches rather than running the body in
-            # place -- see torch_fl/accelerator/mps/mps_stream.py.
-            from torch_fl.accelerator.mps.mps_stream import MpsStream
+            # place -- see torch_fl/accelerator/apple/mps_stream.py.
+            from torch_fl.accelerator.apple.mps_stream import MpsStream
 
             native_type = MpsStream
         elif vendor == "iluvatar":
@@ -1114,14 +1114,14 @@ def _align_flaggems_device_identity():
     tensor must be on cuda device`` class in the DCU survey. On every other
     vendor (Ascend, GCU, MetaX, MUSA, and the remaining descriptors that say
     ``cuda``) the call returns immediately -- see
-    ``torch_fl.accelerator.cuda._cuda_compat.patch_flaggems_device_name``, which
-    GCU mirrors in ``torch_fl.accelerator.gcu._gcu_compat``.
+    ``torch_fl.accelerator.nvidia._cuda_compat.patch_flaggems_device_name``, which
+    GCU mirrors in ``torch_fl.accelerator.enflame._gcu_compat``.
 
     Best-effort -- the name check is a dispatch guard, so failing to realign it
     costs the routed ops their Triton kernel but must not take down device init.
     """
     try:
-        from torch_fl.accelerator.cuda._cuda_compat import patch_flaggems_device_name
+        from torch_fl.accelerator.nvidia._cuda_compat import patch_flaggems_device_name
 
         patch_flaggems_device_name()
     except Exception:

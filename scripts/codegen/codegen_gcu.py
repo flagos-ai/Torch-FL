@@ -26,9 +26,9 @@ topsaten is simpler than aclnn: one direct call, no workspace/executor phase.
     topsaten::topsatenAdd(out, lhs, rhs, alpha, stream)
 
 Generates:
-  - csrc/aten/backends/gcu/generated/gcu_kernels.cc
+  - csrc/aten/backends/enflame/generated/gcu_kernels.cc
       the kernels + REGISTER_IMPL_TO_DISPATCHER(..., Backend::kGcu, ...)
-  - csrc/aten/backends/gcu/generated/gcu_register.inc
+  - csrc/aten/backends/enflame/generated/gcu_register.inc
       the m.impl() subset for register.cc. GCU registers PrivateUse1 ONLY for
       ops it has a kernel for; everything else stays unregistered and reaches
       the cpu_fallback (registering all 2033 ops would instead hit the
@@ -57,8 +57,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from codegen_ops import schema_to_cpp_name
 
 REPO = Path(__file__).resolve().parent.parent.parent
-OUT_CC = REPO / "csrc/aten/backends/gcu/generated/gcu_kernels.cc"
-OUT_INC = REPO / "csrc/aten/backends/gcu/generated/gcu_register.inc"
+OUT_CC = REPO / "csrc/aten/backends/enflame/generated/gcu_kernels.cc"
+OUT_INC = REPO / "csrc/aten/backends/enflame/generated/gcu_register.inc"
 REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
 CONF = REPO / "torch_fl/configs/backends_gcu.conf"
 
@@ -355,7 +355,7 @@ METADATA_OPS = {
 # REGISTER_PRIVATEUSE1_DISPATCH registrar into ATen's _fused_sdp_choice
 # DispatchStub (which is what makes the composite pick this leaf at all) rather
 # than an entry in the flagos dispatcher table. The kernel lives in
-# csrc/aten/backends/gcu/scaled_dot_product_attention.cc.
+# csrc/aten/backends/enflame/scaled_dot_product_attention.cc.
 HANDWRITTEN_OPS = {
     "_scaled_dot_product_efficient_attention",
     "_sample_dirichlet",

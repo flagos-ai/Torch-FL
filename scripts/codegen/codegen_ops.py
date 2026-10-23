@@ -677,7 +677,7 @@ FLAGGEMS_PYTHON_SKIP = {
     # skipped). gems' internal philox_backend_seed_offset(increment) reads
     # torch_device_fn.default_generators[device] (torch.cuda for the nvidia/metax
     # branches) and unpacks its state as 2x int64 (seed, offset). The compat shim
-    # (torch_fl/accelerator/cuda/_cuda_compat.py, .../metax/_metax_compat.py)
+    # (torch_fl/accelerator/nvidia/_cuda_compat.py, .../metax/_metax_compat.py)
     # installs per-device CUDA generators as torch.cuda.default_generators and
     # routes torch.manual_seed there, so those ops find a real, seedable
     # generator with the philox layout gems expects -- no per-op generator

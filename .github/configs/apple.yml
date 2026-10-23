@@ -20,7 +20,7 @@ display_name: MPS
 # the same manifest and the same loader, so this config states what the loader
 # needs rather than a bespoke workflow.
 setup_script: .github/scripts/set_env.sh
-setup_platform: mps
+setup_platform: apple
 
 # Empty on purpose: the empty value is what tells the two consuming workflows to
 # omit the `container:` key entirely, because a macOS runner cannot start a
@@ -39,15 +39,15 @@ runner_labels:
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
-  - torch_fl/accelerator/mps/
+  - torch_fl/accelerator/apple/
   - torch_fl/accelerator/_vendor_libtorch.py
   - torch_fl/configs/backends_mps.conf
-  - csrc/aten/backends/mps/
-  - csrc/runtime/accelerator/mps/
-  - csrc/runtime/allocator/backends/mps_memory.h
+  - csrc/aten/backends/apple/
+  - csrc/runtime/accelerator/apple/
+  - csrc/runtime/allocator/backends/apple_memory.h
   - scripts/codegen/codegen_mps.py
-  - .github/scripts/hooks/set_env_mps.sh
-  - .github/scripts/set_env_mps.sh
+  - .github/scripts/hooks/set_env_apple.sh
+  - .github/scripts/set_env_apple.sh
   # The per-op suites are `test_mps_<op>.py` rather than a `mps/` directory, so
   # the glob is what keeps a new increment's tests inside this lane instead of
   # routing them through "unknown code runs every platform".
@@ -128,5 +128,5 @@ environment_check:
   # for two architectures while CMake builds one, and the tag would be
   # believed: the link to libtorch_bindings is dropped with a warning, the
   # wheel installs everywhere and imports only here. See ARCHFLAGS in
-  # .github/scripts/hooks/set_env_mps.sh and assert_native_extensions_arch.
+  # .github/scripts/hooks/set_env_apple.sh and assert_native_extensions_arch.
   native_extensions_arch: arm64

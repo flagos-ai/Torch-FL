@@ -246,10 +246,10 @@ def test_shipped_manifest_covers_both_symbol_families():
     not the other is only caught at bundle time on a DTK machine otherwise.
     """
     manifest = abi.read_manifest(
-        REPO_ROOT / "torch_fl" / "accelerator" / "dcu" / "dtk_core_compat_symbols.txt"
+        REPO_ROOT / "torch_fl" / "accelerator" / "hygon" / "dtk_core_compat_symbols.txt"
     )
     source = (
-        REPO_ROOT / "csrc" / "runtime" / "accelerator" / "dcu" / "dtk_core_compat.cc"
+        REPO_ROOT / "csrc" / "runtime" / "accelerator" / "hygon" / "dtk_core_compat.cc"
     ).read_text(encoding="utf-8")
 
     missing = sorted(sym for sym in manifest if sym not in source)

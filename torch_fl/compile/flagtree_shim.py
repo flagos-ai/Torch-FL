@@ -173,7 +173,7 @@ def get_gcu_current_raw_stream(device: Any = None) -> int:
 
     Unlike MUSA, no driver rebinding happens here: ``import torch_fl`` already
     points the vendor Triton backend at flagos through
-    ``torch_fl.accelerator.gcu._gcu_compat.patch_gcu_triton_for_flagos()``.
+    ``torch_fl.accelerator.enflame._gcu_compat.patch_gcu_triton_for_flagos()``.
     """
     from torch_fl import flagos
     from torch_fl.compile.device_interface import FlagOSDeviceInterface

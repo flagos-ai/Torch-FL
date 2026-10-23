@@ -30,7 +30,7 @@ paths_watch:
   - csrc/aten/backends/metax/
   - csrc/runtime/accelerator/metax/
   - csrc/runtime/allocator/backends/metax_memory.h
-  - csrc/runtime/allocator/backends/cuda_memory.h
+  - csrc/runtime/allocator/backends/nvidia_memory.h
   - .github/scripts/hooks/set_env_metax.sh
   - .github/scripts/set_env_metax.sh
   - scripts/vendor/bundle_maca_libtorch.sh

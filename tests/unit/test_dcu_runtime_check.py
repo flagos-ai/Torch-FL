@@ -18,7 +18,7 @@ import pytest
 from dcu_module_loader import load_module
 
 check = load_module(
-    "torch_fl/accelerator/dcu/_dcu_runtime_check.py", "_flagos_test_dcu_runtime_check"
+    "torch_fl/accelerator/hygon/_dcu_runtime_check.py", "_flagos_test_dcu_runtime_check"
 )
 
 

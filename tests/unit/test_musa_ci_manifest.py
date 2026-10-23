@@ -18,7 +18,7 @@ The runtime doubles below test the preflight's fail-closed checks, not hardware
 execution. The actual FlagGems and compile suites still require the MUSA runner.
 
 The groups these tests assert on live in the shared manifest rather than in
-.github/configs/musa.yml: a platform config carries the data a step needs, and
+.github/configs/mthreads.yml: a platform config carries the data a step needs, and
 .github/integration-manifest.yml carries the ordered step list every platform is
 composed against. What is checked here is only what the MUSA entries add -- that
 they are wired to the right files and ordered against the suites they gate --
@@ -55,11 +55,11 @@ def register_runtime_marker(pytestconfig):
     pytestconfig.addinivalue_line("markers", "musa: requires MUSA hardware")
 
 
-def _steps(platform="musa"):
+def _steps(platform="mthreads"):
     return composed_steps(platform)
 
 
-def _groups(platform="musa"):
+def _groups(platform="mthreads"):
     return {step["name"]: step for step in _steps(platform)}
 
 
@@ -126,7 +126,7 @@ def test_musa_withholds_torch_compile_until_the_image_ships_the_vendor_stack():
     # a "mthreads" backend), and a stock PyPI triton cannot compile a MUSA
     # kernel at all. Adding the group to this image would record a pass that
     # measured nothing, so the exclusion is asserted rather than assumed.
-    musa = {step["name"] for step in _steps("musa")}
+    musa = {step["name"] for step in _steps("mthreads")}
     assert not any("torch.compile" in name for name in musa), sorted(musa)
 
 

@@ -14,7 +14,7 @@
 
 """Static guards for the DCU environment script that provisions FlagTree.
 
-``set_env_dcu.sh`` runs before every DCU job can do anything, so a defect in it
+``set_env_hygon.sh`` runs before every DCU job can do anything, so a defect in it
 is not a test failure -- it is a job that produces no results at all. That is
 what happened when the FlagTree/FlagGems provisioning landed: the triton
 cleanup used ``while pip uninstall ...; do :; done``, and ``pip uninstall -y``
@@ -35,7 +35,7 @@ import pytest
 
 
 _SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2] / ".github/scripts/hooks/set_env_dcu.sh"
+    Path(__file__).resolve().parents[2] / ".github/scripts/hooks/set_env_hygon.sh"
 )
 _SCRIPT = _SCRIPT_PATH.read_text(encoding="utf-8")
 

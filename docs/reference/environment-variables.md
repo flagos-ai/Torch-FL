@@ -151,7 +151,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | `FLAGOS_DISABLE_APEX_COMPAT` | Runtime | `0` (off) | Disable the optional Apex multi-tensor compatibility layer; see the Apex note below |
 | `FLAGOS_DISABLE_QWENIMAGE_ROPE` | Runtime | `0` (off) | Leave `diffusers`' Qwen-Image rotary-embedding table alone. `torch_fl` registers the `flagos` device there at import on GCU and on Ascend, which is what keeps the rotation off the complex exponential `diffusers` would otherwise fall back to; set `1` to measure that difference. This is a capability switch, not a route switch: it changes which rotation `diffusers` calls, not which backend serves any operator — see the Qwen-Image note below |
 | `FLAGOS_DIST_FORCE_NCCL` | Test | `0` (off) | In the manual MetaX distributed tests, skip FlagCX and use NCCL |
-| `FLAGOS_DCU_SKIP_LEGACY_SMOKE` | Test | `0` (off) | In `.github/scripts/set_env_dcu.sh`, skip the legacy-mode smoke path (`FLAGOS_DCU_VENDOR_CORE=1`) after the decoupled gates have run |
+| `FLAGOS_DCU_SKIP_LEGACY_SMOKE` | Test | `0` (off) | In `.github/scripts/set_env_hygon.sh`, skip the legacy-mode smoke path (`FLAGOS_DCU_VENDOR_CORE=1`) after the decoupled gates have run |
 
 **Apex compatibility.** On CUDA-ABI boxing vendors, torch_fl patches Apex's
 common `MultiTensorApply` entry point when Apex is imported. The patch converts
@@ -169,7 +169,7 @@ multiplies by the complex exponential. `torch_fl` therefore registers the `flago
 device in both halves at import: angles for the operand, and a rotation that
 writes the same values as `diffusers`' `apply_rotary_emb_qwen_neuron` without the
 stride-0 `repeat_interleave` broadcast it uses. The GCU and Ascend branches each
-install their own copy — `torch_fl/accelerator/gcu/_gcu_compat.py` and
+install their own copy — `torch_fl/accelerator/enflame/_gcu_compat.py` and
 `torch_fl/accelerator/ascend/_ascend_compat.py` — on GCU because the topsaten
 stack serves the complex exponential slowly enough for it to dominate a
 transformer forward, and on Ascend because the complex operands cannot be built

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the GCU FlagGems registration list.
 
-``csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`` claims the
+``csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc`` claims the
 FlagGems Python ops on PrivateUse1 so that ``backends_gcu.conf`` can route them
 to the ``flaggems`` backend. ``gcu_register.inc`` only covers the ops topsaten
 has a kernel for, so without this file most FlagGems routes have no registered
@@ -41,7 +41,7 @@ import gen_vendor_confs as g  # noqa: E402
 from codegen_mudnn import REGISTER_INC, wrapper_map  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
-OUT_INC = REPO / "csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc"
+OUT_INC = REPO / "csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc"
 
 INC_HEADER = """\
 // Copyright (c) 2026, BAAI. All rights reserved.
@@ -76,7 +76,7 @@ def target_ops() -> list:
         )
 
     native = g.registered_impls(
-        REPO / "csrc/aten/backends/gcu/generated/gcu_register.inc"
+        REPO / "csrc/aten/backends/enflame/generated/gcu_register.inc"
     )
     gaps = g.NATIVE_TRITON_GAPS.get("gcu", set())
     pending = (

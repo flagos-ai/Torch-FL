@@ -86,7 +86,7 @@ the command fails if any artifact lacks its required provenance.
 
 ### NVIDIA CUDA
 
-The default and most exercised platform. [`.github/configs/cuda.yml`](../../.github/configs/cuda.yml)
+The default and most exercised platform. [`.github/configs/nvidia.yml`](../../.github/configs/nvidia.yml)
 (lines 50-82) builds and tests the **default** wheel — FlagGems-primary, no CUDA boxing kernels and
 no bundled `libtorch_cuda.so`, both asserted from the build record rather than from an environment
 variable — and runs the pipeline `.github/integration-manifest.yml` composes for it: the
@@ -100,7 +100,7 @@ with an NCCL fallback (see
 and §6). `torch.compile` registers flagos as a first-class inductor GPU device with integration
 documented in
 [`docs/architecture/torch-compile-integration.md`](../architecture/torch-compile-integration.md)
-(lines 84-127), but [`.github/configs/cuda.yml`](../../.github/configs/cuda.yml) has no
+(lines 84-127), but [`.github/configs/nvidia.yml`](../../.github/configs/nvidia.yml) has no
 `torch.compile` test step, so this path is not exercised in CI. The profiler achieves structural
 parity with torch-cuda via CUPTI (see
 [`docs/architecture/profiler.md`](../architecture/profiler.md), lines 1-21).
@@ -214,7 +214,7 @@ every strategy resolves through FlagTree's real registry
 
 PPU has its own `FLAGOS_ACCELERATOR=ppu` value (see [`setup.py`](../../setup.py)) and rides the
 CUDA-boxing build against the PPU's CUDA-13-compatible SDK, bundling its own libtorch into
-`lib_ppu/`. `.github/configs/ppu.yml` carries the CI manifest. The
+`lib_ppu/`. `.github/configs/thead.yml` carries the CI manifest. The
 [README](../../README.md)'s build-from-source instructions remain the full local procedure.
 The shared `AutocastPrivateUse1` policies and CUDA-boxing AMP routes expose
 `torch.autocast("flagos")` and `torch.amp.GradScaler("flagos")`, with FP16 and
@@ -232,14 +232,14 @@ this is not covered by CI.
 
 ### Hygon DCU
 
-[`.github/configs/dcu.yml`](../../.github/configs/dcu.yml) (lines 84-99) runs vendor-backend
+[`.github/configs/hygon.yml`](../../.github/configs/hygon.yml) (lines 84-99) runs vendor-backend
 and FlagGems-runtime operator suites, general tests, and the profiler parity suite in CI;
 inference and training smoke are explicitly deferred pending a model mount and card-count
 confirmation on the runner (same file, lines 57-61). DCU is a CUDA-boxing build over the
 hipified DTK torch, so it reuses the generated CUDA boxing kernels with no hand-written kernels
 of its own (see [`setup.py`](../../setup.py), the `FLAGOS_ACCELERATOR=dcu` branch). FlagGems C++ dispatch is not built
 for DCU: [`CMakeLists.txt`](../../CMakeLists.txt) and [`setup.py`](../../setup.py) force `FLAGOS_BUILD_FLAGGEMS_CPP=OFF` with the comment "FLAGOS_BUILD_FLAGGEMS_CPP needs liboperators.so,
-which is not built for DTK," and [`.github/configs/dcu.yml`](../../.github/configs/dcu.yml) line
+which is not built for DTK," and [`.github/configs/hygon.yml`](../../.github/configs/hygon.yml) line
 87 excludes C++ tests with `-m "not flaggems_cpp"`. Distributed collectives (all_reduce,
 broadcast, all_gather, all_gather_into_tensor, reduce_scatter_tensor) and DDP are measured
 working on 2 cards via RCCL (see
@@ -316,7 +316,7 @@ route executed.
 
 ### Enflame GCU
 
-[`.github/configs/gcu.yml`](../../.github/configs/gcu.yml) builds an isolated CPU-PyTorch wheel
+[`.github/configs/enflame.yml`](../../.github/configs/enflame.yml) builds an isolated CPU-PyTorch wheel
 and runs it against an S60 runner without importing the vendor `torch-gcu` plugin. GCU takes the
 native operator route through `libtopsaten.so`, with ops lacking a topsaten kernel reaching
 `cpu_fallback` instead of raising, and int64 operands always falling back to CPU because
@@ -342,7 +342,7 @@ represented in tests or docs for this platform.
 
 ### Moore Threads MUSA
 
-A CI manifest exists for this platform ([`.github/configs/musa.yml`](../../.github/configs/musa.yml)),
+A CI manifest exists for this platform ([`.github/configs/mthreads.yml`](../../.github/configs/mthreads.yml)),
 covering the isolated-environment preflight, MUSA dispatch, general factory ops, the unified AMP,
 math-bits and profiler contracts, the native mudnn operator subset, and the RNG suite. Three groups
 other platforms run are withheld with the reason recorded in that manifest: `torch.compile` and the

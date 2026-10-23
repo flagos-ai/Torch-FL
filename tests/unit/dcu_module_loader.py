@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parents[2]
 _STUB_PACKAGES = (
     ("torch_fl", "torch_fl"),
     ("torch_fl.accelerator", "torch_fl/accelerator"),
-    ("torch_fl.accelerator.dcu", "torch_fl/accelerator/dcu"),
+    ("torch_fl.accelerator.hygon", "torch_fl/accelerator/hygon"),
 )
 
 

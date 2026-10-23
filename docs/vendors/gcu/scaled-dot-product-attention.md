@@ -5,7 +5,7 @@ kernel only when the platform code generator cannot express the required runtime
 behaviour, and requires the concrete limitation to be documented and approved
 before the implementation is added. This file is that document, and the approval
 was obtained before any code was written. The kernel is
-`csrc/aten/backends/gcu/scaled_dot_product_attention.cc`; the route record —
+`csrc/aten/backends/enflame/scaled_dot_product_attention.cc`; the route record —
 counts, artifact hashes, generator idempotency and the S60 measurement — is in
 `docs/reference/operator-support.md` under the 2026-09-20 GCU entry.
 
@@ -263,14 +263,14 @@ get it wrong.
 
 ## 4. What was built
 
-**One new translation unit**, `csrc/aten/backends/gcu/scaled_dot_product_attention.cc`,
+**One new translation unit**, `csrc/aten/backends/enflame/scaled_dot_product_attention.cc`,
 picked up automatically by the CMake glob (`csrc/CMakeLists.txt:138` excludes the
 whole `backends/<vendor>/` tree only when the build is not for that vendor), plus
 **one line** adding `_scaled_dot_product_efficient_attention` to `HANDWRITTEN_OPS`
 in `codegen_gcu.py`, plus regenerated artifacts.
 
 The file mirrors `csrc/aten/backends/ascend/scaled_dot_product_attention.cc` and
-`csrc/aten/backends/gcu/rng.cc`:
+`csrc/aten/backends/enflame/rng.cc`:
 
 1. A namespace-scope `REGISTER_PRIVATEUSE1_DISPATCH(_fused_sdp_choice_stub, ...)`
    (the macro expands a static registrar, so it cannot live in an anonymous

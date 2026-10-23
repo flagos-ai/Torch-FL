@@ -30,14 +30,14 @@ file(GLOB_RECURSE SOURCE_FILES
 # during its own initialization, and the main library pulls in libhpgr.so.
 list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/profiler/tsingmicro_profiler_tool\\.cc$")
 
-# Apple Metal. The operator layer under aten/backends/mps/ is Objective-C++
+# Apple Metal. The operator layer under aten/backends/apple/ is Objective-C++
 # (.mm) because MPSGraph is an Objective-C API, and the globs above only pick up
 # *.cc/*.cu. Objective-C++ is an Apple-only language, so this is gated on the
 # platform rather than run for every build -- exactly as the runtime's own .mm
 # glob is (csrc/runtime/accelerator/CMakeLists.txt).
 if(FLAGOS_ACCELERATOR STREQUAL "mps")
   file(GLOB_RECURSE MPS_ATEN_OBJCXX_SOURCES
-      "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/mps/*.mm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/aten/backends/apple/*.mm"
   )
   list(APPEND SOURCE_FILES ${MPS_ATEN_OBJCXX_SOURCES})
 endif()
@@ -205,10 +205,10 @@ endif()
 # aten/backends/iluvatar/ wraps corex's CUDA-named C ABI (ixdnn/ixblas)
 # directly, with FlagGems still owning the ops it covers.
 if(NOT FLAGOS_BUILD_VENDOR)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|gcu|iluvatar|kunlunxin|musa|mps|tsingmicro)/.*")
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(ascend|enflame|iluvatar|kunlunxin|mthreads|apple|tsingmicro)/.*")
   message(STATUS "FLAGOS_BUILD_VENDOR=OFF: no vendor native kernels")
 else()
-  foreach(_vendor_dir ascend gcu iluvatar kunlunxin musa mps tsingmicro)
+  foreach(_vendor_dir ascend enflame iluvatar kunlunxin mthreads apple tsingmicro)
     if(NOT FLAGOS_ACCELERATOR STREQUAL _vendor_dir)
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
@@ -221,7 +221,7 @@ endif()
 # CUDA into it). Vendors with no CUDA runtime at all (gcu: the tops stack
 # exports no cuda symbols; musa: torch_musa registers under PrivateUse1,
 # never the CUDA key) build with FLAGOS_BUILD_BOXING=OFF, which drops them; the
-# musa wrappers under aten/backends/musa/generated/ replace them there.
+# mthreads wrappers under aten/backends/mthreads/generated/ replace them there.
 if(NOT FLAGOS_BUILD_BOXING)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/generated/cuda_kernels\\.cc$")
   message(STATUS "FLAGOS_BUILD_BOXING=OFF: no generated CUDA boxing kernels")
@@ -469,7 +469,7 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 )
 
 # The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
-# c10/cuda/impl/cuda_cmake_macros.h. A boxing build's cuda_memory.h includes
+# c10/cuda/impl/cuda_cmake_macros.h. A boxing build's nvidia_memory.h includes
 # CUDACachingAllocator.h to delegate flagos allocation to the CUDA caching
 # allocator; this macro tells CUDAMacros.h to skip that generated configure
 # file. Not needed for Ascend (which does not include c10/cuda headers), and
@@ -554,7 +554,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
 elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
 elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
-  # Selects backends/dcu_memory.h (CUDA-compat runtime, no c10::cuda caching
+  # Selects backends/hygon_memory.h (CUDA-compat runtime, no c10::cuda caching
   # delegation -- the DCU wheel exports c10::hip, not c10::cuda).
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   # Link roctracer library for profiler support
@@ -632,7 +632,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${TOPSATEN_LIB})
   endif()
 elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
-  # Apple Metal. The operator layer (backends/mps/, an MPSGraph-first wrapper
+  # Apple Metal. The operator layer (backends/apple/, an MPSGraph-first wrapper
   # set) is Objective-C++ and links the Metal frameworks on top of the
   # Metal/Foundation pair the runtime already links: MPSNDArray (the
   # offset-capable tensor description) lives in MetalPerformanceShaders, and the

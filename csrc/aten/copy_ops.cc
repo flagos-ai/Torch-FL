@@ -25,20 +25,20 @@
 // pulled in only for the platform that defines USE_KUNLUNXIN, matching how
 // contiguous_ops.cc includes it.
 #include "backends/ascend/ascend_copy.h"
-#include "backends/gcu/gcu_copy.h"
+#include "backends/enflame/gcu_copy.h"
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
 #if defined(USE_MPS)
-#include "backends/mps/mps_copy.h"
+#include "backends/apple/mps_copy.h"
 #endif
 
 #if defined(FLAGOS_MUSA_KERNEL)
-#include "backends/musa/mudnn_common.h"
+#include "backends/mthreads/mudnn_common.h"
 #elif defined(USE_MUSA)
-#include "runtime/accelerator/musa/musa_stream.h"
+#include "runtime/accelerator/mthreads/musa_stream.h"
 #elif defined(USE_GCU)
-#include "runtime/accelerator/gcu/tops_stream.h"
+#include "runtime/accelerator/enflame/tops_stream.h"
 #endif
 
 // On the CUDA-family backends (including MetaX boxing) the flagos device shares

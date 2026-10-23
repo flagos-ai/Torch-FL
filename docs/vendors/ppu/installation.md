@@ -12,7 +12,7 @@ The default build is **FlagGems-primary**: `FLAGOS_BUILD_BOXING` is off, so the 
 
 Unless a section says otherwise, the rest of this guide describes the default FlagGems-primary wheel; the boxing build is called out where it differs.
 
-**Status:** Experimental. CI covers the build plus the manifest in `.github/configs/ppu.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
+**Status:** Experimental. CI covers the build plus the manifest in `.github/configs/thead.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
 
 ## Prerequisites
 

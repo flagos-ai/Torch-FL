@@ -30,7 +30,7 @@ import torch
 from dcu_module_loader import load_module
 
 _dcu_compat = load_module(
-    "torch_fl/accelerator/dcu/_dcu_compat.py", "_flagos_test_dcu_compat"
+    "torch_fl/accelerator/hygon/_dcu_compat.py", "_flagos_test_dcu_compat"
 )
 
 _PATCHED_ATTRS = (

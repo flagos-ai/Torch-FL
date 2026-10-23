@@ -6,7 +6,7 @@
 #include "backends/ascend_memory.h"
 #endif
 #if defined(USE_DCU)
-#include "backends/dcu_memory.h"
+#include "backends/hygon_memory.h"
 #endif
 #if defined(USE_ILUVATAR)
 #include "backends/iluvatar_memory.h"
@@ -14,16 +14,16 @@
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
     !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
     !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR)
-#include "backends/cuda_memory.h"
+#include "backends/nvidia_memory.h"
 #endif
 #if defined(USE_TSINGMICRO)
 #include "backends/tsingmicro_memory.h"
 #endif
 #if defined(USE_GCU)
-#include "backends/gcu_memory.h"
+#include "backends/enflame_memory.h"
 #endif
 #if defined(USE_MUSA)
-#include "backends/musa_memory.h"
+#include "backends/mthreads_memory.h"
 #endif
 #if defined(USE_BPU)
 #include "backends/bpu_memory.h"
@@ -32,7 +32,7 @@
 #include "backends/kunlunxin_memory.h"
 #endif
 #if defined(USE_MPS)
-#include "backends/mps_memory.h"
+#include "backends/apple_memory.h"
 #endif
 
 #include <c10/util/Exception.h>
@@ -623,7 +623,7 @@ CachingDeviceAllocator* GetCachingAllocator() {
 #elif defined(USE_DCU)
     // DCU: DTK's CUDA compatibility layer supplies the runtime API, and caching
     // delegates to torch's own allocator via the device-generic registry --
-    // c10::hip under the hood, no c10::cuda symbols (see backends/dcu_memory.h).
+    // c10::hip under the hood, no c10::cuda symbols (see backends/hygon_memory.h).
     auto backend = std::make_unique<DcuDeviceMemory>();
     alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
 #elif defined(USE_ILUVATAR)
@@ -641,7 +641,7 @@ CachingDeviceAllocator* GetCachingAllocator() {
 #elif defined(USE_MUSA)
     // MUSA: raw musa* runtime with flagos's own caching on top. The vendor
     // MUSACachingAllocator claims the same PrivateUse1 allocator slot flagos
-    // registers, so it is deliberately not delegated to (see musa_memory.h).
+    // registers, so it is deliberately not delegated to (see mthreads_memory.h).
     auto backend = std::make_unique<MusaDeviceMemory>();
     alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
 #elif defined(USE_BPU)
@@ -657,7 +657,7 @@ CachingDeviceAllocator* GetCachingAllocator() {
     auto backend = std::make_unique<KunlunxinDeviceMemory>();
     alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
 #elif defined(USE_MPS)
-    // Apple Metal: MTLBuffers from the accelerator/mps contract functions, with
+    // Apple Metal: MTLBuffers from the accelerator/apple contract functions, with
     // flagos's own block pool on top. There is no Apple caching allocator to
     // delegate to (MPSDeviceMemory leaves provides_caching() at the default
     // false), and torch's own MPS allocator claims a different slot entirely.

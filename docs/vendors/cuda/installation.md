@@ -35,7 +35,7 @@ FLAGOS_ACCELERATOR=cuda \
 
 This build:
 - Compiles FlagGems Python-dispatch integration by default (routing comes from `backends_cuda.conf`)
-- Compiles the CUDA device runtime (`csrc/runtime/accelerator/cuda/`), which needs the CUDA toolkit but not a vendor torch package
+- Compiles the CUDA device runtime (`csrc/runtime/accelerator/nvidia/`), which needs the CUDA toolkit but not a vendor torch package
 - Compiles **no** CUDA boxing kernels and does **not** bundle `libtorch_cuda.so`; operations the conf does not route to FlagGems reach `cpu_fallback`
 - Depends on no `nvidia-*-cu12` runtime wheels
 

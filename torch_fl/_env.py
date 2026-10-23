@@ -562,7 +562,7 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     "FLAGOS_DCU_SKIP_LEGACY_SMOKE": (
         SCOPE_TEST,
         "0 (off)",
-        "In .github/scripts/set_env_dcu.sh, skip the legacy-mode smoke path "
+        "In .github/scripts/set_env_hygon.sh, skip the legacy-mode smoke path "
         "(FLAGOS_DCU_VENDOR_CORE=1) after the decoupled gates have run",
     ),
     # --- Assets and libraries --------------------------------------------

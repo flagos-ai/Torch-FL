@@ -55,7 +55,7 @@ LIB_DCU="${REPO_DIR}/torch_fl/lib_dcu"
 TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
 ROCM_PATH="${ROCM_PATH:-/opt/dtk}"
 COMPAT_SO="libflagos_dtk_core_compat.so"
-COMPAT_MANIFEST="${REPO_DIR}/torch_fl/accelerator/dcu/dtk_core_compat_symbols.txt"
+COMPAT_MANIFEST="${REPO_DIR}/torch_fl/accelerator/hygon/dtk_core_compat_symbols.txt"
 
 case "${FLAGOS_DCU_VENDOR_CORE:-0}" in
   1|on|ON|true|TRUE|yes|YES) VENDOR_CORE=1 ;;

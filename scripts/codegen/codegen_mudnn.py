@@ -47,9 +47,9 @@ library rather than assumed:
     here only genuinely unmapped dtypes (complex, quantized) fall back.
 
 Generates:
-  - csrc/aten/backends/musa/generated/musa_kernels.cc
+  - csrc/aten/backends/mthreads/generated/musa_kernels.cc
       the kernels + REGISTER_IMPL_TO_DISPATCHER(..., Backend::kMusa, ...)
-  - csrc/aten/backends/musa/generated/musa_register.inc
+  - csrc/aten/backends/mthreads/generated/musa_register.inc
       the m.impl() subset for register.cc. MUSA registers PrivateUse1 ONLY for
       ops it has a kernel for; everything else stays unregistered and reaches
       the cpu_fallback (registering an op with no kernel behind it would instead
@@ -71,8 +71,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from codegen_ops import schema_to_cpp_name  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
-OUT_CC = REPO / "csrc/aten/backends/musa/generated/musa_kernels.cc"
-OUT_INC = REPO / "csrc/aten/backends/musa/generated/musa_register.inc"
+OUT_CC = REPO / "csrc/aten/backends/mthreads/generated/musa_kernels.cc"
+OUT_INC = REPO / "csrc/aten/backends/mthreads/generated/musa_register.inc"
 REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
 CONF = REPO / "torch_fl/configs/backends_musa.conf"
 
@@ -330,11 +330,11 @@ SKIP: set = set()
 # the cpu_fallback like other uncovered ops -- ATen's default for them is a
 # raising TORCH_CHECK, not something boxable -- so mudnn_conv.cc implements them
 # and they are registered here. Kernel bodies live in
-# csrc/aten/backends/musa/mudnn_conv.cc, so they are absent from OPS.
+# csrc/aten/backends/mthreads/mudnn_conv.cc, so they are absent from OPS.
 HANDWRITTEN_REGISTRATIONS = [
     "convolution_overrideable",
     "convolution_backward_overrideable",
-    # Native muRAND/mudnn RNG kernels live in backends/musa/rng.cc.
+    # Native muRAND/mudnn RNG kernels live in backends/mthreads/rng.cc.
     "rand",
     "rand.generator",
     "rand.out",

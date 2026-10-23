@@ -20,7 +20,7 @@ import types
 import pytest
 from dcu_module_loader import load_module
 
-_LINK_REL = "torch_fl/accelerator/ppu/_ppu_libtorch_link.py"
+_LINK_REL = "torch_fl/accelerator/thead/_ppu_libtorch_link.py"
 
 link = load_module(
     _LINK_REL,

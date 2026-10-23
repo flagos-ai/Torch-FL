@@ -16,10 +16,10 @@ display_name: Hygon DCU
 
 # Platform-specific preparation is implemented outside the common workflows.
 setup_script: .github/scripts/set_env.sh
-setup_platform: dcu
+setup_platform: hygon
 
 # Pinned CI image: DTK base plus the /opt/torch-fl-dcu-venv Python environment
-# used by set_env_dcu.sh. The script still falls back to creating a fresh venv
+# used by set_env_hygon.sh. The script still falls back to creating a fresh venv
 # when the prebuilt one is absent, but the CI image should avoid network installs.
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
 
@@ -29,20 +29,20 @@ runner_labels:
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
-  - torch_fl/accelerator/dcu/
+  - torch_fl/accelerator/hygon/
   - torch_fl/configs/backends_dcu.conf
-  - csrc/aten/backends/dcu/
-  - csrc/runtime/accelerator/dcu/
-  - csrc/runtime/accelerator/cuda/
-  - csrc/runtime/allocator/backends/dcu_memory.h
-  - .github/scripts/hooks/set_env_dcu.sh
-  - .github/scripts/set_env_dcu.sh
+  - csrc/aten/backends/hygon/
+  - csrc/runtime/accelerator/hygon/
+  - csrc/runtime/accelerator/nvidia/
+  - csrc/runtime/allocator/backends/hygon_memory.h
+  - .github/scripts/hooks/set_env_hygon.sh
+  - .github/scripts/set_env_hygon.sh
   - scripts/vendor/bundle_dcu_libtorch.sh
   - scripts/vendor/check_dcu_core_abi.py
 
 # Bind-mount the host hyhal driver into the container. libhydmi.so (Hygon DMI
 # device management) and its sibling driver libs live here on the host, not in
-# the flagos image; set_env_dcu.sh probes /usr/local/hyhal/lib and prepends it
+# the flagos image; set_env_hygon.sh probes /usr/local/hyhal/lib and prepends it
 # to LD_LIBRARY_PATH so flagos device init can dlopen libhydmi.so. Mount the
 # real path /usr/local/hyhal (not the /opt/hyhal symlink) -- docker does not
 # follow a symlink bind source. The runner host installs hyhal at the same
@@ -91,7 +91,7 @@ wheel_artifact_name: wheel-dcu
 # DCU is a boxing build (DTK torch is hipified, HIP kernels live under the CUDA
 # dispatch key), so the vendor bundle takes the CUDA library's place. FlagTree
 # (the DTK triton build carrying the hcu backend) and FlagGems are provisioned
-# by set_env_dcu.sh, and FlagGems-first routing comes from backends_dcu.conf
+# by set_env_hygon.sh, and FlagGems-first routing comes from backends_dcu.conf
 # itself -- no switch involved. What runs here is what a stock DCU install gets:
 # the setup script refuses to continue if the hcu backend or the hygon vendor is
 # not what the process actually resolved, which is where that assertion lives

@@ -19,7 +19,7 @@
 # isolated environment: this backend builds against stock CPU PyTorch and
 # links TopsRider's libtopsrt/libtopsaten libraries instead.
 #
-# The FlagGems Python path is provisioned here the same way set_env_musa.sh
+# The FlagGems Python path is provisioned here the same way set_env_mthreads.sh
 # provisions it: the generated configs/backends_gcu.conf routes most overloads
 # to a FlagGems Triton kernel and the rest to the native topsaten kernel, so the
 # isolated venv needs a Triton build carrying the "enflame" backend (flagtree)
@@ -184,7 +184,7 @@ PY
 # Installed for both stages, not just integration: build and integration share
 # one platform job, and restricting this to CI_STAGE=integration would leave the
 # build job's venv without flag_gems -- the wheel then fails as soon as a
-# FlagGems route dispatches. Same reasoning as set_env_musa.sh.
+# FlagGems route dispatches. Same reasoning as set_env_mthreads.sh.
 #
 # --no-deps on both source packages so pip cannot replace the pinned CPU torch
 # 2.10 with something a transitive requirement prefers.
@@ -204,7 +204,7 @@ done
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which a Triton 3.1 build does not have -- that pair fails at
 # import, so the flagtree and FlagGems pins move together.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_gcu}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_enflame}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 install_flagtree
 

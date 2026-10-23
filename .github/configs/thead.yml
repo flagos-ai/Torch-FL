@@ -15,7 +15,7 @@
 display_name: PPU
 
 setup_script: .github/scripts/set_env.sh
-setup_platform: ppu
+setup_platform: thead
 
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
 
@@ -25,22 +25,22 @@ runner_labels:
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
-  - torch_fl/accelerator/ppu/
+  - torch_fl/accelerator/thead/
   - torch_fl/configs/backends_ppu.conf
-  - csrc/aten/backends/ppu/
-  - csrc/runtime/accelerator/ppu/
-  - csrc/runtime/accelerator/cuda/
-  - csrc/runtime/allocator/backends/cuda_memory.h
-  - csrc/runtime/allocator/backends/ppu_memory.h
-  - .github/scripts/hooks/set_env_ppu.sh
-  - .github/scripts/set_env_ppu.sh
+  - csrc/aten/backends/thead/
+  - csrc/runtime/accelerator/thead/
+  - csrc/runtime/accelerator/nvidia/
+  - csrc/runtime/allocator/backends/nvidia_memory.h
+  - csrc/runtime/allocator/backends/thead_memory.h
+  - .github/scripts/hooks/set_env_thead.sh
+  - .github/scripts/set_env_thead.sh
   - scripts/vendor/bundle_ppu_libtorch.sh
 
 container_volumes:
   # PPU_SDK (underscore, /usr/local/PPU_SDK) is baked into the image with
   # CUDA_SDK/lib64/libcudart.so; no host mount needed. Neither is FlagGems: the
   # image ships it as a PEP 660 editable install pointing at a /workspace/FlagGems
-  # bind mount, which is no longer part of the runner pod. set_env_ppu.sh instead
+  # bind mount, which is no longer part of the runner pod. set_env_thead.sh instead
   # installs the FlagGems stack into the job venv from published FlagOS wheels,
   # so the environment is reproducible from the image plus those indexes alone.
   - /mnt/cpfs/models/Qwen3-0.6B:/models/Qwen3-0.6B:ro

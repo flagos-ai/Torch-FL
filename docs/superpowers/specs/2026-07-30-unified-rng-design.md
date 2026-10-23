@@ -14,7 +14,7 @@ The flagos (PrivateUse1) backend has **two disjoint RNG worlds**, and
   `bernoulli_.float`/`rand_like`/`randn_like`). These read seed+offset from
   `torch.cuda.default_generators[device]`, a per-device `torch.Generator(
   device="cuda")` installed by the vendor compat shim
-  (`torch_fl/accelerator/cuda/_cuda_compat.py`). `torch.manual_seed ->
+  (`torch_fl/accelerator/nvidia/_cuda_compat.py`). `torch.manual_seed ->
   torch.cuda.manual_seed_all` reseeds these, so they ARE reproducible.
 
 - **Native CUDA world** — ops routed to `= cuda` in the backends conf

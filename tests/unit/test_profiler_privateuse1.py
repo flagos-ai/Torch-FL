@@ -33,7 +33,7 @@ import pytest
 # the other order leaves torch's CUDAHooks cached against a process that has not
 # loaded them yet, and every later `torch.empty(..., device="flagos")` dies with
 # "Cannot initialize CUDA without ATen_cuda library". That is exactly the error
-# DCU's own import gate in .github/scripts/set_env_dcu.sh orders these two to
+# DCU's own import gate in .github/scripts/set_env_hygon.sh orders these two to
 # avoid, and exactly the one this file hit in CI (job 104244996282) on the
 # `torch.randn(512, 512, device="flagos")` inside test_stage_b_correlation_or_degrade.
 import torch_fl
@@ -77,7 +77,7 @@ def test_guard_stream_is_real_not_synthetic():
     torch_fl/flagos/__init__.py aimed at FSDP compatibility -- they forward
     to ``torch.cuda.*``, which under the CPU-only torch wheel is either a
     dummy ``_StreamShim`` (unconditionally stream_id/cuda_stream=0, wired up
-    by torch_fl.accelerator.cuda._cuda_compat for triton) or, for
+    by torch_fl.accelerator.nvidia._cuda_compat for triton) or, for
     ``torch.cuda.Stream``, raises "Tried to instantiate dummy base class
     Stream" (the CPU wheel's native _CudaStreamBase is an unconditional
     stub). Neither path reaches c10::flagos::GuardImpl at all, so that

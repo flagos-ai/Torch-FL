@@ -25,7 +25,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_PATH = REPO_ROOT / ".github/scripts/lib/set_env_common.sh"
 COMMON = COMMON_PATH.read_text()
-SCRIPT = (REPO_ROOT / ".github/scripts/hooks/set_env_musa.sh").read_text()
+SCRIPT = (REPO_ROOT / ".github/scripts/hooks/set_env_mthreads.sh").read_text()
 VENDORED_BUILD_VERSION = "1.4.0"
 
 

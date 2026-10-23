@@ -24,7 +24,7 @@ denoising loop — that the existing coverage record does not predict the outcom
 The following are explicitly out of scope for this change:
 
 - CI integration. The inference script lands under `tests/manual/`, which the
-  CUDA manifest in `.github/configs/cuda.yml` does not execute. Adding it would
+  CUDA manifest in `.github/configs/nvidia.yml` does not execute. Adding it would
   require mounting a ~58 GB model into the CI container and installing
   `diffusers` there; that is a separate decision with its own cost.
 - Quantization (bitsandbytes, torchao, GGUF). The memory problem is solved by
@@ -226,7 +226,7 @@ concrete follow-up list for future operator work.
 | torch-fl fixes | wherever the gaps in section 7 land | Unknown in number until the pipeline runs |
 
 `tests/manual/` is the correct home for the script: the CUDA manifest in
-`.github/configs/cuda.yml` lists the tests it executes, and nothing under
+`.github/configs/nvidia.yml` lists the tests it executes, and nothing under
 `tests/manual/` is in that list. A script there runs locally without implying CI
 coverage.
 

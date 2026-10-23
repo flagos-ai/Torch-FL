@@ -119,7 +119,7 @@ SUPPORTS = {
 # platforms"): the concrete limitation is that the vendor op library has no RNG
 # entry point for a template to call, which the PR records and carries explicit
 # human approval for. GCU takes the same route (codegen_gcu.py HANDWRITTEN_OPS +
-# csrc/aten/backends/gcu/rng.cc); this set is that RNG subset verbatim.
+# csrc/aten/backends/enflame/rng.cc); this set is that RNG subset verbatim.
 #
 # The ops still have to appear in the coverage include: gen_vendor_confs.route()
 # gates on the PrivateUse1 registration, so an op missing from

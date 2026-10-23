@@ -52,13 +52,13 @@ which adds 32 entries to the fp32-cast policy macro lists:
   every DTK-added entry becomes an `at::_ops::<op>::call` reference. The plugin is
   compiled against DTK's patched headers, so it inherits them.
 
-Full symbol list: `torch_fl/accelerator/dcu/dtk_core_compat_symbols.txt`.
+Full symbol list: `torch_fl/accelerator/hygon/dtk_core_compat_symbols.txt`.
 
 ## How the decoupled mode works
 
 ### 1. A 32-symbol compatibility shim
 
-`csrc/runtime/accelerator/dcu/dtk_core_compat.cc` defines all 32 symbols. Each is
+`csrc/runtime/accelerator/hygon/dtk_core_compat.cc` defines all 32 symbols. Each is
 a C function aliased to the C++ mangled name:
 
 ```cpp
@@ -101,7 +101,7 @@ and asserts the shipped manifest still matches the shim source (16 + 16).
 
 ### 3. Preload instead of relink
 
-`torch_fl/accelerator/dcu/_dcu_libtorch_link.py` dlopens, in order, before
+`torch_fl/accelerator/hygon/_dcu_libtorch_link.py` dlopens, in order, before
 `import torch`:
 
 ```text
@@ -170,7 +170,7 @@ device exists does:
   `Event(enable_timing=True)` — so making `is_available()` True without this makes
   each autotuning FlagGems op fail one step later, inside `do_bench`.
 
-`patch_torch_cuda_for_dcu()` in `torch_fl/accelerator/dcu/_dcu_compat.py` answers
+`patch_torch_cuda_for_dcu()` in `torch_fl/accelerator/hygon/_dcu_compat.py` answers
 those from the flagos runtime and the HIP driver instead, mirroring the existing
 MetaX shim. Device properties are read through `libgalaxyhip.so.5` by attribute
 **id** (layout-independent), except `gcnArchName`, which is scraped from the
@@ -196,7 +196,7 @@ copied into the bundle: it is pure Python generated at build time, so swapping
 
 ### 5. A post-import runtime check
 
-`torch_fl/accelerator/dcu/_dcu_runtime_check.py` runs right after `import torch`:
+`torch_fl/accelerator/hygon/_dcu_runtime_check.py` runs right after `import torch`:
 
 1. **Base version alignment.** A mismatched official wheel is an ABI mismatch that
    `dlopen` does *not* reject, because the symbols it needs exist with the same
@@ -286,7 +286,7 @@ FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh
 
 The env var must match at build time and at import time; a mismatch is rejected
 with the command needed to fix it rather than a missing-`libc10.so` error. CI
-exercises both: `.github/scripts/set_env_dcu.sh` runs the decoupled wheel
+exercises both: `.github/scripts/set_env_hygon.sh` runs the decoupled wheel
 invariants and an import/compute gate, then smoke-tests the legacy path and
 restores the decoupled bundle.
 

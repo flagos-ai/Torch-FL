@@ -4,7 +4,7 @@
 //
 // Same C API as the CUDA backend -- corex ships the CUDA runtime under its own
 // name (cuda_runtime.h at <corex>/include, libcudart.so.10.2) -- but with the
-// one part of cuda_memory.h that is genuinely CUDA-and-torch-only removed: the
+// one part of nvidia_memory.h that is genuinely CUDA-and-torch-only removed: the
 // caching-allocator delegation to c10::cuda::CUDACachingAllocator. That
 // delegation exists on the CUDA platform because flagos storage there *is* torch
 // CUDA storage (boxing only relabels the device), so both allocators have to be
@@ -18,7 +18,7 @@
 // caching allocator in front of this (runtime/allocator/caching_device_
 // allocator.cc) caches the corex blocks itself.
 //
-// Same shape as backends/dcu_memory.h, which drops the same delegation for the
+// Same shape as backends/hygon_memory.h, which drops the same delegation for the
 // same kind of reason (DTK's wheel exports c10::hip, not c10::cuda).
 
 #pragma once

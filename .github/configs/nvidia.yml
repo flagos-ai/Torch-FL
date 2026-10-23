@@ -16,14 +16,14 @@ display_name: CUDA
 
 # Platform-specific preparation is implemented outside the common workflows.
 setup_script: .github/scripts/set_env.sh
-setup_platform: cuda
+setup_platform: nvidia
 
 # Carries CUDA PyTorch, the FlagGems C++ operators, and an Ubuntu 24.04 userland
 # recent enough for the FlagTree wheels the job installs (they bind GLIBC_2.38).
 # Both CUDA entry points use it: the integration pipeline takes the digest from
 # this file, and the manual Build Wheel path reaches it through the shared,
 # vendor-agnostic workflows, which also need Python and git in the image.
-# set_env_cuda.sh checks the image glibc before installing FlagTree, so a future
+# set_env_nvidia.sh checks the image glibc before installing FlagTree, so a future
 # rebuild on an older userland fails naming the requirement.
 ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev
 
@@ -33,13 +33,13 @@ runner_labels:
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
-  - torch_fl/accelerator/cuda/
+  - torch_fl/accelerator/nvidia/
   - torch_fl/configs/backends_cuda.conf
-  - csrc/aten/backends/cuda/
-  - csrc/runtime/accelerator/cuda/
-  - csrc/runtime/allocator/backends/cuda_memory.h
-  - .github/scripts/hooks/set_env_cuda.sh
-  - .github/scripts/set_env_cuda.sh
+  - csrc/aten/backends/nvidia/
+  - csrc/runtime/accelerator/nvidia/
+  - csrc/runtime/allocator/backends/nvidia_memory.h
+  - .github/scripts/hooks/set_env_nvidia.sh
+  - .github/scripts/set_env_nvidia.sh
   - scripts/vendor/with_cuda_libtorch.sh
 
 container_volumes:

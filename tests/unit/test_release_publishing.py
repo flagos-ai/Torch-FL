@@ -122,9 +122,12 @@ def test_every_publishing_platform_has_a_build_job_in_the_release_workflow():
 
 
 def test_every_publishing_platform_has_a_ci_config():
-    """The release reuses the platform's own pipeline, so the config must exist."""
-    for platform in publishing_platforms():
-        assert (CONFIGS / f"{platform}.yml").is_file(), platform
+    """The release reuses the platform's own pipeline, so the config must exist.
+
+    The config is named for the lane, which is the platform's vendor -- not for
+    the build-table id the wheel is published under."""
+    for platform, lane in publishing_platforms().items():
+        assert (CONFIGS / f"{lane}.yml").is_file(), platform
 
 
 def test_pypi_lanes_are_unique_across_platforms():

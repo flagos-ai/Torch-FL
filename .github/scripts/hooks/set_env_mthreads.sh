@@ -324,7 +324,7 @@ fi
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
 # fails at import, so the two pins move together.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_musa}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_mthreads}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 install_flagtree
 
@@ -387,7 +387,7 @@ PY
 # --- Verify the FlagGems stack imports --------------------------------------
 # Integration only: torch_fl._C does not exist until the wheel is built, and the
 # import order below needs it. Check for the extension module before attempting
-# import -- CI calls set_env_musa.sh before building the wheel, so torch_fl is
+# import -- CI calls set_env_mthreads.sh before building the wheel, so torch_fl is
 # not yet importable at that stage.
 #
 # torch_fl must be imported before flag_gems. FlagGems 5.x selects its MThreads

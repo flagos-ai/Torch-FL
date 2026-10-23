@@ -52,7 +52,7 @@ To take the measurements below, that one dynamic-symbol reference in the
 parsing). The edit is width-preserving and touches no code, only the dynsym
 name and the version-need entry, and it is **not** committed anywhere.
 
-**CI needs none of this**: `.github/configs/gcu.yml` pins the
+**CI needs none of this**: `.github/configs/enflame.yml` pins the
 `flagtree-enflame3.6-py312-torch2.10.0-ubuntu24.04` image, whose glibc 2.39
 satisfies the wheel as shipped. This has not been run through CI yet — the
 change is still a local branch — so the claim rests only on that glibc version
@@ -143,11 +143,11 @@ generation safe to ship.
 
 The two counts reconcile with the generated registration:
 
-- `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc` holds 248
+- `csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc` holds 248
   `m.impl` lines (`FLAGGEMS_PYTHON_OPS` minus the 227-op gap set, minus the
   ops `gcu_register.inc` already registers).
 - 7 further `flaggems` routes are claimed natively first by
-  `csrc/aten/backends/gcu/generated/gcu_register.inc` (`clamp`, `fmod.Tensor`,
+  `csrc/aten/backends/enflame/generated/gcu_register.inc` (`clamp`, `fmod.Tensor`,
   `gelu`, `mean`, `mean.dim`, `remainder.Tensor`, `silu`), which is where the
   255 comes from. `codegen_gcu_flaggems.py` computes its op list as
   `(FLAGGEMS_PYTHON_OPS - gaps) - native - pending` and omits those ops on
@@ -242,7 +242,7 @@ because that is true rather than because the op was overlooked.
 
 The kernels were added to the generator rather than by hand --
 `scripts/codegen/codegen_gcu.py` gains the twelve overloads, twelve templates and
-five helpers in `csrc/aten/backends/gcu/topsaten_common.h` -- and running it a
+five helpers in `csrc/aten/backends/enflame/topsaten_common.h` -- and running it a
 second time leaves all three generated artifacts byte-identical. Within this conf
 `gcu_register.inc` moves 166 -> 178 `m.impl` lines
 (`f961aff0…` -> `806d7ce7…`) and `gcu_kernels.cc` `35c8a37e…` -> `7f34288a…`,
@@ -758,12 +758,12 @@ pytest tests/unit/test_gen_vendor_confs.py tests/integration/ops/test_flaggems_c
 
 ## Full CI manifest reproduction (local)
 
-Every group of `.github/configs/gcu.yml` was run locally on the S60 against the
+Every group of `.github/configs/enflame.yml` was run locally on the S60 against the
 final tree, in one uninterrupted pass, in manifest order. All eight exit 0.
 
 | # | Group | Command | Result |
 |---|---|---|---|
-| 1 | Check isolated GCU environment | `bash .github/scripts/set_env_gcu.sh` | see below |
+| 1 | Check isolated GCU environment | `bash .github/scripts/set_env_enflame.sh` | see below |
 | 2 | Vendor backend, main ops | `pytest tests/integration/ops/ -m "(anyplatform or main_ops) and not flaggems_python and not flaggems_cpp"` | 595 passed, 32 skipped, 499 deselected, 2 xfailed, 2 xpassed |
 | 3 | FlagGems runtime path, main ops | `FLAGOS_USE_FLAGGEMS=1 pytest tests/integration/ops/ -m "flaggems and main_ops"` | 9 passed, 4 skipped, 1116 deselected, 1 xpassed |
 | 4 | Unified RNG | `pytest tests/integration/ops/test_rng_dispatch.py -m main_ops` | 111 passed, 4 skipped, 1 deselected, 1 xpassed |
@@ -812,7 +812,7 @@ both failures pre-date this change:
 
 ### Env-check group (`CI_STAGE=integration`)
 
-`.github/scripts/set_env_gcu.sh` was run end to end against a scratch venv
+`.github/scripts/set_env_enflame.sh` was run end to end against a scratch venv
 (`TORCH_FL_VENV_ROOT` pointing at an empty directory, `CI_STAGE=integration`), so
 the whole provisioning path ran for real rather than being read. Every step
 before the final import check succeeded:
@@ -841,7 +841,7 @@ passes verbatim, which is the output quoted above. Everything else in the run is
 unmodified, and the failure is a property of the 22.04 host, not of the script.
 
 The remaining statement to be exact about: this is a *local* reproduction of the
-provisioning path, not a CI run. `.github/configs/gcu.yml` has not executed this
+provisioning path, not a CI run. `.github/configs/enflame.yml` has not executed this
 change yet.
 
 ### Generator idempotency
@@ -875,4 +875,4 @@ Both generators were run twice in a row and the second run produced no change:
   remains.
 - FlagGems is not patched or forked. Every route that could not work on the
   enflame stack was moved into `NATIVE_TRITON_GAPS["gcu"]` in the generator.
-- All eight `.github/configs/gcu.yml` groups pass locally on the same tree.
+- All eight `.github/configs/enflame.yml` groups pass locally on the same tree.

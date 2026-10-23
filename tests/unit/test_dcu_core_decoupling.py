@@ -25,7 +25,7 @@ import types
 import pytest
 from dcu_module_loader import REPO, load_module
 
-_LINK_REL = "torch_fl/accelerator/dcu/_dcu_libtorch_link.py"
+_LINK_REL = "torch_fl/accelerator/hygon/_dcu_libtorch_link.py"
 
 link = load_module(
     _LINK_REL,

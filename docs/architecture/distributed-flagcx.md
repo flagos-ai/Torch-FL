@@ -137,7 +137,7 @@ implementation (`torch_fl/accelerator/` had `ascend`, `gcu`, `metax`, `dcu`, `cu
 `ppu`), so those three were blocked on that work, not on the collective path.
 
 That work landed as PR #467 over `6b69999`, and with it the three nodeids are no longer blocked by
-it: MUSA now has `torch_fl/accelerator/musa/musa_stream.py`, and the vendor dispatches name their
+it: MUSA now has `torch_fl/accelerator/mthreads/musa_stream.py`, and the vendor dispatches name their
 arms rather than ending in an `else` that meant Ascend. On an MTT S5000 the failing frame
 (`FSDPCommContext.lazy_init`) and FSDP2 itself now run — `tests/manual/musa/test_fsdp2_musa.py
 --world-size 2` trained to a finite, non-increasing loss across two MTT S5000 devices. That run's

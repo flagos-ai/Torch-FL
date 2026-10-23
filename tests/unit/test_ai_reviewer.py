@@ -196,7 +196,7 @@ def test_self_authored_pull_request_is_not_approved():
     [
         ".github/workflows/ai-review.yml",
         ".github/scripts/ci/ai_reviewer.py",
-        ".github/configs/cuda.yml",
+        ".github/configs/nvidia.yml",
         "CODEOWNERS",
     ],
 )

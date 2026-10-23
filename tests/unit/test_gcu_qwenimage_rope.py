@@ -42,7 +42,7 @@ import math
 import pytest
 import torch
 
-from torch_fl.accelerator.gcu._gcu_compat import (
+from torch_fl.accelerator.enflame._gcu_compat import (
     _ROTATION_TABLES,
     _ROTATION_TABLES_MAX,
     _rotation_table,

@@ -376,7 +376,7 @@ def test_cache_cleanup_actions_and_setup_share_one_directory(
 
 
 def test_cuda_caches_cpu_torch_without_the_vendor_wheel_set():
-    hook = (ROOT / ".github/scripts/hooks/set_env_cuda.sh").read_text()
+    hook = (ROOT / ".github/scripts/hooks/set_env_nvidia.sh").read_text()
     assert re.search(r"^install_cpu_torch\s*$", hook, re.M)
     assert re.search(
         r"pip_retry --no-cache-dir --index-url \"\$VENDOR_TORCH_INDEX_URL\"", hook

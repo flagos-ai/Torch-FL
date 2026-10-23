@@ -131,7 +131,7 @@ Run common operator smoke tests:
 pytest tests/integration/ops/test_common_ops.py -v -s --tb=short
 ```
 
-**Note**: MUSA has no CI configuration file (`.github/configs/musa.yml` does not exist), so all validation is manual.
+**Note**: MUSA has no CI configuration file (`.github/configs/mthreads.yml` does not exist), so all validation is manual.
 
 ## Operator Coverage
 
@@ -148,7 +148,7 @@ Category-driven codegen via `scripts/codegen/codegen_mudnn.py` covers:
 
 ### Handwritten operators (2 ops)
 
-**Convolution** (`csrc/aten/backends/musa/mudnn_conv.cc`):
+**Convolution** (`csrc/aten/backends/mthreads/mudnn_conv.cc`):
 - `convolution_overrideable` cannot be left unregistered (ATen's default raises rather than being boxable to CPU)
 - `mudnn`'s `Convolution` covers 2 spatial dims only:
   - conv1d runs as 2D conv with unit `H` dim (exact against CPU)
@@ -156,7 +156,7 @@ Category-driven codegen via `scripts/codegen/codegen_mudnn.py` covers:
 - Bias is a separate broadcast `Binary::ADD`; `RunFusion` accepts bias only for non-grouped 2D
 - Algorithm is chosen by trial and cached per shape (since `GetRecommendForwardAlgorithm` can name one that `Run` then rejects)
 
-**Copy and cast** (`csrc/aten/backends/musa/mudnn_copy.cc`):
+**Copy and cast** (`csrc/aten/backends/mthreads/mudnn_copy.cc`):
 - Strided copies and dtype casts use `mudnn`'s `Unary::IDENTITY` / `Unary::CAST`
 - Handles both in a single device pass
 - Without this, `copy_`/`clone`/`contiguous` would reach the CUDA `DispatchStub` and fail
@@ -243,7 +243,7 @@ A fully broadcast input is materialized before a multi-dim reduction to avoid th
 
 ### Manual S5000 validation
 
-MUSA has no CI runner (no `.github/configs/musa.yml` config exists), so all tests are manual. The platform status is **Experimental** (see [`docs/reference/compatibility.md`](../../reference/compatibility.md) line 31).
+MUSA has no CI runner (no `.github/configs/mthreads.yml` config exists), so all tests are manual. The platform status is **Experimental** (see [`docs/reference/compatibility.md`](../../reference/compatibility.md) line 31).
 
 The native RNG and hybrid FlagGems implementation were measured on 2026-08-17 on an eight-device Moore Threads MTT S5000 host. Device 0 reported capability 3.1, 60 multiprocessors, and 85,813,358,592 bytes of memory. The environment used CPU PyTorch 2.10.0, the installed `/usr/local/musa` toolkit (`mudnn` v3300), FlagGems 5.0.2, and the vendor `flagtree-0.5.0+mthreads3.1` wheel (Triton 3.1.0, backend `mthreads`). Results:
 

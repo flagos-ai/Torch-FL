@@ -62,7 +62,7 @@ The commands are read through ``manifest_composer``, so this file and the
 loader answer "what does this platform run?" the same way. That reader parses
 YAML, which costs nothing here: this file also runs inside the DCU container, and
 that environment already carries PyYAML for ``test_ci_pip_cache.py`` and for
-FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_dcu.sh``).
+FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_hygon.sh``).
 """
 
 import itertools
@@ -233,7 +233,7 @@ def test_dcu_manifest_still_runs_a_repository_script():
     that stops being true, the guards have nothing to hold, and this says so
     rather than letting them pass by accident.
     """
-    references = _script_references("dcu")
+    references = _script_references("hygon")
     assert references, "the reader found no repository script in the DCU manifest"
     assert all(_runs_in_the_checkout(command) for command, _ in references), (
         "the DCU manifest names a repository script from a command that stays in "
@@ -250,7 +250,7 @@ def test_the_manifest_reader_reads_the_composed_groups():
     this workspace -- and then hold a command to a workspace requirement
     nothing has.
     """
-    commands = _manifest_commands("dcu")
+    commands = _manifest_commands("hygon")
     assert commands, "the reader found no commands at all, which cannot be right"
     assert not any("set_env" in command for command in commands), commands
     # The environment check is the group that replaced the per-platform

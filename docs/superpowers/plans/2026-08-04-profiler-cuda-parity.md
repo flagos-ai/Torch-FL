@@ -908,7 +908,7 @@ Test: verify baseline comparison shows 13/13 fields present.
 - Create: `tests/data/profiler_cuda_baseline.json` (torch-cuda reference)
 - Create: `tests/data/gen_profiler_baseline.py` (regeneration script)
 - Create: `tests/integration/test_profiler_parity.py` (CI test with `@pytest.mark.main_ops`)
-- Modify: `.github/configs/cuda.yml` (add explicit profiler test entry)
+- Modify: `.github/configs/nvidia.yml` (add explicit profiler test entry)
 
 **Baseline snapshot structure:**
 ```json
@@ -930,7 +930,7 @@ Test: verify baseline comparison shows 13/13 fields present.
 4. `key_averages()` shows `aten::mm` with `self_device_time_total > 0`
 5. Kernel names are demangled (no `_ZN` prefix)
 
-**CI integration:** Add to `.github/configs/cuda.yml` test matrix:
+**CI integration:** Add to `.github/configs/nvidia.yml` test matrix:
 ```yaml
 - name: Profiler parity test
   run: pytest tests/integration/test_profiler_parity.py -v -m main_ops

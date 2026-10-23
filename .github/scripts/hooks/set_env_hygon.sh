@@ -204,7 +204,7 @@ VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["p
 # Installed for both stages, not just integration: build and integration share
 # one platform job, and restricting this to CI_STAGE=integration would leave the
 # build job's venv without flag_gems -- the wheel then fails as soon as a
-# FlagGems route dispatches. Same reasoning as set_env_musa.sh.
+# FlagGems route dispatches. Same reasoning as set_env_mthreads.sh.
 #
 # --no-deps on the wheels prevents their metadata from replacing the pinned
 # CPU torch with a vendor wheel or another PyTorch version.
@@ -223,7 +223,7 @@ VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["p
 # preference but a requirement: current FlagGems uses tl.map_elementwise and
 # triton.knobs, which flagtree 0.5.x (Triton 3.1) does not have -- that pair
 # fails at import, so the two pins move together.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_dcu}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_hygon}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
 import importlib.metadata as metadata
@@ -321,7 +321,7 @@ export FLAGOS_BUILD_BOXING=1
 # FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
 # one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
 # exactly the CUDA-compatible path a kernel library needs here. Mirrors the
-# backend selection set_env_musa.sh performs -- FLAGOS_BUILD_FLAGGEMS_CPP is the C++
+# backend selection set_env_mthreads.sh performs -- FLAGOS_BUILD_FLAGGEMS_CPP is the C++
 # switch and stays off so nothing tries to rebuild flag_gems
 # against the DCU toolchain.
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
@@ -533,7 +533,7 @@ fi
 
 # --- Verify the FlagGems stack imports ---------------------------------------
 # Integration only: torch_fl._C does not exist until the wheel is built, and the
-# import below needs it. set_env_dcu.sh runs before the wheel build, so torch_fl
+# import below needs it. set_env_hygon.sh runs before the wheel build, so torch_fl
 # is not importable at that stage.
 #
 # torch_fl is imported before flag_gems on purpose. It installs the torch.cuda

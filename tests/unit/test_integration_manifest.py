@@ -51,17 +51,19 @@ from manifest_composer import (
 # The platforms this layer has to keep in step. Written out rather than taken
 # from the directory: a config that quietly disappeared would otherwise take its
 # platform out of every check below and leave the suite green.
+# The lane names: each platform's vendor, which is also the `<lane>` of the
+# flagos-pypi-<lane> it publishes to, and the basename of its config file.
 _PLATFORMS = (
+    "apple",
     "ascend",
-    "cuda",
-    "dcu",
-    "gcu",
+    "enflame",
+    "hygon",
     "iluvatar",
     "kunlunxin",
     "metax",
-    "mps",
-    "musa",
-    "ppu",
+    "mthreads",
+    "nvidia",
+    "thead",
 )
 
 _BOUND_KEYS = {"at_least", "more_than", "exactly"}
@@ -78,136 +80,153 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
     "iluvatar_runtime": (
+        "apple",
         "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
+        "enflame",
+        "hygon",
         "kunlunxin",
         "metax",
-        "mps",
-        "musa",
-        "ppu",
-    ),
-    "rng": ("mps", "ppu"),
-    "soft_lowp_matrix": (
-        "ascend",
-        "cuda",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "mps",
-        "musa",
-        "ppu",
-    ),
-    "amp_contract": ("kunlunxin", "mps", "ppu"),
-    "profiler_contract": ("gcu", "kunlunxin", "mps"),
-    "profiler_parity": (
-        "ascend",
-        "gcu",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-        "ppu",
-    ),
-    "torch_compile": ("ascend", "dcu", "mps", "musa", "ppu"),
-    "inference": (
-        "ascend",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-    ),
-    "training": (
-        "ascend",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-    ),
-    "native_comm_bridge": (
-        "ascend",
-        "cuda",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "musa",
-        "ppu",
-    ),
-    "musa_dispatch": (
-        "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
-        "iluvatar",
-        "kunlunxin",
-        "metax",
-        "mps",
-        "ppu",
+        "mthreads",
+        "nvidia",
+        "thead",
     ),
     "musa_runtime": (
+        "apple",
         "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
+        "enflame",
+        "hygon",
         "iluvatar",
         "kunlunxin",
         "metax",
-        "mps",
-        "ppu",
+        "nvidia",
+        "thead",
     ),
+    "vendor_ops": ("apple",),
     "musa_flaggems_hybrid": (
+        "apple",
         "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
+        "enflame",
+        "hygon",
         "iluvatar",
         "kunlunxin",
         "metax",
-        "mps",
-        "ppu",
+        "nvidia",
+        "thead",
     ),
-    "vendor_ops": ("mps",),
-    "unit_tests_per_file": (
+    "rng": (
+        "apple",
+        "thead",
+    ),
+    "soft_lowp_matrix": (
+        "apple",
         "ascend",
-        "cuda",
-        "gcu",
+        "enflame",
+        "iluvatar",
+        "kunlunxin",
+        "mthreads",
+        "nvidia",
+        "thead",
+    ),
+    "amp_contract": (
+        "apple",
+        "kunlunxin",
+        "thead",
+    ),
+    "profiler_contract": (
+        "apple",
+        "enflame",
+        "kunlunxin",
+    ),
+    "profiler_parity": (
+        "apple",
+        "ascend",
+        "enflame",
+        "kunlunxin",
+        "metax",
+        "mthreads",
+        "thead",
+    ),
+    "torch_compile": (
+        "apple",
+        "ascend",
+        "hygon",
+        "mthreads",
+        "thead",
+    ),
+    "inference": (
+        "apple",
+        "ascend",
+        "enflame",
+        "hygon",
         "iluvatar",
         "kunlunxin",
         "metax",
-        "mps",
-        "musa",
-        "ppu",
+        "mthreads",
+    ),
+    "training": (
+        "apple",
+        "ascend",
+        "enflame",
+        "hygon",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mthreads",
+    ),
+    "native_comm_bridge": (
+        "apple",
+        "ascend",
+        "enflame",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mthreads",
+        "nvidia",
+        "thead",
+    ),
+    "musa_dispatch": (
+        "apple",
+        "ascend",
+        "enflame",
+        "hygon",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "nvidia",
+        "thead",
+    ),
+    "unit_tests_per_file": (
+        "apple",
+        "ascend",
+        "enflame",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mthreads",
+        "nvidia",
+        "thead",
     ),
     "backend_ops": (
         "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
+        "enflame",
+        "hygon",
         "iluvatar",
         "kunlunxin",
         "metax",
-        "musa",
-        "ppu",
+        "mthreads",
+        "nvidia",
+        "thead",
     ),
     "mps_runtime": (
         "ascend",
-        "cuda",
-        "dcu",
-        "gcu",
+        "enflame",
+        "hygon",
         "iluvatar",
         "kunlunxin",
         "metax",
-        "musa",
-        "ppu",
+        "mthreads",
+        "nvidia",
+        "thead",
     ),
 }
 
@@ -430,17 +449,26 @@ _REFUSED = [
         id="empty-platforms",
     ),
     pytest.param(
-        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": "cuda"}]},
+        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": "nvidia"}]},
         id="platforms-not-a-list",
     ),
     pytest.param(
-        {"steps": [{"id": "a", "name": "N", "command": "c", "platforms": ["nvidia"]}]},
+        {
+            "steps": [
+                {"id": "a", "name": "N", "command": "c", "platforms": ["nvidia_h100"]}
+            ]
+        },
         id="unknown-platform",
     ),
     pytest.param(
         {
             "steps": [
-                {"id": "a", "name": "N", "command": "c", "platforms": ["cuda", "cuda"]}
+                {
+                    "id": "a",
+                    "name": "N",
+                    "command": "c",
+                    "platforms": ["nvidia", "nvidia"],
+                }
             ]
         },
         id="repeated-platform",
@@ -505,9 +533,9 @@ def test_a_step_whose_variants_are_not_adjacent_is_refused():
     """Variants of one step sit together, so merging them is a local edit."""
     document = {
         "steps": [
-            {"id": "a", "name": "A", "command": "x", "platforms": ["cuda"]},
+            {"id": "a", "name": "A", "command": "x", "platforms": ["nvidia"]},
             {"id": "b", "name": "B", "command": "y"},
-            {"id": "a", "name": "A", "command": "x", "platforms": ["dcu"]},
+            {"id": "a", "name": "A", "command": "x", "platforms": ["hygon"]},
         ]
     }
     with pytest.raises(composer.ManifestError, match="not contiguous"):
@@ -518,8 +546,8 @@ def test_a_step_that_claims_a_platform_twice_is_refused():
     """Two variants covering one platform would run the step twice, silently."""
     document = {
         "steps": [
-            {"id": "a", "name": "A", "command": "x", "platforms": ["cuda"]},
-            {"id": "a", "name": "A", "command": "x", "platforms": ["cuda", "dcu"]},
+            {"id": "a", "name": "A", "command": "x", "platforms": ["nvidia"]},
+            {"id": "a", "name": "A", "command": "x", "platforms": ["nvidia", "hygon"]},
         ]
     }
     with pytest.raises(composer.ManifestError, match="would run it twice"):
@@ -529,21 +557,21 @@ def test_a_step_that_claims_a_platform_twice_is_refused():
 def test_an_unknown_platform_is_refused():
     with pytest.raises(composer.ManifestError, match="unknown platform"):
         composer.compose(
-            manifest(), platform_config("cuda"), "nvidia", platform_names()
+            manifest(), platform_config("nvidia"), "nvidia_h100", platform_names()
         )
 
 
 def test_a_platform_config_that_is_not_a_mapping_is_refused():
     with pytest.raises(composer.ManifestError, match="must be a mapping"):
-        composer.compose(manifest(), None, "cuda", platform_names())
+        composer.compose(manifest(), None, "nvidia", platform_names())
 
 
 def test_a_config_without_a_display_name_is_refused():
     """The display name reaches job and step names, so it cannot be blank."""
-    config = platform_config("cuda")
+    config = platform_config("nvidia")
     del config["display_name"]
     with pytest.raises(composer.ManifestError, match="display_name"):
-        composer.compose(manifest(), config, "cuda", platform_names())
+        composer.compose(manifest(), config, "nvidia", platform_names())
 
 
 def test_a_config_that_omits_the_block_a_step_reads_is_refused():
@@ -571,7 +599,7 @@ def test_a_config_whose_expectations_no_running_step_reads_is_refused():
     document = manifest()
     for entry in document["steps"]:
         if entry.get("environment_from_config"):
-            entry["platforms"] = ["cuda"]
+            entry["platforms"] = ["nvidia"]
     with pytest.raises(
         composer.ManifestError, match="no step that runs on this platform"
     ):
@@ -581,10 +609,10 @@ def test_a_config_whose_expectations_no_running_step_reads_is_refused():
 def test_a_manifest_that_leaves_a_platform_with_no_steps_is_refused():
     """An empty pipeline is a broken manifest, not a fast platform."""
     document = {
-        "steps": [{"id": "a", "name": "A", "command": "x", "platforms": ["cuda"]}]
+        "steps": [{"id": "a", "name": "A", "command": "x", "platforms": ["nvidia"]}]
     }
     with pytest.raises(composer.ManifestError, match="no steps apply"):
-        composer.compose(document, platform_config("dcu"), "dcu", platform_names())
+        composer.compose(document, platform_config("hygon"), "hygon", platform_names())
 
 
 def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
@@ -597,13 +625,13 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
     manifest_json = tmp_path / "manifest.json"
     config_json = tmp_path / "cuda.json"
     manifest_json.write_text(json.dumps(manifest()))
-    config_json.write_text(json.dumps(platform_config("cuda")))
+    config_json.write_text(json.dumps(platform_config("nvidia")))
 
     assert (
         composer.main(
             [
                 "--platform",
-                "cuda",
+                "nvidia",
                 "--manifest",
                 str(manifest_json),
                 "--platform-config",
@@ -615,26 +643,28 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
         == 0
     )
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == composed_steps("cuda")
+    assert json.loads(captured.out) == composed_steps("nvidia")
     # The loader prints how far the platforms still differ, once per platform.
-    assert "cuda:" in captured.err
+    assert "nvidia:" in captured.err
     assert "do not run on every platform yet" in captured.err
 
 
 def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
     manifest_json = tmp_path / "manifest.json"
     manifest_json.write_text(json.dumps(manifest()))
-    (tmp_path / "nvidia.json").write_text(json.dumps(platform_config("cuda")))
+    # The config is handed over by path, but named for a platform the directory
+    # does not define, which is the case the loader must refuse.
+    (tmp_path / "nvidia_h100.json").write_text(json.dumps(platform_config("nvidia")))
 
     assert (
         composer.main(
             [
                 "--platform",
-                "nvidia",
+                "nvidia_h100",
                 "--manifest",
                 str(manifest_json),
                 "--platform-config",
-                str(tmp_path / "nvidia.json"),
+                str(tmp_path / "nvidia_h100.json"),
                 "--config-dir",
                 str(_CONFIG_DIR),
             ]

@@ -52,7 +52,7 @@ PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 # install below reaches it directly -- see prefer_direct_route. Install it as:
 #   python3.12 -m pip install flagtree===0.7.0+ppu3.6 \
 #     --index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ppu}"
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_thead}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 
 # The T-Head index publishes a Python wheel for the pinned FlagGems release.

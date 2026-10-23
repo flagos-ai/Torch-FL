@@ -617,7 +617,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // (musa_runtime, not cudart), so uncovered ops must fall through rather than
   // be claimed. The two convolution `*_overrideable` ops are the exception that
   // proves the rule -- ATen's default for them raises instead of being boxable,
-  // so they get real kernels in backends/musa/mudnn_conv.cc.
+  // so they get real kernels in backends/mthreads/mudnn_conv.cc.
   //
   // Ascend joined them: it used to fall through to the full register.inc below,
   // claiming every generated op while owning aclnn kernels for a few hundred.
@@ -627,14 +627,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // coverage set, generated and handwritten.
   #if defined(USE_GCU)
     #if defined(FLAGOS_GCU_KERNEL)
-    #include "backends/gcu/generated/gcu_register.inc"
+    #include "backends/enflame/generated/gcu_register.inc"
     #endif
     // Registered whenever the FlagGems Python path is compiled in, not only
     // under FLAGOS_GCU_KERNEL: backends_gcu.conf routes ops to FlagGems by
     // default, so these kFlagGems dispatcher slots must exist or those routes
     // raise "backend not registered". Same contract as the MUSA include below.
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/gcu/generated/gcu_flaggems_register.inc"
+    #include "backends/enflame/generated/gcu_flaggems_register.inc"
     #endif
   #elif defined(USE_KUNLUNXIN)
     // Kunlunxin owns its ops natively: it registers the xdnn_pytorch coverage
@@ -658,14 +658,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #include "backends/ascend/generated/ascend_register.inc"
   #elif defined(USE_MUSA)
     #if defined(FLAGOS_MUSA_KERNEL)
-    #include "backends/musa/generated/musa_register.inc"
+    #include "backends/mthreads/generated/musa_register.inc"
     #endif
     // Registered unconditionally when FlagGems is compiled in: backends_musa.conf
     // routes ops to FlagGems by default, so these kFlagGems dispatcher slots must
     // exist or those routes raise "backend not registered". Gating them on an
     // opt-in env var was correct only while the default conf was mudnn-only.
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/musa/generated/musa_flaggems_register.inc"
+    #include "backends/mthreads/generated/musa_flaggems_register.inc"
     #endif
   #elif defined(USE_ILUVATAR)
     // Iluvatar is FlagGems-primary, with a vendor-native slot alongside it: the
@@ -727,7 +727,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // Apple Metal. Per the design doc
     // (docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md,
     // section 6) the backend is MPSGraph-first: kernels live under
-    // csrc/aten/backends/mps/, and each op is claimed only once its kernel
+    // csrc/aten/backends/apple/, and each op is claimed only once its kernel
     // exists. Claiming an op without a kernel behind it raises "backend not
     // registered" instead of falling back, so this include is exactly the
     // coverage set the operator layer implements -- currently the `unary`
@@ -737,7 +737,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // This is a native backend: it does NOT re-tag onto DispatchKey::MPS or
     // CUDA and does not build the CUDA boxing kernels (FLAGOS_BUILD_BOXING is
     // pinned off in cmake/flagos_platforms.json).
-    #include "backends/mps/generated/mps_register.inc"
+    #include "backends/apple/generated/mps_register.inc"
   #else
   // CUDA-ABI boxing platforms: cuda, metax, dcu, ppu and tsingmicro all share
   // this arm. With FLAGOS_BUILD_BOXING=ON the wheel carries the generated CUDA

@@ -80,7 +80,7 @@ is fine as an interim milestone (§7, stage 0) but not as the finished feature.
 
 ## 5. Architecture
 
-### 5.1 Device runtime floor — `csrc/runtime/accelerator/mps/`
+### 5.1 Device runtime floor — `csrc/runtime/accelerator/apple/`
 
 Same three-file split as every other backend (`device.cc` 5 functions,
 `memory.cc` 9, `stream.cc` 14). Metal maps onto the contract as follows.
@@ -144,7 +144,7 @@ collision to worry about.
 
 - `torch_fl/_platform.py`: add `"mps": "mps"` to `_ACCELERATOR_TO_PLATFORM` and
   `"mps"` to `_CONF_PLATFORM_FRAGMENTS`.
-- `torch_fl/accelerator/mps/` for the Python compat module (stream/event
+- `torch_fl/accelerator/apple/` for the Python compat module (stream/event
   wrappers that `torch.flagos.Stream` dispatches to), mirroring the MUSA layout.
 - The device name stays `flagos`; only the accelerator value and conf file are
   platform-specific.
@@ -156,7 +156,7 @@ magnitude. It is decided: **Option A**. The three options are recorded here so
 the reasoning survives the choice.
 
 **Option A — MPSGraph-first, MSL fallback (recommended).** Treat MPSGraph as the
-"vendor operator library" the way Ascend treats ACLNN. `csrc/aten/backends/mps/`
+"vendor operator library" the way Ascend treats ACLNN. `csrc/aten/backends/apple/`
 wraps `MetalPerformanceShadersGraph` nodes; each op builds a one-node graph,
 binds flagos-allocated `MTLBuffer`s through `MPSGraphTensorData`, runs it on an
 `MPSGraphDevice`, and returns the flagos tensor. Ops MPSGraph cannot express
@@ -231,7 +231,7 @@ Each stage ends with a green build and a measured result; operator support is
 recorded only from measurements, per CLAUDE.md.
 
 Status: stage 0 landed with the `mps` platform row; stage 1 landed with `abs`
-as the first `unary` op (`csrc/aten/backends/mps/`, `scripts/codegen/codegen_mps.py`,
+as the first `unary` op (`csrc/aten/backends/apple/`, `scripts/codegen/codegen_mps.py`,
 `backends_mps.conf` routing `abs` to `mps`), verified on an M-series host with
 `tests/integration/ops/test_mps_unary.py` (matches CPU across f32/f16/bf16 and
 the integer dtypes at row widths that are not multiples of 16 bytes as well as
@@ -1246,24 +1246,24 @@ naming `mps`, and the cost cases.
 | File | Change |
 |---|---|
 | `cmake/flagos_platforms.json` | new `mps` row |
-| `csrc/runtime/accelerator/mps/{device,memory,stream}.cc` (+ `.mm` as needed) | new |
+| `csrc/runtime/accelerator/apple/{device,memory,stream}.cc` (+ `.mm` as needed) | new |
 | `csrc/runtime/accelerator/CMakeLists.txt` | `mps` arm: glob `*.mm`, link Metal/Foundation, `FATAL_ERROR` if the Metal SDK is absent |
-| `csrc/CMakeLists.txt` | `USE_MPS` define; exclude `backends/mps/` from other platforms |
-| `csrc/runtime/allocator/backends/mps_memory.h` | new `DeviceMemoryInterface` |
+| `csrc/CMakeLists.txt` | `USE_MPS` define; exclude `backends/apple/` from other platforms |
+| `csrc/runtime/allocator/backends/apple_memory.h` | new `DeviceMemoryInterface` |
 | `csrc/runtime/allocator/caching_device_allocator.cc` | include guard + `GetCachingAllocator()` arm |
 | `csrc/aten/dispatcher.h` | `Backend::kMps` slot and `GetBackendForOp` arm (stage 1+) |
 | `csrc/aten/register.cc` | `USE_MPS` arm that does not fall through to the generic `#else` |
-| `csrc/aten/backends/mps/` | native kernels (+ `generated/`) |
+| `csrc/aten/backends/apple/` | native kernels (+ `generated/`) |
 | `scripts/codegen/codegen_mps.py` (+ `gen_vendor_confs.py` `VENDORS["mps"]`) | new generator / routing table |
 | `torch_fl/configs/backends_mps.conf` | new |
-| `torch_fl/_platform.py`, `torch_fl/accelerator/mps/` | detection + compat |
+| `torch_fl/_platform.py`, `torch_fl/accelerator/apple/` | detection + compat |
 | `setup.py` | `mps` arm |
 | `tests/integration/test_mps_runtime.py` | smoke test, `@pytest.mark.mps` |
 | `tests/integration/ops/test_mps_unary.py` | stage-1 unary op suite, `@pytest.mark.mps` |
 | `tests/integration/ops/test_mps_binary.py`, `test_mps_reduce.py` | stage-2 elementwise and reduction suites, `@pytest.mark.mps` |
 | `tests/unit/test_platform_capability_matrix.py` inventory lines | add `mps` to the three inventories |
 | `docs/reference/{compatibility,platform-capability-matrix,operator-support}.md`, `docs/vendors/mps/installation.md` | platform rows and guide |
-| `.github/configs/mps.yml` + workflow job | CI on a GitHub-hosted `macos-15` arm64 runner |
+| `.github/configs/apple.yml` + workflow job | CI on a GitHub-hosted `macos-15` arm64 runner |
 
 `tests/unit/test_platform_capability_matrix.py` machine-checks the three
 directory inventories against the tree, so those doc lines and the new

@@ -69,7 +69,7 @@ def plan(level="L2", platforms=None):
         "config_hash": "c" * 64,
         "risk_level": "R2",
         "run_id": "42",
-        "expected_platforms": platforms if platforms is not None else ["cuda"],
+        "expected_platforms": platforms if platforms is not None else ["nvidia"],
     }
 
 
@@ -140,13 +140,13 @@ def test_unsupported_levels_fail_before_platform_dispatch(requested):
 
 def test_runtime_changes_cannot_be_lowered_to_l0():
     result = PLANNER.build_plan(
-        request(requested_level="L0", platforms=["cuda"]),
+        request(requested_level="L0", platforms=["nvidia"]),
         CONTRACT,
         ROOT,
         ["csrc/aten/common.cc"],
     )
     assert result["test_level"] == "L2"
-    assert result["expected_platforms"] == ["cuda"]
+    assert result["expected_platforms"] == ["nvidia"]
 
 
 def test_documentation_has_no_hardware_but_explicit_l2_is_nonempty():
@@ -200,7 +200,7 @@ def test_pr_resolution_pins_head_and_base_and_ignores_claimed_changed_files(
     [
         {"pr_number": "$(whoami)"},
         {"pr_number": "12", "checkout_ref": "main"},
-        {"task_id": "first\nplatforms=cuda"},
+        {"task_id": "first\nplatforms=nvidia"},
         {"test_level": "L4"},
     ],
 )
@@ -241,11 +241,11 @@ def jobs(result="success", **stages):
 def raw_reports(tmp_path, source=SHA, complete=True):
     directory = tmp_path / "pytest"
     directory.mkdir(exist_ok=True)
-    (directory / "pytest-cuda.json").write_text(
+    (directory / "pytest-nvidia.json").write_text(
         json.dumps(
             {
                 "flagcicd": {
-                    "platform": "cuda",
+                    "platform": "nvidia",
                     "source_repository": "flagos-ai/Torch-FL",
                     "source_ref": source,
                     "complete": complete,
@@ -273,7 +273,7 @@ def test_failure_before_pytest_still_produces_a_platform_outcome(
     tmp_path, result, stages, expected
 ):
     report = REPORTER.platform_report(
-        plan(), "cuda", jobs(result, **stages), tmp_path, 1
+        plan(), "nvidia", jobs(result, **stages), tmp_path, 1
     )
     assert report["status"] == expected
     assert not report["metrics"]["coverage"]["available"]
@@ -282,10 +282,10 @@ def test_failure_before_pytest_still_produces_a_platform_outcome(
 def test_successful_job_requires_complete_pytest_data_but_coverage_is_optional(
     tmp_path,
 ):
-    missing = REPORTER.platform_report(plan(), "cuda", jobs(), tmp_path, 1)
+    missing = REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)
     assert missing["status"] == "report_error"
     raw_reports(tmp_path)
-    report = REPORTER.platform_report(plan(), "cuda", jobs(), tmp_path, 1)
+    report = REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)
     assert report["status"] == "passed"
     assert report["metrics"]["tests"]["passed"] == 1
     assert report["coverage_warnings"]
@@ -295,7 +295,7 @@ def test_successful_job_requires_complete_pytest_data_but_coverage_is_optional(
 def test_stale_or_partial_pytest_data_cannot_pass(tmp_path, source, complete):
     raw_reports(tmp_path, source, complete)
     assert (
-        REPORTER.platform_report(plan(), "cuda", jobs(), tmp_path, 1)["status"]
+        REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)["status"]
         == "report_error"
     )
 
@@ -320,11 +320,11 @@ def save_report(tmp_path, status="passed", attempt=1, **changes):
         "report_type": "platform",
         **REPORTER.identity(plan()),
         "run_attempt": attempt,
-        "platform": {"name": "cuda"},
+        "platform": {"name": "nvidia"},
         "status": status,
         **changes,
     }
-    path = tmp_path / f"flagcicd-platform-cuda-{attempt}.json"
+    path = tmp_path / f"flagcicd-platform-nvidia-{attempt}.json"
     path.write_text(json.dumps(report))
     return path
 
@@ -332,7 +332,7 @@ def save_report(tmp_path, status="passed", attempt=1, **changes):
 def test_missing_selected_platform_blocks_summary(tmp_path):
     summary = REPORTER.aggregate(plan(), entry_jobs(), tmp_path, 1)
     assert summary["status"] != "passed"
-    assert "missing platform report: cuda" in summary["errors"]
+    assert "missing platform report: nvidia" in summary["errors"]
 
 
 @pytest.mark.parametrize("outcome", ["failure", "skipped", "cancelled"])
@@ -437,7 +437,7 @@ def test_coverage_is_per_platform_and_partial_data_is_unavailable(
     raw_reports(tmp_path)
     directory = tmp_path / "coverage"
     directory.mkdir()
-    (directory / "coverage-cuda.json").write_text(
+    (directory / "coverage-nvidia.json").write_text(
         json.dumps(
             {
                 "totals": {
@@ -453,12 +453,12 @@ def test_coverage_is_per_platform_and_partial_data_is_unavailable(
             {
                 "source_repository": "flagos-ai/Torch-FL",
                 "source_ref": SHA,
-                "platform": "cuda",
+                "platform": "nvidia",
                 "complete": complete,
             }
         )
     )
-    report = REPORTER.platform_report(plan(), "cuda", jobs(), tmp_path, 1)
+    report = REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)
     assert report["status"] == "passed"
     assert report["metrics"]["coverage"]["available"] is available
 
@@ -574,7 +574,7 @@ def test_report_clis_retain_failed_execution_and_summary(tmp_path):
             str(SCRIPTS / "flagcicd_report.py"),
             "platform",
             "--platform",
-            "cuda",
+            "nvidia",
             "--directory",
             str(raw),
             "--output",
@@ -607,7 +607,7 @@ def test_report_clis_retain_failed_execution_and_summary(tmp_path):
     assert process.returncode == 1, process.stderr
     actual = json.loads(summary.read_text())
     assert actual["status"] == "build_failed"
-    assert actual["children"][0]["platform"] == {"name": "cuda"}
+    assert actual["children"][0]["platform"] == {"name": "nvidia"}
 
 
 @pytest.mark.parametrize(
@@ -670,7 +670,7 @@ def test_failed_plan_summary_keeps_only_safe_request_identity(
 def test_passing_pytest_cannot_hide_a_skipped_required_stage(tmp_path, stage):
     raw_reports(tmp_path)
     result = REPORTER.platform_report(
-        plan(), "cuda", jobs(**{stage: "skipped"}), tmp_path, 1
+        plan(), "nvidia", jobs(**{stage: "skipped"}), tmp_path, 1
     )
     assert result["status"] != "passed"
 
@@ -761,12 +761,12 @@ def test_preflight_is_required_even_without_hardware(tmp_path, outcome):
 
 def test_failed_counts_cannot_hide_behind_a_zero_pytest_exit_code(tmp_path):
     raw_reports(tmp_path)
-    path = tmp_path / "pytest/pytest-cuda.json"
+    path = tmp_path / "pytest/pytest-nvidia.json"
     data = json.loads(path.read_text())
     data["summary"] = {"total": 1, "failed": 1}
     path.write_text(json.dumps(data))
     assert (
-        REPORTER.platform_report(plan(), "cuda", jobs(), tmp_path, 1)["status"]
+        REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)["status"]
         == "report_error"
     )
 
@@ -787,12 +787,12 @@ def test_rerun_does_not_reuse_stale_data_when_the_new_plan_never_ran(tmp_path):
 
 def test_a_report_from_another_platform_cannot_supply_passing_metrics(tmp_path):
     raw_reports(tmp_path)
-    path = tmp_path / "pytest/pytest-cuda.json"
+    path = tmp_path / "pytest/pytest-nvidia.json"
     data = json.loads(path.read_text())
     data["flagcicd"]["platform"] = "ppu"
     path.write_text(json.dumps(data))
     assert (
-        REPORTER.platform_report(plan(), "cuda", jobs(), tmp_path, 1)["status"]
+        REPORTER.platform_report(plan(), "nvidia", jobs(), tmp_path, 1)["status"]
         == "report_error"
     )
 
@@ -801,7 +801,7 @@ def test_cancelled_configuration_is_reported_as_cancelled(tmp_path):
     results = jobs("skipped")
     results["configuration"]["result"] = "cancelled"
     assert (
-        REPORTER.platform_report(plan(), "cuda", results, tmp_path, 1)["status"]
+        REPORTER.platform_report(plan(), "nvidia", results, tmp_path, 1)["status"]
         == "cancelled"
     )
 
@@ -829,6 +829,6 @@ def test_workflow_stage_recorder_and_platform_report_use_the_same_contract(tmp_p
     raw_reports(tmp_path)
     actual = jobs()
     actual["integration-tests"]["outputs"] = values
-    report = REPORTER.platform_report(plan(), "cuda", actual, tmp_path, 3)
+    report = REPORTER.platform_report(plan(), "nvidia", actual, tmp_path, 3)
     assert report["status"] == "passed"
     assert report["execution_attempt"] == "3"

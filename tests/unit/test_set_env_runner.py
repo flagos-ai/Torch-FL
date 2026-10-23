@@ -40,17 +40,19 @@ RUNNER = SCRIPTS / "set_env.sh"
 HOOKS = SCRIPTS / "hooks"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
+# The lane names: a hook and a config are each named for the platform's vendor,
+# which is also the flagos-pypi-<lane> it publishes to.
 PLATFORMS = [
-    "cuda",
+    "apple",
     "ascend",
-    "dcu",
-    "gcu",
+    "enflame",
+    "hygon",
     "iluvatar",
     "kunlunxin",
     "metax",
-    "mps",
-    "musa",
-    "ppu",
+    "mthreads",
+    "nvidia",
+    "thead",
 ]
 
 
@@ -169,7 +171,7 @@ def test_mps_hook_selects_the_host_macos_toolchain():
     installs anything. Those checks are what stop an x86 runner or a missing Xcode
     image from reaching a test suite that skips every MPS case.
     """
-    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    hook = (HOOKS / "set_env_apple.sh").read_text(encoding="utf-8")
     assert '[[ "$(uname -s)" != "Darwin" ]]' in hook
     assert '[[ "$(uname -m)" != "arm64" ]]' in hook
     assert "xcode-select -p" in hook
@@ -195,7 +197,7 @@ def test_mps_hook_installs_the_wheel_build_dependencies():
     where the real distribution is absent and the build then dies later at
     `running build_ext`.
     """
-    hook = (HOOKS / "set_env_mps.sh").read_text(encoding="utf-8")
+    hook = (HOOKS / "set_env_apple.sh").read_text(encoding="utf-8")
     installs = [
         line.strip()
         for line in hook.splitlines()

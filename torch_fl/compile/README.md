@@ -127,7 +127,7 @@ backend compensates:
 - `CudaInterface.get_raw_stream` is re-attached -- the binding exists, but the
   import-time `torch.cuda._is_compiled()` probe left it at `None`.
 
-See `torch_fl/accelerator/cuda/_cuda_compat.py` and
+See `torch_fl/accelerator/nvidia/_cuda_compat.py` and
 `torch_fl/accelerator/metax/_metax_compat.py` for the memory-stats and
 Event/Stream shims that inductor's autotuner needs.
 

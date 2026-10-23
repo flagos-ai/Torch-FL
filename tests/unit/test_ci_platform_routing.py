@@ -211,7 +211,7 @@ def test_the_container_expression_uses_json_values_for_yaml_fields():
         assert '"options":"{2}"' not in expression
 
 
-def test_the_one_platform_without_a_container_is_mps():
+def test_the_one_platform_without_a_container_is_apple():
     """An empty image is allowed only for MPS.
 
     A vendor config that lost its image would otherwise run outside its prepared
@@ -224,7 +224,7 @@ def test_the_one_platform_without_a_container_is_mps():
         assert isinstance(config["ci_image"], str), platform
         if config["ci_image"] == "":
             empty.append(platform)
-    assert empty == ["mps"]
+    assert empty == ["apple"]
 
 
 def test_the_loader_accepts_an_empty_image_but_rejects_null_or_non_strings(tmp_path):
@@ -286,9 +286,9 @@ def test_the_loader_accepts_an_empty_image_but_rejects_null_or_non_strings(tmp_p
         assert (run.returncode == 0) is accepted, (image, run.stdout, run.stderr)
 
 
-def test_mps_is_locked_to_the_standard_hosted_apple_silicon_runner():
+def test_the_apple_lane_is_locked_to_the_standard_hosted_apple_silicon_runner():
     """Pin the label with an Apple Silicon host without a paid larger runner."""
-    config = yaml.safe_load((CONFIGS / "mps.yml").read_text(encoding="utf-8"))
+    config = yaml.safe_load((CONFIGS / "apple.yml").read_text(encoding="utf-8"))
     assert config["runner_labels"] == ["macos-15"]
     assert config["ci_image"] == ""
     assert config["environment_check"]["flagos_devices"] == {"at_least": 1}

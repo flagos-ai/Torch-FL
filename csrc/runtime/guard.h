@@ -18,11 +18,11 @@
 #endif
 
 // Real c10::cuda:: stream/event plumbing. Gated the same way as
-// backends/cuda_memory.h's delegation to
+// backends/nvidia_memory.h's delegation to
 // c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
 // in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
 // exports c10::hip::HIPCachingAllocator with zero c10::cuda symbols (see
-// backends/dcu_memory.h), so c10::cuda::getCurrentCUDAStream would fail to
+// backends/hygon_memory.h), so c10::cuda::getCurrentCUDAStream would fail to
 // resolve there even though DCU's CUDA-compat runtime satisfies plain
 // cudaStream_t calls. MUSA is excluded for the plainer reason that the Moore
 // Threads toolkit ships no CUDA runtime at all, so the header itself is absent
@@ -38,7 +38,7 @@
 // not ship -- enters the build.
 //
 // FLAGOS_BOXING_BUILD is required on top of that list, for the same reason
-// backends/cuda_memory.h gates its allocator delegation: c10::cuda lives in
+// backends/nvidia_memory.h gates its allocator delegation: c10::cuda lives in
 // libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
 // links the CPU-only torch wheel), so the symbols this branch calls are absent
 // at load time even on a real NVIDIA box. Every CUDA-ABI platform that reaches
@@ -475,7 +475,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     // cs.stream() returns cudaStream_t; Stream_t is flagos's opaque
     // `struct Stream*` ABI handle. Both conventions alias a raw
     // cudaStream_t under the hood (see the (cudaStream_t)stream casts in
-    // accelerator/cuda/stream.cc), so this reinterpret is the established
+    // accelerator/nvidia/stream.cc), so this reinterpret is the established
     // flagos<->CUDA stream conversion, not a new pattern.
     ::EventRecord(*(Event_t*)event, (Stream_t)cs.stream());
 #elif defined(USE_ASCEND)

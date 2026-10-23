@@ -3,7 +3,7 @@
 import torch
 
 import torch_fl
-from torch_fl.accelerator.dcu import _dcu_compat
+from torch_fl.accelerator.hygon import _dcu_compat
 
 
 def test_dcu_rng_bridge_forwards_seed_and_state(monkeypatch):

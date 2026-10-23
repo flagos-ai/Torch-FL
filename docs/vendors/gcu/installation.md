@@ -37,7 +37,7 @@ Build flags:
 - `FLAGOS_BUILD_FLAGGEMS=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration. It is on by default under `FLAGOS_ACCELERATOR=gcu`, but the environment variable is applied afterwards, so export `FLAGOS_BUILD_FLAGGEMS=1` explicitly if you also set the other kernel flags in the same shell
 - `--no-build-isolation`: ensures the build uses your installed CPU torch
 
-The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning. `scripts/codegen/codegen_gcu_flaggems.py` separately writes the FlagGems wrapper registrations into `csrc/aten/backends/gcu/generated/gcu_flaggems_register.inc`; both generators must be re-run when the routing sets change.
+The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning. `scripts/codegen/codegen_gcu_flaggems.py` separately writes the FlagGems wrapper registrations into `csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc`; both generators must be re-run when the routing sets change.
 
 ### Codegen validation
 
@@ -89,7 +89,7 @@ pytest tests/integration/test_amp_contract.py -m amp -v --tb=short
 
 Cases needing a capability GCU does not provide skip with a reason naming the platform.
 
-The same suites run in CI through [`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml); see [CI scope](#ci-scope) for what that manifest covers and what it deliberately leaves out.
+The same suites run in CI through [`.github/configs/enflame.yml`](../../../.github/configs/enflame.yml); see [CI scope](#ci-scope) for what that manifest covers and what it deliberately leaves out.
 
 ## Platform-specific Behavior
 
@@ -109,7 +109,7 @@ Ops without a `topsaten` kernel are **not registered** on `PrivateUse1` at all, 
 
 GCU device pointers are device-scoped (no unified addressing): a pointer only resolves against the **current** device. The allocator and every kernel select the device first, and the default stream is per-device.
 
-A copy between two cards is a separate case that selecting the device does not fix. `topsMemcpy` with a device-to-device kind returns an error and leaves the destination byte-for-byte unchanged when the two pointers live on different cards, under every candidate current device, so a copy routed through it moves nothing while reporting a failure that callers commonly ignore — the visible symptom is a tensor that keeps its previous contents, not an exception. `topsMemcpyPeer` is the entry point that transfers the bytes, and it requires the current device to be one of the two cards. Both copy paths in the runtime (`csrc/runtime/accelerator/gcu/memory.cc` and `csrc/runtime/allocator/backends/gcu_memory.h`) resolve both pointers and take the peer route when their devices differ. The asynchronous peer entry point is stricter still: it also needs the caller's stream to belong to the source's device, and stalls the caller rather than returning an error when it does not.
+A copy between two cards is a separate case that selecting the device does not fix. `topsMemcpy` with a device-to-device kind returns an error and leaves the destination byte-for-byte unchanged when the two pointers live on different cards, under every candidate current device, so a copy routed through it moves nothing while reporting a failure that callers commonly ignore — the visible symptom is a tensor that keeps its previous contents, not an exception. `topsMemcpyPeer` is the entry point that transfers the bytes, and it requires the current device to be one of the two cards. Both copy paths in the runtime (`csrc/runtime/accelerator/enflame/memory.cc` and `csrc/runtime/allocator/backends/enflame_memory.h`) resolve both pointers and take the peer route when their devices differ. The asynchronous peer entry point is stricter still: it also needs the caller's stream to belong to the source's device, and stalls the caller rather than returning an error when it does not.
 
 ### Contiguous input requirement
 
@@ -146,7 +146,7 @@ merely *submitted* behind an already-queued Triton kernel does not read that
 kernel's output on this hardware, so a FlagGems producer followed by a `topsaten`
 consumer races unless the stream is drained in between:
 
-- `EXEC_TOPSATEN_CMD` (`csrc/aten/backends/gcu/topsaten_common.h`) synchronises
+- `EXEC_TOPSATEN_CMD` (`csrc/aten/backends/enflame/topsaten_common.h`) synchronises
   the stream **before** issuing its op as well as after it.
 - `BlockingCopyGuard::DrainCurrentQueue` (`csrc/aten/copy_ops.cc`) drains the
   same stream on GCU, so a blocking device-to-host copy waits for a FlagGems
@@ -173,7 +173,7 @@ Installation, routing, and operator-specific failure modes are documented in
 
 ### CI scope
 
-[`.github/configs/gcu.yml`](../../../.github/configs/gcu.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite twice — once on the `anyplatform`/`main_ops` cohort with the FlagGems markers excluded, once on the `flaggems and main_ops` cohort — plus the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, the shared `tests/integration/test_amp_contract.py`, the shared `tests/integration/test_math_bits_contract.py`, and `tests/integration/test_compile.py`. `.github/scripts/set_env_gcu.sh` provisions FlagTree and FlagGems into the isolated venv for both the build and integration stages, so the FlagGems cohort runs against the real Triton stack rather than being excluded. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
+[`.github/configs/enflame.yml`](../../../.github/configs/enflame.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite twice — once on the `anyplatform`/`main_ops` cohort with the FlagGems markers excluded, once on the `flaggems and main_ops` cohort — plus the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, the shared `tests/integration/test_amp_contract.py`, the shared `tests/integration/test_math_bits_contract.py`, and `tests/integration/test_compile.py`. `.github/scripts/set_env_enflame.sh` provisions FlagTree and FlagGems into the isolated venv for both the build and integration stages, so the FlagGems cohort runs against the real Triton stack rather than being excluded. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
 
 ### Distributed support not validated
 

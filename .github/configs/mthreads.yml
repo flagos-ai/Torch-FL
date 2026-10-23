@@ -16,7 +16,7 @@ display_name: MUSA
 
 # MUSA-specific environment preparation stays outside the common workflow.
 setup_script: .github/scripts/set_env.sh
-setup_platform: musa
+setup_platform: mthreads
 
 # Keep the previously running MUSA 5.1 image until the runner driver is
 # upgraded for MUSA 5.2 and that image can be pulled within the job budget.
@@ -29,13 +29,13 @@ runner_labels:
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
-  - torch_fl/accelerator/musa/
+  - torch_fl/accelerator/mthreads/
   - torch_fl/configs/backends_musa.conf
-  - csrc/aten/backends/musa/
-  - csrc/runtime/accelerator/musa/
-  - csrc/runtime/allocator/backends/musa_memory.h
-  - .github/scripts/hooks/set_env_musa.sh
-  - .github/scripts/set_env_musa.sh
+  - csrc/aten/backends/mthreads/
+  - csrc/runtime/accelerator/mthreads/
+  - csrc/runtime/allocator/backends/mthreads_memory.h
+  - .github/scripts/hooks/set_env_mthreads.sh
+  - .github/scripts/set_env_mthreads.sh
   - scripts/codegen/codegen_musa_flaggems.py
   - scripts/codegen/codegen_mudnn.py
 
@@ -45,7 +45,7 @@ integration_environment: {}
 
 # MUSA is non-NVIDIA: expose the /dev/mtgpu* device nodes through --privileged
 # (mirrors the MetaX layout). MTHREADS_VISIBLE_DEVICES=all lets musart see every
-# MT device from container start; set_env_musa.sh re-exports it for subprocesses.
+# MT device from container start; set_env_mthreads.sh re-exports it for subprocesses.
 container_options: >-
   --privileged
   --ipc=host

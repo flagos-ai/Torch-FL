@@ -348,8 +348,8 @@ def _relink_vendor_libtorch() -> None:
         # Decoupled by default: preload only DTK's device libraries on top of the
         # official core, leaving torch/lib untouched. FLAGOS_DCU_VENDOR_CORE=1
         # selects the full vendor core through a private facade. See
-        # torch_fl/accelerator/dcu/_dcu_libtorch_link.py.
-        from torch_fl.accelerator.dcu._dcu_libtorch_link import setup_dcu_runtime
+        # torch_fl/accelerator/hygon/_dcu_libtorch_link.py.
+        from torch_fl.accelerator.hygon._dcu_libtorch_link import setup_dcu_runtime
 
         setup_dcu_runtime()
         return
@@ -360,7 +360,7 @@ def _relink_vendor_libtorch() -> None:
         from torch_fl.accelerator._vendor_libtorch import bundled_lib_dir
 
         if bundled_lib_dir("lib_ppu", "libtorch_cuda.so"):
-            from torch_fl.accelerator.ppu._ppu_libtorch_link import (
+            from torch_fl.accelerator.thead._ppu_libtorch_link import (
                 ensure_ppu_libtorch_links,
             )
 
@@ -490,7 +490,7 @@ def _validate_dcu_decoupled_runtime() -> None:
 
     Only runs for a decoupled DCU build (a DCU wheel without
     FLAGOS_DCU_VENDOR_CORE=1), right after `import torch`; the checks themselves
-    live in accelerator/dcu/_dcu_runtime_check.py. Set
+    live in accelerator/hygon/_dcu_runtime_check.py. Set
     FLAGOS_DCU_SKIP_RUNTIME_CHECK=1 to bypass (e.g. when deliberately testing a
     non-matching wheel pair).
     """
@@ -499,12 +499,12 @@ def _validate_dcu_decoupled_runtime() -> None:
     if _env.flag("FLAGOS_DCU_SKIP_RUNTIME_CHECK"):
         return
 
-    from torch_fl.accelerator.dcu._dcu_libtorch_link import vendor_core_mode
+    from torch_fl.accelerator.hygon._dcu_libtorch_link import vendor_core_mode
 
     if vendor_core_mode():
         return  # legacy mode replaces the core wholesale; nothing to reconcile.
 
-    from torch_fl.accelerator.dcu._dcu_runtime_check import validate_decoupled_runtime
+    from torch_fl.accelerator.hygon._dcu_runtime_check import validate_decoupled_runtime
 
     validate_decoupled_runtime(os.path.join(os.path.dirname(__file__), "lib_dcu"))
 
@@ -1236,7 +1236,7 @@ def _patch_flaggems_codegen_config():
         # from the bundled libtorch's own version so triton sees a HIP torch,
         # matching what the vendor wheel reported.
         _restore_dcu_hip_version()
-        from torch_fl.accelerator.dcu._dcu_compat import (
+        from torch_fl.accelerator.hygon._dcu_compat import (
             install_dcu_rng_bridge,
             patch_torch_cuda_for_dcu,
         )
@@ -1276,7 +1276,7 @@ def _patch_flaggems_codegen_config():
     # leave GEMS_VENDOR unset so the topsaten kernels and cpu_fallback stay in
     # charge.
     if _build_accelerator() == "gcu" and os.environ.get("GEMS_VENDOR") != "ascend":
-        from torch_fl.accelerator.gcu._gcu_compat import (
+        from torch_fl.accelerator.enflame._gcu_compat import (
             install_gcu_rng_generators,
             patch_diffusers_qwenimage_rope,
             patch_gcu_triton_for_flagos,
@@ -1345,7 +1345,7 @@ def _patch_flaggems_codegen_config():
         and _build_accelerator() != "metax"
         and os.environ.get("GEMS_VENDOR") != "ascend"
     ):
-        from torch_fl.accelerator.cuda._cuda_compat import (
+        from torch_fl.accelerator.nvidia._cuda_compat import (
             is_nvidia_cuda_available,
             patch_torch_cuda_for_flagos,
         )
@@ -1894,14 +1894,14 @@ def _register_flaggems_operators():
     # FLAGOS_BACKEND_CONFIG. Calling flag_gems.enable() here would register a
     # competing PrivateUse1 implementation and bypass the shared dispatcher.
     if _build_accelerator() == "gcu":
-        from torch_fl.accelerator.gcu._gcu_compat import is_gcu_triton_available
+        from torch_fl.accelerator.enflame._gcu_compat import is_gcu_triton_available
 
         if not is_gcu_triton_available():
             return
         try:
             import flag_gems
 
-            from torch_fl.accelerator.gcu._gcu_compat import (
+            from torch_fl.accelerator.enflame._gcu_compat import (
                 bind_vendor_ops_in_generic_modules,
                 patch_flaggems_device_name,
             )
@@ -2457,7 +2457,7 @@ def _phase_claim() -> None:
     # dispatch while torch/version.py still reports cuda=None. Restore that build
     # metadata before optional packages inspect it and select a native library.
     if _is_ppu_build():
-        from torch_fl.accelerator.ppu._ppu_libtorch_link import (  # noqa: E402
+        from torch_fl.accelerator.thead._ppu_libtorch_link import (  # noqa: E402
             restore_ppu_cuda_version,
         )
 

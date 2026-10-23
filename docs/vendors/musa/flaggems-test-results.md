@@ -367,7 +367,7 @@ FLAGOS_LOG=dispatch python script.py
 
 ## Full CI manifest reproduction (local)
 
-Every group in `.github/configs/musa.yml` was run locally on the eight-device
+Every group in `.github/configs/mthreads.yml` was run locally on the eight-device
 MTT S5000 host against the working tree, in the same order the CI manifest runs
 them:
 
@@ -405,7 +405,7 @@ manifest already documents this as a driver/toolkit/image regression rather than
 `torch_fl` defect.
 
 Group 7 is run with `FLAGOS_USE_FLAGGEMS=1`, matching
-`.github/scripts/set_env_musa.sh`: the group's marker expression does not
+`.github/scripts/set_env_mthreads.sh`: the group's marker expression does not
 exclude the `flaggems` marker, and `tests/integration/ops/conftest.py` gates
 `flaggems`-marked tests on that variable, so a run without it skips them
 instead of exercising them. `PYTHONPATH` must point at this working tree —

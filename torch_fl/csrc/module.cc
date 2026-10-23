@@ -25,7 +25,7 @@
 
 #ifdef USE_MUSA
 #include <musa_runtime.h>
-#include <runtime/accelerator/musa/musa_stream.h>
+#include <runtime/accelerator/mthreads/musa_stream.h>
 #endif
 
 #ifdef USE_ILUVATAR

@@ -291,7 +291,7 @@ selects it", only more complete.
 
 The new tests must:
 
-- carry the `main_ops` marker (the CI selector in `.github/configs/cuda.yml`)
+- carry the `main_ops` marker (the CI selector in `.github/configs/nvidia.yml`)
 - be wired explicitly into the cuda workflow
 - be confirmed by CI logs to have actually run once landed (a local green run is not enough)
 
@@ -331,6 +331,6 @@ not crash.
 4. Delete `flagos_profiler_stubs.cc` and the tests it skipped.
 5. Generate the baseline snapshot, the regeneration script, and the comparison test (with the
    `main_ops` marker).
-6. Wire it into `.github/configs/cuda.yml` and confirm via CI logs that it actually runs.
+6. Wire it into `.github/configs/nvidia.yml` and confirm via CI logs that it actually runs.
 7. qwen3 real-model regression: confirm the trace has complete op↔kernel links and operator-level
    device time.
