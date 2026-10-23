@@ -336,6 +336,26 @@ asks, using `gen_vendor_confs.py --stats` and the conf tally, never by copying
 old figures. Measured correctness evidence belongs in the PR and the survey
 output, not in that page.
 
+### Default confs never route boxing
+
+Every default `torch_fl/configs/backends_<platform>.conf`, on every chip, may
+only use these keys: `flaggems` / `flaggems_cpp`, `tileops`, the platform's own
+vendor kernel name (`ascend`, `musa`, `gcu`, `kunlunxin`, `iluvatar`,
+`tsingmicro`, `mps`, …), and `none`. It must **never** contain a `boxing` route —
+nor the legacy `cuda` spelling of it.
+
+- If FlagGems does not cover an operator and the vendor kernel is not wired up,
+  the only allowed outcome is `none`, which reaches `cpu_fallback`. A `boxing`
+  entry would hide the missing route behind the vendor's borrowed CUDA kernel and
+  report coverage the vendor + FlagGems story does not have.
+- A CUDA-ABI platform with no native operator library of its own (NVIDIA, MetaX,
+  Hygon DCU, T-Head PPU on this tree) therefore has no vendor key in its default
+  conf: everything FlagGems does not cover is `none`.
+- `scripts/codegen/gen_vendor_confs.py` enforces this — `build_all()` exits if any
+  default conf would emit `boxing`/`cuda`. Do not relax that check; if a route is
+  wrong, fix the route.
+- The only place a `boxing` key may appear is the opt-in day-0 file below.
+
 ### Day-0 boxing confs
 
 `torch_fl/configs/backends_<platform>_boxing.conf` is a **temporary**,

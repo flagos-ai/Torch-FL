@@ -264,7 +264,7 @@ outside a FlagTree environment.
 
 ## FlagGems on MetaX
 
-Every MetaX wheel compiles the FlagGems Python dispatch slot, and `backends_metax.conf` is FlagGems-first and is the only conf a MetaX build ships. `import torch_fl` therefore routes 594 of the conf's 2037 ops to the FlagGems Python path and 10 to the FlagGems C++ path on its own. In a boxing wheel the rest fall back to the CUDA boxing kernel (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and other ops `triton-metax` cannot compile — FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects); in the default FlagGems-primary wheel they reach `cpu_fallback`.
+Every MetaX wheel compiles the FlagGems Python dispatch slot, and `backends_metax.conf` is FlagGems-first. `import torch_fl` therefore routes 586 of the conf's 2037 ops to the FlagGems Python path and 15 to the FlagGems C++ path on its own; everything else -- including the ops `triton-metax` cannot compile (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and others, where FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects) -- is `none` and reaches `cpu_fallback`. A default conf never routes boxing. A boxing wheel that needs those ops on the CUDA kernel selects the opt-in day-0 table explicitly (`FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_metax_boxing.conf`); see `AGENTS.md`, "Day-0 boxing confs".
 
 The ten `flaggems_cpp` routes need a FlagGems built for MACA (the `cpp/` half, `-DFLAGGEMS_BACKEND=MACA`) linked into the wheel; without it the dispatcher sees an empty C++ slot and boxes them. `_softmax` and `embedding` are on the Python path rather than the C++ one until that C++ wiring lands — see *Native Backend Route Changes* in the operator-support reference.
 
@@ -311,7 +311,7 @@ print(f'FlagGems SILU result: {result.cpu().item():.4f}')
 
 The dispatch log line the run prints for `silu` names the backend that served it (`[flagos dispatch] silu -> flagos_python`) — the conf's route, not an environment switch. `tests/integration/ops/backend_conf.py:routed_backend()` resolves that name from the conf so a test can assert it on any platform.
 
-Without FlagTree or FlagGems installed, the 604 ops routed to a FlagGems backend raise at dispatch. Neither build offers a pure-boxing configuration: `backends_metax.conf` is FlagGems-first in both the default and the boxing wheel, so those routes raise instead of falling back.
+Without FlagTree or FlagGems installed, the 604 ops routed to a FlagGems backend raise at dispatch. `backends_metax.conf` is FlagGems-first in both the default and the boxing wheel, so those routes raise instead of falling back. The only pure-boxing table is the opt-in day-0 `backends_metax_boxing.conf` (`FLAGOS_BACKEND_CONFIG=...`), which routes nothing to FlagGems beyond what `backends_metax.conf` measured.
 
 ## Distributed (Experimental)
 

@@ -328,10 +328,12 @@ def test_registered_ops_are_never_left_at_none(platform):
 @pytest.mark.anyplatform
 @pytest.mark.parametrize("platform", sorted(BOXING_PLATFORMS))
 def test_boxing_platforms_have_no_none_entries(platform):
-    """A CUDA-compatible platform claims the full generated op list, so every
-    op has a boxing kernel behind it and ``none`` is never the right answer.
+    """The day-0 boxing variant boxes what it cannot accelerate, so ``none`` is
+    never the right answer there -- that is what makes it a day-0 file. The
+    default conf for the same platform is ``none``-based; see
+    test_gen_vendor_confs.test_default_confs_never_route_boxing.
     """
-    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}_boxing.conf")
     none_ops = [op for op, v in routes.items() if v.split("#", 1)[0].strip() == "none"]
     assert not none_ops, f"{platform} routes {none_ops[:5]} to none"
 
@@ -479,7 +481,12 @@ def test_conf_route_counts_are_stable():
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. Both effects apply: 549/1485.
         "cuda": {"flaggems": 549, "cuda": 1485},
-        "dcu": {"flaggems": 454, "cuda": 1583},
+        # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
+        # own on this tree, and a default conf never routes boxing (AGENTS.md,
+        # "Day-0 boxing confs"): what FlagGems does not cover -- including each
+        # platform's measured triton gaps -- is `none` (cpu_fallback). The
+        # boxing routes live in backends_<platform>_boxing.conf.
+        "dcu": {"flaggems": 454, "none": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -520,10 +527,10 @@ def test_conf_route_counts_are_stable():
         # these 8 ops to `cuda` costs nothing there. If it does cost something,
         # the per-platform answer is NATIVE_TRITON_GAPS["metax"], not a
         # deletion from the shared holds.
-        "metax": {"flaggems": 586, "cuda": 1441, "flaggems_cpp": 10},
+        "metax": {"flaggems": 586, "none": 1436, "flaggems_cpp": 15},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "musa": {"flaggems": 466, "none": 1518, "musa": 53},
-        "ppu": {"flaggems": 592, "cuda": 1445},
+        "ppu": {"flaggems": 592, "none": 1445},
         # Iluvatar adds a native, non-boxing vendor slot on top of FlagGems
         # (scripts/codegen/codegen_iluvatar.py). Its counts are DERIVED, not
         # pinned: the native cohort is a moving measurement -- the first landing

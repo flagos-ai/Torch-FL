@@ -428,14 +428,22 @@ def test_every_vendor_conf_covers_the_whole_op_list(vendor):
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
-def test_boxing_confs_are_fully_covered(platform):
-    """No `none` on a CUDA-compatible platform -- boxing always has a kernel."""
+def test_default_confs_never_route_boxing(platform):
+    """The default conf states the platform's real accelerator coverage.
+
+    A CUDA-ABI platform has no vendor kernel library on this tree, so every op
+    FlagGems does not cover is `none` (cpu_fallback) -- a `boxing` entry would
+    hide the missing route behind the vendor's borrowed CUDA kernel and report
+    coverage the vendor + FlagGems story does not have. Boxing is reachable only
+    through the day-0 backends_<platform>_boxing.conf. See AGENTS.md.
+    """
     routes = g.build_all(CONF_DIR)[platform][1]
     assert routes, f"{platform} produced no routes"
     for op, value in routes.items():
         key = value.split("#", 1)[0].strip()
-        assert key != "none", f"{platform}: {op} routed to none"
-        assert key in {"flaggems_cpp", "flaggems", "tileops", g.BOXING_FALLBACK}
+        assert key in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
+        assert key != g.BOXING_FALLBACK, op
+        assert key != "cuda", op
 
 
 def test_every_platform_covers_the_same_op_set():
@@ -583,9 +591,15 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
 def test_metax_conf_keeps_mm_boxed():
     """A measured exception, not a derivable one: mm is in the shared fg_cpp set
     but was not measured servable on MetaX hardware, so it never entered
-    METAX_CPP_MEASURED and must stay on boxing."""
+    METAX_CPP_MEASURED and must stay off FlagGems.
+
+    In the default conf that is `none` (cpu_fallback) -- MetaX has no vendor
+    kernel of its own on this tree -- and in the day-0 variant it is `boxing`.
+    """
     routes = g.build_all(CONF_DIR)["metax"][1]
-    assert routes["mm"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
+    assert routes["mm"].split("#", 1)[0].strip() == "none"
+    variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["metax"][1]
+    assert variant["mm"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
     # Must exist in METAX_CPP_MEASURED (test_metax_conf_keeps_mm_boxed ensures it
     # stays pinned to "mm not in the measured set")
     assert "mm" not in g.METAX_CPP_MEASURED
@@ -710,13 +724,26 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
-def test_boxing_confs_have_no_none_entries(platform):
-    """A CUDA-compatible platform claims the full generated op list, so every op
-    has a boxing kernel behind it and `none` is never the right answer -- it would
-    reach the dispatcher and raise on an empty slot instead of boxing."""
+def test_default_confs_route_only_measured_flaggems(platform):
+    """The accelerated part of a default conf is FlagGems coverage intersected
+    with the platform's measured routes -- nothing else is claimable here."""
     routes = g.build_all(CONF_DIR)[platform][1]
+    accelerated = {
+        op for op, v in routes.items() if v.split("#", 1)[0].strip() != "none"
+    }
+    fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
+    measured = g.boxing_measured_python_ops(f"backends_{platform}.conf")
+    stray = sorted(accelerated - (fg | measured))
+    assert not stray, f"{platform} accelerates {stray[:5]} with no FlagGems route"
+
+
+@pytest.mark.parametrize("platform", sorted(g.BOXING_VARIANT_PLATFORMS))
+def test_boxing_variant_has_no_none_entries(platform):
+    """The day-0 variant boxes what it cannot accelerate, so `none` never appears
+    there -- that is exactly what makes it a day-0 file."""
+    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
     none_ops = [op for op, v in routes.items() if v.split("#", 1)[0].strip() == "none"]
-    assert not none_ops, f"{platform} routes {none_ops[:5]} to none"
+    assert not none_ops, f"{platform} variant routes {none_ops[:5]} to none"
 
 
 # ---------------------------------------------------------------------------
@@ -772,17 +799,21 @@ def test_boxing_variant_does_not_apply_measured_composite_routes():
 @pytest.mark.parametrize("platform", ["metax", "dcu", "ppu"])
 def test_boxing_variant_keeps_the_platforms_triton_gaps(platform):
     """A gap is an op FlagGems covers that this backend cannot compile. The
-    variant must not send it to flaggems just because boxing is the fallback."""
-    default = g.build_all(CONF_DIR)[platform][1]
+    variant must not send it to flaggems just because boxing is the fallback.
+
+    The gap set comes from the generator (BOXING_TRITON_GAPS or the conf diff),
+    not from the default conf: in the default conf a gap is spelled `none`, so
+    the reference is what boxing_triton_gaps() returns for the platform.
+    """
     variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
-    # Every op the default conf pins to the boxing kernel but FlagGems covers
-    # must still be on the boxing kernel in the variant.
     fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
-    gaps = {
-        op
-        for op, v in default.items()
-        if v.split("#", 1)[0].strip() == "boxing" and op in fg
-    }
+    gaps = g.boxing_triton_gaps(
+        CONF_DIR,
+        f"backends_{platform}.conf",
+        g.flaggems_python_ops_for(platform),
+        g.flaggems_cpp_ops(CONF_DIR),
+    )
     assert gaps, f"{platform} has no measured gaps to preserve"
     for op in gaps:
-        assert variant[op] == "boxing", op
+        if op in fg:
+            assert variant[op] == "boxing", op
