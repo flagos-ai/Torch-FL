@@ -468,13 +468,17 @@ def test_conf_route_counts_are_stable():
         # copy_func kernel the FlagGems `_ascend` flip override builds.
         "ascend": {"flaggems": 221, "none": 1659, "ascend": 157},
         "bpu": {},
-        # PLACEHOLDER -- recomputed on H100 after rebasing onto the main that
-        # carries #340 (which added cuda_route_exceptions /
-        # measured_flaggems_rollback / metadata_route_overrides and moved cuda to
-        # 390/1644). This branch additionally widens the FlagGems ceiling so ops
-        # that had a kFlagGems kernel but were never listed -- mul.Tensor above
-        # all -- reach the FlagGems route instead of cpu_fallback.
-        "cuda": {"flaggems": 551, "cuda": 1483},
+        # Measured on H100 after rebasing onto the main that carries #340.
+        # #340 added three exception groups (cuda_route_exceptions for
+        # contract/compile defects, measured_flaggems_rollback for ops that
+        # failed a surveyed case, metadata_route_overrides for ops that buy no
+        # kernel on either route) and moved cuda to 390/1644. This branch adds
+        # the other half: the FlagGems ceiling is now derived from the generated
+        # kernels instead of being hand-maintained, so ops that had a kFlagGems
+        # kernel but were never listed -- mul.Tensor above all, 1522 host round
+        # trips per forward on the OCR-RM value head -- reach the FlagGems route
+        # instead of cpu_fallback. Both effects apply: 549/1485.
+        "cuda": {"flaggems": 549, "cuda": 1485},
         "dcu": {"flaggems": 454, "cuda": 1583},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
