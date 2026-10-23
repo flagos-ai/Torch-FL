@@ -36,6 +36,7 @@ import importlib.util
 import json
 import os
 import struct
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +81,7 @@ SUPPORTED_KEYS = frozenset(
         "torch_musa_shim_only",
         "flagtree",
         "model_dir",
+        "require_torch_backends_hook",
     }
 )
 
@@ -240,6 +242,34 @@ def assert_package_files(spec, package_root):
         assert (package_root / relative).is_file(), package_root / relative
     for relative in spec.get("forbid_package_files") or []:
         assert not (package_root / relative).is_file(), package_root / relative
+
+
+def assert_torch_backends_hook():
+    """The wheel registers the `torch.backends` autoload hook it was built with.
+
+    A fresh interpreter, because a distribution installed after this one
+    started is invisible to the parent's importlib.metadata cache. It is the
+    wheel's own metadata that has to carry it: setuptools drops an entry-points
+    table that exists only in setup(), and a wheel without it does not activate
+    on `import torch`.
+    """
+    probe = (
+        "from importlib.metadata import entry_points; "
+        "raise SystemExit(0 if any(ep.name == 'torch_fl' "
+        "for ep in entry_points(group='torch.backends')) else 1)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "the wheel declares no torch.backends entry point, so `import torch` "
+        f"activates no backend; entry_points.txt is what has to carry it:\n"
+        f"{result.stderr}"
+    )
 
 
 def assert_cuda_version(dependencies, spec):
@@ -447,6 +477,8 @@ def main():
         flagtree_version = assert_flagtree(dependencies, spec["flagtree"])
     if spec.get("model_dir"):
         assert_model_dir()
+    if spec.get("require_torch_backends_hook"):
+        assert_torch_backends_hook()
     if spec.get("native_extensions_arch"):
         assert_native_extensions_arch(dependencies, spec["native_extensions_arch"])
 

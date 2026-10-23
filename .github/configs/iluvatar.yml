@@ -87,6 +87,11 @@ environment_check:
     exactly: 2
   triton_backend: iluvatar
   flaggems_vendor: iluvatar
+  # The wheel's metadata has to carry the autoload hook; a wheel built without
+  # it does not activate on `import torch` (setuptools drops a setup()-side
+  # entry-points table), and this step is the first place that imports the
+  # installed wheel.
+  require_torch_backends_hook: true
   flagtree:
     version_env: FLAGTREE_VERSION
     version_default: 0.6.2a3+iluvatar3.6
