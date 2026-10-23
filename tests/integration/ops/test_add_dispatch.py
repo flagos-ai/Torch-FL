@@ -153,7 +153,7 @@ class TestAddTensorDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_add__Tensor": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] add.Tensor -> cuda" in result.stderr
+        assert "[flagos dispatch] add.Tensor -> boxing" in result.stderr
 
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):

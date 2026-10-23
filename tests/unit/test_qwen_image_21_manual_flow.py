@@ -222,7 +222,7 @@ def test_runner_appends_the_census_summary_and_exit_status_to_its_log(tmp_path):
     fake_python.write_text(
         "#!/bin/sh\n"
         "echo '[flagos dispatch] add.Tensor -> flagos_python'\n"
-        "echo '[flagos dispatch] mm -> cuda'\n",
+        "echo '[flagos dispatch] mm -> boxing'\n",
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
@@ -254,6 +254,6 @@ def test_runner_appends_the_census_summary_and_exit_status_to_its_log(tmp_path):
     assert "---- readings ----" in saved
     assert "dispatch records   : 2" in saved
     assert "1 flagos_python" in saved
-    assert "1 cuda" in saved
+    assert "1 boxing" in saved
     assert "exit status        : 0" in saved
     assert "dispatch records   : 2" in completed.stdout

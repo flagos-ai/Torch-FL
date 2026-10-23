@@ -182,7 +182,7 @@ class TestSumDimDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_sum__dim_IntList": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] sum.dim_IntList -> cuda" in result.stderr
+        assert "[flagos dispatch] sum.dim_IntList -> boxing" in result.stderr
 
 
 class TestSumDimAscendDispatch:

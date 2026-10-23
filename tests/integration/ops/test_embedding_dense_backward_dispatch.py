@@ -137,7 +137,7 @@ class TestEmbeddingDenseBackwardDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_embedding_dense_backward": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] embedding_dense_backward -> cuda" in result.stderr
+        assert "[flagos dispatch] embedding_dense_backward -> boxing" in result.stderr
 
 
 class TestEmbeddingDenseBackwardAscendDispatch:

@@ -125,7 +125,7 @@ class TestConstantPadNdDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_constant_pad_nd": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] constant_pad_nd -> cuda" in result.stderr
+        assert "[flagos dispatch] constant_pad_nd -> boxing" in result.stderr
 
 
 class TestConstantPadNdAscendDispatch:

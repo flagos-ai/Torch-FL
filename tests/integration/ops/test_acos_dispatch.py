@@ -132,4 +132,4 @@ class TestAcosDispatch:
             },
             check=False,
         )
-        assert "[flagos dispatch] acos -> cuda" in result.stderr
+        assert "[flagos dispatch] acos -> boxing" in result.stderr

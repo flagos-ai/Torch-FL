@@ -137,7 +137,7 @@ class TestSoftmaxDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP__softmax": "cuda"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] _softmax -> cuda" in result.stderr
+        assert "[flagos dispatch] _softmax -> boxing" in result.stderr
 
 
 class TestSoftmaxAscendDispatch:

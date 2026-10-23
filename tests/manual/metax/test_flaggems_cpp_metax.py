@@ -50,7 +50,7 @@ Run (from repo root):
 
 Each op is checked twice:
   * routing -- with FLAGOS_LOG=dispatch the dispatcher logs "-> flagos" for
-    the C++ backend (vs "-> flagos_python" / "-> cuda"). Correct numerics alone
+    the C++ backend (vs "-> flagos_python" / "-> boxing"). Correct numerics alone
     would not prove the C++ path ran, since the boxing fallback is also correct.
   * numerics -- compared against the CPU result.
 Routing is checked in a subprocess because the backend table is read once, at

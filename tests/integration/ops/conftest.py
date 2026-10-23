@@ -60,7 +60,7 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     "metax": ("cuda", "ascend", "musa", "dcu"),
     "ascend": ("cuda", "metax", "musa", "dcu"),
     # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
-    # `-> cuda` routing assertions cannot hold; nor is FlagGems built.
+    # `-> boxing` routing assertions cannot hold; nor is FlagGems built.
     "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
@@ -81,7 +81,7 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     "dcu": ("metax", "ascend", "musa", "gcu"),
     # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
     # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
-    # `none` (CPU fallback), with no `cuda` route, so a `-> cuda` dispatch assertion
+    # `none` (CPU fallback), with no `cuda` route, so a `-> boxing` dispatch assertion
     # cannot hold. Every other backend's marker is skipped for the same reason.
     "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
     # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
@@ -98,7 +98,7 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
         "flaggems_python",
     ),
     # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
-    # vendor op library, so `-> cuda` and every other backend's dispatch
+    # vendor op library, so `-> boxing` and every other backend's dispatch
     # assertions cannot hold. Without this row the platform fell through to the
     # empty skip set and the cuda/ascend-marked tests ran here and failed.
     #
@@ -158,7 +158,7 @@ def pytest_collection_modifyitems(
     if platform == "metax":
         markers_to_skip.append("metax")
     flaggems_cpp_on = _flaggems_cpp_enabled()
-    # The `cuda` mark asserts a `-> cuda` dispatch, and on a CUDA-ABI platform
+    # The `cuda` mark asserts a `-> boxing` dispatch, and on a CUDA-ABI platform
     # that route is served by the generated boxing kernels. A FlagGems-primary
     # wheel (the default since #520, and the only wheel the CUDA-ABI CI lanes
     # build now) compiles none, so the ops the conf routes to `cuda` are left

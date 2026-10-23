@@ -148,7 +148,7 @@ class TestMeanDimDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mean__dim": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] mean.dim -> cuda" in result.stderr
+        assert "[flagos dispatch] mean.dim -> boxing" in result.stderr
 
 
 class TestMeanDimAscendDispatch:

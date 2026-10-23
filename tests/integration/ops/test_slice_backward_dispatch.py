@@ -126,7 +126,7 @@ class TestSliceBackwardDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_slice_backward": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] slice_backward -> cuda" in result.stderr
+        assert "[flagos dispatch] slice_backward -> boxing" in result.stderr
 
 
 class TestSliceBackwardAscendDispatch:

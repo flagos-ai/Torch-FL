@@ -522,7 +522,7 @@ class TestCatDispatchLog:
         result = _run_cat_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cat": "cuda"},
         )
-        assert "[flagos dispatch] cat -> cuda" in result.stderr, (
+        assert "[flagos dispatch] cat -> boxing" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
 

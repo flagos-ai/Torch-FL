@@ -14,7 +14,7 @@
 
 """Moore Threads MUSA routing tests.
 
-The per-op files in this directory assert a ``-> cuda`` routing that MUSA builds
+The per-op files in this directory assert a ``-> boxing`` routing that MUSA builds
 cannot produce: no CUDA boxing kernels are compiled in (the platform ships no
 cudart), so those tests are skipped by conftest's platform gate. This file is the
 MUSA equivalent -- it checks that ops land on accelerated backends (FlagGems or

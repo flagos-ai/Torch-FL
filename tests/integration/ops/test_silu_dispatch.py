@@ -128,7 +128,7 @@ class TestSiluDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] silu -> cuda" in result.stderr
+        assert "[flagos dispatch] silu -> boxing" in result.stderr
 
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):

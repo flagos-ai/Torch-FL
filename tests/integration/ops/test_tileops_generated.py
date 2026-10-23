@@ -171,6 +171,6 @@ def test_dispatches_through_cpp():
         capture_output=True,
         text=True,
     )
-    assert "[flagos dispatch] relu -> cuda" in out.stdout + out.stderr, (
+    assert "[flagos dispatch] relu -> boxing" in out.stdout + out.stderr, (
         f"stdout={out.stdout}\nstderr={out.stderr}"
     )

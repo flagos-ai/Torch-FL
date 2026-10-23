@@ -211,7 +211,7 @@ class TestMulTensorDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mul__Tensor": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] mul.Tensor -> cuda" in result.stderr
+        assert "[flagos dispatch] mul.Tensor -> boxing" in result.stderr
 
 
 class TestMulTensorAscendDispatch:

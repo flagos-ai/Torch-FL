@@ -160,7 +160,7 @@ steps:
   # deselected. It is gone again because this lane builds the default wheel,
   # which has no CUDA boxing kernels: ops/conftest.py skips exactly those cases
   # here, so keeping the mark in the expression would select a set that reports
-  # as skipped instead of adding a measurement. The cases that assert `-> cuda`
+  # as skipped instead of adding a measurement. The cases that assert `-> boxing`
   # routing are the ones the boxing-off wheel cannot answer -- that gap is what
   # the lane's follow-up re-wires to a vendor or FlagGems route.
   - id: vendor_ops
@@ -202,7 +202,7 @@ steps:
   # Kunlunxin is a native-kernel vendor like musa/gcu/ascend:
   # backends_kunlunxin.conf routes ops to the native `kunlunxin` key (the vendor
   # xdnn op library) or leaves them at `none` (CPU fallback), with no `cuda`
-  # route, so the `-> cuda` dispatch assertions are skipped by the platform
+  # route, so the `-> boxing` dispatch assertions are skipped by the platform
   # table in tests/integration/ops/conftest.py rather than run here.
   #
   # test_flaggems_device_name.py is ignored because this image's flagtree XPU

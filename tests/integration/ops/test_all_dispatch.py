@@ -148,7 +148,7 @@ class TestAllDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_all": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] all -> cuda" in result.stderr
+        assert "[flagos dispatch] all -> boxing" in result.stderr
 
 
 class TestAllAscendDispatch:

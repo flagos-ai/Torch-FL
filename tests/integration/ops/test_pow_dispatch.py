@@ -198,7 +198,7 @@ class TestPowTensorScalarDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_pow__Tensor_Scalar": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] pow.Tensor_Scalar -> cuda" in result.stderr
+        assert "[flagos dispatch] pow.Tensor_Scalar -> boxing" in result.stderr
 
 
 class TestPowTensorScalarAscendDispatch:

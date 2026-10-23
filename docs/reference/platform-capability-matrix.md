@@ -89,7 +89,7 @@ build opts into boxing.
   cheap re-wire candidates; the other 1384 have no FlagGems route on any
   platform and need a native CUDA backend
   (cuBLAS/cuDNN/ATen CUDA) or an opt-in boxing build. The CUDA lane builds and
-  tests the default wheel, so a case asserting a `-> cuda` route skips there.
+  tests the default wheel, so a case asserting a `-> boxing` route skips there.
 - **BPU** has no aten backend and an empty conf: its unit of execution is a whole
   compiled graph, so eager ops reach `cpu_fallback` and acceleration comes from
   the `torch.compile(backend="bpu")` path.

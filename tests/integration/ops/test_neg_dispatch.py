@@ -147,7 +147,7 @@ class TestNegDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_neg": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] neg -> cuda" in result.stderr
+        assert "[flagos dispatch] neg -> boxing" in result.stderr
 
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):

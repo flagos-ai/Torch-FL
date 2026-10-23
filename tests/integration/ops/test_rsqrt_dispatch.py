@@ -106,7 +106,7 @@ class TestRsqrtDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_rsqrt": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] rsqrt -> cuda" in result.stderr
+        assert "[flagos dispatch] rsqrt -> boxing" in result.stderr
 
 
 class TestRsqrtAscendDispatch:

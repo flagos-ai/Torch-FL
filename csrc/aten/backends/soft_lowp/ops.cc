@@ -261,7 +261,7 @@ at::Tensor AddmmImpl(
   // low-precision-only validation below.
   if (!HasLowpInput(mat1) && !HasLowpInput(mat2)) {
     return addmm_dispatcher.DispatchBackend(
-        Backend::kCuda, self, mat1, mat2, beta, alpha);
+        Backend::kBoxing, self, mat1, mat2, beta, alpha);
   }
   CheckMatrixInputs(mat1, mat2);
   auto bias = self;
@@ -276,7 +276,7 @@ at::Tensor AddmmImpl(
   // configured backend dispatcher can execute the complete matrix operation
   // without recursively re-entering this software path.
   auto result = addmm_dispatcher.DispatchBackend(
-      Backend::kCuda, bias, lhs, rhs, beta, alpha);
+      Backend::kBoxing, bias, lhs, rhs, beta, alpha);
   const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
   return output_dtype == result.scalar_type() ? result : result.to(output_dtype);
 }

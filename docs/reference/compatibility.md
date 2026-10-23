@@ -91,7 +91,7 @@ The default and most exercised platform. [`.github/configs/cuda.yml`](../../.git
 no bundled `libtorch_cuda.so`, both asserted from the build record rather than from an environment
 variable — and runs the pipeline `.github/integration-manifest.yml` composes for it: the
 FlagGems-runtime operator suite, general/factory tests, the profiler parity suite, and Qwen3-0.6B
-inference and training against a mounted model. Test cases that assert a `-> cuda` route skip on
+inference and training against a mounted model. Test cases that assert a `-> boxing` route skip on
 this lane: the wheel compiles no kernel set for that route, so the marker is an answer the lane
 cannot produce rather than a measurement it declines to take.
 Distributed collectives and DDP gradient sync are live-verified on 2x/8x A100 through FlagCX

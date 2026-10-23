@@ -511,7 +511,7 @@ def test_conf_route_counts_are_stable():
         # cannot steer -- the two failures the CI lane reported.
         "kunlunxin": {"kunlunxin": 57, "none": 1980},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
-        # 8 ops moved flaggems -> cuda (594 -> 586 / 1433 -> 1441) because
+        # 8 ops moved flaggems -> boxing (594 -> 586 / 1433 -> 1441) because
         # route_boxing now consults codegen_ops.py's FlagGems holds. These were
         # ops the metax conf routed to the Python path while
         # flaggems_runtime_broken listed them as broken -- a route the hold list

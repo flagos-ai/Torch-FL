@@ -105,8 +105,13 @@ std::string LowerStr(std::string s) {
 // out-of-tree conf or a pinned script keeps working.
 bool ParseBackendName(const std::string& raw, Backend* out) {
   const std::string val = LowerStr(raw);
-  if (val == "cuda") {
-    *out = Backend::kCuda;
+  if (val == "boxing") {
+    *out = Backend::kBoxing;
+  } else if (val == "cuda") {
+    // Legacy spelling: the boxing kernel used to be named for the CUDA runtime
+    // it borrows. Still accepted so an older conf or FLAGOS_OP_override keeps
+    // working; BackendName() reports the canonical "boxing".
+    *out = Backend::kBoxing;
   } else if (val == "metax") {
     *out = Backend::kMetax;
   } else if (val == "tsingmicro") {
@@ -140,7 +145,7 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
 
 const char* BackendName(Backend b) {
   switch (b) {
-    case Backend::kCuda:         return "cuda";
+    case Backend::kBoxing:       return "boxing";
     case Backend::kFlagGemsCpp:  return "flaggems_cpp";
     case Backend::kFlagGems:     return "flaggems";
     case Backend::kAscend:       return "ascend";
@@ -562,7 +567,7 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype) {
   // the last one because OnesKernelCuda and ZeroKernelCuda are compositional
   // (`at::empty(...).fill_(1)` / `.zero_()`), and the inner in-place call is
   // itself diverted -- `fill_` and `zero_` are registered on the FlagGems
-  // route and the DCU codegen has a kCuda kernel for each. The escape is
+  // route and the DCU codegen has a kBoxing kernel for each. The escape is
   // dtype-scoped, so the same op over float is untouched: measured
   // `ones(float32)` still logs `ones -> flagos_python`.
   //

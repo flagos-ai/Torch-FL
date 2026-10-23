@@ -115,7 +115,7 @@ Run the MUSA dispatch suite:
 pytest tests/integration/ops/test_musa_dispatch.py -v
 ```
 
-This test file checks that ops route to the `musa` backend, exercises per-op environment overrides, and validates results against CPU references. It replaces the generic per-op tests in `tests/integration/ops/`, which assert `-> cuda` routing that MUSA builds cannot produce (no CUDA boxing kernels are compiled).
+This test file checks that ops route to the `musa` backend, exercises per-op environment overrides, and validates results against CPU references. It replaces the generic per-op tests in `tests/integration/ops/`, which assert `-> boxing` routing that MUSA builds cannot produce (no CUDA boxing kernels are compiled).
 
 Run the autocast and GradScaler suite:
 

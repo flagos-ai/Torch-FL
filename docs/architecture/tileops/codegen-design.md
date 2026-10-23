@@ -207,14 +207,14 @@ $ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG=dispatch python -c "..."
 [flagos dispatch] relu -> tileops
 
 $ FLAGOS_FORCE_BACKEND=tileops FLAGOS_LOG=dispatch FLAGOS_OP_relu=cuda python -c "..."
-[flagos dispatch] relu -> cuda
+[flagos dispatch] relu -> boxing
 ```
 
 > **This was not always true.** The first implementation registered the routes
 > from Python with `torch.library.Library("aten", "IMPL")`, and such a binding
 > **intercepts before the C++ dispatcher** -- a bound operator never reached
 > `relu_dispatcher` at all. `common.cc` parsed `FLAGOS_OP_relu=cuda` and printed
-> `[flagos] env override: relu -> cuda`, yet `torch.relu` still built a TileOPs
+> `[flagos] env override: relu -> boxing`, yet `torch.relu` still built a TileOPs
 > instance; `FLAGOS_LOG=dispatch` showed only the operators that fell through
 > to cuda, reading as if TileOPs were not wired up at all. Both features had to
 > be re-implemented in Python (`enable_tileops_for_flagos()` consulted an

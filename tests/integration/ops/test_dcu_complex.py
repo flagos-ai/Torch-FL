@@ -119,5 +119,5 @@ for dtype in (torch.float32, torch.complex64):
     ]
     assert routes == [
         "[flagos dispatch] abs -> flagos_python",
-        "[flagos dispatch] abs -> cuda",
+        "[flagos dispatch] abs -> boxing",
     ], result.stderr

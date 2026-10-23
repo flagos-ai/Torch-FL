@@ -293,7 +293,7 @@ class TestBmmDispatchLog:
         result = _run_bmm_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm": "cuda"}
         )
-        assert "[flagos dispatch] bmm -> cuda" in result.stderr, (
+        assert "[flagos dispatch] bmm -> boxing" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
 
@@ -322,7 +322,7 @@ class TestBmmDispatchLog:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm__out": "cuda"},
             use_out=True,
         )
-        assert "[flagos dispatch] bmm.out -> cuda" in result.stderr, (
+        assert "[flagos dispatch] bmm.out -> boxing" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
 

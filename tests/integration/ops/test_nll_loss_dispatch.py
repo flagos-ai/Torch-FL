@@ -215,7 +215,7 @@ class TestNllLossDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_nll_loss_forward": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] nll_loss_forward -> cuda" in result.stderr
+        assert "[flagos dispatch] nll_loss_forward -> boxing" in result.stderr
 
     @pytest.mark.cuda
     def test_dispatch_log_backward_cuda(self):
@@ -223,7 +223,7 @@ class TestNllLossDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_nll_loss_backward": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] nll_loss_backward -> cuda" in result.stderr
+        assert "[flagos dispatch] nll_loss_backward -> boxing" in result.stderr
 
 
 class TestNllLossForwardAscendDispatch:

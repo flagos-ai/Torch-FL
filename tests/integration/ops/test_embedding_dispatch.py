@@ -211,7 +211,7 @@ class TestEmbeddingDispatchLog:
                 "FLAGOS_OP_embedding": "cuda",
             }
         )
-        assert "[flagos dispatch] embedding -> cuda" in result.stderr, (
+        assert "[flagos dispatch] embedding -> boxing" in result.stderr, (
             f"Expected cuda log, got:\n{result.stderr}"
         )
 

@@ -211,7 +211,7 @@ def _log_declined(overload: str) -> None:
     line followed by vendor-speed timings.
     """
     if "dispatch" in _env.listed("FLAGOS_LOG"):
-        print(f"[flagos dispatch] {overload} -> cuda (tileops declined)", flush=True)
+        print(f"[flagos dispatch] {overload} -> boxing (tileops declined)", flush=True)
 
 
 def _get(op_cls, ctor_key: tuple, *args, **kwargs):

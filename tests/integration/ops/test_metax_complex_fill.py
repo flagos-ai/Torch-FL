@@ -88,6 +88,6 @@ for dtype in (torch.float32, torch.complex64, torch.complex128):
     ]
     assert routes == [
         "[flagos dispatch] flip -> flagos_python",
-        "[flagos dispatch] flip -> cuda",
-        "[flagos dispatch] flip -> cuda",
+        "[flagos dispatch] flip -> boxing",
+        "[flagos dispatch] flip -> boxing",
     ], result.stderr

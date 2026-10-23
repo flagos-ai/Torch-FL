@@ -28,7 +28,7 @@ namespace at::native::flagos {
 //   // cpp:
 //   ADD_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, "mm")
 //   REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kFlagGemsCpp, my_flaggems_cpp_mm)
-//   REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kCuda,   my_cuda_mm)
+//   REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kBoxing,   my_cuda_mm)
 //
 //   // call (uses op_name "mm" for config lookup):
 //   mm_dispatcher(self, mat2, out);
@@ -122,7 +122,7 @@ class Dispatcher {
 
   void RegisterKernel(Backend device, FnPtr fn) {
     switch (device) {
-      case Backend::kCuda:          cuda_fn_ = fn;              break;
+      case Backend::kBoxing:          cuda_fn_ = fn;              break;
       case Backend::kFlagGemsCpp:   flaggems_cpp_fn_ = fn;     break;
       case Backend::kFlagGems:      flaggems_fn_ = fn;         break;
       case Backend::kAscend:        ascend_fn_ = fn;           break;
@@ -216,7 +216,7 @@ class Dispatcher {
   // The build's own native kernel slot, with the backend name that selects it.
   // Exactly one is ever populated: a build registers its native kernels into
   // its own slot (kAscend on Ascend, kMusa on MUSA, ...) and, on the
-  // CUDA-compatible platforms, boxing kernels into kCuda. Ordered
+  // CUDA-compatible platforms, boxing kernels into kBoxing. Ordered
   // most-specific-first so a build that somehow populated two still prefers
   // the vendor's own kernels.
   std::pair<FnPtr, Backend> VendorSlot() const {
@@ -228,7 +228,7 @@ class Dispatcher {
     if (iluvatar_fn_)    return {iluvatar_fn_,    Backend::kIluvatar};
     if (tsingmicro_fn_)  return {tsingmicro_fn_,  Backend::kTsingMicro};
     if (mps_fn_)         return {mps_fn_,         Backend::kMps};
-    if (cuda_fn_)        return {cuda_fn_,        Backend::kCuda};
+    if (cuda_fn_)        return {cuda_fn_,        Backend::kBoxing};
     return {nullptr, Backend::kNone};
   }
 
@@ -277,7 +277,7 @@ class Dispatcher {
       // registration FlagGems installs itself, and returning nullptr there
       // turns "this build does not box" into a dispatch error for ops that ran
       // before the route moved. Same shape as the kFlagGems arm below.
-      case Backend::kCuda:
+      case Backend::kBoxing:
         return cuda_fn_ ? cuda_fn_ : flaggems_fn_;
       // FlagGems C++ runtime is only compiled in for a FLAGOS_BUILD_FLAGGEMS_CPP=ON
       // build (flaggems_cpp_kernels.cc, behind FLAGOS_FLAGGEMS_CPP), which needs
@@ -363,7 +363,7 @@ class Dispatcher {
   // backend that no kernel set owns.
   static const char* KernelSetOf(Backend backend) {
     switch (backend) {
-      case Backend::kCuda:        return "boxing";
+      case Backend::kBoxing:        return "boxing";
       case Backend::kFlagGemsCpp: return "flaggems_cpp";
       case Backend::kFlagGems:    return "flaggems";
       case Backend::kTileOps:     return "tileops";
@@ -389,7 +389,7 @@ class Dispatcher {
     if (!enabled) return;
     const char* name;
     switch (backend) {
-      case Backend::kCuda:          name = "cuda"; break;
+      case Backend::kBoxing:        name = "boxing"; break;
       case Backend::kFlagGemsCpp:   name = "flagos"; break;  // keep old name for test compat
       case Backend::kFlagGems:      name = "flagos_python"; break;  // keep old name for test compat
       case Backend::kAscend:        name = "ascend"; break;

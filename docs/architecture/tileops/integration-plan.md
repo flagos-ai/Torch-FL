@@ -295,7 +295,8 @@ the last segment of `ref_api` with the 1009 aten base names in
 ### 3.1 Positioning: add a fourth dispatch path, `kTileOps`
 
 The existing `Backend` enum in `csrc/aten/common.h` already has
-`kCuda / kFlagOs / kFlagOsPython / kAscend / kMusa / kMetax / kTsingMicro / kGcu`.
+`kBoxing / kFlagGemsCpp / kFlagGems / kAscend / kMusa / kMetax / kTsingMicro / kGcu`
+(the first was spelled `kCuda` when it still named the runtime it borrows).
 `Dispatcher` stores one function pointer per backend, routing is driven by
 `op_name = backend` lines in `backends*.conf`, and `FLAGOS_OP_<op>=<backend>`
 provides a per-operator env override.

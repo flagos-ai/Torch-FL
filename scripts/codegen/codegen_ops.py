@@ -2727,7 +2727,7 @@ def main():
         i = op_info[op]
         kn = kernel_name(i["fn_type"])
         lines.append(
-            f"REGISTER_IMPL_TO_DISPATCHER({i['fn_type']}, {i['dispatcher']}, Backend::kCuda, {kn})"
+            f"REGISTER_IMPL_TO_DISPATCHER({i['fn_type']}, {i['dispatcher']}, Backend::kBoxing, {kn})"
         )
     lines.append("")
     lines.append("} // namespace at::native::flagos")
@@ -3195,7 +3195,7 @@ def main():
         # now sit above this block; see their definitions for the per-op cause.
         #
         # On a wheel built with FLAGOS_BUILD_BOXING=OFF the boxing kernel set is
-        # not compiled. GetFn(kCuda) in csrc/aten/dispatcher.h degrades to the
+        # not compiled. GetFn(kBoxing) in csrc/aten/dispatcher.h degrades to the
         # FlagGems Python path there, the same way kFlagGems / kFlagGemsCpp /
         # kTileOps already do, so one conf stays correct for both builds. The
         # route is what this file is responsible for; whether the wheel can serve

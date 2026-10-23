@@ -162,4 +162,4 @@ class TestAbsDispatch:
             },
             check=False,
         )
-        assert "[flagos dispatch] abs -> cuda" in result.stderr
+        assert "[flagos dispatch] abs -> boxing" in result.stderr

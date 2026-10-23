@@ -148,7 +148,7 @@ class TestLeDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_le__Tensor": "cuda"}
         )
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] le.Tensor -> cuda" in result.stderr
+        assert "[flagos dispatch] le.Tensor -> boxing" in result.stderr
 
 
 class TestLeAscendDispatch:

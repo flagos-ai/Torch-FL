@@ -88,7 +88,7 @@ class TestOnesLikeDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_ones_like": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] ones_like -> cuda" in result.stderr
+        assert "[flagos dispatch] ones_like -> boxing" in result.stderr
 
 
 class TestOnesLikeAscendDispatch:

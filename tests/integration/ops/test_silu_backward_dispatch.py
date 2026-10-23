@@ -127,7 +127,7 @@ class TestSiluBackwardDispatch:
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu_backward": "cuda"}
         )
         assert result.returncode == 0
-        assert "[flagos dispatch] silu_backward -> cuda" in result.stderr
+        assert "[flagos dispatch] silu_backward -> boxing" in result.stderr
 
 
 class TestSiluBackwardAscendDispatch:
