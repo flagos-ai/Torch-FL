@@ -46,11 +46,7 @@ def _require_torch():
 
 
 def _build_accelerator():
-    _require_torch()
-    spec = importlib.util.find_spec("torch_fl")
-    assert spec is not None and spec.origin, "torch_fl package is not installed"
-    detector = runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
-    return detector["build_accelerator"]()
+    return _installed_platform_module()["build_accelerator"]()
 
 
 def _require_torch_first_supported():
@@ -96,6 +92,20 @@ _NO_AUTOLOAD = {
 }
 
 
+def _installed_platform_module():
+    """The installed package's ``_platform.py``, loaded without importing it.
+
+    ``import torch_fl`` runs backend selection, which this test must observe
+    rather than pre-empt. A path relative to this file is not an option: the
+    contract group runs on the wheel's installed files, so ``parents[2]`` is a
+    temporary copy of the tree, not the package that is installed.
+    """
+    _require_torch()
+    spec = importlib.util.find_spec("torch_fl")
+    assert spec is not None and spec.origin, "torch_fl package is not installed"
+    return runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
+
+
 def _accelerator_from_environment():
     """What this install was built for, where it records no accelerator.
 
@@ -106,9 +116,7 @@ def _accelerator_from_environment():
     value = os.environ.get("FLAGOS_ACCELERATOR", "").strip().lower()
     if not value:
         return ""
-    detector = runpy.run_path(
-        str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
-    )
+    detector = _installed_platform_module()
     if "platform_for" in detector:
         # ``platform_for`` answers "" for anything it does not know, so an
         # unrecognised value keeps its own spelling rather than becoming "".
@@ -120,14 +128,11 @@ def _accelerator_recorded_by_the_install():
     """The build record's value in the table's vocabulary.
 
     setup.py writes the record in the vendor spelling (``apple`` for an MPS
-    build), which `import torch_fl` itself compares against -- so this is what
-    the install says about its wheel, not how a test would name the platform.
+    build), while the omission list below is keyed by table id.
     """
     if not _build_accelerator():
         return ""
-    detector = runpy.run_path(
-        str(Path(__file__).resolve().parents[2] / "torch_fl" / "_platform.py")
-    )
+    detector = _installed_platform_module()
     recorded = detector["build_accelerator"]()
     return detector["platform_for"](recorded) or recorded
 
