@@ -165,13 +165,22 @@ def test_a_build_without_a_marker_removes_an_inherited_one():
     tests' copies) names a conf this build cannot route through. A MetaX build
     that inherited an "mps" marker read the empty backends_apple.conf and raised
     "routed to 'none'" on every op it does not list. The other arm of the same
-    gate must therefore remove it at install time, when the prefix is known.
+    gate must therefore remove it -- at configure, at install (when the prefix
+    is known), and from a build that never reaches the install step.
     """
     text = _code(REPO_ROOT / "csrc" / "CMakeLists.txt")
     assert "FLAGOS_PLATFORM_WRITES_MARKER" in text
-    assert re.search(
-        r"if\(FLAGOS_PLATFORM_WRITES_MARKER\).*?else\(\).*?"
-        r"install\(CODE .*?file\(REMOVE .*?flagos_platform",
-        text,
-        re.S,
-    ), "the no-marker arm must remove an inherited lib/flagos_platform"
+    arm = re.search(
+        r"if\(FLAGOS_PLATFORM_WRITES_MARKER\).*?else\(\)(.*?)\nendif\(\)", text, re.S
+    )
+    assert arm, "the no-marker arm must exist"
+    body = arm.group(1)
+    assert re.search(r"file\(REMOVE .*flagos_platform", body), (
+        "configure must remove an inherited marker"
+    )
+    assert re.search(r"install\(CODE .*file\(REMOVE .*flagos_platform", body), (
+        "install must remove it under the final prefix"
+    )
+    assert "install(SCRIPT" in body, (
+        "a second install over an up-to-date build skips install(CODE)"
+    )

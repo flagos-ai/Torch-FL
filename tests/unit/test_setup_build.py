@@ -548,7 +548,7 @@ def test_a_build_without_a_marker_drops_an_inherited_one(monkeypatch, tmp_path):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "ppu")
     namespace, _ = _load_setup(monkeypatch)
     root = tmp_path / "src"
-    marker = root / "torch_fl" / "lib_thead" / "flagos_platform"
+    marker = root / "torch_fl" / "lib" / "flagos_platform"
     marker.parent.mkdir(parents=True)
     marker.write_text("mps\n")
     monkeypatch.setitem(

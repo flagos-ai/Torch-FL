@@ -242,7 +242,7 @@ def _drop_inherited_platform_marker() -> None:
     step did not run, and an in-place editable install.
     """
     writes_marker = _platform_entry(FLAGOS_ACCELERATOR)["writes_platform_marker"]
-    marker = os.path.join(BASE_DIR, "torch_fl", _BUNDLE_LIBDIR, "flagos_platform")
+    marker = os.path.join(BASE_DIR, "torch_fl", "lib", "flagos_platform")
     if not writes_marker and os.path.isfile(marker):
         os.remove(marker)
 
@@ -811,7 +811,23 @@ def build_deps():
         corex_root = _setup_iluvatar_build_env(build_env)
         cmake_args.append(f"-DCOREX_PATH={corex_root}")
 
-    subprocess.check_call([cmake, BASE_DIR] + cmake_args, cwd=build_dir, env=build_env)
+    configure = [cmake, BASE_DIR] + cmake_args
+    subprocess.check_call(configure, cwd=build_dir, env=build_env)
+
+    if "Ninja" in cmake_args:
+        # Ninja regenerates the build files when their source is newer than they
+        # are, and a second `cmake --build` does that check again on what the
+        # first one wrote: "manifest 'build.ninja' still dirty after 100 tries,
+        # perhaps system time is not set". Every OTHER source file is older
+        # than the manifest by now; build.ninja itself is the one new input a
+        # rebuild always sees, and its rule is CMAKE_SUPPRESS_REGENERATION.
+        # (Reconfiguring instead does not settle it -- the regen runs
+        # regardless.)
+        subprocess.check_call(
+            [cmake, "-DCMAKE_SUPPRESS_REGENERATION=ON", BASE_DIR],
+            cwd=build_dir,
+            env=build_env,
+        )
 
     build_args = [
         "--build",

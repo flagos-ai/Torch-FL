@@ -775,7 +775,18 @@ else()
   # every op the empty conf does not list raised "routed to 'none'" instead of
   # taking its FlagGems route.
   #
-  # file() would be a no-op: install time is the first moment that directory
-  # means anything, and CMAKE_INSTALL_PREFIX is only final then.
-  install(CODE "file(REMOVE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${FLAGOS_BUNDLE_LIBDIR}/flagos_platform\")")
+  # The marker always lives in <prefix>/lib, whatever the bundle dir is: this
+  # glob's library is installed there and the Python side looks it up there.
+  #
+  # It has no installed library of its own (it is an install(FILES) entry), so
+  # nothing in the install rules forces it up to date -- and a second
+  # `cmake --install` over an up-to-date build reports nothing to do and would
+  # skip an install(CODE). Three moments cover it instead: configure (the tree
+  # is wrong the moment it is configured), the install, and a build that stops
+  # before installing anything.
+  file(REMOVE "${CMAKE_SOURCE_DIR}/torch_fl/${CMAKE_INSTALL_LIBDIR}/flagos_platform")
+  install(CODE "file(REMOVE \"$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/flagos_platform\")")
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/drop_platform_marker.cmake"
+       CONTENT "file(REMOVE \"${CMAKE_SOURCE_DIR}/torch_fl/${CMAKE_INSTALL_LIBDIR}/flagos_platform\")\n")
+  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/drop_platform_marker.cmake")
 endif()
