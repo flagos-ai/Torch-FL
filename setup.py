@@ -1181,6 +1181,40 @@ def _extension_compile_args():
     return extra_link_args, extra_compile_args
 
 
+def _wheel_omits_entry_points(*, install_scripts: bool) -> bool:
+    """Whether this wheel's metadata carries no ``torch.backends`` hook.
+
+    The MPS wheel omits the entry-points table (see the branch in
+    ``_get_setup_kwargs``), and ``pyproject.toml`` declares ``scripts``
+    dynamically so that table, when present, also installs the preflight as
+    ``torch-fl-<platform>``. Setuptools ignores ``scripts`` in ``setup()`` while
+    ``[project]`` declares it dynamic -- it says so on every build
+    (``_MissingDynamic: `scripts` defined outside of ``pyproject.toml`` is
+    ignored``) and then installs no console script, so a wheel with no entry
+    points loses the tool the preflight is run through. Whether this build
+    passes ``scripts`` is therefore what decides the omission, not the
+    accelerator name.
+
+    Answering without the entry points is not a defect worth stopping a build
+    for -- ``scripts`` is deprecated in favour of the entry-point table, and
+    the iluvatar container sets ``FLAGOS_ACCELERATOR`` to a vendor the table
+    spells differently -- so the build warns and keeps the hook, which is the
+    metadata the autoload contract expects.
+    """
+    # The resolved id, not the environment: a build told `apple` is the MPS one.
+    if FLAGOS_ACCELERATOR != "mps":
+        return False
+    if not install_scripts:
+        return True
+    print(
+        "[setup] torch_fl for MPS: scripts= is ignored beside a dynamic "
+        "entry-points table, so the wheel keeps its torch.backends hook "
+        "instead of installing the preflight as a script",
+        flush=True,
+    )
+    return False
+
+
 def _get_setup_kwargs():
     extra_link_args, extra_compile_args = _extension_compile_args()
     ext_modules = [
@@ -1313,7 +1347,7 @@ def _get_setup_kwargs():
         # (_install_requires), and `pip install torch_fl[cuda]` is unaffected --
         # it never resolved to anything.
     )
-    if FLAGOS_ACCELERATOR == "mps":
+    if _wheel_omits_entry_points(install_scripts=True):
         # A bare import of PyTorch must leave torch.backends.mps as the active
         # accelerator. The MPS build has no device-backend autoload consumer:
         # it uses no FlagTree compile workers, and every user of the native

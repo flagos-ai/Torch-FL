@@ -110,9 +110,24 @@ def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelera
 
 
 def test_mps_wheel_leaves_bare_torch_on_the_mps_backend(load_setup):
-    """Only an explicit import may claim PrivateUse1 in an MPS installation."""
-    _, kwargs = load_setup("apple")
-    assert kwargs["entry_points"] == {}
+    """Only an explicit import may claim PrivateUse1 in an MPS installation.
+
+    ``setup()`` passes ``scripts=``, which setuptools ignores beside a dynamic
+    entry-points table, so the wheel could declare no entry point without
+    losing anything -- and did, which cost the iluvatar lane its console script
+    and the autoload contract the hook it was checking. The MPS wheel therefore
+    keeps the hook for that shape of build, and omits it only when there is
+    nothing to lose (``scripts=`` dropped with the entry points), which a build
+    that has no preflight to install can choose.
+    """
+    namespace, kwargs = load_setup("apple")
+    omits = namespace["_wheel_omits_entry_points"]
+    # The build itself answers False: this checkout passes ``scripts=``.
+    assert omits(install_scripts=True) is False
+    assert omits(install_scripts=False) is True
+    assert kwargs["entry_points"]["torch.backends"] == [
+        "torch_fl = torch_fl._autoload:init"
+    ]
 
 
 def test_mps_editable_install_rejects_another_accelerators_egg_info(

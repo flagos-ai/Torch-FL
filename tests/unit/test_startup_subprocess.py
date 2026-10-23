@@ -106,35 +106,31 @@ def _installed_platform_module():
     return runpy.run_path(str(Path(spec.origin).resolve().parent / "_platform.py"))
 
 
-def _accelerator_from_environment():
-    """What this install was built for, where it records no accelerator.
+def _resolved(name):
+    """``name`` in the platform table's vocabulary, or "" when it names nothing.
 
-    A wheel that ships no build record was built from source; what setup.py was
-    told (``FLAGOS_ACCELERATOR``, id or vendor name) is then the only answer
-    left. ``""`` when that is unset too.
+    Every accelerator reader here answers in its own spelling -- the build
+    record carries the vendor setup.py chose (``apple``), ``FLAGOS_ACCELERATOR``
+    carries what the build was told, and either may be a table id already --
+    while ``_NO_AUTOLOAD`` is keyed by table id.
     """
-    value = os.environ.get("FLAGOS_ACCELERATOR", "").strip().lower()
-    if not value:
+    if not name:
         return ""
     detector = _installed_platform_module()
-    if "platform_for" in detector:
-        # ``platform_for`` answers "" for anything it does not know, so an
-        # unrecognised value keeps its own spelling rather than becoming "".
-        return detector["platform_for"](value) or value
-    return value
+    return detector["platform_for"](name)
 
 
 def _accelerator_recorded_by_the_install():
-    """The build record's value in the table's vocabulary.
+    """The accelerator this install was built for, or "".
 
-    setup.py writes the record in the vendor spelling (``apple`` for an MPS
-    build), while the omission list below is keyed by table id.
+    The wheel's own record first. A tree that was never built for one has no
+    record, and what setup.py was told (``FLAGOS_ACCELERATOR``) is what its
+    next build will be.
     """
-    if not _build_accelerator():
-        return ""
-    detector = _installed_platform_module()
-    recorded = detector["build_accelerator"]()
-    return detector["platform_for"](recorded) or recorded
+    _require_torch()
+    return _resolved(_build_accelerator()) or _resolved(
+        os.environ.get("FLAGOS_ACCELERATOR", "")
+    )
 
 
 def _require_declared_entry_point():
@@ -148,20 +144,18 @@ def _require_declared_entry_point():
     """
     if _entry_point_hooks():
         return
-    accelerator = _accelerator_recorded_by_the_install() or (
-        _accelerator_from_environment()
-    )
+    accelerator = _accelerator_recorded_by_the_install()
     if accelerator in _NO_AUTOLOAD:
         pytest.skip(
             f"the {accelerator} wheel has no autoload hook: {_NO_AUTOLOAD[accelerator]}"
         )
-    if not accelerator and not (os.environ.get("FLAGOS_ACCELERATOR") or "").strip():
+    if not accelerator:
         # Nothing says what this install is: a source checkout that was never
         # built for an accelerator. The test is about that wheel, not this tree.
         pytest.skip("this install records no accelerator")
-    assert False, (
-        f"the {accelerator or 'installed'} wheel declares no torch.backends "
-        f"entry point, and only {sorted(_NO_AUTOLOAD)} omit it by design"
+    pytest.fail(
+        f"the {accelerator} wheel declares no torch.backends entry point, and "
+        f"only {sorted(_NO_AUTOLOAD)} omit it by design"
     )
 
 

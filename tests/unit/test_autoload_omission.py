@@ -31,19 +31,20 @@ STARTUP_TEST = REPO_ROOT / "tests" / "unit" / "test_startup_subprocess.py"
 
 
 def _omitting_accelerators() -> set[str]:
-    """Accelerators whose ``setup()`` kwargs set ``kwargs["entry_points"] = {}``.
+    """Accelerators whose ``setup()`` can set ``kwargs["entry_points"] = {}``.
 
-    The branch is read from the assignment back to the condition that guards
-    it, so it does not have to know where each block ends.
+    Read from the helper that makes the decision, in the shape of build that
+    drops ``scripts=``; a build that keeps it keeps the hook too, which a test
+    in ``test_backend_autoload_contract.py`` pins.
     """
     text = SETUP.read_text(encoding="utf-8")
-    omitting = set()
-    for match in re.finditer(r'kwargs\["entry_points"\] = \{\}', text):
-        before = text[: match.start()]
-        conditions = list(re.finditer(r'FLAGOS_ACCELERATOR == "([a-z0-9_]+)"', before))
-        if conditions:
-            omitting.add(conditions[-1].group(1))
-    return omitting
+    body = text[text.index("def _wheel_omits_entry_points") :]
+    body = body[: body.index("\ndef ")]
+    conditions = re.findall(r'if FLAGOS_ACCELERATOR != "([a-z0-9_]+)"', body)
+    assert 'kwargs["entry_points"] = {}' in text, (
+        "setup.py has no branch that omits the entry-points table"
+    )
+    return set(conditions)
 
 
 def _declared_omissions() -> set[str]:
