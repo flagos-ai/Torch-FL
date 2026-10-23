@@ -33,8 +33,9 @@ file(GLOB_RECURSE SOURCE_FILES
 
 # Apple Metal is an Objective-C API, so the mps runtime is Objective-C++ (.mm).
 # Objective-C++ is an Apple-only language, so the glob is gated on the platform
-# rather than run for every build.
-if(FLAGOS_ACCELERATOR STREQUAL "mps")
+# rather than run for every build. Keyed on the vendor (see the same glob in
+# csrc/CMakeLists.txt).
+if(FLAGOS_PLATFORM_VENDOR STREQUAL "apple")
   file(GLOB_RECURSE MPS_OBJCXX_SOURCES
       "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/*.mm"
   )
@@ -49,7 +50,31 @@ if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
 endif()
 
-if(FLAGOS_ACCELERATOR STREQUAL "ascend")
+# This cascade picks the SDK to find and what to link, and it compares both
+# spellings of the platform (the table id and its vendor): FLAGOS_ACCELERATOR is
+# whichever the build was invoked with, so a lane moved from `mps` to `apple`
+# fell through to the CUDA branch. The first arm that matches wins, and only the
+# platform's own arms can match, so an arm guarded by both spellings is no less
+# exclusive than one guarded by the id alone.
+set(_flagos_is_ascend FALSE)
+set(_flagos_is_metax FALSE)
+set(_flagos_is_tsingmicro FALSE)
+set(_flagos_is_dcu FALSE)
+set(_flagos_is_gcu FALSE)
+set(_flagos_is_musa FALSE)
+set(_flagos_is_bpu FALSE)
+set(_flagos_is_kunlunxin FALSE)
+set(_flagos_is_iluvatar FALSE)
+set(_flagos_is_apple FALSE)
+foreach(_name ascend metax tsingmicro dcu gcu musa bpu kunlunxin iluvatar mps)
+  string(JSON _name_vendor GET "${_flagos_platforms}" accelerators "${_name}" vendor)
+  if(FLAGOS_ACCELERATOR STREQUAL "${_name}"
+     OR FLAGOS_PLATFORM_VENDOR STREQUAL "${_name_vendor}")
+    set(_flagos_is_${_name} TRUE)
+  endif()
+endforeach()
+
+if(_flagos_is_ascend)
   find_path(CANN_INCLUDE_DIR acl/acl.h
       PATHS $ENV{ASCEND_HOME}/include
             /usr/local/Ascend/ascend-toolkit/latest/include)
@@ -75,14 +100,14 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
   # memory.cc drains the shared default ACL stream (acl_stream.h) before any
   # host-visible memcpy now that ops dispatch asynchronously.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${ACL_LIB})
-elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
+elseif(_flagos_is_metax)
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+elseif(_flagos_is_tsingmicro)
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} /usr/local/kuiper/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE /usr/local/kuiper/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE hpgr)
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+elseif(_flagos_is_dcu)
   # dcu/ contains only the DTK-core ABI shim below; the runtime sources themselves
   # are the CUDA ones (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda").
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
@@ -95,11 +120,11 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   flagos_set_portable_rpath(flagos_dtk_core_compat)
   install(TARGETS flagos_dtk_core_compat
       LIBRARY DESTINATION lib_hygon)
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+elseif(_flagos_is_gcu)
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${TOPS_ROOT}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${TOPS_ROOT}/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE topsrt)
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+elseif(_flagos_is_musa)
   # Moore Threads MUSA. The toolkit ships no libcudart shim (unlike MetaX/DCU),
   # so musa/ holds a native port of the CUDA runtime sources onto the musa* API.
   # musa_runtime.h is plain C, so host g++ compiles it -- no mcc, no CUDA
@@ -108,7 +133,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${MUSA_HOME}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${MUSA_HOME}/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE musart)
-elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
+elseif(_flagos_is_bpu)
   # D-Robotics RDK BPU. The UCP allocator (libhbucp) provides device memory and
   # libbpu the core/task API; both ship in the board image under /usr/hobot/lib
   # with headers at /usr/include/hobot, so there is no SDK root to configure.
@@ -129,7 +154,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}
       ${HOBOT_UCP_INCLUDE_DIR} ${HOBOT_UCP_INCLUDE_DIR}/dnn)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${HBUCP_LIB} ${LIBBPU_LIB})
-elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+elseif(_flagos_is_kunlunxin)
   # Kunlunxin XPU. Native, like musa: the SDK ships no usable CUDA runtime for
   # this backend (its cuda_runtime.h is a CUDA-shaped facade and the c10::cuda::
   # C++ plumbing behind it is a hollow shell), so kunlunxin/ holds a native port
@@ -141,7 +166,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
       ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${XPU_ROOT}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${XPU_LIB_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
-elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+elseif(_flagos_is_iluvatar)
   # Iluvatar corex: the SDK ships a *usable* CUDA runtime (cuda_runtime.h +
   # libcudart.so.10.2 at /usr/local/corex), which is what iluvatar/ is built
   # against -- but not torch's CUDA, which is what it deliberately avoids. The
@@ -151,7 +176,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   # would want a CUDA toolkit the corex-only host does not provide.
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
-elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
+elseif(_flagos_is_mps)
   # Apple Metal. There is no vendor SDK to find: Metal and Foundation ship with
   # the macOS SDK, and torch's own MPS support is already in the macOS torch
   # wheel. The only requirement is an Apple host, checked where the weak symbol

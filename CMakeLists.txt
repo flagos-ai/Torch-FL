@@ -30,6 +30,30 @@ set(FLAGOS_VENDOR_RPATH_DIRS "")
 # an unknown FLAGOS_ACCELERATOR.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FlagosPlatforms.cmake)
 
+# Which platform this build is, asked once: both spellings are accepted, because
+# FLAGOS_ACCELERATOR carries whichever the build was invoked with (`cuda` or its
+# vendor `nvidia`, `mps` or `apple`). Every gate below reads these instead of
+# comparing the raw variable, which held for one spelling only -- a lane on the
+# vendor name fell through to the CUDA branch, or skipped its own.
+macro(_flagos_resolve_platforms)
+  foreach(_name ascend metax enflame tsingmicro dcu kunlunxin iluvatar mps cuda ppu
+               mthreads musa gcu bpu hygon nvidia thead apple)
+    string(JSON _name_vendor ERROR_VARIABLE _name_err GET
+           "${_flagos_platforms}" accelerators "${_name}" vendor)
+    if(_name_err)
+      # A vendor name with no row of its own (drobotics) is nobody's spelling.
+      set(_name_vendor "")
+    endif()
+    set(_flagos_is_${_name} FALSE)
+    if(FLAGOS_ACCELERATOR STREQUAL "${_name}"
+       OR (NOT _name_vendor STREQUAL ""
+           AND FLAGOS_PLATFORM_VENDOR STREQUAL "${_name_vendor}"))
+      set(_flagos_is_${_name} TRUE)
+    endif()
+  endforeach()
+endmacro()
+_flagos_resolve_platforms()
+
 # Kernel build options (can be overridden via -D flags from setup.py).
 # Chip selection is FLAGOS_ACCELERATOR's job alone -- there are no per-chip switches.
 #
@@ -100,11 +124,11 @@ flagos_apply_platform_kernel_policy()
 
 # Pre-project accelerator setup: the SDK/toolchain roots a project() call needs
 # before it runs nvcc, plus MetaX's MACA_PATH (reported in the SDK block below).
-if(FLAGOS_ACCELERATOR STREQUAL "metax")
+if(_flagos_is_metax)
   flagos_resolve_sdk_root(MACA_PATH "/opt/maca" MACA_PATH MACA_HOME)
 endif()
 
-if(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "ppu")
+if(_flagos_is_cuda OR _flagos_is_ppu)
   # PPU builds against PPU_SDK/CUDA_SDK, so it rides the CUDA toolchain (CUDA
   # boxing kernels, project(CUDA)); it differs only in the libtorch it bundles
   # -- a local PPU build, not upstream's (FLAGOS_BUNDLE_LIBDIR from the table).
@@ -132,7 +156,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "cuda" OR FLAGOS_ACCELERATOR STREQUAL "ppu")
       set(CMAKE_CUDA_COMPILER "${CUDAToolkit_ROOT}/bin/nvcc" CACHE FILEPATH "")
     endif()
   endif()
-  if(FLAGOS_ACCELERATOR STREQUAL "ppu")
+  if(_flagos_is_ppu)
     message(STATUS "PPU build: CUDA toolchain + bundled PPU libtorch (${FLAGOS_BUNDLE_LIBDIR})")
   endif()
 endif()
@@ -174,7 +198,7 @@ set(CMAKE_INSTALL_MESSAGE NEVER)
 
 set(Torch_DIR ${PYTORCH_INSTALL_DIR}/share/cmake/Torch)
 
-if(FLAGOS_ACCELERATOR STREQUAL "ascend")
+if(_flagos_is_ascend)
   # Huawei CANN SDK
   flagos_resolve_sdk_root(ASCEND_HOME "/usr/local/Ascend/ascend-toolkit/latest" ASCEND_HOME)
   message(STATUS "Huawei CANN SDK path: ${ASCEND_HOME}")
@@ -192,7 +216,7 @@ if(FLAGOS_ACCELERATOR STREQUAL "ascend")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
+elseif(_flagos_is_tsingmicro)
   # TsingMicro Kuiper SDK
   set(KUIPER_ROOT "/usr/local/kuiper" CACHE PATH "Kuiper SDK root")
   message(STATUS "TsingMicro Kuiper SDK path: ${KUIPER_ROOT}")
@@ -213,7 +237,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "tsingmicro")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
+elseif(_flagos_is_dcu)
   # Hygon DTK. ROCM_PATH is what the DTK env.sh exports.
   flagos_resolve_sdk_root(ROCM_PATH "/opt/dtk" ROCM_PATH)
   message(STATUS "Hygon DTK path: ${ROCM_PATH}")
@@ -267,7 +291,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
 
   # Pre-create torch::cudart so PyTorch's cuda.cmake is skipped entirely
   # (guard: if(TARGET torch::cudart) return()).
-elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
+elseif(_flagos_is_gcu)
   # Enflame TopsRider SDK: tops runtime (libtopsrt) + topsaten operator library.
   flagos_resolve_sdk_root(TOPS_ROOT "/opt/tops" TOPS_HOME)
   message(STATUS "Enflame TopsRider SDK path: ${TOPS_ROOT}")
@@ -314,7 +338,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
+elseif(_flagos_is_musa)
   # Moore Threads MUSA toolkit: musart runtime. There is no libcudart shim here
   # (unlike MetaX/DCU), so nothing pretends to be CUDA -- cuda_runtime_compat
   # points at the native musa* headers and libmusart, and the runtime sources
@@ -381,7 +405,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
+elseif(_flagos_is_bpu)
   # D-Robotics RDK BPU. There is no CUDA-compat layer here at all: device
   # memory comes from the Horizon UCP allocator (libhbucp) and the core/task API
   # from libbpu, both linked by csrc/runtime/accelerator/bpu directly. So there
@@ -401,7 +425,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "bpu")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
+elseif(_flagos_is_kunlunxin)
   # Kunlunxin XPU SDK. The backend is native, not CUDA-boxing: the runtime
   # sources under csrc/runtime/accelerator/kunlunxin/ and the native op wrappers
   # call the SDK's own C API -- libxpurt
@@ -534,7 +558,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
+elseif(_flagos_is_iluvatar)
   # Iluvatar corex SDK. Like the Kunlunxin XPU SDK it is CUDA-shaped and ships
   # everything already: cuda_runtime.h under <corex>/include and
   # libcudart.so.10.2 / libcupti.so.10.2 under <corex>/lib64 (corex 4.5.0).
@@ -648,7 +672,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
+elseif(_flagos_is_metax)
   # MetaX SDK: use cu-bridge headers and runtime_cu library.
   # MACA_PATH was resolved in the metax branch above (MACA_PATH -> MACA_HOME ->
   # /opt/maca), and is reported here for the build log.
@@ -676,7 +700,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()
-elseif(FLAGOS_ACCELERATOR STREQUAL "mps")
+elseif(_flagos_is_mps)
   # Apple Silicon (M-series) via Metal. There is no vendor SDK to locate and no
   # CUDA-compat layer: the runtime talks to Metal/Foundation, which the macOS
   # SDK provides, and there is no library under the wheel to link against. So
@@ -714,7 +738,7 @@ endif()
 
 find_package(Torch REQUIRED)
 
-if(FLAGOS_ACCELERATOR STREQUAL "dcu")
+if(_flagos_is_dcu)
   # DTK exports MIOpen with a build-machine absolute path baked into its link
   # interface: /usr/lib/x86_64-linux-gnu/librt.so. glibc >= 2.34 folded librt
   # into libc, so current distros ship only librt.a + librt.so.1 -- that .so
@@ -820,7 +844,7 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
   endif()
   message(STATUS "FlagGems liboperators RPATH: ${_flaggems_libdir}")
   list(APPEND CMAKE_INSTALL_RPATH "${_flaggems_libdir}")
-elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
+elseif(_flagos_is_metax)
   message(STATUS "MetaX build: CUDA boxing kernels + bundled maca libtorch (no native mxcc)")
 endif()
 

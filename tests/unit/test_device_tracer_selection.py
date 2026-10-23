@@ -117,19 +117,20 @@ def _selection_arms() -> list[tuple[str, str]]:
 
 
 def _condition_terms(condition: str) -> list[str]:
-    """The ``FLAGOS_ACCELERATOR`` values an ``if``/``elseif`` condition selects.
+    """The accelerators an ``if``/``elseif`` condition selects.
 
-    The arms are a disjunction of ``FLAGOS_ACCELERATOR STREQUAL "<value>"``
-    terms. Anything else would make this evaluator quietly wrong rather than
-    merely incomplete, so the shape is asserted instead of guessed at. Splitting
-    on a spaced ``OR`` matters: ``FLAGOS_ACCELERATOR`` itself contains those
-    letters.
+    The arms are a disjunction of ``_flagos_is_<accelerator>`` terms -- the
+    platform flags the top-level CMakeLists resolves from both spellings of
+    FLAGOS_ACCELERATOR (``cuda``/``nvidia``, ``mps``/``apple``). Anything else
+    would make this evaluator quietly wrong rather than merely incomplete, so
+    the shape is asserted instead of guessed at. Splitting on a spaced ``OR``
+    matters: the flag name itself contains those letters.
     """
     body = re.fullmatch(r"(?:if|elseif)\((.*)\)", condition, re.DOTALL)
     assert body, f"not a well-formed tracer-selection arm: {condition!r}"
     values = []
     for term in re.split(r"\s+OR\s+", body.group(1).strip()):
-        match = re.fullmatch(r'FLAGOS_ACCELERATOR STREQUAL "([^"]+)"', term)
+        match = re.fullmatch(r"_flagos_is_(\w+)", term)
         assert match, f"unexpected tracer-selection condition term: {term!r}"
         values.append(match.group(1))
     return values
@@ -248,9 +249,9 @@ def test_the_cupti_arm_names_its_platforms_explicitly():
     above readable.
     """
     condition, _ = _arm_for("cuda")
-    assert condition.startswith('if(FLAGOS_ACCELERATOR STREQUAL "cuda"'), condition
+    assert condition.startswith("if(_flagos_is_cuda"), condition
     assert "MATCHES" not in condition and "STRLESS" not in condition
-    assert sorted(re.findall(r'STREQUAL "([^"]+)"', condition)) == [
+    assert sorted(_condition_terms(condition)) == [
         "cuda",
         "iluvatar",
         "metax",
