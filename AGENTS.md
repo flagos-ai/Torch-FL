@@ -336,6 +336,34 @@ asks, using `gen_vendor_confs.py --stats` and the conf tally, never by copying
 old figures. Measured correctness evidence belongs in the PR and the survey
 output, not in that page.
 
+### Platform names: vendor first, chip only in source
+
+A platform has two halves, and they are used at different layers.
+
+**Vendor** — the company, and the `<lane>` of `flagos-pypi-<lane>`: `nvidia`,
+`hygon`, `metax`, `mthreads`, `enflame`, `thead`, `iluvatar`, `kunlunxin`,
+`ascend`, `tsingmicro`, `drobotics` (Nexus spells it `d-robotics`; identifiers
+drop the hyphen), `apple`. Declared as `vendor` in
+`cmake/flagos_platforms.json`. `FLAGOS_ACCELERATOR` accepts it.
+
+**Platform id** — the key in the same table: `cuda`, `dcu`, `musa`, `gcu`,
+`ppu`, `bpu`, `mps`, or the vendor name itself where they coincide. It is what
+CMake, `setup.py`, the wheel filename, `backends_<platform>.conf` and the
+`.github/configs/<platform>.yml` lane file key on. Both spellings of
+`FLAGOS_ACCELERATOR` resolve to the same row; a vendor name prints the row it
+resolved to.
+
+**Chip** — a specific part (`Ascend 310B`, `910B`, `A100`, …). Chip names are
+**source-only**: a runtime predicate such as `csrc/aten/backends/ascend/
+dtype_support.h`'s `IsFp16OnlyMatmulSoc`, keyed off the device's own SoC name.
+They never appear in a conf, an accelerator id, a wheel name or a lane: one
+wheel serves every chip of its platform, and the conf is selected before
+`import torch`, when the device name is not yet readable. `tests/unit/
+test_platform_vendor_naming.py` enforces this.
+
+Do not introduce a third spelling. A new platform declares both a `vendor` and
+an accelerator id, and the vendor must equal its `pypi_lane` where it publishes.
+
 ### Default confs never route boxing
 
 Every default `torch_fl/configs/backends_<platform>.conf`, on every chip, may

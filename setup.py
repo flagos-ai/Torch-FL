@@ -35,9 +35,56 @@ from setuptools.command.editable_wheel import editable_wheel as _editable_wheel
 IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
-# Accelerator platform: "cuda" (default), "ppu", "metax", "kunlunxin",
-# "iluvatar", "ascend", "tsingmicro", "dcu", "gcu", "musa", or "bpu"
-FLAGOS_ACCELERATOR = os.environ.get("FLAGOS_ACCELERATOR", "cuda").lower()
+#: Vendor layer -> build-table platform id, mirroring ``vendor`` in
+#: cmake/flagos_platforms.json (a test keeps the two equal). A build may name
+#: either half: the vendor (nvidia, hygon, mthreads, enflame, thead, drobotics,
+#: apple) or the platform id that keys the table (cuda, dcu, musa, gcu, ppu,
+#: bpu, mps). The vendor is the public name -- it is also the
+#: flagos-pypi-<lane> a wheel publishes to -- while the platform id stays the
+#: table/cmake/CI key, so a wheel built as either lands on the same row.
+_VENDOR_TO_PLATFORM = {
+    "ascend": "ascend",
+    "apple": "mps",
+    "drobotics": "bpu",
+    "enflame": "gcu",
+    "hygon": "dcu",
+    "iluvatar": "iluvatar",
+    "kunlunxin": "kunlunxin",
+    "metax": "metax",
+    "mthreads": "musa",
+    "nvidia": "cuda",
+    "thead": "ppu",
+    "tsingmicro": "tsingmicro",
+}
+
+
+def _normalize_accelerator(raw: str) -> str:
+    """Build-table platform id for a FLAGOS_ACCELERATOR value.
+
+    Identity for a platform id (the historical spelling every CI lane and doc
+    uses), a mapping for a vendor name, "" for anything unknown (the caller
+    reports it against the table's own list). A vendor name prints one line
+    saying which row it resolved to, so a log of the build names both halves.
+    """
+    value = raw.strip().lower()
+    if value in _VENDOR_TO_PLATFORM:
+        platform = _VENDOR_TO_PLATFORM[value]
+        if platform != value:
+            print(
+                f"[setup] FLAGOS_ACCELERATOR={value} is the vendor name; "
+                f"building the '{platform}' platform ({value})"
+            )
+        return platform
+    # The Nexus lane spells D-Robotics with a hyphen; identifiers cannot.
+    if value == "d-robotics":
+        # The Nexus lane spelling; identifiers and the table drop the hyphen.
+        return "bpu"
+    return value
+
+
+FLAGOS_ACCELERATOR = _normalize_accelerator(
+    os.environ.get("FLAGOS_ACCELERATOR", "cuda")
+)
 
 # Where the sources live. Distinct from BASE_DIR, which is repointed at a
 # scratch tree when the generated files are redirected somewhere else -- the

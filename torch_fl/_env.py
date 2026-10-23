@@ -305,10 +305,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     "FLAGOS_ACCELERATOR": (
         SCOPE_BUILD,
         "cuda",
-        "Hardware platform the wheel is built for: cuda, ppu, metax, ascend, "
-        "tsingmicro, dcu, gcu, musa, or bpu. Read by setup.py alone -- the wheel "
-        "records it in _build_config.py, and that record, not a re-export, is "
-        "what every run-time reader consults",
+        "Hardware platform the wheel is built for. Either half of its name is "
+        "accepted: the vendor (nvidia, thead, metax, ascend, tsingmicro, hygon, "
+        "enflame, mthreads, drobotics, apple) or the build-table id it resolves "
+        "to (cuda, ppu, metax, ascend, tsingmicro, dcu, gcu, musa, bpu, mps). "
+        "Read by setup.py alone -- the wheel records the platform id it resolved "
+        "to in _build_config.py, and that record, not a re-export, is what every "
+        "run-time reader consults",
     ),
     "FLAGOS_BUILD_VENDOR": (
         SCOPE_BUILD,
