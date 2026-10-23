@@ -169,3 +169,92 @@ def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype):
         f"{src_dtype} -> {dst_dtype} performed {n} host/device transfers; the cast "
         "is routing through host memory instead of the native copy kernel"
     )
+
+
+@pytest.mark.parametrize("src_dtype,dst_dtype", CASTS)
+def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
+    """`copy_` into a non-contiguous destination must stay on device.
+
+    The same-device fast path in `_copy_from` only covers a contiguous source
+    into a contiguous destination of equal shape and dtype. Everything else --
+    a dtype change, a strided destination, a transposed source -- used to fall
+    through to `strided_copy_cast_via_cpu` on the non-boxing build, which is two
+    blocking `cudaMemcpy` per call. This is the arm `_to_copy` lands on after its
+    own `contiguous()`, so the cost showed up under `_to_copy` and not here.
+    """
+    src = torch.randn(64, 96, dtype=src_dtype, device=_device())
+    dst = torch.empty(96, 64, dtype=dst_dtype, device=_device()).t()
+
+    def run():
+        dst.copy_(src)
+
+    n = _memcpy_count(run)
+    assert n == 0, (
+        f"copy_({src_dtype} -> {dst_dtype}) into a strided destination performed "
+        f"{n} host/device transfers; the copy is going through host memory"
+    )
+
+
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype",
+    [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
+)
+def test_contiguous_of_transposed_source_is_transfer_free(src_dtype, dst_dtype):
+    """`contiguous()` on a strided source must gather on device.
+
+    `_to_copy` calls it before its cast, so a host gather here costs the round
+    trip twice: once to make the source contiguous, once for the cast.
+    """
+    src = torch.randn(64, 96, dtype=src_dtype, device=_device()).t()
+    assert not src.is_contiguous()
+
+    out = src.contiguous()
+
+    assert out.is_contiguous()
+    assert out.device.type == "flagos"
+    n = _memcpy_count(lambda: src.contiguous())
+    assert n == 0, (
+        f"contiguous() of a transposed {src_dtype} source performed {n} "
+        "host/device transfers; the gather is going through host memory"
+    )
+
+
+def test_contiguous_matches_cpu_after_the_on_device_gather():
+    """The on-device gather must produce the same values as ATen's."""
+    torch.manual_seed(0)
+    base = torch.randn(48, 72, dtype=torch.float32)
+    src = base.to(_device()).t()
+    expected = base.t().contiguous()
+    torch.cuda.synchronize()
+    got = src.contiguous().cpu()
+    assert torch.equal(got, expected)
+
+
+@pytest.mark.parametrize("platform", CUDA_ABI_PLATFORMS)
+def test_copy_arm_boxes_instead_of_going_host(platform):
+    """Pin the `copy_` arm in the source, so this runs without a device.
+
+    The regression: the non-boxing arm called `strided_copy_cast_via_cpu`
+    unconditionally, on the premise that the wheel has no native CUDA copy
+    kernel. It has one -- `DeviceBoxingGuard` reaches it, and the boxing
+    kernels are not involved.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[3] / "csrc/aten/copy_ops.cc").read_text()
+    # The flagos -> flagos branch of _copy_from, told apart from its
+    # device <-> host siblings by the fast-path comment above it.
+    marker = "// Fast path: both contiguous, same shape and dtype"
+    branch = src.find(marker)
+    assert branch != -1, "the same-device copy fast path is gone"
+    arm = src[branch : branch + 2200]
+    fast = arm.find("CrossDeviceMemcpy")
+    assert fast != -1, "the contiguous fast path is gone"
+    tail = arm[fast:]
+    assert "DeviceBoxingGuard guard(self, dst);" in tail, (
+        f"{platform}: the non-boxing copy_ arm no longer boxes to CUDA, so a "
+        "strided or dtype-changing copy is a host round trip again"
+    )
+    assert "strided_copy_cast_via_cpu(self, dst);" in tail, (
+        f"{platform}: the unsigned-dtype escape hatch is missing from the arm"
+    )
