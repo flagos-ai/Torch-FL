@@ -1,5 +1,5 @@
 # Symbols imported from DTK 2604's forked PyTorch core that the official PyTorch
-# 2.10 core does not export. csrc/runtime/accelerator/dcu/dtk_core_compat.cc must
+# 2.10 core does not export. csrc/runtime/accelerator/hygon/dtk_core_compat.cc must
 # export all of these, and scripts/vendor/check_hygon_core_abi.py rejects any new import
 # outside this compatibility superset at bundle time.
 #

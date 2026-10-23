@@ -108,13 +108,13 @@ elseif(_flagos_is_tsingmicro)
   target_link_directories(${LIBRARY_NAME} PRIVATE /usr/local/kuiper/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE hpgr)
 elseif(_flagos_is_dcu)
-  # dcu/ contains only the DTK-core ABI shim below; the runtime sources themselves
-  # are the CUDA ones (FLAGOS_PLATFORM_RUNTIME_DIR == "cuda").
+  # hygon/ contains only the DTK-core ABI shim below; the runtime sources
+  # themselves are the NVIDIA ones (FLAGOS_PLATFORM_RUNTIME_DIR == "nvidia").
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 
   add_library(flagos_dtk_core_compat SHARED
-      "${CMAKE_CURRENT_SOURCE_DIR}/dcu/dtk_core_compat.cc")
+      "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/dtk_core_compat.cc")
   set_target_properties(flagos_dtk_core_compat PROPERTIES
       POSITION_INDEPENDENT_CODE ON)
   flagos_set_portable_rpath(flagos_dtk_core_compat)
