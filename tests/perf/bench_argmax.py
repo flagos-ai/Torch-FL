@@ -16,7 +16,7 @@
 
 Usage:
     # torch_fl
-    CUDA_VISIBLE_DEVICES=2 FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
+    CUDA_VISIBLE_DEVICES=2 FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
         python tests/perf/bench_argmax.py
 
     # CUDA baseline

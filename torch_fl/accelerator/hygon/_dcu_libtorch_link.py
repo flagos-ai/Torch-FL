@@ -29,7 +29,7 @@ Default (decoupled) mode
     from compiling against DTK's patched ``ATen/autocast_mode.h``).  All 32 are
     supplied by ``libflagos_dtk_core_compat.so``, which is loaded first and
     throws a descriptive error if a DTK-private op is ever actually called.
-    ``scripts/vendor/check_dcu_core_abi.py`` re-proves that gap at build time.
+    ``scripts/vendor/check_hygon_core_abi.py`` re-proves that gap at build time.
 
     Nothing under the official ``torch/lib`` is touched, so the wheel is
     installable next to a stock torch and uninstalling torch_fl leaves no trace.
@@ -40,7 +40,7 @@ Legacy mode (``FLAGOS_DCU_VENDOR_CORE=1``)
     where DTK-private schemas such as ``aten::native_fuse_rmsnorm`` work, since
     their schema wrappers and autograd registrations live in the core fork.  It
     leaves the torch installation intact and needs the matching full bundle from
-    ``FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh``.
+    ``FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_hygon_libtorch.sh``.
 
 Why the preload must happen before ``import torch``: PyTorch caches its
 CUDAHooks on first import (docs/vendors/cuda/external-libtorch-cuda.md,
@@ -51,7 +51,7 @@ kernels did register.
 The DTK driver stack (``libgalaxyhip.so.5``, ``libMIOpen.so.1``,
 ``librocblas.so.4``, ``librccl.so.1``, ...) stays on the target under
 ``/opt/dtk`` and is reached through the RUNPATH baked in by
-``cmake/FlagosRpath.cmake`` / ``scripts/vendor/bundle_dcu_libtorch.sh``.
+``cmake/FlagosRpath.cmake`` / ``scripts/vendor/bundle_hygon_libtorch.sh``.
 """
 
 import ctypes
@@ -68,7 +68,7 @@ from torch_fl.accelerator._vendor_libtorch import (
     restore_original_libtorch as _restore,
 )
 
-_BUNDLE_DIR = "lib_dcu"
+_BUNDLE_DIR = "lib_hygon"
 
 # Core C++ .so that legacy mode takes from the DTK wheel as a self-consistent set.
 _CORE_SO = (
@@ -160,7 +160,7 @@ def _bundled_dcu_lib():
 def _discover_dcu_torch_lib():
     """Locate the DTK libtorch .so dir.
 
-    Priority: bundled lib_dcu/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
+    Priority: bundled lib_hygon/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
     envs whose torch is a DTK build.
     """
     return discover_vendor_torch_lib(
@@ -175,7 +175,7 @@ def _compat_shim_path(lib_dir):
     """The ABI shim, from the bundle or from the build tree next to it."""
     for cand in (
         os.path.join(lib_dir, _COMPAT_SO),
-        # Non-bundled in-place build: cmake installs into torch_fl/lib_dcu, but a
+        # Non-bundled in-place build: cmake installs into torch_fl/lib_hygon, but a
         # dev may point FLAGOS_VENDOR_TORCH_LIB straight at the DTK wheel.
         os.path.join(
             os.path.dirname(
@@ -242,7 +242,7 @@ def preload_dcu_device_libs():
             else:
                 raise FileNotFoundError(
                     f"DCU/DTK device library missing: {os.path.join(lib_dir, name)}. "
-                    "Run scripts/vendor/bundle_dcu_libtorch.sh, or point "
+                    "Run scripts/vendor/bundle_hygon_libtorch.sh, or point "
                     "FLAGOS_VENDOR_TORCH_LIB at a DTK torch/lib."
                 )
         try:
@@ -279,7 +279,7 @@ def ensure_dcu_libtorch_links():
                 f"bundle, but {bundle} has none ({', '.join(absent)} missing). "
                 "This wheel was bundled in decoupled mode. Either unset "
                 "FLAGOS_DCU_VENDOR_CORE, or rebuild the bundle with "
-                "FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_dcu_libtorch.sh."
+                "FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_hygon_libtorch.sh."
             )
     return ensure_vendor_libtorch_links(
         _BUNDLE_DIR,

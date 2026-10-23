@@ -196,7 +196,7 @@ relevant categories:
   body `at::Tensor {kernel}(...)` plus
   `REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kGcu, {kernel})`.
 * **`HANDWRITTEN_OPS`** — emits only `m.impl("<op>", Wrapper...)` into
-  `gcu_register.inc` and a `= gcu` route into `backends_gcu.conf`, and expects a
+  `gcu_register.inc` and a `= gcu` route into `backends_enflame.conf`, and expects a
   hand-written translation unit to carry the body (this is how `rng.cc` and
   `native_dropout` are done).
 * **`METADATA_OPS`** — same, for view ops whose bodies live in
@@ -549,7 +549,7 @@ change to inference. The diffusion loop runs under `torch.no_grad()`.
   `FLAGGEMS_PENDING_NATIVE_OPS`, which `build_all` subtracts from `py_here` for
   `gcu`, so it will not be captured by the FlagGems route and the generated conf
   line becomes `_scaled_dot_product_efficient_attention = gcu` (today `none` at
-  `backends_gcu.conf:486`). The backward line (`flaggems`, `:487`) is unchanged,
+  `backends_enflame.conf:486`). The backward line (`flaggems`, `:487`) is unchanged,
   and `gcu_flaggems_register.inc` must not gain a forward entry or the vendor
   kernel would stop being reached.
 * `docs/reference/operator-support.md` must be updated for GCU in the same

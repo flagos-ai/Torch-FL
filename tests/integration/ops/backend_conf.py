@@ -205,7 +205,7 @@ def route_is_served(op: str) -> bool:
     a dispatch -- a test asserting ``[flagos dispatch] <op> -> <backend>`` then
     has nothing to hold on and has to skip rather than fail. That is exactly the
     default (FlagGems-primary) wheel's shape for every op
-    ``backends_cuda.conf`` routes to ``cuda``: no boxing kernels, no dispatch.
+    ``backends_nvidia.conf`` routes to ``cuda``: no boxing kernels, no dispatch.
 
     Both facts are asked of the wheel (``torch_fl._env.build_kernels()``), never
     of an environment variable, so the answer cannot disagree with the build it

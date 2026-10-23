@@ -34,7 +34,7 @@ wrapped number is now handed over as, so ``mask * 1.3333333333333333`` raised
 "Expected a value of type 'Tensor' for argument 'other' but instead found type
 'float'". On hygon the guarded modules raise instead --
 ``ValueError: i0: input tensor must be on cuda device`` -- so the route is dead
-rather than slow, and seven of ``backends_dcu.conf``'s fourteen guarded
+rather than slow, and seven of ``backends_hygon.conf``'s fourteen guarded
 ``flaggems`` routes raised one on the survey's profiles.
 
 The invariant these tests pin is the one the fix establishes: on a box whose
@@ -186,7 +186,7 @@ class TestFlaggemsGuardedRoutes:
     Each route below resolves to a module that compares an operand's device type
     against the name FlagGems gave the device and raises when they differ, so the
     kernel's own guard, not a fallback, is what a call meets. Seven of the
-    fourteen such routes in ``backends_dcu.conf`` raised on a flagos tensor
+    fourteen such routes in ``backends_hygon.conf`` raised on a flagos tensor
     before the alignment -- the four ``reflection_pad`` routes and
     ``_embedding_bag_dense_backward`` are the other five, and are exercised here
     with arguments ATen's schema accepts, which the survey's profiles do not

@@ -117,7 +117,7 @@ def test_count_outcomes_ignores_other_selections():
 
 
 def _load_runtime_caps(tmp_path, monkeypatch, routes):
-    conf = tmp_path / "backends_mps.conf"
+    conf = tmp_path / "backends_apple.conf"
     conf.write_text(
         "".join(f"{op} = {value}\n" for op, value in routes.items()),
         encoding="utf-8",
@@ -144,9 +144,9 @@ def test_effective_route_separates_an_unimplemented_op_from_a_missing_one(
     runtime_caps = _load_runtime_caps(
         tmp_path,
         monkeypatch,
-        {"add.Tensor": "mps", "cat": "none"},
+        {"add.Tensor": "apple", "cat": "none"},
     )
-    assert runtime_caps.effective_route("add.Tensor") == ("mps", "routed")
+    assert runtime_caps.effective_route("add.Tensor") == ("apple", "routed")
     assert runtime_caps.effective_route("cat") == (None, "unimplemented")
     with pytest.raises(AssertionError, match="embedding is not listed"):
         runtime_caps.effective_route("embedding")
@@ -156,7 +156,7 @@ def test_unimplemented_ops_retain_their_names_and_missing_routes_still_fail(
     tmp_path, monkeypatch
 ):
     routes = {
-        op: "none" if op in {"cat", "embedding", "where.self"} else "mps"
+        op: "none" if op in {"cat", "embedding", "where.self"} else "apple"
         for op in _RUNTIME_OPS
     }
     runtime_caps = _load_runtime_caps(tmp_path, monkeypatch, routes)
@@ -175,7 +175,7 @@ def test_effective_route_does_not_translate_an_empty_conf_value(tmp_path, monkey
     runtime_caps = _load_runtime_caps(
         tmp_path,
         monkeypatch,
-        {"add.Tensor": "mps", "cat": ""},
+        {"add.Tensor": "apple", "cat": ""},
     )
     assert runtime_caps.effective_route("cat") == ("", "routed")
 
@@ -192,7 +192,7 @@ def _write_tree(root, *, runtime_tests, other_tests):
     )
     (root / "stub_torch_fl.py").write_text(
         "def backend_config_path():\n"
-        "    return 'backends_mps.conf'\n"
+        "    return 'backends_apple.conf'\n"
         "\n"
         "\n"
         "class _env:\n"
@@ -212,7 +212,7 @@ def _write_tree(root, *, runtime_tests, other_tests):
     (root / "pyproject.toml").write_text(
         '[tool.pytest.ini_options]\nmarkers = ["multi_device: probe marker"]\n'
     )
-    conf = root / "backends_mps.conf"
+    conf = root / "backends_apple.conf"
     conf.write_text(
         "".join(
             f"{op} = {'none' if op in {'cat', 'embedding', 'where.self'} else 'mps'}\n"
@@ -321,11 +321,13 @@ def test_unimplemented_routes_are_named_in_the_report(conformance_tree):
     report = _run_pytest(conformance_tree, "tests/integration/runtime", "-s")
     assert report.returncode == 0, report.stdout + report.stderr
     line = next(row for row in report.stdout.splitlines() if row.startswith(_LINE))
-    assert "accel=mps" in line
+    assert "accel=apple" in line
     assert "ops_total=10 ops_routed=7 ops_none=3" in line
     assert "RUNTIME-COVERAGE unimplemented=cat,embedding,where.self" in (report.stdout)
     report_json = json.loads(
-        (conformance_tree / "runtime-conformance-mps.json").read_text(encoding="utf-8")
+        (conformance_tree / "runtime-conformance-apple.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert report_json["ops_none"] == 3
     assert report_json["unimplemented_ops"] == ["cat", "embedding", "where.self"]

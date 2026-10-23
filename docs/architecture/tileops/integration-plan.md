@@ -272,7 +272,7 @@ the disk kernel cache layer:
 
 The manifest has 184 entries: 165 `implemented` and 19 spec-only. Intersecting
 the last segment of `ref_api` with the 1009 aten base names in
-`backends_cuda.conf`:
+`backends_nvidia.conf`:
 
 - **84** aten operators have a direct same-name counterpart, including
   `mm` (via matmul), `bmm`, `add`, `mul`, `div`, `sub`, `pow`, `sum`, `mean`,
@@ -309,7 +309,7 @@ The plan is to **reuse that machinery**, adding:
   `"tileops"` name in `LogDispatch`, and `"tileops"` string parsing in
   `common.cc` (recognized both as a conf value and in `FLAGOS_OP_*` overrides).
 - `torch_fl/configs/backends_tileops.conf`: structurally identical to
-  `backends_cuda.conf`, with only the allowlisted operators changed to
+  `backends_nvidia.conf`, with only the allowlisted operators changed to
   `= tileops` and everything else left at `cuda`.
 - A `FLAGOS_USE_TILEOPS=1` branch in
   `torch_fl/__init__.py::_select_backend_config()` selecting that conf. (Neither

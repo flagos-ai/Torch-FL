@@ -34,13 +34,13 @@ runner_labels:
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
   - torch_fl/accelerator/nvidia/
-  - torch_fl/configs/backends_cuda.conf
+  - torch_fl/configs/backends_nvidia.conf
   - csrc/aten/backends/nvidia/
   - csrc/runtime/accelerator/nvidia/
   - csrc/runtime/allocator/backends/nvidia_memory.h
   - .github/scripts/hooks/set_env_nvidia.sh
   - .github/scripts/set_env_nvidia.sh
-  - scripts/vendor/with_cuda_libtorch.sh
+  - scripts/vendor/with_nvidia_libtorch.sh
 
 container_volumes:
   - /data/models/Qwen/Qwen3-0.6B:/models/Qwen3-0.6B:ro

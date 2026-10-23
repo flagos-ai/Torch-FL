@@ -37,7 +37,7 @@ record rather than on the accelerator name because DCU runs this file with
 boxing on and must keep checking all five assertions.
 
 Run:
-    PYTHONPATH=$(pwd) bash scripts/vendor/with_cuda_libtorch.sh \
+    PYTHONPATH=$(pwd) bash scripts/vendor/with_nvidia_libtorch.sh \
         python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops
 """
 

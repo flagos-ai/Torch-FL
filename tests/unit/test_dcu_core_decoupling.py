@@ -50,7 +50,7 @@ def _reset_module_state(monkeypatch):
 @pytest.fixture
 def fake_env(tmp_path, monkeypatch):
     """A bundle with only device libs, plus an official torch/lib beside it."""
-    bundle = tmp_path / "lib_dcu"
+    bundle = tmp_path / "lib_hygon"
     official = tmp_path / "torch" / "lib"
     bundle.mkdir()
     official.mkdir(parents=True)
@@ -203,7 +203,7 @@ def test_shim_is_found_in_the_bundle(fake_env):
 
 def test_missing_device_lib_names_the_path_and_the_fix(fake_env):
     (fake_env.bundle / "libtorch_hip.so").unlink()
-    with pytest.raises(FileNotFoundError, match="bundle_dcu_libtorch.sh"):
+    with pytest.raises(FileNotFoundError, match="bundle_hygon_libtorch.sh"):
         link.preload_dcu_device_libs()
 
 
@@ -266,7 +266,7 @@ def test_legacy_preloads_every_symlinked_so_from_the_bundle():
     expands the loaded object's ``$ORIGIN`` to torch/lib -- where the bundle's
     auditwheel-mangled deps do not exist. Measured: libmagma.so opened that way
     dies with "libmkl_gf_lp64-<hash>.so: cannot open shared object file", while the
-    same file opened from lib_dcu loads and satisfies the later resolution by inode.
+    same file opened from lib_hygon loads and satisfies the later resolution by inode.
     """
     assert set(link._LOAD_ORDER) == set(link._CORE_SO) | set(link._HIP_SO)
 

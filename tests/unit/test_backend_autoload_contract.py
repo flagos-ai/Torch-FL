@@ -86,7 +86,7 @@ def _function(name):
 def test_entry_points_are_resolved_by_the_build(load_setup):
     """Build selection is where MPS can differ from the device plugins."""
     assert "entry-points" in _dynamic_fields()
-    _, kwargs = load_setup("cuda")
+    _, kwargs = load_setup("nvidia")
     assert kwargs["entry_points"] == {
         "torch.backends": ["torch_fl = torch_fl._autoload:init"]
     }
@@ -101,7 +101,7 @@ def _dynamic_fields() -> set[str]:
     raise AssertionError("pyproject.toml has no project.dynamic list")
 
 
-@pytest.mark.parametrize("accelerator", ["cuda", "dcu", "mthreads"])
+@pytest.mark.parametrize("accelerator", ["nvidia", "hygon", "mthreads"])
 def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelerator):
     _, kwargs = load_setup(accelerator)
     assert kwargs["entry_points"] == {
@@ -111,7 +111,7 @@ def test_privateuse1_wheels_keep_the_torch_backend_autoload(load_setup, accelera
 
 def test_mps_wheel_leaves_bare_torch_on_the_mps_backend(load_setup):
     """Only an explicit import may claim PrivateUse1 in an MPS installation."""
-    _, kwargs = load_setup("mps")
+    _, kwargs = load_setup("apple")
     assert kwargs["entry_points"] == {}
 
 
@@ -120,7 +120,7 @@ def test_mps_editable_install_rejects_another_accelerators_egg_info(
 ):
     """A stale vendor entry point must not leak into the MPS installation."""
     (tmp_path / "torch_fl.egg-info").mkdir()
-    namespace, kwargs = load_setup("mps")
+    namespace, kwargs = load_setup("apple")
     wheel = SimpleNamespace(
         distribution=SimpleNamespace(get_name=lambda: "torch_fl"),
         _find_egg_info_dir=lambda: "vendor-entry-points",
@@ -165,7 +165,7 @@ def test_unclaimed_or_our_privateuse1_name_is_accepted(current):
     check()
 
 
-@pytest.mark.parametrize("current", ["musa", "other_backend"])
+@pytest.mark.parametrize("current", ["mthreads", "other_backend"])
 def test_foreign_privateuse1_claim_fails_before_native_extension(current):
     check = _function("_check_privateuse1_unclaimed")
     check.__globals__["torch"] = SimpleNamespace(
@@ -179,7 +179,7 @@ def test_foreign_privateuse1_claim_fails_before_native_extension(current):
     assert "TORCH_DEVICE_BACKEND_AUTOLOAD=0" in message
 
 
-@pytest.mark.parametrize("accelerator,expected", [("musa", ["0"]), ("cuda", [])])
+@pytest.mark.parametrize("accelerator,expected", [("mthreads", ["0"]), ("nvidia", [])])
 def test_only_musa_disables_vendor_entry_points_before_torch_import(
     accelerator, expected
 ):

@@ -84,7 +84,7 @@ CUDA torch wheel; keep the active pip torch CPU-only. Do not inherit vendor-box
 or vendor shim and produce false registration failures.
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh python scripts/codegen/codegen_ops.py \
+FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_nvidia_libtorch.sh python scripts/codegen/codegen_ops.py \
   2>&1 | tee /tmp/torch-codegen.log
 
 # 1. No dropped operators. Any "SKIP <op>" or "WARN" means an op failed to
@@ -99,7 +99,7 @@ FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh python scripts/co
 # 2. Idempotency. Compare two complete generated patches, not the working tree
 #    against HEAD (a valid version port is expected to differ from HEAD).
 git diff --binary > /tmp/codegen-1.patch
-FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh python scripts/codegen/codegen_ops.py \
+FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_nvidia_libtorch.sh python scripts/codegen/codegen_ops.py \
   > /tmp/torch-codegen-second.log 2>&1
 git diff --binary > /tmp/codegen-2.patch
 cmp -s /tmp/codegen-1.patch /tmp/codegen-2.patch && echo idempotent
@@ -184,8 +184,8 @@ error to codegen.
 Then, through the preload wrapper:
 
 ```bash
-bash scripts/vendor/with_cuda_libtorch.sh python -c "import torch_fl; print('ok')"
-bash scripts/vendor/with_cuda_libtorch.sh python -m pytest tests/integration/ops/ \
+bash scripts/vendor/with_nvidia_libtorch.sh python -c "import torch_fl; print('ok')"
+bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest tests/integration/ops/ \
     -m "not flaggems and not flaggems_python" -q
 ```
 
@@ -219,7 +219,7 @@ A version port that leaves the docs claiming the old range is half-done. Update:
 - `FLAGOS_CODEGEN_ALL=1 python scripts/codegen/codegen_ops.py` runs clean: no `SKIP`, no
   `WARN`, and a second run leaves no diff
 - Operator count matches what the conf lists (no silent drops vs the base branch)
-- `import torch_fl` is clean through `scripts/vendor/with_cuda_libtorch.sh`
+- `import torch_fl` is clean through `scripts/vendor/with_nvidia_libtorch.sh`
 - `tests/integration/ops/` passes modulo the allocator cold-start tests above
 - Version claims in `compatibility.md` / `README.md` match reality
 - `ruff check .` and `ruff format --check .` pass — see [[pre-pr-checks]]

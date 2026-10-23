@@ -36,7 +36,7 @@ FLAGOS_ACCELERATOR=musa pip install --no-build-isolation -v -e .
 Build flags:
 - `FLAGOS_ACCELERATOR=musa`: selects the MUSA build path and enables `FLAGOS_BUILD_VENDOR=ON`
 - `FLAGOS_BUILD_VENDOR=ON`: compiles generated `mudnn` operator kernels (automatic when `FLAGOS_ACCELERATOR=musa`)
-- `FLAGOS_BUILD_FLAGGEMS=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing comes from `backends_musa.conf`
+- `FLAGOS_BUILD_FLAGGEMS=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing comes from `backends_mthreads.conf`
 - `FLAGOS_BUILD_BOXING=OFF`: forced (the MUSA toolkit exports no CUDA symbols)
 - `FLAGOS_BUILD_FLAGGEMS_CPP=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
 - `--no-build-isolation`: **required** (without it, pip resolves its own torch into a build overlay, and the extension links against that instead of your installed torch, causing `import torch_fl` to fail with `undefined symbol: c10::ValueError`)
@@ -79,10 +79,10 @@ print(f"abs matches CPU: {torch.allclose(y.cpu(), x.cpu().abs())}")
 
 ### Runtime backend selection
 
-`torch_fl` installs a `lib/flagos_platform` marker so the runtime picks `backends_musa.conf` automatically. This native-only mode requires no environment variable override.
+`torch_fl` installs a `lib/flagos_platform` marker so the runtime picks `backends_mthreads.conf` automatically. This native-only mode requires no environment variable override.
 
 There is no `FLAGOS_USE_FLAGGEMS` opt-in and no separate `*_flagos_py.conf`
-narrow hybrid set. `backends_musa.conf` is generated FlagGems-first: of the 515
+narrow hybrid set. `backends_mthreads.conf` is generated FlagGems-first: of the 515
 ops MUSA registers on PrivateUse1, 468 resolve to `flaggems` and 47 to `musa`,
 and the remaining ops are written `none` because MUSA does not register them, so
 they reach `cpu_fallback`. Where a mudnn kernel exists behind an op FlagGems
@@ -365,7 +365,7 @@ The full procedure, including the environment variables the MUSA CI job sets, is
 in [flaggems-setup.md](flaggems-setup.md). Because the MUSA wheel registers the
 whole FlagGems Python operator set on PrivateUse1, no dispatcher subset has to be
 selected at build time and there is no `FLAGOS_USE_FLAGGEMS` opt-in to set: the
-generated `backends_musa.conf` already decides the routing, and native
+generated `backends_mthreads.conf` already decides the routing, and native
 mudnn/muRAND plus CPU fallback remain usable for the ops it sends to `musa` or
 `none`.
 

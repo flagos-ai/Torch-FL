@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Replay the pointwise overloads `backends_dcu.conf` pins to CUDA boxing.
+"""Replay the pointwise overloads `backends_hygon.conf` pins to CUDA boxing.
 
 The DCU conf routes eleven `add`/`sub`/`div` overloads to the CUDA boxing kernel
 because their FlagGems kernels do not compile on the HCU backend. A pinned entry
@@ -187,7 +187,7 @@ def main() -> int:
         print(f"unknown op(s): {', '.join(unknown)}", file=sys.stderr)
         return 2
 
-    conf = REPO / "torch_fl/configs/backends_dcu.conf"
+    conf = REPO / "torch_fl/configs/backends_hygon.conf"
     routes = {}
     for line in conf.read_text(encoding="utf-8").splitlines():
         if line.lstrip().startswith("#"):

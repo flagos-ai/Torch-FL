@@ -21,7 +21,7 @@ The NVIDIA backend writes **zero hand-written CUDA kernels**. Instead it:
    flagos and CUDA share GPU memory), calls PyTorch's own optimized CUDA kernel via
    the public `at::` API, then **unboxes** the result back to flagos.
 2. **Generates** all boxing kernels + dispatcher glue + registration for every op in
-   `torch_fl/backends_cuda.conf` from `native_functions.yaml` via `torchgen`.
+   `torch_fl/backends_nvidia.conf` from `native_functions.yaml` via `torchgen`.
 3. Runs against an **external `libtorch_cuda.so`** that is `LD_PRELOAD`ed before
    `import torch` — so the pip environment stays CPU-only (`torch==X+cpu`), no pip
    CUDA torch, no nvcc at build time.
@@ -39,7 +39,7 @@ the preloaded `libtorch_cuda.so`.
   (wrapper fns + `m.impl()` lines, `#include`d twice by register.cc).
 - `csrc/aten/device_boxing.h` — `DeviceBoxingGuard` / `TensorListBoxingGuard` /
   `MaterializeToTensorVec` / `Box`/`UnboxToFlagos`. The runtime mechanism.
-- `scripts/vendor/with_cuda_libtorch.sh` — wraps any command with the LD_PRELOAD +
+- `scripts/vendor/with_nvidia_libtorch.sh` — wraps any command with the LD_PRELOAD +
   LD_LIBRARY_PATH needed to inject the external CUDA libs. Test/run through this.
 - `docs/vendors/cuda/external-libtorch-cuda.md` — full rationale + the 4 hard
   constraints. Read it once before adapting a new version.
@@ -60,7 +60,7 @@ scripts/codegen/extract_name_map.py
 csrc/aten/device_boxing.h
 csrc/aten/dispatcher.h
 csrc/aten/register.cc
-scripts/vendor/with_cuda_libtorch.sh
+scripts/vendor/with_nvidia_libtorch.sh
 docs/vendors/cuda/external-libtorch-cuda.md
 ```
 
@@ -114,8 +114,8 @@ FLAGOS_BUILD_FLAGGEMS_CPP=OFF FLAGOS_BUILD_FLAGGEMS=OFF \
   pip install -e . --no-build-isolation
 
 # c) smoke test THROUGH the wrapper (LD_PRELOAD external libtorch_cuda.so)
-FLAGOS_BACKEND_CONFIG=torch_fl/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -c "
+FLAGOS_BACKEND_CONFIG=torch_fl/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -c "
 import torch_fl, torch
 a=torch.randn(4,4,device='flagos:0'); b=torch.randn(4,4,device='flagos:0')
 print(torch.add(a,b).cpu()); print(torch.cat([a,b]).shape)
@@ -123,8 +123,8 @@ t=[torch.randn(3,device='flagos:0') for _ in range(2)]
 torch._foreach_add_(t,[torch.ones(3,device='flagos:0')]*2); print('OK')"
 
 # d) full op suite (deselect flaggems markers — that backend isn't built)
-FLAGOS_BACKEND_CONFIG=torch_fl/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh \
+FLAGOS_BACKEND_CONFIG=torch_fl/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh \
   pytest tests/integration/ops/ -q -m "not flaggems and not flaggems_python"
 ```
 
@@ -184,7 +184,7 @@ Any *other* compute-factory added to the conf needs the same CUDA-device treatme
 `libtorch_cuda.so` **must** load before `import torch`. Loading it after → kernels
 register fine but device init throws "Cannot initialize CUDA without ATen_cuda
 library" (torch caches stub CUDAHooks at first `import torch`). This is why testing
-goes through `scripts/vendor/with_cuda_libtorch.sh` (LD_PRELOAD) and not a late
+goes through `scripts/vendor/with_nvidia_libtorch.sh` (LD_PRELOAD) and not a late
 `ctypes.CDLL`. Never call `torch.cuda.*` from tests — the flagos boxing path stays in
 C++ and sidesteps torch's Python `_lazy_init` gate.
 

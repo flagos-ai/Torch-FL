@@ -373,7 +373,7 @@ def ensure_vendor_libtorch_links(
     """Select the vendor core through a private torch facade before importing torch.
 
     Args:
-        bundle_dirname: dir inside the wheel holding the bundle ("lib_maca", ...).
+        bundle_dirname: dir inside the wheel holding the bundle ("lib_metax", ...).
         core_so: .so that MUST be present; a missing one raises.
         extra_so: vendor libraries expected by the caller; retained for API
             compatibility. The facade contains every file in the vendor bundle.

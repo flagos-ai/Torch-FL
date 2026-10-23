@@ -116,7 +116,7 @@ def test_empty_cache_keeps_allocated_accounting():
     assert flagos.memory_allocated() == 0
 
 
-def test_coexists_with_torch_backends_mps():
+def test_coexists_with_torch_backends_apple():
     """Both the flagos device and torch's own MPS backend stay usable.
 
     They own separate command queues and allocations, so forward tensors raised

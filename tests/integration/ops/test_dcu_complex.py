@@ -41,7 +41,7 @@ pytestmark = pytest.mark.main_ops
 
 
 def _require_dcu() -> None:
-    if not torch_fl.backend_config_path().endswith("backends_dcu.conf"):
+    if not torch_fl.backend_config_path().endswith("backends_hygon.conf"):
         pytest.skip("requires the DCU boxing runtime")
     if torch_fl.flagos.device_count() < 1:
         pytest.skip("DCU device is unavailable")

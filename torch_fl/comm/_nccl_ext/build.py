@@ -86,7 +86,7 @@ WHEEL_EXTENSION_NAME = "torch_fl.comm._nccl_ext._flagos_nccl"
 # Accelerators whose link set is wired into the wheel build. DCU only: its
 # _dcu_config() refuses to configure unless every one of libc10_hip,
 # libtorch_hip and librccl is linkable, so the wheel either gets a bridge
-# measured against the bundled lib_dcu or fails the build -- and without it
+# measured against the bundled lib_hygon or fails the build -- and without it
 # ProcessGroupFlagOS's native RCCL fallback is dead in a released wheel (the
 # bug in issue #366). The CUDA link set gets no such check: it would have to
 # link nvidia-nccl-cu12, which is an extra rather than a build dependency, so
@@ -237,7 +237,7 @@ def _dcu_library_dirs(
     vendor_torch_lib = env.get("FLAGOS_VENDOR_TORCH_LIB")
     if vendor_torch_lib:
         candidates.append(vendor_torch_lib)
-    candidates.append(os.path.join(repo_root, "torch_fl", "lib_dcu"))
+    candidates.append(os.path.join(repo_root, "torch_fl", "lib_hygon"))
     candidates.extend([os.path.join(dtk_root, "lib"), os.path.join(dtk_root, "lib64")])
     candidates.extend(_env_paths(env, "LIBRARY_PATH"))
     candidates.extend(_env_paths(env, "LD_LIBRARY_PATH"))
@@ -285,9 +285,9 @@ def _dcu_config(env: Mapping[str, str], repo_root: str) -> _BuildConfig:
         )
 
     library_dirs = _dcu_library_dirs(env, repo_root, dtk_root)
-    bundled_lib_dir = _normalize_dir(os.path.join(repo_root, "torch_fl", "lib_dcu"))
+    bundled_lib_dir = _normalize_dir(os.path.join(repo_root, "torch_fl", "lib_hygon"))
     rpaths = tuple(
-        "$ORIGIN/../../lib_dcu"
+        "$ORIGIN/../../lib_hygon"
         if os.path.normcase(directory) == os.path.normcase(bundled_lib_dir)
         else directory
         for directory in library_dirs
@@ -364,7 +364,7 @@ def _wheel_rpaths(config: _BuildConfig) -> Tuple[str, ...]:
     that built the wheel: on DCU, FLAGOS_VENDOR_TORCH_LIB is an absolute DTK
     torch/lib path, taken at build time so the factory can be linked against
     libc10_hip/libtorch_hip. In a decoupled wheel those come from the bundled
-    lib_dcu, which the $ORIGIN entry reaches first anyway -- and leaving the
+    lib_hygon, which the $ORIGIN entry reaches first anyway -- and leaving the
     absolute entry in would let a target that happens to have a DTK torch at that
     path load libtorch_hip.so from it instead, silently re-coupling the wheel to
     a vendor build this one was never measured against. The DTK driver

@@ -18,7 +18,7 @@ This is the one detector the package (torch_fl/__init__.py::_build_accelerator)
 and both integration test trees (ops/conftest.py, platform_support.py) read. The
 sibling test_platform_support_detect.py exercises it through the test-tree
 re-export; this file covers the module directly, including the pieces only it
-resolves (lib_ppu/ bundle, the conf fallback, and the documented default).
+resolves (lib_thead/ bundle, the conf fallback, and the documented default).
 
 Loaded by path, not imported: importing torch_fl executes torch_fl/__init__.py,
 whose device-claiming side effects must not run in a unit test.
@@ -67,7 +67,7 @@ def isolated_torch_fl(monkeypatch):
             sys.modules["torch_fl"] = real
 
 
-def _install_wheel(tmp_path, accelerator=None, marker=None, lib_ppu=False):
+def _install_wheel(tmp_path, accelerator=None, marker=None, lib_thead=False):
     """Put a stub torch_fl on sys.path describing a wheel; caller removes it."""
     package = tmp_path / "torch_fl"
     package.mkdir()
@@ -79,8 +79,8 @@ def _install_wheel(tmp_path, accelerator=None, marker=None, lib_ppu=False):
     if marker is not None:
         (package / "lib").mkdir()
         (package / "lib" / "flagos_platform").write_text(f"{marker}\n")
-    if lib_ppu:
-        (package / "lib_ppu").mkdir()
+    if lib_thead:
+        (package / "lib_thead").mkdir()
     sys.path.insert(0, str(tmp_path))
     return tmp_path
 
@@ -134,9 +134,9 @@ def test_marker_identifies_without_a_record(isolated_torch_fl, tmp_path):
         sys.path.remove(str(tmp_path))
 
 
-def test_lib_ppu_bundle_identifies_ppu(isolated_torch_fl, tmp_path):
-    """PPU wheels predating the ppu record value ship a lib_ppu/ bundle instead."""
-    _install_wheel(tmp_path, lib_ppu=True)
+def test_lib_thead_bundle_identifies_ppu(isolated_torch_fl, tmp_path):
+    """PPU wheels predating the ppu record value ship a lib_thead/ bundle instead."""
+    _install_wheel(tmp_path, lib_thead=True)
     try:
         assert platform.detect_platform() == "ppu"
     finally:
@@ -155,9 +155,9 @@ def test_ppu_sdk_env_wins_over_the_marker(isolated_torch_fl, tmp_path, monkeypat
 @pytest.mark.parametrize(
     "conf, expected",
     [
-        ("/x/backends_gcu.conf", "gcu"),
-        ("/x/backends_dcu.conf", "dcu"),
-        ("/x/backends_cuda.conf", "cuda"),
+        ("/x/backends_enflame.conf", "gcu"),
+        ("/x/backends_hygon.conf", "dcu"),
+        ("/x/backends_nvidia.conf", "cuda"),
     ],
 )
 def test_conf_fallback(isolated_torch_fl, tmp_path, monkeypatch, conf, expected):

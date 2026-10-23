@@ -112,7 +112,7 @@ VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
 # kernels are registered under the CUDA dispatch key, so torch_fl reaches them
 # via PrivateUse1->CUDA boxing kernels without shipping its own kernels.
 # libtorch_hip.so is the DTK analogue of CUDA's libtorch_cuda.so; the bundle
-# script stages it (plus the core .so) into torch_fl/lib_dcu for a
+# script stages it (plus the core .so) into torch_fl/lib_hygon for a
 # self-contained wheel.
 if [[ ! -f "$VENDOR_TORCH_LIB/libtorch_hip.so" ]]; then
   echo "::error::$VENDOR_TORCH_LIB has no libtorch_hip.so, not a DTK torch/lib" >&2
@@ -160,7 +160,7 @@ echo "CPU torch target: $CPU_TORCH_VERSION+cpu"
 
 # Isolated venv with the matching CPU-only torch wheel. Unlike CUDA, DCU does
 # not stage libtorch_cuda.so into .libtorch_cuda_assets; the DTK forked libtorch
-# .so are bundled into torch_fl/lib_dcu by bundle_dcu_libtorch.sh below.
+# .so are bundled into torch_fl/lib_hygon by bundle_hygon_libtorch.sh below.
 PREBUILT_VENV="${TORCH_FL_PREBUILT_DCU_VENV:-/opt/torch-fl-dcu-venv}"
 if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
   VENV_ROOT="$PREBUILT_VENV"
@@ -183,7 +183,7 @@ fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   # patchelf is required by setup.py (rewrites _C.so RPATH to $ORIGIN/lib and
-  # $ORIGIN/lib_dcu after copy) and by bundle_dcu_libtorch.sh (sets RPATH on the
+  # $ORIGIN/lib_hygon after copy) and by bundle_hygon_libtorch.sh (sets RPATH on the
   # bundled DTK .so). The pinned CI image ships it at /usr/bin/patchelf; the pip
   # install here is a redundant fallback in case the image lacks it.
   "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake build patchelf
@@ -314,7 +314,7 @@ export FLAGOS_ACCELERATOR=dcu
 # for every accelerator now (cmake/flagos_platforms.json), so the lane opts in
 # explicitly; otherwise the wheel would compile no CUDA boxing kernels.
 # The CUDA lane no longer opts in -- it measures the FlagGems-primary default a
-# `pip install` gets. DCU keeps the vendor path until the ops backends_dcu.conf
+# `pip install` gets. DCU keeps the vendor path until the ops backends_hygon.conf
 # routes to `cuda` have a FlagGems or DTK-native route of their own; flipping it
 # first would leave those ops on cpu_fallback.
 export FLAGOS_BUILD_BOXING=1
@@ -369,7 +369,7 @@ if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   build_flagos_inplace
 fi
 
-# Bundle DTK's device .so into torch_fl/lib_dcu for a self-contained wheel
+# Bundle DTK's device .so into torch_fl/lib_hygon for a self-contained wheel
 # (replaces CUDA's .libtorch_cuda_assets staging step). Default is the decoupled
 # mode: device libraries only, running on the official torch+cpu core installed
 # above, with the DTK-private ATen symbols supplied by
@@ -378,9 +378,9 @@ fi
 # FLAGOS_DCU_VENDOR_CORE=1 selects the full-core bundle and private facade; CI
 # smoke-tests that path separately below.
 FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
-  PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
+  PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_hygon_libtorch.sh
 
-# Wheel invariants for the decoupled default. A vendor core .so in lib_dcu means
+# Wheel invariants for the decoupled default. A vendor core .so in lib_hygon means
 # the wheel would shadow the official core through RPATH order, i.e. silently
 # fall back to the old coupled layout; the shim's absence means the DTK device
 # libraries have nothing to satisfy their DTK-private imports with.
@@ -389,7 +389,7 @@ if [[ "${FLAGOS_DCU_VENDOR_CORE:-0}" != "1" ]]; then
 from pathlib import Path
 import sys
 
-bundle = Path("torch_fl/lib_dcu")
+bundle = Path("torch_fl/lib_hygon")
 core = (
     "libc10.so",
     "libtorch_cpu.so",
@@ -447,7 +447,7 @@ PY
   #   2. A full legacy bundle selects the vendor core and computes cleanly.
   #
   # Order matters: this runs *after* the decoupled gates because it rebuilds
-  # lib_dcu. The last step restores the decoupled bundle, which is what the wheel
+  # lib_hygon. The last step restores the decoupled bundle, which is what the wheel
   # is built from, and re-runs the invariant check to prove it.
   if [[ "${FLAGOS_DCU_SKIP_LEGACY_SMOKE:-0}" != "1" ]]; then
     echo "Legacy-mode smoke: refusing a decoupled bundle"
@@ -466,7 +466,7 @@ PY
     echo "Legacy-mode smoke: full-core bundle"
     FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
       PYTHON="$VENV_PYTHON" FLAGOS_DCU_VENDOR_CORE=1 \
-      bash scripts/vendor/bundle_dcu_libtorch.sh
+      bash scripts/vendor/bundle_hygon_libtorch.sh
     FLAGOS_DCU_VENDOR_CORE=1 python - <<'PY'
 import hashlib
 import importlib.util
@@ -512,12 +512,12 @@ PY
 
     echo "Restoring the decoupled bundle for the wheel"
     FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
-      PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_dcu_libtorch.sh
+      PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_hygon_libtorch.sh
     python - <<'PY'
 from pathlib import Path
 import sys
 
-bundle = Path("torch_fl/lib_dcu")
+bundle = Path("torch_fl/lib_hygon")
 leaked = [
     name
     for name in ("libc10.so", "libtorch_cpu.so", "libtorch.so", "libtorch_python.so")

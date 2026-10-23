@@ -607,7 +607,7 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
     ),
     "tests/integration/ops/test_full_cuda_coverage.py": (
         "exercises the CUDA boxing path: every case asserts that an op "
-        "backends_cuda.conf routes to `cuda` dispatches to the boxing kernel "
+        "backends_nvidia.conf routes to `cuda` dispatches to the boxing kernel "
         "rather than reaching cpu_fallback, and the file's own docstring says "
         "its ops need the external libtorch_cuda.so. The CUDA lane was the only "
         "manifest that selected the `cuda` marker, and it now builds the "

@@ -18,21 +18,21 @@
 # PPU is a CUDA-ABI boxing backend with its own FLAGOS_ACCELERATOR value: the toolchain
 # is CUDA (PPU torch is a local USE_CUDA=1 build whose libtorch_cpu.so provides
 # ~2092 undefined symbols of libtorch_fl.so), but the vendor is PPU, so the
-# build bundles its libtorch into lib_ppu/. The stock CPU wheel's core libs must
+# build bundles its libtorch into lib_thead/. The stock CPU wheel's core libs must
 # be replaced by the PPU build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
 #   3. Installs the published FlagTree and FlagGems wheels into it.
 #   4. Exports FLAGOS_ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
 #   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
-#      torch_fl/lib_ppu/ via bundle_ppu_libtorch.sh (setup.py does not call it).
+#      torch_fl/lib_thead/ via bundle_thead_libtorch.sh (setup.py does not call it).
 #
 # Nothing here reads a host bind mount, so the environment is fully reproducible
 # from the image plus this script's indexes.
 #
 # Core replacement itself is automatic at `import torch_fl` time, gated on
-# lib_ppu/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
-# backends_ppu.conf. No mode env var is involved.
+# lib_thead/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
+# backends_thead.conf. No mode env var is involved.
 
 
 # Thin wrapper: the parameterized entrypoint is set_env.sh.

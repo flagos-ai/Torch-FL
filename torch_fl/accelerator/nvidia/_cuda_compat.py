@@ -876,7 +876,7 @@ def patch_flaggems_device_name() -> bool:
     never compare equal, so a module that makes that comparison takes the
     fallback branch for every flagos input rather than only for the ones it means
     to exclude, and its Triton kernel never runs. Eleven of the ``flaggems``
-    routes in ``backends_cuda.conf`` land on such a module. The fallback is also
+    routes in ``backends_nvidia.conf`` land on such a module. The fallback is also
     where the CUDA test failure came from: it redispatches to the ``Tensor``
     overload, which cannot accept the Python scalar that wrapped numbers are now
     handed over as, so ``mask * 1.3333333333333333`` raised "Expected a value of
@@ -886,7 +886,7 @@ def patch_flaggems_device_name() -> bool:
     declares the same ``device_name="cuda"``, so DCU has the same defect with a
     louder failure mode: the guarded modules there raise instead of falling
     back, as ``ValueError: i0: input tensor must be on cuda device``. Nine of
-    ``backends_dcu.conf``'s ``flaggems`` ops are guarded that way, over fourteen
+    ``backends_hygon.conf``'s ``flaggems`` ops are guarded that way, over fourteen
     routes: ``i0`` and its ``.out``, ``special_i0e``, ``special_i1``,
     ``special_scaled_modified_bessel_k1`` and its ``.out``, ``soft_margin_loss``,
     ``reflection_pad2d`` and its ``.out``, ``reflection_pad3d`` and its ``.out``,
@@ -897,7 +897,7 @@ def patch_flaggems_device_name() -> bool:
     ATen's schema for them, and the ``eq`` pair passed either way because the
     comparison sits on a path a two-operand call does not reach. Re-running that
     survey on DCU with this change moved all seven off ``FAILED`` -- four to
-    ``STRICT`` and three to ``BASIC_ONLY`` -- with ``backends_dcu.conf`` byte for
+    ``STRICT`` and three to ``BASIC_ONLY`` -- with ``backends_hygon.conf`` byte for
     byte unchanged.
 
     A second guard class is out of reach and is not claimed here. Five of the

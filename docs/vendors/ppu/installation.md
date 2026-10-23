@@ -4,11 +4,11 @@
 
 PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain (`PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit) but has its own `FLAGOS_ACCELERATOR=ppu` value like every other vendor. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`).
 
-The default build is **FlagGems-primary**: `FLAGOS_BUILD_BOXING` is off, so the wheel compiles no CUDA boxing kernels and bundles no vendor libtorch; `backends_ppu.conf` routes the ops it names to FlagGems and everything else reaches `cpu_fallback`. Boxing is the explicit opt-in (`FLAGOS_BUILD_BOXING=1`), and it is the simplest compatibility-boxing case:
+The default build is **FlagGems-primary**: `FLAGOS_BUILD_BOXING` is off, so the wheel compiles no CUDA boxing kernels and bundles no vendor libtorch; `backends_thead.conf` routes the ops it names to FlagGems and everything else reaches `cpu_fallback`. Boxing is the explicit opt-in (`FLAGOS_BUILD_BOXING=1`), and it is the simplest compatibility-boxing case:
 
 - **No stock `+cpu` wheel and no external `libtorch_cuda.so`** are required — the PPU torch wheel ships its own CUDA runtime
 - PPU registers ops under the `CUDA` dispatch key (not `PrivateUse1`), so the generated CUDA boxing kernels are reused unchanged
-- `FLAGOS_ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_ppu/` bundle) and is recorded in `torch_fl/_build_config.py`, which is what selects `backends_ppu.conf` at runtime — the environment is not consulted there; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
+- `FLAGOS_ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_thead/` bundle) and is recorded in `torch_fl/_build_config.py`, which is what selects `backends_thead.conf` at runtime — the environment is not consulted there; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
 
 Unless a section says otherwise, the rest of this guide describes the default FlagGems-primary wheel; the boxing build is called out where it differs.
 
@@ -39,7 +39,7 @@ FLAGOS_ACCELERATOR=ppu \
   pip install --no-build-isolation -vvv -e .
 ```
 
-This wheel compiles the FlagGems Python path and no CUDA boxing kernels; the ops `backends_ppu.conf` does not route to FlagGems reach `cpu_fallback`. `FLAGOS_SKIP_CUDA_ASSETS=1` is still required here because the PPU `torch` wheel ships its own CUDA runtime.
+This wheel compiles the FlagGems Python path and no CUDA boxing kernels; the ops `backends_thead.conf` does not route to FlagGems reach `cpu_fallback`. `FLAGOS_SKIP_CUDA_ASSETS=1` is still required here because the PPU `torch` wheel ships its own CUDA runtime.
 
 ### From Source (Boxing Build, Opt-in)
 
@@ -182,7 +182,7 @@ FLAGOS_DISABLE_CUDA_ASSETS=1 \
 
 ## FlagGems on PPU (default)
 
-`FLAGOS_BUILD_FLAGGEMS=ON` is the build default; `import torch_fl` then reads `torch_fl/configs/backends_ppu.conf`, which routes discovered ops to FlagGems' Triton kernels first. In the default FlagGems-primary wheel the remaining ops reach `cpu_fallback`; in a boxing wheel they reach the vendor CUDA kernel instead. No runtime opt-in variable is needed.
+`FLAGOS_BUILD_FLAGGEMS=ON` is the build default; `import torch_fl` then reads `torch_fl/configs/backends_thead.conf`, which routes discovered ops to FlagGems' Triton kernels first. In the default FlagGems-primary wheel the remaining ops reach `cpu_fallback`; in a boxing wheel they reach the vendor CUDA kernel instead. No runtime opt-in variable is needed.
 
 PPU needs no compatibility shim beyond the generic CUDA one: `libcuda.so` is a real driver, so `is_nvidia_cuda_available()` succeeds, `GEMS_VENDOR=nvidia` is set automatically, and `triton.language.extra.cuda.libdevice` resolves.
 

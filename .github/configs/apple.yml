@@ -41,7 +41,7 @@ runner_labels:
 paths_watch:
   - torch_fl/accelerator/apple/
   - torch_fl/accelerator/_vendor_libtorch.py
-  - torch_fl/configs/backends_mps.conf
+  - torch_fl/configs/backends_apple.conf
   - csrc/aten/backends/apple/
   - csrc/runtime/accelerator/apple/
   - csrc/runtime/allocator/backends/apple_memory.h

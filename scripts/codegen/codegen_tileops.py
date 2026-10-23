@@ -85,12 +85,12 @@ from torch_fl.tileops.spec import (  # noqa: E402
     UNARY,
 )
 
-CONF_CUDA = REPO / "torch_fl" / "configs" / "backends_cuda.conf"
+CONF_CUDA = REPO / "torch_fl" / "configs" / "backends_nvidia.conf"
 OUT_ROUTES = REPO / "torch_fl" / "tileops" / "generated" / "routes.py"
 OUT_SHIMS = REPO / "torch_fl" / "tileops" / "generated" / "shims.py"
 OUT_KERNELS = REPO / "csrc" / "aten" / "generated" / "tileops_python_kernels.cc"
 # Formerly torch_fl/configs/backends_tileops.conf. The routing decision now
-# lives as a `# tileops` annotation in backends_cuda.conf, so what this script
+# lives as a `# tileops` annotation in backends_nvidia.conf, so what this script
 # owns is the op *set*, patched into the shared coverage module the conf
 # generators read (only the TILEOPS_OPS block is rewritten).
 OUT_COVERAGE = REPO / "scripts" / "codegen" / "backend_coverage.py"
@@ -770,13 +770,13 @@ def render_coverage(routes: List[Route], current: str) -> str:
     """Rewrite TILEOPS_OPS inside scripts/codegen/backend_coverage.py.
 
     This used to be render_conf(), writing torch_fl/configs/backends_tileops.conf
-    -- a full copy of backends_cuda.conf with these overloads flipped to
+    -- a full copy of backends_nvidia.conf with these overloads flipped to
     `tileops`. That file was a per-*mode* conf rather than a per-platform one, so
     torch_fl/configs/ held two files describing one platform and
     FLAGOS_FORCE_BACKEND=tileops had to swap between them.
 
     `tileops` is now a routing key like any other, carried as a `# tileops`
-    annotation in backends_cuda.conf, and FLAGOS_FORCE_BACKEND=tileops repins the
+    annotation in backends_nvidia.conf, and FLAGOS_FORCE_BACKEND=tileops repins the
     annotated ops in the loaded table (ApplyForcedBackend in csrc/aten/common.cc).
     Default routing is untouched, which is what the annotation buys: TileOPs is
     SM90-only and an optional dependency, so it must stay opt-in rather than

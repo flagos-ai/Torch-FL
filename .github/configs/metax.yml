@@ -33,7 +33,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/nvidia_memory.h
   - .github/scripts/hooks/set_env_metax.sh
   - .github/scripts/set_env_metax.sh
-  - scripts/vendor/bundle_maca_libtorch.sh
+  - scripts/vendor/bundle_metax_libtorch.sh
 
 container_volumes: []
 

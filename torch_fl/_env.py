@@ -576,7 +576,7 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         SCOPE_BUILD_RUNTIME,
         "Auto-discovered",
         "Path to the vendor torch's lib directory, used when no bundled "
-        "lib_maca/lib_dcu/lib_ppu is present. Only the active accelerator's "
+        "lib_metax/lib_hygon/lib_thead is present. Only the active accelerator's "
         "build reads it",
     ),
     "FLAGOS_USE_CACHING_ALLOCATOR": (

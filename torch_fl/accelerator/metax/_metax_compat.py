@@ -47,7 +47,7 @@ def _find_metax_path():
     """Find the MetaX SDK root path.
 
     Same candidate order as the rest of the tree (setup.py, the cudart shim,
-    bundle_maca_libtorch.sh): the vendor's MACA_PATH, then MACA_HOME, then the
+    bundle_metax_libtorch.sh): the vendor's MACA_PATH, then MACA_HOME, then the
     default installs.
     """
     for env_var in ("MACA_PATH", "MACA_HOME"):

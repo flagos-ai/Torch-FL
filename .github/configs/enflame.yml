@@ -31,7 +31,7 @@ runner_labels:
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
   - torch_fl/accelerator/enflame/
-  - torch_fl/configs/backends_gcu.conf
+  - torch_fl/configs/backends_enflame.conf
   - csrc/aten/backends/enflame/
   - csrc/runtime/accelerator/enflame/
   - csrc/runtime/allocator/backends/enflame_memory.h
@@ -69,7 +69,7 @@ wheel_artifact_name: wheel-gcu
 #
 # The FlagGems stack has to be the flagtree build, not a stock triton wheel left
 # behind by the image: only flagtree carries the enflame backend, and without it
-# every FlagGems route in backends_gcu.conf fails to compile.
+# every FlagGems route in backends_enflame.conf fails to compile.
 environment_check:
   torch_version_base: "2.10.0"
   cuda_version: null

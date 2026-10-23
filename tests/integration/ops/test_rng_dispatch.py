@@ -35,7 +35,7 @@ of the cross-backend test contract.
 
 The second path only exists in a wheel that carries the generated CUDA boxing
 kernels. Boxing is off by default for every CUDA-ABI platform (#520) and the
-CUDA lane builds that default wheel, so on it the ops `backends_cuda.conf`
+CUDA lane builds that default wheel, so on it the ops `backends_nvidia.conf`
 routes to `cuda` -- `normal_`, `randint`, `randperm`, `log_normal_` and the
 `*_out`/`.generator` overloads -- reach cpu_fallback instead. The cases that
 assert the boxing path's translation behaviour are therefore gated on the build
@@ -43,7 +43,7 @@ record (`_boxing_built()`), the same way the `cuda` marker is gated in
 `tests/integration/ops/conftest.py`, rather than on the accelerator name: the
 two stopped being interchangeable when boxing became an opt-in.
 
-That wheel is not unclaimed everywhere. `backends_cuda.conf` routes `rand`,
+That wheel is not unclaimed everywhere. `backends_nvidia.conf` routes `rand`,
 `randn`, the two `_like` factories and `uniform_` to a FlagGems arm, and the
 factory path goes along with it: `torch.rand(..., generator=)` has no
 PrivateUse1 kernel of its own, so the composite fills a device tensor and calls

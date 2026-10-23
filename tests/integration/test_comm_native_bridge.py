@@ -21,7 +21,7 @@ in it. `ProcessGroupFlagOS` builds its inner backend as FlagCX -> vendor native
 without the bridge the tier cannot be built at all and the group lands on
 host-staged gloo -- a working tier, with nothing said about the one that is
 missing. The bridge is ``_flagos_nccl``, a pybind factory built against the
-bundled ``lib_dcu`` (``libc10_hip`` / ``libtorch_hip``) plus ``librccl``, and
+bundled ``lib_hygon`` (``libc10_hip`` / ``libtorch_hip``) plus ``librccl``, and
 issue #366 is about the wheel packaging it at ``torch_fl/comm/_nccl_ext/`` so an
 installed wheel reaches RCCL with no source checkout.
 

@@ -52,7 +52,7 @@ Both support modules share `platform_support.detect_platform()` and must not imp
 
 ### Platform Detection
 
-Test filtering is automatic: `conftest.py` detects the active platform from the wheel's build record (`_build_config.py`, plus the `PPU_SDK` environment or the `lib_ppu/` bundle for wheels that predate PPU's own record value), `lib/flagos_platform`, or the name of the conf `torch_fl.backend_config_path()` reports, and skips tests marked for unavailable backends.
+Test filtering is automatic: `conftest.py` detects the active platform from the wheel's build record (`_build_config.py`, plus the `PPU_SDK` environment or the `lib_thead/` bundle for wheels that predate PPU's own record value), `lib/flagos_platform`, or the name of the conf `torch_fl.backend_config_path()` reports, and skips tests marked for unavailable backends.
 
 ## Running Tests
 
@@ -108,12 +108,12 @@ variable to keep in step by hand. Actual routing still follows the conf's
 exact ATen overloads on real accelerator hardware. It is a manual survey, not a
 pytest test, and ordinary CI does not invoke it.
 
-Run it with the platform conf under test (`backends_cuda.conf` on a CUDA host;
+Run it with the platform conf under test (`backends_nvidia.conf` on a CUDA host;
 each vendor has its own `backends_<platform>.conf`):
 
 ```bash
 python tests/manual/flaggems_overload_survey.py \
-  --conf torch_fl/configs/backends_cuda.conf \
+  --conf torch_fl/configs/backends_nvidia.conf \
   --out /tmp/flaggems-overloads.json
 ```
 

@@ -67,7 +67,7 @@ print(f"abs matches CPU: {torch.allclose(y.cpu(), x.cpu().abs())}")
 
 ### Runtime backend selection
 
-`torch_fl` installs a `lib/flagos_platform` marker so the runtime picks `backends_gcu.conf` automatically. No `FLAGOS_BACKEND_CONFIG` override is needed.
+`torch_fl` installs a `lib/flagos_platform` marker so the runtime picks `backends_enflame.conf` automatically. No `FLAGOS_BACKEND_CONFIG` override is needed.
 
 ## Testing
 
@@ -118,7 +118,7 @@ Unlike `mudnn` (MUSA), `topsaten` does not honor strides on non-contiguous input
 ## FlagGems via the enflame Triton backend
 
 FlagGems provides Triton-compiled kernels for the operators `topsaten` does not
-cover, and the generated `backends_gcu.conf` routes to them by default wherever
+cover, and the generated `backends_enflame.conf` routes to them by default wherever
 FlagGems can execute the operator correctly on GCU. GCU builds compile the
 FlagGems Python caller alongside the native `topsaten` wrappers, and the backend
 configuration selects which implementation runs for each exact ATen overload.

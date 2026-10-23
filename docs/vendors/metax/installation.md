@@ -66,11 +66,11 @@ FLAGOS_ACCELERATOR=metax \
 ```bash
 FLAGOS_VENDOR_TORCH_LIB=<path-to-torch+metax>/torch/lib \
   MACA_PATH=/opt/maca \
-  bash scripts/vendor/bundle_maca_libtorch.sh
+  bash scripts/vendor/bundle_metax_libtorch.sh
 ```
 
 This script:
-- Copies 8 forked libtorch `.so` files from `torch+metax/torch/lib` into `torch_fl/lib_maca/`
+- Copies 8 forked libtorch `.so` files from `torch+metax/torch/lib` into `torch_fl/lib_metax/`
 - Rewrites RPATH with `patchelf` so libraries find each other via `$ORIGIN` and locate the MACA runtime at `/opt/maca/lib`
 
 #### Step 3: Repackage the Wheel
@@ -427,7 +427,7 @@ shim) did not run.
 
 **Fix:** confirm the wheel was built for MetaX (`FLAGOS_ACCELERATOR=metax`, recorded at
 build time) and that the vendor torch is reachable through
-`FLAGOS_VENDOR_TORCH_LIB` or the bundled `lib_maca/`. No mode environment variable
+`FLAGOS_VENDOR_TORCH_LIB` or the bundled `lib_metax/`. No mode environment variable
 is involved any more.
 
 ### Wheel Too Large for PyPI

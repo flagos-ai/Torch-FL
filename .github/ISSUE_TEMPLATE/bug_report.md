@@ -29,7 +29,7 @@ FLAGOS_ACCELERATOR=cuda FLAGOS_BUILD_FLAGGEMS_CPP=1 pip install -e .
 <!-- Include relevant environment variables -->
 ```bash
 # Example:
-export FLAGOS_BACKEND_CONFIG=torch_fl/backends_cuda.conf
+export FLAGOS_BACKEND_CONFIG=torch_fl/backends_nvidia.conf
 export FLAGGEMS_SOURCE_DIR=/path/to/FlagGems
 ```
 

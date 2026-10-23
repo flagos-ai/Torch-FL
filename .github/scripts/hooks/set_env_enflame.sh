@@ -20,7 +20,7 @@
 # links TopsRider's libtopsrt/libtopsaten libraries instead.
 #
 # The FlagGems Python path is provisioned here the same way set_env_mthreads.sh
-# provisions it: the generated configs/backends_gcu.conf routes most overloads
+# provisions it: the generated configs/backends_enflame.conf routes most overloads
 # to a FlagGems Triton kernel and the rest to the native topsaten kernel, so the
 # isolated venv needs a Triton build carrying the "enflame" backend (flagtree)
 # plus FlagGems itself. See docs/vendors/gcu/flaggems-setup.md.
@@ -95,7 +95,7 @@ export FLAGOS_ACCELERATOR=gcu
 export FLAGOS_BUILD_VENDOR=1
 # FLAGOS_BUILD_FLAGGEMS_CPP=0: the FlagGems C++ kernels (liboperators.so) need
 # FLAGOS_BUILD_FLAGGEMS_CPP=ON, which is not built here. FLAGOS_BUILD_FLAGGEMS=1 is what makes
-# the flaggems routes in backends_gcu.conf resolvable at all: setup.py turns
+# the flaggems routes in backends_enflame.conf resolvable at all: setup.py turns
 # FLAGOS_BUILD_FLAGGEMS on for FLAGOS_ACCELERATOR=gcu, but this environment variable is
 # applied afterwards and would otherwise switch it back off, producing a wheel
 # whose conf routes ops to dispatcher slots that were never compiled in.

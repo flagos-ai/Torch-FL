@@ -396,7 +396,7 @@ PY
 # flag_gems first raises AttributeError: module 'torch' has no attribute 'musa'.
 #
 # That shim is itself conditional on the active conf routing at least one op to
-# FlagGems, so this check also fails if backends_musa.conf has no flaggems route
+# FlagGems, so this check also fails if backends_mthreads.conf has no flaggems route
 # -- which is exactly the state this environment is being provisioned to leave.
 if "$VENV_PYTHON" -c "import torch_fl._C" 2>/dev/null; then
   "$VENV_PYTHON" - <<'PY'

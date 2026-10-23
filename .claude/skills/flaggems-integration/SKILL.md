@@ -107,7 +107,7 @@ If CUDA boxing is used, the external CUDA assets may be preloaded only through
 the repository's wrapper, while the active Python torch remains CPU-only:
 
 ```bash
-FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_cuda_libtorch.sh \
+FLAGOS_CODEGEN_ALL=1 bash scripts/vendor/with_nvidia_libtorch.sh \
   python scripts/codegen/codegen_ops.py 2>&1 | tee /tmp/flaggems-codegen.log
 ```
 
@@ -212,13 +212,13 @@ python tests/integration/ops/test_flaggems_conf_consistency.py -v
 python -m pytest tests/integration/ops/ -m "flaggems or flaggems_python" -q
 
 python tests/manual/flaggems_overload_survey.py \
-  --conf torch_fl/configs/backends_cuda.conf \
+  --conf torch_fl/configs/backends_nvidia.conf \
   --out /tmp/flaggems-overloads.json
 ```
 
 There is no generic `backends_flaggems.conf` any more: FlagGems routing lives in
 each platform's own conf, so survey the conf for the platform under test
-(`backends_ascend.conf`, `backends_musa.conf`, ...).
+(`backends_ascend.conf`, `backends_mthreads.conf`, ...).
 
 The survey first rejects synthesized inputs that fail on CPU. Recompute each
 operator verdict from the remaining cases:
@@ -243,7 +243,7 @@ Two standalone tools help when the survey is impractical:
   Ascend without a full sweep. Triton JIT dominates, so use `--ops a,b,c` or
   `--shard i/n` rather than the full run.
 - `scripts/tools/record_musa_flaggems_failures.py` records MUSA ops that fail CI
-  so they move into `NATIVE_TRITON_GAPS`, then regenerates `backends_musa.conf`.
+  so they move into `NATIVE_TRITON_GAPS`, then regenerates `backends_mthreads.conf`.
 
 ## Step 7 — update evidence and review the boundary
 

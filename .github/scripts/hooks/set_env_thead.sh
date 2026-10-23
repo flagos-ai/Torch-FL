@@ -17,21 +17,21 @@
 # PPU is a CUDA-ABI boxing backend with its own FLAGOS_ACCELERATOR value: the toolchain
 # is CUDA (PPU torch is a local USE_CUDA=1 build whose libtorch_cpu.so provides
 # ~2092 undefined symbols of libtorch_fl.so), but the vendor is PPU, so the
-# build bundles its libtorch into lib_ppu/. The stock CPU wheel's core libs must
+# build bundles its libtorch into lib_thead/. The stock CPU wheel's core libs must
 # be selected from the PPU build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
 #   3. Installs the published FlagTree and FlagGems wheels into it.
 #   4. Exports FLAGOS_ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
 #   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
-#      torch_fl/lib_ppu/ via bundle_ppu_libtorch.sh (setup.py does not call it).
+#      torch_fl/lib_thead/ via bundle_thead_libtorch.sh (setup.py does not call it).
 #
 # Nothing here reads a host bind mount, so the environment is fully reproducible
 # from the image plus this script's indexes.
 #
 # Core selection itself is automatic at `import torch_fl` time, gated on
-# lib_ppu/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
-# backends_ppu.conf. No mode env var is involved.
+# lib_thead/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
+# backends_thead.conf. No mode env var is involved.
 
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # Use the official indexes by default: the PPU runner pod's HTTP proxy returns
@@ -346,13 +346,13 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=ppu
-# This lane stages the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_ppu
+# This lane stages the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_thead
 # and asserts the bundle, so it builds the boxing wheel. Boxing is off by default
 # for every accelerator now (cmake/flagos_platforms.json); without this the
 # default FlagGems-primary wheel would bundle no libtorch_cuda.so.
 #
 # The CUDA lane no longer opts in: it measures the FlagGems-primary default a
-# `pip install` gets. PPU keeps the vendor path until the ops backends_ppu.conf
+# `pip install` gets. PPU keeps the vendor path until the ops backends_thead.conf
 # routes to `cuda` have a FlagGems route of their own -- flipping it first would
 # leave them on cpu_fallback.
 export FLAGOS_BUILD_BOXING=1
@@ -389,10 +389,10 @@ if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
   build_flagos_inplace
 fi
 
-# Bundle PPU core+CUDA+MKL .so into torch_fl/lib_ppu/ and rewrite the plugin
+# Bundle PPU core+CUDA+MKL .so into torch_fl/lib_thead/ and rewrite the plugin
 # RPATH. setup.py does not auto-invoke this; mirrors the metax pattern. The
 # bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
-bash scripts/vendor/bundle_ppu_libtorch.sh
+bash scripts/vendor/bundle_thead_libtorch.sh
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "::error::nvidia-smi is unavailable"
@@ -410,11 +410,11 @@ assert sys.executable.startswith("/"), sys.executable
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
-assert Path("torch_fl/lib_ppu/libtorch_cuda.so").is_file()
+assert Path("torch_fl/lib_thead/libtorch_cuda.so").is_file()
 print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
-print(f"PPU bundle: {Path('torch_fl/lib_ppu').resolve()}")
+print(f"PPU bundle: {Path('torch_fl/lib_thead').resolve()}")
 PY
 
 # Prove the installed FlagGems stack is importable and wired to PPU, so a broken
@@ -422,7 +422,7 @@ PY
 # FlagGems runtime step. flag_gems queries torch.cuda at import time, so torch_fl
 # must be imported first: that is what swaps the stock CPU core libs for the PPU
 # build bundled above. The check therefore has to run after
-# bundle_ppu_libtorch.sh, and only in the integration stage, which is where
+# bundle_thead_libtorch.sh, and only in the integration stage, which is where
 # flagtree and flag_gems are installed.
 #
 # The three assertions are the ones that actually went wrong while bringing this

@@ -6,7 +6,7 @@ This is a manual hardware survey, not a pytest test. CI does not invoke files in
 ``tests/manual``.
 
 The unit of measurement is an active, unique FlagGems Python overload from the
-platform conf under test (``backends_cuda.conf`` for a CUDA host; each vendor has
+platform conf under test (``backends_nvidia.conf`` for a CUDA host; each vendor has
 its own ``backends_<platform>.conf``). It is spelled ``flaggems`` in the current
 configurations and ``flagos_python`` in the historical ones; both name
 ``Backend::kFlagGems``. Each overload runs in a fresh child process through
@@ -32,7 +32,7 @@ summary against a full-matrix one.
 
 Usage:
   python tests/manual/flaggems_overload_survey.py \
-      --conf torch_fl/configs/backends_cuda.conf \
+      --conf torch_fl/configs/backends_nvidia.conf \
       --out /tmp/flaggems-overloads.json
 
 Resume after interruption by running the same command again. Use ``--rerun`` to

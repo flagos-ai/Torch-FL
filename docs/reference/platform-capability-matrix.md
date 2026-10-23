@@ -15,7 +15,7 @@ when a platform gains or loses one.
 | lane (`FLAGOS_ACCELERATOR` id) | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
 | `nvidia` | native CUDA (FlagGems-primary; CUDA boxing opt-in) | `nvidia` | — (C++ / FlagGems / CUDA) | `nvidia` | 2034 | yes |
-| `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_ppu/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2037 | yes |
+| `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_thead/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2037 | yes |
 | `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2037 | yes |
 | `hygon` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `nvidia` (+ `hygon` DTK-core shim) | — (FlagGems / boxing opt-in) | `hygon` | 2037 | yes |
 | `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | yes |
@@ -81,7 +81,7 @@ build opts into boxing.
 ## Known gaps
 
 - **CUDA** is where the gap between the conf and the default wheel is widest.
-  `backends_cuda.conf` routes 392 ops to `flaggems` and 1642 to `cuda`, and the
+  `backends_nvidia.conf` routes 392 ops to `flaggems` and 1642 to `cuda`, and the
   default wheel compiles the generated FlagGems register list only, so those
   1642 ops are unregistered on PrivateUse1 and reach `cpu_fallback`. Of them,
   258 are FlagGems-capable on at least one of `metax`/`dcu`/`ppu` (unchanged --
@@ -134,7 +134,7 @@ build opts into boxing.
   `gpu_memset`. That keeps the CUDA-baseline parity group off in `.github/configs/thead.yml` —
   two of its tests need the memset category and one needs a `::`-qualified kernel name, which
   the vendor's `gemm_ktype0_*`/`sum_kernel_*` kernel set does not produce. It also ships no
-  `lib/flagos_platform` marker (it uses the `lib_ppu/` bundle).
+  `lib/flagos_platform` marker (it uses the `lib_thead/` bundle).
 - **Kunlunxin** (Kunlun P800 XPU) is a native vendor backend: its
   `backends_kunlunxin.conf` routes ops to the `kunlunxin` key (the vendor xdnn
   op library) and leaves the rest at `none`, with **no `cuda` boxing route**. It

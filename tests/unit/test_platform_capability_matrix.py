@@ -24,7 +24,6 @@ drift from reality, so the page cannot go stale silently.
 Pure text + os.listdir: no torch needed.
 """
 
-import json
 import re
 from pathlib import Path
 
@@ -85,6 +84,9 @@ def _matrix_rows() -> dict[str, list[str]]:
 
 def _conf_route_count(platform: str) -> int:
     conf = REPO_ROOT / "torch_fl" / "configs" / f"backends_{platform}.conf"
+    if not conf.exists() and platform == "drobotics":
+        # BPU keeps the platform-id file name; its list is empty.
+        conf = REPO_ROOT / "torch_fl" / "configs" / "backends_bpu.conf"
     count = 0
     for line in conf.read_text(encoding="utf-8").splitlines():
         body = line.split("#", 1)[0]
@@ -103,25 +105,25 @@ def test_matrix_covers_every_accelerator():
     """
     # The row is named for the lane (the vendor); the conf is still named for the
     # platform id, so a row's key is the conf's stem mapped through the table.
-    table = json.loads(
-        (REPO_ROOT / "cmake" / "flagos_platforms.json").read_text(encoding="utf-8")
-    )["accelerators"]
+    # Conf, row and lane are all named for the vendor now; BPU is still a
+    # platform row without a conf of its own (backends_bpu.conf, empty by design
+    # -- see test_bpu_conf_is_empty), so its row key and file disagree on purpose.
     confs = {
-        table[p.stem.removeprefix("backends_")]["vendor"]
+        p.stem.removeprefix("backends_")
         for p in (REPO_ROOT / "torch_fl" / "configs").glob("backends_*.conf")
         if not p.stem.endswith("_boxing")
     }
+    confs |= {"drobotics"} if "bpu" in confs else set()
+    confs.discard("bpu")
     assert set(_matrix_rows()) == confs
 
 
 def test_documented_conf_route_counts_match_the_confs():
-    table = json.loads(
-        (REPO_ROOT / "cmake" / "flagos_platforms.json").read_text(encoding="utf-8")
-    )["accelerators"]
     for lane, cells in _matrix_rows().items():
-        platform = next(k for k, row in table.items() if row["vendor"] == lane)
+        # The BPU row has no conf file: its route list is the empty
+        # backends_bpu.conf, which the count is 0 for either way.
         documented = int(cells[5])
-        assert documented == _conf_route_count(platform), platform
+        assert documented == _conf_route_count(lane), lane
 
 
 def test_documented_ci_coverage_matches_the_configs():

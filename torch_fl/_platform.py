@@ -37,7 +37,7 @@ Two functions:
 ``detect_platform()``
     The platform *name* the integration contracts use, resolving the build
     record first, then PPU's markers (older PPU wheels report cuda), then the
-    ``lib/flagos_platform`` marker and the ``lib_ppu`` bundle dir, then the
+    ``lib/flagos_platform`` marker and the ``lib_thead`` bundle dir, then the
     selected conf, and finally ``DEFAULT_PLATFORM``.
 """
 
@@ -90,27 +90,29 @@ _ACCELERATOR_TO_PLATFORM = {
 }
 # A record that reads "cuda" is ambiguous: it is both NVIDIA's platform id and
 # the value older builds wrote for a PPU wheel that predated its own id. Those
-# wheels are identified by PPU_SDK / the lib_ppu bundle, so the record alone must
+# wheels are identified by PPU_SDK / the lib_thead bundle, so the record alone must
 # NOT answer for them -- only a non-identity record (a vendor name, or a platform
 # id that is not also a fallback value) short-circuits detect_platform().
 _AMBIGUOUS_ACCELERATORS = frozenset({"cuda"})
 
 #: Conf-name fragments, matched in order, for the last-resort case where the
-#: marker and the record are both absent. "cuda" is last so a vendor conf that
+#: marker and the record are both absent. "nvidia" is last so a vendor conf that
 #: happens to mention it cannot win over its own name. These are the conf file
-#: names (backends_<platform>.conf), not vendor names -- a conf is per platform.
-_CONF_PLATFORM_FRAGMENTS = (
+#: names (backends_<vendor>.conf), so they are vendor names; each maps back to its
+#: platform through _VENDOR_TO_PLATFORM, because detect_platform() answers in
+#: platform ids.
+_CONF_VENDOR_FRAGMENTS = (
     "ascend",
     "metax",
-    "musa",
-    "gcu",
-    "dcu",
-    "ppu",
+    "mthreads",
+    "enflame",
+    "hygon",
+    "thead",
     "kunlunxin",
     "iluvatar",
-    "mps",
+    "apple",
     "tsingmicro",
-    "cuda",
+    "nvidia",
 )
 
 
@@ -193,7 +195,7 @@ def detect_platform() -> str:
 
     # PPU signals come before the marker: a PPU wheel predating its own build-record
     # value reports cuda and ships no lib/flagos_platform marker (CMake writes that
-    # only for gcu/musa/bpu/ascend), so PPU_SDK and the lib_ppu/ bundle are what
+    # only for gcu/musa/bpu/ascend), so PPU_SDK and the lib_thead/ bundle are what
     # identify it.
     if os.environ.get("PPU_SDK") or Path("/usr/local/PPU_SDK").is_dir():
         return "ppu"
@@ -206,11 +208,11 @@ def detect_platform() -> str:
             marker = ""
         if marker:
             return marker
-        if (package / "lib_ppu").is_dir():
+        if (package / "lib_thead").is_dir():
             return "ppu"
 
     config = _resolved_conf().lower()
-    for fragment in _CONF_PLATFORM_FRAGMENTS:
+    for fragment in _CONF_VENDOR_FRAGMENTS:
         if fragment in config:
-            return fragment
+            return _VENDOR_TO_PLATFORM[fragment]
     return DEFAULT_PLATFORM

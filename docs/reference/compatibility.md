@@ -214,7 +214,7 @@ every strategy resolves through FlagTree's real registry
 
 PPU has its own `FLAGOS_ACCELERATOR=ppu` value (see [`setup.py`](../../setup.py)) and rides the
 CUDA-boxing build against the PPU's CUDA-13-compatible SDK, bundling its own libtorch into
-`lib_ppu/`. `.github/configs/thead.yml` carries the CI manifest. The
+`lib_thead/`. `.github/configs/thead.yml` carries the CI manifest. The
 [README](../../README.md)'s build-from-source instructions remain the full local procedure.
 The shared `AutocastPrivateUse1` policies and CUDA-boxing AMP routes expose
 `torch.autocast("flagos")` and `torch.amp.GradScaler("flagos")`, with FP16 and

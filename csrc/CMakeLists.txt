@@ -729,7 +729,7 @@ endif()
 
 if(FLAGOS_PLATFORM_WRITES_MARKER)
   # Which platforms land here is the `writes_platform_marker` flag in
-  # cmake/flagos_platforms.json. torch_fl/__init__.py pins backends_cuda.conf by
+  # cmake/flagos_platforms.json. torch_fl/__init__.py pins backends_nvidia.conf by
   # default, which on GCU/MUSA/BPU/Ascend/TsingMicro would route every op to the
   # (absent) CUDA kernels -- on a tsingmicro wheel that is a hard failure, not a
   # fallback, since the config routes to `cuda` and the CPU-torch build cannot

@@ -23,11 +23,11 @@ resolves 0, ``libc10_cuda.so`` 10) -- so the core libs must be swapped in, and
 
 That local build also links the system MKL from ``/usr/local/lib``
 (``libmkl_core``/``libmkl_gnu_thread``/``libmkl_intel_lp64``), which the bundling
-script copies into ``lib_ppu/`` alongside the core libs.
+script copies into ``lib_thead/`` alongside the core libs.
 
 See ``torch_fl.accelerator._vendor_libtorch`` for the private facade mechanism and
 why a ctypes preload cannot replace core libs. No env gate: selection is skipped when
-``torch_fl/lib_ppu/`` was not bundled or torch already IS the PPU build.  The PPU
+``torch_fl/lib_thead/`` was not bundled or torch already IS the PPU build.  The PPU
 SDK runtime stays on the target under ``/usr/local/PPU_SDK``.
 """
 
@@ -40,7 +40,7 @@ from torch_fl.accelerator._vendor_libtorch import (
     restore_original_libtorch as _restore,
 )
 
-_BUNDLE_DIR = "lib_ppu"
+_BUNDLE_DIR = "lib_thead"
 
 # Core C++ .so that must come from the PPU build as a self-consistent set.
 _CORE_SO = (
@@ -87,7 +87,7 @@ def _bundled_ppu_lib():
 def _discover_ppu_torch_lib():
     """Locate the PPU libtorch .so dir.
 
-    Priority: bundled lib_ppu/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
+    Priority: bundled lib_thead/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
     envs whose torch is a PPU build.
     """
     return discover_vendor_torch_lib(

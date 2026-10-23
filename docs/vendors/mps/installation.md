@@ -148,7 +148,7 @@ and `silu_backward` increments. The Qwen3.5 GatedDeltaNet checkpoint run then
 identified the two out-of-place `masked_fill` spellings as MPSGraph selects,
 bringing the native set to thirty-seven.
 Those thirty-seven are claimed on the `PrivateUse1` `mps` slot by
-`csrc/aten/register.cc`, and `torch_fl/configs/backends_mps.conf` routes exactly
+`csrc/aten/register.cc`, and `torch_fl/configs/backends_apple.conf` routes exactly
 them to `mps` and every other op to `none`, which is what sends the rest to
 `cpu_fallback`. The routes
 are generated from `csrc/aten/backends/apple/generated/mps_register.inc`, so the

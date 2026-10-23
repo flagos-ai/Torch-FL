@@ -90,12 +90,12 @@ def test_documentation_needs_no_hardware(files):
 def test_a_conf_is_still_named_for_its_platform_id():
     """Step 4 renames the confs; until then each one selects only its own lane."""
     for lane, conf in (
-        ("nvidia", "cuda"),
-        ("hygon", "dcu"),
-        ("mthreads", "musa"),
-        ("enflame", "gcu"),
-        ("thead", "ppu"),
-        ("apple", "mps"),
+        ("nvidia", "nvidia"),
+        ("hygon", "hygon"),
+        ("mthreads", "mthreads"),
+        ("enflame", "enflame"),
+        ("thead", "thead"),
+        ("apple", "apple"),
     ):
         assert _run(files=f"torch_fl/configs/backends_{conf}.conf")[1] == [lane], lane
 

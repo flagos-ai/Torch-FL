@@ -14,7 +14,7 @@
 
 """Input shapes that decide whether DCU's pinned routes may be unpinned.
 
-``backends_dcu.conf`` routes ``scatter_add_``, ``argmin``, ``mean``,
+``backends_hygon.conf`` routes ``scatter_add_``, ``argmin``, ``mean``,
 ``mean.dim`` and ``native_batch_norm`` to the CUDA boxing kernel. Each was
 moved off the FlagGems Python route after a same-tensor A/B on DCU in which the
 boxing arm matched ATen and the FlagGems arm did not:

@@ -7,7 +7,7 @@
 | NVIDIA CUDA | `FLAGOS_ACCELERATOR=cuda` (default) | FlagGems-primary; CUDA boxing over an external `libtorch_cuda.so` is opt-in | [CUDA Installation](../vendors/cuda/installation.md) |
 | MetaX | `FLAGOS_ACCELERATOR=metax` | FlagGems-primary; CUDA boxing via `cu-bridge` against the vendor libtorch is opt-in | [MetaX Installation](../vendors/metax/installation.md) |
 | Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | [Ascend Installation](../vendors/ascend/installation.md) |
-| PPU | `FLAGOS_ACCELERATOR=ppu` | FlagGems-primary; the CUDA-boxing path against the PPU's CUDA-13-compatible SDK (bundling its own libtorch into `lib_ppu/`) is opt-in | [PPU Installation](../vendors/ppu/installation.md) |
+| PPU | `FLAGOS_ACCELERATOR=ppu` | FlagGems-primary; the CUDA-boxing path against the PPU's CUDA-13-compatible SDK (bundling its own libtorch into `lib_thead/`) is opt-in | [PPU Installation](../vendors/ppu/installation.md) |
 | Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | FlagGems-primary; CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) is opt-in | [DCU Installation](../vendors/dcu/installation.md) |
 | Kunlunxin (Kunlun P800) | `FLAGOS_ACCELERATOR=kunlunxin` | Native XPU backend over the vendor xdnn operator library | [Kunlunxin Installation](../vendors/kunlunxin/installation.md) |
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64 ops | [GCU Installation](../vendors/gcu/installation.md) |

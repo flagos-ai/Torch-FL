@@ -60,7 +60,7 @@
 //     FlagGems-primary build compiles no boxed kernels, so the route resolves
 //     to nothing and `convolution_overrideable` falls to ATen's raising
 //     CompositeExplicitAutograd stub. FlagGems has no conv kernel to route to on
-//     either platform (register_flaggems_cuda.inc / _dcu.inc name none).
+//     either platform (register_flaggems_nvidia.inc / _dcu.inc name none).
 //   * metax, ppu -- the conf routes conv to FlagGems, so the conf-derived list
 //     does claim `convolution_overrideable` and only the forward is served.
 //     Nothing claims `convolution_backward_overrideable` that way, so the
@@ -630,7 +630,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #include "backends/enflame/generated/gcu_register.inc"
     #endif
     // Registered whenever the FlagGems Python path is compiled in, not only
-    // under FLAGOS_GCU_KERNEL: backends_gcu.conf routes ops to FlagGems by
+    // under FLAGOS_GCU_KERNEL: backends_enflame.conf routes ops to FlagGems by
     // default, so these kFlagGems dispatcher slots must exist or those routes
     // raise "backend not registered". Same contract as the MUSA include below.
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
@@ -660,7 +660,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_MUSA_KERNEL)
     #include "backends/mthreads/generated/musa_register.inc"
     #endif
-    // Registered unconditionally when FlagGems is compiled in: backends_musa.conf
+    // Registered unconditionally when FlagGems is compiled in: backends_mthreads.conf
     // routes ops to FlagGems by default, so these kFlagGems dispatcher slots must
     // exist or those routes raise "backend not registered". Gating them on an
     // opt-in env var was correct only while the default conf was mudnn-only.
@@ -757,13 +757,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #undef FLAGOS_GEN_IMPLS
   #elif defined(FLAGOS_FLAGGEMS_PYTHON)
   #if defined(FLAGOS_ACCEL_CUDA)
-  #include "generated/register_flaggems_cuda.inc"
+  #include "generated/register_flaggems_nvidia.inc"
   #elif defined(FLAGOS_ACCEL_METAX)
   #include "generated/register_flaggems_metax.inc"
   #elif defined(FLAGOS_ACCEL_DCU)
-  #include "generated/register_flaggems_dcu.inc"
+  #include "generated/register_flaggems_hygon.inc"
   #elif defined(FLAGOS_ACCEL_PPU)
-  #include "generated/register_flaggems_ppu.inc"
+  #include "generated/register_flaggems_thead.inc"
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_flaggems_tsingmicro.inc"
   #endif

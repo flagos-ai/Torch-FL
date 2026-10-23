@@ -315,7 +315,7 @@ fi
 
 # Populate the ignored package-data directory after the optional native
 # prebuild. This also normalizes the native RPATHs before wheel/editable install.
-bash scripts/vendor/bundle_maca_libtorch.sh
+bash scripts/vendor/bundle_metax_libtorch.sh
 
 # --- FlagGems cohort ---------------------------------------------------------
 #
@@ -351,7 +351,7 @@ bash scripts/vendor/bundle_maca_libtorch.sh
 #
 #     Importing torch_fl is what removes that condition: it selects the MetaX
 #     libtorch through a private facade (the bundle
-#     bundle_maca_libtorch.sh just wrote, or FLAGOS_VENDOR_TORCH_LIB), and it has
+#     bundle_metax_libtorch.sh just wrote, or FLAGOS_VENDOR_TORCH_LIB), and it has
 #     to happen before `import torch` -- which is exactly the order the probe
 #     uses. Child interpreters inherit the facade through PYTHONPATH; other
 #     processes select it independently when they import torch_fl first.

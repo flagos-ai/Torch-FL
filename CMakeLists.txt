@@ -257,7 +257,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
   #   hip/lib, lib64         hip runtime
   #   aillvm/lib             libomp.so
   #   .hyhal/rocm_smi/lib    librocm_smi64.so.2
-  # Keep in sync with VENDOR_RPATH in scripts/vendor/bundle_dcu_libtorch.sh.
+  # Keep in sync with VENDOR_RPATH in scripts/vendor/bundle_hygon_libtorch.sh.
   set(_dcu_rpath_dirs
       "${DCU_CUDA_ROOT}/lib64" "${ROCM_PATH}/lib" "${ROCM_PATH}/hip/lib"
       "${ROCM_PATH}/lib64" "${ROCM_PATH}/aillvm/lib" "${ROCM_PATH}/llvm/lib"

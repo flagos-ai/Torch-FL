@@ -238,7 +238,7 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
 def append_boxing_path_probe(device=None, platform=None):
     """Append the one workload op that still runs on the device backend.
 
-    Under a FlagGems-first conf (``backends_cuda.conf``) every op the shared
+    Under a FlagGems-first conf (``backends_nvidia.conf``) every op the shared
     workload used to reach cuBLAS with -- ``mm``, ``relu``, ``sort``, ``sum``,
     ``randn`` -- is a Triton kernel. That costs the trace three things the
     profiler contract asserts on, all measured on A100:

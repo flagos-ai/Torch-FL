@@ -2,7 +2,7 @@
 """Generate the GCU FlagGems registration list.
 
 ``csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc`` claims the
-FlagGems Python ops on PrivateUse1 so that ``backends_gcu.conf`` can route them
+FlagGems Python ops on PrivateUse1 so that ``backends_enflame.conf`` can route them
 to the ``flaggems`` backend. ``gcu_register.inc`` only covers the ops topsaten
 has a kernel for, so without this file most FlagGems routes have no registered
 slot: the call does not box to CPU, it reaches the dispatcher's empty

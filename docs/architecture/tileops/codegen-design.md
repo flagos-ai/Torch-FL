@@ -44,7 +44,7 @@ classes resolve by name (0 unresolved, measured).
 Intersecting the last segment of `ref_api` (with an alias table:
 `torch.matmul -> mm`, `torch.nn.functional.softmax -> _softmax`,
 `layer_norm -> native_layer_norm`, ...) against the 1009 aten base names in
-`backends_cuda.conf`:
+`backends_nvidia.conf`:
 
 - **102 Ops align** (90 unique aten names, 8.9% of the conf), distributed by
   family: `elementwise_unary_math` 23, `elementwise_binary` 23, `reduction` 19,
@@ -277,7 +277,7 @@ classify -> call a generator per category -> write files and conf):
 
 1. Read every manifest yaml, filter to `status == "implemented"`.
 2. Map `ref_api` to an aten base name via `ATEN_ALIAS`; intersect with the base
-   names in `backends_cuda.conf` and drop anything outside it (-> 102).
+   names in `backends_nvidia.conf` and drop anything outside it (-> 102).
 3. Take ctor parameters from `inspect.signature(cls.__init__)` (dropping
    `self/kernel_map/tune`) and look up `RECIPES` to pick a recipe; anything not
    found falls to `MANUAL` (34 operators, see section 3.4).
@@ -806,7 +806,7 @@ ahead of torch.)
 implementation is registered on PrivateUse1, so calling aten directly on a flagos
 tensor **recurses infinitely** (measured: `RecursionError`). Changed to
 `_make_fallback()`: box to a CUDA view with zero copy, run aten on CUDA (which is
-what `backends_cuda.conf` does by default anyway), then unbox.
+what `backends_nvidia.conf` does by default anyway), then unbox.
 
 **(c) `TILELANG_DISABLE_CACHE=1` must be set before importing tileops.** TileLang
 reads the variable at import time; setting it later has no effect, and the

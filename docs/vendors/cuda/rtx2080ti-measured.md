@@ -91,7 +91,7 @@ if not grad_output.is_contiguous():
 
 | Failure | Cause |
 |---|---|
-| `test_conv1d_dispatch.py` (3 fwd + 3 bwd) | `convolution_overrideable not implemented`. `backends_cuda.conf` routes `convolution*` to `cuda`, and on a boxing-off build that key has no kernel, so the call reaches `cpu_fallback` and raises. Expected for this wheel shape, not a 2080 Ti result |
+| `test_conv1d_dispatch.py` (3 fwd + 3 bwd) | `convolution_overrideable not implemented`. `backends_nvidia.conf` routes `convolution*` to `cuda`, and on a boxing-off build that key has no kernel, so the call reaches `cpu_fallback` and raises. Expected for this wheel shape, not a 2080 Ti result |
 | `*_dispatch_log_flaggems_python` (cat, embedding, embedding_dense_backward, nll_loss, sum) | assert the route resolves to `flagos_python`; this build routes to `flaggems` |
 | `TestNewOnesGcuRoute` (4) | marked `@pytest.mark.gcu`; GCU-only |
 | `test_where_dispatch.py::test_out_grows_from_empty` | FlagGems `where` rejects a 0-size `out` |
@@ -115,7 +115,7 @@ suite above ran on that fallback.
 
 There is a `_nvidia/turing/` directory, so the map looks like an omission, but
 it is a narrow one: in 5.4.0 that directory holds a single override
-(`ops/_safe_softmax.py`), and `backends_cuda.conf` routes `_safe_softmax` to
+(`ops/_safe_softmax.py`), and `backends_nvidia.conf` routes `_safe_softmax` to
 `cuda`, which on this boxing-off wheel reaches `cpu_fallback` rather than
 FlagGems. Adding `"7": "turing"` would enable that one override and no more.
 `ARCH=turing` is not a workaround either: the lookup derives its key with

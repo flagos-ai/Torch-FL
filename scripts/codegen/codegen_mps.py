@@ -16,7 +16,7 @@
 #
 # Two consequences worth stating up front, mirroring codegen_kunlunxin.py:
 #
-#   * There is no conf writer. torch_fl/configs/backends_mps.conf is generated
+#   * There is no conf writer. torch_fl/configs/backends_apple.conf is generated
 #     by scripts/codegen/gen_vendor_confs.py from the emitted mps_register.inc
 #     (mps is in VENDORS), so the register file is the single hand-off between
 #     the two generators and the conf keeps one writer.
@@ -5266,7 +5266,7 @@ INC_HEADER = """\
 // cpu_fallback. So this file is exactly the Apple backend's coverage set.
 //
 // It is also what scripts/codegen/gen_vendor_confs.py reads to decide which ops
-// backends_mps.conf may name for this backend, so the conf cannot claim a route
+// backends_apple.conf may name for this backend, so the conf cannot claim a route
 // this file does not register.
 
 """

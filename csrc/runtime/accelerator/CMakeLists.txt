@@ -94,7 +94,7 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "dcu")
       POSITION_INDEPENDENT_CODE ON)
   flagos_set_portable_rpath(flagos_dtk_core_compat)
   install(TARGETS flagos_dtk_core_compat
-      LIBRARY DESTINATION lib_dcu)
+      LIBRARY DESTINATION lib_hygon)
 elseif(FLAGOS_ACCELERATOR STREQUAL "gcu")
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} ${TOPS_ROOT}/include)
   target_link_directories(${LIBRARY_NAME} PRIVATE ${TOPS_ROOT}/lib)

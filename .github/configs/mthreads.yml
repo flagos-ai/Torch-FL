@@ -30,7 +30,7 @@ runner_labels:
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
   - torch_fl/accelerator/mthreads/
-  - torch_fl/configs/backends_musa.conf
+  - torch_fl/configs/backends_mthreads.conf
   - csrc/aten/backends/mthreads/
   - csrc/runtime/accelerator/mthreads/
   - csrc/runtime/allocator/backends/mthreads_memory.h

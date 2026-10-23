@@ -16,7 +16,7 @@ forward issues **8826 `cudaMemcpy`**; 71 ops reach `cpu_fallback`.
 
 ## Root cause
 
-`torch_fl/configs/backends_cuda.conf` holds 2039 routes: **1630 to `cuda`**, 353 to
+`torch_fl/configs/backends_nvidia.conf` holds 2039 routes: **1630 to `cuda`**, 353 to
 `flaggems`. The `cuda` route is how the conf says "run ATen's CUDA kernel here",
 and on a boxing build it does exactly that — `DeviceBoxingGuard` retags to
 `DispatchKey::CUDA` and ATen's kernel runs.

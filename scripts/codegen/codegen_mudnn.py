@@ -54,7 +54,7 @@ Generates:
       ops it has a kernel for; everything else stays unregistered and reaches
       the cpu_fallback (registering an op with no kernel behind it would instead
       hit the dispatcher's "backend not registered" check).
-  - appends `<op> = musa` to torch_fl/configs/backends_musa.conf
+  - appends `<op> = musa` to torch_fl/configs/backends_mthreads.conf
 """
 
 import argparse
@@ -74,7 +74,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 OUT_CC = REPO / "csrc/aten/backends/mthreads/generated/musa_kernels.cc"
 OUT_INC = REPO / "csrc/aten/backends/mthreads/generated/musa_register.inc"
 REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
-CONF = REPO / "torch_fl/configs/backends_musa.conf"
+CONF = REPO / "torch_fl/configs/backends_mthreads.conf"
 
 # --------------------------------------------------------------------------
 # Op registry: schema op name -> (category, mudnn mode).
@@ -3047,7 +3047,7 @@ def main():
     ap.add_argument(
         "--no-conf",
         action="store_true",
-        help="do not append covered ops to backends_musa.conf",
+        help="do not append covered ops to backends_mthreads.conf",
     )
     args = ap.parse_args()
 

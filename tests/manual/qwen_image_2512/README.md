@@ -726,7 +726,7 @@ The 24 on the boxing path: `_upsample_nearest_exact2d`, `addmm`, `alias`, `cat`,
 
 Two of those are worth calling out for a chip that has to reproduce them.
 `view_as_complex` and `view_as_real` are the complex-dtype rotary embeddings of
-§3; they are on the boxing path because `torch_fl/configs/backends_cuda.conf`
+§3; they are on the boxing path because `torch_fl/configs/backends_nvidia.conf`
 routes them there (`view_as_complex = cuda`, `view_as_real = cuda`), and they are
 called 24,000 and 120,000 times per image respectively. `convolution` is the
 VAE's causal `Conv3d`, 37 calls per image.

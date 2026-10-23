@@ -465,7 +465,7 @@ export FLAGOS_ACCELERATOR=cuda
 # by default for every accelerator (cmake/flagos_platforms.json) and the opt-in
 # is an explicit FLAGOS_BUILD_BOXING=1 the lane deliberately does not set, so CI
 # measures the configuration that actually ships. What boxing used to serve --
-# the ops backends_cuda.conf routes to `cuda` rather than to a FlagGems kernel
+# the ops backends_nvidia.conf routes to `cuda` rather than to a FlagGems kernel
 # -- is consequently unregistered here and reaches cpu_fallback; the `cuda`
 # marker gate in tests/integration/ops/conftest.py skips the cases that assert
 # that routing rather than letting them fail on a kernel the wheel does not

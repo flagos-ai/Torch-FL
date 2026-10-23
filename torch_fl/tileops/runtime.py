@@ -305,7 +305,7 @@ def _make_fallback(overload: str):
     Calling ``torch.ops.aten.<op>`` on a flagos tensor would re-enter this very
     registration and recurse forever. Instead the args are boxed to CUDA views
     (zero-copy) and aten runs there, which is exactly what the default
-    ``backends_cuda.conf`` route does anyway, then the result is unboxed.
+    ``backends_nvidia.conf`` route does anyway, then the result is unboxed.
     """
     op = _aten_op(overload)
 

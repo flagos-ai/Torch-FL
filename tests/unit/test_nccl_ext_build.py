@@ -81,7 +81,7 @@ def test_cuda_configuration_preserves_existing_link_set(tmp_path, monkeypatch):
 def test_dcu_configuration_uses_bundled_libtorch_and_rccl(tmp_path):
     repo = tmp_path / "repo"
     dtk = tmp_path / "dtk"
-    bundled = repo / "torch_fl" / "lib_dcu"
+    bundled = repo / "torch_fl" / "lib_hygon"
     _make_dtk(dtk)
     _make_dcu_torch_lib(bundled)
 
@@ -99,7 +99,7 @@ def test_dcu_configuration_uses_bundled_libtorch_and_rccl(tmp_path):
     )
     assert config.library_dirs == (str(bundled), str(dtk / "lib"))
     assert config.rpaths == (
-        "$ORIGIN/../../lib_dcu",
+        "$ORIGIN/../../lib_hygon",
         str(dtk / "lib"),
     )
 
@@ -201,7 +201,7 @@ def test_wheel_extension_targets_the_package_path_with_the_dcu_link_set(tmp_path
     vendor_lib = tmp_path / "vendor-torch" / "lib"
     _make_dtk(dtk)
     _make_dcu_torch_lib(vendor_lib)
-    _make_dcu_torch_lib(repo / "torch_fl" / "lib_dcu")
+    _make_dcu_torch_lib(repo / "torch_fl" / "lib_hygon")
 
     extension = build.wheel_extension(
         {
@@ -225,11 +225,11 @@ def test_wheel_extension_targets_the_package_path_with_the_dcu_link_set(tmp_path
         "TORCH_EXTENSION_NAME": "_flagos_nccl",
     }
     assert extension.extra_compile_args == ["-std=c++17"]
-    # The bundled lib_dcu is the only RUNPATH a wheel may carry, even though the
+    # The bundled lib_hygon is the only RUNPATH a wheel may carry, even though the
     # vendor tree and DTK are still link search paths.
-    assert extension.extra_link_args == ["-Wl,-rpath,$ORIGIN/../../lib_dcu"]
+    assert extension.extra_link_args == ["-Wl,-rpath,$ORIGIN/../../lib_hygon"]
     assert str(vendor_lib) in extension.library_dirs
-    assert str(repo / "torch_fl" / "lib_dcu") in extension.library_dirs
+    assert str(repo / "torch_fl" / "lib_hygon") in extension.library_dirs
     assert str(dtk / "cuda" / "cuda-12" / "include") in extension.include_dirs
     # torch's own include/library paths are deliberately absent: resolving them
     # here would make loading setup.py import torch. setup.py adds them at
@@ -254,7 +254,7 @@ def test_every_build_defines_the_module_init_symbol(tmp_path):
     vendor_lib = tmp_path / "vendor-torch" / "lib"
     _make_dtk(dtk)
     _make_dcu_torch_lib(vendor_lib)
-    _make_dcu_torch_lib(repo / "torch_fl" / "lib_dcu")
+    _make_dcu_torch_lib(repo / "torch_fl" / "lib_hygon")
     env = {
         "FLAGOS_ACCELERATOR": "dcu",
         "ROCM_PATH": str(dtk),
@@ -289,7 +289,7 @@ def test_wheel_rpaths_keeps_only_relocatable_entries(tmp_path):
     vendor_lib = tmp_path / "vendor-torch" / "lib"
     _make_dtk(dtk)
     _make_dcu_torch_lib(vendor_lib)
-    _make_dcu_torch_lib(repo / "torch_fl" / "lib_dcu")
+    _make_dcu_torch_lib(repo / "torch_fl" / "lib_hygon")
 
     config = build._build_config(
         {
@@ -302,13 +302,13 @@ def test_wheel_rpaths_keeps_only_relocatable_entries(tmp_path):
 
     assert config.rpaths == (
         str(vendor_lib),
-        "$ORIGIN/../../lib_dcu",
+        "$ORIGIN/../../lib_hygon",
         str(dtk / "lib"),
     )
-    assert build._wheel_rpaths(config) == ("$ORIGIN/../../lib_dcu",)
+    assert build._wheel_rpaths(config) == ("$ORIGIN/../../lib_hygon",)
     assert build._extension_kwargs(config)["extra_link_args"] == [
         f"-Wl,-rpath,{vendor_lib}",
-        "-Wl,-rpath,$ORIGIN/../../lib_dcu",
+        "-Wl,-rpath,$ORIGIN/../../lib_hygon",
         f"-Wl,-rpath,{dtk / 'lib'}",
     ]
 

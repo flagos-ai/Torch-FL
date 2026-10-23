@@ -847,7 +847,7 @@ inline at::ScalarType ClampComputeDtype(
 // the op just issued; it does not wait for work another producer already queued,
 // and on this backend there is another producer. `mean.dim`, `pow.Scalar` and
 // the other reduction/pointwise ops that carry `= flaggems` in
-// configs/backends_gcu.conf run through triton, and topsaten submits to the same
+// configs/backends_enflame.conf run through triton, and topsaten submits to the same
 // tops stream triton launches on -- but an op that is merely *submitted* behind
 // a queued kernel does not read that kernel's output on this hardware. Measured
 // on an S60 at `transformer_blocks.0.attn.norm_q` -- the RMSNorm every attention

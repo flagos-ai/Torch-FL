@@ -40,7 +40,7 @@
 // unbound strides, so the bool row becomes an fp32 additive with stride 0 on its
 // broadcast axes before the call (RouteMask). Everything else keeps the boxed
 // route: the calls outside those bounds, the other boxing confs (which name the
-// op `cuda`), and the confs that do not name it at all (backends_cuda.conf,
+// op `cuda`), and the confs that do not name it at all (backends_nvidia.conf,
 // TsingMicro).
 // HasBackendForOp() is what keeps that last case out of the route, because an
 // unlisted op reads as flaggems -- the right default for the generated leaf

@@ -348,10 +348,19 @@ drop the hyphen), `apple`. Declared as `vendor` in
 
 **Platform id** — the key in the same table: `cuda`, `dcu`, `musa`, `gcu`,
 `ppu`, `bpu`, `mps`, or the vendor name itself where they coincide. It is what
-CMake, `setup.py`, the wheel filename, `backends_<platform>.conf` and the
-`.github/configs/<platform>.yml` lane file key on. Both spellings of
-`FLAGOS_ACCELERATOR` resolve to the same row; a vendor name prints the row it
-resolved to.
+CMake, `setup.py`'s kernel-switch table and the CI runner configuration key on.
+**Everything a reader names is the vendor**: the conf (`backends_<vendor>.conf`),
+its route keys, the `register_flaggems_<vendor>.inc`, the `lib_<vendor>/` bundle,
+the lane file, and the `ACCELERATOR` a wheel records. Both spellings of
+`FLAGOS_ACCELERATOR` resolve to the same row; the platform id remains accepted
+so older scripts and docs keep working.
+
+The **wheel filename** keeps the SDK segment (`+cuda13.3`, `+dtk2604`,
+`+maca3.8.1.3`, `+ppu2.0.0`): that is the build variant, it is what every
+published `flagtree`/`torch_fl` artifact on `resource.flagos.net` uses, and the
+lane already carries the vendor. `FLAGOS_BUILD_BOXING`-style switches and
+`Backend` spellings follow the same rule: a name a user types resolves either
+half; a name the tree produces is the vendor.
 
 **Chip** — a specific part (`Ascend 310B`, `910B`, `A100`, …). Chip names are
 **source-only**: a runtime predicate such as `csrc/aten/backends/ascend/

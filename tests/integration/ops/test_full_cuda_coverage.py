@@ -17,7 +17,7 @@ Full-CUDA-coverage sampling tests.
 
 After the codegen was expanded from the hand-listed 71-op conf to the full set
 of leaf CUDA operators (~1800 ops, see scripts/codegen/codegen_ops.py FLAGOS_CODEGEN_ALL
-mode), every op in torch_fl/configs/backends_cuda.conf is routed to either the
+mode), every op in torch_fl/configs/backends_nvidia.conf is routed to either the
 FlagGems Python path or the CUDA boxing kernel. The per-op test files only cover
 the original 71; this file samples a representative slice of the NEWLY
 registered ops across every codegen category and checks:
@@ -36,8 +36,8 @@ external libtorch_cuda.so). They are marked @cuda so the per-platform conftest
 skips them on metax/ascend runtimes.
 
 Usage:
-    FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-      bash scripts/vendor/with_cuda_libtorch.sh \
+    FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+      bash scripts/vendor/with_nvidia_libtorch.sh \
       pytest tests/integration/ops/test_full_cuda_coverage.py -v
 """
 
@@ -55,7 +55,7 @@ DEVICE = "flagos:0"
 
 # The CUDA conf shipped alongside torch_fl. Used by TestNewOpDispatchRouting to
 # assert the generated default route independently of ambient opt-in variables.
-_CUDA_CONF = pathlib.Path(torch_fl.__file__).parent / "configs" / "backends_cuda.conf"
+_CUDA_CONF = pathlib.Path(torch_fl.__file__).parent / "configs" / "backends_nvidia.conf"
 
 
 # ---------------------------------------------------------------------------

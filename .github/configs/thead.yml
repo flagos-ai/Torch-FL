@@ -26,7 +26,7 @@ runner_labels:
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
   - torch_fl/accelerator/thead/
-  - torch_fl/configs/backends_ppu.conf
+  - torch_fl/configs/backends_thead.conf
   - csrc/aten/backends/thead/
   - csrc/runtime/accelerator/thead/
   - csrc/runtime/accelerator/nvidia/
@@ -34,7 +34,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/thead_memory.h
   - .github/scripts/hooks/set_env_thead.sh
   - .github/scripts/set_env_thead.sh
-  - scripts/vendor/bundle_ppu_libtorch.sh
+  - scripts/vendor/bundle_thead_libtorch.sh
 
 container_volumes:
   # PPU_SDK (underscore, /usr/local/PPU_SDK) is baked into the image with
@@ -89,7 +89,7 @@ wheel_artifact_name: wheel-ppu
 # the hand-written heredoc that used to sit here did.
 #
 # PPU takes the CUDA dispatch key over with its own bundled libtorch_cuda.so
-# under lib_ppu, which is why torch.version.cuda reads 13.0 in a stock +cpu
+# under lib_thead, which is why torch.version.cuda reads 13.0 in a stock +cpu
 # wheel, and why both the torch.cuda and the flagos device surfaces have to
 # report devices. The Qwen3 groups are the two steps that need the mounted
 # checkpoint, so the mount is asserted here.
@@ -99,7 +99,7 @@ environment_check:
   torch_path_forbidden:
     - /opt/conda/
   require_package_files:
-    - lib_ppu/libtorch_cuda.so
+    - lib_thead/libtorch_cuda.so
   flagos_devices:
     more_than: 0
   cuda_available: true

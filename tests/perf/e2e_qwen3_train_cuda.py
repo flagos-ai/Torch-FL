@@ -19,7 +19,7 @@ Measures pure wall-clock step time and throughput without TorchDispatchMode
 overhead, providing a fair e2e comparison with native CUDA.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
+    CUDA_VISIBLE_DEVICES=0 FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
     python tests/perf/e2e_qwen3_train_cuda.py \
         --model /nfs/hcr/models/Qwen/Qwen3-0.6B --steps 10
 """

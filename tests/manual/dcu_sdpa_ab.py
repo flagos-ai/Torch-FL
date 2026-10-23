@@ -18,7 +18,7 @@ PR #347 gave the op a FlagGems route on MetaX, where the boxing path had no
 reachable fused kernel. DCU is the other CUDA-boxing platform where the same
 whole-op override (`csrc/aten/sdp_choice_stub.cc`) is compiled in, so the
 question of whether to follow MetaX is a conf line. This is the measurement
-behind the answer, which is no: `backends_dcu.conf` keeps the `cuda` route and
+behind the answer, which is no: `backends_hygon.conf` keeps the `cuda` route and
 the vendor CUTLASS flash adapter is 2.5x faster than FlagGems at both shapes.
 
 Three arms, all through the same `torch.ops.aten.scaled_dot_product_attention`:

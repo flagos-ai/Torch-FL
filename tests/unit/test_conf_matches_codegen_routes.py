@@ -16,7 +16,7 @@
 
 `scripts/codegen/codegen_ops.py` decides each op's backend from three sets --
 `cuda_route_exceptions`, `measured_flaggems_rollback` and
-`metadata_route_overrides` -- and `torch_fl/configs/backends_cuda.conf` is its
+`metadata_route_overrides` -- and `torch_fl/configs/backends_nvidia.conf` is its
 output. The two can only be checked against each other by re-running the
 generator, and that is not always possible: the generator discovers the FlagGems
 cohort from whatever `flag_gems` is installed, so on a box whose FlagGems is
@@ -40,7 +40,7 @@ import pytest
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _CODEGEN = _REPO / "scripts/codegen/codegen_ops.py"
-_CONF = _REPO / "torch_fl/configs/backends_cuda.conf"
+_CONF = _REPO / "torch_fl/configs/backends_nvidia.conf"
 
 _ROUTE_SETS = (
     "cuda_route_exceptions",

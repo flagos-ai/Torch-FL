@@ -81,24 +81,27 @@ def test_route_priority_is_cpp_then_python_then_tileops_then_vendor_then_none():
     fg_cpp, fg_py, native = {"a"}, {"b"}, {"c", "t"}
     tileops = {"t"}
     reg = {"a", "b", "c", "d", "t"}
-    assert g.route("a", "musa", fg_cpp, fg_py, native, reg, tileops) == "flaggems_cpp"
-    assert g.route("b", "musa", fg_cpp, fg_py, native, reg, tileops) == "flaggems"
+    assert (
+        g.route("a", "mthreads", fg_cpp, fg_py, native, reg, tileops) == "flaggems_cpp"
+    )
+    assert g.route("b", "mthreads", fg_cpp, fg_py, native, reg, tileops) == "flaggems"
     # tileops outranks the vendor kernel, and still records that it exists.
     assert (
-        g.route("t", "musa", fg_cpp, fg_py, native, reg, tileops) == "tileops  # musa"
+        g.route("t", "mthreads", fg_cpp, fg_py, native, reg, tileops)
+        == "tileops  # mthreads"
     )
-    assert g.route("c", "musa", fg_cpp, fg_py, native, reg, tileops) == "musa"
-    assert g.route("d", "musa", fg_cpp, fg_py, native, reg, tileops) == "none"
+    assert g.route("c", "mthreads", fg_cpp, fg_py, native, reg, tileops) == "mthreads"
+    assert g.route("d", "mthreads", fg_cpp, fg_py, native, reg, tileops) == "none"
 
 
 def test_route_loses_tileops_to_flaggems_and_withholds_it_when_unregistered():
     """tileops sits below both FlagGems keys and above the vendor, and is subject
     to the same registration ceiling as every other accelerated route."""
     both = {"t"}
-    assert g.route("t", "musa", both, set(), set(), both, both) == "flaggems_cpp"
-    assert g.route("t", "musa", set(), both, set(), both, both) == "flaggems"
+    assert g.route("t", "mthreads", both, set(), set(), both, both) == "flaggems_cpp"
+    assert g.route("t", "mthreads", set(), both, set(), both, both) == "flaggems"
     # unregistered: no route may be claimed, tileops included
-    assert g.route("t", "musa", set(), set(), set(), set(), both) == "none"
+    assert g.route("t", "mthreads", set(), set(), set(), set(), both) == "none"
 
 
 def test_route_omits_tileops_when_the_platform_cannot_compile_the_slot():
@@ -117,18 +120,20 @@ def test_route_withholds_flaggems_from_unregistered_ops():
     FlagGems wrapper, so claiming `flaggems` would report coverage for a call
     path that boxes to CPU."""
     fg_cpp, fg_py = {"a"}, {"b"}
-    assert g.route("a", "musa", fg_cpp, fg_py, set(), set()) == "none"
-    assert g.route("b", "musa", fg_cpp, fg_py, set(), set()) == "none"
+    assert g.route("a", "mthreads", fg_cpp, fg_py, set(), set()) == "none"
+    assert g.route("b", "mthreads", fg_cpp, fg_py, set(), set()) == "none"
     # ...and it is the registration set that decides, not the coverage set.
-    assert g.route("b", "musa", fg_cpp, fg_py, set(), {"b"}) == "flaggems"
+    assert g.route("b", "mthreads", fg_cpp, fg_py, set(), {"b"}) == "flaggems"
 
 
 def test_route_annotates_vendor_kernels_that_lose_to_flaggems():
     """The annotation is what tells a reader (and FLAGOS_FORCE_BACKEND=vendor)
     that a kernel exists behind an op FlagGems currently wins."""
     both = {"mm"}
-    assert g.route("mm", "musa", both, set(), both, both) == "flaggems_cpp  # musa"
-    assert g.route("mm", "musa", set(), both, both, both) == "flaggems  # musa"
+    assert (
+        g.route("mm", "mthreads", both, set(), both, both) == "flaggems_cpp  # mthreads"
+    )
+    assert g.route("mm", "mthreads", set(), both, both, both) == "flaggems  # mthreads"
 
 
 def test_route_boxing_never_emits_none():
@@ -176,18 +181,18 @@ def test_vendor_registered_ops_includes_the_flaggems_inc():
     """MUSA claims a second file whose wrappers route to the FlagGems Python
     slot. Those ops are registered without being native kernels, so the
     registered set must be strictly wider than the native set."""
-    native = g.vendor_native_ops("musa")
-    registered = g.vendor_registered_ops("musa")
+    native = g.vendor_native_ops("mthreads")
+    registered = g.vendor_registered_ops("mthreads")
     assert native < registered
 
 
 def test_musa_complex_views_use_native_metadata_kernels():
     """Complex rotary views cannot fall through to CPU because they alias storage."""
-    routes = g.build_all(CONF_DIR)["musa"][1]
-    native = g.vendor_native_ops("musa")
+    routes = g.build_all(CONF_DIR)["mthreads"][1]
+    native = g.vendor_native_ops("mthreads")
     for op in ("view_as_complex", "view_as_real"):
         assert op in native
-        assert routes[op] == "musa"
+        assert routes[op] == "mthreads"
 
 
 def test_musa_registers_all_flaggems_ops_except_known_failures():
@@ -241,13 +246,13 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     Ops in NATIVE_TRITON_GAPS are NOT registered (to avoid "backend not registered"
     errors when they route to none/musa).
     """
-    routes = g.build_all(CONF_DIR)["musa"][1]
-    native = g.vendor_native_ops("musa")
+    routes = g.build_all(CONF_DIR)["mthreads"][1]
+    native = g.vendor_native_ops("mthreads")
     # The ceiling this platform's conf was actually built from: cuda reads the
     # measured package set, every other vendor the frozen pre-2026-10-22 one.
-    flaggems_py = g.flaggems_python_ops_for("musa")
-    registered = g.vendor_registered_ops("musa")
-    gaps = g.NATIVE_TRITON_GAPS.get("musa", set())
+    flaggems_py = g.flaggems_python_ops_for("mthreads")
+    registered = g.vendor_registered_ops("mthreads")
+    gaps = g.NATIVE_TRITON_GAPS.get("mthreads", set())
 
     # The shared ceiling is discovered from the installed flag_gems package, so it
     # is wider than any one vendor's measured cohort. Ops it gained after MUSA's
@@ -257,7 +262,7 @@ def test_musa_registers_all_flaggems_ops_except_known_failures():
     # pinned: widening either coverage set moves it without an edit here.
     pending = (
         g.FLAGGEMS_PENDING_NATIVE_OPS
-        if "musa" in g.FLAGGEMS_PENDING_NATIVE_VENDORS
+        if "mthreads" in g.FLAGGEMS_PENDING_NATIVE_VENDORS
         else set()
     )
     cohort = flaggems_py - pending
@@ -443,7 +448,7 @@ def test_default_confs_never_route_boxing(platform):
         key = value.split("#", 1)[0].strip()
         assert key in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
         assert key != g.BOXING_FALLBACK, op
-        assert key != "cuda", op
+        assert key != "nvidia", op
 
 
 def test_every_platform_covers_the_same_op_set():
@@ -500,7 +505,7 @@ def test_flaggems_cpp_set_is_a_subset_of_the_python_set():
 
 def test_tileops_set_survived_the_conf_deletion():
     """backends_tileops.conf carried this set as 60 `tileops` lines in a 2060-line
-    file that was otherwise a copy of backends_cuda.conf. It is now
+    file that was otherwise a copy of backends_nvidia.conf. It is now
     TILEOPS_OPS in scripts/codegen/backend_coverage.py, regenerated in place by
     scripts/codegen/codegen_tileops.py. The count is pinned because losing entries here
     silently shrinks what FLAGOS_FORCE_BACKEND=tileops can repin."""
@@ -514,7 +519,7 @@ def test_vendor_routing_never_exceeds_registration(vendor):
     """Every accelerated route must be an op the platform actually claims.
 
     This is the invariant the earlier generator broke: it used the CUDA-measured
-    FlagGems set as every vendor's coverage, so backends_musa.conf routed 482 ops
+    FlagGems set as every vendor's coverage, so backends_mthreads.conf routed 482 ops
     to `flaggems` against 158 registered -- 324 claims for calls that box to CPU.
     Equality (not just containment) also pins the converse: a registered op is
     never left at `none`, which would send a real kernel to cpu_fallback.
@@ -539,12 +544,12 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     it ships, so it is a generated full-coverage conf too.
     """
     assert set(g.VENDORS) == {
-        "musa",
-        "gcu",
+        "mthreads",
+        "enflame",
         "ascend",
         "kunlunxin",
         "iluvatar",
-        "mps",
+        "apple",
     }
     assert "metax" not in g.VENDORS
     assert "tsingmicro" not in g.VENDORS
@@ -572,17 +577,17 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
     assert g.boxing_measured_python_ops("backends_metax.conf") == (
         g.METAX_FLAGGEMS_MEASURED | g.METAX_COMPOSITE_FLAGGEMS
     )
-    assert g.boxing_measured_python_ops("backends_dcu.conf") == (
+    assert g.boxing_measured_python_ops("backends_hygon.conf") == (
         g.DCU_COMPOSITE_FLAGGEMS
     )
     # Named the other way round on purpose: a platform that never measured the
     # op gets nothing, and backends_metax.conf's set must not arrive here.
-    assert g.boxing_measured_python_ops("backends_musa.conf") == set()
+    assert g.boxing_measured_python_ops("backends_mthreads.conf") == set()
 
     built = g.build_all(CONF_DIR)
     for platform, (_, routes, _) in built.items():
         route = routes["scaled_dot_product_attention"].split("#", 1)[0].strip()
-        if platform in ("dcu", "metax"):
+        if platform in ("hygon", "metax"):
             assert route == "flaggems", f"{platform} routes the op to {route}"
         else:
             assert route != "flaggems", f"{platform} took a route it never measured"
@@ -754,7 +759,7 @@ def test_boxing_variant_has_no_none_entries(platform):
 def test_boxing_variant_platforms_are_the_cuda_compatible_ones():
     """NVIDIA, MetaX, DCU and PPU. The set is the platforms a boxing wheel exists
     for -- an extra row here ships a conf nothing can serve."""
-    assert set(g.BOXING_VARIANT_PLATFORMS) == {"cuda", "metax", "dcu", "ppu"}
+    assert set(g.BOXING_VARIANT_PLATFORMS) == {"nvidia", "metax", "hygon", "thead"}
 
 
 def test_boxing_variants_are_routed_and_committed():
@@ -784,7 +789,7 @@ def test_boxing_variant_leaves_unmeasured_ops_on_boxing():
     """The whole-coverage platforms have no measured FlagGems route beyond the
     shared ceiling, so their variants keep everything FlagGems does not cover on
     the boxing kernel rather than claiming coverage they never ran."""
-    cuda_routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["cuda"][1]
+    cuda_routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["nvidia"][1]
     assert set(cuda_routes.values()) == {"boxing"}
 
 
@@ -792,11 +797,11 @@ def test_boxing_variant_does_not_apply_measured_composite_routes():
     """DCU's measured scaled_dot_product_attention route belongs to the default
     conf; the variant's premise is that FlagGems is not what it trusts."""
     assert "scaled_dot_product_attention" in g.DCU_COMPOSITE_FLAGGEMS
-    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["dcu"][1]
+    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["hygon"][1]
     assert routes["scaled_dot_product_attention"] == "boxing"
 
 
-@pytest.mark.parametrize("platform", ["metax", "dcu", "ppu"])
+@pytest.mark.parametrize("platform", ["metax", "hygon", "thead"])
 def test_boxing_variant_keeps_the_platforms_triton_gaps(platform):
     """A gap is an op FlagGems covers that this backend cannot compile. The
     variant must not send it to flaggems just because boxing is the fallback.

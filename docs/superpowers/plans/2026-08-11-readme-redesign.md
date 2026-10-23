@@ -378,10 +378,10 @@ git commit -m "docs: add configuration and contribution references"
 - Reference: `README.md:224-465`
 - Reference: `.github/configs/{cuda,metax,dcu}.yml`
 - Reference: `.github/scripts/set_env_{cuda,metax,dcu}.sh`
-- Reference: `scripts/vendor/with_cuda_libtorch.sh`
-- Reference: `scripts/vendor/bundle_maca_libtorch.sh`
-- Reference: `scripts/vendor/bundle_ppu_libtorch.sh`
-- Reference: `scripts/vendor/bundle_dcu_libtorch.sh`
+- Reference: `scripts/vendor/with_nvidia_libtorch.sh`
+- Reference: `scripts/vendor/bundle_metax_libtorch.sh`
+- Reference: `scripts/vendor/bundle_thead_libtorch.sh`
+- Reference: `scripts/vendor/bundle_hygon_libtorch.sh`
 - Reference: `docs/vendors/cuda/external-libtorch-cuda.md`
 
 **Interfaces:**

@@ -142,7 +142,7 @@ sparse_resize_and_clear.out
 # torchgen yaml declares them, so codegen picks them up on a DCU box but not
 # on an upstream-torch box. Generating them would put DTK-only ATen/ops/
 # native_fuse_*.h includes into the shared cuda_kernels.cc and DTK-only routes
-# into the shared backends_cuda.conf, breaking the NVIDIA/MetaX builds. Skipped
+# into the shared backends_nvidia.conf, breaking the NVIDIA/MetaX builds. Skipped
 # so codegen output stays identical no matter which wheel it runs against.
 native_fuse_bias_dropout_add
 native_fuse_bias_dropout_add_backward

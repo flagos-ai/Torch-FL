@@ -232,7 +232,7 @@ recorded only from measurements, per CLAUDE.md.
 
 Status: stage 0 landed with the `mps` platform row; stage 1 landed with `abs`
 as the first `unary` op (`csrc/aten/backends/apple/`, `scripts/codegen/codegen_mps.py`,
-`backends_mps.conf` routing `abs` to `mps`), verified on an M-series host with
+`backends_apple.conf` routing `abs` to `mps`), verified on an M-series host with
 `tests/integration/ops/test_mps_unary.py` (matches CPU across f32/f16/bf16 and
 the integer dtypes at row widths that are not multiples of 16 bytes as well as
 aligned ones, bool declined to the same `NotImplementedError` as CPU).
@@ -1202,7 +1202,7 @@ runtime_caps.py`'s `RUNTIME_OPS` lists ten ops a platform must route to a real
 backend, and `require_routed()` raises rather than skips when one of them lands
 on `none` -- deliberately, because a `none` route there is a generation gap
 rather than a platform that does not implement the op. Every other platform's
-conf already routed both; only `backends_mps.conf` had them on `none`, so the
+conf already routed both; only `backends_apple.conf` had them on `none`, so the
 fix is the two kernels and not a skip. `cat` is MPSGraph's variadic
 `concatTensors:dimension:name:`, and the increment's two bugs are the two halves
 of the shape work. The first is the **row-pitch trap** section 6 records:
@@ -1255,7 +1255,7 @@ naming `mps`, and the cost cases.
 | `csrc/aten/register.cc` | `USE_MPS` arm that does not fall through to the generic `#else` |
 | `csrc/aten/backends/apple/` | native kernels (+ `generated/`) |
 | `scripts/codegen/codegen_mps.py` (+ `gen_vendor_confs.py` `VENDORS["mps"]`) | new generator / routing table |
-| `torch_fl/configs/backends_mps.conf` | new |
+| `torch_fl/configs/backends_apple.conf` | new |
 | `torch_fl/_platform.py`, `torch_fl/accelerator/apple/` | detection + compat |
 | `setup.py` | `mps` arm |
 | `tests/integration/test_mps_runtime.py` | smoke test, `@pytest.mark.mps` |

@@ -21,7 +21,7 @@
 # links TopsRider's libtopsrt/libtopsaten libraries instead.
 #
 # The FlagGems Python path is provisioned here the same way set_env_mthreads.sh
-# provisions it: the generated configs/backends_gcu.conf routes most overloads
+# provisions it: the generated configs/backends_enflame.conf routes most overloads
 # to a FlagGems Triton kernel and the rest to the native topsaten kernel, so the
 # isolated venv needs a Triton build carrying the "enflame" backend (flagtree)
 # plus FlagGems itself. See docs/vendors/gcu/flaggems-setup.md.

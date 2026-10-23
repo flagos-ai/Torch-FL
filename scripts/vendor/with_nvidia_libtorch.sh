@@ -11,8 +11,8 @@
 # LD_PRELOAD rather than loaded later from __init__.py.
 #
 # Usage:
-#   bash scripts/vendor/with_cuda_libtorch.sh pytest tests/integration/ops/test_add_dispatch.py -v
-#   bash scripts/vendor/with_cuda_libtorch.sh python -c "import torch_fl, torch; ..."
+#   bash scripts/vendor/with_nvidia_libtorch.sh pytest tests/integration/ops/test_add_dispatch.py -v
+#   bash scripts/vendor/with_nvidia_libtorch.sh python -c "import torch_fl, torch; ..."
 
 set -e
 
@@ -20,7 +20,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CUDA_ASSETS="${REPO_DIR}/.libtorch_cuda_assets"
 
 if [ "$#" -eq 0 ]; then
-  echo "usage: bash scripts/vendor/with_cuda_libtorch.sh <command> [args...]" >&2
+  echo "usage: bash scripts/vendor/with_nvidia_libtorch.sh <command> [args...]" >&2
   exit 2
 fi
 

@@ -102,7 +102,7 @@ uncovered falls back to CPU automatically:
   `fn_type` / `dispatcher`) and `name_map.json` as the naming authority.
 - **Add** an ascend-specific emitter: it emits an aclnn body rather than a boxing body, and its
   input is an `aten→aclnn` mapping table (a new file, e.g. `torch_fl/ascend_aclnn_map.json`)
-  rather than `backends_cuda.conf`.
+  rather than `backends_nvidia.conf`.
 - Output lands in `csrc/aten/backends/ascend/generated/`, picked up by the `ASCEND_KERNEL` glob
   in `csrc/CMakeLists.txt`.
 

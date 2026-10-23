@@ -19,7 +19,7 @@ Runs the worker once per backend in its own subprocess (routing is fixed at
 import), then prints a side-by-side table comparing three dispatch paths for
 the SAME op on the SAME device (flagos:0, shared GPU memory):
 
-    cuda     : the platform conf as shipped (backends_cuda.conf), pure C++
+    cuda     : the platform conf as shipped (backends_nvidia.conf), pure C++
                dispatch into the vendor libtorch_cuda kernel.
     gems_py  : FLAGOS_FORCE_BACKEND=flaggems, Python dispatch -- kFlagOsPython
                crosses into CPython + pybind to launch the FlagGems Triton

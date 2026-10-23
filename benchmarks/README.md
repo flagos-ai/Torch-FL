@@ -47,7 +47,7 @@ analysis in [docs/vendors/bpu/integration.md](../docs/vendors/bpu/integration.md
 Compares the **host-side dispatch cost** of three paths for the same op on the
 same device (`flagos:0`, shared GPU memory):
 
-- **cuda** — the platform conf as shipped (`backends_cuda.conf`), pure C++
+- **cuda** — the platform conf as shipped (`backends_nvidia.conf`), pure C++
   dispatch into the vendor `libtorch_cuda` kernel.
 - **gems_py** — `FLAGOS_FORCE_BACKEND=flaggems`, Python dispatch: `kFlagOsPython`
   crosses into CPython + pybind to launch the FlagGems Triton kernel.

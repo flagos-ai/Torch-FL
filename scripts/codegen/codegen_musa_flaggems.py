@@ -2,7 +2,7 @@
 """Generate the MUSA FlagGems registration list.
 
 ``csrc/aten/backends/mthreads/generated/musa_flaggems_register.inc`` claims the
-FlagGems Python ops on PrivateUse1 so that ``backends_musa.conf`` can route them
+FlagGems Python ops on PrivateUse1 so that ``backends_mthreads.conf`` can route them
 to the ``flaggems`` backend. ``musa_register.inc`` only covers the ops mudnn has
 a kernel for, so without this file most FlagGems routes have no registered slot:
 the call does not box to CPU, it reaches the dispatcher's empty ``kFlagGems``

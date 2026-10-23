@@ -15,8 +15,8 @@
 """Unit tests for the PrivateUse1 "flagos" profiler support work.
 
 Run (must go through the CUDA libtorch preload wrapper):
-    FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-      bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+    FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+      bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
       tests/unit/test_profiler_privateuse1.py -v
 """
 

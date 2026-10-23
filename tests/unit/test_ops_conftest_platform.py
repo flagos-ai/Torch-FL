@@ -18,7 +18,7 @@ The ops gate skips backend-specific tests per detected platform
 (_PLATFORM_SKIP_MARKERS). PPU is a CUDA-ABI boxing backend, but it has its own
 value in the wheel's build record like every other chip; wheels built before it
 had one report cuda there and are still recognised through the PPU_SDK
-environment or the lib_ppu/ bundle directory. These tests pin the record
+environment or the lib_thead/ bundle directory. These tests pin the record
 mapping, the legacy PPU fallbacks, and the skip-set parity with cuda that
 keeps those changes behavior-neutral.
 
@@ -74,7 +74,7 @@ def isolated_torch_fl_import():
 
 
 def _fake_torch_fl(
-    tmp_path, *, record=None, marker=None, bundle_lib_ppu=False, resolved_conf=None
+    tmp_path, *, record=None, marker=None, bundle_lib_thead=False, resolved_conf=None
 ):
     """Point ``torch_fl`` at a stub package with the given layout.
 
@@ -99,8 +99,8 @@ def _fake_torch_fl(
         lib_dir = package / "lib"
         lib_dir.mkdir()
         (lib_dir / "flagos_platform").write_text(marker + "\n")
-    if bundle_lib_ppu:
-        (package / "lib_ppu").mkdir()
+    if bundle_lib_thead:
+        (package / "lib_thead").mkdir()
     sys.path.insert(0, str(tmp_path))
     try:
         yield package
@@ -160,33 +160,35 @@ def test_cuda_without_ppu_signals_stays_cuda(
         assert ops_conftest._platform.detect_platform() == "cuda"
 
 
-def test_lib_ppu_bundle_dir_identifies_ppu_without_env(
+def test_lib_thead_bundle_dir_identifies_ppu_without_env(
     monkeypatch, isolated_torch_fl_import, tmp_path
 ):
     """An installed PPU wheel with no PPU_SDK in the environment
     (dev pod with the baked SDK) is still recognized by its bundle dir."""
-    for _ in _fake_torch_fl(tmp_path, record="cuda", bundle_lib_ppu=True):
+    for _ in _fake_torch_fl(tmp_path, record="cuda", bundle_lib_thead=True):
         assert ops_conftest._platform.detect_platform() == "ppu"
 
 
 def test_marker_stays_authoritative_over_bundle_dir(
     monkeypatch, isolated_torch_fl_import, tmp_path
 ):
-    """A flagos_platform marker wins even if lib_ppu/ is also present, so the
+    """A flagos_platform marker wins even if lib_thead/ is also present, so the
     native-kernel platforms keep their existing precedence."""
-    for _ in _fake_torch_fl(tmp_path, record="cuda", marker="gcu", bundle_lib_ppu=True):
+    for _ in _fake_torch_fl(
+        tmp_path, record="cuda", marker="gcu", bundle_lib_thead=True
+    ):
         assert ops_conftest._platform.detect_platform() == "gcu"
 
 
 def test_resolved_ppu_backend_config_identifies_ppu(
     monkeypatch, isolated_torch_fl_import, tmp_path
 ):
-    """A wheel whose conf resolves to backends_ppu.conf is identified as PPU even
-    when neither PPU_SDK nor lib_ppu/ says so. This is the name-based last
+    """A wheel whose conf resolves to backends_thead.conf is identified as PPU even
+    when neither PPU_SDK nor lib_thead/ says so. This is the name-based last
     resort, read from torch_fl.backend_config_path() -- the import no longer
     writes FLAGOS_BACKEND_CONFIG, so there is nothing to read from the
     environment."""
-    conf = "/opt/venv/lib/torch_fl/configs/backends_ppu.conf"
+    conf = "/opt/venv/lib/torch_fl/configs/backends_thead.conf"
     for _ in _fake_torch_fl(tmp_path, record="cuda", resolved_conf=conf):
         assert ops_conftest._platform.detect_platform() == "ppu"
 
@@ -198,7 +200,7 @@ def test_explicit_backend_config_identifies_platform_without_the_accessor(
     which is what the accessor itself falls back to: FLAGOS_BACKEND_CONFIG is
     still honored as the user's explicit override."""
     monkeypatch.setenv(
-        "FLAGOS_BACKEND_CONFIG", "/opt/venv/lib/torch_fl/configs/backends_ppu.conf"
+        "FLAGOS_BACKEND_CONFIG", "/opt/venv/lib/torch_fl/configs/backends_thead.conf"
     )
     for _ in _fake_torch_fl(tmp_path, record="cuda"):
         assert ops_conftest._platform.detect_platform() == "ppu"

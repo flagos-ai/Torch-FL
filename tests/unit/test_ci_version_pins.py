@@ -161,7 +161,7 @@ TRITON_AND_FLAGTREE = (
 # (zero macosx files across every release), so the rule enforced below --
 # FlagTree or Triton, plus FlagGems -- cannot be met without an unsatisfiable
 # requirement. setup.py's mps arm returns torch and packaging only, and
-# backends_mps.conf names the native MPSGraph kernels in its full-coverage
+# backends_apple.conf names the native MPSGraph kernels in its full-coverage
 # table, but its MPSGraph kernels need no FlagTree/FlagGems/Triton operator
 # cohort; the native source is the design of the platform rather than the
 # omission this check exists to catch.

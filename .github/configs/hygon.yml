@@ -30,15 +30,15 @@ runner_labels:
 # Shared or unrecognized code selects every lane conservatively.
 paths_watch:
   - torch_fl/accelerator/hygon/
-  - torch_fl/configs/backends_dcu.conf
+  - torch_fl/configs/backends_hygon.conf
   - csrc/aten/backends/hygon/
   - csrc/runtime/accelerator/hygon/
   - csrc/runtime/accelerator/nvidia/
   - csrc/runtime/allocator/backends/hygon_memory.h
   - .github/scripts/hooks/set_env_hygon.sh
   - .github/scripts/set_env_hygon.sh
-  - scripts/vendor/bundle_dcu_libtorch.sh
-  - scripts/vendor/check_dcu_core_abi.py
+  - scripts/vendor/bundle_hygon_libtorch.sh
+  - scripts/vendor/check_hygon_core_abi.py
 
 # Bind-mount the host hyhal driver into the container. libhydmi.so (Hygon DMI
 # device management) and its sibling driver libs live here on the host, not in
@@ -91,7 +91,7 @@ wheel_artifact_name: wheel-dcu
 # DCU is a boxing build (DTK torch is hipified, HIP kernels live under the CUDA
 # dispatch key), so the vendor bundle takes the CUDA library's place. FlagTree
 # (the DTK triton build carrying the hcu backend) and FlagGems are provisioned
-# by set_env_hygon.sh, and FlagGems-first routing comes from backends_dcu.conf
+# by set_env_hygon.sh, and FlagGems-first routing comes from backends_hygon.conf
 # itself -- no switch involved. What runs here is what a stock DCU install gets:
 # the setup script refuses to continue if the hcu backend or the hygon vendor is
 # not what the process actually resolved, which is where that assertion lives

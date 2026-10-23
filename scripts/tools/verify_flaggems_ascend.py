@@ -62,7 +62,7 @@ def candidates():
 
     # The generic backends_flaggems.conf is gone; FlagGems-Python routing now
     # lives in each platform's own conf. CUDA's is the reference set.
-    cuda_conf = REPO / "torch_fl/configs/backends_cuda.conf"
+    cuda_conf = REPO / "torch_fl/configs/backends_nvidia.conf"
     cuda_py = set()
     for line in cuda_conf.read_text().splitlines():
         line = line.split("#")[0]

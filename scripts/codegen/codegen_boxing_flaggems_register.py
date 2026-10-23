@@ -60,7 +60,7 @@ CONFIGS = REPO / "torch_fl/configs"
 
 # The CUDA-ABI platforms that share the `#else` arm of register.cc. Order fixes
 # the --check report order; each writes the file named after it.
-PLATFORMS = ("cuda", "metax", "dcu", "ppu", "tsingmicro")
+PLATFORMS = ("nvidia", "metax", "hygon", "thead", "tsingmicro")
 
 # Conf values that are not a FlagGems backend: `cuda` is the boxing kernel,
 # `none` is cpu_fallback, and the empty value is a malformed line.

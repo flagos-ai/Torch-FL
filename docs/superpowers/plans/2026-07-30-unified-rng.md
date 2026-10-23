@@ -13,7 +13,7 @@
 - Work in a dedicated worktree on branch `rng-completeness-check`; run every command from that worktree's repository root.
 - Env: initialize conda through `source "$(conda info --base)/etc/profile.d/conda.sh"`, then `conda activate torch-fl-210` (torch `2.10.0+cpu`). Use the locally configured proxy, if needed, for network access.
 - Build: `FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON pip install -e . --no-build-isolation` (g++, links torch_cpu; CUDA symbols resolve at runtime).
-- Single-wheel auto-preload build: run tests with plain `python` / `pytest`. Do NOT use `scripts/vendor/with_cuda_libtorch.sh` — it double-loads `libc10_cuda.so` → "Duplicated key 'graph_capture_record_stream_reuse'" core dump.
+- Single-wheel auto-preload build: run tests with plain `python` / `pytest`. Do NOT use `scripts/vendor/with_nvidia_libtorch.sh` — it double-loads `libc10_cuda.so` → "Duplicated key 'graph_capture_record_stream_reuse'" core dump.
 - Standalone repro scripts MUST `import torch_fl` BEFORE `import torch` (CUDAHooks / auto-preload order). The lazy CUDA generator needs ATen_cuda live — trigger it with a first RNG/CUDA op.
 - Test env for HF models: `HF_HOME="$HF_HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`; set `HF_HOME` to a local cache directory.
 - RNG reproducibility tests only hold with `FLAGOS_USE_FLAGGEMS=1` for the flaggems_python ops, but native RNG unification is independent of that switch — test both.

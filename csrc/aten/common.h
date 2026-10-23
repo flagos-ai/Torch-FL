@@ -51,7 +51,7 @@ enum class Backend {
 // Config file path, in order of precedence:
 //   1. SetBackendConfigPath(), called by torch_fl._select_backend_config()
 //   2. $FLAGOS_BACKEND_CONFIG
-//   3. torch_fl/configs/backends_cuda.conf, located from this library's own path
+//   3. torch_fl/configs/backends_nvidia.conf, located from this library's own path
 // Format: "op_name = backend"
 //   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
 //            "flaggems"     -- FlagGems Python (Triton) path
@@ -155,7 +155,7 @@ bool LogEnabled(const char* item);
 //   RuntimeError: Pipeline run failed: PassManager execution failed
 //
 // from `error: 64-bit data type not supported on GCU300!`. Measured on the
-// shipped `backends_gcu.conf` (torch 2.10.0+cpu, S60, card 2): `clamp`,
+// shipped `backends_enflame.conf` (torch 2.10.0+cpu, S60, card 2): `clamp`,
 // `clamp_min`, `clamp_max`, `clamp_`, `fmod.Tensor` and `rsub.Scalar` over
 // int64 hit one or the other, and `remainder.Tensor` over int64 is worse
 // than either -- it returns a plausible int32 tensor, so nothing upstream

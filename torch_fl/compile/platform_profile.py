@@ -86,7 +86,7 @@ _DCU_PROFILE = PlatformProfile(
     triton_device_type="hip",
     triton_backend_key="hcu",
     is_cuda_like=True,
-    vendor="dcu",
+    vendor="hygon",
 )
 
 # MetaX: triton-metax's MACABackend.supports_target checks for "maca", and it is
@@ -113,7 +113,7 @@ _MUSA_PROFILE = PlatformProfile(
     triton_device_type="musa",
     triton_backend_key="mthreads",
     is_cuda_like=False,
-    vendor="musa",
+    vendor="mthreads",
 )
 
 # Enflame: triton_gcu names both the target and backend package "gcu". Like
@@ -123,7 +123,7 @@ _GCU_PROFILE = PlatformProfile(
     triton_device_type="gcu",
     triton_backend_key="gcu",
     is_cuda_like=False,
-    vendor="gcu",
+    vendor="enflame",
 )
 
 # Kunlunxin (Kunlun P800 XPU): the de-boxed native backend reaches Triton
@@ -171,11 +171,11 @@ _TSINGMICRO_PROFILE = PlatformProfile(
 )
 
 _PROFILES = {
-    "dcu": _DCU_PROFILE,
+    "hygon": _DCU_PROFILE,
     "metax": _METAX_PROFILE,
     "ascend": _ASCEND_PROFILE,
-    "musa": _MUSA_PROFILE,
-    "gcu": _GCU_PROFILE,
+    "mthreads": _MUSA_PROFILE,
+    "enflame": _GCU_PROFILE,
     "kunlunxin": _KUNLUNXIN_PROFILE,
     "iluvatar": _ILUVATAR_PROFILE,
     "tsingmicro": _TSINGMICRO_PROFILE,

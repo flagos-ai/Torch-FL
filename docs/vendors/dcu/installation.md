@@ -71,7 +71,7 @@ To build the bundle:
 
 ```bash
 FLAGOS_ACCELERATOR=dcu python setup.py build_ext --inplace   # builds the ABI shim
-bash scripts/vendor/bundle_dcu_libtorch.sh                    # stages DTK's device libs
+bash scripts/vendor/bundle_hygon_libtorch.sh                    # stages DTK's device libs
 ```
 
 `FLAGOS_DCU_VENDOR_CORE=1` on both commands selects the legacy mode, which
@@ -219,7 +219,7 @@ kernel path is Python (Triton), not the C++ wrapped FlagGems library, so
 `FLAGOS_BUILD_FLAGGEMS_CPP=0` and `FLAGOS_BUILD_FLAGGEMS=1` are the build switches.
 
 `.github/scripts/set_env_hygon.sh` performs all of the following; routing comes from
-`backends_dcu.conf` itself, so a CI job runs the FlagGems path with no switch
+`backends_hygon.conf` itself, so a CI job runs the FlagGems path with no switch
 involved. The steps below are what that script does, for a local install.
 
 ### Step 1: Install FlagTree and FlagGems
@@ -262,7 +262,7 @@ record rather than on a variable.
 
 `GEMS_VENDOR=hygon` is set automatically on a DCU build, so you no longer need to export it manually. This matters beyond FlagGems: `GEMS_VENDOR` also selects the comm profile (see `torch_fl/comm/process_group.py`), and DCU is a CUDA-ABI vendor whose `ProcessGroupNCCL` is RCCL underneath.
 
-A DCU build records `ACCELERATOR = "dcu"` in `torch_fl/_build_config.py`, which selects `backends_dcu.conf` — no need to re-export `FLAGOS_ACCELERATOR` at runtime (the record is the only thing read there), and no opt-in variable exists any more.
+A DCU build records `ACCELERATOR = "dcu"` in `torch_fl/_build_config.py`, which selects `backends_hygon.conf` — no need to re-export `FLAGOS_ACCELERATOR` at runtime (the record is the only thing read there), and no opt-in variable exists any more.
 
 Confirm what the interpreter actually resolved before trusting the flags:
 
@@ -279,18 +279,18 @@ PY
 
 ### FlagGems Configuration
 
-`backends_dcu.conf` routes FlagGems, and holds a few ops off that path entirely -- in the default conf they stay `none` (`cpu_fallback`), never a boxing kernel, because a default conf does not route boxing (see `AGENTS.md`, "Day-0 boxing confs"). Most are `hcu` Triton gaps; `_conj` and `relu`/`relu_` are contract cases:
+`backends_hygon.conf` routes FlagGems, and holds a few ops off that path entirely -- in the default conf they stay `none` (`cpu_fallback`), never a boxing kernel, because a default conf does not route boxing (see `AGENTS.md`, "Day-0 boxing confs"). Most are `hcu` Triton gaps; `_conj` and `relu`/`relu_` are contract cases:
 
 - `silu_backward`: `tl.math.div_rn` has no `create_precise_divf` lowering
 - `slice_backward`: output is correct standalone, but feeding that grad to MIOpen's `convolution_backward` triggers a hardware VMFault
 - `_conj`: FlagGems' `_conj` materializes the conjugated values, while ATen's `conj` is a lazy view that only sets the Conjugate bit; `tests/integration/test_math_bits_contract.py` pins that, and only the boxing kernel keeps the view lazy
 - `relu`/`relu_`: FlagGems' `relu_forward_kernel_rank_1` displaces ATen's `at::native::vectorized_elementwise_kernel` from the profiler-parity workload's trace, and `tests/integration/test_profiler_parity.py` requires that trace to carry an `at::native` template kernel; only the boxing kernel launches one
 
-The complete pinned set, with its per-op diagnosis, is in `backends_dcu.conf`'s own
+The complete pinned set, with its per-op diagnosis, is in `backends_hygon.conf`'s own
 header note (`mm`/`bmm` -- FlagGems issue #6227 -- plus `mse_loss` #6221 and
 `transpose.int` #6219).
 
-Override per-op routing with `FLAGOS_OP_<name>=flagos_python|cuda`. A DCU boxing wheel that needs the held ops on the CUDA kernel (rather than CPU) selects the opt-in day-0 table: `FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_dcu_boxing.conf`.
+Override per-op routing with `FLAGOS_OP_<name>=flagos_python|cuda`. A DCU boxing wheel that needs the held ops on the CUDA kernel (rather than CPU) selects the opt-in day-0 table: `FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_hygon_boxing.conf`.
 
 ### FlagGems Verification
 
@@ -331,7 +331,7 @@ project, so it stays opt-in instead of being assumed either way.
 
 Multi-card works with FlagGems enabled, over FlagCX or the RCCL fallback. The automatic `GEMS_VENDOR=hygon` routes `ProcessGroupFlagOS` to the CUDA-ABI profile (zero-copy `_flagos_to_cuda_view` + `ProcessGroupNCCL`, which on DTK is RCCL: `dist.is_nccl_available() == True` and `torch.cuda.nccl.version()` reports `(2, 22, 3)`).
 
-The RCCL tier needs `ProcessGroupNCCL`, which the CPU-only `torch==2.10.0+cpu` core this wheel front-ends does not export — `torch.distributed.ProcessGroupNCCL` is absent, so without the bridge the tier cannot be built at all and the group falls through to host-staged gloo. On DCU that class is supplied by `_flagos_nccl`, a pybind factory built against the bundled `lib_dcu` (`libc10_hip` / `libtorch_hip`) plus `librccl`; since #366 the wheel packages it at `torch_fl/comm/_nccl_ext/`, so an installed wheel reaches RCCL with no source checkout and no `build.py` run. Confirm what the installed package actually carries before relying on the tier:
+The RCCL tier needs `ProcessGroupNCCL`, which the CPU-only `torch==2.10.0+cpu` core this wheel front-ends does not export — `torch.distributed.ProcessGroupNCCL` is absent, so without the bridge the tier cannot be built at all and the group falls through to host-staged gloo. On DCU that class is supplied by `_flagos_nccl`, a pybind factory built against the bundled `lib_hygon` (`libc10_hip` / `libtorch_hip`) plus `librccl`; since #366 the wheel packages it at `torch_fl/comm/_nccl_ext/`, so an installed wheel reaches RCCL with no source checkout and no `build.py` run. Confirm what the installed package actually carries before relying on the tier:
 
 ```bash
 python -m pytest tests/integration/test_comm_native_bridge.py -v
@@ -398,7 +398,7 @@ environment resolve by import order.
 
 **Cause:** `hcu` Triton backend limitation or MIOpen interaction bug.
 
-**Expected behavior.** `backends_dcu.conf` holds these ops off the FlagGems path, so they reach `cpu_fallback` (or `boxing` if you selected `backends_dcu_boxing.conf`). If you see crashes, verify the config is being selected (e.g. `FLAGOS_LOG=dispatch` and check the `[flagos dispatch]` lines).
+**Expected behavior.** `backends_hygon.conf` holds these ops off the FlagGems path, so they reach `cpu_fallback` (or `boxing` if you selected `backends_hygon_boxing.conf`). If you see crashes, verify the config is being selected (e.g. `FLAGOS_LOG=dispatch` and check the `[flagos dispatch]` lines).
 
 ### Multi-card: GPU VMFault or device-side hang
 

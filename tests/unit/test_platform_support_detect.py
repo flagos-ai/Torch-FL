@@ -94,7 +94,7 @@ def test_dcu_accelerator_is_recognized(isolated_torch_fl_import, tmp_path):
 
     DCU is a boxing build, so every other signal detect_platform() consults
     reports CUDA: the marker records the accelerator name, but a DCU wheel
-    installs its assets under lib_dcu/ rather than lib/, so the marker read
+    installs its assets under lib_hygon/ rather than lib/, so the marker read
     misses and the final fallback returns "cuda". That silent fall-through
     made platform-specific guards written as `detect_platform() == "dcu"`
     dead code -- tests/integration/test_amp_contract.py had two such guards

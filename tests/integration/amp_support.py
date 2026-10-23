@@ -37,7 +37,7 @@ AMP_NATIVE_DEVICE_PLATFORMS = frozenset({"ascend", "gcu", "musa"})
 #: kernels. Every op this contract exercises is routed `cuda` by their confs --
 #: `convolution`/`convolution_overrideable`, `_amp_foreach_non_finite_check_and_unscale`,
 #: `_amp_update_scale` and the `_foreach_mul`/`_foreach_div` family behind
-#: GradScaler all read `= cuda` in backends_cuda.conf. Boxing became an explicit
+#: GradScaler all read `= cuda` in backends_nvidia.conf. Boxing became an explicit
 #: opt-in in #520, so on a default (FlagGems-primary) wheel there is no kernel
 #: behind that route and the device cases belong on the skipping side.
 AMP_BOXING_DEVICE_PLATFORMS = frozenset({"cuda", "dcu", "metax", "ppu"})

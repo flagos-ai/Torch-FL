@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Bundle the MetaX-forked libtorch C++ .so into torch_fl/lib_maca/ for a
+# Bundle the MetaX-forked libtorch C++ .so into torch_fl/lib_metax/ for a
 # self-contained single wheel.
 #
 # The official torch+cpu wheel lacks the MetaX-forked libtorch (which exports
 # at::maca::* / wcuda* symbols), and the boxing artifact libtorch_fl.so must
 # link against those symbols. This script copies that batch of libtorch .so
-# from the MetaX torch wheel into torch_fl/lib_maca/, and rewrites RPATH with
+# from the MetaX torch wheel into torch_fl/lib_metax/, and rewrites RPATH with
 # patchelf:
-#   - libtorch .so inside lib_maca  -> $ORIGIN:/opt/maca/lib:/opt/maca/lib64
+#   - libtorch .so inside lib_metax  -> $ORIGIN:/opt/maca/lib:/opt/maca/lib64
 #     (at runtime find mcblas/mcdnn and other maca runtime from /opt/maca on
 #      the target machine; the runtime is not bundled)
-#   - torch_fl/lib/libtorch_fl.so   -> $ORIGIN:$ORIGIN/../lib_maca
-#     (find the forked libtorch from lib_maca inside the package, removing the
+#   - torch_fl/lib/libtorch_fl.so   -> $ORIGIN:$ORIGIN/../lib_metax
+#     (find the forked libtorch from lib_metax inside the package, removing the
 #      absolute path hard-coded on the build machine)
 #
 # maca runtime (libmcblas etc., ~4.9G) is not bundled: machines with MetaX
 # cards installed must have the /opt/maca driver.
 #
 # Usage:
-#   FLAGOS_VENDOR_TORCH_LIB=<maca torch/lib> bash scripts/vendor/bundle_maca_libtorch.sh
-#   MACA_PATH=/opt/maca bash scripts/vendor/bundle_maca_libtorch.sh   # override maca path
+#   FLAGOS_VENDOR_TORCH_LIB=<maca torch/lib> bash scripts/vendor/bundle_metax_libtorch.sh
+#   MACA_PATH=/opt/maca bash scripts/vendor/bundle_metax_libtorch.sh   # override maca path
 #
 # Should run after `python setup.py bdist_wheel` (FLAGOS_ACCELERATOR=metax) and before
 # packing the wheel, or re-pack the wheel after running. Idempotent.
@@ -30,7 +30,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=scripts/vendor/bundle_common.sh
 source "${REPO_DIR}/scripts/vendor/bundle_common.sh"
 
-LIB_MACA="${REPO_DIR}/torch_fl/lib_maca"
+LIB_MACA="${REPO_DIR}/torch_fl/lib_metax"
 TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
 # Vendor name only, matching setup.py / the metax CMake branch.
 MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
@@ -57,12 +57,12 @@ CORE_SO=(libc10.so libtorch_cpu.so libtorch.so libtorch_global_deps.so libtorch_
 CUDA_SO=(libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so libshm.so)
 
 VENDOR_RPATH="${MACA_PATH}/lib:${MACA_PATH}/lib64"
-# Libraries are opened from lib_maca/ or from the private torch facade's lib/.
+# Libraries are opened from lib_metax/ or from the private torch facade's lib/.
 # Both directories contain the complete bundled dependency set.
 BUNDLE_ORIGIN="\$ORIGIN"
 
 echo "Source MetaX torch/lib : ${SRC}"
-echo "Target lib_maca        : ${LIB_MACA}"
+echo "Target lib_metax        : ${LIB_MACA}"
 echo "maca runtime path      : ${MACA_PATH}/lib"
 
 bundle_copy_so "${SRC}" "${LIB_MACA}" "${BUNDLE_ORIGIN}:${VENDOR_RPATH}" 0 \
@@ -81,9 +81,9 @@ else
 fi
 
 # Strip the build machine's hard-coded MetaX torch/lib absolute path from
-# torch_fl.so, rewrite to find the forked libtorch from lib_maca inside the package.
+# torch_fl.so, rewrite to find the forked libtorch from lib_metax inside the package.
 bundle_rewrite_plugin_rpath "${TORCH_FL_LIB}" \
-    "\$ORIGIN:\$ORIGIN/../lib_maca:${VENDOR_RPATH}"
+    "\$ORIGIN:\$ORIGIN/../lib_metax:${VENDOR_RPATH}"
 
 bundle_summary "${LIB_MACA}"
 bundle_check_needed "${LIB_MACA}" \

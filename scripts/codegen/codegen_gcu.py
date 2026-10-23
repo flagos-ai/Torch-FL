@@ -35,7 +35,7 @@ Generates:
       dispatcher's "backend not registered" check). FlagGems Python kernels are
       compiled alongside GCU, but only overloads in this coverage set own a
       PrivateUse1 wrapper and may select that dispatcher slot.
-  - appends `<op> = gcu` to torch_fl/configs/backends_gcu.conf
+  - appends `<op> = gcu` to torch_fl/configs/backends_enflame.conf
 
 Validation:
   - the derived topsaten<Name> must exist in libtopsaten.so or the op is
@@ -60,7 +60,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 OUT_CC = REPO / "csrc/aten/backends/enflame/generated/gcu_kernels.cc"
 OUT_INC = REPO / "csrc/aten/backends/enflame/generated/gcu_register.inc"
 REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
-CONF = REPO / "torch_fl/configs/backends_gcu.conf"
+CONF = REPO / "torch_fl/configs/backends_enflame.conf"
 
 # --------------------------------------------------------------------------
 # Op registry: schema op name -> (category, topsaten-name override or None).
@@ -3676,7 +3676,7 @@ def main():
     ap.add_argument(
         "--no-conf",
         action="store_true",
-        help="do not append covered ops to backends_gcu.conf",
+        help="do not append covered ops to backends_enflame.conf",
     )
     args = ap.parse_args()
 

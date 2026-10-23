@@ -260,7 +260,7 @@ CPU-only pip torch plus an externally supplied `libtorch_cuda.so` registers real
 CUDA implementations for `aten::mm` / `add` / `_softmax` / `bmm` and computes
 correct results (`mm max_err = 9.5e-06`). The hard constraint is **load timing**:
 the library must be loaded before `import torch`, hence `LD_PRELOAD` and
-`scripts/vendor/with_cuda_libtorch.sh`.
+`scripts/vendor/with_nvidia_libtorch.sh`.
 
 ### Phase 3a — Establish CUDA compatibility (a gate, not an assumption)
 
@@ -310,14 +310,14 @@ wheel:
 
 ### Phase 3c — Route operators through boxing
 
-Populate `backends_<vendor>.conf` from `backends_cuda.conf`, then narrow it by
+Populate `backends_<vendor>.conf` from `backends_nvidia.conf`, then narrow it by
 measurement. Vendor CUDA-compatibility is rarely total; the honest output is a
 conf where each entry was tested, and unsupported ops fall back explicitly.
 
 ### Exit criteria
 
 - vendor `.so` version matches the branch torch version exactly
-- `import torch_fl` clean through `with_cuda_libtorch.sh`
+- `import torch_fl` clean through `with_nvidia_libtorch.sh`
 - `torch.__version__` still `+cpu` — no vendor CUDA torch installed into the env
 - `tests/integration/ops/` passing for routed ops, with failures either fixed or
   removed from the conf, never left silently routed

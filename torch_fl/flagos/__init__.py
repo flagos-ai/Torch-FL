@@ -49,7 +49,7 @@ def _platform() -> str:
     because their conf follows from the build record rather than from a file the
     build writes. On a DCU wheel the marker read therefore returned ``""`` -- an
     accelerator no arm below knows -- while ``_select_backend_config()`` had
-    already resolved that same wheel to ``backends_dcu.conf``. That empty token
+    already resolved that same wheel to ``backends_hygon.conf``. That empty token
     is what reached ``Stream.__init__``'s final arm and raised.
 
     detect_platform() consults the marker too, but after the build record: the
@@ -1104,7 +1104,7 @@ def _align_flaggems_device_identity():
     when the two differ. On a generic NVIDIA box those are ``flagos`` (torch_fl's
     registered backend) and ``cuda`` (what FlagGems' nvidia descriptor says), so
     every op that makes that comparison fell back and never ran its kernel under
-    the ``backends_cuda.conf`` routing.
+    the ``backends_nvidia.conf`` routing.
 
     No platform gate here: the remedy is decided by which vendor descriptor
     FlagGems resolved, and of the CUDA-compatible ones only nvidia's and hygon's
@@ -1253,7 +1253,7 @@ def _patch_flaggems_vector_norm():
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
 
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
             return
         import flag_gems.ops as _gems_ops
 
@@ -1366,7 +1366,7 @@ def _patch_flaggems_pow_scalar_square():
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
 
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
             return
         import flag_gems
         import flag_gems.ops as _gems_ops
@@ -1513,7 +1513,7 @@ def _patch_flaggems_mean_last_dim():
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
 
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
             return
         import flag_gems
         import flag_gems.ops as _gems_ops
@@ -2228,7 +2228,7 @@ def _prewarm_triton_key():
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
 
-        if _build_accelerator() != "dcu" or not _conf_routes_to_flaggems():
+        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
             return
 
         import threading
@@ -2597,7 +2597,7 @@ def _patch_flaggems_tune_space():
     try:
         from .. import _build_accelerator
 
-        if _build_accelerator() != "musa":
+        if _build_accelerator() != "mthreads":
             return
 
         libentry = importlib.import_module("flag_gems.utils.libentry")

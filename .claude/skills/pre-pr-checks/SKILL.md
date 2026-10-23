@@ -65,7 +65,7 @@ FLAGOS_CODEGEN_ALL=1 /usr/bin/python3 scripts/codegen/codegen_ops.py  # csrc/ate
 /usr/bin/python3 scripts/codegen/gen_vendor_confs.py                  # torch_fl/configs/backends_*.conf
 ```
 
-`torch_fl/configs/backends_cuda.conf` is the exception: it is the CUDA boxing
+`torch_fl/configs/backends_nvidia.conf` is the exception: it is the CUDA boxing
 table `codegen_ops.py` writes, one line per wrapper that run generated. Every
 other conf belongs to `gen_vendor_confs.py` and `codegen_ops.py` does not write
 it, so a CUDA-path run leaves the vendor confs at whatever the checkout put

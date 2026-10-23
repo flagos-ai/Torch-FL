@@ -17,7 +17,7 @@
 tests/unit/test_gen_vendor_confs.py pins what that generator produces. This file
 pins that nothing else produces it.
 
-codegen_ops.py used to write backends_metax.conf and backends_dcu.conf itself,
+codegen_ops.py used to write backends_metax.conf and backends_hygon.conf itself,
 from `op_info` plus a local fallback set (`metax_triton_fallback`,
 `dcu_triton_fallback`) in the pre-#272 `cuda | flagos_python` vocabulary. Both
 writers overwrote the conf unconditionally, so
@@ -28,7 +28,7 @@ record: mm/bmm/mean.dim on metax, and on dcu the 78 ops the conf holds on cuda,
 among them slice_backward, silu_backward and the native_batch_norm pin from
 #295/#458. It also dropped matmul, matmul_backward and
 scaled_dot_product_attention, which the generator's op universe carries on top
-of `op_info`. Measured in issue #459: backends_dcu.conf went 2037 -> 2034 ops,
+of `op_info`. Measured in issue #459: backends_hygon.conf went 2037 -> 2034 ops,
 531 routes moved, 121 `# Note:` lines deleted, and `gen_vendor_confs.py --check`
 then failed on three confs.
 
@@ -60,7 +60,7 @@ CONF_DIR = REPO_ROOT / "torch_fl" / "configs"
 # per wrapper that run generates, and it is deliberately not an input to the
 # vendor conf generator -- that one enumerates from the generated
 # csrc/aten/generated/register.inc instead (see GENERATED_REGISTER_INC there).
-OWNED_BY_CODEGEN_OPS = {"backends_cuda.conf"}
+OWNED_BY_CODEGEN_OPS = {"backends_nvidia.conf"}
 
 # Sets that fed the two deleted writers. Their names coming back means a second
 # routing policy is being grown next to the confs again.
@@ -123,11 +123,11 @@ def test_codegen_ops_names_no_generated_vendor_conf():
     named = _conf_paths_named(_tree(CODEGEN_OPS))
     assert named, (
         "the scan found no conf path in codegen_ops.py at all -- it is meant to "
-        "find backends_cuda.conf, so this test has stopped policing anything"
+        "find backends_nvidia.conf, so this test has stopped policing anything"
     )
     assert named <= OWNED_BY_CODEGEN_OPS, (
         f"codegen_ops.py names {sorted(named - OWNED_BY_CODEGEN_OPS)}; every "
-        "torch_fl/configs/backends_<platform>.conf except backends_cuda.conf is "
+        "torch_fl/configs/backends_<platform>.conf except backends_nvidia.conf is "
         "written by scripts/codegen/gen_vendor_confs.py"
     )
 
@@ -177,7 +177,7 @@ def test_codegen_ops_does_not_run_the_generator():
     FlagGems coverage the caller's environment happened to discover, inside a
     diff a reviewer reads as CUDA-binding churn. Measured on the delegation
     variant of this fix, in a container whose flag_gems discovers 533 of the 639
-    committed ops: backends_metax.conf moved 95 routes and backends_ppu.conf was
+    committed ops: backends_metax.conf moved 95 routes and backends_thead.conf was
     rewritten too, neither of them on the DCU/CUDA path this script owns.
 
     The chain is already manual one step upstream -- codegen_tileops.py writes

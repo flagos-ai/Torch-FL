@@ -41,19 +41,19 @@ std::string DefaultConfigPath() {
 #if defined(USE_TSINGMICRO)
       platform = "tsingmicro";
 #elif defined(USE_GCU)
-      platform = "gcu";
+      platform = "enflame";
 #elif defined(USE_KUNLUNXIN)
       platform = "kunlunxin";
 #elif defined(USE_ASCEND)
       platform = "ascend";
 #elif defined(USE_MUSA)
-      platform = "musa";
+      platform = "mthreads";
 #elif defined(USE_BPU)
       platform = "bpu";
 #elif defined(USE_ILUVATAR)
       platform = "iluvatar";
 #elif defined(USE_MPS)
-      platform = "mps";
+      platform = "apple";
 #endif
       if (platform) {
         // dir is <prefix>/torch_fl/lib, configs are at <prefix>/torch_fl/configs/
@@ -63,21 +63,26 @@ std::string DefaultConfigPath() {
         if (test.is_open()) return candidate;
       }
 
-      // No platform-specific conf (cuda/metax/dcu/ppu): the CUDA conf is the
-      // base list those builds inherit. Python normally sets the path via
-      // SetBackendConfigPath(); this is only the last-resort default.
-      std::string candidate = dir + "/../configs/backends_cuda.conf";
+      // No platform-specific conf (metax, or a CUDA-ABI vendor whose conf was
+      // not found): the nvidia conf is the base list those builds inherit.
+      // Python normally sets the path via SetBackendConfigPath(); this is only
+      // the last-resort default.
+      //
+      // A conf is named after the build's vendor (see cmake/flagos_platforms.json);
+      // only platforms that compile a vendor op library have one, which is why
+      // this arm names the ones with a USE_* macro.
+      std::string candidate = dir + "/../configs/backends_nvidia.conf";
       std::ifstream test(candidate);
       if (test.is_open()) return candidate;
-      // Try: <dir>/configs/backends_cuda.conf
-      candidate = dir + "/configs/backends_cuda.conf";
+      // Try: <dir>/configs/backends_nvidia.conf
+      candidate = dir + "/configs/backends_nvidia.conf";
       test.open(candidate);
       if (test.is_open()) return candidate;
     }
   }
 #endif
   // Fallback to build-time path
-  return FLAGOS_SOURCE_ROOT "/torch_fl/configs/backends_cuda.conf";
+  return FLAGOS_SOURCE_ROOT "/torch_fl/configs/backends_nvidia.conf";
 }
 
 std::string TrimStr(std::string s) {
@@ -114,9 +119,16 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kBoxing;
   } else if (val == "metax") {
     *out = Backend::kMetax;
+  } else if (val == "hygon" || val == "thead") {
+    // This CUDA-ABI vendor's kernel slot was retired with the mxcc backend, so
+    // there is no Backend for it. Before the vendor rename a conf could not name
+    // it either; the two spellings are accepted only so an out-of-tree conf (or a
+    // FLAGOS_OP_* override written earlier) does not fail to parse. They resolve
+    // to kNone, the same answer the tree used to give the op.
+    *out = Backend::kNone;
   } else if (val == "tsingmicro") {
     *out = Backend::kTsingMicro;
-  } else if (val == "gcu") {
+  } else if (val == "enflame" || val == "gcu") {  // gcu: the SDK-era spelling
     *out = Backend::kGcu;
   } else if (val == "kunlunxin") {
     *out = Backend::kKunlunxin;
@@ -124,11 +136,11 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kIluvatar;
   } else if (val == "ascend") {
     *out = Backend::kAscend;
-  } else if (val == "musa") {
+  } else if (val == "mthreads" || val == "musa") {  // musa: the SDK-era spelling
     *out = Backend::kMusa;
   } else if (val == "tileops") {
     *out = Backend::kTileOps;
-  } else if (val == "mps") {
+  } else if (val == "apple" || val == "mps") {  // mps: the SDK-era spelling
     *out = Backend::kMps;
   } else if (val == "flaggems_cpp" || val == "flagos") {
     *out = Backend::kFlagGemsCpp;
@@ -540,7 +552,7 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype) {
   return dtype == at::kComplexFloat || dtype == at::kComplexDouble;
 #elif defined(FLAGOS_ACCEL_DCU)
   // Same gap, same shape as MetaX, and measured separately in the shipped DCU
-  // environment (torch 2.10.0+dtk2604, HIP 6.3.26113, DTK, `backends_dcu.conf`,
+  // environment (torch 2.10.0+dtk2604, HIP 6.3.26113, DTK, `backends_hygon.conf`,
   // boxing ON). The released wheel predates this change, so it reproduces the
   // two defects below; the fix was measured on a libtorch_fl.so rebuilt from
   // this source and copied into that same environment.

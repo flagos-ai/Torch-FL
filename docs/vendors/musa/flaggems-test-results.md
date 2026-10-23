@@ -336,7 +336,7 @@ pytest tests/integration/ -v
 
 ## Configuration
 
-### Backend Priority (backends_musa.conf)
+### Backend Priority (backends_mthreads.conf)
 Current MUSA platform uses FlagGems-first routing:
 1. **flaggems_cpp** - FlagGems C++ runtime (if available)
 2. **flaggems** - FlagGems Python/Triton kernels ← **PREFERRED**
@@ -390,7 +390,7 @@ Group 7's three failures are `test_flaggems_conf_consistency.py`
 (`test_every_conf_op_maps_to_a_dispatcher`, `test_no_orphan_flagos_python_kernels`,
 `test_counts_match`), which report `mm`/`bmm`/`addmm` dispatcher drift in
 `csrc/aten/generated/`. They reproduce byte-identically against the pristine
-`backends_musa.conf` on the same tree, so they are pre-existing and unrelated to
+`backends_mthreads.conf` on the same tree, so they are pre-existing and unrelated to
 integer division or to the promoted routes.
 
 Group 8 needs the manifest's own `-k` filter. Without it the suite reports 8
@@ -411,11 +411,11 @@ exclude the `flaggems` marker, and `tests/integration/ops/conftest.py` gates
 instead of exercising them. `PYTHONPATH` must point at this working tree —
 the conda environment also carries a non-editable wheel install of `torch_fl`
 from an earlier tree, and without the override `import torch_fl` resolves to
-that install and reads its stale `backends_musa.conf`.
+that install and reads its stale `backends_mthreads.conf`.
 
 Unit tests: `tests/unit/test_gen_vendor_confs.py` — **34 passed, 1 failed**. The
 one failure is `test_shipped_confs_are_up_to_date`, which reports
-`stale: ['backends_gcu.conf', 'backends_ascend.conf']`; it is pre-existing
+`stale: ['backends_enflame.conf', 'backends_ascend.conf']`; it is pre-existing
 generator drift on the two out-of-scope platforms, and the MUSA conf it also
 checks is byte-identical to a fresh generation.
 
@@ -426,7 +426,7 @@ checks is byte-identical to a fresh generation.
   on the second run).
 - `scripts/codegen/codegen_musa_flaggems.py --check` reports "is up to date".
 - `scripts/codegen/gen_vendor_confs.py --check` is clean for MUSA. It is stale for
-  `backends_ascend.conf` and `backends_gcu.conf`; that drift predates this work
+  `backends_ascend.conf` and `backends_enflame.conf`; that drift predates this work
   and those platforms are out of scope here.
 
 Order matters between the first and third: `gen_vendor_confs.py` reads the

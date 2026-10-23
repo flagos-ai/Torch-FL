@@ -43,7 +43,7 @@ function(flagos_set_portable_rpath _target)
   endif()
 
   # $ORIGIN is torch_fl/lib/ for every installed target. A sibling bundle dir
-  # (torch_fl/lib_maca, lib_dcu, lib_ppu) is reached via $ORIGIN/../<name>.
+  # (torch_fl/lib_metax, lib_hygon, lib_thead) is reached via $ORIGIN/../<name>.
   set(_rpath "$ORIGIN" "$ORIGIN/lib")
   if(FLAGOS_BUNDLE_LIBDIR AND NOT FLAGOS_BUNDLE_LIBDIR STREQUAL "lib")
     list(APPEND _rpath "$ORIGIN/../${FLAGOS_BUNDLE_LIBDIR}")

@@ -10,7 +10,7 @@
 // cpu_fallback. So this file is exactly the Apple backend's coverage set.
 //
 // It is also what scripts/codegen/gen_vendor_confs.py reads to decide which ops
-// backends_mps.conf may name for this backend, so the conf cannot claim a route
+// backends_apple.conf may name for this backend, so the conf cannot claim a route
 // this file does not register.
 
   m.impl("_softmax", WrapperPrivSoftmax);

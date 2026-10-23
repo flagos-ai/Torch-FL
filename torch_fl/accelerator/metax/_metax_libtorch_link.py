@@ -26,7 +26,7 @@ and why a pure ctypes preload cannot do this on its own -- lives in
 lists; whether to select the vendor runtime is decided by
 ``torch_fl.__init__._relink_vendor_libtorch`` (unconditional on a MetaX build --
 it is boxing-only, reaching the vendor torch through FLAGOS_VENDOR_TORCH_LIB or a
-self-contained lib_maca/ bundle).
+self-contained lib_metax/ bundle).
 """
 
 from torch_fl.accelerator._vendor_libtorch import (
@@ -38,7 +38,7 @@ from torch_fl.accelerator._vendor_libtorch import (
     restore_original_libtorch as _restore,
 )
 
-_BUNDLE_DIR = "lib_maca"
+_BUNDLE_DIR = "lib_metax"
 
 # Core C++ .so that must come from the MetaX wheel as a self-consistent set.
 # libtorch_python.so is included because the stock one references symbols
@@ -94,7 +94,7 @@ def _bundled_maca_lib():
 def _discover_maca_torch_lib():
     """Locate the MetaX libtorch .so dir.
 
-    Priority: bundled lib_maca/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
+    Priority: bundled lib_metax/, then FLAGOS_VENDOR_TORCH_LIB, then sibling conda
     envs whose torch is a ``+metax``/``+maca`` build.
     """
     return discover_vendor_torch_lib(
@@ -113,7 +113,7 @@ def ensure_maca_libtorch_links():
 
     Deciding *whether* to select it is the caller's job -- see
     ``torch_fl.__init__._relink_vendor_libtorch``, which runs on every MetaX
-    build (a self-contained wheel finds lib_maca/, an in-place build finds the
+    build (a self-contained wheel finds lib_metax/, an in-place build finds the
     vendor torch through FLAGOS_VENDOR_TORCH_LIB).  This used to self-gate on a
     mode variable, which made the self-contained path a silent no-op:
     the stock libtorch_cpu.so stayed in place and libtorch_cuda.so then failed

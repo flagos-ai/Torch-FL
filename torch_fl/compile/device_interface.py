@@ -222,11 +222,11 @@ def _raw_stream(device_idx: int) -> int:
     profile = platform_profile()
     if profile.is_cuda_like:
         return torch._C._cuda_getCurrentRawStream(device_idx)
-    if profile.vendor == "musa":
+    if profile.vendor == "mthreads":
         from torch_fl.compile.flagtree_shim import get_musa_current_raw_stream
 
         return get_musa_current_raw_stream(device_idx)
-    if profile.vendor == "gcu":
+    if profile.vendor == "enflame":
         from torch_fl.compile.flagtree_shim import get_gcu_current_raw_stream
 
         return get_gcu_current_raw_stream(device_idx)
@@ -258,7 +258,7 @@ def _set_stream(stream: Any) -> None:
         torch.cuda.set_stream(stream)
         return
     native = getattr(stream, "_stream", stream)
-    if profile.vendor == "musa" and not hasattr(native, "set_current"):
+    if profile.vendor == "mthreads" and not hasattr(native, "set_current"):
         # Native MUSA currently exposes the default stream only. Reject a
         # foreign stream instead of silently switching CUDA state.
         if getattr(stream, "musa_stream", None) is not None:
@@ -279,12 +279,12 @@ def _set_stream(stream: Any) -> None:
 
 def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> None:
     profile = platform_profile()
-    if profile.is_cuda_like or profile.vendor == "musa":
+    if profile.is_cuda_like or profile.vendor == "mthreads":
         torch.cuda._set_stream_by_id(
             stream_id=stream_id, device_index=device_index, device_type=device_type
         )
         return
-    if profile.vendor == "gcu":
+    if profile.vendor == "enflame":
         from torch_fl.accelerator.enflame.tops_stream import TopsStream
 
         TopsStream.borrowed(stream_id, device=device_index).set_current()

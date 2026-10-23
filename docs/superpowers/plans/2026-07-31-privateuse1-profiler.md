@@ -24,9 +24,9 @@ Activity API (dlopen), CMake, pytest.
 - Build command:
   `FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON pip install -e . --no-build-isolation`
   (g++ only; CUDA symbols resolve from the external .so at runtime).
-- Every run/test goes through `bash scripts/vendor/with_cuda_libtorch.sh <cmd>` (`LD_PRELOAD` injects
+- Every run/test goes through `bash scripts/vendor/with_nvidia_libtorch.sh <cmd>` (`LD_PRELOAD` injects
   libtorch_cuda.so; direct pytest fails during device initialization).
-- Backend config: `FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf`.
+- Backend config: `FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf`.
 - Qwen3 tests need an offline Hugging Face cache supplied by the user:
   `HF_HOME="$HF_HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`; model
   `Qwen/Qwen3-0.6B`.
@@ -100,8 +100,8 @@ between pip flag_gems and liboperators.so.
 - [ ] **Step 4: verify import**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -c \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -c \
   "import torch_fl, torch; x=torch.randn(8,8,device='flagos'); torch.flagos.synchronize(); print('OK', (x@x).sum().item())"
 ```
 
@@ -148,8 +148,8 @@ def test_guard_stream_is_real_not_synthetic():
 - [ ] **Step 2: run and confirm it fails**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_guard_stream_is_real_not_synthetic -v
 ```
 
@@ -212,8 +212,8 @@ the flagos ABI exactly as the existing `(cudaStream_t)stream` conversion in `cud
 ```bash
 FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON \
   pip install -e . --no-build-isolation
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_guard_stream_is_real_not_synthetic -v
 ```
 
@@ -222,8 +222,8 @@ Expected: PASS.
 - [ ] **Step 6: guard regression — ordinary ops and copy remain correct**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/integration/ops/ -m "not flaggems and not flaggems_python" -q
 ```
 
@@ -276,8 +276,8 @@ def test_stage_a_privateuse1_device_time():
 - [ ] **Step 2: run and confirm it fails**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_stage_a_privateuse1_device_time -v
 ```
 
@@ -365,8 +365,8 @@ non-empty `*event`, so this function always creates a new one.
 ```bash
 FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON \
   pip install -e . --no-build-isolation
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_stage_a_privateuse1_device_time -v
 ```
 
@@ -424,9 +424,9 @@ def test_profiler_over_qwen3_infer():
 - [ ] **Step 2: run**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
   HF_HOME="$HF_HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/integration/test_profiler_qwen3_infer.py -v -s
 ```
 
@@ -478,8 +478,8 @@ def test_cupti_library_locatable():
 - [ ] **Step 2: run it**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_cupti_library_locatable -v
 ```
 
@@ -627,8 +627,8 @@ def test_stage_b_chrome_trace_has_gpu_kernels():
 - [ ] **Step 2: run and confirm it fails**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_stage_b_chrome_trace_has_gpu_kernels -v
 ```
 
@@ -719,8 +719,8 @@ Use the field names from the active environment's `torch/include/kineto/output_b
 ```bash
 FLAGGEMS_KERNEL=OFF FLAGGEMS_PYTHON=OFF CUDA_KERNEL=ON \
   pip install -e . --no-build-isolation
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_stage_b_chrome_trace_has_gpu_kernels -v
 ```
 
@@ -781,8 +781,8 @@ def test_stage_b_correlation_or_degrade():
 - [ ] **Step 2: run**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/unit/test_profiler_privateuse1.py::test_stage_b_correlation_or_degrade -v -s
 ```
 
@@ -837,9 +837,9 @@ def test_profiler_qwen3_chrome_trace_kernels():
 - [ ] **Step 2: run**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
   HF_HOME="$HF_HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/integration/test_profiler_qwen3_infer.py -v -s
 ```
 
@@ -848,8 +848,8 @@ Expected: both tests PASS.
 - [ ] **Step 3: full regression**
 
 ```bash
-FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_cuda.conf \
-  bash scripts/vendor/with_cuda_libtorch.sh python -m pytest \
+FLAGOS_BACKEND_CONFIG=torch_fl/configs/backends_nvidia.conf \
+  bash scripts/vendor/with_nvidia_libtorch.sh python -m pytest \
   tests/integration/ops/ -m "not flaggems and not flaggems_python" -q
 ```
 

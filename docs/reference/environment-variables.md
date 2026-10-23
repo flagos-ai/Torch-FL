@@ -147,7 +147,7 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
 | `FLAGOS_DCU_HIP_VERSION` | Runtime | No default | Override HIP version detection for the DCU runtime |
 | `FLAGOS_DCU_SKIP_RUNTIME_CHECK` | Runtime | `0` (off) | Skip the DCU post-import checks (torch/DTK version alignment and CUDA-key kernel presence), for deliberately testing a non-matching wheel pair |
-| `FLAGOS_DCU_SDPA_FLASH` | Runtime | `1` (on) | On DCU, point DTK's SDPA selector at its CUTLASS flash adapter when the stack has one, instead of forcing the math decomposition. A stack without DTK's flash-attn library falls back to math on its own. Set `0` to force math everywhere. This is a capability switch, not a route switch: `scaled_dot_product_attention` stays a `cuda` route in `backends_dcu.conf`, and `FLAGOS_OP_scaled_dot_product_attention=flaggems` is the (measured-slower) FlagGems alternative |
+| `FLAGOS_DCU_SDPA_FLASH` | Runtime | `1` (on) | On DCU, point DTK's SDPA selector at its CUTLASS flash adapter when the stack has one, instead of forcing the math decomposition. A stack without DTK's flash-attn library falls back to math on its own. Set `0` to force math everywhere. This is a capability switch, not a route switch: `scaled_dot_product_attention` stays a `cuda` route in `backends_hygon.conf`, and `FLAGOS_OP_scaled_dot_product_attention=flaggems` is the (measured-slower) FlagGems alternative |
 | `FLAGOS_DISABLE_APEX_COMPAT` | Runtime | `0` (off) | Disable the optional Apex multi-tensor compatibility layer; see the Apex note below |
 | `FLAGOS_DISABLE_QWENIMAGE_ROPE` | Runtime | `0` (off) | Leave `diffusers`' Qwen-Image rotary-embedding table alone. `torch_fl` registers the `flagos` device there at import on GCU and on Ascend, which is what keeps the rotation off the complex exponential `diffusers` would otherwise fall back to; set `1` to measure that difference. This is a capability switch, not a route switch: it changes which rotation `diffusers` calls, not which backend serves any operator — see the Qwen-Image note below |
 | `FLAGOS_DIST_FORCE_NCCL` | Test | `0` (off) | In the manual MetaX distributed tests, skip FlagCX and use NCCL |
@@ -177,7 +177,7 @@ at all (`RuntimeError: Unsupported dtype for ACL: ComplexFloat`).
 `FLAGOS_DISABLE_QWENIMAGE_ROPE=1` leaves the table as `diffusers` ships it, which
 is the off leg of the measurement in
 `tests/manual/qwen_image_2512/README.md`. The patch is confined to `diffusers`;
-no operator route in `backends_gcu.conf` or `backends_ascend.conf` changes, and
+no operator route in `backends_enflame.conf` or `backends_ascend.conf` changes, and
 the tokens it removes (`repeat_interleave.self_int`, and the complex multiply)
 are not routed anywhere else by this switch.
 
@@ -227,7 +227,7 @@ import time.
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
 | `FLAGOS_DISABLE_CUDA_ASSETS` | Runtime | `0` (off) | Skip preloading the bundled `libtorch_cuda.so` and CUDA libraries, for builds that use system libtorch |
-| `FLAGOS_VENDOR_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_maca`/`lib_dcu`/`lib_ppu` is present. Only the active accelerator's build reads it |
+| `FLAGOS_VENDOR_TORCH_LIB` | Build & Runtime | Auto-discovered | Path to the vendor torch's `lib` directory, used when no bundled `lib_metax`/`lib_hygon`/`lib_thead` is present. Only the active accelerator's build reads it |
 | `FLAGOS_USE_CACHING_ALLOCATOR` | Runtime | `1` (on) | Caching device allocator. Set `0` to hand every allocation straight to the vendor runtime |
 
 ### Compiler and feature backends

@@ -14,7 +14,7 @@
 
 """DCU coverage for the FlagGems ``scaled_dot_product_attention`` route.
 
-``backends_dcu.conf`` routes ``scaled_dot_product_attention`` to FlagGems, which
+``backends_hygon.conf`` routes ``scaled_dot_product_attention`` to FlagGems, which
 means the composite reaches ``flag_gems``' Triton ``_attn_fwd`` instead of the
 boxing route's math decomposition. The route exists for one call in particular:
 Qwen-Image-2.1's prefill hands every one of its 32 blocks a ``(1, 1, 1, 4122)``
@@ -315,9 +315,9 @@ def _active_conf() -> str:
 
 def _require_dcu_flaggems() -> None:
     """Skip unless this is a DCU boxing build with a usable FlagGems runtime."""
-    if not _active_conf().endswith("backends_dcu.conf"):
+    if not _active_conf().endswith("backends_hygon.conf"):
         pytest.skip(
-            "the DCU FlagGems routes are stated in backends_dcu.conf; this run "
+            "the DCU FlagGems routes are stated in backends_hygon.conf; this run "
             f"selected {_active_conf() or '<no conf>'}"
         )
     if torch_fl.flagos.device_count() < 1:
@@ -396,7 +396,7 @@ def _sdpa_report(result: subprocess.CompletedProcess):
 
 @pytest.fixture(scope="module")
 def sdpa_shipped():
-    """The shipped ``backends_dcu.conf``, with no environment override."""
+    """The shipped ``backends_hygon.conf``, with no environment override."""
     _require_dcu_flaggems()
     result = _run_sdpa_cases()
     assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"

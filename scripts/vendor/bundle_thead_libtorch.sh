@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundle the locally built PPU libtorch C++ .so into torch_fl/lib_ppu/ for a
+# Bundle the locally built PPU libtorch C++ .so into torch_fl/lib_thead/ for a
 # self-contained single wheel.
 #
 # PPU is compiled against PPU_SDK/CUDA_SDK with its own FLAGOS_ACCELERATOR=ppu value;
@@ -12,15 +12,15 @@
 #
 # That local build also links against system MKL in /usr/local/lib
 # (libmkl_core / libmkl_gnu_thread / libmkl_intel_lp64, ~171 MB); the official
-# torch+cpu wheel does not ship these files, so they are bundled into lib_ppu/
+# torch+cpu wheel does not ship these files, so they are bundled into lib_thead/
 # together.
 #
 # Not bundled: PPU SDK runtime stays on the target machine at /usr/local/PPU_SDK.
 #
 # Usage:
-#   FLAGOS_VENDOR_TORCH_LIB=<ppu torch/lib> bash scripts/vendor/bundle_ppu_libtorch.sh
-#   PPU_SDK=/usr/local/PPU_SDK bash scripts/vendor/bundle_ppu_libtorch.sh
-#   FLAGOS_PPU_MKL_DIR=/usr/local/lib bash scripts/vendor/bundle_ppu_libtorch.sh
+#   FLAGOS_VENDOR_TORCH_LIB=<ppu torch/lib> bash scripts/vendor/bundle_thead_libtorch.sh
+#   PPU_SDK=/usr/local/PPU_SDK bash scripts/vendor/bundle_thead_libtorch.sh
+#   FLAGOS_PPU_MKL_DIR=/usr/local/lib bash scripts/vendor/bundle_thead_libtorch.sh
 #
 # Should run after `python setup.py bdist_wheel` and before packing the wheel.
 # Idempotent.
@@ -31,7 +31,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=scripts/vendor/bundle_common.sh
 source "${REPO_DIR}/scripts/vendor/bundle_common.sh"
 
-LIB_PPU="${REPO_DIR}/torch_fl/lib_ppu"
+LIB_PPU="${REPO_DIR}/torch_fl/lib_thead"
 TORCH_FL_LIB="${REPO_DIR}/torch_fl/lib"
 PPU_SDK="${PPU_SDK:-/usr/local/PPU_SDK}"
 MKL_DIR="${FLAGOS_PPU_MKL_DIR:-/usr/local/lib}"
@@ -64,12 +64,12 @@ CUDA_SO=(libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so libshm.so)
 MKL_SO=(libmkl_core.so.1 libmkl_gnu_thread.so.1 libmkl_intel_lp64.so.1)
 
 VENDOR_RPATH="${PPU_SDK}/CUDA_SDK/lib64:${PPU_SDK}/lib:${PPU_SDK}/lib64"
-# Libraries are opened from lib_ppu/ or from the private torch facade's lib/.
+# Libraries are opened from lib_thead/ or from the private torch facade's lib/.
 # Both directories contain the complete bundled dependency set.
 BUNDLE_ORIGIN="\$ORIGIN"
 
 echo "Source PPU torch/lib : ${SRC}"
-echo "Target lib_ppu       : ${LIB_PPU}"
+echo "Target lib_thead       : ${LIB_PPU}"
 echo "PPU SDK path         : ${PPU_SDK}"
 
 bundle_copy_so "${SRC}" "${LIB_PPU}" "${BUNDLE_ORIGIN}:${VENDOR_RPATH}" 1 "${CORE_SO[@]}"
@@ -92,7 +92,7 @@ else
 fi
 
 bundle_rewrite_plugin_rpath "${TORCH_FL_LIB}" \
-    "\$ORIGIN:\$ORIGIN/../lib_ppu:${VENDOR_RPATH}"
+    "\$ORIGIN:\$ORIGIN/../lib_thead:${VENDOR_RPATH}"
 
 bundle_summary "${LIB_PPU}"
 bundle_check_needed "${LIB_PPU}" \
