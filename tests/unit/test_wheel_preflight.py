@@ -181,6 +181,50 @@ def test_wheel_rejects_missing_or_stale_manifest(tmp_path, manifest):
         preflight.load_wheel(_wheel(tmp_path, manifest))
 
 
+def test_a_wheel_is_accepted_under_its_vendor_name(manifest):
+    """CI lanes export the vendor name; a wheel records the table id.
+
+    The apple lane runs `--platform apple` against a wheel whose manifest says
+    `mps`, which failed closed with "Wheel platform is mps; requested apple".
+    """
+    errors, _ = preflight.check_environment(manifest, platform="cuda")
+    assert errors == []
+    for vendor in ("nvidia", "cuda"):
+        errors, _ = preflight.check_environment(manifest, platform=vendor)
+        assert errors == [], (vendor, errors)
+
+
+def test_the_vendor_equivalence_follows_the_platform_table(manifest):
+    """The row under test is accepted under both names; no other row is.
+
+    Keyed off the wheel's own row (`cuda`) so the test does not depend on which
+    platform the fixture happens to build.
+    """
+    table = json.loads(
+        (SOURCE_ROOT / "cmake" / "flagos_platforms.json").read_text(encoding="utf-8")
+    )["accelerators"]
+    row = manifest["platform"]
+    vendor = table[row]["vendor"]
+    for name in (row, vendor):
+        errors, _ = preflight.check_environment(manifest, platform=name)
+        assert not any("Wheel platform is" in item for item in errors), name
+
+    others = [name for name in table if name != row]
+    for name in others:
+        errors, _ = preflight.check_environment(manifest, platform=name)
+        assert f"Wheel platform is {row}; requested {name}" in errors, name
+
+
+def test_without_the_table_the_comparison_stays_exact(monkeypatch):
+    """Installed beside a wheel there is no table; do not guess an equivalence."""
+    monkeypatch.setattr(
+        preflight, "PLATFORM_TABLE", Path("/nonexistent/flagos_platforms.json")
+    )
+    assert preflight.platform_vendor("apple") is None
+    assert preflight._same_platform("apple", "mps") is False
+    assert preflight._same_platform("mps", "mps") is True
+
+
 def test_sdk_and_platform_mismatches_fail_closed(manifest):
     errors, _ = preflight.check_environment(
         manifest, platform="musa", sdk_version="13.0"

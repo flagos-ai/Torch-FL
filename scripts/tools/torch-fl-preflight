@@ -27,6 +27,43 @@ MANIFEST_PATH = "torch_fl/compatibility.json"
 SCHEMA_VERSION = 1
 BUILD_DISTRIBUTIONS = ("torch", "flagtree", "flag_gems", "flagcx")
 UNKNOWN_VERSION_MARKERS = {"unknown", "latest", "none", "n/a"}
+#: The repository's platform table, next to this script (scripts/tools -> root).
+PLATFORM_TABLE = Path(__file__).resolve().parents[2] / "cmake" / "flagos_platforms.json"
+
+
+def platform_vendor(name):
+    """The vendor sharing ``name``'s platform row, or ``None``.
+
+    ``--platform`` is given whatever the caller calls the build: a table id
+    (``mps``) or the vendor name the table advertises for that row (``apple``),
+    which is what a CI lane exports. A wheel records the id, so comparing the
+    strings alone rejects the vendor spelling of the platform it was built for.
+
+    The table is read only when the repository is at hand. A preflight installed
+    beside a wheel has no table, and then the comparison stays exact -- failing
+    closed rather than guessing that two names mean the same thing.
+    """
+    try:
+        table = json.loads(PLATFORM_TABLE.read_text(encoding="utf-8"))
+        accelerators = table["accelerators"]
+    except (OSError, ValueError, KeyError):
+        return None
+    row = accelerators.get(name)
+    if isinstance(row, dict) and isinstance(row.get("vendor"), str):
+        return row["vendor"]
+    for key, entry in accelerators.items():
+        if isinstance(entry, dict) and entry.get("vendor") == name:
+            return key
+    return None
+
+
+def _same_platform(requested, recorded):
+    if requested == recorded:
+        return True
+    vendor = platform_vendor(requested)
+    if vendor == recorded:
+        return True
+    return platform_vendor(recorded) == requested
 
 
 def installed_version(name):
@@ -208,7 +245,7 @@ def check_environment(
     """Return actionable errors and warnings without loading a native library."""
     errors = []
     warnings = []
-    if platform and platform != manifest["platform"]:
+    if platform and not _same_platform(platform, manifest["platform"]):
         errors.append(f"Wheel platform is {manifest['platform']}; requested {platform}")
     recorded_sdk = manifest["build"]["sdk_version"]
     if (require_sdk or release) and not recorded_sdk:
