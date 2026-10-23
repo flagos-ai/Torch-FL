@@ -2657,6 +2657,17 @@ def _phase_ecosystem() -> None:
     # first op call, which is where the generated kernel resolves the callable.
     _patch_flaggems_layer_norm_backward()
 
+    # Iluvatar: flag_gems' non-inner reductions do not honour the row half of
+    # their 2-D tile mask on this backend, so they read rows they should have
+    # masked off. Same reason as above for the ordering -- the generated kernel
+    # resolves the callable on first use. No-op on every other platform.
+    if _build_accelerator() == "iluvatar":
+        from torch_fl.compile.iluvatar_masked_reductions import (
+            patch_iluvatar_masked_reductions,
+        )
+
+        patch_iluvatar_masked_reductions()
+
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()
 
