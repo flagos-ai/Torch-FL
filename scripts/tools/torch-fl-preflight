@@ -345,7 +345,15 @@ def main(argv=None):
     source.add_argument(
         "--installed", action="store_true", help="inspect installed torch_fl"
     )
-    parser.add_argument("--platform", help="expected accelerator")
+    parser.add_argument(
+        "--platform",
+        help="expected accelerator: the table id (mps) or its vendor (apple)",
+    )
+    parser.add_argument(
+        "--wheel-name",
+        action="store_true",
+        help="accept --platform naming the wheel file (torch_fl-2.10.0+mps-...whl)",
+    )
     parser.add_argument("--sdk-version", help="SDK version to compare with the build")
     parser.add_argument(
         "--require-sdk", action="store_true", help="reject an unknown SDK"
@@ -376,6 +384,19 @@ def main(argv=None):
             if args.wheel
             else [load_installed()]
         )
+        if args.wheel_name:
+            if not args.wheel or not args.platform:
+                parser.error("--wheel-name needs --wheel and --platform")
+            # The SDK segment names the wheel's SDK (cuda13.3 for a cuda wheel,
+            # mps for the MPS build, which has no SDK), so the platform asked
+            # for is matched as the segment's prefix.
+            segment = args.wheel[0].name.split("-")[1].partition("+")[2]
+            if not segment.startswith(args.platform):
+                parser.exit(
+                    2,
+                    f"torch-fl-preflight: {args.wheel[0].name} is not a "
+                    f"{args.platform} wheel\n",
+                )
         errors = []
         warnings = []
         for manifest in manifests:

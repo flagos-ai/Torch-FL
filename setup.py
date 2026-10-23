@@ -1330,7 +1330,17 @@ def _get_setup_kwargs():
         kwargs["entry_points"] = {
             "torch.backends": [
                 "torch_fl = torch_fl._autoload:init",
-            ]
+            ],
+            # The wheel is named for its platform's SDK segment (torch_fl-2.10.0
+            # +cuda13.3), and the MPS build has none (`+mps`), as base wheels
+            # do -- an artifact called torch_fl-2.10.0.whl could not be told
+            # from a CUDA-free CPU build. The platform id's segment doubles as
+            # the preflight's console script: `torch-fl-cuda ... --platform
+            # cuda`. The MPS one is `torch-fl-mps`, the id that build uses
+            # (setup.py reads FLAGOS_ACCELERATOR=mps for it).
+            "console_scripts": [
+                f"torch-fl-{FLAGOS_ACCELERATOR} = torch_fl._preflight_main:main",
+            ],
         }
     return kwargs
 

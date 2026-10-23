@@ -291,6 +291,43 @@ def test_strict_tested_rejects_optional_build_version_changes(manifest, monkeypa
     assert any("flagtree was built/tested with" in item for item in errors)
 
 
+def test_wheel_name_names_the_platform_id(tmp_path, manifest, capsys):
+    """`--wheel-name` ties --platform to the SDK segment in the filename.
+
+    The artifact names its build variant (`torch_fl-2.10.0+cuda13.3`), and the
+    MPS build's segment is `+mps` -- not the vendor `apple`. The check is
+    therefore against the table id, which is what a wheel's filename carries.
+    """
+    wheel = tmp_path / "torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl"
+    wheel.write_bytes(_wheel(tmp_path, manifest).read_bytes())
+    assert (
+        preflight.main(["--wheel", str(wheel), "--platform", "cuda", "--wheel-name"])
+        == 0
+    )
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as raised:
+        preflight.main(["--wheel", str(wheel), "--platform", "mps", "--wheel-name"])
+    assert raised.value.code == 2
+    capsys.readouterr()
+    # The MPS build's version carries no SDK segment, so the platform id is the
+    # segment (`+mps`), as a base build's `+cpu` would be.
+    mps_wheel = tmp_path / "torch_fl-2.10.0+mps-cp312-cp312-linux_x86_64.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(mps_wheel, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename.endswith("/METADATA"):
+                data = data.replace(b"Version: 0.1.0+cuda13.3", b"Version: 0.1.0+mps")
+            elif item.filename == preflight.MANIFEST_PATH:
+                data = json.dumps(
+                    {**manifest, "platform": "mps", "wheel_version": "0.1.0+mps"}
+                ).encode()
+            target.writestr(item, data)
+    assert (
+        preflight.main(["--wheel", str(mps_wheel), "--platform", "mps", "--wheel-name"])
+        == 0
+    )
+
+
 def test_cli_reports_mismatch_before_import(tmp_path, manifest, capsys):
     wheel = _wheel(tmp_path, manifest)
     before = _snapshot_modules()
