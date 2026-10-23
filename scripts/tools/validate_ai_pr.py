@@ -154,10 +154,32 @@ def check_commit_messages() -> bool:
     """Check recent commit messages follow conventions."""
     print(f"\n{Color.BOLD}=== Commit Message Checks ==={Color.RESET}")
 
-    # Get commits not in main
+    # The commits this branch adds on top of the main its PR targets.
+    #
+    # A development branch is cut from upstream (flagos-ai/Torch-FL), while
+    # `main` in a contributor's clone is their fork's: it can lag upstream (so
+    # `main..HEAD` counts upstream's already-merged commits too) and carry
+    # fork-only commits (so an upstream cut point is not on local `main`).
+    #
+    # List the HEAD commits no branch named `main` (local or remote) contains.
+    # `--not` works even when the cut point is not an ancestor of local main.
     ret, stdout, _ = run_command(
-        ["git", "log", "main..HEAD", "--pretty=format:%s", "--no-merges"]
+        [
+            "git",
+            "log",
+            "HEAD",
+            "--not",
+            "--branches=main",
+            "--remotes=*/main",
+            "--pretty=format:%s",
+            "--no-merges",
+        ]
     )
+    if ret != 0 or not stdout.strip():
+        # Nothing beyond a main git knows about; fall back to the local one.
+        ret, stdout, _ = run_command(
+            ["git", "log", "main..HEAD", "--pretty=format:%s", "--no-merges"]
+        )
 
     if ret != 0 or not stdout.strip():
         print_status("No commits found (may need to fetch main)", "WARN")
