@@ -52,6 +52,30 @@ import torch_fl  # noqa: F401  -- registers the device
 CUDA_ABI_PLATFORMS = ("cuda", "dcu", "metax", "ppu")
 
 
+def _build_platform() -> str:
+    """The accelerator this wheel was built for ("" when unrecorded)."""
+    return torch_fl._build_accelerator()
+
+
+# Builds with no on-device dtype cast at all: copy_ops.cc puts them in the
+# same-device flagos->flagos branch's "Fallback: CPU round-trip when no
+# on-device cast is available". The CUDA-ABI platforms reach the native
+# TensorIterator cast through the boxed arm, and Ascend / GCU / Kunlunxin /
+# MUSA each compile a vendor cast (`aclnnCast`, `topsatenToCopy`, `cast`,
+# `MudnnCopy`); these four do not, so a host round trip is the design there and
+# the transfer count below cannot be zero.
+_NO_ON_DEVICE_CAST = ("bpu", "iluvatar", "mps", "tsingmicro")
+
+
+def _has_on_device_cast() -> bool:
+    """Whether `.to(dtype)` can stay on the device on this build.
+
+    See `csrc/aten/copy_ops.cc`, the same-device flagos->flagos dtype branch;
+    the USE_ILUVATAR group there has no `DtypeCast` implementation.
+    """
+    return _build_platform() not in _NO_ON_DEVICE_CAST
+
+
 def _flagos_available():
     try:
         return (
@@ -179,6 +203,14 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     )
 
 
+@pytest.mark.skipif(
+    not _has_on_device_cast(),
+    reason=(
+        "this build has no on-device dtype cast: copy_ops.cc takes the documented "
+        "'Fallback: CPU round-trip when no on-device cast is available' branch, "
+        "so the transfer count below is the design and not a regression"
+    ),
+)
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],

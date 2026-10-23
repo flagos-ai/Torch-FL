@@ -23,27 +23,48 @@ would be wrong on every platform while looking like a correct fix.
 
 The module is loaded by path rather than imported: importing ``torch_fl``
 executes the package ``__init__`` and needs a built accelerator, and the module
-under test itself only needs ``torch``.
+under test itself only needs ``torch``. The path resolves through the installed
+``torch_fl`` first so the same file runs in a wheel-only workspace and in a
+source checkout.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "torch_fl"
-    / "compile"
-    / "iluvatar_masked_reductions.py"
-)
+
+def _module_path() -> Path:
+    """Locate torch_fl/compile/iluvatar_masked_reductions.py without importing the package.
+
+    From wherever torch_fl resolves: the installed wheel in CI's wheel-only test
+    workspace (which has no source tree), or the repo copy in a source checkout.
+    Same arrangement as tests/integration/ops/conftest.py's `_platform_path`,
+    because this file runs in both.
+    """
+    spec = importlib.util.find_spec("torch_fl")
+    if spec is not None and spec.origin:
+        candidate = (
+            Path(spec.origin).resolve().parent
+            / "compile"
+            / "iluvatar_masked_reductions.py"
+        )
+        if candidate.is_file():
+            return candidate
+    return (
+        Path(__file__).resolve().parents[2]
+        / "torch_fl"
+        / "compile"
+        / "iluvatar_masked_reductions.py"
+    )
 
 
 def _load():
     spec = importlib.util.spec_from_file_location(
-        "iluvatar_masked_reductions", _MODULE_PATH
+        "iluvatar_masked_reductions", _module_path()
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -162,9 +183,83 @@ def test_std_kind_keeps_keepdim_keyword_only():
     assert shape == (2, 4, 3) and dim == -1 and correction == 1 and keepdim is False
 
 
-def test_patch_is_idempotent_and_tolerates_missing_flag_gems(monkeypatch):
-    import sys
+def test_out_entry_points_are_never_rewired(monkeypatch):
+    """`out=` entry points keep their own argument behaviour.
 
+    flag_gems' `sum_dim_out` is not `sum_dim`: with no `dtype` it passes the
+    caller's `keepdim` through and reads the result dtype off the input, which
+    is how `torch.sum(bool_input, dim=1, out=int64_out)` lands in an int64
+    buffer. The wrapper forces `keepdim=False` and returns a fresh tensor, so
+    wrapping that binding would silently change both. Alias sweeps keyed on
+    object identity are exactly where that mistake hides: a build that binds
+    `sum_dim_out` to the same function as `sum_dim` would be rewired with it.
+    """
+
+    class FakeGems:
+        pass
+
+    def sum_dim(inp, dim=None, keepdim=False, **kw):
+        return inp
+
+    def sum_dim_out(inp, dim=None, keepdim=False, **kw):
+        return inp
+
+    fake = FakeGems()
+    fake.sum_dim = sum_dim
+    fake.sum_dim_out = sum_dim_out
+    monkeypatch.setitem(sys.modules, "flag_gems", fake)
+
+    assert mr.patch_iluvatar_masked_reductions() is True
+    assert fake.sum_dim.__code__.co_name == "patched"
+    assert fake.sum_dim_out is sum_dim_out
+
+    # The identity sweep is what makes this worth pinning: a build that aliases
+    # the two entry points must still leave the `out=` name alone.
+    del sys.modules["flag_gems"]
+    aliased = FakeGems()
+    aliased.sum_dim = aliased.sum_dim_out = sum_dim
+    monkeypatch.setitem(sys.modules, "flag_gems", aliased)
+    assert mr.patch_iluvatar_masked_reductions() is True
+    assert aliased.sum_dim.__code__.co_name == "patched"
+    assert aliased.sum_dim_out is sum_dim
+
+
+def test_bool_sum_out_dtype_survives_the_patch(monkeypatch, tmp_path):
+    """`torch.sum(bool, dim=1, out=...)` still writes the int64 the op promises.
+
+    Mirrors flag_gems' `sum_dim_comm` dtype rule: an unspecified dtype is read
+    off the input, and a bool input becomes int64. The patched binding is the
+    one `sum.IntList_out` resolves, so if the sweep had wrapped it the caller
+    would get a bool result back and the `out=` buffer would stay untouched.
+    """
+
+    class FakeGems:
+        pass
+
+    def sum_dim_comm(inp, dim=None, keepdim=False, *, dtype=None, out=None):
+        if dtype is None:
+            dtype = torch.int64 if inp.dtype is torch.bool else inp.dtype
+        result = torch.sum(inp, dim=dim, keepdim=keepdim, dtype=dtype)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
+
+    fake = FakeGems()
+    fake.sum_dim = lambda inp, dim=None, keepdim=False, **kw: inp
+    fake.sum_dim_out = sum_dim_comm
+    monkeypatch.setitem(sys.modules, "flag_gems", fake)
+    mr.patch_iluvatar_masked_reductions()
+
+    mask = torch.tensor([[True, False, True], [False, True, True]])
+    out = torch.empty(2, dtype=torch.int64)
+    got = fake.sum_dim_out(mask, 1, out=out)
+    assert got is out
+    assert out.dtype == torch.int64
+    assert out.tolist() == [2, 2]
+
+
+def test_patch_is_idempotent_and_tolerates_missing_flag_gems(monkeypatch):
     class FakeGems:
         pass
 
