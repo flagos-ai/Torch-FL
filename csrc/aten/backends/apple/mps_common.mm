@@ -39,10 +39,10 @@
 // Pulls in the flagos C ABI (Stream_t, GetDevice, GetCurrentStreamForDevice)
 // plus the two Metal side-door helpers the operator layer needs, the same way
 // every other vendor backend includes runtime/accelerator/<vendor>/.
-#include "runtime/accelerator/mps/mps.h"
+#include "runtime/accelerator/apple/mps.h"
 // and the C++ runtime surface: DrainAll, the host-read barrier the staging
 // copies live behind.
-#include "runtime/accelerator/mps/mps_runtime.h"
+#include "runtime/accelerator/apple/mps_runtime.h"
 // and the allocator, whose record_stream is what keeps a block a queued graph
 // is still reading out of the free pool until that work completes.
 #include "runtime/allocator/caching_device_allocator.h"

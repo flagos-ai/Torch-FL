@@ -69,7 +69,6 @@ paths_watch:
   - tests/integration/test_factory_ops.py
   # This suite also runs on MPS, but its filename is shared with other lanes.
   # Keeping it here prevents an MPS-only change from omitting the Apple job.
-  - tests/integration/ops/test_linear_dispatch.py
 
 container_volumes: []
 

@@ -9,7 +9,7 @@
 // The Metal runtime's C entry points. The C++ allocator translation unit is not
 // Objective-C++, so the internal header is available only to this small
 // Objective-C++ bridge; its two functions expose the allocator's exit release.
-#include "../../accelerator/mps/mps.h"
+#include "../../accelerator/apple/mps.h"
 
 extern "C" void FlagosMPSRegisterAllocatorShutdown(
     void (*release_cache)(void*),
@@ -37,7 +37,7 @@ class MpsShutdownRegistration final {
 // Apple Silicon (M-series) Metal implementation of DeviceMemoryInterface.
 //
 // Like the BPU backend this delegates to the flagos contract functions in
-// csrc/runtime/accelerator/mps/ rather than calling Metal directly: those own
+// csrc/runtime/accelerator/apple/ rather than calling Metal directly: those own
 // the side table that says which pointers are device memory, and a second,
 // independent registry here would disagree the moment either side changed.
 //

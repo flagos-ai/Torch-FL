@@ -11,7 +11,7 @@
 // no temporary buffer, no CPU round-trip. The one shape it cannot serve itself
 // is a source and destination on *different* devices; see the staging helper.
 
-#include "aten/backends/musa/mudnn_common.h"
+#include "aten/backends/mthreads/mudnn_common.h"
 
 #include <ATen/ops/view_as_real_native.h>
 

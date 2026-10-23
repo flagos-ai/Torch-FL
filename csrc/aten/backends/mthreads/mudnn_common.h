@@ -21,7 +21,7 @@
 
 #ifdef USE_MUSA
 
-#include "runtime/accelerator/musa/musa_stream.h"
+#include "runtime/accelerator/mthreads/musa_stream.h"
 
 #include <ATen/ATen.h>
 #include <ATen/Context.h>
