@@ -384,14 +384,14 @@ class TestExpDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] exp -> apple" in result.stderr
+        assert "[flagos dispatch] exp -> mps" in result.stderr
 
     @pytest.mark.main_ops
     def test_a_declined_width_stays_served(self):
         """A declined width is the body's round-trip, not a `none` route.
 
         The conf route is what the log names, so a float64 call still logs
-        ``exp -> apple`` even though the body hands it to the reference. This holds
+        ``exp -> mps`` even though the body hands it to the reference. This holds
         that the decline is inside the body, and that the conf has not been
         narrowed to the served widths.
         """

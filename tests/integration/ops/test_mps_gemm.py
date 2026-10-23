@@ -531,5 +531,5 @@ class TestGemmDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] mm -> apple" in result.stderr
-        assert "[flagos dispatch] bmm -> apple" in result.stderr
+        assert "[flagos dispatch] mm -> mps" in result.stderr
+        assert "[flagos dispatch] bmm -> mps" in result.stderr

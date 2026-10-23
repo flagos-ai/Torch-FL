@@ -644,7 +644,7 @@ class TestTanhDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] tanh -> apple" in result.stderr
+        assert "[flagos dispatch] tanh -> mps" in result.stderr
 
     @pytest.mark.main_ops
     @pytest.mark.parametrize("dtype", ["float32", "float64"])

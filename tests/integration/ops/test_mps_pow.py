@@ -316,4 +316,4 @@ class TestPowDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] pow.Tensor_Scalar -> apple" in result.stderr
+        assert "[flagos dispatch] pow.Tensor_Scalar -> mps" in result.stderr

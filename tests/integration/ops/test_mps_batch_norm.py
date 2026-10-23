@@ -1001,7 +1001,7 @@ class TestBatchNormDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] native_batch_norm -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] native_batch_norm -> mps") == 2
 
     @pytest.mark.main_ops
     def test_the_inference_front_end_does_not_reach_the_host(self):
@@ -1064,7 +1064,7 @@ class TestBatchNormDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] native_batch_norm -> apple" in result.stderr
+        assert "[flagos dispatch] native_batch_norm -> mps" in result.stderr
         assert "out (2, 3, 4, 5) mean (3,) invstd (3,) moved True" in result.stdout
 
 

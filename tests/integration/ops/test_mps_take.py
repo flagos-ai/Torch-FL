@@ -573,7 +573,7 @@ class TestTakeDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] take -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] take -> mps") == 2
 
     @pytest.mark.main_ops
     def test_a_declined_index_does_not_reach_the_graph(self):
@@ -606,7 +606,7 @@ class TestTakeDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "IndexError True" in result.stdout
-        assert "[flagos dispatch] take -> apple" in result.stderr
+        assert "[flagos dispatch] take -> mps" in result.stderr
 
 
 class TestTakeCost:
@@ -626,7 +626,7 @@ class TestTakeCost:
 
         What catches it is the dispatch log rather than the clock. The log line
         names the backend this module routed to and is emitted once per call, so
-        ten reads that were all served log exactly ten ``-> apple`` lines. The
+        ten reads that were all served log exactly ten ``-> mps`` lines. The
         timing bound this replaced measured 52 ms on CI against 0.3 ms locally
         *for calls that were being served* -- it failed on the runner for work
         the log count proves correct, and it would still miss a fast fallback.

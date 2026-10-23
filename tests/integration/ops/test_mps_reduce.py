@@ -403,5 +403,5 @@ class TestReduceDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert "[flagos dispatch] sum.dim_IntList -> apple" in result.stderr
-        assert "[flagos dispatch] mean.dim -> apple" in result.stderr
+        assert "[flagos dispatch] sum.dim_IntList -> mps" in result.stderr
+        assert "[flagos dispatch] mean.dim -> mps" in result.stderr

@@ -507,7 +507,7 @@ class TestIndexSelectDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] index_select -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] index_select -> mps") == 2
 
     @pytest.mark.main_ops
     def test_declined_dim_does_not_reach_the_graph(self):
@@ -535,7 +535,7 @@ class TestIndexSelectDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "(8, 2)" in result.stdout
-        assert "[flagos dispatch] index_select -> apple" in result.stderr
+        assert "[flagos dispatch] index_select -> mps" in result.stderr
 
 
 class TestIndexSelectCost:
@@ -554,7 +554,7 @@ class TestIndexSelectCost:
 
         What catches it is the dispatch log rather than the clock. The log line
         names the backend this module routed to and is emitted once per call, so
-        ten reads that were all served log exactly ten ``-> apple`` lines. A
+        ten reads that were all served log exactly ten ``-> mps`` lines. A
         timing bound was tried first and is the wrong instrument: it measured
         53 ms on CI against 0.3 ms locally *for calls that were being served*,
         so it fails on a paravirtualized runner for work the log count proves

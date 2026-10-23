@@ -309,7 +309,7 @@ def test_dispatch_log_names_mps():
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "[flagos dispatch] masked_fill.Scalar -> apple" in result.stderr
+    assert "[flagos dispatch] masked_fill.Scalar -> mps" in result.stderr
 
 
 @pytest.mark.anyplatform

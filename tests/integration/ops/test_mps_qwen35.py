@@ -119,7 +119,7 @@ torch.linalg.solve_triangular(
 torch_fl._C._synchronize()
 """
     result = run_python_source(source, {"FLAGOS_LOG": "dispatch,fallback"})
-    assert "[flagos dispatch] linalg_solve_triangular -> apple" in result.stderr
+    assert "[flagos dispatch] linalg_solve_triangular -> mps" in result.stderr
     assert "[flagos cpu_fallback] aten::linalg_solve_triangular" not in result.stderr
     expected = torch.linalg.solve_triangular(
         a.float(),
@@ -163,5 +163,5 @@ def test_checkpoint_shaped_bfloat16_triangular_solve():
 )
 def test_triangular_solve_dispatches_to_mps(source):
     result = run_python_source(source, {"FLAGOS_LOG": "dispatch,fallback"})
-    assert "[flagos dispatch] linalg_solve_triangular -> apple" in result.stderr
+    assert "[flagos dispatch] linalg_solve_triangular -> mps" in result.stderr
     assert "[flagos cpu_fallback] aten::linalg_solve_triangular" not in result.stderr

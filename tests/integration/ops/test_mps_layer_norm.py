@@ -758,7 +758,7 @@ class TestLayerNormDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] native_layer_norm -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] native_layer_norm -> mps") == 2
 
     @pytest.mark.main_ops
     def test_the_cpu_fallback_no_longer_carries_layer_norm(self):
@@ -822,7 +822,7 @@ class TestLayerNormDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "RuntimeError True" in result.stdout
-        assert "[flagos dispatch] native_layer_norm -> apple" in result.stderr
+        assert "[flagos dispatch] native_layer_norm -> mps" in result.stderr
 
 
 class TestLayerNormCost:

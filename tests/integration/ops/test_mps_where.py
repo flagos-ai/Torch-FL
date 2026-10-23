@@ -603,7 +603,7 @@ class TestWhereDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] where.self -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] where.self -> mps") == 2
 
     @pytest.mark.main_ops
     def test_a_declined_condition_does_not_reach_the_graph(self):
@@ -636,7 +636,7 @@ class TestWhereDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "RuntimeError True" in result.stdout
-        assert "[flagos dispatch] where.self -> apple" in result.stderr
+        assert "[flagos dispatch] where.self -> mps" in result.stderr
 
 
 class TestWhereCost:
@@ -654,7 +654,7 @@ class TestWhereCost:
 
         What catches it is the dispatch log rather than the clock. The log line
         names the backend this module routed to and is emitted once per call, so
-        ten selects that were all served log exactly ten ``-> apple`` lines -- a
+        ten selects that were all served log exactly ten ``-> mps`` lines -- a
         count a shared runner cannot move, unlike the wall clock the other cost
         cases in this suite were originally written against.
         """

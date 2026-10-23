@@ -601,7 +601,7 @@ class TestCatDispatch:
             text=True,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stderr.count("[flagos dispatch] cat -> apple") == 2
+        assert result.stderr.count("[flagos dispatch] cat -> mps") == 2
 
     @pytest.mark.main_ops
     def test_a_declined_list_does_not_reach_the_graph(self):
@@ -629,7 +629,7 @@ class TestCatDispatch:
         )
         assert result.returncode == 0, result.stderr
         assert "bool [True, False, True, True]" in result.stdout
-        assert "[flagos dispatch] cat -> apple" in result.stderr
+        assert "[flagos dispatch] cat -> mps" in result.stderr
 
 
 class TestCatCost:
@@ -647,7 +647,7 @@ class TestCatCost:
 
         What catches it is the dispatch log rather than the clock. The log line
         names the backend this module routed to and is emitted once per call, so
-        ten concatenations that were all served log exactly ten ``-> apple`` lines
+        ten concatenations that were all served log exactly ten ``-> mps`` lines
         -- a count a shared runner cannot move, unlike the wall clock the other
         cost cases in this suite were originally written against.
         """
