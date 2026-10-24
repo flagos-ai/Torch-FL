@@ -799,7 +799,7 @@ def _patch_flaggems_philox():
     deterministic without maintaining a second CUDA-style generator state.
     """
     if (
-        _build_accelerator() not in ("musa", "tsingmicro")
+        _build_accelerator() not in ("mthreads", "tsingmicro")
         or not _conf_routes_to_flaggems()
     ):
         return
@@ -935,7 +935,7 @@ def _patch_flaggems_layer_norm_backward() -> None:
     """
     if not _conf_routes_to_flaggems():
         return
-    if _build_accelerator() not in ("cuda", "", "ppu", "musa", "tsingmicro"):
+    if _build_accelerator() not in ("nvidia", "", "thead", "mthreads", "tsingmicro"):
         return
 
     try:
@@ -2528,7 +2528,7 @@ def _phase_ecosystem() -> None:
     # bundled, so the init works and is what its FlagGems/Triton path relies on.
     if (
         not _env.flag("FLAGOS_DISABLE_FLAGGEMS_PY")
-        and _build_accelerator() in ("cuda", "", "ppu")
+        and _build_accelerator() in ("nvidia", "", "thead")
         and torch.cuda.is_available()
     ):
         torch.cuda.init()

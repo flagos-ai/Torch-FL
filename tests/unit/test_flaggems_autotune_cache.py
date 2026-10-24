@@ -51,7 +51,7 @@ ENV_VAR = "TRITON_CACHE_AUTOTUNING"
 @pytest.fixture
 def as_dcu(monkeypatch):
     """Make the patch believe it is on the configuration it was measured on."""
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "dcu")
+    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "hygon")
     monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: True)
     monkeypatch.delenv(ENV_VAR, raising=False)
     yield

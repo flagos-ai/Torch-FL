@@ -471,7 +471,7 @@ class TestGcuInt64Fallback:
     def _gcu_only(self):
         from torch_fl._build_config import ACCELERATOR
 
-        if ACCELERATOR != "gcu":
+        if ACCELERATOR != "enflame":
             pytest.skip("GCU build required")
 
     @pytest.fixture(scope="class")
@@ -498,7 +498,7 @@ class TestGcuInt64Fallback:
         """
         i64 = gcu_routes["torch.int64"]
         for op in self._MOVED_OPS:
-            assert i64[op] == "gcu", f"{op} ran on {i64[op]}"
+            assert i64[op] == "enflame", f"{op} ran on {i64[op]}"
 
     @pytest.mark.gcu
     def test_float32_keeps_the_configured_route(self, gcu_routes):

@@ -81,7 +81,7 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
     def import_get_raw_stream_as(self, name: str) -> str:
         from torch_fl._build_config import ACCELERATOR
 
-        if ACCELERATOR == "musa":
+        if ACCELERATOR == "mthreads":
             # MThreads FlagTree's launcher consumes a raw musaStream_t.  Do not
             # import the CUDA binding on native MUSA, where CPU PyTorch has no
             # CUDA runtime symbols.
@@ -89,7 +89,7 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
                 "from torch_fl.compile.flagtree_shim import "
                 f"get_musa_current_raw_stream as {name}"
             )
-        if ACCELERATOR == "gcu":
+        if ACCELERATOR == "enflame":
             # Same on GCU: triton_gcu's launcher takes a topsStream_t and there
             # is no CUDA runtime behind torch.flagos.
             return (

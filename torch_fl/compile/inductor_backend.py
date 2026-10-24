@@ -60,14 +60,14 @@ def _patch_native_triton_autotune() -> None:
     if getattr(CachingAutotuner, "_flagos_native_patched", False):
         return
 
-    vendor = "MThreads FlagTree" if ACCELERATOR == "musa" else "triton_gcu"
+    vendor = "MThreads FlagTree" if ACCELERATOR == "mthreads" else "triton_gcu"
     # triton_gcu miscompiles a persistent reduction at XBLOCK=1: the cross-row
     # `tl.sum(..., 1)` silently returns wrong values (XBLOCK=2 fails to compile
     # outright, XBLOCK>=4 is correct). It is the first config Inductor generates
     # for every persistent reduction, so taking launchers[0] would ship the
     # broken one -- and being wrong rather than failing, it only surfaces as bad
     # gradients, since dim-0 reductions are mostly a backward-pass shape.
-    min_xblock = 4 if ACCELERATOR == "gcu" else 0
+    min_xblock = 4 if ACCELERATOR == "enflame" else 0
 
     def _usable(launcher) -> bool:
         if not min_xblock:
@@ -145,7 +145,7 @@ def _bind_musa_flagtree_runtime() -> None:
     """
     from torch_fl._build_config import ACCELERATOR
 
-    if ACCELERATOR != "musa":
+    if ACCELERATOR != "mthreads":
         return
     try:
         from torch_fl.compile.flagtree_shim import bind_flagtree_musa_driver
@@ -350,12 +350,12 @@ def pin_compile_threads() -> bool:
     from torch_fl.compile.device_interface import _torch_has_cuda_kernels
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
-    if ACCELERATOR == "gcu":
+    if ACCELERATOR == "enflame":
         vendor_pinned = True
     else:
         backend = flagtree_backend()
         vendor_pinned = backend == "ppu" or (
-            ACCELERATOR == "musa" and backend == "mthreads"
+            ACCELERATOR == "mthreads" and backend == "mthreads"
         )
 
     # The default FlagGems-primary CUDA wheel links the CPU-only pip torch, where
@@ -455,7 +455,7 @@ def _resolve_config_patches(
     # indexing linear and sidesteps it; the transpose then costs an extra kernel
     # rather than a tiled load. Only a default -- an explicit
     # options={"triton.max_tiles": ...} above still wins.
-    if ACCELERATOR == "gcu":
+    if ACCELERATOR == "enflame":
         patches.setdefault("triton.max_tiles", 1)
 
     # CUDA graphs need torch.cuda.CUDAGraph, a dummy base class in the CPU torch
@@ -494,12 +494,12 @@ def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> No
     from torch_fl._build_config import ACCELERATOR
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
-    if ACCELERATOR == "gcu":
+    if ACCELERATOR == "enflame":
         config_patches["compile_threads"] = 1
         return
 
     backend = flagtree_backend()
-    if backend == "ppu" or (ACCELERATOR == "musa" and backend == "mthreads"):
+    if backend == "ppu" or (ACCELERATOR == "mthreads" and backend == "mthreads"):
         config_patches["compile_threads"] = 1
 
 

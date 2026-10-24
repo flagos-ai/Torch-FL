@@ -1707,7 +1707,7 @@ def _patch_flaggems_index_put():
 # same measurement was taken on an H100 (see the section header) -- an external
 # libtorch_cuda.so behind a CPU torch changes how the vendor kernels are reached,
 # not how FlagGems launches its own.
-_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("dcu", "cuda")
+_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("hygon", "nvidia")
 
 
 def _flagos_launch_patches_apply():

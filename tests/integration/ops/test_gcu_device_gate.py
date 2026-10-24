@@ -43,7 +43,7 @@ DEVICE = torch.device("flagos:0")
 def _gcu_only():
     from torch_fl._build_config import ACCELERATOR
 
-    if ACCELERATOR != "gcu":
+    if ACCELERATOR != "enflame":
         pytest.skip("GCU build required")
 
 

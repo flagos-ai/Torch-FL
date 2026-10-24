@@ -295,7 +295,7 @@ class TestMulTensorComplex64:
     def _gcu_only(self):
         from torch_fl._build_config import ACCELERATOR
 
-        if ACCELERATOR != "gcu":
+        if ACCELERATOR != "enflame":
             pytest.skip("GCU build required")
 
     @pytest.mark.parametrize(

@@ -187,7 +187,7 @@ def runtime(monkeypatch, tmp_path):
     torch_fl._env = modules["torch_fl._env"]
     torch_fl._env.build_kernels = lambda: state["kernels"]
     torch_fl.flagos = SimpleNamespace(is_available=lambda: state["available"])
-    modules["torch_fl._build_config"].ACCELERATOR = "musa"
+    modules["torch_fl._build_config"].ACCELERATOR = "mthreads"
     shim = modules["torch_fl.compile.flagtree_shim"]
     shim.is_flagtree_active = lambda: state["active"]
     shim.flagtree_backend = lambda: state["backend"]

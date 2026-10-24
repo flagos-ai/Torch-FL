@@ -69,7 +69,9 @@ DEVICE_TYPE = "flagos"
 # backend on a wheel that pairs with a CPU-only torch. The distinction that
 # matters to this module is the same for all of them, so keep the checks keyed
 # on this set rather than on a vendor name.
-_NATIVE_ACCELERATORS = frozenset({"musa", "gcu", "kunlunxin", "iluvatar", "tsingmicro"})
+_NATIVE_ACCELERATORS = frozenset(
+    {"mthreads", "enflame", "kunlunxin", "iluvatar", "tsingmicro"}
+)
 
 
 def is_native_accelerator() -> bool:
@@ -485,8 +487,8 @@ class FlagOSDeviceInterface(DeviceInterface):
             from torch_fl._build_config import ACCELERATOR
 
             hint = {
-                "musa": "install the MThreads FlagTree runtime for MUSA",
-                "gcu": (
+                "mthreads": "install the MThreads FlagTree runtime for MUSA",
+                "enflame": (
                     "install Enflame's triton_gcu plugin and the /opt/triton_gcu "
                     "toolchain (see docs/vendors/gcu/installation.md)"
                 ),
