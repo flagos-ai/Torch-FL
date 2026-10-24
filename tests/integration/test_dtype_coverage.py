@@ -110,16 +110,13 @@ def _routed_to_flagos(op) -> bool:
     and a slot that does serve it returns a device tensor.
     """
     try:
-        tensor = torch.empty(0, device="flagos:0")
         if op == "aten::to.dtype":
-            out = torch.ops.aten.to.dtype(tensor, torch.float32)
-        elif op == "aten::masked_select":
+            return _probe_to_dtype()
+        if op == "aten::masked_select":
             return _probe_masked_select()
-        else:
-            raise AssertionError(f"no probe for {op}")
+        raise AssertionError(f"no probe for {op}")
     except (NotImplementedError, RuntimeError):
         return False
-    return out.device.type == "flagos"
 
 
 def _probe_masked_select() -> bool:
@@ -137,8 +134,32 @@ def _probe_masked_select() -> bool:
     return out.device.type == "flagos" and out.numel() == 1
 
 
+def _probe_to_dtype() -> bool:
+    """Route probe for ``to.dtype``, on a conversion the kernel actually serves.
+
+    The probe asks nothing of the dtype: ``torch.ops.aten.to.dtype(x, float32)``
+    on an fp64 tensor is that op, but the conf routes the op a cast *dispatches
+    to*, not the cast itself. ``_to_copy`` (the op a device cast lands on) is
+    claimed unconditionally, and on a CUDA-ABI build its like-for-like cast
+    boxes to CUDA's TensorIterator copy -- fine for any dtype -- while an fp64
+    *conversion* boxes to CUDA's ``copy_``, whose bool/double kernel a CPU-only
+    torch does not ship: "DispatchStub: missing kernel for cuda".
+
+    The float32 -> float64 conversion below is what the guarded cases need and
+    what the CUDA copy kernel serves, and it is asked through ``Tensor.to``
+    exactly as the cases call it. Guarding on the fp32 cast therefore admitted
+    a route the fp64 conversion could not take (NVIDIA lane, run 40142698275:
+    all twelve mixed-precision pairs and ``test_float32_to_float64_on_device``).
+    """
+    try:
+        out = torch.ones(4, device=DEVICE, dtype=torch.float32).to(torch.float64)
+    except (NotImplementedError, RuntimeError):
+        return False
+    return out.device.type == "flagos" and out.dtype == torch.float64
+
+
 def _to_dtype_is_routed() -> bool:
-    return _routed_to_flagos("aten::to.dtype")
+    return _probe_to_dtype()
 
 
 def _masked_select_is_routed() -> bool:
