@@ -100,12 +100,15 @@ PLATFORM_REGISTRATION = {
     # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro share the
     # register.cc ``#else`` arm. With boxing ON it includes
     # generated/register_boxing_<platform>.inc -- every op the conf routes
-    # somewhere other than ``none``, because a default conf never routes
-    # ``boxing`` and a claim without a route raises instead of falling back;
-    # with boxing OFF -- the FlagGems-primary default -- it includes the
-    # matching generated/register_flaggems_<platform>.inc, which claims only the
-    # ops the conf routes to a FlagGems backend. Both are listed here because a
-    # build compiles one or the other.
+    # somewhere other than ``none`` that this wheel has a kernel for; with
+    # boxing OFF -- the FlagGems-primary default -- it includes the matching
+    # generated/register_flaggems_<platform>.inc, which claims only the ops the
+    # conf routes to a FlagGems backend. Both are listed here because a build
+    # compiles one or the other. A boxing build also includes the full
+    # generated/register.inc after the boxed list, so the claimed set of that
+    # arm is the boxed list plus whatever register.inc adds; the checks below
+    # ask that the boxed list is a subset of it, which is what the claim gating
+    # guarantees.
     "nvidia": [
         "generated/register_boxing_nvidia.inc",
         "generated/register_flaggems_nvidia.inc",

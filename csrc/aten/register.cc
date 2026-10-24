@@ -752,14 +752,25 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // stays unregistered and falls through to cpu_fallback. Boxing remains an
   // explicit opt-in (-DFLAGOS_BUILD_BOXING=ON / FLAGOS_BUILD_BOXING=1).
   #if defined(FLAGOS_BOXING_BUILD)
-  // The whole generated list is claimed only where the conf can serve it. A
-  // default conf never routes `boxing` (AGENTS.md), so an op it routes to
-  // `none` would be claimed here with no kernel behind the claim and raise
-  // "routed to 'none' ... but the op is registered on PrivateUse1" instead of
-  // reaching cpu_fallback -- measured on DCU (clone of a flagos tensor failing
-  // on `empty_like`). The per-platform conf therefore gates the list on a
-  // boxing build too, from strings the generated confs already spell; dropping
-  // strings leaves every op the conf routes to a backend that is not `none`.
+  // Two lists, because the previous "claim everything" arm made the two ends of
+  // registration and routing disagree:
+  //
+  //   * Nothing may be claimed for an op the conf routes to `none`: the claim
+  //     puzzles the dispatcher into "routed to 'none' ... but the op is
+  //     registered on PrivateUse1" instead of letting cpu_fallback take it --
+  //     measured on DCU (cloning a flagos tensor failed on `empty_like`). The
+  //     per-platform boxed list names exactly the ops the conf routes and this
+  //     wheel has a kernel for.
+  //   * The full generated list stays, one claim per generated op, for the ops
+  //     the boxed list leaves out. A wrapper that is *defined* but never
+  //     registered strands every route to it: the FP8/FP4 matrix ops answer
+  //     through their wrapper's soft_lowp prelude regardless of the route, so
+  //     without a claim `torch.mm` on metax reached cpu_fallback's
+  //     `addmm_impl_cpu_` instead of the software path (run 40137411252, the
+  //     whole low-precision group). Only ops whose kernel exists can be routed
+  //     here, so the extra claims are never selected by a route this wheel
+  //     cannot compile; ones after this include win, which keeps the conf's
+  //     deliberately-unclaimed ops unclaimed.
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_boxing_nvidia.inc"
   #elif defined(FLAGOS_ACCEL_METAX)
@@ -770,9 +781,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #include "generated/register_boxing_thead.inc"
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_boxing_tsingmicro.inc"
-  #else
-  #include "generated/register.inc"
   #endif
+  #include "generated/register.inc"
   #elif defined(FLAGOS_FLAGGEMS_PYTHON)
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_flaggems_nvidia.inc"
