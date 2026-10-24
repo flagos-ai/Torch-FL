@@ -37,17 +37,16 @@ paths_watch:
   - .github/scripts/set_env_thead.sh
   - scripts/vendor/bundle_thead_libtorch.sh
 
-container_volumes:
-  # PPU_SDK (underscore, /usr/local/PPU_SDK) is baked into the image with
-  # CUDA_SDK/lib64/libcudart.so; no host mount needed. Neither is FlagGems: the
-  # image ships it as a PEP 660 editable install pointing at a /workspace/FlagGems
-  # bind mount, which is no longer part of the runner pod. set_env_thead.sh instead
-  # installs the FlagGems stack into the job venv from published FlagOS wheels,
-  # so the environment is reproducible from the image plus those indexes alone.
-  - /mnt/cpfs/models/Qwen3-0.6B:/models/Qwen3-0.6B:ro
-
-integration_environment:
-  MODEL_PATH: /models/Qwen3-0.6B
+container_volumes: []
+# The Qwen3 steps need a checkpoint, and the runner pod was the only place one
+# lived: this config mounted /mnt/cpfs/models/Qwen3-0.6B from the pod's host.
+# Every dsw-batch pod with that path is gone (the dsw-879514... run that still
+# carried it has no PPU result), so the mount now references nothing and the
+# job container comes up without /models at all. An empty list says so instead
+# of failing inside a runner-side docker create, where the error is invisible.
+# Restore the line -- and integration_environment's MODEL_PATH -- once the
+# checkpoint lives somewhere the pod can mount again.
+integration_environment: {}
 
 # DSW authZ plugin denies --privileged / --ipc=host / --security-opt /
 # --cap-add (Aliyun DSW docs: "authorization denied by plugin authZ"). Mount
@@ -94,8 +93,6 @@ wheel_artifact_name: wheel-ppu
 # required because that is where the ops run; `vendor` stays in the build
 # record (backends_thead.conf still lists the vendor slot as a route), so it is
 # asserted absent only as a file -- the bundle above -- not as a kernel set.
-# The Qwen3 groups are the two steps that need the mounted checkpoint, so the
-# mount is asserted here.
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
@@ -107,4 +104,3 @@ environment_check:
     - lib_thead/libtorch_cuda.so
   flagos_devices:
     more_than: 0
-  model_dir: true
