@@ -295,7 +295,10 @@ class TestBmmDispatchLog:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         """FLAGOS_OP_bmm=cuda overrides to cuda backend."""
-        if not override_is_logged("bmm"):
+        if not (
+            override_is_logged("bmm", "boxing")
+            or override_is_logged("bmm", "flaggems_python")
+        ):
             pytest.skip(_OVERRIDE_UNSERVED)
         result = _run_bmm_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm": "cuda"}, check=False

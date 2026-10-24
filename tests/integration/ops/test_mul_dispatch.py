@@ -213,7 +213,10 @@ class TestMulTensorDispatch:
     @pytest.mark.cuda
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
-        if not override_is_logged("mul.Tensor"):
+        if not (
+            override_is_logged("mul.Tensor", "boxing")
+            or override_is_logged("mul.Tensor", "flaggems_python")
+        ):
             pytest.skip(_OVERRIDE_UNSERVED)
         # check=False: this asserts the route the override selects, not that
         # the kernel runs -- an unserved route leaves the op unregistered when

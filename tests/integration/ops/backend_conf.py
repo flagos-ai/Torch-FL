@@ -202,34 +202,45 @@ _VENDOR_BACKENDS = frozenset(
 )
 
 
-#: The reason a ``FLAGOS_OP_<op>=cuda`` case skips, shared by the callers so the
-#: three suites state it once.
+#: The FlagGems conf values, whose kernels a FlagGems-primary build claims.
+_FLAGGEMS_BACKENDS = frozenset({"flaggems", "flaggems_cpp", "flaggems_python"})
+
+#: The reason a ``FLAGOS_OP_<op>=<backend>`` case skips, shared by the callers so
+#: the suites state it once.
 _OVERRIDE_UNSERVED = (
-    "FLAGOS_OP_<op>=cuda selects the boxing route in the log reader, but this "
-    "wheel compiled no boxing kernels and the conf hands the op to cpu_fallback, "
-    "so the op is unregistered and the override never reaches a dispatch"
+    "FLAGOS_OP_<op>=<backend> selects a backend this wheel did not compile or "
+    "whose slot the conf never registers, so the op takes cpu_fallback and the "
+    "override never reaches a dispatch"
 )
 
 
-def override_is_logged(op: str, target: str = "cuda") -> bool:
-    """True when ``FLAGOS_OP_<op>=<target>`` can produce a dispatch line.
+def override_is_logged(op: str, backend: str) -> bool:
+    """True when ``FLAGOS_OP_<op>=<backend>`` can produce a dispatch line.
 
-    The env override chooses among the slots a wheel registered; it binds that
-    op to the backend named, whatever the conf says. A wheel without boxing
-    kernels registers nothing for the boxing slot, so on a conf that routes the
-    op to ``none`` the call takes cpu_fallback and the process the test starts
-    logs no dispatch at all -- the override is a no-op there (PPU, runs
-    40127851880 and 40135954656: ``FLAGOS_OP_mm=cuda`` on
-    ``backends_thead_boxing.conf``).
+    The env override binds the op to the backend it names, but only a slot the
+    wheel registered can be bound. Each build arm of ``register.cc`` claims a
+    different set, so the question is asked of the arm rather than of the conf:
 
-    Both halves are asked of the wheel, never of a platform name: does the
-    override's backend have kernels compiled in, and does the conf actually
-    route this op somewhere a claim exists (``route_is_served``)?
+    * ``boxing`` -- a boxing build claims every op its conf routes to any
+      backend whose kernel it has; ``OP=<boxing>`` is logged iff the wheel
+      compiled boxing and the conf has the op registered (``route_is_served``).
+    * a FlagGems backend -- the FlagGems-primary arm claims the ops its conf
+      routes to FlagGems, so the override is logged iff the conf already routes
+      the op to a FlagGems arm and this wheel compiled it.
+
+    Neither arm registers an op its conf leaves to cpu_fallback, and on those
+    the process the test starts logs no dispatch at all -- the override is a
+    no-op (PPU, runs 40127851880 and 40135954656: ``FLAGOS_OP_mm=cuda`` on
+    ``backends_thead_boxing.conf``). Both halves are asked of the wheel, never
+    of a platform name.
     """
-    kernel_set = _BACKEND_KERNEL_SET.get(target)
-    if kernel_set is None or kernel_set not in torch_fl._env.build_kernels():
+    kernels = torch_fl._env.build_kernels()
+    if backend == "boxing":
+        return "boxing" in kernels and route_is_served(op)
+    kernel_set = _BACKEND_KERNEL_SET.get(backend)
+    if kernel_set is None or kernel_set not in kernels:
         return False
-    return route_is_served(op)
+    return _conf_route(op) in _FLAGGEMS_BACKENDS
 
 
 def route_is_served(op: str) -> bool:
