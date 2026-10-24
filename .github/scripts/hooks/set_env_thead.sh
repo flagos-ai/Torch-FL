@@ -395,7 +395,11 @@ fi
 # Bundle PPU core+CUDA+MKL .so into torch_fl/lib_thead/ and rewrite the plugin
 # RPATH. setup.py does not auto-invoke this; mirrors the metax pattern. The
 # bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
-bash scripts/vendor/bundle_thead_libtorch.sh
+# Boxing-only, like the bundle itself: the FlagGems-primary wheel links no
+# vendor kernels and selects stock torch at import, so it has none to stage.
+if [[ "${FLAGOS_BUILD_BOXING:-0}" == "1" ]]; then
+  bash scripts/vendor/bundle_thead_libtorch.sh
+fi
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "::error::nvidia-smi is unavailable"
@@ -404,6 +408,7 @@ fi
 nvidia-smi
 
 python - <<'PY'
+import os
 from pathlib import Path
 import sys
 import torch
@@ -413,7 +418,8 @@ assert sys.executable.startswith("/"), sys.executable
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
-assert Path("torch_fl/lib_thead/libtorch_cuda.so").is_file()
+if os.environ.get("FLAGOS_BUILD_BOXING") == "1":
+    assert Path("torch_fl/lib_thead/libtorch_cuda.so").is_file()
 print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")

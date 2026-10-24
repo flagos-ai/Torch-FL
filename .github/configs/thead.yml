@@ -89,21 +89,24 @@ wheel_artifact_name: wheel-ppu
 # that script; the values are this platform's, and they assert the same things
 # the hand-written heredoc that used to sit here did.
 #
-# PPU takes the CUDA dispatch key over with its own bundled libtorch_cuda.so
-# under lib_thead, which is why torch.version.cuda reads 13.0 in a stock +cpu
-# wheel, and why both the torch.cuda and the flagos device surfaces have to
-# report devices. The Qwen3 groups are the two steps that need the mounted
-# checkpoint, so the mount is asserted here.
+# The lane builds the FlagGems-primary wheel, the one a user installs: stock
+# +cpu torch, no lib_thead/ bundle, torch.version.cuda None. The kernel set is
+# pinned rather than its files, because `vendor` (boxing) is still a listed
+# route in backends_thead.conf even though this build compiles no boxing
+# kernels; a `cuda` route on this wheel is what `require_build_kernels` would
+# catch, not the bundle. The Qwen3 groups are the two steps that need the
+# mounted checkpoint, so the mount is asserted here.
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
-  cuda_version: "13.0"
+  cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
-  require_package_files:
+  require_build_kernels:
+    - flaggems
+  forbid_build_kernels:
+    - vendor
+  forbid_package_files:
     - lib_thead/libtorch_cuda.so
   flagos_devices:
-    more_than: 0
-  cuda_available: true
-  cuda_devices:
     more_than: 0
   model_dir: true
