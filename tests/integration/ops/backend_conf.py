@@ -202,6 +202,36 @@ _VENDOR_BACKENDS = frozenset(
 )
 
 
+#: The reason a ``FLAGOS_OP_<op>=cuda`` case skips, shared by the callers so the
+#: three suites state it once.
+_OVERRIDE_UNSERVED = (
+    "FLAGOS_OP_<op>=cuda selects the boxing route in the log reader, but this "
+    "wheel compiled no boxing kernels and the conf hands the op to cpu_fallback, "
+    "so the op is unregistered and the override never reaches a dispatch"
+)
+
+
+def override_is_logged(op: str, target: str = "cuda") -> bool:
+    """True when ``FLAGOS_OP_<op>=<target>`` can produce a dispatch line.
+
+    The env override chooses among the slots a wheel registered; it binds that
+    op to the backend named, whatever the conf says. A wheel without boxing
+    kernels registers nothing for the boxing slot, so on a conf that routes the
+    op to ``none`` the call takes cpu_fallback and the process the test starts
+    logs no dispatch at all -- the override is a no-op there (PPU, runs
+    40127851880 and 40135954656: ``FLAGOS_OP_mm=cuda`` on
+    ``backends_thead_boxing.conf``).
+
+    Both halves are asked of the wheel, never of a platform name: does the
+    override's backend have kernels compiled in, and does the conf actually
+    route this op somewhere a claim exists (``route_is_served``)?
+    """
+    kernel_set = _BACKEND_KERNEL_SET.get(target)
+    if kernel_set is None or kernel_set not in torch_fl._env.build_kernels():
+        return False
+    return route_is_served(op)
+
+
 def route_is_served(op: str) -> bool:
     """True when this wheel compiled the backend the conf routes ``op`` to.
 

@@ -36,7 +36,13 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import route_is_served, routed_backend, routed_backend_or_none
+from backend_conf import (
+    override_is_logged,
+    route_is_served,
+    routed_backend,
+    routed_backend_or_none,
+    _OVERRIDE_UNSERVED,
+)
 
 
 DEVICE = "flagos:0"
@@ -207,10 +213,11 @@ class TestMulTensorDispatch:
     @pytest.mark.cuda
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
+        if not override_is_logged("mul.Tensor"):
+            pytest.skip(_OVERRIDE_UNSERVED)
         # check=False: this asserts the route the override selects, not that
-        # the kernel runs. A boxing wheel that did not compile the route the
-        # conf names leaves the op unregistered, so the call itself fails after
-        # the dispatch line is written.
+        # the kernel runs -- an unserved route leaves the op unregistered when
+        # the conf hands it to cpu_fallback, so the call fails after the line.
         result = _run_mul_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mul__Tensor": "cuda"}, check=False
         )
