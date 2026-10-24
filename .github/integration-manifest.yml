@@ -135,6 +135,9 @@ steps:
   #   test_cast_values_are_exact_on_nonzero_device
   #   test_issue_313_repro_in_a_fresh_process      the cast
   #   test_boxed_op_leaves_current_device_untouched  t
+  #   test_cast_on_nonzero_device_leaves_current_device_alone
+  #                                                the int64->bool cast on a
+  #                                                non-zero flagos device
   #
   # Three more are metax-only, because backends_metax.conf keeps two ops on
   # `none` that backends_thead.conf routes to FlagGems:
@@ -169,7 +172,8 @@ steps:
       and not test_issue_313_repro_in_a_fresh_process
       and not test_unary_inplace_op
       and not test_tensor_list_op
-      and not test_full_like_defaults_to_source_device"
+      and not test_full_like_defaults_to_source_device
+      and not test_cast_on_nonzero_device_leaves_current_device_alone"
 
   # The MUSA runtime preflight. It is deliberately a required check rather than
   # a capability skip, and it runs before the suites it gates so a broken
