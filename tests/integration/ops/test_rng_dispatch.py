@@ -64,6 +64,8 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import route_is_served
+
 
 def _is_musa() -> bool:
     return torch_fl._build_accelerator() == "musa"
@@ -78,21 +80,6 @@ def _boxing_built() -> bool:
     opt-in on every CUDA-ABI platform, so a default ``cuda`` wheel answers False.
     """
     return "boxing" in torch_fl._env.build_kernels()
-
-
-def _normal_inplace_routed() -> bool:
-    """True when the conf routes ``normal_`` to a kernel (not `none`/unlisted).
-
-    The device RNG tests below draw with ``tensor.normal_()``. Since #643 a
-    boxing build registers only the ops the conf routes -- claiming an op whose
-    route is `none` makes the dispatcher raise instead of falling back -- so a
-    `normal_ = none` conf leaves the op unregistered and it reaches
-    cpu_fallback. ppu's FlagGems-primary conf is exactly that: `rand` goes to a
-    FlagGems arm whose generated wrapper takes the flagos generator, while
-    `normal_` is unrouted, so the file's two draw paths disagree (PPU lane, run
-    40127851880).
-    """
-    return _conf_route("normal_") not in ("", "none")
 
 
 def _device_rng_reads_flagos_seed() -> bool:
@@ -121,7 +108,7 @@ def _device_rng_reads_flagos_seed() -> bool:
         # cpu one the kernel accepts -- the boxing prelude that would have
         # translated a device generator is not in this wheel.
         return False
-    return _boxing_built() and _normal_inplace_routed()
+    return _boxing_built()
 
 
 def _supports_flagos_generator() -> bool:
@@ -161,6 +148,38 @@ def _conf_route(op: str) -> str:
             if sep and name.strip() == op:
                 return value.strip()
     return ""
+
+
+def _route_to_cpu_fallback(op: str) -> bool:
+    """True when a boxing wheel leaves ``op`` unregistered, to cpu_fallback.
+
+    Since #643 a default conf never routes `boxing`, and a boxing build claims
+    only the ops the conf routes somewhere other than `none`
+    (`generated/register_boxing_<platform>.inc`): claiming an unrouted op makes
+    the dispatcher raise instead of falling back. The per-op knob that turns
+    this into a red lane is whether the *wheel* compiled the route's backend,
+    not whether the conf names one -- `route_is_served` in backend_conf.py says
+    the same thing for the dispatch-log tests.
+
+    Two routes land here and both are asserted below: a `none`/unlisted route,
+    and a route to a backend this wheel did not compile (the metax lane, run
+    40129896922: its `backends_metax_boxing.conf` routes `normal_` to boxing
+    while the wheel ships `KERNELS=("flaggems","vendor")`, so a flagos
+    generator reached FlagGems' cpu-backed kernel and was rejected).
+    """
+    if not _boxing_built():
+        return False
+    return not route_is_served(op)
+
+
+#: The routeless draw paths a boxing wheel leaves to cpu_fallback. `normal_` is
+#: the in-place draw the generator tests below use; `rand` is the factory one,
+#: which reaches the device through `uniform_`.
+_UNROUTED_DRAWS = pytest.mark.skipif(
+    _route_to_cpu_fallback("normal_") or _route_to_cpu_fallback("uniform_"),
+    reason="a boxing wheel leaves the draw unregistered and cpu_fallback takes "
+    "a cpu generator, so the flagos generator cannot be honoured",
+)
 
 
 def _factory_rng_served_by_flag_gems() -> bool:
@@ -405,6 +424,7 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_UNROUTED_DRAWS
     def test_flagos_generator_device_contract(self):
         gen = torch.Generator(device="flagos").manual_seed(99)
         if _supports_flagos_generator():
@@ -420,6 +440,7 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_UNROUTED_DRAWS
     def test_flagos_generator_factory_contract(self):
         gen = torch.Generator(device="flagos").manual_seed(99)
         if _supports_flagos_generator():
@@ -442,6 +463,7 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_UNROUTED_DRAWS
     def test_flagos_generator_leaves_shared_generator_untouched(self):
         # On CUDA boxing, accepting a flagos generator works by translation:
         # a *clone* of the shared CUDA generator is reseeded per call. If it
@@ -463,6 +485,7 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_UNROUTED_DRAWS
     def test_flagos_generator_translation_advances_state(self):
         # The contract tests above reseed between draws; this pins the other
         # half of generator semantics on CUDA boxing: two consecutive draws
@@ -471,10 +494,6 @@ class TestRngSeedSource:
         # with it. Covers both the `normal_` and factory translation sites.
         if not _boxing_built():
             pytest.skip("per-call seed translation is a CUDA boxing behavior")
-        if not _normal_inplace_routed():
-            pytest.skip(
-                "this conf leaves normal_ unrouted, so it takes a cpu generator"
-            )
         gen = torch.Generator(device="flagos").manual_seed(4242)
         first = _empty(8).normal_(generator=gen).cpu()
         assert not torch.equal(first, _empty(8).normal_(generator=gen).cpu())
@@ -494,13 +513,10 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_UNROUTED_DRAWS
     def test_explicit_generator_is_honoured(self):
         # Injection must only fill an *absent* generator. A caller-supplied one
         # keeps its own stream, reproducible on its own terms.
-        if not _normal_inplace_routed():
-            pytest.skip(
-                "this conf leaves normal_ unrouted, so it takes a cpu generator"
-            )
         gen = _explicit_generator(99)
         a = _empty().normal_(generator=gen).cpu()
         gen.manual_seed(99)
@@ -509,11 +525,8 @@ class TestRngSeedSource:
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
+    @_UNROUTED_DRAWS
     def test_explicit_generator_isolated_from_manual_seed(self):
-        if not _normal_inplace_routed():
-            pytest.skip(
-                "this conf leaves normal_ unrouted, so it takes a cpu generator"
-            )
         gen = _explicit_generator(5)
         a = _empty().normal_(generator=gen).cpu()
         torch.manual_seed(SEED)  # must not perturb `gen`
@@ -538,11 +551,7 @@ class TestRngSeedSource:
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
     @_NEEDS_DEVICE_RNG
-    @pytest.mark.skipif(
-        not _normal_inplace_routed(),
-        reason="normal_ is unrouted on this conf, so the draw is cpu_fallback's "
-        "and does not read the flagos state this case round-trips",
-    )
+    @_UNROUTED_DRAWS
     def test_rng_state_round_trip(self):
         torch.flagos.manual_seed(SEED)
         state = torch.flagos.get_rng_state()

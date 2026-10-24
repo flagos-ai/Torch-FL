@@ -225,6 +225,10 @@ class TestMmDispatchLog:
         result = _run_mm_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "cuda"}, check=False
         )
+        # check=False: this asserts the route the override selects, not that
+        # the kernel runs. A boxing wheel that did not compile the route the
+        # conf names leaves the op unregistered, so the call itself fails after
+        # the dispatch line is written.
         assert "[flagos dispatch] mm -> boxing" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
