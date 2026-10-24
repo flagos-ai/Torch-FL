@@ -204,9 +204,11 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "metax": "flaggems",
     "apple": "none",
     "musa": "none",
-    # PPU is measured on its FlagGems-primary wheel now; the `cuda` spelling
-    # this recorded was the boxing build's, which the lane no longer builds.
-    "ppu": "none",
+    # `cuda` on PPU: the boxing route this recorded is what backends_thead.conf
+    # still names, and this table pins the conf's text. The FlagGems-primary
+    # wheel routes the composite elsewhere without the conf changing, so which
+    # arm a call takes is the operator tests' property, not this table's.
+    "ppu": "cuda",
 }
 
 #: conf value -> the name ``[flagos dispatch]`` prints for the same backend. The
