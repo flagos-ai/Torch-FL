@@ -54,12 +54,15 @@ def ctx(request):
 
     print(f"\n[1] Loading model ({model_path})...")
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # The path is a mounted checkpoint, not a hub repo id: without this
+    # huggingface_hub validates it as a repo name and rejects it outright.
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
+        local_files_only=True,
         dtype=torch.float32,
         attn_implementation="eager",
     )

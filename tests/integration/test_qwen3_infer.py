@@ -42,9 +42,12 @@ def ctx(request):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # The path is a mounted checkpoint, not a hub repo id: without this
+    # huggingface_hub validates it as a repo name and rejects it outright.
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
+        local_files_only=True,
         dtype=torch.float16,
     )
     device = "flagos:0"
