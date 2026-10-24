@@ -97,3 +97,10 @@ environment_check:
   triton_backend: metax
   require_imports:
     - flag_gems
+  # This lane builds the boxing wheel (set_env_metax.sh) and runs it against
+  # the day-0 conf: `boxing` in the build record is what says so, and a build
+  # that lost the switch would fail here as a named kernel set instead of as
+  # `empty_like: routed to 'none'` halfway through the portable group.
+  require_build_kernels:
+    - flaggems
+    - boxing

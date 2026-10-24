@@ -143,6 +143,16 @@ export FLAGOS_BUILD_VENDOR=OFF
 export FLAGOS_BUILD_BOXING=1
 export FLAGOS_METAX_CUDART_SHIM=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
+# The day-0 conf the boxing wheel above needs. A boxing wheel registers every
+# op on PrivateUse1 (the generated boxing tables name a kernel for each), and
+# backends_metax.conf -- the file a *default* wheel selects -- leaves the
+# uncovered ones on `none`, which on this wheel is a raise rather than a
+# cpu_fallback. Measured on the MetaX lane (run 40093392100 onwards first
+# showed it; run 40107997127 is the collapse): `empty_like: routed to 'none'
+# ... but the op is registered on PrivateUse1` for every unary/binary case of
+# the portable group. backends_metax_boxing.conf is the same routing table with
+# FlagGems where this build has it (594 ops) and boxing for the other 1442.
+export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_metax_boxing.conf}"
 # Which op takes which backend is stated in backends_metax.conf, not here: that
 # file is full-coverage and lists all five keys per op
 # (flaggems_cpp > flaggems > tileops > cuda), selected from the accelerator
@@ -294,7 +304,7 @@ fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf '%s=%s\n' PATH "$PATH" >> "$GITHUB_ENV"
-  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
+  export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR FLAGOS_BACKEND_CONFIG MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
   fi
