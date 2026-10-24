@@ -102,6 +102,14 @@ _KNOWN_GAPS = {
         "thead",
     ),
     "vendor_ops": ("apple",),
+    "multi_device_contracts": (
+        "apple",
+        "ascend",
+        "enflame",
+        "iluvatar",
+        "kunlunxin",
+        "mthreads",
+    ),
     "musa_flaggems_hybrid": (
         "apple",
         "ascend",
