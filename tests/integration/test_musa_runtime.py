@@ -39,7 +39,13 @@ def test_musa_flagtree_and_flaggems_runtime():
     import flag_gems
     import triton.backends
 
-    assert ACCELERATOR == "musa", ACCELERATOR
+    # The vendor name is what ACCELERATOR carries: #648 renamed the conf
+    # routes, the build record and _build_config's ACCELERATOR to the vendor,
+    # so the emitted value is `mthreads` and `musa` is only an accepted input
+    # alias for FLAGOS_ACCELERATOR. Pinning the alias here asserted a contract
+    # the rename retired, and it took this preflight down on the first run
+    # after both landed.
+    assert ACCELERATOR == "mthreads", ACCELERATOR
     assert "flaggems" in _env.build_kernels(), _env.build_kernels()
     assert is_flagtree_active(), triton.__file__
     assert flagtree_backend() == "mthreads", flagtree_backend()
