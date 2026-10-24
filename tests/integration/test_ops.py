@@ -338,6 +338,12 @@ class TestIndexing:
         "PrivateUse1 while the default conf routes `none`, so the call raises "
         "'routed to none' instead of selecting",
     )
+    @pytest.mark.skipif(
+        not hasattr(torch.ops.aten.masked_select, "default"),
+        reason="this wheel registers no masked_select on PrivateUse1 (it "
+        "compiles no boxing kernels), so the call reaches ATen's CUDA dispatch "
+        "stub, which a CPU-only torch has no kernel for",
+    )
     def test_masked_select(self, device):
         x = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device)
         mask = x > 2
