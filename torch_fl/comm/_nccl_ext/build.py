@@ -271,6 +271,9 @@ def _dcu_config(env: Mapping[str, str], repo_root: str) -> _BuildConfig:
             os.path.join(cuda_root, "include"),
             os.path.join(dtk_root, "include"),
             os.path.join(dtk_root, "include", "rccl"),
+            # rccl.h takes hipStream_t as a bare parameter type, so it only
+            # parses where a HIP header has already defined it.
+            os.path.join(dtk_root, "include", "hip"),
         )
     )
     if not any(

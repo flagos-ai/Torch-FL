@@ -21,10 +21,13 @@ project(FLAGOS_RUNTIME ${FLAGOS_PLATFORM_LANGUAGES})
 
 set(LIBRARY_NAME flagos)
 
-# The runtime sources live under <runtime_dir>/, except DCU which reuses the CUDA
-# runtime sources (DTK's CUDA compatibility toolkit provides cuda_runtime.h and a
-# libcudart shim over libgalaxyhip, so they build unchanged) and adds its own
-# DTK-core ABI shim below. Iluvatar used to reuse them too and no longer does:
+# The runtime sources live under <runtime_dir>/ -- DCU's row names "nvidia",
+# since it reuses the CUDA runtime sources (DTK's CUDA compatibility toolkit
+# provides cuda_runtime.h and a libcudart shim over libgalaxyhip, so they build
+# unchanged) and adds its own DTK-core ABI shim from hygon/ below. A row is globbed
+# as it stands, so hygon/ holds the shim and nothing else: this target is the
+# whole flagos ABI, and a row pointing here would build a library of stubs.
+# Iluvatar used to reuse the CUDA sources too and no longer does:
 # its sources are a copy of the CUDA ones with the stream half replaced by the
 # platform's own registry, so the build needs no c10::cuda (see iluvatar/stream.cc).
 file(GLOB_RECURSE SOURCE_FILES
@@ -108,13 +111,13 @@ elseif(_flagos_is_tsingmicro)
   target_link_directories(${LIBRARY_NAME} PRIVATE /usr/local/kuiper/lib)
   target_link_libraries(${LIBRARY_NAME} PRIVATE hpgr)
 elseif(_flagos_is_dcu)
-  # hygon/ contains only the DTK-core ABI shim below; the runtime sources
+  # hygon/ holds only the DTK-core ABI shim below; the runtime sources
   # themselves are the NVIDIA ones (FLAGOS_PLATFORM_RUNTIME_DIR == "nvidia").
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 
   add_library(flagos_dtk_core_compat SHARED
-      "${CMAKE_CURRENT_SOURCE_DIR}/${FLAGOS_PLATFORM_RUNTIME_DIR}/dtk_core_compat.cc")
+      "${CMAKE_CURRENT_SOURCE_DIR}/hygon/dtk_core_compat.cc")
   set_target_properties(flagos_dtk_core_compat PROPERTIES
       POSITION_INDEPENDENT_CODE ON)
   flagos_set_portable_rpath(flagos_dtk_core_compat)

@@ -364,7 +364,7 @@
         "for the rest). A boxing wheel is an explicit opt-in."
       ],
       "project_languages": ["CXX", "C"],
-      "runtime_dir": "hygon",
+      "runtime_dir": "nvidia",
       "bundle_libdir": "lib_hygon",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",

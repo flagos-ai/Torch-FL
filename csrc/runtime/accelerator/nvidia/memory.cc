@@ -251,6 +251,20 @@ Error_t PointerGetAttributes(
   return MemoryManager::getInstance().getPointerAttributes(attributes, ptr);
 }
 
+#if defined(USE_DCU)
+// The query csrc/runtime/hooks.h and guard.h call on DCU; see the declaration in
+// hooks.h. It lives in c10::flagos because that is where they declare it, and the
+// namespace is spelled out rather than entered through a c10 header, which this
+// library keeps out of its include path and link set.
+namespace c10::flagos {
+__attribute__((visibility("default"))) Error_t DcuPointerGetAttributes(
+    PointerAttributes* attributes,
+    const void* ptr) {
+  return MemoryManager::getInstance().getPointerAttributes(attributes, ptr);
+}
+} // namespace c10::flagos
+#endif
+
 Error_t Memset(void* devPtr, int value, size_t count) {
   return MemoryManager::getInstance().memset(devPtr, value, count);
 }

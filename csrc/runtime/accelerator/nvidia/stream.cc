@@ -14,6 +14,7 @@
 
 #include <flagos.h>
 #include <cuda_runtime.h>
+#include <cstdint>
 
 Error_t StreamCreateWithPriority(
     Stream_t* stream,
@@ -98,3 +99,16 @@ Error_t EventElapsedTime(float* ms, Event_t start, Event_t end) {
   cudaError_t err = cudaEventElapsedTime(ms, (cudaEvent_t)start, (cudaEvent_t)end);
   return (err == cudaSuccess) ? Success : ErrorUnknown;
 }
+
+#if defined(USE_DCU)
+// The flagos stream handle for the stream csrc/ synchronizes, encoded in
+// ``c10::Stream::id()`` exactly as the Kunlunxin and Iluvatar arms encode theirs.
+// It lives in c10::flagos because that is where guard.h declares it, next to the
+// interface that calls it; the namespace is spelled out instead of entering it
+// through <c10/core/Stream.h>, since this library keeps c10 out of its link set.
+namespace c10::flagos {
+__attribute__((visibility("default"))) Stream_t DcuStreamHandleOf(uintptr_t id) {
+  return reinterpret_cast<Stream_t>(id);
+}
+} // namespace c10::flagos
+#endif

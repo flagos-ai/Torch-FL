@@ -28,6 +28,16 @@
 
 namespace c10::flagos {
 
+#if defined(USE_DCU)
+// On DCU, flagos.h's PointerGetAttributes has no symbol in the built library:
+// DTK's <cuda_runtime.h> turns the two-argument name into a template, so the
+// definition in runtime/accelerator/nvidia/memory.cc is a different one from
+// the flat function this header calls. Declared here, beside its only caller,
+// for the reason guard.h gives; both declarations name the same definition.
+__attribute__((visibility("default"))) Error_t
+DcuPointerGetAttributes(PointerAttributes* attributes, const void* ptr);
+#endif
+
 struct HooksInterface : public at::PrivateUse1HooksInterface {
   HooksInterface() {};
   ~HooksInterface() override = default;
@@ -49,7 +59,11 @@ struct HooksInterface : public at::PrivateUse1HooksInterface {
   bool isPinnedPtr(const void* data) const override {
     // First check flagos's own registry
     PointerAttributes fo_attr{};
+#if defined(USE_DCU)
+    DcuPointerGetAttributes(&fo_attr, data);
+#else
     ::PointerGetAttributes(&fo_attr, data);
+#endif
     if (fo_attr.type == MemoryTypeHost) {
       return true;
     }
