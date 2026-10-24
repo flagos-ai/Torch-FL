@@ -90,24 +90,58 @@ _MUSA = detect_platform() == "musa"
 # from the platform name.
 _BOXING_WHEEL = "boxing" in _env.build_kernels()
 
-# Two conversions have no route on a wheel that compiles no boxing kernels.
-#
-# A default wheel (FLAGOS_BUILD_BOXING=0) does not register `to.dtype`, so a
-# `.to(dtype)` between two device dtypes reaches ATen's own dispatcher, which
-# has no CUDA kernel for the conversion in a CPU-only torch build:
+# Two operations have no route at all on a wheel whose conf serves neither of
+# them: `to.dtype` between two device dtypes and `masked_select`. Both then
+# reach ATen's own dispatcher, which has no CUDA kernel for them in a CPU-only
+# torch build:
 #
 #   RuntimeError: DispatchStub: missing kernel for cuda
 #
-# measured on the NVIDIA lane (run 40109182886, 22 failures in the portable
-# group). The same-wheel clone (same dtype) passes, and
-# `test_cpu_device_roundtrip` covers the host<->device direction. `isinstance`
-# rather than truthiness: `to.dtype` is a tuple of overload names, and an empty
-# one still reads as "registered".
-_BOXING_KERNELS = "boxing" in _env.build_kernels()
+# measured on the NVIDIA lane (run 40109182886, and again on 40123568695 for
+# this same suite, 22 failures in the portable group). "No route" is asked of
+# the dispatcher (`_routed_to_flagos`) rather than read off the build record,
+# because a CUDA-ABI wheel can compile boxing and still measure `vendor` for
+# these ops. The same-wheel clone (same dtype) passes, and
+# `test_cpu_device_roundtrip` covers the host<->device direction.
 
 
-def _to_dtype_is_registered() -> bool:
-    return hasattr(torch.ops.aten.to, "dtype")
+def _routed_to_flagos(op) -> bool:
+    """True when the dispatcher serves the op from this backend's kernels.
+
+    The question the guards here ask is not "did the wheel compile boxing
+    kernels" but "does the op land somewhere that computes it". A build record
+    that names `boxing` does not answer that: on a CUDA-ABI platform a boxing
+    wheel also compiles the vendor slot, and the default conf chooses one of
+    them per op (NVIDIA lane, run 40123568695: 22 failures, every one
+    `DispatchStub: missing kernel for cuda`, on a wheel whose build record says
+    boxing).
+
+    Answered by calling the kernel: a slot that does not serve the op either
+    raises -- `NotImplementedError` for a conf route to `none`, or the
+    CPU-only torch's `DispatchStub` error for a reference arm with no kernel --
+    and a slot that does serve it returns a device tensor.
+    """
+    try:
+        tensor = torch.empty(0, device="flagos:0")
+        if op == "aten::to.dtype":
+            out = torch.ops.aten.to.dtype(tensor, torch.float32)
+        elif op == "aten::masked_select":
+            out = torch.ops.aten.masked_select(
+                tensor, torch.empty(0, device="flagos:0", dtype=torch.bool)
+            )
+        else:
+            raise AssertionError(f"no probe for {op}")
+    except (NotImplementedError, RuntimeError):
+        return False
+    return out.device.type == "flagos"
+
+
+def _to_dtype_is_routed() -> bool:
+    return _routed_to_flagos("aten::to.dtype")
+
+
+def _masked_select_is_routed() -> bool:
+    return _routed_to_flagos("aten::masked_select")
 
 
 # The float32 counterpart of the float64 matmul case below: an fp32 product must
@@ -426,10 +460,10 @@ class TestCopyDtypeSupport:
         "'routed to none' instead of converting",
     )
     @pytest.mark.skipif(
-        not _to_dtype_is_registered(),
-        reason="this wheel registers no to.dtype on PrivateUse1 (it compiles "
-        "no boxing kernels), so a device<->device conversion reaches ATen's "
-        "CUDA dispatch stub, which a CPU-only torch has no kernel for",
+        not _to_dtype_is_routed(),
+        reason="no slot in this wheel's conf serves to.dtype on PrivateUse1, so "
+        "a device<->device conversion reaches ATen's CUDA dispatch stub, which "
+        "a CPU-only torch has no kernel for",
     )
     @pytest.mark.parametrize("src_dtype", FLOAT_DTYPES)
     @pytest.mark.parametrize("dst_dtype", FLOAT_DTYPES)
@@ -451,10 +485,10 @@ class TestCopyDtypeSupport:
         "'routed to none' instead of converting",
     )
     @pytest.mark.skipif(
-        not _to_dtype_is_registered(),
-        reason="this wheel registers no to.dtype on PrivateUse1 (it compiles "
-        "no boxing kernels), so a device<->device conversion reaches ATen's "
-        "CUDA dispatch stub, which a CPU-only torch has no kernel for",
+        not _to_dtype_is_routed(),
+        reason="no slot in this wheel's conf serves to.dtype on PrivateUse1, so "
+        "a device<->device conversion reaches ATen's CUDA dispatch stub, which "
+        "a CPU-only torch has no kernel for",
     )
     def test_float32_to_float64_on_device(self):
         result = torch.ones(4, device=DEVICE, dtype=torch.float32).to(torch.float64)
@@ -492,10 +526,10 @@ class TestIndexingDtypeSupport:
         "'routed to none' instead of selecting",
     )
     @pytest.mark.skipif(
-        not hasattr(torch.ops.aten.masked_select, "default"),
-        reason="this wheel registers no masked_select on PrivateUse1 (it "
-        "compiles no boxing kernels), so the call reaches ATen's CUDA dispatch "
-        "stub, which a CPU-only torch has no kernel for",
+        not _masked_select_is_routed(),
+        reason="no slot in this wheel's conf serves masked_select on "
+        "PrivateUse1, so the call reaches ATen's CUDA dispatch stub, which a "
+        "CPU-only torch has no kernel for",
     )
     @pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
     def test_masked_select_preserves_dtype(self, dtype):
