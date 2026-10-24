@@ -222,7 +222,9 @@ class TestMmDispatchLog:
     @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         """FLAGOS_OP_mm=cuda overrides to cuda backend."""
-        result = _run_mm_subprocess({"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "cuda"})
+        result = _run_mm_subprocess(
+            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "cuda"}, check=False
+        )
         assert "[flagos dispatch] mm -> boxing" in result.stderr, (
             f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
