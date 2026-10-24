@@ -771,6 +771,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   //     here, so the extra claims are never selected by a route this wheel
   //     cannot compile; ones after this include win, which keeps the conf's
   //     deliberately-unclaimed ops unclaimed.
+  //
+  //     The wrappers are claimed whole because narrowing this to the matrix
+  //     ops does not work: a generated wrapper calls the *whole-op*
+  //     dispatcher (`mm_dispatcher`), and once the claim exists that dispatcher
+  //     answers "routed to 'none' ... but the op is registered" for every
+  //     dtype, including the fp32/fp16 mm the two-arm layout is meant to leave
+  //     on cpu_fallback (measured on the DCU rig, backends_hygon.conf).
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_boxing_nvidia.inc"
   #elif defined(FLAGOS_ACCEL_METAX)
