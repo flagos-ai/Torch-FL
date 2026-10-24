@@ -346,16 +346,19 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=ppu
-# This lane stages the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_thead
-# and asserts the bundle, so it builds the boxing wheel. Boxing is off by default
-# for every accelerator now (cmake/flagos_platforms.json); without this the
-# default FlagGems-primary wheel would bundle no libtorch_cuda.so.
+# FlagGems-primary, the default every other lane measures.
 #
-# The CUDA lane no longer opts in: it measures the FlagGems-primary default a
-# `pip install` gets. PPU keeps the vendor path until the ops backends_thead.conf
-# routes to `cuda` have a FlagGems route of their own -- flipping it first would
-# leave them on cpu_fallback.
-export FLAGOS_BUILD_BOXING=1
+# This lane used to build the boxing wheel (FLAGOS_BUILD_BOXING=1) because it
+# staged the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_thead and
+# asserted the bundle. That bundle is not what a user installs: since PR #643
+# the default confs never route `boxing`, so a boxing wheel claims every op on
+# PrivateUse1 with no route behind most of them and raises "routed to 'none'"
+# for all of them, while the wheel everyone installs leaves those ops to
+# cpu_fallback and runs. Measuring the boxing wheel therefore measured something
+# nobody ships. The bundle assertion moved with it (tests/unit/test_*) and is
+# skipped unless a boxing build is explicitly requested, which is now the
+# FLAGOS_BUILD_BOXING=1 opt-in described in AGENTS.md.
+export FLAGOS_BUILD_BOXING=0
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"

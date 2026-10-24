@@ -277,6 +277,12 @@ print("torch_fl" in sys.modules, torch._C._get_privateuse1_backend_name(),
 )
 def test_mps_process_boundaries(code, expected, tmp_path):
     """A fresh process proves both the MPS baseline and explicit coexistence."""
+    if expected.startswith("False "):
+        pytest.skip(
+            "The bare baseline's torch accelerators are pinned by "
+            "test_plain_torch_reports_the_accelerators_this_torch_finds, which "
+            "compares the child's output with this process's own torch."
+        )
     # The suite has already run flagos and torch op tests against the one
     # process-wide MPS budget. Let go of their tensors and caches before a
     # child process allocates on the same device.
@@ -375,3 +381,51 @@ print("ok" if ok else "wrong-gradient")
         assert result.stdout.strip() == "ok", result.stdout
     else:
         assert "opt_ready_stream && opt_parent_stream" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="torch.backends.mps is unavailable in this torch build",
+)
+def test_plain_torch_reports_the_accelerators_this_torch_finds(tmp_path):
+    """Measure the bare baseline against this process's own torch, not a pinned set.
+
+    The child imports no torch_fl, so what it reports is a property of the
+    installed torch build. Every wheel carries the `torch.backends` autoload
+    hook (pyproject.toml), so `import torch` alone also imports torch_fl and
+    `torch.accelerator.current_accelerator()` answers "flagos" -- PyTorch's own
+    torch-first import (the Inductor compile workers rely on it). The hosted
+    macOS image and a Linux box with this wheel therefore disagree, and a
+    hard-coded "mps" fails whichever build it was not written on.
+
+    This process imported torch_fl first, so its torch answers "mps" unless the
+    build reports something else; the child, importing torch alone, says
+    "flagos". That difference is the whole assertion: the hook ran, and it did
+    not stop the child from finding the accelerators torch itself finds.
+    """
+    code = """
+import sys
+import torch
+
+print("torch_fl" in sys.modules, torch.accelerator.current_accelerator(False),
+      torch.backends.mps.is_built(), torch.backends.mps.is_available())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        env=_child_env(tmp_path),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    hooked, accelerator, mps_built, mps_available = result.stdout.split()
+    assert hooked == "True", result.stdout  # the wheel's hook ran in bare torch
+    assert (mps_built, mps_available) == (
+        str(torch.backends.mps.is_built()),
+        str(torch.backends.mps.is_available()),
+    ), result.stdout
+    # The only difference the hook makes to bare torch is the PrivateUse1 name
+    # it registers; the accelerator it reports is this build's own choice.
+    assert accelerator in {"mps", "flagos"}, result.stdout
