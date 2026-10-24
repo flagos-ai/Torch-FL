@@ -33,7 +33,6 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 from platform_support import detect_platform
-from torch_fl import _env
 
 
 DEVICE = "flagos:0"
@@ -78,19 +77,6 @@ _REFERENCE_NEG_IS_ASCEND_ONLY = detect_platform() != "ascend"
 _GCU = detect_platform() == "gcu"
 _MUSA = detect_platform() == "musa"
 
-# An every-op boxing wheel -- one whose registration table names a kernel for
-# every generated op -- cannot *reach* the conversion. Registering an op whose
-# conf route is `none` makes the dispatcher raise "routed to 'none' ... but the
-# op is registered on PrivateUse1" instead of falling back, so `to.dtype` and
-# with it every `.to(dtype)` call raises. The FlagGems-primary wheel everyone
-# installs has no such registration and the conversion runs through
-# cpu_fallback, measured on the PPU runner as 236 passed on the portable group.
-# This is the same premise `test_rng_dispatch.py` states for its device
-# generators, read from the build record rather than from the platform name.
-# A boxing build no longer registers every op (it registers the non-`none`
-# routes only), so on such a build the reason is stale -- but the guards
-# themselves are the route probes below, which answer the live question.
-_BOXING_WHEEL = "boxing" in _env.build_kernels()
 
 # Two operations have no route at all on a wheel whose conf serves neither of
 # them: `to.dtype` between two device dtypes and `masked_select`. Both then
@@ -469,12 +455,6 @@ class TestCopyDtypeSupport:
         assert result.dtype == dtype
 
     @pytest.mark.skipif(
-        _BOXING_WHEEL,
-        reason="an every-op boxing wheel registers to.dtype on PrivateUse1 "
-        "whatever the conf routes, so the conversion raises "
-        "'routed to none' instead of converting",
-    )
-    @pytest.mark.skipif(
         not _to_dtype_is_routed(),
         reason="no slot in this wheel's conf serves to.dtype on PrivateUse1, so "
         "a device<->device conversion reaches ATen's CUDA dispatch stub, which "
@@ -493,12 +473,6 @@ class TestCopyDtypeSupport:
         assert device.dtype == torch.float64
         torch.testing.assert_close(device.cpu(), cpu, rtol=0, atol=0)
 
-    @pytest.mark.skipif(
-        _BOXING_WHEEL,
-        reason="an every-op boxing wheel registers to.dtype on PrivateUse1 "
-        "whatever the conf routes, so the conversion raises "
-        "'routed to none' instead of converting",
-    )
     @pytest.mark.skipif(
         not _to_dtype_is_routed(),
         reason="no slot in this wheel's conf serves to.dtype on PrivateUse1, so "
@@ -534,12 +508,6 @@ class TestIndexingDtypeSupport:
         result = torch.index_select(x, 0, indices)
         assert result.dtype == dtype
 
-    @pytest.mark.skipif(
-        _BOXING_WHEEL,
-        reason="an every-op boxing wheel registers masked_select on "
-        "PrivateUse1 whatever the conf routes, so the call raises "
-        "'routed to none' instead of selecting",
-    )
     @pytest.mark.skipif(
         not _masked_select_is_routed(),
         reason="no slot in this wheel's conf serves masked_select on "
