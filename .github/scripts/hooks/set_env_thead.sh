@@ -201,6 +201,14 @@ fi
 export FLAGOS_SKIP_CUDA_ASSETS=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 
+# The boxing wheel selects the day-0 conf, the one whose second route is the
+# boxing kernel this wheel carries. The default backends_thead.conf leaves the
+# 1445 ops this build registers without a FlagGems kernel on `none`, which on a
+# boxing wheel is a raise rather than a cpu_fallback. Exported here, before the
+# build, because it also travels to the integration runner through GITHUB_ENV
+# and is what the tests' `routed_backend()` reads.
+export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_thead_boxing.conf}"
+
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}}"
 if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
   echo "::warning::Vendor Python cannot create a venv; trying uv"
@@ -346,19 +354,23 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=ppu
-# FlagGems-primary, the default every other lane measures.
+# The boxing wheel: it stages the PPU torch wheel's libtorch into lib_thead/ and
+# the lane measures it against the day-0 conf that exists for exactly this
+# wheel (backends_thead_boxing.conf, selected below).
 #
-# This lane used to build the boxing wheel (FLAGOS_BUILD_BOXING=1) because it
-# staged the PPU torch wheel's libtorch_cuda.so into torch_fl/lib_thead and
-# asserted the bundle. That bundle is not what a user installs: since PR #643
-# the default confs never route `boxing`, so a boxing wheel claims every op on
-# PrivateUse1 with no route behind most of them and raises "routed to 'none'"
-# for all of them, while the wheel everyone installs leaves those ops to
-# cpu_fallback and runs. Measuring the boxing wheel therefore measured something
-# nobody ships. The bundle assertion moved with it (tests/unit/test_*) and is
-# skipped unless a boxing build is explicitly requested, which is now the
-# FLAGOS_BUILD_BOXING=1 opt-in described in AGENTS.md.
-export FLAGOS_BUILD_BOXING=0
+# This lane built the FlagGems-primary wheel for a while, and that wheel cannot
+# run the gen_vendor_confs.py confs at all: `torch_fl` selects `backends_thead.conf`
+# whenever the build record names the platform, and that conf names `flaggems`
+# for 592 ops while a build without FLAGOS_BUILD_FLAGGEMS=1 registers no FlagGems
+# wrapper -- measured on the PPU runner as `add.Tensor: routed to 'none' ... but
+# the op is registered on PrivateUse1`. The default wheel's wheel-local build
+# directory read *its own* conf, which is why it looked fine there; the
+# installed-tree measurement is what failed.
+#
+# `boxing` is the route a boxing wheel serves without FlagGems, and the conf for
+# it is the day-0 variant AGENTS.md describes: FlagGems where this build has it,
+# boxing everywhere else. That is the combination the PPU lane measures.
+export FLAGOS_BUILD_BOXING=1
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
@@ -467,6 +479,13 @@ after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
          for path in lib.iterdir() if path.is_file()}
 assert after == before, "PPU import changed the installed torch/lib"
 
+# The routing half of the same contract. A boxing wheel registers every op on
+# PrivateUse1, and a `none` route there raises instead of falling back, so the
+# conf has to agree with the registration for the ops a model actually calls.
+# The day-0 conf is the one that does; the default one leaves 1445 of them on
+# `none` (measured on the PPU runner).
+conf = torch_fl.backend_config_path()
+assert conf.endswith("backends_thead_boxing.conf"), conf
 print(f"triton (FlagTree): {triton.__version__} -> {triton.__file__}")
 print(f"triton backends: {sorted(triton.backends.backends)}")
 print(f"flag_gems: {flag_gems.__version__} -> {flag_gems.__file__}")
@@ -478,5 +497,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

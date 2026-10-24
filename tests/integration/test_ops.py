@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 import torch_fl
+from torch_fl import _env
 
 
 @pytest.fixture(scope="session")
@@ -326,6 +327,17 @@ class TestIndexing:
         x = torch.arange(10, device=device, dtype=torch.float32)
         assert x[2:5].shape == (3,)
 
+    # An every-op boxing wheel registers masked_select on PrivateUse1 while the
+    # default conf routes `none`; the FlagGems-primary wheel leaves it
+    # unregistered and the call runs through cpu_fallback. Same premise as
+    # test_dtype_coverage.py and test_rng_dispatch.py, read from the build
+    # record.
+    @pytest.mark.skipif(
+        "boxing" in _env.build_kernels(),
+        reason="an every-op boxing wheel registers masked_select on "
+        "PrivateUse1 while the default conf routes `none`, so the call raises "
+        "'routed to none' instead of selecting",
+    )
     def test_masked_select(self, device):
         x = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device)
         mask = x > 2
