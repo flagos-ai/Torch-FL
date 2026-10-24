@@ -152,10 +152,14 @@ def restore_ppu_cuda_version():
     if current:
         return current
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            "PPU libtorch is active but torch.cuda.is_available() is false; "
-            "the vendor runtime was not loaded before importing torch"
-        )
+        # No CUDA runtime was loaded ahead of torch, so there is no PPU CUDA ABI
+        # to reconcile -- the FlagGems-primary wheel is exactly that case: it
+        # carries no vendor libtorch (lib_thead/ is a boxing-only bundle) and
+        # answers through the flagos device, leaving torch.version.cuda None.
+        # A boxing wheel whose driver is unreachable lands here too; either way
+        # the wheel's own metadata is already right, so return it rather than
+        # refusing to import torch_fl.
+        return current
     getter = getattr(torch._C, "_cuda_getCompiledVersion", None)
     if not callable(getter):
         raise RuntimeError(

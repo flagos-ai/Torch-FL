@@ -74,12 +74,19 @@ def test_existing_vendor_torch_metadata_is_left_unchanged(monkeypatch):
     assert calls == []
 
 
-def test_missing_ppu_runtime_is_reported(monkeypatch):
-    torch, _ = _fake_torch(available=False)
+def test_a_wheel_without_a_loaded_cuda_runtime_keeps_its_metadata(monkeypatch):
+    """The FlagGems-primary wheel carries no vendor libtorch to describe.
+
+    torch.version.cuda is None because nothing was loaded in front of torch,
+    which is the wheel's own correct answer; reporting it must not refuse to
+    import torch_fl.
+    """
+    torch, calls = _fake_torch(available=False)
     monkeypatch.setitem(sys.modules, "torch", torch)
 
-    with pytest.raises(RuntimeError, match=r"torch\.cuda\.is_available\(\) is false"):
-        link.restore_ppu_cuda_version()
+    assert link.restore_ppu_cuda_version() is None
+    assert calls == []
+    assert torch.version.cuda is None
 
 
 def test_missing_compiled_version_getter_is_reported(monkeypatch):
