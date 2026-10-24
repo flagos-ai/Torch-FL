@@ -752,9 +752,27 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // stays unregistered and falls through to cpu_fallback. Boxing remains an
   // explicit opt-in (-DFLAGOS_BUILD_BOXING=ON / FLAGOS_BUILD_BOXING=1).
   #if defined(FLAGOS_BOXING_BUILD)
-  #define FLAGOS_GEN_IMPLS
+  // The whole generated list is claimed only where the conf can serve it. A
+  // default conf never routes `boxing` (AGENTS.md), so an op it routes to
+  // `none` would be claimed here with no kernel behind the claim and raise
+  // "routed to 'none' ... but the op is registered on PrivateUse1" instead of
+  // reaching cpu_fallback -- measured on DCU (clone of a flagos tensor failing
+  // on `empty_like`). The per-platform conf therefore gates the list on a
+  // boxing build too, from strings the generated confs already spell; dropping
+  // strings leaves every op the conf routes to a backend that is not `none`.
+  #if defined(FLAGOS_ACCEL_CUDA)
+  #include "generated/register_boxing_nvidia.inc"
+  #elif defined(FLAGOS_ACCEL_METAX)
+  #include "generated/register_boxing_metax.inc"
+  #elif defined(FLAGOS_ACCEL_DCU)
+  #include "generated/register_boxing_hygon.inc"
+  #elif defined(FLAGOS_ACCEL_PPU)
+  #include "generated/register_boxing_thead.inc"
+  #elif defined(FLAGOS_ACCEL_TSINGMICRO)
+  #include "generated/register_boxing_tsingmicro.inc"
+  #else
   #include "generated/register.inc"
-  #undef FLAGOS_GEN_IMPLS
+  #endif
   #elif defined(FLAGOS_FLAGGEMS_PYTHON)
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_flaggems_nvidia.inc"

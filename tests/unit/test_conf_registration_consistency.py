@@ -98,17 +98,32 @@ PLATFORM_REGISTRATION = {
         "backends/iluvatar/generated/iluvatar_flaggems_register.inc",
     ],
     # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro share the
-    # register.cc ``#else`` arm. With boxing ON it includes generated/register.inc
-    # (every generated op); with boxing OFF -- the FlagGems-primary default -- it
-    # includes the matching generated/register_flaggems_<platform>.inc, which
-    # claims only the ops the conf routes to a FlagGems backend. Both are listed
-    # here because a build compiles one or the other.
-    "nvidia": ["generated/register.inc", "generated/register_flaggems_nvidia.inc"],
-    "hygon": ["generated/register.inc", "generated/register_flaggems_hygon.inc"],
-    "metax": ["generated/register.inc", "generated/register_flaggems_metax.inc"],
-    "thead": ["generated/register.inc", "generated/register_flaggems_thead.inc"],
+    # register.cc ``#else`` arm. With boxing ON it includes
+    # generated/register_boxing_<platform>.inc -- every op the conf routes
+    # somewhere other than ``none``, because a default conf never routes
+    # ``boxing`` and a claim without a route raises instead of falling back;
+    # with boxing OFF -- the FlagGems-primary default -- it includes the
+    # matching generated/register_flaggems_<platform>.inc, which claims only the
+    # ops the conf routes to a FlagGems backend. Both are listed here because a
+    # build compiles one or the other.
+    "nvidia": [
+        "generated/register_boxing_nvidia.inc",
+        "generated/register_flaggems_nvidia.inc",
+    ],
+    "hygon": [
+        "generated/register_boxing_hygon.inc",
+        "generated/register_flaggems_hygon.inc",
+    ],
+    "metax": [
+        "generated/register_boxing_metax.inc",
+        "generated/register_flaggems_metax.inc",
+    ],
+    "thead": [
+        "generated/register_boxing_thead.inc",
+        "generated/register_flaggems_thead.inc",
+    ],
     "tsingmicro": [
-        "generated/register.inc",
+        "generated/register_boxing_tsingmicro.inc",
         "generated/register_flaggems_tsingmicro.inc",
     ],
     # MPS is a native vendor backend: register.cc's USE_MPS arm includes the
