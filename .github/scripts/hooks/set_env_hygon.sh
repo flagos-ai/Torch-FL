@@ -478,7 +478,7 @@ before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
 import torch_fl  # noqa: F401  (selects DTK's core without changing torch/lib)
 import torch
 
-from torch_fl.accelerator.dcu._dcu_libtorch_link import restore_original_libtorch
+from torch_fl.accelerator.hygon._dcu_libtorch_link import restore_original_libtorch
 
 try:
     assert torch.version.hip, f"torch.version.hip not restored: {torch.version.hip!r}"
