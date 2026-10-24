@@ -69,6 +69,7 @@ GENERATED = REPO / "csrc/aten/generated"
 REGISTER_INC = GENERATED / "register.inc"
 OPS_CC = GENERATED / "ops.cc"
 FLAGGEMS_KERNELS = GENERATED / "flaggems_python_kernels.cc"
+BOXING_KERNELS = GENERATED / "cuda_kernels.cc"
 CONFIGS = REPO / "torch_fl/configs"
 
 # The CUDA-ABI platforms that share the `#else` arm of register.cc. Order fixes
@@ -171,6 +172,29 @@ def flaggems_kernel_ops():
     return {disp_to_op[d] for d in dispatchers if d in disp_to_op}
 
 
+def boxing_kernel_ops():
+    """Op names whose ``kBoxing`` dispatcher the generated boxing kernels fill.
+
+    Same join as ``flaggems_kernel_ops``, against ``cuda_kernels.cc`` -- the
+    file the CUDA codegen scores boxing coverage into. The per-vendor narrowing
+    happens at build time inside those kernels, so a listed op can still leave
+    its C++ slot empty for a given vendor; the four bench-measured cases that do
+    (cuda/dcu/ppu ``mm``/``bmm``, metax ``add.Tensor``) are registered by hand
+    in ``register.cc``.
+    """
+    ops_cc = OPS_CC.read_text()
+    disp_to_op = dict(
+        re.findall(r"ADD_IMPL_TO_DISPATCHER\(\w+,\s*(\w+),\s*\"([^\"]+)\"\)", ops_cc)
+    )
+    kernels = BOXING_KERNELS.read_text()
+    dispatchers = set(
+        re.findall(
+            r"REGISTER_IMPL_TO_DISPATCHER\(\w+,\s*(\w+),\s*Backend::kBoxing,", kernels
+        )
+    )
+    return {disp_to_op[d] for d in dispatchers if d in disp_to_op}
+
+
 def conf_routes(platform):
     """op name -> route value for one platform's conf, comments stripped."""
     routes = {}
@@ -182,26 +206,47 @@ def conf_routes(platform):
     return routes
 
 
-def boxing_target_ops(platform, wrappers):
-    """(registered ops, ops left out because the conf says `none`).
+def boxing_target_ops(platform, wrappers, kernel_ops):
+    """(registered ops, ops left out, and why).
 
-    An op the conf routes to a backend that ``register.inc`` has no wrapper for
-    (metax/dcu's ``scaled_dot_product_attention``) is not claimed here either --
-    claiming it would need a wrapper symbol that does not exist. It is named in
-    the file's excluded list, like the ``none`` routes, so the difference is on
-    the record rather than implicit.
+    The claim is what a boxing build can actually serve: the ops the conf routes
+    to ``boxing`` that the generated boxing kernels have a dispatcher for, plus
+    the ops it routes to any other backend, which are served through the vendor
+    slot or a FlagGems arm and need nothing from this list to be registered.
+    ``kernel_ops`` is the boxing kernel set (see ``flaggems_kernel_ops`` for the
+    ``flaggems_python_kernels.cc`` side of the same join).
+
+    Two kinds of op are left out, and both reach cpu_fallback:
+
+    * a ``none`` route -- the conf states there is nothing to serve it;
+    * a ``boxing`` route with no boxing kernel, which is a conf that describes
+      a build other than this one (metax's ``backends_metax_boxing.conf`` names
+      ``boxing`` for ``normal_`` while the wheel ships no boxing kernels:
+      claiming it there raised from the dispatcher, run 40129896922);
+
+    as is an op the conf routes elsewhere that ``register.inc`` has no wrapper
+    for (metax/dcu's ``scaled_dot_product_attention``): claiming it would need a
+    wrapper symbol that does not exist. Each is named in the file's excluded
+    list, so the difference is on the record rather than implicit.
     """
     routes = conf_routes(platform)
     unserved = {op for op, value in routes.items() if value == "none"}
+    unkerneled = {
+        op for op, value in routes.items() if value == "boxing" and op not in kernel_ops
+    }
     claimed = sorted(
-        op for op, value in routes.items() if value != "none" and op in wrappers
+        op
+        for op, value in routes.items()
+        if value != "none"
+        and op in wrappers
+        and (value != "boxing" or op in kernel_ops)
     )
     unwrapped = {op for op, value in routes.items() if value != "none"} - set(wrappers)
-    return claimed, sorted(unserved | unwrapped)
+    return claimed, sorted(unserved | unkerneled | unwrapped)
 
 
-def render_boxing(platform, wrappers):
-    ops, unserved = boxing_target_ops(platform, wrappers)
+def render_boxing(platform, wrappers, kernel_ops):
+    ops, unserved = boxing_target_ops(platform, wrappers, kernel_ops)
     lines = [
         BOXING_HEADER.format(platform=platform, count=len(ops)),
         "//\n// Held back from the boxing claim: the conf routes them to `none`, or",
@@ -262,12 +307,13 @@ def main():
         )
     wrappers = wrapper_map()
     kernel_ops = flaggems_kernel_ops()
+    boxing_kernels = boxing_kernel_ops()
 
     stale = []
     for platform in PLATFORMS:
         text = render(platform, wrappers, kernel_ops)
         out = GENERATED / f"register_flaggems_{platform}.inc"
-        boxing_text = render_boxing(platform, wrappers)
+        boxing_text = render_boxing(platform, wrappers, boxing_kernels)
         boxing_out = GENERATED / f"register_boxing_{platform}.inc"
 
         if args.check:
@@ -284,10 +330,10 @@ def main():
             f"{len(no_kernel)} FlagGems routes left unregistered)"
         )
         boxing_out.write_text(boxing_text)
-        claimed, unserved = boxing_target_ops(platform, wrappers)
+        claimed, unserved = boxing_target_ops(platform, wrappers, boxing_kernels)
         print(
             f"[gen] {boxing_out.relative_to(REPO)}  ({len(claimed)} m.impl lines, "
-            f"{len(unserved)} `none` routes left unregistered)"
+            f"{len(unserved)} unrouted/unserved ops left unregistered)"
         )
 
     if args.check:
