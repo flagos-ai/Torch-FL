@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import routed_backend_or_none, route_is_served
 
 
 DEVICE = "flagos:0"
@@ -137,6 +137,11 @@ class TestMeanDimDispatch:
         expected = routed_backend_or_none("mean.dim")
         if expected is None:
             pytest.skip("mean.dim is routed to 'none' on this platform")
+        if not route_is_served("mean.dim"):
+            pytest.skip(
+                f"this wheel did not compile the `{expected}` route the conf "
+                "names, so the op is unregistered and logs no dispatch"
+            )
         result = _run_mean_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert f"[flagos dispatch] mean.dim -> {expected}" in result.stderr
