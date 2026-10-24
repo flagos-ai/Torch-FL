@@ -204,7 +204,9 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "metax": "flaggems",
     "apple": "none",
     "musa": "none",
-    "ppu": "cuda",
+    # PPU is measured on its FlagGems-primary wheel now; the `cuda` spelling
+    # this recorded was the boxing build's, which the lane no longer builds.
+    "ppu": "none",
 }
 
 #: conf value -> the name ``[flagos dispatch]`` prints for the same backend. The

@@ -99,12 +99,30 @@ def _device_rng_reads_flagos_seed() -> bool:
     """
     if torch_fl._build_accelerator() in ("ascend", "gcu", "musa", "kunlunxin"):
         return True
+    if torch_fl._build_accelerator() == "ppu" and not _boxing_built():
+        # FlagGems-primary PPU: the RNG ops are CPU-backed (flag_gems names a
+        # `cpp`/cpu generator for rand, multinomial, bernoulli_ and the
+        # explicit-generator tests' op), so a caller's generator must be the
+        # cpu one the kernel accepts -- the boxing prelude that would have
+        # translated a device generator is not in this wheel.
+        return False
     return _boxing_built()
 
 
 def _supports_flagos_generator() -> bool:
     """The generator-acceptance face of ``_device_rng_reads_flagos_seed``."""
     return _device_rng_reads_flagos_seed()
+
+
+def _device_rng_accepts_device_generator() -> bool:
+    """True when a device generator is consumed rather than rejected.
+
+    A flagos one counts (_supports_flagos_generator), and so does a cuda one on
+    the boxing builds whose prelude translates it. Everything else -- the
+    FlagGems-primary wheels behind a CPU-seeded kernel, PPU included -- only
+    takes a cpu generator.
+    """
+    return _supports_flagos_generator() or _boxing_built()
 
 
 #: The conf backends whose route ends in a FlagGems kernel.
@@ -203,6 +221,12 @@ def _explicit_generator(seed):
         gen = torch.Generator(device="cuda")
     except RuntimeError:
         gen = torch.Generator()  # cpu
+    else:
+        if not _device_rng_accepts_device_generator():
+            # The choice above is not a guard: a FlagGems-primary PPU wheel
+            # builds a cuda Generator fine and then rejects it in the flag_gems
+            # cpu-backed kernel ("Expected a 'cpu' device type for generator").
+            gen = torch.Generator()
     return gen.manual_seed(seed)
 
 
