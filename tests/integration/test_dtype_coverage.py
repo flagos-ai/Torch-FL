@@ -78,16 +78,18 @@ _REFERENCE_NEG_IS_ASCEND_ONLY = detect_platform() != "ascend"
 _GCU = detect_platform() == "gcu"
 _MUSA = detect_platform() == "musa"
 
-# PPU on an every-op boxing wheel is the one backend that cannot *reach* the
-# conversion. That wheel registers every ATen operator on PrivateUse1 (the
-# boxing tables name the kernel for each), but since #643 a default conf never
-# routes `boxing`, so `to.dtype` -- and with it every `.to(dtype)` call -- is
-# "routed to 'none' ... but the op is registered on PrivateUse1". The
-# FlagGems-primary wheel everyone installs has no such registration and the
-# conversion runs through cpu_fallback, measured on the PPU runner as 236
-# passed on the portable group. This is the same premise `test_rng_dispatch.py`
-# states for its device generators, read from the build record rather than
-# from the platform name.
+# An every-op boxing wheel -- one whose registration table names a kernel for
+# every generated op -- cannot *reach* the conversion. Registering an op whose
+# conf route is `none` makes the dispatcher raise "routed to 'none' ... but the
+# op is registered on PrivateUse1" instead of falling back, so `to.dtype` and
+# with it every `.to(dtype)` call raises. The FlagGems-primary wheel everyone
+# installs has no such registration and the conversion runs through
+# cpu_fallback, measured on the PPU runner as 236 passed on the portable group.
+# This is the same premise `test_rng_dispatch.py` states for its device
+# generators, read from the build record rather than from the platform name.
+# A boxing build no longer registers every op (it registers the non-`none`
+# routes only), so on such a build the reason is stale -- but the guards
+# themselves are the route probes below, which answer the live question.
 _BOXING_WHEEL = "boxing" in _env.build_kernels()
 
 # Two operations have no route at all on a wheel whose conf serves neither of
@@ -469,7 +471,7 @@ class TestCopyDtypeSupport:
     @pytest.mark.skipif(
         _BOXING_WHEEL,
         reason="an every-op boxing wheel registers to.dtype on PrivateUse1 "
-        "while the default conf routes `none`, so the conversion raises "
+        "whatever the conf routes, so the conversion raises "
         "'routed to none' instead of converting",
     )
     @pytest.mark.skipif(
@@ -494,7 +496,7 @@ class TestCopyDtypeSupport:
     @pytest.mark.skipif(
         _BOXING_WHEEL,
         reason="an every-op boxing wheel registers to.dtype on PrivateUse1 "
-        "while the default conf routes `none`, so the conversion raises "
+        "whatever the conf routes, so the conversion raises "
         "'routed to none' instead of converting",
     )
     @pytest.mark.skipif(
@@ -535,7 +537,7 @@ class TestIndexingDtypeSupport:
     @pytest.mark.skipif(
         _BOXING_WHEEL,
         reason="an every-op boxing wheel registers masked_select on "
-        "PrivateUse1 while the default conf routes `none`, so the call raises "
+        "PrivateUse1 whatever the conf routes, so the call raises "
         "'routed to none' instead of selecting",
     )
     @pytest.mark.skipif(
