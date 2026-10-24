@@ -44,16 +44,18 @@ def _routed_to_flagos(op) -> bool:
     and a slot that does serve it returns a device tensor.
     """
     try:
-        tensor = torch.empty(0, device="flagos:0")
-        if op == "aten::masked_select":
-            out = torch.ops.aten.masked_select(
-                tensor, torch.empty(0, device="flagos:0", dtype=torch.bool)
-            )
-        else:
+        if op != "aten::masked_select":
             raise AssertionError(f"no probe for {op}")
+        # Not an empty input: FlagGems' Ascend arm reads `prefix_sum[-1]` on an
+        # empty cumsum, which raises IndexError from the kernel rather than
+        # from the route (Ascend lane, run 40124915577 -- both integration
+        # suites errored at collection). See test_dtype_coverage.py.
+        tensor = torch.ones(1, device="flagos:0")
+        mask = torch.ones(1, device="flagos:0", dtype=torch.bool)
+        out = torch.ops.aten.masked_select(tensor, mask)
     except (NotImplementedError, RuntimeError):
         return False
-    return out.device.type == "flagos"
+    return out.device.type == "flagos" and out.numel() == 1
 
 
 @pytest.fixture(scope="session")

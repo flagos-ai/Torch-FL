@@ -126,14 +126,27 @@ def _routed_to_flagos(op) -> bool:
         if op == "aten::to.dtype":
             out = torch.ops.aten.to.dtype(tensor, torch.float32)
         elif op == "aten::masked_select":
-            out = torch.ops.aten.masked_select(
-                tensor, torch.empty(0, device="flagos:0", dtype=torch.bool)
-            )
+            return _probe_masked_select()
         else:
             raise AssertionError(f"no probe for {op}")
     except (NotImplementedError, RuntimeError):
         return False
     return out.device.type == "flagos"
+
+
+def _probe_masked_select() -> bool:
+    """Route probe for masked_select, on a shape the FlagGems arm can serve.
+
+    An empty input is the natural probe shape, but FlagGems' Ascend arm reads
+    `prefix_sum[-1]` on an empty cumsum, so an empty input raises IndexError
+    from the kernel rather than from the route (Ascend lane, run 40124915577:
+    both suites errored at collection). One input element and one True mask
+    element keeps the call tiny and makes the arm compute something.
+    """
+    tensor = torch.ones(1, device="flagos:0")
+    mask = torch.ones(1, device="flagos:0", dtype=torch.bool)
+    out = torch.ops.aten.masked_select(tensor, mask)
+    return out.device.type == "flagos" and out.numel() == 1
 
 
 def _to_dtype_is_routed() -> bool:
