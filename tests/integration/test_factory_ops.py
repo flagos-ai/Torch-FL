@@ -26,6 +26,28 @@ import torch
 import torch_fl
 
 
+def _masked_select_is_served() -> bool:
+    """Whether this wheel has a route for `masked_select` on this case's shape.
+
+    Asked by calling the operator, on the 4-element shape the case uses: the
+    conf's route is not enough to answer it. The PPU lane (run 40171498946)
+    routes `masked_select` to FlagGems in `backends_thead.conf` and still raised
+    `DispatchStub: missing kernel for cuda`, because that wheel imported without
+    the FlagGems Python runtime -- the call reaches ATen's CUDA dispatch stub,
+    which a CPU-only torch has no kernel for. A probe on a 1-element input takes
+    the other arm and answers "served" for a shape the case does not use
+    (`test_dtype_coverage.py` measured exactly that), so the probe below asks
+    the same call the case asks. Same probe as test_ops.py's.
+    """
+    try:
+        tensor = torch.ones(4, device="flagos:0")
+        mask = torch.tensor([False, False, True, True], device="flagos:0")
+        out = torch.ops.aten.masked_select(tensor, mask)
+    except (NotImplementedError, RuntimeError):
+        return False
+    return out.device.type == "flagos" and out.numel() == 2
+
+
 @pytest.fixture(scope="session")
 def device():
     print(
@@ -337,6 +359,12 @@ class TestIndexing:
         x = torch.arange(10, device=device, dtype=torch.float32)
         assert x[2:5].shape == (3,)
 
+    @pytest.mark.skipif(
+        not _masked_select_is_served(),
+        reason="no route serves masked_select on this wheel's build and conf, "
+        "so the call reaches ATen's CUDA dispatch stub, which a CPU-only torch "
+        "has no kernel for",
+    )
     def test_masked_select(self, device):
         x = torch.tensor([1.0, 2.0, 3.0, 4.0], device=device)
         mask = x > 2
