@@ -752,37 +752,31 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // stays unregistered and falls through to cpu_fallback. Boxing remains an
   // explicit opt-in (-DFLAGOS_BUILD_BOXING=ON / FLAGOS_BUILD_BOXING=1).
   #if defined(FLAGOS_BOXING_BUILD)
-  // Two lists, because the previous "claim everything" arm made the two ends of
-  // registration and routing disagree:
+  // One list, and it is the conf's: generated/register_boxing_<platform>.inc
+  // names exactly the ops backends_<platform>.conf routes and this wheel has a
+  // kernel for. Nothing else is claimed here, because registration and routing
+  // have to agree in BOTH directions:
   //
   //   * Nothing may be claimed for an op the conf routes to `none`: the claim
   //     puzzles the dispatcher into "routed to 'none' ... but the op is
   //     registered on PrivateUse1" instead of letting cpu_fallback take it --
-  //     measured on DCU (cloning a flagos tensor failed on `empty_like`). The
-  //     per-platform boxed list names exactly the ops the conf routes and this
-  //     wheel has a kernel for.
-  //   * The full generated list stays, one claim per generated op, for the ops
-  //     the boxed list leaves out -- and only for those; `FLAGOS_GEN_IMPLS`
-  //     orders it ARG after the boxed list, so a claim here can only add what
-  //     the boxed list left out. A wrapper that is *defined* but never
-  //     registered strands every route to it: the FP8/FP4 matrix ops answer
-  //     through their wrapper's soft_lowp prelude regardless of the route, so
-  //     without a claim `torch.mm` on metax reached cpu_fallback's
-  //     `addmm_impl_cpu_` instead of the software path (run 40137411252, the
-  //     whole low-precision group). A generated wrapper's body is behind
-  //     `FLAGOS_SOFT_LOWP`, which only metax and dcu compile, so on cuda and
-  //     ppu each of these claims is a call into its dispatcher, which obeys the
-  //     route: `mm = none` on both, and the PPU runtime contract asserts that
-  //     mm/bmm/mul.Tensor emit no dispatch line (run 40153064301 -- without the
-  //     define below those three were claimed by this list alone and the
-  //     contract failed).
+  //     measured on DCU (cloning a flagos tensor failed on `empty_like`).
+  //   * Nothing the conf routes may be left unclaimed either, and generated
+  //     wrappers are not a route: on metax `torch.mm` reached cpu_fallback's
+  //     `addmm_impl_cpu_` instead of the FP8/FP4 wrapper's soft_lowp prelude
+  //     (run 40137411252, the whole low-precision group) because the wrapper
+  //     was defined and never registered. That is what the boxed list is for:
+  //     it holds the matrix ops the default conf routes to `boxing`.
   //
-  //     The wrappers are claimed whole because narrowing this to the matrix
-  //     ops does not work: a generated wrapper calls the *whole-op*
-  //     dispatcher (`mm_dispatcher`), and once the claim exists that dispatcher
-  //     answers "routed to 'none' ... but the op is registered" for every
-  //     dtype, including the fp32/fp16 mm the two-arm layout is meant to leave
-  //     on cpu_fallback (measured on the DCU rig, backends_hygon.conf).
+  // The full generated list used to be included here as a second claim, and it
+  // cannot be. A generated wrapper calls the *whole-op* dispatcher
+  // (`mm_dispatcher`), so a claim on it is not a claim on one route: on a
+  // platform whose conf leaves mm on `none` it turns every dtype of mm into
+  // "routed to 'none' ... but the op is registered" (DCU, run 40156011560, the
+  // DCU import gate), and on PPU the same claim made mm/bmm/mul.Tensor answer
+  // with their boxed wrapper while the runtime contract required no dispatch
+  // (run 40153064301). Both platforms now leave those ops unclaimed, which is
+  // what their conf asks for.
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_boxing_nvidia.inc"
   #elif defined(FLAGOS_ACCEL_METAX)
@@ -794,9 +788,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_boxing_tsingmicro.inc"
   #endif
-  #define FLAGOS_GEN_IMPLS
-  #include "generated/register.inc"
-  #undef FLAGOS_GEN_IMPLS
   #elif defined(FLAGOS_FLAGGEMS_PYTHON)
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_flaggems_nvidia.inc"

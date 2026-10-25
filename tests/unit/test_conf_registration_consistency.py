@@ -164,17 +164,16 @@ def _registered_ops(inc_path: Path) -> set[str]:
 
 @pytest.mark.anyplatform
 @pytest.mark.parametrize("platform", sorted(BOXING_PLATFORMS))
-def test_a_boxed_claim_is_an_op_this_platform_routes_away_from_none(platform):
-    """A boxed claim must be an op the conf routes away from ``none``.
+def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
+    """The boxed list is the conf's route set, not a superset or a subset.
 
-    register.cc's boxing arm includes ``generated/register_boxing_<p>.inc`` and
-    then the generic ``generated/register.inc``; the second is behind
-    ``FLAGOS_GEN_IMPLS`` so it can only add to the boxed list. Without that
-    guard the generic wrappers are claimed whole, and on the PPU runtime
-    contract that made mm/bmm/mul.Tensor -- routed to ``none`` there -- real
-    dispatch candidates whose boxed wrapper emitted no dispatch line (run
-    40153064301). The boxed list holds the other end: codegen leaves an op out
-    when its route is ``none`` or it has no wrapper, and this holds it to that.
+    register.cc's boxing arm claims exactly ``register_boxing_<platform>.inc``.
+    A claim with no route is "routed to 'none' ... but the op is registered on
+    PrivateUse1", and a route with no claim -- an op the conf routes to
+    ``boxing`` that nothing registered -- is "backend not registered" the first
+    time a model calls it. Both directions are measured failures on DCU: mm
+    after the arm stopped claiming unlisted wrappers (run 40156011560), and
+    `empty_like` the other way round before the boxed list existed.
     """
     boxed = _registered_ops(GEN_DIR / f"register_boxing_{platform}.inc")
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
@@ -186,6 +185,14 @@ def test_a_boxed_claim_is_an_op_this_platform_routes_away_from_none(platform):
     unlisted = sorted(op for op in boxed if op not in routes)
     assert not unlisted, (
         f"{platform} claims ops its conf does not list: {unlisted[:10]}"
+    )
+    routed_to_boxes = sorted(
+        op for op, value in routes.items() if value.split("#")[0].strip() == "boxing"
+    )
+    unclaimed = sorted(set(routed_to_boxes) - boxed)
+    assert not unclaimed, (
+        f"{platform} routes {len(unclaimed)} op(s) to boxing that its boxed list "
+        f"does not claim: {unclaimed[:10]}"
     )
 
 
