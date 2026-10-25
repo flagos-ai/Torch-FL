@@ -2370,6 +2370,7 @@ FLAGGEMS_RUNTIME_BROKEN = {
     "addcdiv.out",
     "addcmul.out",
     "as_strided_copy.out",
+    "baddbmm.out",
     "logit.out",
     "_log_softmax.out",
     "_log_softmax_backward_data.out",

@@ -94,7 +94,7 @@ FLAGGEMS_HOLDS = frozenset({
     "_cdist_backward", "_embedding_bag_per_sample_weights_backward", "_fake_quantize_learnable_per_tensor_affine_backward", "_log_softmax.out",
     "_log_softmax_backward_data.out", "_native_batch_norm_legit_functional", "_softmax.out", "_softmax_backward_data.out",
     "_upsample_bilinear2d_aa", "_upsample_nearest_exact2d_backward", "adaptive_max_pool3d_backward", "addcdiv.out",
-    "addcmul.out", "as_strided_copy.out", "binary_cross_entropy",
+    "addcmul.out", "as_strided_copy.out", "baddbmm.out", "binary_cross_entropy",
     "binary_cross_entropy.out", "binary_cross_entropy_with_logits", "cudnn_batch_norm_backward", "gcd",
     "gcd.out", "hardtanh_backward", "igammac", "igammac.out",
     "igammac_", "im2col", "index_select", "leaky_relu_",
