@@ -169,10 +169,10 @@ jobs:
       # the suite -- into a seconds-long failure with the orphan named.
       - name: Check conf routes against the generated kernels
         run: |
-          # --confcutdir: tests/integration/conftest.py imports torch_fl and a
-          # device for the hardware suites. This file compares generated text,
-          # so keep pytest from loading that conftest -- there is no torch here,
-          # by design.
+          # The hardware suites' conftests (tests/integration/conftest.py and
+          # tests/integration/ops/conftest.py) import torch_fl and a device, and
+          # there is no torch here by design. Every conftest between the rootdir
+          # and the file has to be cut, not just the nearest one.
           python -m pytest tests/integration/ops/test_flaggems_conf_consistency.py \
-            --confcutdir=tests/integration/ops \
+            --confcutdir=tests \
             -v --tb=short -p no:cacheprovider
