@@ -187,6 +187,22 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     #: `boxing`. Both counts are the conf's text, not a measurement.
     "ppu": 592,
     "ppu_boxing": 592,
+    # The other three boxing lanes' day-0 confs. Both NVIDIA counts are 0 and
+    # that is not a measurement to re-take: `backends_nvidia_boxing.conf` routes
+    # every op the CUDA conf names to `boxing`, because on NVIDIA the boxed CUDA
+    # kernel *is* the covered route -- the FlagGems coverage that would have
+    # answered a `flaggems` row is the same kernel the boxing wheel already
+    # reaches, so the day-0 conf does not keep a second copy of it. The suite
+    # then skips its FlagGems cases for this lane by the conf's own route, which
+    # is the designed behaviour (see ``flaggems_route_count``).
+    "nvidia": 0,
+    "nvidia_boxing": 0,
+    # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
+    # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
+    # FlagGems coverage and boxes the rest. Counted from the shipped confs the
+    # same way ``flaggems_route_count`` counts (``= flaggems`` only).
+    "metax_boxing": 583,
+    "dcu_boxing": 453,
 }
 
 #: The route ``scaled_dot_product_attention`` is expected to carry, per platform.
@@ -217,6 +233,12 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     # not this table's.
     "ppu": "none",
     "ppu_boxing": "boxing",
+    # The day-0 confs name the boxed CUDA kernel for the composite, the arm the
+    # packaging wheel actually dispatches to.
+    "nvidia": None,
+    "nvidia_boxing": "boxing",
+    "metax_boxing": "boxing",
+    "dcu_boxing": "boxing",
 }
 
 #: conf value -> the name ``[flagos dispatch]`` prints for the same backend. The
