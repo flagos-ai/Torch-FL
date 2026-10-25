@@ -542,7 +542,15 @@ CLEAN_LD_LIBRARY_PATH="$(strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
 export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${VENDOR_FLAGGEMS_DIR:+:$VENDOR_FLAGGEMS_DIR}${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
 export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
-export LD_LIBRARY_PATH="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}${VENDOR_TORCH_LIB:+$VENDOR_TORCH_LIB:}$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
+# The vendor torch's lib/ is on the path only for the boxing lane: that is the
+# libtorch the boxed kernels re-dispatch into. The vendor lane's whole premise
+# is a wheel with no such dependency, so adding it there would be a subtle
+# change to what that lane measures.
+BOXING_LD_PREFIX=""
+if [[ "${BOXING_LANE:-}" == "1" ]]; then
+  BOXING_LD_PREFIX="$VENDOR_TORCH_LIB:"
+fi
+export LD_LIBRARY_PATH="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}${BOXING_LD_PREFIX}$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 cd "$REPO_ROOT"
 # Verify that the source-free wheel installed the Triton provider it ships,
