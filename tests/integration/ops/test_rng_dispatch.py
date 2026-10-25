@@ -617,9 +617,12 @@ class TestRngSeedSource:
         value = torch.ones((256,), device=DEVICE)
         # native_dropout draws from `random_`, so a wheel that does not serve
         # that draw cannot run the contract at all (CUDA lane, run
-        # 40148742285); the probe is the same one the catalogue uses.
+        # 40148742285); the probe is the same one the catalogue uses. It takes
+        # the first element of the tuple: the probe warms up with `.float()`,
+        # which a two-output op has no single answer for (Kunlunxin lane, run
+        # 40149862610).
         _skip_if_random_leaves_the_device(
-            lambda: torch.ops.aten.native_dropout(value, 0.25, True)
+            lambda: torch.ops.aten.native_dropout(value, 0.25, True)[0]
         )
         output, mask = torch.ops.aten.native_dropout(value, 0.25, True)
         assert output.device == torch.device(DEVICE)
