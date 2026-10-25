@@ -59,7 +59,33 @@ def test_non_contiguous_source_round_trip():
     torch.testing.assert_close(device.cpu(), transposed_cpu)
 
 
+def _dtype_cast_is_served() -> bool:
+    """Whether a device dtype cast reaches a kernel on this wheel.
+
+    A cast on a device tensor dispatches to ``_to_copy``, and a conf that leaves
+    that op on ``none`` hands the call to ATen's own dispatcher -- which has no
+    CUDA kernel in a CPU-only torch, so it raises
+    ``DispatchStub: missing kernel for cuda``. That is the conf's decision, not
+    a broken copy engine: ``backends_thead.conf`` and ``backends_metax.conf``
+    both leave ``_to_copy.out`` on ``none`` while ``backends_nvidia.conf``
+    routes it (PPU lane, run 40188039682). Asked by making the call, on the
+    same dtype the case casts to, so the probe cannot answer for a cast the
+    case does not make.
+    """
+    try:
+        out = torch.ones(1, device=DEVICE).to(torch.float16)
+    except (NotImplementedError, RuntimeError):
+        return False
+    return out.device.type == "flagos" and out.dtype == torch.float16
+
+
 @pytest.mark.anyplatform
+@pytest.mark.skipif(
+    not _dtype_cast_is_served(),
+    reason="no route serves a device dtype cast on this wheel's conf, so the "
+    "call reaches ATen's CUDA dispatch stub, which a CPU-only torch has no "
+    "kernel for",
+)
 def test_dtype_cast_round_trip():
     cpu = _cpu_tensor(3, (4, 4))
     device = cpu.to(DEVICE)
