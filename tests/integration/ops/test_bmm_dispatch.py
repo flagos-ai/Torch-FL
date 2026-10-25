@@ -78,12 +78,14 @@ def _run_bmm_subprocess(
     use_out: bool = False,
     check: bool = True,
     stub_python_op: bool = False,
-    dtype_name: str | None = None,
+    dtype: torch.dtype | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a minimal bmm call in a subprocess and return the result."""
     env = os.environ.copy()
     env.update(extra_env)
-    operands = f"dtype={dtype_name}, " if dtype_name else ""
+    # Spelled in full: the probe body runs in a fresh interpreter that has
+    # imported nothing but torch_fl and torch, so a bare `float32` is a NameError.
+    operands = f"dtype=torch.{str(dtype).split('.')[-1]}, " if dtype else ""
     setup = "import torch_fl, torch; "
     if stub_python_op:
         # This test only verifies routing; avoid triggering FlagGems BMM autotuning.
@@ -371,9 +373,7 @@ class TestFloatBmmKeepsItsRoute:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_float_bmm_logs_the_conf_route(self, dtype):
         expected = routed_backend("bmm")
-        result = _run_bmm_subprocess(
-            {"FLAGOS_LOG": "dispatch"}, dtype_name=str(dtype).split(".")[-1]
-        )
+        result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch"}, dtype=dtype)
         assert f"[flagos dispatch] bmm -> {expected}" in result.stderr, (
             f"Expected the conf's route ({expected}) for a {dtype} bmm, got:\n"
             f"{result.stderr}"
