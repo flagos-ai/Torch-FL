@@ -172,7 +172,7 @@ def _route_to_cpu_fallback(op: str) -> bool:
     return not route_is_served(op)
 
 
-def _skip_if_random_leaves_the_device(draw):
+def _skip_if_random_leaves_the_device(op):
     """Skip a draw whose op this wheel does not serve on the device at all.
 
     The two reproducibility cases below draw from every op in the catalogue,
@@ -180,18 +180,18 @@ def _skip_if_random_leaves_the_device(draw):
     reaches ATen's `random()` dispatch stub through cpu_fallback, and a
     CPU-only torch has no kernel there -- "DispatchStub: missing kernel for
     cuda" (NVIDIA lane, run 40146671425: 29 failures, `multinomial`, `random_`,
-    `randint`, `randperm` and their out variants). Asking the draw is the
-    narrowest form of the question and the one that cannot go stale: a skippable
-    draw raises, a served one returns.
+    `randint`, `randperm` and their out variants).
 
-    It skips, rather than failing, because what these two cases test --
-    seed reproducibility and seed sensitivity -- needs a draw that lands on the
-    device, and a wheel that sends the op elsewhere has nothing to assert. The
-    other classes in this file still cover the generator contract where it
-    applies.
+    `op()` alone answers a different question, and it answered wrong: the
+    draws that got past it failed in the warmup's `.float()` (run 40147673906,
+    the same 29), which is where the boxed read of the drawn tensor -- not
+    the draw -- reached the stub. So the probe runs the draw exactly as the
+    cases do. That is the narrowest form of the question and the one that
+    cannot go stale: a draw this wheel cannot serve raises, a served one
+    returns.
     """
     try:
-        draw()
+        _draw(op, SEED)
     except (NotImplementedError, RuntimeError) as exc:
         if "not implemented" not in str(exc) and "DispatchStub" not in str(exc):
             raise
