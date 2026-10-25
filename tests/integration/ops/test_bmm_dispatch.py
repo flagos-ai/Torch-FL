@@ -354,25 +354,43 @@ class TestBmmDispatchLog:
         )
 
 
+# The backend this build can serve for an ordinary-dtype bmm.
+#
+# Not the conf value: the conf is generated for the FlagGems runtime, and on the
+# platforms with the software low-precision path (MetaX, DCU -- FLAGOS_SOFT_LOWP)
+# the matrix ops are held out of the generated kernels, so the routes those confs
+# name degrade (``Backend::kFlagGemsCpp`` falls back to boxing, then FlagGems;
+# ``kFlagGems`` to boxing) and the vendor build has no boxing kernels at all.
+# The log prints the backend that ran, and on MetaX that is ``flagos``.
+_VENDOR_FALLBACK = {"flagos": "flagos", "boxing": "flagos"}
+
+
+def _expected_bmm_route() -> str:
+    expected = routed_backend("bmm")
+    return _VENDOR_FALLBACK.get(expected, expected)
+
+
 class TestFloatBmmKeepsItsRoute:
-    """An ordinary-dtype bmm stays on the backend the conf names.
+    """An ordinary-dtype bmm stays on an accelerated route.
 
     The software low-precision path runs on FLAGOS_SOFT_LOWP platforms (MetaX,
     DCU), and the generated wrapper's dtype prelude cannot tell whether the
     build compiles it -- so on those platforms every bmm wrapper call enters the
     software implementation. It has to hand the ordinary dtypes straight back to
-    the conf's route, because the boxing kernel refuses them ("soft-lowp matrix
-    kernel requires a low-precision input", MetaX CI run 40189509687; its
-    addmm spellings took the whole process down with fp64, run 447e9a6).
+    the dispatch route, because taking them itself fails: a boxing kernel
+    refuses them ("soft-lowp matrix kernel requires a low-precision input", MetaX
+    CI run 40189509687), the addmm spellings took the whole process down with
+    fp64 (run 447e9a6), and a build whose wheel compiled the prelude without the
+    sources behind it segfaulted (run 40195692591).
 
-    The dispatch log names what actually ran, so it separates the conf's route
-    from a fallback that still computed the right answer.
+    The dispatch log names what actually ran, so it separates a routed call from
+    a fallback that still computed the right answer.
     """
 
     @pytest.mark.main_ops
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_float_bmm_logs_the_conf_route(self, dtype):
-        expected = routed_backend("bmm")
+        expected = _expected_bmm_route()
         result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch"}, dtype=dtype)
         assert f"[flagos dispatch] bmm -> {expected}" in result.stderr, (
             f"Expected the conf's route ({expected}) for a {dtype} bmm, got:\n"
