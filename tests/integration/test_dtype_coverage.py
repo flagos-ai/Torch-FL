@@ -120,18 +120,31 @@ def _routed_to_flagos(op) -> bool:
 
 
 def _probe_masked_select() -> bool:
-    """Route probe for masked_select, on a shape the FlagGems arm can serve.
+    """Route probe for masked_select, on shapes each arm can serve.
 
-    An empty input is the natural probe shape, but FlagGems' Ascend arm reads
-    `prefix_sum[-1]` on an empty cumsum, so an empty input raises IndexError
-    from the kernel rather than from the route (Ascend lane, run 40124915577:
-    both suites errored at collection). One input element and one True mask
-    element keeps the call tiny and makes the arm compute something.
+    Two shapes, because the FlagGems/Triton arm and the boxed CUDA arm disagree
+    about which ones compute. One input element and one True mask element keeps
+    the call tiny and makes the FlagGems arm compute something -- an empty input
+    is the natural probe shape, but FlagGems' Ascend arm reads `prefix_sum[-1]`
+    on an empty cumsum and raises from the kernel (Ascend lane, run
+    40124915577: both suites errored at collection). The boxed CUDA kernel, for
+    its part, refuses that shape and takes the case's own 4-element one: the PPU
+    boxing lane's day-0 conf routes `masked_select` to FlagGems, but the PPU
+    conf routes it to FlagGems on *both* builds, and this wheel imported without
+    the FlagGems Python runtime, so the call fell through to the CUDA stub (run
+    40171498946). A probe that answers "routed" for a shape the cases do not use
+    is a guard that guards nothing.
     """
-    tensor = torch.ones(1, device="flagos:0")
-    mask = torch.ones(1, device="flagos:0", dtype=torch.bool)
-    out = torch.ops.aten.masked_select(tensor, mask)
-    return out.device.type == "flagos" and out.numel() == 1
+    shapes = (
+        (1, torch.ones(1, dtype=torch.bool)),
+        (4, torch.tensor([False, False, True, True])),
+    )
+    for length, mask in shapes:
+        tensor = torch.ones(length, device=DEVICE)
+        out = torch.ops.aten.masked_select(tensor, mask.to(DEVICE))
+        if out.device.type != "flagos":
+            return False
+    return True
 
 
 def _probe_to_dtype() -> bool:

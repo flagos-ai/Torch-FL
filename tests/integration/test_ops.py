@@ -27,35 +27,25 @@ import torch.nn.functional as F
 import torch_fl
 
 
-def _routed_to_flagos(op) -> bool:
-    """True when the dispatcher serves the op from this backend's kernels.
+def _masked_select_is_served() -> bool:
+    """Whether this wheel has a route for `masked_select` on the case's shape.
 
-    The question the guards here ask is not "did the wheel compile boxing
-    kernels" but "does the op land somewhere that computes it". A build record
-    that names `boxing` does not answer that: on a CUDA-ABI platform a boxing
-    wheel also compiles the vendor slot, and the default conf chooses one of
-    them per op (NVIDIA lane, run 40123568695: 22 failures, every one
-    `DispatchStub: missing kernel for cuda`, on a wheel whose build record says
-    boxing).
-
-    Answered by calling the kernel: a slot that does not serve the op either
-    raises -- `NotImplementedError` for a conf route to `none`, or the
-    CPU-only torch's `DispatchStub` error for a reference arm with no kernel --
-    and a slot that does serve it returns a device tensor.
+    The same probe `tests/integration/test_dtype_coverage.py` guards with: the
+    op is asked through `torch.ops.aten.masked_select` on the 4-element shape
+    the case uses. A conf route is not enough to answer it. On the PPU boxing
+    lane (run 40171498946) `backends_thead.conf` routes the op to FlagGems, yet
+    the wheel imported without the FlagGems Python runtime, so the call fell
+    through to ATen's CUDA dispatch stub -- `DispatchStub: missing kernel for
+    cuda` -- while the 1-element shape the probe used to ask about took the
+    other arm and answered. Share the probe, not the guess.
     """
     try:
-        if op != "aten::masked_select":
-            raise AssertionError(f"no probe for {op}")
-        # Not an empty input: FlagGems' Ascend arm reads `prefix_sum[-1]` on an
-        # empty cumsum, which raises IndexError from the kernel rather than
-        # from the route (Ascend lane, run 40124915577 -- both integration
-        # suites errored at collection). See test_dtype_coverage.py.
-        tensor = torch.ones(1, device="flagos:0")
-        mask = torch.ones(1, device="flagos:0", dtype=torch.bool)
+        tensor = torch.ones(4, device="flagos:0")
+        mask = torch.tensor([False, False, True, True], device="flagos:0")
         out = torch.ops.aten.masked_select(tensor, mask)
     except (NotImplementedError, RuntimeError):
         return False
-    return out.device.type == "flagos" and out.numel() == 1
+    return out.device.type == "flagos" and out.numel() == 2
 
 
 @pytest.fixture(scope="session")
@@ -364,7 +354,7 @@ class TestIndexing:
     # (run 40123568695) because of exactly that assumption. Ask the dispatcher
     # instead; same probe as test_dtype_coverage.py.
     @pytest.mark.skipif(
-        not _routed_to_flagos("aten::masked_select"),
+        not _masked_select_is_served(),
         reason="no slot in this wheel's conf serves masked_select on "
         "PrivateUse1, so the call reaches ATen's CUDA dispatch stub, which a "
         "CPU-only torch has no kernel for",
