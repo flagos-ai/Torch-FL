@@ -354,20 +354,25 @@ class TestBmmDispatchLog:
         )
 
 
-# The backend this build can serve for an ordinary-dtype bmm.
+# The backends a platform with the software low-precision path (FLAGOS_SOFT_LOWP:
+# MetaX, DCU) can serve for an ordinary-dtype bmm.
 #
-# Not the conf value: the conf is generated for the FlagGems runtime, and on the
-# platforms with the software low-precision path (MetaX, DCU -- FLAGOS_SOFT_LOWP)
-# the matrix ops are held out of the generated kernels, so the routes those confs
-# name degrade (``Backend::kFlagGemsCpp`` falls back to boxing, then FlagGems;
-# ``kFlagGems`` to boxing) and the vendor build has no boxing kernels at all.
-# The log prints the backend that ran, and on MetaX that is ``flagos``.
-_VENDOR_FALLBACK = {"flagos": "flagos", "boxing": "flagos"}
+# The conf names whatever its generator measured, and those platform confs are
+# written for the FlagGems runtime: MetaX names a FlagGems route the generated
+# kernels hold, so it degrades at dispatch (``Backend::kFlagGemsCpp`` falls back
+# to boxing, then FlagGems) to ``flagos``. Accepting the fall-through rather than
+# one spelling keeps the case honest on both wheel shapes -- a vendor build has
+# no boxing kernels at all, and a boxing build, on some platforms, resolves the
+# same conf there.
+_SOFT_LOWP_ROUTES = {
+    "flagos": {"flagos"},
+    "boxing": {"boxing", "flagos"},
+}
 
 
-def _expected_bmm_route() -> str:
+def _expected_bmm_route() -> tuple:
     expected = routed_backend("bmm")
-    return _VENDOR_FALLBACK.get(expected, expected)
+    return tuple(sorted(_SOFT_LOWP_ROUTES.get(expected, {expected})))
 
 
 class TestFloatBmmKeepsItsRoute:
@@ -376,12 +381,11 @@ class TestFloatBmmKeepsItsRoute:
     The software low-precision path runs on FLAGOS_SOFT_LOWP platforms (MetaX,
     DCU), and the generated wrapper's dtype prelude cannot tell whether the
     build compiles it -- so on those platforms every bmm wrapper call enters the
-    software implementation. It has to hand the ordinary dtypes straight back to
-    the dispatch route, because taking them itself fails: a boxing kernel
+    software implementation, and it has to compute the ordinary dtypes (its
+    decode is a no-op) rather than fail or take the process down: a boxing kernel
     refuses them ("soft-lowp matrix kernel requires a low-precision input", MetaX
-    CI run 40189509687), the addmm spellings took the whole process down with
-    fp64 (run 447e9a6), and a build whose wheel compiled the prelude without the
-    sources behind it segfaulted (run 40195692591).
+    CI run 40189509687), the addmm spellings died with fp64 (run 447e9a6), and
+    re-routing the call by name from inside the path segfaulted (run 40195692591).
 
     The dispatch log names what actually ran, so it separates a routed call from
     a fallback that still computed the right answer.
@@ -392,9 +396,13 @@ class TestFloatBmmKeepsItsRoute:
     def test_float_bmm_logs_the_conf_route(self, dtype):
         expected = _expected_bmm_route()
         result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch"}, dtype=dtype)
-        assert f"[flagos dispatch] bmm -> {expected}" in result.stderr, (
-            f"Expected the conf's route ({expected}) for a {dtype} bmm, got:\n"
-            f"{result.stderr}"
+        logged = [
+            route
+            for route in expected
+            if f"[flagos dispatch] bmm -> {route}" in result.stderr
+        ]
+        assert logged, (
+            f"Expected one of {expected} for a {dtype} bmm, got:\n{result.stderr}"
         )
 
 
