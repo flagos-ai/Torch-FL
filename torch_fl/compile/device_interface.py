@@ -417,7 +417,7 @@ class FlagOSDeviceInterface(DeviceInterface):
     @staticmethod
     def get_compute_capability(device: Any = None) -> Union[int, str]:
         profile = platform_profile()
-        if profile.vendor == "dcu":
+        if profile.vendor == "hygon":
             # DTK reports major/minor 9/3, so CUDA's numeric capability is 93.
             # HCU Triton forwards this value unchanged as GPUTarget.arch and
             # its compiler requires the device's string instruction-set name.
@@ -440,9 +440,14 @@ class FlagOSDeviceInterface(DeviceInterface):
                 return int(digits)
             props = torch.flagos.get_device_properties(_vendor_device(device))
             return props.major * 10 + props.minor
-        if profile.vendor in ("musa", "gcu", "iluvatar"):
+        if profile.vendor in ("mthreads", "enflame", "iluvatar"):
             # All three report a real capability pair through torch.flagos;
-            # iluvatar reads it from corex's cudaGetDeviceProperties.
+            # iluvatar reads it from corex's cudaGetDeviceProperties. The
+            # spelling is the vendor's, which is what
+            # ``platform_profile().vendor`` carries (``enflame``, ``mthreads``)
+            # -- reading platform ids here fell through to the Ascend arm below
+            # and asked a GCU build for ``triton.backends.ascend`` (Enflame
+            # lane, run 40242938356).
             props = torch.flagos.get_device_properties(_vendor_device(device))
             return props.major * 10 + props.minor
         if profile.vendor == "kunlunxin":

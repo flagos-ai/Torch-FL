@@ -88,7 +88,7 @@ def gcu_64bit_unsupported() -> bool:
     """
     from torch_fl.compile.platform_profile import platform_profile
 
-    return platform_profile().vendor == "gcu"
+    return platform_profile().vendor == "enflame"
 
 
 def patch_triton_64bit_guard() -> None:
