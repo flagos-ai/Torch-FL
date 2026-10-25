@@ -275,6 +275,21 @@ def _require_device_arithmetic(*operations):
             pytest.skip(f"device arithmetic reaches cpu_fallback on this wheel: {exc}")
 
 
+def _flagos_generator_is_rejected():
+    """True when this wheel's native RNG refuses a flagos generator.
+
+    Ascend/GCU/MUSA/Kunlunxin accept one by contract, and a boxing wheel's
+    prelude translates a device generator instead of refusing it. Everything
+    else -- the FlagGems-primary wheels behind a CPU-seeded kernel, PPU
+    included -- answers with "Expected a <ctype> device type for generator".
+    The two "rejecting" cases below assert exactly that, so they have to ask
+    which face this wheel shows rather than assume the rejecting one: GCU
+    accepts the generator and the assertion "DID NOT RAISE" was a wrong
+    expectation, not a defect (run 40157088291).
+    """
+    return not _device_rng_accepts_device_generator()
+
+
 def _draw(op, seed):
     torch.manual_seed(seed)
     return op().float().cpu()
@@ -302,10 +317,12 @@ def _explicit_generator(seed):
     except RuntimeError:
         gen = torch.Generator()  # cpu
     else:
-        if not _device_rng_accepts_device_generator():
+        if _flagos_generator_is_rejected():
             # The choice above is not a guard: a FlagGems-primary PPU wheel
             # builds a cuda Generator fine and then rejects it in the flag_gems
             # cpu-backed kernel ("Expected a 'cpu' device type for generator").
+            # A vendor whose RNG reads the flagos seed (gcu) is in the
+            # accepting half and legitimately refuses the cpu one.
             gen = torch.Generator()
     return gen.manual_seed(seed)
 
@@ -480,11 +497,16 @@ class TestRngSeedSource:
             gen.manual_seed(99)
             second = _empty().normal_(generator=gen).cpu()
             assert torch.equal(first, second)
-        else:
+        elif _flagos_generator_is_rejected():
             # Backends whose native kernels use a different generator contract
             # reject a flagos generator rather than silently changing streams.
             with pytest.raises(RuntimeError, match="device type for generator"):
                 _empty(8).normal_(generator=gen)
+        else:
+            pytest.skip(
+                "this wheel's RNG accepts a flagos generator, so there is no "
+                "rejection to assert"
+            )
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops
@@ -505,9 +527,14 @@ class TestRngSeedSource:
                 "wheel, which accepts an explicit generator instead of "
                 "rejecting it"
             )
-        else:
+        elif _flagos_generator_is_rejected():
             with pytest.raises(RuntimeError, match="device type for generator"):
                 torch.rand(8, device=DEVICE, generator=gen)
+        else:
+            pytest.skip(
+                "this wheel's factory RNG accepts a flagos generator, so there "
+                "is no rejection to assert"
+            )
 
     @pytest.mark.anyplatform
     @pytest.mark.main_ops

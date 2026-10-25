@@ -498,7 +498,11 @@ class TestGcuInt64Fallback:
         """
         i64 = gcu_routes["torch.int64"]
         for op in self._MOVED_OPS:
-            assert i64[op] == "enflame", f"{op} ran on {i64[op]}"
+            # The log prints the dispatch name, not the conf key: GCU's native
+            # slot is `gcu` (csrc/aten/dispatcher.h:LogDispatch), while the conf
+            # row says `enflame`. Naming the conf key here failed on the GCU lane
+            # (run 40157088291) although every op did run on the vendor kernel.
+            assert i64[op] == "gcu", f"{op} ran on {i64[op]}"
 
     @pytest.mark.gcu
     def test_float32_keeps_the_configured_route(self, gcu_routes):
