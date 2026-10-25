@@ -430,6 +430,38 @@ Rules for these files:
   documentation, no test may depend on `backends_<platform>_boxing.conf` being
   present.
 
+### The two CI lanes of a boxing platform
+
+NVIDIA, Hygon DCU, MetaX and the T-Head PPU each run **two** integration lanes:
+`<platform>` builds and tests the default (vendor + FlagGems) wheel, and
+`<platform>-boxing` builds and tests the CUDA-boxing wheel of the same source.
+The second lane is opted into by `boxing_lane: true` in `.github/configs/<p>.yml`
+and always runs alongside the first; do not add a way to schedule one alone.
+
+Rules for these lanes:
+
+- **One manifest, two selections.** The boxing lane composes the same
+  `.github/integration-manifest.yml` groups in the same order. A step whose
+  selection differs per build is spelled per build, on the same entry: list the
+  platforms in `boxing_variant` (`boxing_variant: [nvidia]`), and that entry then
+  runs on their boxing build instead of their vendor build. `vendor_only: true`
+  marks the other half -- a step that asserts routing only the vendor build can
+  have. The composer runs one build per job; `validate_manifest` refuses a boxing
+  platform that left one of these unscoped.
+- **Two expectation blocks.** `.github/configs/<p>.yml` states
+  `environment_check` for the vendor lane and `boxing_environment_check` for the
+  boxing lane. The loader hands the boxing block to the environment step in place
+  of the vendor one; the hook asserts the build record (`torch_fl/_build_config.py`)
+  carries `boxing` in `KERNELS` on the boxing lane and not on the vendor lane.
+- **The hook reads `BOXING_LANE`.** `set_env_<platform>.sh` sets
+  `FLAGOS_BUILD_BOXING=1` and `FLAGOS_BACKEND_CONFIG=backends_<platform>_boxing.conf`
+  only when `BOXING_LANE=1`, and the two venvs are separate
+  (`torch-fl-<vendor>-<stage>-boxing`). Do not reintroduce a mode variable the
+  build and the runtime both have to agree on.
+- **Separate artifacts.** The boxing lane publishes as
+  `wheel-<platform>-boxing` (`load-platform-config.yml` appends the suffix) so a
+  release's two builds cannot overwrite each other.
+
 ### Dependency sources
 
 FlagTree, FlagGems, and FlagCX are consumed as published wheels from

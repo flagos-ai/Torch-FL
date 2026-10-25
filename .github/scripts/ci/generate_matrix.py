@@ -34,8 +34,13 @@ Usage (called from a GitHub Actions step):
         --dispatch-platforms "ascend" \\
         >> "$GITHUB_OUTPUT"
 
+A boxing platform (.github/configs/<p>.yml with ``boxing_lane: true``) is
+scheduled twice: the bare platform name runs the vendor build, and the
+``<p>-boxing`` lane runs the CUDA-boxing build of the same platform. The two
+are selected together -- there is no way to ask for one and not the other.
+
 Output written to GITHUB_OUTPUT:
-    platforms=["ascend","cuda","dcu"]
+    platforms=["ascend","cuda","dcu","dcu-boxing","hygon","hygon-boxing"]
 """
 
 from __future__ import annotations
@@ -60,6 +65,47 @@ def _load_platforms(configs_dir: pathlib.Path) -> list[str]:
     return sorted(
         p.stem for p in configs_dir.glob("*.yml") if p.stem not in _NON_PLATFORM_STEMS
     )
+
+
+def _platform_config(configs_dir: pathlib.Path, platform: str) -> dict:
+    """One platform's config, or {} when it cannot be read."""
+    try:
+        cfg = yaml.safe_load((configs_dir / f"{platform}.yml").read_text())
+    except (OSError, yaml.YAMLError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def boxing_platforms(configs_dir: pathlib.Path, platforms: list[str]) -> list[str]:
+    """The platforms whose config opts into a second, CUDA-boxing lane.
+
+    Read from ``boxing_lane: true`` in the platform's own config rather than
+    from a list here: the flag is a statement about that platform's build, and
+    it sits beside the ``environment_check`` that holds the lane to it.
+    """
+    return [
+        platform
+        for platform in platforms
+        if _platform_config(configs_dir, platform).get("boxing_lane") is True
+    ]
+
+
+def _schedule(platforms: list[str], boxing: list[str]) -> list[str]:
+    """Each boxing platform followed by its ``<p>-boxing`` lane."""
+    lanes = []
+    for platform in platforms:
+        lanes.append(platform)
+        if platform in boxing:
+            lanes.append(f"{platform}-boxing")
+    return lanes
+
+
+def _platform_of(lane: str, boxing: list[str]) -> str:
+    """The platform a lane name stands for (``dcu-boxing`` -> ``dcu``)."""
+    for platform in boxing:
+        if lane == f"{platform}-boxing":
+            return platform
+    return lane
 
 
 def _changed_files(
@@ -95,6 +141,19 @@ def _matches(path: str, pattern: str) -> bool:
 
 
 def _platforms_from_files(
+    changed: list[str] | None,
+    all_platforms: list[str],
+    configs_dir: pathlib.Path,
+    boxing: list[str] | None = None,
+) -> list[str]:
+    """The lanes a pull request's changed files select."""
+    platforms = _platforms_from_files_bare(changed, all_platforms, configs_dir)
+    if boxing is None:
+        boxing = boxing_platforms(configs_dir, all_platforms)
+    return _schedule(platforms, boxing)
+
+
+def _platforms_from_files_bare(
     changed: list[str] | None,
     all_platforms: list[str],
     configs_dir: pathlib.Path,
@@ -174,18 +233,31 @@ def _platforms_from_labels(
 def _platforms_from_dispatch(
     requested: str,
     all_platforms: list[str],
+    boxing: list[str] | None = None,
 ) -> list[str]:
-    """Validate and return platforms requested by workflow_dispatch."""
+    """Validate and return the lanes requested by workflow_dispatch.
+
+    A platform name selects its lanes whole: naming ``dcu`` dispatches the DCU
+    vendor build and ``dcu-boxing`` together, which is what a person asking for
+    DCU means and keeps the two from ratcheting apart. Naming the lane itself
+    (``dcu-boxing``) is accepted too, and also brings its platform's other
+    build: there is no way to ask for one lane and not the other.
+    """
+    if boxing is None:
+        boxing = []
+    lanes = _schedule(all_platforms, boxing)
     values = [value.strip() for value in requested.split(",") if value.strip()]
     if not values or values == ["all"]:
-        return all_platforms
-    if "all" in values or any(value not in all_platforms for value in values):
-        unknown = sorted(set(values) - set(all_platforms) - {"all"})
+        return lanes
+    platforms = {_platform_of(value, boxing) for value in values}
+    if "all" in platforms or any(value not in all_platforms for value in platforms):
+        unknown = sorted(platforms - set(all_platforms) - {"all"})
         detail = f": {', '.join(unknown)}" if unknown else ""
         raise ValueError(f"invalid workflow_dispatch platform selection{detail}")
-    # Preserve config order and remove duplicates from the user input.
-    requested_set = set(values)
-    return [platform for platform in all_platforms if platform in requested_set]
+    # Every lane of a named platform is dispatched, the boxing lane included:
+    # the two are one wheel built two ways, so asking for the platform is
+    # asking for both.
+    return [lane for lane in lanes if _platform_of(lane, boxing) in platforms]
 
 
 def main() -> None:
@@ -229,6 +301,7 @@ def main() -> None:
         sys.exit(1)
 
     all_platforms = _load_platforms(configs_dir)
+    boxing = boxing_platforms(configs_dir, all_platforms)
     if not all_platforms:
         print(
             f"::error::No platform configs found in {configs_dir}",
@@ -241,6 +314,7 @@ def main() -> None:
             selected = _platforms_from_dispatch(
                 args.dispatch_platforms,
                 all_platforms,
+                boxing,
             )
         except ValueError as exc:
             print(f"::error::{exc}", file=sys.stderr)
@@ -250,14 +324,14 @@ def main() -> None:
 
     # Other non-PR events always run the full matrix.
     if args.event_name != "pull_request":
-        print(f"platforms={json.dumps(all_platforms)}")
+        print(f"platforms={json.dumps(_schedule(all_platforms, boxing))}")
         return
 
     # PR: label routing takes priority over file-change filtering.
     labels = [lb.strip() for lb in args.pr_labels.split(",") if lb.strip()]
     label_platforms = _platforms_from_labels(labels, all_platforms)
     if label_platforms is not None:
-        print(f"platforms={json.dumps(label_platforms)}")
+        print(f"platforms={json.dumps(_schedule(label_platforms, boxing))}")
         return
 
     # PR: compute reduced matrix from changed files.
@@ -265,7 +339,7 @@ def main() -> None:
         changed = [f for f in args.changed_files.splitlines() if f.strip()]
     else:
         changed = _changed_files(args.base_ref, args.base_sha, args.head_sha)
-    selected = _platforms_from_files(changed, all_platforms, configs_dir)
+    selected = _platforms_from_files(changed, all_platforms, configs_dir, boxing)
     print(f"platforms={json.dumps(selected)}")
 
 

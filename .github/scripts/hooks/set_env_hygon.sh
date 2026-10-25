@@ -108,12 +108,13 @@ VENDOR_TORCH_ROOT="${VENDOR_FIELDS[2]}"
 VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[3]}"
 VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
 
-# DCU is a boxing build: the DTK torch wheel is a hipified build whose HIP
+# DCU is a CUDA-ABI platform: the DTK torch wheel is a hipified build whose HIP
 # kernels are registered under the CUDA dispatch key, so torch_fl reaches them
-# via PrivateUse1->CUDA boxing kernels without shipping its own kernels.
-# libtorch_hip.so is the DTK analogue of CUDA's libtorch_cuda.so; the bundle
-# script stages it (plus the core .so) into torch_fl/lib_hygon for a
-# self-contained wheel.
+# through that dispatch key -- with the generated boxing kernels on the boxing
+# lane (BOXING_LANE=1), and with the DTK-native routes backends_hygon.conf names
+# on the vendor lane. libtorch_hip.so is the DTK analogue of CUDA's
+# libtorch_cuda.so; the bundle script stages it (plus the core .so) into
+# torch_fl/lib_hygon for a self-contained wheel on both lanes.
 if [[ ! -f "$VENDOR_TORCH_LIB/libtorch_hip.so" ]]; then
   echo "::error::$VENDOR_TORCH_LIB has no libtorch_hip.so, not a DTK torch/lib" >&2
   exit 1
@@ -166,7 +167,7 @@ if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
   VENV_ROOT="$PREBUILT_VENV"
   echo "Using prebuilt DCU venv: $VENV_ROOT"
 else
-  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-dcu-${CI_STAGE}}"
+  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-dcu-${CI_STAGE}${BOXING_LANE:+-boxing}}"
   if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
     echo "::warning::Vendor Python cannot create a venv; trying uv"
     if ! command -v uv >/dev/null 2>&1; then
@@ -309,15 +310,22 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=dcu
-# This lane builds the DCU boxing wheel: it stages the hipified DTK libtorch into
-# the bundle and asserts libtorch_hip.so/libc10_hip.so. Boxing is off by default
-# for every accelerator now (cmake/flagos_platforms.json), so the lane opts in
-# explicitly; otherwise the wheel would compile no CUDA boxing kernels.
-# The CUDA lane no longer opts in -- it measures the FlagGems-primary default a
-# `pip install` gets. DCU keeps the vendor path until the ops backends_hygon.conf
-# routes to `cuda` have a FlagGems or DTK-native route of their own; flipping it
-# first would leave those ops on cpu_fallback.
-export FLAGOS_BUILD_BOXING=1
+# Both lanes stage the hipified DTK libtorch into the bundle and assert
+# libtorch_hip.so/libc10_hip.so: that is the platform's vendor path, not the
+# boxing kernels. What BOXING_LANE adds is the generated CUDA boxing kernel set
+# (off by default for every accelerator, cmake/flagos_platforms.json), which is
+# the explicit opt-in a user makes with FLAGOS_BUILD_BOXING=1.
+if [[ "${BOXING_LANE:-}" == "1" ]]; then
+  export FLAGOS_BUILD_BOXING=1
+  # The day-0 conf a boxing wheel needs (AGENTS.md, "Day-0 boxing confs"):
+  # FlagGems where this build has it, boxing for everything else, instead of
+  # the default conf's DTK-native routes.
+  export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_hygon_boxing.conf}"
+  if [[ ! -f "$FLAGOS_BACKEND_CONFIG" ]]; then
+    echo "::error::the DCU boxing lane needs the day-0 conf $FLAGOS_BACKEND_CONFIG"
+    exit 1
+  fi
+fi
 # FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
 # one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
 # exactly the CUDA-compatible path a kernel library needs here. Mirrors the
@@ -379,6 +387,30 @@ fi
 # smoke-tests that path separately below.
 FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
   PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_hygon_libtorch.sh
+
+# Kernel sets are a build input (setup.py records them in
+# torch_fl/_build_config.py), so a lane that silently got the other one would run
+# the other lane's tests. Asserted here, before the import gate below.
+python - "$([[ "${BOXING_LANE:-}" == "1" ]] && echo boxing || echo vendor)" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+_record = Path("torch_fl/_build_config.py")
+assert _record.is_file(), _record
+_loader = importlib.machinery.SourceFileLoader("_flagos_build_config", str(_record))
+_spec = importlib.util.spec_from_loader(_loader.name, _loader)
+_config = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_config)
+kernels = tuple(_config.KERNELS)
+assert "flaggems" in kernels, kernels
+if sys.argv[1] == "boxing":
+    assert "boxing" in kernels, kernels
+else:
+    assert "boxing" not in kernels, kernels
+print(f"Kernel sets: {kernels}")
+PY
 
 # Wheel invariants for the decoupled default. A vendor core .so in lib_hygon means
 # the wheel would shadow the official core through RPATH order, i.e. silently
@@ -588,5 +620,5 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

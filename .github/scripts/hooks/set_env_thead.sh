@@ -201,15 +201,24 @@ fi
 export FLAGOS_SKIP_CUDA_ASSETS=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 
-# The boxing wheel selects the day-0 conf, the one whose second route is the
-# boxing kernel this wheel carries. The default backends_thead.conf leaves the
-# 1445 ops this build registers without a FlagGems kernel on `none`, which on a
-# boxing wheel is a raise rather than a cpu_fallback. Exported here, before the
-# build, because it also travels to the integration runner through GITHUB_ENV
-# and is what the tests' `routed_backend()` reads.
-export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_thead_boxing.conf}"
+# PPU runs both builds of the wheel, and BOXING_LANE says which one this job is.
+#
+# The boxing lane selects the day-0 conf, the one whose second route is the
+# boxing kernel that wheel carries: backends_thead.conf leaves the 1445 ops this
+# build registers without a FlagGems kernel on `none`, which on a boxing wheel
+# is a raise rather than a cpu_fallback. Exported here, before the build,
+# because it also travels to the integration runner through GITHUB_ENV and is
+# what the tests' `routed_backend()` reads. The vendor lane selects nothing: the
+# build record names the platform and the runtime picks backends_thead.conf.
+if [[ "${BOXING_LANE:-}" == "1" ]]; then
+  export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_thead_boxing.conf}"
+  if [[ ! -f "$FLAGOS_BACKEND_CONFIG" ]]; then
+    echo "::error::the PPU boxing lane needs the day-0 conf $FLAGOS_BACKEND_CONFIG"
+    exit 1
+  fi
+fi
 
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}}"
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}${BOXING_LANE:+-boxing}}"
 if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
   echo "::warning::Vendor Python cannot create a venv; trying uv"
   if ! command -v uv >/dev/null 2>&1; then
@@ -369,8 +378,12 @@ export FLAGOS_ACCELERATOR=ppu
 #
 # `boxing` is the route a boxing wheel serves without FlagGems, and the conf for
 # it is the day-0 variant AGENTS.md describes: FlagGems where this build has it,
-# boxing everywhere else. That is the combination the PPU lane measures.
-export FLAGOS_BUILD_BOXING=1
+# boxing everywhere else. That is the combination the boxing lane measures; the
+# vendor lane leaves FLAGOS_BUILD_BOXING unset and builds the default wheel the
+# sentence above describes.
+if [[ "${BOXING_LANE:-}" == "1" ]]; then
+  export FLAGOS_BUILD_BOXING=1
+fi
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
@@ -407,9 +420,10 @@ fi
 # Bundle PPU core+CUDA+MKL .so into torch_fl/lib_thead/ and rewrite the plugin
 # RPATH. setup.py does not auto-invoke this; mirrors the metax pattern. The
 # bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
-# Boxing-only, like the bundle itself: the FlagGems-primary wheel links no
-# vendor kernels and selects stock torch at import, so it has none to stage.
-if [[ "${FLAGOS_BUILD_BOXING:-0}" == "1" ]]; then
+# Both lanes bundle it: the PPU build links into the vendor libtorch (the
+# vendor torch tree it resolved above) rather than loading stock torch at
+# import, while the boxing kernels are what only the boxing lane adds.
+if [[ "${BOXING_LANE:-}" != "1" || "${FLAGOS_BUILD_BOXING:-0}" == "1" ]]; then
   bash scripts/vendor/bundle_thead_libtorch.sh
 fi
 
@@ -479,13 +493,24 @@ after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
          for path in lib.iterdir() if path.is_file()}
 assert after == before, "PPU import changed the installed torch/lib"
 
-# The routing half of the same contract. A boxing wheel registers every op on
-# PrivateUse1, and a `none` route there raises instead of falling back, so the
-# conf has to agree with the registration for the ops a model actually calls.
-# The day-0 conf is the one that does; the default one leaves 1445 of them on
-# `none` (measured on the PPU runner).
+# Which build this lane made, and the routing half of the same contract. A
+# boxing wheel registers every op on PrivateUse1, and a `none` route there
+# raises instead of falling back, so its conf has to agree with the
+# registration for the ops a model actually calls -- the day-0 conf is the one
+# that does, where the default one leaves 1445 of them on `none` (measured on
+# the PPU runner). The vendor lane selects the default conf and stages nothing.
+import torch_fl._env as _env
+
+kernels = _env.build_kernels()
 conf = torch_fl.backend_config_path()
-assert conf.endswith("backends_thead_boxing.conf"), conf
+if os.environ.get("BOXING_LANE") == "1":
+    assert "boxing" in kernels, kernels
+    assert Path("torch_fl/lib_thead/libtorch_cuda.so").is_file(), "no PPU bundle"
+    assert conf.endswith("backends_thead_boxing.conf"), conf
+else:
+    assert "boxing" not in kernels, kernels
+    assert conf.endswith("backends_thead.conf"), conf
+assert "flaggems" in kernels, kernels
 print(f"triton (FlagTree): {triton.__version__} -> {triton.__file__}")
 print(f"triton backends: {sorted(triton.backends.backends)}")
 print(f"flag_gems: {flag_gems.__version__} -> {flag_gems.__file__}")

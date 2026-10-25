@@ -88,14 +88,25 @@ wheel_artifact_name: wheel-dcu
 # that script; the values are this platform's, and they assert the same things
 # the hand-written heredoc that used to sit here did.
 #
-# DCU is a boxing build (DTK torch is hipified, HIP kernels live under the CUDA
-# dispatch key), so the vendor bundle takes the CUDA library's place. FlagTree
-# (the DTK triton build carrying the hcu backend) and FlagGems are provisioned
-# by set_env_hygon.sh, and FlagGems-first routing comes from backends_hygon.conf
-# itself -- no switch involved. What runs here is what a stock DCU install gets:
-# the setup script refuses to continue if the hcu backend or the hygon vendor is
-# not what the process actually resolved, which is where that assertion lives
-# rather than here, where it would be a second copy of the same value.
+# DCU runs both builds of the wheel, one job each:
+#
+#   vendor lane (this file's `platform:` name)  backends_hygon.conf as it
+#       ships: the ops it routes to a DTK-native kernel on the hipified DTK
+#       libtorch, FlagGems for the rest. The DTK device libraries are always
+#       bundled -- they are what the platform's vendor route runs on -- so this
+#       is not the CUDA vendor lane's "no vendor libtorch" shape.
+#
+#   boxing lane (`hygon-boxing`)  the same platform built with
+#       FLAGOS_BUILD_BOXING=1: the generated CUDA boxing kernels registered, run
+#       against the day-0 conf backends_hygon_boxing.conf, which is what a
+#       user's boxing opt-in selects (AGENTS.md, "Day-0 boxing confs").
+#
+# `boxing_lane: true` is what schedules the second job
+# (.github/scripts/ci/generate_matrix.py reads it). Both lanes keep the
+# decoupled DCU runtime (the official +cpu core plus the DTK device libraries),
+# so `torch.version.cuda` is null on both and the kernel sets are what differ.
+boxing_lane: true
+
 environment_check:
   cuda_version: null
   torch_path_forbidden:
@@ -104,3 +115,19 @@ environment_check:
     - lib/libtorch_fl.so
   flagos_devices:
     more_than: 0
+  require_build_kernels:
+    - flaggems
+  forbid_build_kernels:
+    - boxing
+
+boxing_environment_check:
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib/libtorch_fl.so
+  flagos_devices:
+    more_than: 0
+  require_build_kernels:
+    - flaggems
+    - boxing

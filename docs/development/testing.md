@@ -368,6 +368,17 @@ step means editing only the config: nothing lists tests inline, and there is no 
 workflow to copy. Keeping `yq` off the vendor images is deliberate, so no accelerator container
 needs a YAML dependency.
 
+A platform that can build CUDA boxing runs **two lanes**: its vendor lane (`<platform>`) and
+its boxing lane (`<platform>-boxing`), scheduled together by `generate_matrix.py` from
+`boxing_lane: true` in its config. Naming the platform in a dispatch (or `/ci run <platform>`)
+selects both; there is no way to run one without the other. The two lanes compose the same
+manifest -- the same groups, in the same order -- and differ in exactly two places: the
+`vendor_ops` entry, which carries `boxing_variant: [<platform>]` and therefore runs only on the
+boxing build (the vendor build's selection cannot answer the boxing conf), and the environment
+check, where the boxing lane is held to `boxing_environment_check` instead of `environment_check`. The hook builds the boxing wheel when the job is the boxing lane (it reads
+`BOXING_LANE` from the loader) and publishes under `wheel-<platform>-boxing` so the two artifacts
+cannot overwrite each other.
+
 There is no generic integration fallback. A selected platform without a config fails discovery
 instead of being silently omitted. `build-wheel.yml` -- the one parameterized wheel build, used by
 `release.yml` and manual dispatches -- and `build-wheel-common.yml`, the single implementation it

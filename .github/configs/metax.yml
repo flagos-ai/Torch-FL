@@ -75,15 +75,25 @@ wheel_artifact_name: wheel-metax
 # What this platform's environment has to look like before any test runs, read
 # by the first step of .github/integration-manifest.yml through
 # .github/scripts/check_platform_environment.py. The vocabulary is documented on
-# that script; the values are this platform's, and they assert the same things
-# the hand-written heredoc that used to sit here did.
+# that script; the values are this platform's.
 #
-# MetaX runs in an isolated /opt/venv with stock +cpu torch, and reads its
-# devices through BOTH surfaces: torch.cuda (the MACA shim) and the flagos
-# device. The FlagGems group cannot run without both halves -- the generated
-# kernels call flag_gems.<name>, and the Triton that compiles them has to be the
-# vendor one carrying the metax backend. `require_imports` is where that second
-# half is stated: the import itself is the check.
+# MetaX runs both builds of the wheel, one job each:
+#
+#   vendor lane (this file's `platform:` name)  a MetaX build with boxing off:
+#       the FlagGems routes the conf names, no generated boxing kernels, no
+#       cu-bridge shim. setup.py records the kernel sets in
+#       torch_fl/_build_config.py and the runtime derives its conf from that
+#       record, so the assertions below are about the wheel, not the env.
+#
+#   boxing lane (`metax-boxing`)  FLAGOS_BUILD_BOXING=1 with the cu-bridge
+#       shim and the MXVM runtime, run against the day-0 conf
+#       backends_metax_boxing.conf -- what a user's boxing opt-in selects
+#       (AGENTS.md, "Day-0 boxing confs").
+#
+# `boxing_lane: true` is what schedules the second job
+# (.github/scripts/ci/generate_matrix.py reads it).
+boxing_lane: true
+
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
   torch_path_prefix: /opt/venv/
@@ -97,10 +107,27 @@ environment_check:
   triton_backend: metax
   require_imports:
     - flag_gems
-  # This lane builds the boxing wheel (set_env_metax.sh) and runs it against
-  # the day-0 conf: `boxing` in the build record is what says so, and a build
-  # that lost the switch would fail here as a named kernel set instead of as
-  # `empty_like: routed to 'none'` halfway through the portable group.
+  require_build_kernels:
+    - flaggems
+  forbid_build_kernels:
+    - boxing
+
+boxing_environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  torch_path_prefix: /opt/venv/
+  torch_path_forbidden:
+    - /opt/conda/
+  flagos_devices:
+    exactly: 8
+  cuda_available: true
+  cuda_devices:
+    exactly: 8
+  triton_backend: metax
+  require_imports:
+    - flag_gems
+  # A boxing build that lost the switch would fail here as a named kernel set
+  # instead of as `empty_like: routed to 'none'` halfway through the portable
+  # group.
   require_build_kernels:
     - flaggems
     - boxing

@@ -65,17 +65,29 @@ wheel_artifact_name: wheel-cuda
 # that script; the values are this platform's, and they assert the same things
 # the hand-written heredoc that used to sit here did.
 #
-# This lane tests the default wheel: FlagGems-primary, boxing off. Both halves
-# of that are asserted here from the build record rather than from an
-# environment variable, so the check describes the wheel that was built. A
-# bundled libtorch_cuda.so would mean the wheel still carries the
-# accelerator-side libtorch, which is the dependency this lane exists to prove
-# absent, and a `boxing` kernel set would mean it shipped the CUDA dispatch-key
-# routes instead of the FlagGems ones.
+# CUDA runs both builds of the wheel, one job each:
 #
-# The Triton that compiles those FlagGems routes is the flagtree build the setup
-# script installs. Failing here names an image with the wrong Triton once,
-# instead of ninety errors into the FlagGems group.
+#   vendor lane (this file's `platform:` name)  the default wheel: FlagGems
+#       routes compiled, boxing off, no bundled libtorch_cuda.so. Both halves of
+#       that are asserted below from the build record rather than from an
+#       environment variable, so the check describes the wheel that was built.
+#
+#   boxing lane (`nvidia-boxing`)  the same platform built with
+#       FLAGOS_BUILD_BOXING=1: the generated CUDA boxing kernels plus the
+#       libtorch_cuda.so they re-dispatch into, with FlagGems beside them. Its
+#       expectations are `boxing_environment_check` below. Boxing is opt-in for
+#       a user (FLAGOS_BUILD_BOXING=1 and FLAGOS_BACKEND_CONFIG pointing at
+#       backends_nvidia_boxing.conf), and the lane measures exactly that opt-in.
+#
+# The Triton that compiles the FlagGems routes is the flagtree build the setup
+# script installs, on both builds. Failing here names an image with the wrong
+# Triton once, instead of ninety errors into the FlagGems group.
+#
+# `boxing_lane: true` is what schedules the second job
+# (.github/scripts/ci/generate_matrix.py reads it); a platform without it, or
+# without boxing, has one build.
+boxing_lane: true
+
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
@@ -86,6 +98,22 @@ environment_check:
   require_build_kernels:
     - flaggems
   forbid_build_kernels:
+    - boxing
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0rc2
+    triton_prefix: "3.6."
+  model_dir: true
+
+boxing_environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
     - boxing
   flagtree:
     version_env: FLAGTREE_VERSION

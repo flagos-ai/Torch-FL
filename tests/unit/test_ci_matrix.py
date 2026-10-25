@@ -30,6 +30,17 @@ SPEC = importlib.util.spec_from_file_location("ci_matrix", SCRIPT)
 MATRIX = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MATRIX)
 PLATFORMS = MATRIX._load_platforms(CONFIGS)
+# The platforms whose config opts into a second, CUDA-boxing lane. A platform
+# named in a selection always brings both of its lanes: they are two builds of
+# one wheel, and letting one run without the other is how they drift apart.
+BOXING = MATRIX.boxing_platforms(CONFIGS, PLATFORMS)
+LANES = MATRIX._schedule(PLATFORMS, BOXING)
+
+
+def lanes(*platforms):
+    """The scheduled lanes a set of platform names stands for."""
+    selected = set(platforms)
+    return [lane for lane in LANES if MATRIX._platform_of(lane, BOXING) in selected]
 
 
 def _run(event="pull_request", files="", labels="", dispatch=""):
@@ -70,10 +81,10 @@ def _run(event="pull_request", files="", labels="", dispatch=""):
         ".github/workflows/integration-test-{platform}.yml",
     ],
 )
-def test_platform_owned_files_select_only_that_lane(platform, path):
+def test_platform_owned_files_select_only_that_platforms_lanes(platform, path):
     result, selected = _run(files=path.format(platform=platform))
     assert result.returncode == 0, result.stderr
-    assert selected == [platform]
+    assert selected == lanes(platform)
 
 
 def test_a_vendor_kernel_tree_selects_its_own_lane():
@@ -114,7 +125,9 @@ def test_a_conf_is_still_named_for_its_platform_id():
         ("thead", "thead"),
         ("apple", "apple"),
     ):
-        assert _run(files=f"torch_fl/configs/backends_{conf}.conf")[1] == [lane], lane
+        assert _run(files=f"torch_fl/configs/backends_{conf}.conf")[1] == lanes(lane), (
+            lane
+        )
 
 
 @pytest.mark.parametrize(
@@ -136,26 +149,22 @@ def test_a_conf_is_still_named_for_its_platform_id():
     ],
 )
 def test_shared_or_unknown_code_runs_every_lane_even_with_vendor_changes(path):
-    assert _run(files=f"torch_fl/accelerator/ascend/op.py\n{path}")[1] == PLATFORMS
+    assert _run(files=f"torch_fl/accelerator/ascend/op.py\n{path}")[1] == LANES
 
 
 def test_multiple_vendors_select_the_union():
     assert _run(
         files="torch_fl/accelerator/ascend/op.py\ncsrc/aten/backends/mthreads/op.cc"
-    )[1] == ["ascend", "mthreads"]
+    )[1] == lanes("ascend", "mthreads")
 
 
 def test_shared_cuda_runtime_selects_all_consumers():
-    assert _run(files="csrc/runtime/accelerator/nvidia/device.cc")[1] == [
-        "hygon",
-        "nvidia",
-        "thead",
-    ]
-    assert _run(files="csrc/runtime/allocator/backends/nvidia_memory.h")[1] == [
-        "metax",
-        "nvidia",
-        "thead",
-    ]
+    assert _run(files="csrc/runtime/accelerator/nvidia/device.cc")[1] == lanes(
+        "hygon", "nvidia", "thead"
+    )
+    assert _run(files="csrc/runtime/allocator/backends/nvidia_memory.h")[1] == lanes(
+        "metax", "nvidia", "thead"
+    )
 
 
 @pytest.mark.parametrize(
@@ -166,7 +175,7 @@ def test_shared_cuda_runtime_selects_all_consumers():
     ],
 )
 def test_independent_iluvatar_runtime_selects_only_iluvatar(path):
-    assert _run(files=path)[1] == ["iluvatar"]
+    assert _run(files=path)[1] == lanes("iluvatar")
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
@@ -183,18 +192,19 @@ def test_runtime_watch_paths_cover_the_build_tables_actual_source_directory(plat
 
 @pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
 def test_non_pr_events_default_to_every_lane(event):
-    assert (
-        _run(event=event, files="README.md", labels="platform:ascend")[1] == PLATFORMS
-    )
+    assert _run(event=event, files="README.md", labels="platform:ascend")[1] == LANES
 
 
 @pytest.mark.parametrize(
     "labels, expected",
     [
-        ("platform:mthreads,platform:ascend,platform:mthreads", ["ascend", "mthreads"]),
-        ("platform:ascend,platform:all", PLATFORMS),
-        ("platform:unknown", PLATFORMS),
-        ("platform:ascend,platform:unknown", PLATFORMS),
+        (
+            "platform:mthreads,platform:ascend,platform:mthreads",
+            lanes("ascend", "mthreads"),
+        ),
+        ("platform:ascend,platform:all", LANES),
+        ("platform:unknown", LANES),
+        ("platform:ascend,platform:unknown", LANES),
     ],
 )
 def test_routing_labels_override_file_filters_without_duplicates(labels, expected):
@@ -204,9 +214,13 @@ def test_routing_labels_override_file_filters_without_duplicates(labels, expecte
 @pytest.mark.parametrize(
     "requested, expected",
     [
-        ("", PLATFORMS),
-        ("all", PLATFORMS),
-        ("mthreads,ascend,mthreads", ["ascend", "mthreads"]),
+        ("", LANES),
+        ("all", LANES),
+        ("mthreads,ascend,mthreads", lanes("ascend", "mthreads")),
+        # A platform name dispatches both of its lanes; a lane name alone is
+        # accepted only alongside its platform.
+        ("hygon", lanes("hygon")),
+        ("nvidia-boxing", lanes("nvidia")),
     ],
 )
 def test_manual_selection(requested, expected):
@@ -222,8 +236,10 @@ def test_invalid_manual_selection_fails(requested):
 
 def test_missing_watch_metadata_falls_back_to_all(tmp_path):
     (tmp_path / "cuda.yml").write_text("display_name: CUDA\n")
-    assert MATRIX._platforms_from_files(["op.cc"], ["nvidia"], tmp_path) == ["nvidia"]
-    assert MATRIX._platforms_from_files(None, PLATFORMS, CONFIGS) == PLATFORMS
+    assert MATRIX._platforms_from_files(["op.cc"], ["nvidia"], tmp_path, []) == [
+        "nvidia"
+    ]
+    assert MATRIX._platforms_from_files(None, PLATFORMS, CONFIGS) == LANES
 
 
 def test_shared_mps_runtime_changes_select_the_mps_lane():
@@ -235,7 +251,7 @@ def test_shared_mps_runtime_changes_select_the_mps_lane():
     ):
         result, selected = _run(files=path)
         assert result.returncode == 0, result.stderr
-        assert selected == ["apple"], path
+        assert selected == lanes("apple"), path
 
 
 def test_mps_suites_with_shared_filenames_keep_the_mps_lane():
@@ -248,7 +264,7 @@ def test_mps_suites_with_shared_filenames_keep_the_mps_lane():
     ):
         result, selected = _run(files=path)
         assert result.returncode == 0, result.stderr
-        assert selected == ["apple"], path
+        assert selected == lanes("apple"), path
 
 
 def test_git_diff_preserves_deleted_and_renamed_platform_paths(tmp_path, monkeypatch):

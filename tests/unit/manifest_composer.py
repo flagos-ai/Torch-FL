@@ -57,6 +57,11 @@ def platform_names() -> list[str]:
     return composer.known_platforms(CONFIG_DIR)
 
 
+def boxing_platforms() -> list[str]:
+    """The platforms whose config opts into a second, CUDA-boxing build."""
+    return composer.boxing_platforms(CONFIG_DIR)
+
+
 def manifest() -> dict:
     """The shared step list, as the composer's own input shape."""
     return yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -66,19 +71,43 @@ def platform_config(platform: str) -> dict:
     return yaml.safe_load((CONFIG_DIR / f"{platform}.yml").read_text(encoding="utf-8"))
 
 
-def composed_steps(platform: str) -> list[dict]:
-    """The groups one platform runs, in the order it runs them."""
+def composed_steps(platform: str, boxing_lane: bool = False) -> list[dict]:
+    """The groups one platform runs on one of its builds, in order."""
+    config = platform_config(platform)
     return composer.compose(
-        manifest(), platform_config(platform), platform, platform_names()
+        manifest(),
+        config,
+        platform,
+        platform_names(),
+        boxing_lane=boxing_lane,
+        environment_check=(config["boxing_environment_check"] if boxing_lane else None),
+        boxing=boxing_platforms(),
     )
 
 
-def step_ids(platform: str) -> list[str]:
-    """The manifest ids one platform's composed groups came from."""
-    return [
-        step_id
-        for step_id, platforms in composer.validate_manifest(
-            manifest(), platform_names()
-        )[2].items()
-        if platform in platforms
-    ]
+def step_ids(platform: str, boxing_lane: bool = False) -> list[str]:
+    """The manifest ids one platform's composed groups came from.
+
+    Composed output keeps a step's `name`, not its `id`, so this maps each
+    group back to the entry the composer selected for it.
+    """
+    config = platform_config(platform)
+    known = platform_names()
+    boxing = boxing_platforms()
+    steps, _ids, _assigned, _named = composer.validate_manifest(
+        manifest(), known, boxing
+    )
+    composed = composer.compose(
+        manifest(),
+        config,
+        platform,
+        known,
+        boxing_lane=boxing_lane,
+        environment_check=config["boxing_environment_check"] if boxing_lane else None,
+        boxing=boxing,
+    )
+    selection = {}
+    for entry in steps:
+        if entry["name"] not in selection:
+            selection[entry["name"]] = entry.get("id", "")
+    return [selection[step["name"]] for step in composed]

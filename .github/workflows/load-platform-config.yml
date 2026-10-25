@@ -42,7 +42,9 @@ on:
   workflow_call:
     inputs:
       platform:
-        description: Config basename under .github/configs (without .yml)
+        description: >-
+          Config basename under .github/configs (without .yml), optionally
+          suffixed with "-boxing" for that platform's CUDA-boxing lane
         required: true
         type: string
       checkout_repository:
@@ -56,6 +58,12 @@ on:
         type: string
         default: ''
     outputs:
+      platform:
+        description: Config basename the lane reads (without any -boxing suffix)
+        value: ${{ jobs.configuration.outputs.platform }}
+      boxing_lane:
+        description: '"1" when the lane builds the CUDA-boxing wheel, else ""'
+        value: ${{ jobs.configuration.outputs.boxing_lane }}
       display_name:
         description: Human-readable platform name, used in job and step names
         value: ${{ jobs.configuration.outputs.display_name }}
@@ -111,6 +119,8 @@ jobs:
       run:
         shell: bash
     outputs:
+      platform: ${{ steps.config.outputs.platform }}
+      boxing_lane: ${{ steps.config.outputs.boxing_lane }}
       display_name: ${{ steps.config.outputs.display_name }}
       setup_script: ${{ steps.config.outputs.setup_script }}
       setup_platform: ${{ steps.config.outputs.setup_platform }}
@@ -140,9 +150,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A lane name is the platform's config name plus "-boxing" when the
+          # lane builds the platform's CUDA-boxing wheel. The config itself is
+          # the platform's one file either way: boxing_lane says which of the
+          # two builds this job is, and the hook reads it from BOXING_LANE.
+          LANE="$PLATFORM"
+          BOXING_LANE=""
+          if [[ "$LANE" == *-boxing ]]; then
+            PLATFORM="${LANE%-boxing}"
+            BOXING_LANE=1
+          fi
           CONFIG_FILE=".github/configs/${PLATFORM}.yml"
           if [[ ! -f "$CONFIG_FILE" ]]; then
-            echo "::error::Platform config not found: $CONFIG_FILE"
+            echo "::error::Platform config not found: $CONFIG_FILE (lane $LANE)"
             exit 1
           fi
           MANIFEST_FILE=".github/integration-manifest.yml"
@@ -172,7 +192,24 @@ jobs:
             exit 1
           fi
 
+          BOXING_PLATFORM=$(yq -r '.boxing_lane == true' "$CONFIG_FILE")
+          if [[ "$BOXING_LANE" == "1" && "$BOXING_PLATFORM" != "true" ]]; then
+            echo "::error::$CONFIG_FILE does not opt into a boxing lane (boxing_lane: true), so lane $LANE must not be scheduled"
+            exit 1
+          fi
+          if [[ "$BOXING_LANE" == "1" ]]; then
+            # The vendor build's artifact name is the platform's; the boxing
+            # lane publishes under its own so the two cannot overwrite each
+            # other in a release.
+            ARTIFACT_NAME_SUFFIX="-boxing"
+          else
+            ARTIFACT_NAME_SUFFIX=""
+          fi
+
           DISPLAY_NAME=$(yq -r '.display_name' "$CONFIG_FILE")
+          if [[ "$BOXING_LANE" == "1" ]]; then
+            DISPLAY_NAME="$DISPLAY_NAME CUDA boxing"
+          fi
           SETUP_SCRIPT=$(yq -r '.setup_script' "$CONFIG_FILE")
           SETUP_PLATFORM=$(yq -r '.setup_platform' "$CONFIG_FILE")
           SETUP_STAGE=$(yq -r '.setup_stage // "integration"' "$CONFIG_FILE")
@@ -182,10 +219,25 @@ jobs:
           OPTIONS=$(yq -r '.container_options' "$CONFIG_FILE")
           TIMEOUT_MINUTES=$(yq -r '.timeout_minutes' "$CONFIG_FILE")
           INTEGRATION_TIMEOUT=$(yq -r '.integration_timeout_minutes // .timeout_minutes' "$CONFIG_FILE")
-          ARTIFACT_NAME=$(yq -r '.wheel_artifact_name' "$CONFIG_FILE")
+          ARTIFACT_NAME="$(yq -r '.wheel_artifact_name' "$CONFIG_FILE")${ARTIFACT_NAME_SUFFIX}"
           INTEGRATION_ENVIRONMENT=$(yq -o=json -I=0 '.integration_environment // {}' "$CONFIG_FILE")
+          # A boxing lane states its own expectations: the same platform built
+          # with boxing carries a different kernel set and, on CUDA, the bundled
+          # libtorch the vendor lane forbids. Stated as its own block beside the
+          # vendor one so the two cannot be edited apart.
+          if [[ "$BOXING_LANE" == "1" ]]; then
+            ENVIRONMENT_CHECK_JSON=$(yq -o=json -I=0 '.boxing_environment_check' "$CONFIG_FILE")
+            if [[ "$ENVIRONMENT_CHECK_JSON" == "null" ]]; then
+              echo "::error::$CONFIG_FILE opts into a boxing lane but states no boxing_environment_check"
+              exit 1
+            fi
+          else
+            ENVIRONMENT_CHECK_JSON=$(yq -o=json -I=0 '.environment_check' "$CONFIG_FILE")
+          fi
           INTEGRATION_TESTS=$(python .github/scripts/compose_integration_manifest.py \
             --platform "$PLATFORM" \
+            ${BOXING_LANE:+--boxing-lane} \
+            --environment-check "$ENVIRONMENT_CHECK_JSON" \
             --manifest "$MANIFEST_JSON" \
             --platform-config "$CONFIG_JSON" \
             --config-dir .github/configs)
@@ -260,9 +312,10 @@ jobs:
           fi
           # The wheel build derives the vendor lane from this name
           # (build-wheel-common.yml strips `wheel-` and hands the rest to
-          # publish_wheels.py), so a name that is not `wheel-<platform>` would
-          # publish under a lane nobody chose.
-          if [[ ! "$ARTIFACT_NAME" =~ ^wheel-[a-z0-9]+$ ]]; then
+          # publish_wheels.py), so a name that is not `wheel-<platform>` (or
+          # `wheel-<platform>-boxing` for the boxing lane) would publish under a
+          # lane nobody chose.
+          if [[ ! "$ARTIFACT_NAME" =~ ^wheel-[a-z0-9]+(-boxing)?$ ]]; then
             echo "::error::wheel_artifact_name must be 'wheel-<platform>' in $CONFIG_FILE, found: $ARTIFACT_NAME"
             exit 1
           fi
@@ -291,6 +344,8 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           }
 
+          emit platform "$PLATFORM"
+          emit boxing_lane "$BOXING_LANE"
           emit display_name "$DISPLAY_NAME"
           emit setup_script "$SETUP_SCRIPT"
           emit setup_platform "$SETUP_PLATFORM"

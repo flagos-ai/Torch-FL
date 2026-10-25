@@ -61,6 +61,15 @@
 # platform config. Everything else that looks like a variable -- $MODEL_PATH,
 # ${ASCEND_MSPTI_PRELOAD}, $GITHUB_WORKSPACE -- is left for the shell or the
 # environment on the hardware runner, and is not the composer's to resolve.
+#
+# `vendor_only: true` marks a step that asserts routing only the platform's
+# vendor build can have. NVIDIA, Hygon DCU, MetaX and the PPU each run two
+# lanes -- the vendor build and the CUDA-boxing build of the same wheel, the
+# second scheduled as `<platform>-boxing` -- and this manifest is composed for
+# both, from this one file. A step whose selection differs per build names the
+# platforms in `boxing_variant` (the entry then runs on their boxing build and
+# not their vendor build); `vendor_only: true` is the other half. Every other
+# step runs on both builds.
 
 steps:
   # The environment the wheel landed in, asserted against the expectations the
@@ -85,6 +94,9 @@ steps:
   # The vocabulary is documented on the script, not repeated per platform: what
   # a platform states is a value, and why it states it is in that platform's
   # config beside it.
+  # Runs on both of a boxing platform's builds. The expectations are the
+  # config's, and the loader hands the boxing lane the config's
+  # boxing_environment_check block in their place.
   - id: environment
     name: Check isolated {{display_name}} environment
     command: cd "$GITHUB_WORKSPACE" && python .github/scripts/check_platform_environment.py
@@ -229,6 +241,7 @@ steps:
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [nvidia]
+    boxing_variant: [nvidia]
     command: >-
       python -m pytest tests/integration/ops/
       -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -243,6 +256,7 @@ steps:
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [hygon]
+    boxing_variant: [hygon]
     command: >-
       python -m pytest tests/integration/ops/
       -m "(dcu or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -315,6 +329,7 @@ steps:
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [metax, thead]
+    boxing_variant: [metax, thead]
     command: >-
       python -m pytest tests/integration/ops/
       -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
@@ -339,6 +354,13 @@ steps:
     platforms: [ascend]
     command: python -m pytest tests/integration/ops/ -m "ascend" -v -s --tb=short
 
+  # Both builds. The vendor build's selection is the one that can answer its
+  # own conf; the boxing build's op set is a different conf
+  # (`backends_<platform>_boxing.conf`) over a different kernel table, and it
+  # reads the same selection. Saying that here rather than in a second
+  # `.<platform>` entry keeps "these platforms have a second build" visible as
+  # `boxing_variant` on the entry itself, where a reviewer comparing the two
+  # builds of a step sees it.
   # The FlagGems runtime-path group, byte-identical on every platform: it
   # measures the @pytest.mark.flaggems cases, each of which asserts the conf's
   # own route (through tests/integration/ops/backend_conf.py:routed_backend)

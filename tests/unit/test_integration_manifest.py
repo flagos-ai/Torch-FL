@@ -39,6 +39,7 @@ from pathlib import Path
 import pytest
 
 from manifest_composer import (
+    boxing_platforms,
     composed_steps,
     composer,
     environment_check,
@@ -241,19 +242,48 @@ _KNOWN_GAPS = {
 }
 
 
+# The platforms that run two builds: their vendor build and the CUDA-boxing
+# build of the same wheel. Written out for the same reason as _PLATFORMS: the
+# lane set is a decision, and a config that dropped `boxing_lane: true` should
+# fail here rather than quietly halve the coverage below.
+_BOXING = ("hygon", "metax", "nvidia", "thead")
+
+
 def _entries() -> list[dict]:
     """The manifest's entries, in the order they run."""
     return manifest()["steps"]
 
 
-def _assigned() -> dict[str, set[str]]:
-    """Each step id mapped to the platforms that run it, as composed."""
-    return composer.validate_manifest(manifest(), platform_names())[2]
+def _assigned(build: str = "vendor") -> dict[str, set[str]]:
+    """Each step id mapped to the platforms that run it, as composed.
+
+    ``build`` is one of a boxing platform's two builds; a shared step composes
+    into both, so the vendor build is the one to read a platform's step list
+    from.
+    """
+    by_build = composer.validate_manifest(
+        manifest(), platform_names(), boxing_platforms()
+    )[2]
+    return {step_id: lanes[build] for step_id, lanes in by_build.items()}
 
 
-def _expected_entry(platform: str, entry: dict) -> bool:
-    """Whether one manifest entry applies to a platform."""
-    return platform in (entry.get("platforms") or _PLATFORMS)
+def _expected_entry(platform: str, entry: dict, boxing_lane: bool = False) -> bool:
+    """Whether one manifest entry composes into this platform's given build.
+
+    A `.<platform>`-scoped id is that platform's boxing build; an entry with
+    `boxing_variant: [<platform>]` runs on that platform's boxing build
+    instead of its vendor build; `vendor_only` is the vendor build's own; and
+    every other entry runs on both builds.
+    """
+    if "." in entry["id"]:
+        return entry["id"].split(".", 1)[1] == platform and boxing_lane
+    if platform not in (entry.get("platforms") or _PLATFORMS):
+        return False
+    if entry.get("vendor_only"):
+        return not boxing_lane
+    if platform in (entry.get("boxing_variant") or ()):
+        return boxing_lane
+    return True
 
 
 def _environment_entry() -> dict:
@@ -304,12 +334,14 @@ def test_only_platform_configs_live_in_the_config_directory():
 
 def test_the_manifest_composes_at_all():
     """A reader that found nothing would make every check below vacuous."""
-    steps, seen_order, assigned = composer.validate_manifest(
-        manifest(), platform_names()
+    steps, seen_order, assigned, _named = composer.validate_manifest(
+        manifest(), platform_names(), boxing_platforms()
     )
     assert steps and seen_order and assigned
     assert set(seen_order) == set(assigned)
-    assert all(assigned.values()), "a step id was composed for no platform"
+    for by_build in assigned.values():
+        assert set(by_build) == {"vendor", "boxing"}
+        assert all(by_build.values()), "a step id was composed for no build"
 
 
 def test_the_manifest_still_records_which_steps_are_not_universal():
@@ -330,11 +362,25 @@ def test_the_manifest_still_records_which_steps_are_not_universal():
     assert len(_assigned()) < len(steps)
 
 
-@pytest.mark.parametrize("platform", _PLATFORMS)
-def test_each_platform_runs_the_manifest_in_manifest_order(platform):
-    """Order is the manifest's for every platform, and nothing is added or lost."""
-    composed = composed_steps(platform)
-    expected = [entry for entry in _entries() if _expected_entry(platform, entry)]
+@pytest.mark.parametrize(
+    "platform, boxing_lane",
+    [
+        (platform, boxing_lane)
+        for platform in _PLATFORMS
+        for boxing_lane in ((False, True) if platform in _BOXING else (False,))
+    ],
+)
+def test_each_platform_runs_the_manifest_in_manifest_order(platform, boxing_lane):
+    """Order is the manifest's for every platform, and nothing is added or lost.
+
+    A boxing platform is checked on both of its builds: they run the same
+    groups in the same order, and differ only in which entry of a step each
+    build selected -- that selection is the point of the second lane.
+    """
+    composed = composed_steps(platform, boxing_lane=boxing_lane)
+    expected = [
+        entry for entry in _entries() if _expected_entry(platform, entry, boxing_lane)
+    ]
     assert [group["command"] for group in composed] == [
         entry["command"] for entry in expected
     ]
@@ -342,6 +388,28 @@ def test_each_platform_runs_the_manifest_in_manifest_order(platform):
     assert [group["name"] for group in composed] == [
         entry["name"].replace("{{display_name}}", display_name) for entry in expected
     ]
+
+
+@pytest.mark.parametrize("platform", _BOXING)
+def test_a_boxing_platform_runs_the_same_groups_on_both_builds(platform):
+    """The two builds differ in what a group selects, not in which groups run.
+
+    A group that only one build ran would be coverage nobody sees the other
+    half of: the boxing build is the same model suite, built the other way.
+    `vendor_ops` is the one step whose entry names its build, so it is the one
+    group the vendor build does not run.
+    """
+    vendor = composed_steps(platform)
+    boxing = composed_steps(platform, boxing_lane=True)
+    # `vendor_ops` is the step whose entry names its build (`boxing_variant`):
+    # the vendor build's own selection cannot answer the boxing conf, so that
+    # entry runs on the boxing build and only there. Every other group is the
+    # same entry run on both builds, in the same order.
+    vendor_ids = [group["manifest_id"] for group in vendor]
+    boxing_ids = [group["manifest_id"] for group in boxing]
+    assert vendor_ids.count("vendor_ops") == 0
+    assert boxing_ids.count("vendor_ops") == 1
+    assert [i for i in boxing_ids if i != "vendor_ops"] == vendor_ids
 
 
 def test_the_only_substitution_is_the_display_name():
@@ -600,13 +668,19 @@ def test_a_step_that_claims_a_platform_twice_is_refused():
 def test_an_unknown_platform_is_refused():
     with pytest.raises(composer.ManifestError, match="unknown platform"):
         composer.compose(
-            manifest(), platform_config("nvidia"), "nvidia_h100", platform_names()
+            manifest(),
+            platform_config("nvidia"),
+            "nvidia_h100",
+            platform_names(),
+            boxing=boxing_platforms(),
         )
 
 
 def test_a_platform_config_that_is_not_a_mapping_is_refused():
     with pytest.raises(composer.ManifestError, match="must be a mapping"):
-        composer.compose(manifest(), None, "nvidia", platform_names())
+        composer.compose(
+            manifest(), None, "nvidia", platform_names(), boxing=boxing_platforms()
+        )
 
 
 def test_a_config_without_a_display_name_is_refused():
@@ -614,7 +688,9 @@ def test_a_config_without_a_display_name_is_refused():
     config = platform_config("nvidia")
     del config["display_name"]
     with pytest.raises(composer.ManifestError, match="display_name"):
-        composer.compose(manifest(), config, "nvidia", platform_names())
+        composer.compose(
+            manifest(), config, "nvidia", platform_names(), boxing=boxing_platforms()
+        )
 
 
 def test_a_config_that_omits_the_block_a_step_reads_is_refused():
@@ -622,7 +698,9 @@ def test_a_config_that_omits_the_block_a_step_reads_is_refused():
     config = platform_config("metax")
     config.pop("environment_check")
     with pytest.raises(composer.ManifestError, match="does not define it"):
-        composer.compose(manifest(), config, "metax", platform_names())
+        composer.compose(
+            manifest(), config, "metax", platform_names(), boxing=boxing_platforms()
+        )
 
 
 def test_a_block_stated_as_a_non_mapping_is_refused():
@@ -630,7 +708,9 @@ def test_a_block_stated_as_a_non_mapping_is_refused():
     config = copy.deepcopy(platform_config("metax"))
     config["environment_check"] = "metax"
     with pytest.raises(composer.ManifestError, match="rather than the mapping"):
-        composer.compose(manifest(), config, "metax", platform_names())
+        composer.compose(
+            manifest(), config, "metax", platform_names(), boxing=boxing_platforms()
+        )
 
 
 def test_a_config_whose_expectations_no_running_step_reads_is_refused():
@@ -646,7 +726,13 @@ def test_a_config_whose_expectations_no_running_step_reads_is_refused():
     with pytest.raises(
         composer.ManifestError, match="no step that runs on this platform"
     ):
-        composer.compose(document, platform_config("metax"), "metax", platform_names())
+        composer.compose(
+            document,
+            platform_config("metax"),
+            "metax",
+            platform_names(),
+            boxing=boxing_platforms(),
+        )
 
 
 def test_a_manifest_that_leaves_a_platform_with_no_steps_is_refused():
@@ -655,7 +741,13 @@ def test_a_manifest_that_leaves_a_platform_with_no_steps_is_refused():
         "steps": [{"id": "a", "name": "A", "command": "x", "platforms": ["nvidia"]}]
     }
     with pytest.raises(composer.ManifestError, match="no steps apply"):
-        composer.compose(document, platform_config("hygon"), "hygon", platform_names())
+        composer.compose(
+            document,
+            platform_config("hygon"),
+            "hygon",
+            platform_names(),
+            boxing=boxing_platforms(),
+        )
 
 
 def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):

@@ -68,6 +68,21 @@ def _conf_path() -> str:
     return torch_fl.backend_config_path()
 
 
+#: The build a test is running against, when the wheel cannot say.
+#:
+#: A platform that builds both a vendor and a CUDA-boxing wheel runs one CI job
+#: per build, and the loader tells each job which one it is. The build record
+#: names the kernel sets, but a conf can route a `boxing` op on a vendor build
+#: too (DCU's libtorch_hip is reached through the CUDA key), so the kernel set
+#: alone is not the selector: the job is.
+_BUILD_ENV = "BOXING_LANE"
+
+
+def boxing_build() -> bool:
+    """Whether the wheel under test is the CUDA-boxing build of its platform."""
+    return os.environ.get(_BUILD_ENV) == "1"
+
+
 def _conf_route(op: str) -> str:
     """Raw conf value for ``op`` -- ``none`` included, and ``none`` unmapped.
 

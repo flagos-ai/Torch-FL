@@ -165,10 +165,15 @@ jobs:
       # that library before it builds the wheel. Every other platform provisions
       # device-dependent pieces at `integration`, which is what a job named this
       # used to pass. See setup_stage in .github/configs/<p>.yml.
+      # BOXING_LANE=1 says this job is the platform's CUDA-boxing lane, the
+      # second build the config's `boxing_lane: true` exists for. The hook
+      # decides which kernel sets that lane compiles; the vendor lane is the
+      # one that leaves it unset.
       - name: Prepare ${{ needs.configuration.outputs.display_name }} build environment
         id: setup
         env:
           CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}
+          BOXING_LANE: ${{ needs.configuration.outputs.boxing_lane }}
         run: bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
 
       # Kunlunxin's image ships no `build` module, and a missing one does not

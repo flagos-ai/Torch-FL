@@ -23,10 +23,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 from github_api import GitHub, GitHubError
-from generate_matrix import _load_platforms, _platforms_from_dispatch
+from generate_matrix import (
+    _load_platforms,
+    _platforms_from_dispatch,
+    boxing_platforms,
+)
 
 
-def parse_command(body, platforms):
+def parse_command(body, platforms, boxing=()):
     first_line = body.splitlines()[0].strip() if body.splitlines() else ""
     words = first_line.split()
     if not words or words[0] != "/ci":
@@ -35,7 +39,7 @@ def parse_command(body, platforms):
         raise ValueError("Use /ci run [all | platform ...].")
     requested = ",".join(words[2:])
     try:
-        selected = _platforms_from_dispatch(requested, platforms)
+        selected = _platforms_from_dispatch(requested, platforms, boxing)
     except ValueError as exc:
         raise ValueError(
             "Invalid platform selection. Use /ci run all or /ci run <platform ...>. "
@@ -46,7 +50,7 @@ def parse_command(body, platforms):
     return selected
 
 
-def handle(event, platforms, github):
+def handle(event, platforms, github, boxing=()):
     issue = event.get("issue", {})
     comment = event.get("comment", {})
     if not issue.get("pull_request"):
@@ -64,7 +68,7 @@ def handle(event, platforms, github):
     if not isinstance(number, int) or number <= 0:
         raise ValueError("PR number must be a positive integer.")
     try:
-        selected = parse_command(body, platforms)
+        selected = parse_command(body, platforms, boxing)
     except ValueError as exc:
         github.repo_api(
             f"issues/{number}/comments", method="POST", payload={"body": str(exc)}
@@ -157,7 +161,15 @@ def main():
     event = json.loads(Path(args.event_file).read_text())
     github = GitHub(event["repository"]["full_name"])
     try:
-        print(handle(event, _load_platforms(Path(args.configs_dir)), github))
+        platforms = _load_platforms(Path(args.configs_dir))
+        print(
+            handle(
+                event,
+                platforms,
+                github,
+                boxing_platforms(Path(args.configs_dir), platforms),
+            )
+        )
     except (GitHubError, ValueError) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1

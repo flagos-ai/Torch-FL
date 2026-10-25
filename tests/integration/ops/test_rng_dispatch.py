@@ -817,9 +817,12 @@ class TestRngMultiDevice:
         "from Triton (cpu tensor?)' on flagos:1..7, fine on flagos:0. A device-context "
         "bug on the FlagGems Triton path rather than an RNG one: the same op on the "
         "native path is reproducible on every device. xfail (non-strict) so the "
-        "eventual fix surfaces as an xpass instead of being silently assumed.",
+        "eventual fix surfaces as an xpass instead of being silently assumed. "
+        "RuntimeError is in `raises` because on a wheel that registers no CUDA "
+        "kernel for multinomial (FlagGems-first, boxing off) the same op fails "
+        "earlier with 'DispatchStub: missing kernel for cuda'.",
         strict=False,
-        raises=(ValueError, AssertionError),
+        raises=(ValueError, AssertionError, RuntimeError),
     )
     def test_multinomial_on_second_device(self):
         dev = self._second_device()

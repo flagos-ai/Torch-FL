@@ -146,7 +146,8 @@ def test_runtime_changes_cannot_be_lowered_to_l0():
         ["csrc/aten/common.cc"],
     )
     assert result["test_level"] == "L2"
-    assert result["expected_platforms"] == ["nvidia"]
+    # A boxing platform names both of its lanes; the plan runs each.
+    assert result["expected_platforms"] == ["nvidia", "nvidia-boxing"]
 
 
 def test_documentation_has_no_hardware_but_explicit_l2_is_nonempty():

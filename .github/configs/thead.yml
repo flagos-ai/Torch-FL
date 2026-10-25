@@ -85,17 +85,44 @@ wheel_artifact_name: wheel-ppu
 # What this platform's environment has to look like before any test runs, read
 # by the first step of .github/integration-manifest.yml through
 # .github/scripts/check_platform_environment.py. The vocabulary is documented on
-# that script; the values are this platform's, and they assert the same things
-# the hand-written heredoc that used to sit here did.
+# that script; the values are this platform's.
 #
-# The lane builds the boxing wheel (see set_env_thead.sh): stock +cpu torch with
-# PPU's own libtorch staged into lib_thead/. Importing it selects that core,
-# which is why torch.version.cuda reads 13.0 rather than None, and the day-0
-# conf (FLAGOS_BACKEND_CONFIG) is what routes the ops this build registers
-# without a FlagGems kernel to `boxing` -- `boxing` in the build record is both
-# the kernel set required here and the reason the bundle is required rather
-# than forbidden.
+# PPU runs both builds of the wheel, one job each:
+#
+#   vendor lane (this file's `platform:` name)  the default wheel: stock +cpu
+#       torch, FlagGems routes compiled, backends_thead.conf as it ships. No
+#       boxing kernels.
+#
+#   boxing lane (`thead-boxing`)  FLAGOS_BUILD_BOXING=1: the generated CUDA
+#       boxing kernels plus PPU's own libtorch staged into lib_thead/ and
+#       selected at import (which is why torch.version.cuda reads 13.0), run
+#       against the day-0 conf backends_thead_boxing.conf that routes the ops
+#       this build registers without a FlagGems kernel to `boxing`.
+#
+# Both lanes bundle PPU's libtorch into lib_thead/: it is the tree the PPU
+# build links into, not something the boxing kernels add. What selects it at
+# import -- and so what makes torch.version.cuda read 13.0 -- is the boxing
+# kernel set.
+#
+# `boxing_lane: true` is what schedules the second job
+# (.github/scripts/ci/generate_matrix.py reads it).
+boxing_lane: true
+
 environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  require_package_files:
+    - lib_thead/libtorch_cuda.so
+  require_build_kernels:
+    - flaggems
+  forbid_build_kernels:
+    - boxing
+  flagos_devices:
+    more_than: 0
+
+boxing_environment_check:
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: "13.0"
   torch_path_forbidden:
