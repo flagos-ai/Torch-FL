@@ -184,6 +184,12 @@ class Dispatcher {
     return operator()(std::forward<Args>(args)...);
   }
 
+  // The op this dispatcher routes by default, for a caller that re-dispatches
+  // the same op with prepared operands (soft_lowp's fused addmm).
+  const char* OpName() const {
+    return op_name_;
+  }
+
   template <typename... Args>
   decltype(auto) DispatchAs(const std::string& op_name, Args&&... args) const {
     auto backend = GetBackendForOp(op_name);

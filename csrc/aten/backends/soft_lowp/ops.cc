@@ -159,10 +159,6 @@ at::Tensor DecodeBatchMatrix(const at::Tensor& input, bool packed_dim1) {
   return result.copy_(input);
 }
 
-bool HasLowpInput(const at::Tensor& tensor) {
-  return tensor.defined() && IsLowPrecision(tensor.scalar_type());
-}
-
 void CheckDevice(const at::Tensor& tensor, const char* name) {
   TORCH_CHECK(
       tensor.device().is_privateuseone(),
@@ -172,24 +168,12 @@ void CheckDevice(const at::Tensor& tensor, const char* name) {
       tensor.device());
 }
 
-// The software path owns FP8/FP4 and only those. Any other operand pair leaves
-// it the way it entered: on the route the conf names. That is what the generated
-// wrapper would have called had its prelude not fired -- FlagGems on MetaX,
-// boxing everywhere else -- and on a pair a vendor cannot take it is also the
-// only option, since this path has nothing to compute with (see
-// CheckMatrixInputs below).
-//
-// The wrapper cannot make that call itself. The generated gates live in a shared
-// .inc that runs with no idea whether the build compiles the software path at
-// all, so they read `IsLowPrecision(dtype)` and every FLAGOS_SOFT_LOWP platform
-// -- MetaX and DCU -- takes the branch.
-bool HasVendorMatrixInput(const at::Tensor& self, const at::Tensor& mat2) {
-  return !HasLowpInput(self) && !HasLowpInput(mat2);
-}
-
-void CheckMatrixInputs(const at::Tensor& self, const at::Tensor& mat2) {
-  TORCH_CHECK(HasLowpInput(self) || HasLowpInput(mat2),
-              "soft-lowp matrix kernel requires a low-precision input");
+// What the software path can compute with, for every dtype. An ordinary tensor
+// decodes to itself; an unaligned star (transpose) view does not, and a device
+// fp16 kernel cannot take one, so it is rejected here.
+void CheckSoftwareMatrixInputs(
+    const at::Tensor& self,
+    const at::Tensor& mat2) {
   CheckDevice(self, "matrix operation");
   CheckDevice(mat2, "matrix operation");
   TORCH_CHECK(self.is_contiguous() && mat2.is_contiguous(),
@@ -237,16 +221,11 @@ c10::ScalarType DefaultOutputDtype(const at::Tensor& self, c10::ScalarType reque
 
 } // namespace
 
-namespace {
-
 at::Tensor MmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return mm_dispatcher.DispatchConfigured(self, mat2);
-  }
-  CheckMatrixInputs(self, mat2);
+  CheckSoftwareMatrixInputs(self, mat2);
   auto lhs = DecodeIfNeeded(self, false);
   auto rhs = DecodeIfNeeded(mat2, true);
   auto result = at::mm(lhs, rhs);
@@ -258,10 +237,7 @@ at::Tensor BmmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return bmm_dispatcher.DispatchConfigured(self, mat2);
-  }
-  CheckMatrixInputs(self, mat2);
+  CheckSoftwareMatrixInputs(self, mat2);
   auto lhs = DecodeBatchIfNeeded(self, false);
   auto rhs = DecodeBatchIfNeeded(mat2, true);
   auto result = at::bmm(lhs, rhs);
@@ -276,16 +252,13 @@ at::Tensor AddmmImpl(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     c10::ScalarType out_dtype) {
-  // Some composite callers (notably linear_out) can reach this helper after
-  // their own boxing/decomposition even when the matrix operands are ordinary
-  // dtypes. Keep that path on a fused backend, the one the conf names, instead
-  // of applying the low-precision-only validation below. It used to name the
-  // boxing slot outright, which put a float64 addmm on a kernel that rejects
-  // it.
-  if (HasVendorMatrixInput(mat1, mat2)) {
-    return addmm_dispatcher.DispatchConfigured(self, mat1, mat2, beta, alpha);
-  }
-  CheckMatrixInputs(mat1, mat2);
+  // Ordinary dtypes take the same software route as FP8/FP4: decode is a
+  // no-op for them, and the fused kernel below is the one the conf names --
+  // reaching it by name again would be the same call with the wrapper in
+  // between. Handing an ordinary pair to a fixed slot instead is what put a
+  // float64 addmm on a kernel that rejects it.
+  CheckDevice(mat1, "addmm");
+  CheckDevice(mat2, "addmm");
   auto bias = self;
   CheckDevice(bias, "addmm");
   if (IsLowPrecision(bias.scalar_type())) {
@@ -293,12 +266,15 @@ at::Tensor AddmmImpl(
   }
   auto lhs = DecodeIfNeeded(mat1, false);
   auto rhs = DecodeIfNeeded(mat2, true);
-  // Preserve one fused addmm operation while bypassing the public wrapper's
-  // low-precision gate. The decoded inputs are ordinary BF16 tensors, so the
-  // configured backend dispatcher can execute the complete matrix operation
-  // without recursively re-entering this software path.
-  auto result = addmm_dispatcher.DispatchBackend(
-      Backend::kBoxing, bias, lhs, rhs, beta, alpha);
+  // One fused addmm, on the backend the conf names -- FlagGems on MetaX.
+  // Named by op, not by slot: the boxing slot is empty on a vendor build, and
+  // naming it would also make the log claim boxing. The guard keeps the
+  // wrapper's prelude off this call: a FlagGems route runs through
+  // addmm_dispatcher again from inside it, and without the guard that inner
+  // call would come straight back here.
+  DispatchSuppressionGuard suppress;
+  auto result = addmm_dispatcher.DispatchAs(
+      addmm_dispatcher.OpName(), bias, lhs, rhs, beta, alpha);
   const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
   return output_dtype == result.scalar_type() ? result : result.to(output_dtype);
 }
@@ -313,9 +289,6 @@ at::Tensor MmDtype(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return mm_dtype_dispatcher.DispatchConfigured(self, mat2, out_dtype);
-  }
   return MmImpl(self, mat2, out_dtype);
 }
 
@@ -324,10 +297,6 @@ at::Tensor& MmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return mm_dtype_out_dispatcher.DispatchConfigured(
-        self, mat2, out_dtype, out);
-  }
   auto result = MmImpl(self, mat2, out_dtype);
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp mm.dtype_out shape mismatch");
   out.copy_(result);
@@ -338,9 +307,6 @@ at::Tensor& MmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return mm_out_dispatcher.DispatchConfigured(self, mat2, out);
-  }
   auto result = MmImpl(self, mat2, out.scalar_type());
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp mm.out shape mismatch");
   out.copy_(result);
@@ -363,10 +329,6 @@ at::Tensor& BmmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return bmm_dtype_out_dispatcher.DispatchConfigured(
-        self, mat2, out_dtype, out);
-  }
   auto result = BmmImpl(self, mat2, out_dtype);
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp bmm.dtype_out shape mismatch");
   out.copy_(result);
@@ -377,9 +339,6 @@ at::Tensor& BmmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
-    return bmm_out_dispatcher.DispatchConfigured(self, mat2, out);
-  }
   auto result = BmmImpl(self, mat2, out.scalar_type());
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp bmm.out shape mismatch");
   out.copy_(result);
@@ -413,10 +372,6 @@ at::Tensor& AddmmDtypeOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(mat1, mat2)) {
-    return addmm_dtype_out_dispatcher.DispatchConfigured(
-        self, mat1, mat2, out_dtype, beta, alpha, out);
-  }
   auto result = AddmmImpl(self, mat1, mat2, beta, alpha, out_dtype);
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp addmm.dtype_out shape mismatch");
   out.copy_(result);
@@ -430,10 +385,6 @@ at::Tensor& AddmmOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(mat1, mat2)) {
-    return addmm_out_dispatcher.DispatchConfigured(
-        self, mat1, mat2, beta, alpha, out);
-  }
   auto result = AddmmImpl(self, mat1, mat2, beta, alpha, out.scalar_type());
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp addmm.out shape mismatch");
   out.copy_(result);
@@ -446,10 +397,6 @@ at::Tensor& AddmmInplace(
     const at::Tensor& mat2,
     const at::Scalar& beta,
     const at::Scalar& alpha) {
-  if (HasVendorMatrixInput(mat1, mat2)) {
-    return addmm_inplace_dispatcher.DispatchConfigured(
-        self, mat1, mat2, beta, alpha);
-  }
   auto result = AddmmImpl(self, mat1, mat2, beta, alpha, self.scalar_type());
   self.copy_(result);
   return self;
