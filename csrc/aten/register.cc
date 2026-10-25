@@ -762,15 +762,20 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   //     per-platform boxed list names exactly the ops the conf routes and this
   //     wheel has a kernel for.
   //   * The full generated list stays, one claim per generated op, for the ops
-  //     the boxed list leaves out. A wrapper that is *defined* but never
+  //     the boxed list leaves out -- and only for those; `FLAGOS_GEN_IMPLS`
+  //     orders it ARG after the boxed list, so a claim here can only add what
+  //     the boxed list left out. A wrapper that is *defined* but never
   //     registered strands every route to it: the FP8/FP4 matrix ops answer
   //     through their wrapper's soft_lowp prelude regardless of the route, so
   //     without a claim `torch.mm` on metax reached cpu_fallback's
   //     `addmm_impl_cpu_` instead of the software path (run 40137411252, the
-  //     whole low-precision group). Only ops whose kernel exists can be routed
-  //     here, so the extra claims are never selected by a route this wheel
-  //     cannot compile; ones after this include win, which keeps the conf's
-  //     deliberately-unclaimed ops unclaimed.
+  //     whole low-precision group). A generated wrapper's body is behind
+  //     `FLAGOS_SOFT_LOWP`, which only metax and dcu compile, so on cuda and
+  //     ppu each of these claims is a call into its dispatcher, which obeys the
+  //     route: `mm = none` on both, and the PPU runtime contract asserts that
+  //     mm/bmm/mul.Tensor emit no dispatch line (run 40153064301 -- without the
+  //     define below those three were claimed by this list alone and the
+  //     contract failed).
   //
   //     The wrappers are claimed whole because narrowing this to the matrix
   //     ops does not work: a generated wrapper calls the *whole-op*
@@ -789,7 +794,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_boxing_tsingmicro.inc"
   #endif
+  #define FLAGOS_GEN_IMPLS
   #include "generated/register.inc"
+  #undef FLAGOS_GEN_IMPLS
   #elif defined(FLAGOS_FLAGGEMS_PYTHON)
   #if defined(FLAGOS_ACCEL_CUDA)
   #include "generated/register_flaggems_nvidia.inc"

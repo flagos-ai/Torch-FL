@@ -162,6 +162,33 @@ def _registered_ops(inc_path: Path) -> set[str]:
     return set(re.findall(r'm\.impl\("([^"]+)"', inc_path.read_text()))
 
 
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(BOXING_PLATFORMS))
+def test_a_boxed_claim_is_an_op_this_platform_routes_away_from_none(platform):
+    """A boxed claim must be an op the conf routes away from ``none``.
+
+    register.cc's boxing arm includes ``generated/register_boxing_<p>.inc`` and
+    then the generic ``generated/register.inc``; the second is behind
+    ``FLAGOS_GEN_IMPLS`` so it can only add to the boxed list. Without that
+    guard the generic wrappers are claimed whole, and on the PPU runtime
+    contract that made mm/bmm/mul.Tensor -- routed to ``none`` there -- real
+    dispatch candidates whose boxed wrapper emitted no dispatch line (run
+    40153064301). The boxed list holds the other end: codegen leaves an op out
+    when its route is ``none`` or it has no wrapper, and this holds it to that.
+    """
+    boxed = _registered_ops(GEN_DIR / f"register_boxing_{platform}.inc")
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    assert boxed, f"{platform} claims no boxed op"
+    left_at_none = sorted(op for op in boxed if routes.get(op) == "none")
+    assert not left_at_none, (
+        f"{platform} claims ops its conf routes to none: {left_at_none[:10]}"
+    )
+    unlisted = sorted(op for op in boxed if op not in routes)
+    assert not unlisted, (
+        f"{platform} claims ops its conf does not list: {unlisted[:10]}"
+    )
+
+
 def _platform_registered(platform: str) -> set[str]:
     """Union of ops registered by every ``.inc`` this platform compiles.
 
