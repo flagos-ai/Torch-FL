@@ -45,6 +45,7 @@ import pytest
 import torch
 
 import torch_fl  # noqa: F401
+from backend_conf import routed_backend_or_none
 
 DEVICE = "flagos:0"
 
@@ -82,7 +83,22 @@ requires_cuda_boxing = pytest.mark.skipif(
 # fixed kernel reports an xpass and anything else stays a failure.  The
 # predicate reads the build's accelerator rather than the conf, so a conf that
 # cannot be found cannot quietly drop the mark and turn the job red again.
-FLAGGEMS_EMPTY_INDEX_ADD = torch_fl._build_accelerator() == "musa"
+#
+# The guard reads the routing table rather than the accelerator name. MUSA is
+# the platform the divide was found on, but what reaches the defect is the
+# `index_add_` route: on the MUSA lane the sparse surface was reached through
+# `TorchFunctionMode` before `torch_fl` had activated, and the parameterized
+# `index_add` slot answered while `index_add_` -- routed `flaggems`, with the
+# divide in it -- was not. A router that skips `index_add_` cannot reach the
+# line at all, so the cases run for real there instead of reporting an xfail
+# for a defect they never touch.
+
+
+def _routes_to_flaggems(op):
+    return routed_backend_or_none(op) == "flagos_python"
+
+
+FLAGGEMS_EMPTY_INDEX_ADD = _routes_to_flaggems("index_add_")
 
 empty_densification_xfail = pytest.mark.xfail(
     FLAGGEMS_EMPTY_INDEX_ADD,
