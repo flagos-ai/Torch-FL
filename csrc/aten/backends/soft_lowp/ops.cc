@@ -172,26 +172,21 @@ void CheckDevice(const at::Tensor& tensor, const char* name) {
       tensor.device());
 }
 
-// The operand dtypes an ordinary route can serve. The software path owns
-// FP8/FP4 and only those, so every other dtype leaves it exactly the way addmm
-// already leaves an ordinary addmm: on the route the conf names.
+// Whether both operands are ordinary dtypes -- no FP8/FP4 on either side. Such
+// a pair is not this path's to compute: it leaves the way it came, on the route
+// the conf names.
 //
 // The wrapper cannot make that call itself. The generated gates live in a shared
 // .inc that runs with no idea whether the build compiles the software path at
-// all, so they read `IsLowPrecision(dtype)` and every FLAGOS_SOFT_LOWP platform
-// -- MetaX and DCU -- takes the branch. Once here, a float32 bmm that started on
-// FlagGems (backends_metax.conf) ended on the boxing kernel and was refused by
-// CheckMatrixInputs below: "soft-lowp matrix kernel requires a low-precision
-// input" (metax CI, run 40189509687). Vendors are not expected to accept the
-// low-precision types, but their float GEMMs are their own business.
-bool IsVendorMatrixDtype(c10::ScalarType dtype) {
-  return at::isFloatingType(dtype) || at::isComplexType(dtype);
-}
-
-bool HasVendorMatrixInput(const at::Tensor& self, const at::Tensor& mat2) {
-  return !HasLowpInput(self) && !HasLowpInput(mat2) &&
-      (IsVendorMatrixDtype(self.scalar_type()) ||
-       IsVendorMatrixDtype(mat2.scalar_type()));
+// all, so they read `IsLowPrecision(dtype)` and every build that compiles this
+// path takes the branch. Once here, a pair that stayed would be computed by
+// `at::mm`/`at::bmm` on PrivateUse1 tensors, which on MetaX lands in FlagGems'
+// vendored bmm and, for the shapes it cannot compile, back on this same
+// function: the two ping-pong until the stack runs out (C550 host, float32
+// (2, 4, 4); CI run 40202397139). Vendors are not expected to take the
+// low-precision types, but their ordinary GEMMs are their own business.
+bool IsOrdinaryMatrixPair(const at::Tensor& self, const at::Tensor& mat2) {
+  return !HasLowpInput(self) && !HasLowpInput(mat2);
 }
 
 void CheckMatrixInputs(const at::Tensor& self, const at::Tensor& mat2) {
@@ -250,7 +245,7 @@ at::Tensor MmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return mm_dispatcher.DispatchConfigured(self, mat2);
   }
   CheckMatrixInputs(self, mat2);
@@ -265,7 +260,7 @@ at::Tensor BmmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return bmm_dispatcher.DispatchConfigured(self, mat2);
   }
   CheckMatrixInputs(self, mat2);
@@ -319,7 +314,7 @@ at::Tensor MmDtype(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return mm_dtype_dispatcher.DispatchConfigured(self, mat2, out_dtype);
   }
   return MmImpl(self, mat2, out_dtype);
@@ -330,7 +325,7 @@ at::Tensor& MmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return mm_dtype_out_dispatcher.DispatchConfigured(
         self, mat2, out_dtype, out);
   }
@@ -344,7 +339,7 @@ at::Tensor& MmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return mm_out_dispatcher.DispatchConfigured(self, mat2, out);
   }
   auto result = MmImpl(self, mat2, out.scalar_type());
@@ -369,7 +364,7 @@ at::Tensor& BmmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return bmm_dtype_out_dispatcher.DispatchConfigured(
         self, mat2, out_dtype, out);
   }
@@ -383,7 +378,7 @@ at::Tensor& BmmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(self, mat2)) {
+  if (IsOrdinaryMatrixPair(self, mat2)) {
     return bmm_out_dispatcher.DispatchConfigured(self, mat2, out);
   }
   auto result = BmmImpl(self, mat2, out.scalar_type());
@@ -419,7 +414,7 @@ at::Tensor& AddmmDtypeOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(mat1, mat2)) {
+  if (IsOrdinaryMatrixPair(mat1, mat2)) {
     return addmm_dtype_out_dispatcher.DispatchConfigured(
         self, mat1, mat2, out_dtype, beta, alpha, out);
   }
@@ -436,7 +431,7 @@ at::Tensor& AddmmOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
-  if (HasVendorMatrixInput(mat1, mat2)) {
+  if (IsOrdinaryMatrixPair(mat1, mat2)) {
     return addmm_out_dispatcher.DispatchConfigured(
         self, mat1, mat2, beta, alpha, out);
   }
@@ -452,7 +447,7 @@ at::Tensor& AddmmInplace(
     const at::Tensor& mat2,
     const at::Scalar& beta,
     const at::Scalar& alpha) {
-  if (HasVendorMatrixInput(mat1, mat2)) {
+  if (IsOrdinaryMatrixPair(mat1, mat2)) {
     return addmm_inplace_dispatcher.DispatchConfigured(
         self, mat1, mat2, beta, alpha);
   }
