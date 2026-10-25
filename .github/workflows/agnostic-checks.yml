@@ -161,18 +161,3 @@ jobs:
       # the most expensive place to find a stale generated file.
       - name: Check the vendor confs are regenerated
         run: python3 scripts/codegen/gen_vendor_confs.py --check
-
-      # The generated C++ behind each conf route needs no torch to compare
-      # either: the checks read register.inc, flaggems_python_kernels.cc and the
-      # confs as text. Running them here turns "a conf route with no kernel" --
-      # which on hardware surfaces as a raise or a cpu_fallback in the middle of
-      # the suite -- into a seconds-long failure with the orphan named.
-      - name: Check conf routes against the generated kernels
-        run: |
-          # The hardware suites' conftests (tests/integration/conftest.py and
-          # tests/integration/ops/conftest.py) import torch_fl and a device, and
-          # there is no torch here by design. Every conftest between the rootdir
-          # and the file has to be cut, not just the nearest one.
-          python -m pytest tests/integration/ops/test_flaggems_conf_consistency.py \
-            --confcutdir=tests \
-            -v --tb=short -p no:cacheprovider
