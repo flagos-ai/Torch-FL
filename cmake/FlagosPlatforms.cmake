@@ -19,7 +19,6 @@
 # scope (and therefore to every add_subdirectory below it):
 #
 #   FLAGOS_KERNEL_SWITCHES            the five FLAGOS_BUILD_* names, in order
-#   FLAGOS_EXTRA_SWITCHES             table extra_switches (not kernel sets)
 #   FLAGOS_PLATFORM_LANGUAGES         project() language list
 #   FLAGOS_PLATFORM_VENDOR            the platform's vendor (apple, nvidia, ...)
 #   FLAGOS_ATEN_VENDOR_DIRS           accelerator keys owning an
@@ -123,10 +122,6 @@ endif()
 # regex matches nothing.
 
 flagos_json_list(FLAGOS_KERNEL_SWITCHES "${_flagos_platforms}" kernel_switches)
-# Switches that are not kernel sets (see extra_switches in the table): resolved,
-# pinned and refused like the kernel switches, but absent from KERNELS.
-flagos_json_list(FLAGOS_EXTRA_SWITCHES "${_flagos_platforms}" extra_switches)
-set(FLAGOS_ALL_SWITCHES ${FLAGOS_KERNEL_SWITCHES} ${FLAGOS_EXTRA_SWITCHES})
 flagos_json_list(FLAGOS_PLATFORM_LANGUAGES "${_flagos_platforms}"
     accelerators "${FLAGOS_ACCELERATOR}" project_languages)
 
@@ -183,7 +178,7 @@ string(JSON FLAGOS_BUNDLE_LIBDIR GET "${_flagos_platforms}"
 # combination). Both come from the table, so a direct cmake invocation resolves
 # the same kernel set setup.py would.
 function(flagos_apply_platform_kernel_policy)
-  foreach(_switch IN LISTS FLAGOS_ALL_SWITCHES)
+  foreach(_switch IN LISTS FLAGOS_KERNEL_SWITCHES)
     string(JSON _default GET "${_flagos_platforms}"
            accelerators "${FLAGOS_ACCELERATOR}" kernel_defaults "${_switch}")
     if(NOT ${_switch}_EXPLICIT)

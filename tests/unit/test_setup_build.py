@@ -145,7 +145,7 @@ def test_iluvatar_manifest_records_official_cpu_runtime(
 def clean_kernel_env(monkeypatch):
     """No build switch inherited from the ambient environment."""
     monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
-    for name in KERNEL_SWITCHES + ("FLAGOS_SOFT_LOWP",):
+    for name in KERNEL_SWITCHES:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -323,8 +323,7 @@ def test_default_kernel_set_per_accelerator(
     namespace, _ = _load_setup(monkeypatch)
     resolved = _switches(namespace, accelerator)
     names = namespace["KERNEL_SET_NAME"]
-    sets = {switch for switch in resolved if switch in names}
-    assert {names[switch] for switch in sets if resolved[switch]} == expected
+    assert {names[switch] for switch, on in resolved.items() if on} == expected
 
 
 @pytest.mark.parametrize(
@@ -411,7 +410,7 @@ def test_kernel_switch_uses_the_shared_truth_table(monkeypatch, clean_kernel_env
 
 
 def test_cmake_kernel_set_names_match_the_build_record(monkeypatch):
-    """csrc/CMakeLists.txt builds FLAGOS_BUILTIN_KERNELS from the same set names.
+    """csrc/CMakeLists.txt builds FLAGOS_BUILTIN_KERNELS from the same five set names.
 
     The names are spelled in CMake and in KERNEL_SET_NAME; the definition is what
     lets a dispatch failure say "this kernel set was not compiled into this
@@ -427,39 +426,6 @@ def test_cmake_kernel_set_names_match_the_build_record(monkeypatch):
         block,
     )
     assert dict(pairs) == namespace["KERNEL_SET_NAME"]
-
-
-def test_cmake_resolves_the_table_switches(monkeypatch):
-    """CMake resolves, pins and refuses the same switches setup.py does.
-
-    The kernel sets and the extra switches share one resolution loop, so a
-    switch present in only one of the two tables would be resolved on one side
-    and left at its option() default on the other -- the drift that put the
-    soft-lowp prelude into builds whose sources had been filtered out.
-    """
-    table = _platform_table()
-    cmake = (ROOT / "cmake" / "FlagosPlatforms.cmake").read_text(encoding="utf-8")
-    assert (
-        'flagos_json_list(FLAGOS_EXTRA_SWITCHES "${_flagos_platforms}" extra_switches)'
-        in cmake
-    )
-    assert (
-        "set(FLAGOS_ALL_SWITCHES ${FLAGOS_KERNEL_SWITCHES} ${FLAGOS_EXTRA_SWITCHES})"
-    ) in cmake
-    assert "foreach(_switch IN LISTS FLAGOS_ALL_SWITCHES)" in cmake
-    root = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
-    assert "foreach(_switch IN LISTS FLAGOS_ALL_SWITCHES)" in root
-    setup = (ROOT / "setup.py").read_text(encoding="utf-8")
-    assert (
-        'EXTRA_SWITCHES = tuple(_platform_table().get("extra_switches", ()))' in setup
-    )
-    assert "for name in KERNEL_SWITCHES + EXTRA_SWITCHES:" in setup
-    # Every resolved switch has a default on every platform: the pin check reads
-    # it, and a missing one resolves to the all-ON seed.
-    for accelerator, row in table["accelerators"].items():
-        assert set(row["kernel_defaults"]) == set(table["kernel_switches"]) | set(
-            table["extra_switches"]
-        ), accelerator
 
 
 def test_impossible_kernel_switch_raises_instead_of_being_ignored(
@@ -512,7 +478,6 @@ def test_platform_table_is_internally_consistent():
         "pins",
     )
     for accelerator, row in table["accelerators"].items():
-        table_switches = set(switches) | set(table["extra_switches"])
         for field in required:
             assert field in row, (accelerator, field)
         assert isinstance(row["vendor_torch_libraries"], bool), accelerator
@@ -523,12 +488,12 @@ def test_platform_table_is_internally_consistent():
         if gate is not None:
             assert row["vendor_torch_libraries"], accelerator
             assert gate in switches, (accelerator, gate)
-        assert set(row["kernel_defaults"]) == table_switches, accelerator
+        assert set(row["kernel_defaults"]) == set(switches), accelerator
         assert all(
             isinstance(value, bool) for value in row["kernel_defaults"].values()
         ), accelerator
         for name, pin in row["pins"].items():
-            assert name in table_switches, (accelerator, name)
+            assert name in switches, (accelerator, name)
             assert pin["value"] is row["kernel_defaults"][name], (accelerator, name)
             assert pin["reason"], (accelerator, name)
         # CUDA-toolchain platforms enable CUDA; every other platform builds host
@@ -548,13 +513,10 @@ def test_cmake_declares_every_kernel_switch():
     exactly the drift this fixed: FLAGOS_BUILD_TILEOPS was missing from the root
     explicit-request loop, so a contradictory -D was not rejected there.
     """
-    table = _platform_table()
-    switches = set(table["kernel_switches"]) | set(table["extra_switches"])
+    switches = set(_platform_table()["kernel_switches"])
     for relative in ("CMakeLists.txt", "csrc/CMakeLists.txt"):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        # Only the table's switches are counted: setup.py also takes
-        # FLAGOS_BUILD_JOBS and friends, which are not build switches.
-        declared = set(re.findall(r"^option\((FLAGOS_\w+)", text, re.M)) & switches
+        declared = set(re.findall(r"^option\((FLAGOS_BUILD_\w+)", text, re.M))
         assert declared == switches, (relative, declared ^ switches)
 
 

@@ -153,9 +153,6 @@ def _platform_entry(accelerator: str) -> dict:
 # env-name -> -D-name -> record-name translation exists to fall out of sync.
 KERNEL_SWITCHES = tuple(_platform_table()["kernel_switches"])
 KERNEL_SET_NAME = dict(_platform_table()["kernel_set_names"])
-# Build switches that are not kernel sets: resolved, pinned and recorded like
-# the five above, but absent from KERNELS because nothing dispatches to them.
-EXTRA_SWITCHES = tuple(_platform_table().get("extra_switches", ()))
 
 # Directory inside the wheel holding a bundled forked libtorch, for the backends
 # that ship one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate
@@ -679,7 +676,7 @@ def _kernel_switches(accelerator: str) -> dict[str, bool]:
     # reading it as "on" and compiling a set the user never asked for.
     env = _env_module()
     pinned = _pinned_kernel_switches(accelerator)
-    for name in KERNEL_SWITCHES + EXTRA_SWITCHES:
+    for name in KERNEL_SWITCHES:
         requested = env.flag(name, resolved[name])
         if name in pinned and requested != pinned[name]:
             raise ValueError(
