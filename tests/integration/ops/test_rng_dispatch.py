@@ -615,6 +615,12 @@ class TestRngSeedSource:
     def test_dropout_forward_backward_contract(self):
         torch.flagos.manual_seed(SEED)
         value = torch.ones((256,), device=DEVICE)
+        # native_dropout draws from `random_`, so a wheel that does not serve
+        # that draw cannot run the contract at all (CUDA lane, run
+        # 40148742285); the probe is the same one the catalogue uses.
+        _skip_if_random_leaves_the_device(
+            lambda: torch.ops.aten.native_dropout(value, 0.25, True)
+        )
         output, mask = torch.ops.aten.native_dropout(value, 0.25, True)
         assert output.device == torch.device(DEVICE)
         assert mask.device == torch.device(DEVICE)
@@ -685,6 +691,7 @@ class TestRngMultiDevice:
             "randperm": lambda: torch.randperm(50, device=dev),
         }
         op = ops[name]
+        _skip_if_random_leaves_the_device(op)
         assert torch.equal(_draw(op, SEED), _draw(op, SEED))
         assert not torch.equal(_draw(op, SEED), _draw(op, OTHER_SEED))
 
