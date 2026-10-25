@@ -152,3 +152,22 @@ jobs:
       - name: Run FlagCICD entry contract tests
         if: hashFiles('tests/unit/test_flagcicd_entry.py') != ''
         run: python -m pytest tests/unit/test_flagcicd_entry.py -v --tb=short -p no:cacheprovider
+
+      # Every vendor conf must be exactly what its generator emits. The
+      # generator needs only the standard library (it reads codegen_ops.py and
+      # backend_coverage.py as data, precisely so it can run where torchgen and
+      # torch are absent), so this costs seconds here -- and without it a conf
+      # edit is only caught once a hardware runner has built a wheel, which is
+      # the most expensive place to find a stale generated file.
+      - name: Check the vendor confs are regenerated
+        run: python3 scripts/codegen/gen_vendor_confs.py --check
+
+      # The generated C++ behind each conf route needs no torch to compare
+      # either: the checks read register.inc, flaggems_python_kernels.cc and the
+      # confs as text. Running them here turns "a conf route with no kernel" --
+      # which on hardware surfaces as a raise or a cpu_fallback in the middle of
+      # the suite -- into a seconds-long failure with the orphan named.
+      - name: Check conf routes against the generated kernels
+        run: |
+          python -m pytest tests/integration/ops/test_flaggems_conf_consistency.py \
+            -v --tb=short -p no:cacheprovider

@@ -172,26 +172,19 @@ void CheckDevice(const at::Tensor& tensor, const char* name) {
       tensor.device());
 }
 
-// The operand dtypes an ordinary route can serve. The software path owns
-// FP8/FP4 and only those, so every other dtype leaves it exactly the way addmm
-// already leaves an ordinary addmm: on the route the conf names.
+// The software path owns FP8/FP4 and only those. Any other operand pair leaves
+// it the way it entered: on the route the conf names. That is what the generated
+// wrapper would have called had its prelude not fired -- FlagGems on MetaX,
+// boxing everywhere else -- and on a pair a vendor cannot take it is also the
+// only option, since this path has nothing to compute with (see
+// CheckMatrixInputs below).
 //
 // The wrapper cannot make that call itself. The generated gates live in a shared
 // .inc that runs with no idea whether the build compiles the software path at
 // all, so they read `IsLowPrecision(dtype)` and every FLAGOS_SOFT_LOWP platform
-// -- MetaX and DCU -- takes the branch. Once here, a float32 bmm that started on
-// FlagGems (backends_metax.conf) ended on the boxing kernel and was refused by
-// CheckMatrixInputs below: "soft-lowp matrix kernel requires a low-precision
-// input" (metax CI, run 40189509687). Vendors are not expected to accept the
-// low-precision types, but their float GEMMs are their own business.
-bool IsVendorMatrixDtype(c10::ScalarType dtype) {
-  return at::isFloatingType(dtype) || at::isComplexType(dtype);
-}
-
+// -- MetaX and DCU -- takes the branch.
 bool HasVendorMatrixInput(const at::Tensor& self, const at::Tensor& mat2) {
-  return !HasLowpInput(self) && !HasLowpInput(mat2) &&
-      (IsVendorMatrixDtype(self.scalar_type()) ||
-       IsVendorMatrixDtype(mat2.scalar_type()));
+  return !HasLowpInput(self) && !HasLowpInput(mat2);
 }
 
 void CheckMatrixInputs(const at::Tensor& self, const at::Tensor& mat2) {
@@ -285,11 +278,12 @@ at::Tensor AddmmImpl(
     c10::ScalarType out_dtype) {
   // Some composite callers (notably linear_out) can reach this helper after
   // their own boxing/decomposition even when the matrix operands are ordinary
-  // dtypes. Keep that path on a fused backend instead of applying the
-  // low-precision-only validation below.
-  if (!HasLowpInput(mat1) && !HasLowpInput(mat2)) {
-    return addmm_dispatcher.DispatchBackend(
-        Backend::kBoxing, self, mat1, mat2, beta, alpha);
+  // dtypes. Keep that path on a fused backend, the one the conf names, instead
+  // of applying the low-precision-only validation below. It used to name the
+  // boxing slot outright, which put a float64 addmm on a kernel that rejects
+  // it.
+  if (HasVendorMatrixInput(mat1, mat2)) {
+    return addmm_dispatcher.DispatchConfigured(self, mat1, mat2, beta, alpha);
   }
   CheckMatrixInputs(mat1, mat2);
   auto bias = self;
