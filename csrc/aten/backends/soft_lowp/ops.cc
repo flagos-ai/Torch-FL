@@ -221,6 +221,8 @@ c10::ScalarType DefaultOutputDtype(const at::Tensor& self, c10::ScalarType reque
 
 } // namespace
 
+namespace {
+
 at::Tensor MmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
