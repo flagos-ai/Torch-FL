@@ -30,20 +30,25 @@ from profiler_support import (
 
 pytestmark = pytest.mark.profiler
 
-# The one platform whose matmul is measured to report no device time to the
-# operator that dispatched it:
+# The platforms whose matmul is measured to report no device time to the
+# operator that dispatched it, each for an `mm`/`bmm` route that is not a
+# vendor GEMM:
 #
 #   cuda    #272 moved `mm`/`bmm` from `cuda` to `flaggems`, and FlagGems' Triton
 #           matmul does not surface device time on the launching op (FlagGems
 #           issue #6223). Before that reroute the case passed on CUDA.
+#   ppu     `backends_thead.conf` routes `mm`, `mm.out` and `bmm` to `none` --
+#           the same reroute, for a platform with no native mm to fall back to
+#           (PPU lane, run 40144165031). The operator still runs (cpu_fallback),
+#           so the trace has `aten::matmul` and `aten::mm`, both at 0.0 s.
 #
 # The condition is written down rather than left implicit because `xfail` runs
 # the test body and only absorbs the outcome -- an unconditional marker is not a
 # skip, it is a blanket licence to fail, and it was covering four platforms this
-# defect is not about. DCU, PPU and MUSA have each been measured passing the
+# defect is not about. DCU and MUSA have each been measured passing the
 # assertion below under the old unconditional marker (`1 xpassed` in their
 # profiler-contract runs), so they are expected to stay green now that it
-# reports, and a regression on any of them fails the build the way it should.
+# reports, and a regression on either fails the build the way it should.
 #
 # Ascend was the fourth and came off this list in #425: its tracer popped the
 # external-correlation stack with a null out-parameter, which CANN rejects
@@ -51,7 +56,7 @@ pytestmark = pytest.mark.profiler
 # A source guard on the call shape lives in
 # tests/unit/test_device_tracer_correlation.py; the behavioural assertion is
 # this case, which now runs for real on the Ascend job.
-_MATMUL_DEVICE_TIME_XFAIL = detect_platform() == "cuda"
+_MATMUL_DEVICE_TIME_XFAIL = detect_platform() in ("cuda", "ppu")
 
 
 @pytest.mark.anyplatform
