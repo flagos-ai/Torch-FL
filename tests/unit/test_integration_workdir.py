@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from manifest_composer import composed_steps, platform_names
+from manifest_composer import boxing_platforms, composed_steps, platform_names
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -173,8 +173,8 @@ def _copied_paths(run_script: str) -> list[str]:
     return copied
 
 
-def _manifest_commands(platform: str) -> list[str]:
-    """The command of every group one platform runs, in the order it runs them.
+def _manifest_commands(platform: str, boxing_lane: bool = False) -> list[str]:
+    """The command of every group one platform's build runs, in order.
 
     Composed from the shared manifest rather than read out of the platform's
     config, which is what the pipeline itself does: the loader job calls
@@ -184,7 +184,9 @@ def _manifest_commands(platform: str) -> list[str]:
     script too, but the workflow runs that one outside this workspace, so it is
     not among these.
     """
-    return [group["command"] for group in composed_steps(platform)]
+    return [
+        group["command"] for group in composed_steps(platform, boxing_lane=boxing_lane)
+    ]
 
 
 def _script_references(platform: str) -> list[tuple[str, str]]:
@@ -439,12 +441,18 @@ def _selection_of(command: str) -> _Selection | None:
 
 
 def _manifest_selections(platform: str) -> list[_Selection]:
-    """What every pytest invocation in one platform's manifest runs."""
+    """What every pytest invocation in one platform's manifest runs.
+
+    A boxing platform runs two builds, and each composes its own selection of
+    the same manifest; a file counts as reached when either build runs it.
+    """
     selections = []
-    for command in _manifest_commands(platform):
-        selection = _selection_of(command)
-        if selection is not None:
-            selections.append(selection)
+    builds = (False, True) if platform in boxing_platforms() else (False,)
+    for boxing_lane in builds:
+        for command in _manifest_commands(platform, boxing_lane=boxing_lane):
+            selection = _selection_of(command)
+            if selection is not None:
+                selections.append(selection)
     return selections
 
 
