@@ -172,6 +172,18 @@ class Dispatcher {
     return fn(std::forward<Args>(args)...);
   }
 
+  // Route exactly the way operator() would, without the generated wrapper's
+  // dtype prelude in front of it. The software low-precision matrix path needs
+  // this: its wrapper takes every FLAGOS_SOFT_LOWP build's floating-point GEMMs
+  // as well as the FP8/FP4 ones (the generated .inc cannot tell whether this
+  // build compiles the software path), and the software path has to hand the
+  // ordinary ones back to whatever the conf names -- FlagGems on MetaX, boxing
+  // elsewhere -- rather than to one hard-coded slot.
+  template <typename... Args>
+  decltype(auto) DispatchConfigured(Args&&... args) const {
+    return operator()(std::forward<Args>(args)...);
+  }
+
   template <typename... Args>
   decltype(auto) DispatchAs(const std::string& op_name, Args&&... args) const {
     auto backend = GetBackendForOp(op_name);

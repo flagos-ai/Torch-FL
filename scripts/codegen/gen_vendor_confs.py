@@ -760,6 +760,7 @@ BOXING_TRITON_GAPS = {
         "_fused_rms_norm",
         "add.Tensor",
         "alias_copy.out",
+        "baddbmm.out",
         "bmm",
         "bmm.out",
         "cat",

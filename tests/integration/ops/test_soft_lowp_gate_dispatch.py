@@ -193,6 +193,26 @@ class TestSoftLowpGateLeavesFloatPathsAlone:
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.anyplatform
+    def test_bmm_and_addmm_out_still_run(self, dtype):
+        """The .out/.inplace spellings reach the conf's route with a real out."""
+        torch.manual_seed(0)
+        a = torch.randn(2, 8, 12, device=DEVICE, dtype=dtype)
+        b = torch.randn(2, 12, 4, device=DEVICE, dtype=dtype)
+
+        out = torch.empty(2, 8, 4, device=DEVICE, dtype=dtype)
+        assert torch.bmm(a, b, out=out) is out
+        torch.testing.assert_close(out, torch.bmm(a, b), atol=0, rtol=0)
+
+        bias = torch.zeros(8, 4, device=DEVICE, dtype=dtype)
+        acc = bias.clone().addmm_(a[0], b[0])
+        torch.testing.assert_close(acc, bias.addmm(a[0], b[0]), atol=0, rtol=0)
+
+        mm_out = torch.empty(8, 4, device=DEVICE, dtype=dtype)
+        assert torch.mm(a[0], b[0], out=mm_out) is mm_out
+        torch.testing.assert_close(mm_out, torch.mm(a[0], b[0]), atol=0, rtol=0)
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.anyplatform
     def test_bmm_and_addmm_still_run(self, dtype):
         torch.manual_seed(0)
         a = torch.randn(2, 8, 12, device=DEVICE, dtype=dtype)

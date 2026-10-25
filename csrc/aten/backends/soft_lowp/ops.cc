@@ -172,6 +172,28 @@ void CheckDevice(const at::Tensor& tensor, const char* name) {
       tensor.device());
 }
 
+// The operand dtypes an ordinary route can serve. The software path owns
+// FP8/FP4 and only those, so every other dtype leaves it exactly the way addmm
+// already leaves an ordinary addmm: on the route the conf names.
+//
+// The wrapper cannot make that call itself. The generated gates live in a shared
+// .inc that runs with no idea whether the build compiles the software path at
+// all, so they read `IsLowPrecision(dtype)` and every FLAGOS_SOFT_LOWP platform
+// -- MetaX and DCU -- takes the branch. Once here, a float32 bmm that started on
+// FlagGems (backends_metax.conf) ended on the boxing kernel and was refused by
+// CheckMatrixInputs below: "soft-lowp matrix kernel requires a low-precision
+// input" (metax CI, run 40189509687). Vendors are not expected to accept the
+// low-precision types, but their float GEMMs are their own business.
+bool IsVendorMatrixDtype(c10::ScalarType dtype) {
+  return at::isFloatingType(dtype) || at::isComplexType(dtype);
+}
+
+bool HasVendorMatrixInput(const at::Tensor& self, const at::Tensor& mat2) {
+  return !HasLowpInput(self) && !HasLowpInput(mat2) &&
+      (IsVendorMatrixDtype(self.scalar_type()) ||
+       IsVendorMatrixDtype(mat2.scalar_type()));
+}
+
 void CheckMatrixInputs(const at::Tensor& self, const at::Tensor& mat2) {
   TORCH_CHECK(HasLowpInput(self) || HasLowpInput(mat2),
               "soft-lowp matrix kernel requires a low-precision input");
@@ -228,6 +250,9 @@ at::Tensor MmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return mm_dispatcher.DispatchConfigured(self, mat2);
+  }
   CheckMatrixInputs(self, mat2);
   auto lhs = DecodeIfNeeded(self, false);
   auto rhs = DecodeIfNeeded(mat2, true);
@@ -240,6 +265,9 @@ at::Tensor BmmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return bmm_dispatcher.DispatchConfigured(self, mat2);
+  }
   CheckMatrixInputs(self, mat2);
   auto lhs = DecodeBatchIfNeeded(self, false);
   auto rhs = DecodeBatchIfNeeded(mat2, true);
@@ -291,6 +319,9 @@ at::Tensor MmDtype(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return mm_dtype_dispatcher.DispatchConfigured(self, mat2, out_dtype);
+  }
   return MmImpl(self, mat2, out_dtype);
 }
 
@@ -299,6 +330,10 @@ at::Tensor& MmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return mm_dtype_out_dispatcher.DispatchConfigured(
+        self, mat2, out_dtype, out);
+  }
   auto result = MmImpl(self, mat2, out_dtype);
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp mm.dtype_out shape mismatch");
   out.copy_(result);
@@ -309,6 +344,9 @@ at::Tensor& MmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return mm_out_dispatcher.DispatchConfigured(self, mat2, out);
+  }
   auto result = MmImpl(self, mat2, out.scalar_type());
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp mm.out shape mismatch");
   out.copy_(result);
@@ -331,6 +369,10 @@ at::Tensor& BmmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return bmm_dtype_out_dispatcher.DispatchConfigured(
+        self, mat2, out_dtype, out);
+  }
   auto result = BmmImpl(self, mat2, out_dtype);
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp bmm.dtype_out shape mismatch");
   out.copy_(result);
@@ -341,6 +383,9 @@ at::Tensor& BmmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
+  if (HasVendorMatrixInput(self, mat2)) {
+    return bmm_out_dispatcher.DispatchConfigured(self, mat2, out);
+  }
   auto result = BmmImpl(self, mat2, out.scalar_type());
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp bmm.out shape mismatch");
   out.copy_(result);
@@ -374,6 +419,10 @@ at::Tensor& AddmmDtypeOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
+  if (HasVendorMatrixInput(mat1, mat2)) {
+    return addmm_dtype_out_dispatcher.DispatchConfigured(
+        self, mat1, mat2, out_dtype, beta, alpha, out);
+  }
   auto result = AddmmImpl(self, mat1, mat2, beta, alpha, out_dtype);
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp addmm.dtype_out shape mismatch");
   out.copy_(result);
@@ -387,6 +436,10 @@ at::Tensor& AddmmOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
+  if (HasVendorMatrixInput(mat1, mat2)) {
+    return addmm_out_dispatcher.DispatchConfigured(
+        self, mat1, mat2, beta, alpha, out);
+  }
   auto result = AddmmImpl(self, mat1, mat2, beta, alpha, out.scalar_type());
   TORCH_CHECK(out.sizes() == result.sizes(), "soft-lowp addmm.out shape mismatch");
   out.copy_(result);
@@ -399,6 +452,10 @@ at::Tensor& AddmmInplace(
     const at::Tensor& mat2,
     const at::Scalar& beta,
     const at::Scalar& alpha) {
+  if (HasVendorMatrixInput(mat1, mat2)) {
+    return addmm_inplace_dispatcher.DispatchConfigured(
+        self, mat1, mat2, beta, alpha);
+  }
   auto result = AddmmImpl(self, mat1, mat2, beta, alpha, self.scalar_type());
   self.copy_(result);
   return self;

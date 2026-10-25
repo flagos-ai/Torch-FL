@@ -2359,10 +2359,17 @@ FLAGGEMS_RECURSIVE_FALLBACK: set[str] = set()
 FLAGGEMS_RUNTIME_BROKEN = {
     # (1) gems `out` is required keyword-only -- codegen fixed, pending
     # a DCU re-test before these come off the list.
+    #
+    # `baddbmm.out` came off this list unmeasured, on a routing reason rather
+    # than a kernel fix: MetaX's conf now pins it to the boxing kernel
+    # (BOXING_TRITON_GAPS["metax"], where the same triton-metax SPLIT_K
+    # rejection that pins mm/bmm lives), so the FlagGems overload here is kept
+    # for FLAGOS_OP_baddbmm__out=flaggems and no platform routes it by default.
+    # That is not the same as the DCU re-test the other entries are waiting on,
+    # and it should get one before any conf sends it back to the Python path.
     "addcdiv.out",
     "addcmul.out",
     "as_strided_copy.out",
-    "baddbmm.out",
     "logit.out",
     "_log_softmax.out",
     "_log_softmax_backward_data.out",
