@@ -244,8 +244,13 @@ class TestCopyTransfer:
                     device_weight,
                     device_bias,
                 ).cpu()
+            # Same weights, same inputs, two summation orders. Printing the
+            # difference as well as the values matters: a one-ulp disagreement
+            # renders as two identical tensors, and the reader needs to know
+            # it is looking at the last bit rather than at a wrong result.
             assert torch.allclose(actual, reference), (
-                f"linear on {device} differs from CPU: {actual} vs {reference}"
+                f"linear on {device} differs from CPU: {actual} vs {reference} "
+                f"(max abs diff {(actual - reference).abs().max().item():.3g})"
             )
             del actual, reference, inputs, device_weight, device_bias
 
