@@ -20,6 +20,7 @@
     "FLAGOS_BUILD_FLAGGEMS_CPP",
     "FLAGOS_BUILD_TILEOPS"
   ],
+  "extra_switches": ["FLAGOS_SOFT_LOWP"],
 
   "kernel_set_names": {
     "FLAGOS_BUILD_VENDOR": "vendor",
@@ -28,6 +29,16 @@
     "FLAGOS_BUILD_FLAGGEMS_CPP": "flaggems_cpp",
     "FLAGOS_BUILD_TILEOPS": "tileops"
   },
+
+  "_extra_switches_comment": [
+    "extra_switches: build switches that are not kernel sets. They are resolved,",
+    "pinned and refused the same way (an explicit -D or environment value may not",
+    "contradict the platform) and their resolved value goes to the build record,",
+    "but they do not appear in KERNELS: nothing dispatches to them. FLAGOS_SOFT_LOWP",
+    "is the FP8/FP4 software matrix path the generated mm/addmm/bmm wrappers",
+    "return into; it is one switch for both halves (the prelude macro and the",
+    "sources it calls), never a platform constant."
+  ],
 
   "_accelerators_comment": [
     "kernel_defaults: what the platform builds before any explicit FLAGOS_BUILD_*",
@@ -109,7 +120,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": true,
-        "FLAGOS_BUILD_TILEOPS": true
+        "FLAGOS_BUILD_TILEOPS": true,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {}
     },
@@ -138,7 +150,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {}
     },
@@ -157,7 +170,12 @@
         "",
         "Boxing is now an explicit opt-in (-DFLAGOS_BUILD_BOXING=ON /",
         "FLAGOS_BUILD_BOXING=1); the default wheel compiles no boxing kernels and",
-        "needs neither the MACA libtorch bundle nor a vendor torch package."
+        "needs neither the MACA libtorch bundle nor a vendor torch package.",
+        "",
+        "FLAGOS_SOFT_LOWP is on: one switch for both halves of the FP8/FP4",
+        "software matrix path -- the generated dtype prelude and the sources it",
+        "returns into -- so they cannot land on opposite sides of an",
+        "architecture-specific build."
       ],
       "project_languages": ["CXX", "C"],
       "runtime_dir": "metax",
@@ -175,7 +193,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": true
       },
       "pins": {}
     },
@@ -208,7 +227,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_VENDOR": {
@@ -259,7 +279,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_VENDOR": {
@@ -299,7 +320,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_VENDOR": {
@@ -342,7 +364,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_VENDOR": {
@@ -378,7 +401,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": true
       },
       "pins": {
         "FLAGOS_BUILD_FLAGGEMS_CPP": {
@@ -410,7 +434,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {}
     },
@@ -437,7 +462,8 @@
         "FLAGOS_BUILD_FLAGGEMS": true,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_VENDOR": {
@@ -476,7 +502,8 @@
         "FLAGOS_BUILD_FLAGGEMS": false,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_FLAGGEMS_CPP": {
@@ -513,7 +540,8 @@
         "FLAGOS_BUILD_FLAGGEMS": false,
         "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
-        "FLAGOS_BUILD_TILEOPS": false
+        "FLAGOS_BUILD_TILEOPS": false,
+        "FLAGOS_SOFT_LOWP": false
       },
       "pins": {
         "FLAGOS_BUILD_FLAGGEMS_CPP": {

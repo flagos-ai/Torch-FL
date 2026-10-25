@@ -19,6 +19,10 @@ option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via P
 option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
+# The FP8/FP4 software matrix path. Not a kernel set of its own: it is the
+# implementation the generated mm/addmm/bmm wrappers return into, so the source
+# filter and the macro below are the same switch.
+option(FLAGOS_SOFT_LOWP "Build the FP8/FP4 software matrix path (MetaX, DCU)" OFF)
 
 file(GLOB_RECURSE SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
@@ -288,6 +292,15 @@ if(NOT _needs_python_op_caller)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/flagos/.*")
 endif()
 
+# The FP8/FP4 software matrix path is a build input, not a platform constant.
+# Its call sites used to sit under two gates -- the generated wrapper prelude
+# under `FLAGOS_SOFT_LOWP`, the implementation under this source list -- so a
+# build could carry the prelude and not the code it returns into. One switch
+# decides both: no sources and no prelude, or both.
+if(NOT FLAGOS_SOFT_LOWP)
+  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/soft_lowp/.*")
+endif()
+
 set(_torch_fl_sources ${SOURCE_FILES})
 
 add_library(${LIBRARY_NAME} SHARED ${_torch_fl_sources})
@@ -459,6 +472,12 @@ if(FLAGOS_BUILD_TILEOPS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
 endif()
 
+# The prelude half of the software matrix path. Compiled in when its sources are,
+# only (the two halves are one switch).
+if(FLAGOS_SOFT_LOWP)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_SOFT_LOWP=1)
+endif()
+
 # The kernel sets this wheel actually contains, as one comma-separated list, so
 # a dispatch failure can say whether the backend is missing because this build
 # never compiled it rather than leaving the user to guess. Names match
@@ -518,10 +537,8 @@ if(_flagos_is_metax)
   # Context.h allow_tf32_cudnn). Without it the headers hit static_assert(0).
   # MCPTI callback ids use a different namespace from NVIDIA CUPTI ids.
   target_compile_definitions(${LIBRARY_NAME} PRIVATE
-    FLAGOS_METAX_MCPTI=1
-    FLAGOS_SOFT_LOWP=1)
+    FLAGOS_METAX_MCPTI=1)
 elseif(_flagos_is_dcu)
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_SOFT_LOWP=1)
   # DTK's libtorch_hip.so carries no index-value bounds check: index.Tensor,
   # index_select, index_fill, index_add, index_copy and index_reduce all accept
   # an out-of-range index and read or write outside the tensor (silently wrong

@@ -65,7 +65,7 @@ _flagos_resolve_platforms()
 # a contradictory -D instead of force-set()ting it away: setup.py resolves the
 # same combination into the build record, so a switch quietly overridden here
 # would ship a wheel describing a kernel set it does not contain.
-foreach(_switch IN LISTS FLAGOS_KERNEL_SWITCHES)
+foreach(_switch IN LISTS FLAGOS_ALL_SWITCHES)
   if(DEFINED ${_switch})
     set(${_switch}_EXPLICIT TRUE)
   endif()
@@ -77,6 +77,10 @@ option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via P
 option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
+# The FP8/FP4 software matrix path. Not a kernel set of its own: it is the
+# implementation the generated mm/addmm/bmm wrappers return into, so the source
+# filter and the macro below are the same switch.
+option(FLAGOS_SOFT_LOWP "Build the FP8/FP4 software matrix path (MetaX, DCU)" OFF)
 
 # Pin one kernel build switch for the accelerator selected below.
 #
