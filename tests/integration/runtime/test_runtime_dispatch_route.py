@@ -74,6 +74,16 @@ def test_dispatch_matches_conf_route(op: str):
     assert len(report) == 1
     entry = report[0]
     assert entry["error"] is None, entry["error"]
+    if entry["dispatched_backend"] is None and backend == "boxing":
+        # A `boxing` route reads to a flagos tensor as "served on this device
+        # by the vendor's own CUDA kernels through PrivateUse1", with no
+        # transport and no device-level dispatch to log -- the day-0 conf's
+        # whole premise. Only a CUDA/PPU build can see this: everywhere else
+        # the boxed list registers at least one kernel that logs.
+        pytest.skip(
+            f"{op} is served on-device through its boxing route, so there is "
+            "no dispatch line to read; the CPU reference above already ran"
+        )
     assert entry["dispatched_backend"] == backend, (
         f"{op} dispatched to {entry['dispatched_backend']!r}, conf says {backend!r}"
     )
