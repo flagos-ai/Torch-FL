@@ -91,7 +91,8 @@ wheel_artifact_name: wheel-ppu
 #
 #   vendor lane (this file's `platform:` name)  the default wheel: stock +cpu
 #       torch, FlagGems routes compiled, backends_thead.conf as it ships. No
-#       boxing kernels.
+#       boxing kernels, and no lib_thead/ bundle -- that dir is how torch_fl
+#       recognises a PPU-core wheel, and this lane is not one.
 #
 #   boxing lane (`thead-boxing`)  FLAGOS_BUILD_BOXING=1: the generated CUDA
 #       boxing kernels plus PPU's own libtorch staged into lib_thead/ and
@@ -99,10 +100,10 @@ wheel_artifact_name: wheel-ppu
 #       against the day-0 conf backends_thead_boxing.conf that routes the ops
 #       this build registers without a FlagGems kernel to `boxing`.
 #
-# Both lanes bundle PPU's libtorch into lib_thead/: it is the tree the PPU
-# build links into, not something the boxing kernels add. What selects it at
-# import -- and so what makes torch.version.cuda read 13.0 -- is the boxing
-# kernel set.
+# Only the boxing lane bundles PPU's libtorch into lib_thead/: it is the tree
+# the PPU build links into, and it is what makes the wheel identify itself as a
+# PPU wheel (torch.version.cuda then reads 13.0). The vendor lane is the stock
+# +cpu wheel a `pip install` gets, judged by environment_check below.
 #
 # `boxing_lane: true` is what schedules the second job
 # (.github/scripts/ci/generate_matrix.py reads it).
@@ -113,7 +114,10 @@ environment_check:
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
-  require_package_files:
+  # The vendor lane ships no lib_thead/ bundle: that directory is how torch_fl
+  # identifies a PPU-core wheel, so a bundled one would make this stock +cpu
+  # wheel select the PPU libtorch and read cuda 13.0 (run 40168685639).
+  forbid_package_files:
     - lib_thead/libtorch_cuda.so
   require_build_kernels:
     - flaggems

@@ -420,10 +420,15 @@ fi
 # Bundle PPU core+CUDA+MKL .so into torch_fl/lib_thead/ and rewrite the plugin
 # RPATH. setup.py does not auto-invoke this; mirrors the metax pattern. The
 # bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
-# Both lanes bundle it: the PPU build links into the vendor libtorch (the
-# vendor torch tree it resolved above) rather than loading stock torch at
-# import, while the boxing kernels are what only the boxing lane adds.
-if [[ "${BOXING_LANE:-}" != "1" || "${FLAGOS_BUILD_BOXING:-0}" == "1" ]]; then
+#
+# Boxing lane only. `torch_fl` recognises a PPU wheel by `lib_thead/libtorch_cuda.so`
+# (torch_fl/__init__.py:_is_ppu_build), and the presence of that dir is what makes
+# import select the PPU core and reconcile `torch.version.cuda`. The vendor lane
+# is the default FlagGems-primary wheel, which ships neither (setup.py honours
+# the PPU row's `vendor_torch_gate: FLAGOS_BUILD_BOXING`); bundling here made
+# that lane a PPU-core wheel and its environment check read cuda "13.0" on a
+# wheel advertised as stock +cpu torch (run 40168685639).
+if [[ "${BOXING_LANE:-}" == "1" ]]; then
   bash scripts/vendor/bundle_thead_libtorch.sh
 fi
 
