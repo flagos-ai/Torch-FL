@@ -656,9 +656,17 @@ def _patch_device_properties() -> None:
             # runtimes keep the flagos device here: there is no torch.cuda to
             # look up, and our own interface is registered for flagos.
             device = torch.device("cuda", device.index or 0)
-        elif is_flagos and vendor in ("musa", "gcu", "kunlunxin", "tsingmicro"):
+        elif is_flagos and vendor in (
+            "mthreads",
+            "enflame",
+            "kunlunxin",
+            "tsingmicro",
+        ):
             # These vendor implementations of DeviceProperties.create cannot
-            # read a flagos device, so build the record from our interface.
+            # read a flagos device, so build the record from our interface. The
+            # names are the vendor's, the vocabulary ``profile.vendor`` speaks;
+            # platform ids here would miss GCU and MUSA and fall through to
+            # inductor's CUDA-shaped record.
 
             interface = FlagOSDeviceInterface
             props = interface.get_device_properties(device)
