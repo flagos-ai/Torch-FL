@@ -170,17 +170,21 @@ jobs:
   # One hardware pipeline per configured platform. The reusable workflow reads
   # runner, image, timeout, and test manifest values from that platform config.
   #
-  # fail-fast: once one platform's build or tests fail, this PR is red whatever
-  # the others do, and the remaining hardware jobs would only burn accelerator
-  # time to confirm it. GitHub cancels them. That also means the first red is
-  # the only one you see: fix it, push, and the next run reports the next --
-  # which is why the platform set stays as narrow as the diff allows
-  # (paths_watch in .github/configs/<platform>.yml) rather than growing.
+  # fail-fast is off on purpose. The PR is red whatever the other lanes do, so
+  # cancelling them on the first failure saves accelerator time only when the
+  # failure is the *only* one -- and that is exactly the case that is not true
+  # here. A cancelling matrix reports the first red and nothing else: fix it,
+  # push, wait a full round, and the next run reports the next. The cost is paid
+  # on every lane that turned out to be fine anyway (a cancelled lane is not a
+  # measurement), which is why the platform set stays as narrow as the diff
+  # allows (paths_watch in .github/configs/<platform>.yml). Letting every
+  # selected lane finish turns N rounds into one and still fails `CI complete`
+  # for any lane that did not pass -- see tests/unit/test_ci_fail_fast.py.
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: [resolve-checkout, discover-platforms]
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         platform: ${{ fromJson(needs.discover-platforms.outputs.platforms) }}
     uses: ./.github/workflows/integration-tests.yml
@@ -235,10 +239,11 @@ jobs:
           elif not selected and platform_result not in ("success", "skipped"):
               errors.append(f"platform-pipeline: {platform_result}")
 
-          # With fail-fast, a failing platform cancels its siblings, so the
-          # matrix result alone does not name the lane that broke. Read the
-          # run's jobs back and report each one's conclusion. This is a
-          # nicety: wherever the API cannot answer (no token, no run id), the
+          # The matrix result says that some lane failed, not which one -- the
+          # matrix collapses every failure into "failure", and a lane can still
+          # be cancelled out from under it (a timeout, or the run being stopped
+          # by hand). Read the run's jobs back and report each one's conclusion.
+          # This is a nicety: wherever the API cannot answer (no token, no run id), the
           # gate still decides on the results above.
           run_id = os.environ.get("GITHUB_RUN_ID", "")
           repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -268,8 +273,8 @@ jobs:
                   print(f"::error::{name}: {conclusion}")
               elif conclusion == "cancelled" and name.startswith("Platform pipeline ("):
                   print(
-                      f"::notice::{name} was cancelled because another platform "
-                      "failed (fail-fast); see the failed job above"
+                      f"::notice::{name} was cancelled before it finished, so it "
+                      "measured nothing; re-run that lane to measure it"
                   )
 
           for error in errors:

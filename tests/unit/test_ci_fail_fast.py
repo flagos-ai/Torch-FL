@@ -12,20 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A platform lane that is already red must not keep the other chips busy.
+"""One red lane must not hide how many others are red.
 
-The platform matrix runs with ``fail-fast: true``: once one platform's build or
-tests fail, the PR is red whatever the rest do, and each remaining lane would
-hold an accelerator for minutes to confirm it. GitHub cancels the siblings.
+The platform matrix runs with ``fail-fast: false``. Under ``true`` the first
+platform to fail cancels every sibling, and the run reports one failure no
+matter how many lanes were broken -- so a red PR converges one platform per
+round, each round costing a full build on every lane that had already been
+cancelled. Under ``false`` every selected lane finishes and the run reports all
+of them, which is what makes a red PR fixable in one push instead of N.
 
 Two things have to stay true for that to be safe:
 
-* ``CI complete`` still fails on a fast-failed matrix. A cancelled sibling makes
-  the matrix result ``failure``, which the gate already rejects; the test below
-  pins that it keeps doing so, so fail-fast cannot turn a red PR green.
-* The gate names the lane that failed. With fail-fast the first failure is the
-  only one reported, and "platform-pipeline: failure" says nothing; the gate
-  reads the run's jobs back and reports their conclusions.
+* ``CI complete`` still fails when any lane is not green. The matrix result is
+  ``failure`` if any lane failed, and the gate rejects everything that is not
+  ``success``; the test below pins that, so running every lane cannot turn a red
+  PR green.
+* The gate names the lane that failed. "platform-pipeline: failure" says
+  nothing, so the gate reads the run's jobs back and reports their conclusions
+  -- including a lane that never finished, which is a gap in measurement rather
+  than a pass.
 
 Pure text/json: no network.
 """
@@ -56,17 +61,18 @@ def _gate_script() -> str:
     return block[block.index("python3 - <<'PY'") : block.index("\n          PY\n")]
 
 
-def test_the_platform_matrix_is_fail_fast():
+def test_the_platform_matrix_runs_every_lane():
     text = _text()
     start = text.index("  platform-pipeline:")
     end = text.find("\n  ci-complete:", start)
     block = text[start : end if end != -1 else len(text)]
-    assert re.search(r"^\s+fail-fast: true$", block, re.M), (
-        "platform-pipeline must cancel its siblings on the first failure"
+    assert re.search(r"^\s+fail-fast: false$", block, re.M), (
+        "platform-pipeline must let every selected lane finish: cancelling the "
+        "siblings on the first failure reports one red per run, not all of them"
     )
 
 
-def test_a_fast_failed_matrix_still_fails_ci_complete():
+def test_a_failed_matrix_still_fails_ci_complete():
     script = _gate_script()
     assert 'platform_result = jobs["platform-pipeline"]["result"]' in script
     assert 'if selected and platform_result != "success":' in script, (
@@ -79,12 +85,13 @@ def test_a_fast_failed_matrix_still_fails_ci_complete():
 def test_the_gate_names_the_failed_lane():
     script = _gate_script()
     assert "GITHUB_RUN_ID" in script and "/jobs" in script, (
-        "the gate must list the run's jobs: with fail-fast, the matrix result "
-        "alone does not say which platform broke"
+        "the gate must list the run's jobs: the matrix result alone does not "
+        "say which platform broke"
     )
     assert '("failure", "timed_out")' in script
     assert '"cancelled"' in script, (
-        "a cancelled sibling must be reported as fail-fast, not as a finding"
+        "a lane that was cancelled measured nothing; the gate must say so "
+        "rather than let it read as a pass"
     )
     assert 'name.startswith("Platform pipeline (")' in script
 
