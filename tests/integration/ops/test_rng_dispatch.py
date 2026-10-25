@@ -59,6 +59,8 @@ Usage:
     pytest tests/integration/ops/test_rng_dispatch.py -v
 """
 
+import warnings
+
 import pytest
 
 import torch
@@ -280,6 +282,39 @@ def _draw(op, seed):
     return op().float().cpu()
 
 
+def _generator_device_rejection() -> RuntimeError | None:
+    """The rejection this wheel gives a flagos generator on a device RNG op, if any.
+
+    Asked, not assumed: this backend's RNG either accepts ``Generator(device=
+    "flagos")`` or refuses it, and which of the two it is does not follow from
+    the build record on every vendor. A draw that returns here means the wheel
+    accepts the generator, which is the outcome the three generator cases below
+    record rather than contradict -- the contract they guard is that the
+    generator is honoured, not that it is refused. A refusal still has to be
+    the documented one.
+    """
+    gen = torch.Generator(device="flagos").manual_seed(99)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            _empty(8).normal_(generator=gen)
+        except RuntimeError as exc:
+            if "device type for generator" not in str(exc):
+                raise
+            return exc
+    return None
+
+
+def _skip_if_generator_is_accepted(rejection) -> None:
+    """Skip a rejection case on a wheel whose RNG accepts the flagos generator."""
+    if rejection is None:
+        pytest.skip(
+            "this wheel's device RNG accepts a flagos generator, so there is "
+            "no rejection to assert; the generator-honouring cases below cover "
+            "the acceptance"
+        )
+
+
 def _explicit_generator(seed):
     """A caller-supplied generator that this backend's RNG kernels accept.
 
@@ -296,6 +331,12 @@ def _explicit_generator(seed):
     injection logic and holds for every one of those representations.
     """
     if _supports_flagos_generator():
+        return torch.Generator(device="flagos").manual_seed(seed)
+    if _generator_device_rejection() is None:
+        # The build record does not list this vendor among the ones that read
+        # the flagos seed, but its RNG accepts a flagos generator all the same
+        # (gcu). Asking the device is the only answer that holds for every
+        # wheel; handing such a vendor the cpu generator below fails every call.
         return torch.Generator(device="flagos").manual_seed(seed)
     try:
         gen = torch.Generator(device="cuda")
@@ -483,6 +524,7 @@ class TestRngSeedSource:
         else:
             # Backends whose native kernels use a different generator contract
             # reject a flagos generator rather than silently changing streams.
+            _skip_if_generator_is_accepted(_generator_device_rejection())
             with pytest.raises(RuntimeError, match="device type for generator"):
                 _empty(8).normal_(generator=gen)
 
@@ -506,6 +548,7 @@ class TestRngSeedSource:
                 "rejecting it"
             )
         else:
+            _skip_if_generator_is_accepted(_generator_device_rejection())
             with pytest.raises(RuntimeError, match="device type for generator"):
                 torch.rand(8, device=DEVICE, generator=gen)
 

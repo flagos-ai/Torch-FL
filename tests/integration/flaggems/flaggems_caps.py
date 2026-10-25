@@ -269,11 +269,37 @@ def accel_label() -> str:
     (or any vendor probe): it is the wheel's own statement of what it was built
     for, and it is the key the measurement tables above are stored under. A conf
     with a user-chosen path has no row and the data-driven tests skip it.
+
+    A day-0 variant (``backends_<platform>_boxing.conf``) is the same wheel's
+    conf in its other variant, so it is reported as ``<portable name>_boxing``
+    when that row exists. The portable name is the vendor's platform id —
+    ``ppu`` for ``thead`` — because ``detect_platform()`` answers with the id a
+    test can compare against on every platform.
     """
     name = conf_path().name
-    if name.startswith("backends_") and name.endswith(".conf"):
-        return name[len("backends_") : -len(".conf")]
-    return ""
+    if not (name.startswith("backends_") and name.endswith(".conf")):
+        return ""
+    label = name[len("backends_") : -len(".conf")]
+    if label.endswith("_boxing"):
+        platform = label[: -len("_boxing")]
+        if f"{platform}_boxing" in EXPECTED_FLAGGEMS_ROUTES:
+            return f"{_portable_id(platform)}_boxing"
+    return label
+
+
+def _portable_id(base: str) -> str:
+    """``base`` as the id ``detect_platform()`` reports for it."""
+    from torch_fl._platform import detect_platform
+
+    if detect_platform() == base:
+        return base
+    return detect_platform()
+
+
+def daily_variant_label(base: str) -> str | None:
+    """``base``'s day-0 variant label when the tables carry one, else None."""
+    label = f"{base}_boxing"
+    return label if label in EXPECTED_FLAGGEMS_ROUTES else None
 
 
 def route_reason(op: str) -> tuple[str | None, str]:
