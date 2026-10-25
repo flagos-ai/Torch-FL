@@ -255,6 +255,26 @@ def _empty(n=64, dtype=torch.float32, device=DEVICE):
     return torch.empty(n, dtype=dtype, device=device)
 
 
+def _require_device_arithmetic(*operations):
+    """Skip when a device dtype conversion or scalar multiply leaves the device.
+
+    A boxing decision that is the test's own -- comparing two devices' results,
+    scaling a mask to the dropout output's dtype -- is not part of the RNG
+    contract, but on a wheel whose conf routes the unary to ``none`` each of
+    them reaches cpu_fallback, and a CPU-only torch has no copy or mul kernel
+    for a non-CPU tensor there. Probe the exact expressions rather than the ops
+    by name: a route that changes still answers correctly, and the ones that
+    cannot run skip with the exception that proves it.
+    """
+    for operation in operations:
+        try:
+            operation()
+        except (NotImplementedError, RuntimeError) as exc:
+            if "not implemented" not in str(exc) and "DispatchStub" not in str(exc):
+                raise
+            pytest.skip(f"device arithmetic reaches cpu_fallback on this wheel: {exc}")
+
+
 def _draw(op, seed):
     torch.manual_seed(seed)
     return op().float().cpu()
@@ -629,6 +649,15 @@ class TestRngSeedSource:
         assert mask.device == torch.device(DEVICE)
         assert mask.dtype == torch.bool
         assert torch.equal(output.ne(0), mask)
+        # The draw can be served while the *comparison* is not: every unary here
+        # leaves the device through cpu_fallback, and a CPU-only torch has no
+        # float->float copy kernel for it -- "DispatchStub: missing kernel for
+        # cuda" at `mask.to(output.dtype)` (NVIDIA lane, run 40154845873). The
+        # contract is a device one, so skip where the wheel cannot express it.
+        _require_device_arithmetic(
+            lambda: mask.to(output.dtype) * (1.0 / 0.75),
+            lambda: mask.to(torch.float32) * 4.0,
+        )
         expected = mask.to(output.dtype) * (1.0 / 0.75)
         assert torch.allclose(output, expected)
 
