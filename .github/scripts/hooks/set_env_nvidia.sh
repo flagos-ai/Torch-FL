@@ -621,7 +621,7 @@ if os.environ.get("BOXING_LANE") == "1":
     _conf = os.environ.get("FLAGOS_BACKEND_CONFIG", "")
     assert _conf.endswith("backends_nvidia_boxing.conf"), _conf
 else:
-    assert os.environ.get("FLAGOS_BUILD_BOXING") is None, (
+    assert not os.environ.get("FLAGOS_BUILD_BOXING"), (
         "this lane must not force FLAGOS_BUILD_BOXING; it tests the default wheel"
     )
     assert "boxing" not in tuple(_config.KERNELS), _config.KERNELS
@@ -646,6 +646,12 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$PATH" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
+
+  # The boxing lane assigns these; the vendor lane leaves them unset, and
+  # export_ci_env reads every name under `set -u`. Assign the empty default here
+  # so both lanes persist an explicit value.
+  : "${FLAGOS_BUILD_BOXING:=}"
+  : "${FLAGOS_BACKEND_CONFIG:=}"
   export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG FLAGOS_CUDA_ASSETS_DIR FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
