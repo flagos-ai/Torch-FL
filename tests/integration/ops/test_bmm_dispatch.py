@@ -78,10 +78,12 @@ def _run_bmm_subprocess(
     use_out: bool = False,
     check: bool = True,
     stub_python_op: bool = False,
+    dtype_name: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a minimal bmm call in a subprocess and return the result."""
     env = os.environ.copy()
     env.update(extra_env)
+    operands = f"dtype={dtype_name}, " if dtype_name else ""
     setup = "import torch_fl, torch; "
     if stub_python_op:
         # This test only verifies routing; avoid triggering FlagGems BMM autotuning.
@@ -92,15 +94,15 @@ def _run_bmm_subprocess(
         )
     if use_out:
         code = setup + (
-            "a = torch.randn(2,4,4,device='flagos:0'); "
-            "b = torch.randn(2,4,4,device='flagos:0'); "
+            f"a = torch.randn(2,4,4,device='flagos:0', {operands}); "
+            f"b = torch.randn(2,4,4,device='flagos:0', {operands}); "
             "out = torch.empty(2,4,4,device='flagos:0'); "
             "torch.bmm(a, b, out=out)"
         )
     else:
         code = setup + (
-            "a = torch.randn(2,4,4,device='flagos:0'); "
-            "b = torch.randn(2,4,4,device='flagos:0'); "
+            f"a = torch.randn(2,4,4,device='flagos:0', {operands}); "
+            f"b = torch.randn(2,4,4,device='flagos:0', {operands}); "
             "torch.bmm(a, b)"
         )
     result = subprocess.run(
@@ -347,6 +349,34 @@ class TestBmmDispatchLog:
         )
         assert "[flagos dispatch] bmm -> ascend" in result.stderr, (
             f"Expected ascend dispatch log, got:\n{result.stderr}"
+        )
+
+
+class TestFloatBmmKeepsItsRoute:
+    """An ordinary-dtype bmm stays on the backend the conf names.
+
+    The software low-precision path runs on FLAGOS_SOFT_LOWP platforms (MetaX,
+    DCU), and the generated wrapper's dtype prelude cannot tell whether the
+    build compiles it -- so on those platforms every bmm wrapper call enters the
+    software implementation. It has to hand the ordinary dtypes straight back to
+    the conf's route, because the boxing kernel refuses them ("soft-lowp matrix
+    kernel requires a low-precision input", MetaX CI run 40189509687; its
+    addmm spellings took the whole process down with fp64, run 447e9a6).
+
+    The dispatch log names what actually ran, so it separates the conf's route
+    from a fallback that still computed the right answer.
+    """
+
+    @pytest.mark.main_ops
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    def test_float_bmm_logs_the_conf_route(self, dtype):
+        expected = routed_backend("bmm")
+        result = _run_bmm_subprocess(
+            {"FLAGOS_LOG": "dispatch"}, dtype_name=str(dtype).split(".")[-1]
+        )
+        assert f"[flagos dispatch] bmm -> {expected}" in result.stderr, (
+            f"Expected the conf's route ({expected}) for a {dtype} bmm, got:\n"
+            f"{result.stderr}"
         )
 
 
