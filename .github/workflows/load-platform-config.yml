@@ -208,7 +208,7 @@ jobs:
 
           DISPLAY_NAME=$(yq -r '.display_name' "$CONFIG_FILE")
           if [[ "$BOXING_LANE" == "1" ]]; then
-            DISPLAY_NAME="$DISPLAY_NAME CUDA boxing"
+            DISPLAY_NAME="$DISPLAY_NAME (CUDA boxing)"
           fi
           SETUP_SCRIPT=$(yq -r '.setup_script' "$CONFIG_FILE")
           SETUP_PLATFORM=$(yq -r '.setup_platform' "$CONFIG_FILE")
