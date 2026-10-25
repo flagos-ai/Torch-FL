@@ -170,6 +170,7 @@ _KNOWN_GAPS = {
         "kunlunxin",
         "metax",
         "mthreads",
+        "thead",
     ),
     "training": (
         "apple",
@@ -180,6 +181,7 @@ _KNOWN_GAPS = {
         "kunlunxin",
         "metax",
         "mthreads",
+        "thead",
     ),
     "native_comm_bridge": (
         "apple",
@@ -406,6 +408,39 @@ def test_every_expectation_key_is_one_the_check_script_reads(platform):
     for key in ("require_package_files", "forbid_package_files", "require_imports"):
         if key in block:
             assert isinstance(block[key], list) and block[key], (platform, key)
+
+
+_COMMAND_VARIABLE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# Set by GitHub Actions for every runner and by the image for the python
+# toolchain; no config states them and none needs to.
+_RUNNER_VARIABLES = {"GITHUB_WORKSPACE", "HOME", "PATH", "PYTHONPATH", "RUNNER_TEMP"}
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_every_command_variable_has_an_environment_supplier(platform):
+    """A group's `$NAME` must come from the config, or it cannot have run.
+
+    Groups execute under `set -u`, so a variable the platform's
+    `integration_environment` does not define ends the group with bash's
+    "unbound variable" -- a line that names neither the variable's owner nor
+    the configuration. That is how thead's two Qwen3 groups have been red
+    since its checkpoint mount went away: the manifest still lists them and
+    the config, correctly, has no MODEL_PATH to give them. Every `$NAME` a
+    command reads therefore has to be a key the runner puts in that group's
+    environment: the platform's `integration_environment` (which also carries
+    the caller's own environment through) plus the group's inline
+    `environment` mapping.
+    """
+    supplied = set(platform_config(platform).get("integration_environment") or {})
+    for group in composed_steps(platform):
+        supplied |= set(group.get("environment") or {})
+    for group in composed_steps(platform):
+        wanted = set(_COMMAND_VARIABLE.findall(group["command"]))
+        missing = sorted(wanted - supplied - _RUNNER_VARIABLES)
+        assert not missing, (
+            f"{platform} runs '{group['name']}', whose command expands "
+            f"{missing}, but its integration_environment defines none of them"
+        )
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)

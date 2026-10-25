@@ -96,6 +96,40 @@ def _run_main(monkeypatch, tmp_path, tests):
     return _RUNNER.main()
 
 
+def test_unset_variable_is_named_instead_of_bash_unbound(monkeypatch, tmp_path):
+    """A group whose command expands an unset variable says so, and stops.
+
+    thead's Qwen3 groups run ``--model "$MODEL_PATH"`` while its
+    integration_environment is empty. Under ``set -u`` that used to surface as
+    ``bash: line 2: MODEL_PATH: unbound variable`` with no mention of the group
+    or the configuration, which reads as a test failure.
+    """
+    tests = [
+        {
+            "name": "Run inference tests",
+            "command": ('printf "$MODEL_PATH" > model.txt && touch should_not_run'),
+        }
+    ]
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_main(monkeypatch, tmp_path, tests)
+
+    assert exit_info.value.code != 0
+    assert not (tmp_path / "model.txt").exists()
+    assert not (tmp_path / "should_not_run").exists()
+
+
+def test_unset_variable_detection_ignores_supplied_and_builtin_parameters():
+    assert _RUNNER._unset_variables(
+        'python -m pytest x.py --model "$MODEL_PATH" -v', {}
+    ) == ["MODEL_PATH"]
+    assert _RUNNER._unset_variables(
+        'cd "$GITHUB_WORKSPACE" && python ${HOME}/a.py $$ $?',
+        {"GITHUB_WORKSPACE": "/w"},
+    ) == ["HOME"]
+
+
 CLEAN_SUMMARY_COMMAND = "printf '2 passed in 0.01s\\n'; kill -SEGV $$"
 BANNERED_CLEAN_SUMMARY_COMMAND = (
     "printf '===== 2 passed, 1 skipped in 0.01s =====\\n'; kill -SEGV $$"

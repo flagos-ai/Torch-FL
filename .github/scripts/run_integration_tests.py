@@ -158,6 +158,30 @@ def classify_command_result(returncode, output, allow_teardown_crash):
     return False, False
 
 
+_SHELL_PARAMETER = r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))"
+
+
+def _unset_variables(command, test_environment):
+    """Return the shell parameters ``command`` expands that nothing supplies.
+
+    The command runs under ``set -u``. A parameter no layer defines then ends
+    the group with bash's own "unbound variable", which reports the *group
+    name* and nothing about the variable or the configuration that owes it.
+    ``MODEL_PATH`` is the standing example: the manifest lists the Qwen3 groups
+    for a platform whose ``integration_environment`` has no model mount.
+
+    ``$name`` and ``${name}`` are the forms a manifest command uses; shell
+    lookup variables (``$?``, ``$@``, ``$$``) and commands that spell a
+    parameter as ``${name:-default}`` are left alone.
+    """
+    missing = []
+    for match in re.finditer(_SHELL_PARAMETER, command):
+        name = match.group(1) or match.group(2)
+        if name not in test_environment and name not in missing:
+            missing.append(name)
+    return missing
+
+
 def signal_number(returncode):
     """Human-readable signal for a fatal-signal returncode."""
     if returncode < 0:
@@ -249,6 +273,21 @@ def main():
             test_environment[key] = os.path.expandvars(value)
         if test_environment.get("FLAGCICD_REPORT_DIR"):
             test_environment["FLAGCICD_TEST_GROUP"] = test["name"]
+        missing = _unset_variables(test["command"], test_environment)
+        if missing:
+            # The command runs under `set -u`, so a variable no layer supplies
+            # aborts with "unbound variable": a bash message that never names
+            # the group or the configuration that forgot it. thead is the live
+            # example -- integration_environment is empty because its Qwen3
+            # checkpoint mount went away, while the manifest still lists both
+            # Qwen3 groups for it.
+            output = (
+                f"integration group '{test['name']}' was not run: "
+                f"nothing supplies {', '.join(f'${name}' for name in missing)}, "
+                f"which its command expands\n"
+            )
+            print(output, flush=True)
+            raise SystemExit(1)
         allow_crash = teardown_crash_allowed(test_environment)
         returncode, output = run_command(test["command"], test_environment, workdir)
         ok, tolerated = classify_command_result(returncode, output, allow_crash)

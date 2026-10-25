@@ -567,16 +567,24 @@ steps:
   # GCU, Kunlunxin, Iluvatar and MUSA record the gap as a missing model mount
   # rather than a missing test; DCU's inference/training are deferred until its runner
   # has the mount and the first CI run confirms the card count.
+  #
+  # The two are listed platform by platform because they expand $MODEL_PATH and
+  # every listed platform's `integration_environment` must define it
+  # (test_every_command_variable_has_an_environment_supplier). thead used to be
+  # listed on the strength of its own checkpoint mount, which no longer exists:
+  # its `integration_environment` is empty and the group could only fail with
+  # bash's "unbound variable". Restore its `platforms` entry together with the
+  # mount.
   - id: inference
     name: Run inference tests
-    platforms: [nvidia, thead]
+    platforms: [nvidia]
     command: >-
       python -m pytest tests/integration/test_qwen3_infer.py --model "$MODEL_PATH"
       -v -s --tb=short
 
   - id: training
     name: Run training tests
-    platforms: [nvidia, thead]
+    platforms: [nvidia]
     command: >-
       python -m pytest tests/integration/test_qwen3_train.py --model "$MODEL_PATH"
       -v -s --tb=short
