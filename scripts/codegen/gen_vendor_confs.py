@@ -3480,6 +3480,16 @@ def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
             if platform in FLAGGEMS_PYTHON_PLATFORMS
             else set()
         )
+        if is_boxing:
+            # The day-0 variant is allowed what EVERY platform has measured, not
+            # what the platform's own ceiling has. Those differ in one
+            # direction: nvidia's ceiling is the whole FlagGems package while
+            # the others read the frozen copy, so a variant built from the
+            # per-platform ceiling would make the cuda variant the one file that
+            # routes what only CUDA has run -- the opposite of what a day-0 file
+            # is for. Applying the shared set here only narrows nvidia's variant;
+            # every other platform already IS this set.
+            py_here &= set(FLAGGEMS_PYTHON_OPS_FROZEN)
         # The platform's measured triton gaps stay gaps: boxing is the fallback
         # here, so an op FlagGems covers but this backend cannot compile belongs
         # on boxing -- route_boxing() checks the gap set before the coverage set.

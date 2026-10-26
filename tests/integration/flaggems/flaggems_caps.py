@@ -188,18 +188,19 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "ppu_boxing": 592,
     # The CUDA lane's own conf, and its day-0 variant. The default conf keeps
     # FlagGems for the 549 operators the CUDA generation measured it on; the
-    # day-0 variant is 0 because `backends_nvidia_boxing.conf` routes every op
-    # the CUDA conf names to `boxing` -- on NVIDIA the boxed CUDA kernel *is* the
-    # covered route, the same kernel the FlagGems rows would have reached, so the
-    # day-0 conf does not keep a second copy of it. The suite then skips its
-    # FlagGems cases for that lane by the conf's own route, which is the designed
-    # behaviour (see ``flaggems_route_count``).
+    # day-0 variant routes everything else to `boxing` -- on NVIDIA the boxed
+    # CUDA kernel *is* the covered route -- and keeps FlagGems for exactly the
+    # two seeded-drawout ops (native_dropout, native_dropout_backward): the
+    # boxing kernel there is ATen's own draw, which torch.manual_seed cannot
+    # reach on a CPU-torch wheel (run 40255168276). It was 0 before those two
+    # moved; the suite's FlagGems cases skip by the conf's own route on this
+    # lane, which is the designed behaviour (see ``flaggems_route_count``).
     #
     # Both counts count `flaggems` only, the way ``flaggems_route_count`` does:
     # `backends_metax.conf` also carries 15 `flaggems_cpp` routes and
     # `backends_metax_boxing.conf` 12, which neither number below includes.
     "nvidia": 549,
-    "nvidia_boxing": 0,
+    "nvidia_boxing": 2,
     # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
     # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
     # FlagGems coverage and boxes the rest. Counted from the shipped confs the

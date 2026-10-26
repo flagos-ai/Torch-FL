@@ -842,6 +842,38 @@ def test_boxing_variant_routes_only_ops_flaggems_registers():
         )
 
 
+def test_boxing_variant_uses_only_the_flaggems_ceiling_every_platform_measured():
+    """A variant may route to FlagGems only what no platform is missing.
+
+    ``FLAGGEMS_PYTHON_OPS`` has ``mul.Tensor`` and ``FLAGGEMS_PYTHON_OPS_FROZEN``
+    does not: the difference is what only CUDA has measured. A variant built
+    straight from the union hands every chip a route nobody ran there, and the
+    day-0 files exist for the platforms whose day-0 model cannot afford that.
+    Pinning both sides keeps the subtraction honest -- a widened ceiling that
+    is not first frozen reaches the variants, and this fails.
+    """
+    assert set(g.FLAGGEMS_PYTHON_OPS) - set(g.FLAGGEMS_PYTHON_OPS_FROZEN) == {
+        "mul.Tensor"
+    }
+    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))
+    for platform in g.BOXING_VARIANT_PLATFORMS:
+        # Read the "flaggems" matrices: metax's variant carries the mm family on
+        # `flaggems_cpp`, and the union a variant is built from is the whole
+        # Python coverage set, C++ ops included.
+        over = sorted(
+            {
+                op
+                for op, value in routes[platform][1].items()
+                if value == "flaggems" and op in g.FLAGGEMS_PYTHON_OPS
+            }
+            - g.FLAGGEMS_PYTHON_OPS_FROZEN
+        )
+        assert not over, (
+            f"{platform}: {over} is outside the frozen ceiling; a variant may "
+            "route only what every platform has measured"
+        )
+
+
 def test_boxing_variant_does_not_apply_measured_composite_routes():
     """DCU's measured scaled_dot_product_attention route belongs to the default
     conf; the variant's premise is that FlagGems is not what it trusts."""
