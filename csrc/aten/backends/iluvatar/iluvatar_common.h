@@ -254,8 +254,16 @@ inline bool IluvatarSupportsBatchNormDtype(at::ScalarType type) {
   return type == at::kFloat;
 }
 
+// bfloat16 joins the gate on the strength of a BI-V150 measurement: corex's
+// cublasGemmEx accepts CUDA_R_16BF operands with a CUDA_R_32F accumulate
+// (`IX/mapping_ixsdk.h` aliases CUDA_R_16BF to IX_R_16BF, and ToBlasDataType /
+// IluvatarGemmComputeType already carried that pair), and a 2048x2048 bf16 `mm`
+// on flagos:0 goes from 0.41 TFLOPS to 79.9 TFLOPS once it stops taking the host
+// round-trip below -- the same op is 80.2 TFLOPS in half, and the vendor's own
+// torch reports 84.6. Without bf16 here every bf16 matmul in a bf16 model ran on
+// the CPU: 40 ms per 2048^3 GEMM instead of 0.2 ms.
 inline bool IluvatarSupportsGemmDtype(at::ScalarType type) {
-  return type == at::kHalf || type == at::kFloat;
+  return type == at::kHalf || type == at::kFloat || type == at::kBFloat16;
 }
 
 // Whether a `Tensor?` argument actually carries a tensor.

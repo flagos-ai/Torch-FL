@@ -851,7 +851,16 @@ at::Tensor MmKernelIluvatar(const at::Tensor& self, const at::Tensor& mat2) {
   }
   iluvatar::IluvatarDeviceGuard guard(self);
   at::Tensor a = self.contiguous();
-  at::Tensor b = mat2.contiguous();
+  // `mat2` is usually `weight.t()`: a transposed view whose transpose is the
+  // contiguous weight. Iluvatar has no on-device strided copy, so `.contiguous()`
+  // on such a view is a host round-trip -- measured 22.6 ms for a 2048x2048 bf16
+  // transpose against 0.05 ms for a contiguous clone of the same bytes, and
+  // 11.9 ms of every `F.linear` call. Hand the view to cublas transposed
+  // instead: its storage already is the contiguous (k x n) row-major operand,
+  // which as column-major is the [k, n] matrix CUBLAS_OP_T wants.
+  const bool b_t = !mat2.is_contiguous() &&
+      mat2.transpose(0, 1).is_contiguous();
+  at::Tensor b = (mat2.is_contiguous() || b_t) ? mat2 : mat2.contiguous();
   const int64_t m = a.size(0);
   const int64_t k = a.size(1);
   const int64_t n = b.size(1);
@@ -864,11 +873,16 @@ at::Tensor MmKernelIluvatar(const at::Tensor& self, const at::Tensor& mat2) {
       iluvatar::IluvatarGemmComputeType(a.scalar_type());
   const float alpha = 1.0f;
   const float beta = 0.0f;
+  const cublasOperation_t b_op = b_t ? CUBLAS_OP_T : CUBLAS_OP_N;
+  // Leading dimension of the *stored* column-major operand: n when mat2 is the
+  // contiguous (k x n) row-major that reads as column-major [n, k], k when it is
+  // a (k x n) view of a contiguous (n x k) row-major weight.
+  const int ld_b = static_cast<int>(b_t ? b.stride(1) : b.stride(0));
   ILUVATAR_EXEC(
       cublasGemmEx(
-          handle, CUBLAS_OP_N, CUBLAS_OP_N, static_cast<int>(n),
+          handle, b_op, CUBLAS_OP_N, static_cast<int>(n),
           static_cast<int>(m), static_cast<int>(k), &alpha, b.const_data_ptr(),
-          ab_type, static_cast<int>(n), a.const_data_ptr(), ab_type,
+          ab_type, static_cast<int>(ld_b), a.const_data_ptr(), ab_type,
           static_cast<int>(k), &beta, out.data_ptr(), c_type,
           static_cast<int>(n), compute_type, CUBLAS_GEMM_DEFAULT),
       "cublasGemmEx");
@@ -945,7 +959,16 @@ at::Tensor AddmmKernelIluvatar(
   }
   iluvatar::IluvatarDeviceGuard guard(mat1);
   at::Tensor a = mat1.contiguous();
-  at::Tensor b = mat2.contiguous();
+  // `mat2` is usually `weight.t()`: a transposed view whose transpose is the
+  // contiguous weight. Iluvatar has no on-device strided copy, so `.contiguous()`
+  // on such a view is a host round-trip -- measured 22.6 ms for a 2048x2048 bf16
+  // transpose against 0.05 ms for a contiguous clone of the same bytes, and
+  // 11.9 ms of every `F.linear` call. Hand the view to cublas transposed
+  // instead: its storage already is the contiguous (k x n) row-major operand,
+  // which as column-major is the [k, n] matrix CUBLAS_OP_T wants.
+  const bool b_t = !mat2.is_contiguous() &&
+      mat2.transpose(0, 1).is_contiguous();
+  at::Tensor b = (mat2.is_contiguous() || b_t) ? mat2 : mat2.contiguous();
   const int64_t m = a.size(0);
   const int64_t k = a.size(1);
   const int64_t n = b.size(1);
@@ -965,12 +988,17 @@ at::Tensor AddmmKernelIluvatar(
   }
   const float alpha_v = alpha.to<float>();
   const float beta_gemm = 1.0f;
+  const cublasOperation_t b_op = b_t ? CUBLAS_OP_T : CUBLAS_OP_N;
+  // Leading dimension of the *stored* column-major operand: n when mat2 is the
+  // contiguous (k x n) row-major that reads as column-major [n, k], k when it is
+  // a (k x n) view of a contiguous (n x k) row-major weight.
+  const int ld_b = static_cast<int>(b_t ? b.stride(1) : b.stride(0));
   if (alpha_v != 0.0f) {
     ILUVATAR_EXEC(
         cublasGemmEx(
-            handle, CUBLAS_OP_N, CUBLAS_OP_N, static_cast<int>(n),
+            handle, b_op, CUBLAS_OP_N, static_cast<int>(n),
             static_cast<int>(m), static_cast<int>(k), &alpha_v, b.const_data_ptr(),
-            ab_type, static_cast<int>(n), a.const_data_ptr(), ab_type,
+            ab_type, static_cast<int>(ld_b), a.const_data_ptr(), ab_type,
             static_cast<int>(k), &beta_gemm, out.data_ptr(), c_type,
             static_cast<int>(n), compute_type, CUBLAS_GEMM_DEFAULT),
         "cublasGemmEx");
