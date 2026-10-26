@@ -839,6 +839,32 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #include "generated/register_flaggems_metax.inc"
   #elif defined(FLAGOS_ACCEL_DCU)
   #include "generated/register_flaggems_hygon.inc"
+  #if defined(FLAGOS_SOFT_LOWP)
+  // mm/bmm on DCU, which `backends_hygon.conf` routes `none` and the list above
+  // therefore leaves unregistered. The FP8/FP4 software path lives INSIDE the
+  // generated wrapper (`WrapperMm`/`WrapperBmm` run `soft_lowp::Mm`/`Bmm`
+  // before the dispatcher), so an unregistered op never reaches it: `mm` fell to
+  // cpu_fallback and answered in the input dtype (bf16 required), `mm.dtype` had
+  // no CPU arm, `bmm` did not support the dtype at all, and `addmm` reached
+  // `addmm_impl_cpu_` for the two dtypes its FlagGems route lacks. 23 failures
+  // in test_soft_lowp_gate_dispatch.py (run 40256656989).
+  //
+  // The claim is the dispatcher slot per op, not per overload, and that is the
+  // one measured reason it must be the FULL generated registration rather than
+  // these four ops appended to the list: `addmm` is already claimed by the list
+  // (four FlagGems routes), its low-precision prelude hands the decoded,
+  // ordinary-dtype pair back through `addmm_dispatcher`, and that hand-back
+  // recurses into the same wrapper unless `addmm_dispatcher`'s kFlagGems slot
+  // holds `soft_lowp::AddmmKernel` (backends/soft_lowp/dispatch.cc). The
+  // registration above is what puts it there.
+  //
+  // The boxing arm deliberately does not do this: there the ops are routed
+  // `boxing`, and claiming what the conf routes `none` is the dispatcher raise
+  // measured on DCU's import gate (run 40156011560).
+  #define FLAGOS_GEN_IMPLS
+  #include "generated/register.inc"
+  #undef FLAGOS_GEN_IMPLS
+  #endif
   #elif defined(FLAGOS_ACCEL_PPU)
   #include "generated/register_flaggems_thead.inc"
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
