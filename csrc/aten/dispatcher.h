@@ -5,6 +5,7 @@
 #include "common.h"
 #include <c10/util/Exception.h>
 #include <cstdio>
+#include <exception>
 #include <flagos_env.h>
 #include <optional>
 #include <string>
@@ -109,6 +110,30 @@ inline bool FlagGemsRejectsArgs(const char* op_name, const Args&... args) {
 
 } // namespace detail
 
+namespace soft_lowp {
+
+// The software low-precision path's view of the route it hands an
+// ordinary-dtype matrix pair back to. Defined in soft_lowp/dispatch.cc, so only
+// a build that compiles that file calls these.
+//
+// A route can refuse the operands it is given without being broken.
+// KernelFor() answers "is something registered here", not "can that something
+// run", and for the FlagGems Python route those are different questions: the
+// callable is looked up on first call, so a FlagGems kernel that raises at
+// compile time -- `flag_gems.bmm` on MetaX wants K >= 16, a 4x4 test operand
+// gives K = 4 -- is still "a kernel" here. It is a real kernel, though: the
+// conf routed the op there and it declined these operands.
+
+// The backend whose kernel raised `error`, or Backend::kUncached when the
+// exception did not come from a FlagGems route at all.
+Backend RefusingRoute(const std::exception& error);
+
+// Whether any Python kernel has run in this process yet. A route whose callable
+// this build has not looked up cannot have been called.
+bool PythonRouteResolved();
+
+} // namespace soft_lowp
+
 template <typename FnPtr>
 class Dispatcher {
  public:
@@ -185,14 +210,78 @@ class Dispatcher {
 
   // Route exactly the way operator() would, without the generated wrapper's
   // dtype prelude in front of it. The software low-precision matrix path needs
-  // this: its wrapper takes every FLAGOS_SOFT_LOWP build's floating-point GEMMs
-  // as well as the FP8/FP4 ones (the generated .inc cannot tell whether this
-  // build compiles the software path), and the software path has to hand the
-  // ordinary ones back to whatever the conf names -- FlagGems on MetaX, boxing
-  // elsewhere -- rather than to one hard-coded slot.
+  // this for the variants that cannot re-enter: its wrapper takes every
+  // FLAGOS_SOFT_LOWP build's floating-point GEMMs as well as the FP8/FP4 ones
+  // (the generated .inc cannot tell whether this build compiles the software
+  // path), and the software path has to hand the ordinary ones back to whatever
+  // the conf names -- FlagGems on MetaX, boxing elsewhere -- rather than to one
+  // hard-coded slot.
   template <typename... Args>
   decltype(auto) DispatchConfigured(Args&&... args) const {
     return operator()(std::forward<Args>(args)...);
+  }
+
+  // The same for the one caller where re-entry is a real risk: the software
+  // low-precision path handing an ordinary-dtype matrix pair back to the conf.
+  //
+  // That caller's route can BE this dispatcher's own kernel set.
+  // `soft_lowp/dispatch.cc` registers its mm/bmm on Backend::kFlagGemsCpp when
+  // no FlagGems C++ kernel owns the slot, so a `flaggems_cpp` route hands the
+  // pair to this dispatcher, which hands it straight back -- the recursion that
+  // ran the stack out on MetaX (SIGSEGV, `torch.bmm` float32, CI run
+  // 40242938356). Its signature is ordinary-dtype only, so the infinite variant
+  // is a kernel that raises, and the two are told apart by whether the kernel
+  // this frame called was resolved before the call:
+  //
+  //   * `error` came from a FlagGems route whose callable had not been resolved
+  //     yet: the route ran for the first time and refused these operands, which
+  //     is ordinary here -- an FP8/FP4 pair reaches the wrapper, the software
+  //     path decodes it and hands the bf16 pair back, and the route may decline
+  //     the shape (FlagGems' MetaX bmm compiles only K >= 16). The refusal is
+  //     reported and the call continues on what the conf's own degradation
+  //     reads: this build's native kernels, else boxing.
+  //   * anything else -- a resolved kernel still raising, an exception from
+  //     this code or from the dispatcher -- is rethrown. A loaded kernel that
+  //     raises twice would recurse just the same, and a defect must not be
+  //     laundered into a fallback.
+  //
+  // Without the route refusing, this is operator(): same route, same log line,
+  // same message.
+  template <typename... Args>
+  decltype(auto) DispatchConfiguredForSoftLowp(Args&&... args) const {
+#if defined(FLAGOS_SOFT_LOWP)
+    Backend backend = cached_backend_;
+    if (__builtin_expect(backend == Backend::kUncached, 0)) {
+      backend = GetBackendForOp(op_name_);
+      cached_backend_ = backend;
+    }
+    auto fn = ResolveFn(op_name_, backend, args...);
+    LogDispatch(op_name_, backend);
+    if (!fn) ThrowIfForcedBackendMissing(op_name_, backend);
+    TORCH_CHECK(fn, op_name_, DispatchFailureMessage(backend));
+
+    const bool was_resolved = soft_lowp::PythonRouteResolved();
+    try {
+      return fn(std::forward<Args>(args)...);
+    } catch (const std::exception& error) {
+      if (!was_resolved) throw;
+      const auto refused_by = soft_lowp::RefusingRoute(error);
+      if (refused_by == Backend::kUncached) throw;
+
+      FnPtr next_fn = nullptr;
+      const char* refused_name = nullptr;
+      const char* next_name = nullptr;
+      if (!ResolveBelow(refused_by, next_fn, refused_name, next_name)) {
+        // Nothing below the route: the refusal is the answer, exactly as it is
+        // for any call on a build that routes here directly.
+        throw;
+      }
+      LogDispatchRefused(op_name_, refused_name, next_name);
+      return next_fn(std::forward<Args>(args)...);
+    }
+#else
+    return operator()(std::forward<Args>(args)...);
+#endif
   }
 
   template <typename... Args>
@@ -234,6 +323,28 @@ class Dispatcher {
           ": FLAGOS_FORCE_BACKEND=vendor but no vendor kernel is registered "
           "for this op");
     }
+  }
+
+  // Where a route that refused its operands sends the call: this build's own
+  // native kernels if it has any, else the boxing set. The same two places the
+  // conf's own degradation reads (GetFn's kFlagGems and kFlagGemsCpp arms),
+  // and nowhere else.
+  bool ResolveBelow(Backend refused, FnPtr& fn, const char*& refused_name,
+                    const char*& next_name) const {
+    auto [vendor_fn, vendor_backend] = VendorSlot();
+    if (vendor_fn != nullptr) {
+      fn = vendor_fn;
+      refused_name = NameOf(refused);
+      next_name = NameOf(vendor_backend);
+      return true;
+    }
+    if (cuda_fn_ != nullptr) {
+      fn = cuda_fn_;
+      refused_name = NameOf(refused);
+      next_name = NameOf(Backend::kBoxing);
+      return true;
+    }
+    return false;
   }
 
   // The build's own native kernel slot, with the backend name that selects it.
@@ -421,6 +532,12 @@ class Dispatcher {
   static void LogDispatch(const std::string& op_name, Backend backend) {
     static const bool enabled = LogEnabled("dispatch");
     if (!enabled) return;
+    fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(),
+            NameOf(backend));
+  }
+
+  // The name the dispatch log prints for `backend`.
+  static const char* NameOf(Backend backend) {
     const char* name;
     switch (backend) {
       case Backend::kBoxing:        name = "boxing"; break;
@@ -438,7 +555,19 @@ class Dispatcher {
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }
-    fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(), name);
+    return name;
+  }
+
+  // The dispatch log's line for a route that refused its operands and the one
+  // that took the call instead. Kept apart from LogDispatch so a call still
+  // writes exactly one `op -> backend` line, with the move-on beside it.
+  static void LogDispatchRefused(const char* op_name, const char* refused,
+                                 const char* next) {
+    static const bool enabled = LogEnabled("dispatch");
+    if (!enabled) return;
+    fprintf(stderr,
+            "[flagos dispatch] %s: %s refused these operands, -> %s\n", op_name,
+            refused, next);
   }
 
   const char* op_name_ = nullptr;

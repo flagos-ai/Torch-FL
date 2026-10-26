@@ -172,16 +172,6 @@ void CheckDevice(const at::Tensor& tensor, const char* name) {
       tensor.device());
 }
 
-// Whether the conf's FlagGems C++ route for mm/bmm resolves to this very
-// software wrapper -- a FLAGOS_SOFT_LOWP build with no FlagGems C++ kernels of
-// its own, where dispatch.cc registered these wrappers on Backend::kFlagGemsCpp.
-// The ordinary-dtype hand-back must then not go back through the dispatcher:
-// it would resolve to these same functions and recurse until the stack runs
-// out (MetaX C550, torch.bmm float32: CI run 40242938356). Such a build has no
-// FlagGems C++ kernels to hand to either, so the plain at::mm/at::bmm on the
-// operands is what the hand-back was for on a build that does.
-bool CppGemmRouteIsThisKernel();
-
 // Whether both operands are ordinary dtypes -- no FP8/FP4 on either side. Such
 // a pair is not this path's to compute: it leaves the way it came, on the route
 // the conf names.
@@ -251,15 +241,11 @@ c10::ScalarType DefaultOutputDtype(const at::Tensor& self, c10::ScalarType reque
 
 namespace {
 
-// Compute a pair the software path does not own (no FP8/FP4 on either side)
-// without routing it back through the conf, for CppGemmRouteIsThisKernel
-// builds.
-//
-// Handing the pair back to the conf (DispatchConfigured) is right when the
-// conf's `flaggems_cpp` route is a FlagGems C++ kernel, but on such a build it
-// is this file's own wrapper, so the hand-back recursed until the stack ran out:
-// SIGSEGV in torch.bmm on float32 (4, 64, 128) x (4, 128, 32), MetaX C550, CI
-// run 40242938356.
+// The pair computed with the conf out of the loop: decode, then ATen's own
+// mm/bmm on the PrivateUse1 operands. dispatch.cc binds these to the
+// mm_fallback/bmm_fallback dispatchers, which is how
+// Dispatcher::DispatchConfiguredForSoftLowp can tell a FlagGems C++ slot this
+// file filled from a real FlagGems C++ kernel.
 at::Tensor OrdinaryMm(const at::Tensor& self, const at::Tensor& mat2) {
   auto lhs = DecodeIfNeeded(self, false);
   auto rhs = DecodeIfNeeded(mat2, true);
@@ -272,26 +258,12 @@ at::Tensor OrdinaryBmm(const at::Tensor& self, const at::Tensor& mat2) {
   return at::bmm(lhs, rhs);
 }
 
-bool CppGemmRouteIsThisKernel() {
-  // Compared through the dispatcher, not by name: the same function reached as
-  // RegisteredImpl<T> or as a plain address must compare equal. The fallback
-  // dispatchers answer with nullptr until dispatch.cc claims the slot, so
-  // "equal" means that file registered these very wrappers.
-  return flagos::mm_dispatcher.KernelFor(Backend::kFlagGemsCpp) ==
-      mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp);
-}
-
-bool CppGemmRouteIsThisKernel(BmmFn bmm_route) {
-  return bmm_route == bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp);
-}
-
 at::Tensor MmImpl(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
   if (IsOrdinaryMatrixPair(self, mat2)) {
-    if (CppGemmRouteIsThisKernel()) return OrdinaryMm(self, mat2);
-    return mm_dispatcher.DispatchConfigured(self, mat2);
+    return mm_dispatcher.DispatchConfiguredForSoftLowp(self, mat2);
   }
   CheckMatrixInputs(self, mat2);
   auto lhs = DecodeIfNeeded(self, false);
@@ -306,9 +278,7 @@ at::Tensor BmmImpl(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype) {
   if (IsOrdinaryMatrixPair(self, mat2)) {
-    const auto bmm_route = bmm_dispatcher.KernelFor(Backend::kFlagGemsCpp);
-    if (CppGemmRouteIsThisKernel(bmm_route)) return OrdinaryBmm(self, mat2);
-    return bmm_route(self, mat2);
+    return bmm_dispatcher.DispatchConfiguredForSoftLowp(self, mat2);
   }
   CheckMatrixInputs(self, mat2);
   auto lhs = DecodeBatchIfNeeded(self, false);

@@ -15,6 +15,15 @@
 
 namespace at::native::flagos {
 
+// How many Python op calls this process has made through the callers below.
+// soft_lowp::PythonRouteResolved asks it (see DispatchConfiguredForSoftLowp in
+// aten/dispatcher.h): zero means no FlagGems callable has been resolved yet, so
+// the next call can be the one doing the resolving.
+uint64_t PythonOpCallsStarted();
+
+// Called by every caller below and by the generated kernels.
+void NotePythonOpCall();
+
 // Call a FlagGems Python op by function name.
 // All variants acquire the GIL internally and look up the function
 // from the cached flag_gems.ops module.

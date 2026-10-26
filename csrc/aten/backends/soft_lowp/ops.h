@@ -31,10 +31,10 @@ class DispatchSuppressionGuard {
 };
 
 at::Tensor Mm(const at::Tensor& self, const at::Tensor& mat2);
-// The ordinary-dtype mm/bmm computation. MmImpl/BmmImpl use it when the conf's
-// FlagGems C++ route is this file itself (see CppGemmRouteIsThisKernel) instead
-// of handing the pair back to that route, and dispatch.cc also binds it to the
-// mm_fallback/bmm_fallback dispatchers.
+// The ordinary-dtype mm/bmm computation, with the conf out of the loop:
+// dispatch.cc binds it to the mm_fallback/bmm_fallback dispatchers, which is
+// how Dispatcher::DispatchConfiguredForSoftLowp recognises a FlagGems C++ slot
+// this file filled itself.
 at::Tensor OrdinaryMm(const at::Tensor& self, const at::Tensor& mat2);
 at::Tensor OrdinaryBmm(const at::Tensor& self, const at::Tensor& mat2);
 

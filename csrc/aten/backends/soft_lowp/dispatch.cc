@@ -4,8 +4,14 @@
 
 #include "ops.h"
 
-#include "../../generated/ops.h"
+#include <pybind11/pybind11.h>
+
+#include <c10/util/Exception.h>
+#include <exception>
+
 #include "../../dispatcher.h"
+#include "../../generated/ops.h"
+#include "../flagos/python_op_caller.h"
 
 namespace at::native::flagos::soft_lowp {
 namespace {
@@ -113,6 +119,34 @@ at::Tensor& AddmmInplaceKernel(
 
 } // namespace
 
+Backend RefusingRoute(const std::exception& error) {
+  // Python's own exceptions arrive as pybind11's error_already_set, which is
+  // not a std::exception; the FlagGems Python kernels are Python, so without
+  // that the refusal did not come from one. Anything else (a bad_alloc, a
+  // TORCH_CHECK in this file) is a defect, so it is let through untouched.
+  if (dynamic_cast<const py::error_already_set*>(&error) == nullptr) {
+    return Backend::kUncached;
+  }
+  // Which route refused. The C++ FlagGems kernels (liboperators) do not run
+  // Python, so a route that selects one cannot have reached the interpreter --
+  // and on this build that slot may be this file's own fallback wrappers. The
+  // only slot that runs Python is kFlagGems.
+  const auto flaggems_cpp = mm_dispatcher.KernelFor(Backend::kFlagGemsCpp);
+  if (flaggems_cpp != nullptr &&
+      flaggems_cpp == mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp)) {
+    return Backend::kUncached;
+  }
+  return Backend::kFlagGems;
+}
+
+bool PythonRouteResolved() {
+  // Read off the caller module's counter (every Python op caller bumps it on
+  // entry, before any callable is looked up) rather than importing flag_gems
+  // from here, which would need the GIL on a path that may be entered from a
+  // non-Python thread.
+  return PythonOpCallsStarted() != 0;
+}
+
 ADD_IMPL_TO_DISPATCHER(MmFn, mm_fallback_dispatcher, "mm")
 ADD_IMPL_TO_DISPATCHER(BmmFn, bmm_fallback_dispatcher, "bmm")
 
@@ -148,10 +182,10 @@ at::Tensor OrdinaryBmmKernel(const at::Tensor& self, const at::Tensor& mat2) {
 // so which one registered first was link order, and link order is not a way to
 // decide routing.
 //
-// The fallback dispatchers below are registered in both cases: they are how
-// ops.cc recognises that the slot is this file (equal kernel) rather than a
-// FlagGems C++ kernel, and on a file-owned slot they remain a route to the
-// same computation that cannot come back here.
+// The fallback dispatchers below are registered in both cases: comparing the
+// slot against them is how this file recognises a slot it filled itself (see
+// RefusingRoute), and on a file-owned slot they remain a route to the same
+// computation that cannot come back here.
 void RegisterGemmKernels() {
   MmFn mm_fallback_fn = OrdinaryMmKernel;
   BmmFn bmm_fallback_fn = OrdinaryBmmKernel;

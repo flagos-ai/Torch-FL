@@ -13,6 +13,7 @@
 
 #include "runtime/functions.h"
 
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 
@@ -20,6 +21,23 @@ namespace py = pybind11;
 using namespace pybind11::literals;
 
 namespace at::native::flagos {
+
+namespace {
+
+// One counter for every Python op call this process makes; see
+// PythonOpCallsStarted in the header. Atomic because a caller runs on whatever
+// thread dispatched the op.
+std::atomic<uint64_t> python_op_calls{0};
+
+} // namespace
+
+uint64_t PythonOpCallsStarted() {
+  return python_op_calls.load(std::memory_order_relaxed);
+}
+
+void NotePythonOpCall() {
+  python_op_calls.fetch_add(1, std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -142,6 +160,15 @@ PythonOpCache& GetCache() {
   static PythonOpCache* cache = new PythonOpCache();
   return *cache;
 }
+
+// Every caller below constructs one, which is what keeps PythonOpCallsStarted a
+// count of calls: a call can resolve a FlagGems callable (the lookup is cached
+// per process, on first use), so the count has to start before anything is
+// looked up, and it does not matter which caller did the looking.
+class CallScope {
+ public:
+  CallScope() { NotePythonOpCall(); }
+};
 
 // Resolve the flagos device a factory call should produce on.
 //
@@ -383,6 +410,7 @@ py::tuple BuildPyArgs(const std::vector<c10::IValue>& args, const char* func_nam
 } // namespace
 
 at::Tensor CallPythonOp_T(const char* func_name, const at::Tensor& self) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
@@ -393,6 +421,7 @@ at::Tensor CallPythonOp_T(const char* func_name, const at::Tensor& self) {
 }
 
 at::Tensor& CallPythonOp_T_inplace(const char* func_name, at::Tensor& self) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
@@ -403,6 +432,7 @@ at::Tensor& CallPythonOp_T_inplace(const char* func_name, at::Tensor& self) {
 }
 
 at::Tensor CallPythonOp_TT(const char* func_name, const at::Tensor& a, const at::Tensor& b) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(a, b));
@@ -413,6 +443,7 @@ at::Tensor CallPythonOp_TT(const char* func_name, const at::Tensor& a, const at:
 }
 
 at::Tensor CallPythonOp_TTS(const char* func_name, const at::Tensor& a, const at::Tensor& b, const at::Scalar& alpha) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(a, b));
@@ -423,6 +454,7 @@ at::Tensor CallPythonOp_TTS(const char* func_name, const at::Tensor& a, const at
 }
 
 at::Tensor CallPythonOp_TS(const char* func_name, const at::Tensor& self, const at::Scalar& other) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
@@ -433,6 +465,7 @@ at::Tensor CallPythonOp_TS(const char* func_name, const at::Tensor& self, const 
 }
 
 at::Tensor CallPythonOp_TIB(const char* func_name, const at::Tensor& self, int64_t dim, bool flag) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
@@ -445,6 +478,7 @@ at::Tensor CallPythonOp_TIB(const char* func_name, const at::Tensor& self, int64
 at::Tensor CallPythonOp_TOIB(const char* func_name, const at::Tensor& self,
                               at::OptionalIntArrayRef dim, bool keepdim,
                               std::optional<at::ScalarType> dtype) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
@@ -459,6 +493,7 @@ at::Tensor CallPythonOp_TOIB(const char* func_name, const at::Tensor& self,
 }
 
 at::Tensor CallPythonOp_TTT(const char* func_name, const at::Tensor& a, const at::Tensor& b, const at::Tensor& c) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(a, b, c));
@@ -470,6 +505,7 @@ at::Tensor CallPythonOp_TTT(const char* func_name, const at::Tensor& a, const at
 
 at::Tensor CallPythonOp_TD(const char* func_name, const at::Tensor& self,
                             std::optional<at::ScalarType> dtype) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
@@ -481,6 +517,7 @@ at::Tensor CallPythonOp_TD(const char* func_name, const at::Tensor& self,
 
 at::Tensor CallPythonOp_ListI(const char* func_name,
                               const at::ITensorListRef& tensors, int64_t dim) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   std::optional<c10::Device> list_dev;
@@ -501,6 +538,7 @@ at::Tensor CallPythonOp_ListI(const char* func_name,
 at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weight,
                                   const at::Tensor& indices, int64_t padding_idx,
                                   bool scale_grad_by_freq, bool sparse) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(weight, indices));
@@ -513,6 +551,7 @@ at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weigh
 }
 
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));
@@ -548,6 +587,7 @@ py::dict BuildPyKwargs(const std::vector<PyKwarg>& kwargs, const char* func_name
 at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<c10::IValue>& args,
                                   const std::vector<PyKwarg>& kwargs) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));
@@ -563,6 +603,7 @@ at::Tensor CallPythonOp_Factory(const char* func_name,
                                 const std::vector<c10::IValue>& args,
                                 std::optional<at::ScalarType> dtype,
                                 std::optional<at::Device> device) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   // Set the device before entering Python: gems' internal torch.empty and the
@@ -594,6 +635,7 @@ at::Tensor CallPythonOp_LikeFactory(const char* func_name,
                                     const std::vector<c10::IValue>& args,
                                     std::optional<at::ScalarType> dtype,
                                     std::optional<at::Device> device) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   // For *_like, an absent device means "same as self" (not "current device"), so
@@ -632,6 +674,7 @@ at::Tensor CallPythonOp_LikeFactory(const char* func_name,
 
 at::Tensor CallPythonOp_RandomInplace(const char* func_name,
                                       const std::vector<c10::IValue>& args) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));
@@ -649,6 +692,7 @@ at::Tensor CallPythonOp_RandomInplace(const char* func_name,
 std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
     const char* func_name, const std::vector<c10::IValue>& args,
     const std::vector<PyKwarg>& kwargs, int64_t n) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));
@@ -673,6 +717,7 @@ std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
 
 std::vector<at::Tensor> CallPythonOp_GenericTuple(
     const char* func_name, const std::vector<c10::IValue>& args, int64_t n) {
+  const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));

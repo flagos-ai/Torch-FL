@@ -213,6 +213,14 @@ passed (`37 passed`), including all five FP8 formats, packed FP4, `mm`/`bmm`/`ad
 scaled-mm check. Re-run the command above after changing the build or vendor runtime;
 the result applies to the CUDA-boxing path and not the legacy handwritten MetaX kernel mode.
 
+The suite is measured with the tests' own 4x4 and `(2, 4, 4)` operands. A decoded BF16
+pair is still handed to the route the conf names rather than computed in place, so an
+operand that route cannot compile is reported instead of answered: FlagGems' MetaX `bmm`
+requires `K >= 16`, and a `(2, 4, 4)` `bmm` reaches it whenever `bmm` is not routed to the
+FlagGems C++ kernels (a wheel without `liboperators.so`, or `FLAGOS_BUILD_FLAGGEMS_CPP=0`).
+The C++ kernel has the same minimum tile, so those operand sizes keep that limit either
+way; they are outside what this path was measured on.
+
 ### torch.compile and FlagTree
 
 The boxing path supports `torch.compile(backend="flagos")` with either the MetaX
