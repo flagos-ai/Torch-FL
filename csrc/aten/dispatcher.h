@@ -144,6 +144,17 @@ class Dispatcher {
     }
   }
 
+  // The kernel `device` resolves to, including GetFn's own degradation, or
+  // nullptr. Lets a kernel set claim an empty slot without displacing the set
+  // the conf's key actually names (soft_lowp/dispatch.cc).
+  FnPtr KernelFor(Backend device) const {
+    return GetFn(device);
+  }
+
+  bool HasKernel(Backend device) const {
+    return KernelFor(device) != nullptr;
+  }
+
   template <typename... Args>
   decltype(auto) operator()(Args&&... args) const {
     // Hot path: the op name is fixed (op_name_) and the backend routing is

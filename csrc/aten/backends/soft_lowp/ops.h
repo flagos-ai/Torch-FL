@@ -7,6 +7,10 @@
 #include <ATen/core/Tensor.h>
 #include <c10/core/ScalarType.h>
 
+#include "../../dispatcher.h"
+// Defines the MmFn/BmmFn types the fallback dispatcher declarations below use.
+#include "../../generated/ops.h"
+
 namespace at::native::flagos::soft_lowp {
 
 // Suppress the low-precision wrapper while a decoded operation invokes its
@@ -27,6 +31,20 @@ class DispatchSuppressionGuard {
 };
 
 at::Tensor Mm(const at::Tensor& self, const at::Tensor& mat2);
+// The ordinary-dtype mm/bmm computation. MmImpl/BmmImpl use it when the conf's
+// FlagGems C++ route is this file itself (see CppGemmRouteIsThisKernel) instead
+// of handing the pair back to that route, and dispatch.cc also binds it to the
+// mm_fallback/bmm_fallback dispatchers.
+at::Tensor OrdinaryMm(const at::Tensor& self, const at::Tensor& mat2);
+at::Tensor OrdinaryBmm(const at::Tensor& self, const at::Tensor& mat2);
+
+// Fallback GEMM dispatchers: the unboxed, unregistered counterpart of mm/bmm.
+// dispatch.cc registers OrdinaryMm/OrdinaryBmm on Backend::kFlagGemsCpp here
+// when (and only when) it owns that slot of mm_dispatcher/bmm_dispatcher; a
+// caller then goes through these to the same computation through the same
+// PrivateUse1 dispatch path, instead of recursing.
+DECLARE_DISPATCHER(MmFn, mm_fallback_dispatcher)
+DECLARE_DISPATCHER(BmmFn, bmm_fallback_dispatcher)
 at::Tensor MmDtype(
     const at::Tensor& self,
     const at::Tensor& mat2,
