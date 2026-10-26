@@ -171,10 +171,10 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
 #: proves a route on device, never visits one.
 SEEDED_DRAWOPS = frozenset({"native_dropout", "native_dropout_backward"})
 
-#: Number of ``flaggems`` routes each platform's conf is measured to hold -- the
-#: raw tally, as ``flaggems_route_count`` counts it. The conformance test
-#: compares ``flaggems_coverage_count``, which is this less a ``flaggems`` route
-#: for a ``SEEDED_DRAWOPS`` operator on the confs that have one.
+#: Number of ``flaggems`` routes each platform's conf is measured to hold --
+#: as ``flaggems_coverage_count`` counts them: ``= flaggems`` less a ``flaggems``
+#: route for a ``SEEDED_DRAWOPS`` operator. A row is a number CI measured on the
+#: lane's own conf; the raw tally is two higher on the confs that route both.
 #:
 #: A regression guard rather than an exact contract: the count only moves when an
 #: operator is added, removed or re-measured, and each of those changes the
@@ -183,7 +183,7 @@ SEEDED_DRAWOPS = frozenset({"native_dropout", "native_dropout_backward"})
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "ascend": 221,
-    "dcu": 454,
+    "dcu": 452,
     "gcu": 251,
     # The iluvatar lane's landing: the conf routes 585 ops to FlagGems, eleven
     # to the native slot (six ixdnn/ixblas kernels -- `_convolution`, `addmm`,
@@ -191,21 +191,23 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # `view_as_real`, `add_.Scalar`, `add_.Tensor` and `div_.Tensor` served
     # from register.cc) and the rest to `none`. Recorded because the lane runs
     # this suite on the platform and the count is what the conf states -- it is
-    # not an on-device measurement yet.
-    "iluvatar": 585,
+    # not an on-device measurement yet. 583 is that tally less the two
+    # ``SEEDED_DRAWOPS`` routes, which CI run 40341912173 measured on the lane.
+    "iluvatar": 583,
     "kunlunxin": 0,
-    "metax": 586,
+    "metax": 584,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,
-    "musa": 466,
+    "musa": 464,
     #: The two confs the PPU lane can run. `ppu` is the default
     #: backends_thead.conf, which a FlagGems-primary wheel reads; `ppu_boxing`
     #: is the day-0 variant the boxing wheel selects (FLAGOS_BACKEND_CONFIG),
     #: identical to it except that the ops without a FlagGems route go to
-    #: `boxing`. Both counts are the conf's text, not a measurement.
-    "ppu": 592,
-    "ppu_boxing": 592,
+    #: `boxing`. Both counts are the conf's text less the two ``SEEDED_DRAWOPS``
+    #: routes -- 590, which both PPU lanes of CI run 40341912173 measured.
+    "ppu": 590,
+    "ppu_boxing": 590,
     # The CUDA lane's own conf, and its day-0 variant. The default conf keeps
     # FlagGems for the 549 operators the CUDA generation measured it on; the
     # day-0 variant routes everything else to `boxing` -- on NVIDIA the boxed
@@ -222,15 +224,16 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # All counts are `flaggems` only: `backends_metax.conf` also carries 15
     # `flaggems_cpp` routes and `backends_metax_boxing.conf` 12, which neither
     # metax number includes.
-    "nvidia": 549,
+    "nvidia": 548,
     "nvidia_boxing": 0,
     # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
     # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
     # FlagGems coverage and boxes the rest. Counted from the shipped confs the
-    # same way ``flaggems_route_count`` counts (``= flaggems`` only); the two
-    # ``native_dropout`` rows are part of that count on every variant.
-    "metax_boxing": 583,
-    "dcu_boxing": 453,
+    # same way ``flaggems_route_count`` counts (``= flaggems`` only) less the two
+    # ``SEEDED_DRAWOPS`` routes (583 - 2 on metax, and the same - 2 on DCU's 453:
+    # the seeded ops reach FlagGems in the day-0 tables of every platform).
+    "metax_boxing": 581,
+    "dcu_boxing": 451,
     # TsingMicro's conf is the other hand-maintained one: 81 routes, of which 65
     # are the plain `flaggems` key, 2 spell it `flagos_python` (a log name this
     # conf uses as a route value) and 14 are metadata-view routes on the vendor.
