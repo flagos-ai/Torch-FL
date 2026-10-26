@@ -822,7 +822,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   //   metax        0. Also has a FLAGOS_SOFT_LOWP prelude in every matrix
   //   hygon        0. wrapper, so `mm`/`bmm`/`addmm` must be REGISTERED or the
   //   thead        0. FP8/FP4 path is unreachable (run 40137411252), and
-  //                `bmm` cannot be left to the list (run 40245371944).
+  //                `bmm` cannot be left to the list (run 40245371944). On DCU
+  //                that prelude is reached on the boxing route, which these
+  //                ops carry here; the DEFAULT DCU conf still spells them
+  //                `none`, and claiming them there instead breaks every
+  //                mm/bmm call (measured, PR #655).
   //   tsingmicro   no: it routes 81 ops and `register.inc` claims 1953 more it
   //                does not list. Keeps the conf-derived list alone.
   #if defined(FLAGOS_ACCEL_TSINGMICRO)
