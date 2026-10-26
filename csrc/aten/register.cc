@@ -777,16 +777,60 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // with their boxed wrapper while the runtime contract required no dispatch
   // (run 40153064301). Both platforms now leave those ops unclaimed, which is
   // what their conf asks for.
-  #if defined(FLAGOS_ACCEL_CUDA)
-  #include "generated/register_boxing_nvidia.inc"
-  #elif defined(FLAGOS_ACCEL_METAX)
-  #include "generated/register_boxing_metax.inc"
-  #elif defined(FLAGOS_ACCEL_DCU)
-  #include "generated/register_boxing_hygon.inc"
-  #elif defined(FLAGOS_ACCEL_PPU)
-  #include "generated/register_boxing_thead.inc"
-  #elif defined(FLAGOS_ACCEL_TSINGMICRO)
+  //
+  // "Which conf" is the second half of that bullet, and it is where the list
+  // above goes wrong. The generator reads the platform's DEFAULT conf
+  // (`backends_<platform>.conf`), but a boxing wheel runs the day-0 variant
+  // (`backends_<platform>_boxing.conf`), and the two disagree on exactly one
+  // direction: every op the default conf routes `none` is `boxing` in the
+  // variant. Those are the ops a boxing wheel COULD serve and the list leaves
+  // out, not ops that lack a kernel -- so an op routed `boxing` ends up with no
+  // m.impl at all and the call silently takes ATen's CompositeExplicitAutograd
+  // arm instead of a routed kernel. Measured on PPU: `torch.bmm` on the boxing
+  // conf emitted no `[flagos dispatch]` line, because `backends_thead.conf` says
+  // `bmm = none`, the list held it back, and nothing else claimed it (run
+  // 40245371944, test_float_bmm_logs_the_conf_route).
+  //
+  // The wrappers for the left-out ops are already compiled -- `register.inc`
+  // defines all of them at file scope above -- so the missing half is the
+  // registration. Claiming it is what a boxing wheel did before the per-platform
+  // list existed, and it is safe here for the one reason it was not safe before:
+  // the conf a boxing wheel runs routes these ops `boxing`, so the claim follows
+  // the route instead of inventing one. A wrapper is not a competing
+  // implementation either -- `WrapperBmm` enters `bmm_dispatcher`, which on the
+  // `boxing` route is the same `BmmKernelCuda` a direct registration would have
+  // called, so the claim reaches the same computation rather than shadowing it.
+  //
+  // The per-platform list and the full generated registration are mutually
+  // exclusive, and it used to be `register.inc` alone before the list existed.
+  // Both cannot be included: every entry of every per-platform list is already
+  // an entry of `register.inc` (592 of 2034 on PPU, 453 of 2034 on DCU), and a
+  // duplicate `m.impl` in one TORCH_LIBRARY_IMPL body is a compile error, not a
+  // harmless override. `FLAGOS_GEN_IMPLS` turns `register.inc` into its m.impl()
+  // block only -- the wrappers are defined once at file scope above.
+  //
+  // Which claim a platform gets is decided by ONE measurement: does
+  // `register.inc` claim any op its day-0 boxing conf routes `none`? An extra
+  // claim is fine only where the answer is zero, because a claim on a `none`
+  // route is the dispatcher's "routed to 'none' ... but the op is registered"
+  // raise rather than cpu_fallback. The same count against the DEFAULT conf is
+  // large for every platform and says nothing -- those ops are `boxing` in the
+  // conf the boxing wheel actually runs, which is the whole bug this arm fixes.
+  //
+  //   nvidia       0 of 2035 boxing routes shadow a `none` -- `register.inc`
+  //                is exactly the CUDA conf, so it is the whole claim.
+  //   metax        0. Also has a FLAGOS_SOFT_LOWP prelude in every matrix
+  //   hygon        0. wrapper, so `mm`/`bmm`/`addmm` must be REGISTERED or the
+  //   thead        0. FP8/FP4 path is unreachable (run 40137411252), and
+  //                `bmm` cannot be left to the list (run 40245371944).
+  //   tsingmicro   no: it routes 81 ops and `register.inc` claims 1953 more it
+  //                does not list. Keeps the conf-derived list alone.
+  #if defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_boxing_tsingmicro.inc"
+  #else
+  #define FLAGOS_GEN_IMPLS
+  #include "generated/register.inc"
+  #undef FLAGOS_GEN_IMPLS
   #endif
   #elif defined(FLAGOS_FLAGGEMS_PYTHON)
   #if defined(FLAGOS_ACCEL_CUDA)

@@ -1085,13 +1085,20 @@ def test_gcu_device_properties_use_vendor_warp_size():
 
     ``_DeviceProperties`` carries no ``warp_size`` on GCU, and Inductor's default
     is CUDA's. The authority is the Triton driver, since it compiles the kernel.
+
+    The ``type`` asserted here is the driver's **triton** device name, ``gcu`` --
+    not the vendor name ``enflame``. ``platform_profile`` keeps the two apart
+    (``triton_device_type`` vs ``vendor``) because ``props.type`` is also the key
+    ``triton_heuristics`` feeds to ``get_interface_for_device``; asserting the
+    vendor spelling here would have required the profile to report a device type
+    no Triton backend answers to.
     """
     _skip_unless_gcu()
     from torch._inductor.runtime.hints import DeviceProperties
     from triton.runtime import driver
 
     props = DeviceProperties.create(torch.device("flagos", 0))
-    assert props.type == "enflame"
+    assert props.type == "gcu"
     assert props.warp_size == driver.active.get_current_target().warp_size
 
 
