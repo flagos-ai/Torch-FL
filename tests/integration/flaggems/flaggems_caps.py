@@ -203,8 +203,10 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
     # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
     # FlagGems coverage and boxes the rest. Counted from the shipped confs the
-    # same way ``flaggems_route_count`` counts (``= flaggems`` only).
-    "metax_boxing": 583,
+    # same way ``flaggems_route_count`` counts (``= flaggems`` only). The two
+    # seeded-drawout ops the day-0 confs route to FlagGems (native_dropout and
+    # native_dropout_backward) are part of that count on every variant.
+    "metax_boxing": 595,
     "dcu_boxing": 453,
     # TsingMicro's conf is the other hand-maintained one: 81 routes, of which 65
     # are the plain `flaggems` key, 2 spell it `flagos_python` (a log name this

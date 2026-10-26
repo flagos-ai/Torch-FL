@@ -377,23 +377,18 @@ BOXING_FALLBACK = "boxing"
 # boxing lane: two `F.dropout(ones, 0.5)` calls at the same seed drew different
 # masks -- test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible,
 # failing on main (run 40255168276) and on the PR that followed it.
-BOXING_VARIANT_FLAGGEMS_OPS = frozenset(
-    {
-        "native_dropout",
-        "native_dropout.out",
-        "native_dropout_backward",
-        "native_dropout_backward.out",
-    }
-)
+BOXING_VARIANT_FLAGGEMS_OPS = frozenset({"native_dropout", "native_dropout_backward"})
 BOXING_VARIANT_FLAGGEMS_NOTE = (
-    "native_dropout and native_dropout_backward (and their .out forms) are",
-    "routed to flaggems rather than boxing: the boxing kernel is ATen's",
-    "native_dropout, so it draws from getDefaultCUDAGenerator(), which",
-    "torch.manual_seed cannot write on a CPU-torch wheel. Measured: two",
-    "dropout calls at the same seed drew different masks",
+    "native_dropout and native_dropout_backward are routed to flaggems rather",
+    "than boxing: the boxing kernel is ATen's native_dropout, so it draws from",
+    "getDefaultCUDAGenerator(), which torch.manual_seed cannot write on a",
+    "CPU-torch wheel. Measured: two dropout calls at the same seed drew",
+    "different masks",
     "(test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible, run",
     "40255168276). Which generator a seed reaches is a property of the kernel",
-    "library and not of the platform, so every variant gets this.",
+    "library and not of the platform, so every variant gets this. The .out",
+    "overloads stay on boxing: FlagGems registers no kernel for them on any",
+    "platform, and a conf row is a claim that one exists.",
 )
 
 # Generated conf notes for platform-specific FlagGems fallbacks. Keep these in
@@ -3499,18 +3494,19 @@ def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
             gaps -= boxing_measured_python_ops(sparse_conf)
         cpp_here = fg_cpp if platform in FLAGGEMS_CPP_PLATFORMS else set()
         routes = {op: route_boxing(op, cpp_here, py_here, gaps) for op in sorted(ops)}
-        routes.update(
-            {
-                op: "flaggems"
-                for op in BOXING_VARIANT_FLAGGEMS_OPS
-                if routes.get(op) == BOXING_FALLBACK
-            }
-        )
         if platform == "nvidia":
             routes = {
                 op: (BOXING_FALLBACK if value == "cuda" else value)
                 for op, value in routes.items()
             }
+        # The seeded-RNG override is a property of the kernel, not the platform,
+        # so it is applied last and unconditionally: PPU's conf names these ops
+        # `boxing` in its default conf too, and moving them to `flaggems` is the
+        # only difference the variant is allowed to make there. A boxing kernel
+        # reads ATen's own generator, which a CPU-torch wheel cannot seed; a
+        # FlagGems route reads the shared flagos one, which torch.manual_seed
+        # does write.
+        routes.update({op: "flaggems" for op in BOXING_VARIANT_FLAGGEMS_OPS})
         out[platform] = (
             render(
                 platform,

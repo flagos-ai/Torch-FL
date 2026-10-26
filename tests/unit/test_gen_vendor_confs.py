@@ -814,6 +814,34 @@ def test_boxing_variants_route_the_seeded_rng_ops_to_flaggems():
             assert routes[op] == "flaggems", f"{platform}: {op} is {routes[op]}"
 
 
+def test_boxing_variant_routes_only_ops_flaggems_registers():
+    """A conf row is a claim that a kernel exists behind it, so every
+    ``flaggems`` row of a variant must be an op FlagGems registers here.
+
+    The seeded-RNG override used to name the ``.out`` overloads too, which
+    FlagGems registers on no platform: the row said ``flaggems`` while the call
+    had no kernel to reach, and the shared test that counts the conf's
+    ``flaggems`` rows against the measured number caught it (thead-boxing, run
+    40268688923). The generators' own names carry no ``.out`` spelling.
+    """
+    variants = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))
+    for platform in g.BOXING_VARIANT_PLATFORMS:
+        routes = variants[platform][1]
+        registered = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
+        # route_boxing() holds these back whatever the coverage set says, so a
+        # variant never claims them either.
+        held = g.flaggems_holds()
+        claimed = {
+            op
+            for op, value in routes.items()
+            if value.startswith("flaggems") and op not in held
+        }
+        assert not claimed - registered, (
+            f"{platform}: routed to flaggems but not registered: "
+            f"{sorted(claimed - registered)}"
+        )
+
+
 def test_boxing_variant_does_not_apply_measured_composite_routes():
     """DCU's measured scaled_dot_product_attention route belongs to the default
     conf; the variant's premise is that FlagGems is not what it trusts."""
