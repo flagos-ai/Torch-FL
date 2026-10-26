@@ -788,9 +788,30 @@ def test_boxing_variant_routes_only_flaggems_and_boxing(platform):
 def test_boxing_variant_leaves_unmeasured_ops_on_boxing():
     """The whole-coverage platforms have no measured FlagGems route beyond the
     shared ceiling, so their variants keep everything FlagGems does not cover on
-    the boxing kernel rather than claiming coverage they never ran."""
+    the boxing kernel rather than claiming coverage they never ran.
+
+    ``BOXING_VARIANT_FLAGGEMS_OPS`` is the one exception, and it is not a
+    coverage claim: the boxing kernel for those ops is ATen's own
+    ``native_dropout``, whose draw ``torch.manual_seed`` cannot reach on a
+    CPU-torch wheel, so routing them to boxing makes the mask irreproducible.
+    See the table for the measurement.
+    """
     cuda_routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["nvidia"][1]
-    assert set(cuda_routes.values()) == {"boxing"}
+    assert set(cuda_routes.values()) == {"boxing", "flaggems"}
+    assert {op for op, value in cuda_routes.items() if value == "flaggems"} == set(
+        g.BOXING_VARIANT_FLAGGEMS_OPS
+    )
+
+
+def test_boxing_variants_route_the_seeded_rng_ops_to_flaggems():
+    """Every variant, not just nvidia's: which generator ``manual_seed``
+    reaches is a property of the kernel library the route runs, so a variant
+    that boxes these ops has the same irreproducible draw."""
+    variants = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))
+    for platform in g.BOXING_VARIANT_PLATFORMS:
+        routes = variants[platform][1]
+        for op in g.BOXING_VARIANT_FLAGGEMS_OPS:
+            assert routes[op] == "flaggems", f"{platform}: {op} is {routes[op]}"
 
 
 def test_boxing_variant_does_not_apply_measured_composite_routes():

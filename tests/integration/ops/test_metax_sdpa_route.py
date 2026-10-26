@@ -50,7 +50,18 @@ import torch_fl
 
 DEVICE = "flagos:0"
 
-pytestmark = [pytest.mark.flaggems, pytest.mark.main_ops]
+pytestmark = [
+    pytest.mark.flaggems,
+    pytest.mark.main_ops,
+    pytest.mark.skip(
+        reason="MetaX SDPA has no vendor kernel yet, and the FlagGems arm does "
+        "not compile its _attn_fwd on this stack: Triton rejects the fp32 "
+        "tl.dot in flag_gems/ops/attention.py with 'Input shapes should have "
+        "M >= 1, N >= 1 and K >= 16', which fails the probe for every case "
+        "rather than the one (run 40256656989). Re-enable when either the "
+        "vendor op lands or the FlagGems kernel compiles here."
+    ),
+]
 
 
 def _active_conf() -> str:
