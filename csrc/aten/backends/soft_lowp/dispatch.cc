@@ -4,14 +4,8 @@
 
 #include "ops.h"
 
-#include <pybind11/pybind11.h>
-
-#include <c10/util/Exception.h>
-#include <exception>
-
 #include "../../dispatcher.h"
 #include "../../generated/ops.h"
-#include "../flagos/python_op_caller.h"
 
 namespace at::native::flagos::soft_lowp {
 namespace {
@@ -119,34 +113,6 @@ at::Tensor& AddmmInplaceKernel(
 
 } // namespace
 
-Backend RefusingRoute(const std::exception& error) {
-  // Python's own exceptions arrive as pybind11's error_already_set, which is
-  // not a std::exception; the FlagGems Python kernels are Python, so without
-  // that the refusal did not come from one. Anything else (a bad_alloc, a
-  // TORCH_CHECK in this file) is a defect, so it is let through untouched.
-  if (dynamic_cast<const py::error_already_set*>(&error) == nullptr) {
-    return Backend::kUncached;
-  }
-  // Which route refused. The C++ FlagGems kernels (liboperators) do not run
-  // Python, so a route that selects one cannot have reached the interpreter --
-  // and on this build that slot may be this file's own fallback wrappers. The
-  // only slot that runs Python is kFlagGems.
-  const auto flaggems_cpp = mm_dispatcher.KernelFor(Backend::kFlagGemsCpp);
-  if (flaggems_cpp != nullptr &&
-      flaggems_cpp == mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp)) {
-    return Backend::kUncached;
-  }
-  return Backend::kFlagGems;
-}
-
-bool PythonRouteResolved() {
-  // Read off the caller module's counter (every Python op caller bumps it on
-  // entry, before any callable is looked up) rather than importing flag_gems
-  // from here, which would need the GIL on a path that may be entered from a
-  // non-Python thread.
-  return PythonOpCallsStarted() != 0;
-}
-
 ADD_IMPL_TO_DISPATCHER(MmFn, mm_fallback_dispatcher, "mm")
 ADD_IMPL_TO_DISPATCHER(BmmFn, bmm_fallback_dispatcher, "bmm")
 
@@ -160,32 +126,30 @@ at::Tensor OrdinaryBmmKernel(const at::Tensor& self, const at::Tensor& mat2) {
   return OrdinaryBmm(self, mat2);
 }
 
-// Register mm/bmm/addmm/.out on Backend::kFlagGemsCpp unless another kernel set
-// already owns the slot.
+// Claim the flaggems_cpp slot of mm/bmm/addmm/.out, unless another kernel set
+// already owns it.
 //
-// Why the software path registers mm/bmm at all: an ordinary-dtype pair does
-// not stay in MmImpl/BmmImpl, it is handed back to the conf ("the route that
-// names this op's accelerated kernel"). A FLAGOS_SOFT_LOWP build without FlagGems
-// C++ kernels (DCU, a CPU-torch build) has no other kernel for mm/bmm, so the
-// hand-back needs one: with these wrappers the slot resolves and they compute
-// the pair the conventional way; without them it is "backend not registered".
-// (An FP8/FP4 call never comes through the dispatcher -- the generated wrapper's
-// IsLowPrecision prelude calls soft_lowp::Mm/Bmm directly.)
+// This is the route an ordinary-dtype pair takes back out of Mm/Bmm:
+// RunMatrix hands it to whatever the conf names (soft_lowp/ops.cc), and on a
+// build without FlagGems C++ kernels -- DCU, a CPU-torch build -- flaggems_cpp
+// is what the confs name for a platform with no vendor kernel either. Without
+// these wrappers that route is "backend not registered"; with them it computes
+// the pair the conventional way.
 //
-// A FLAGOS_SOFT_LOWP build that also compiles flaggems_cpp_kernels.cc (MetaX's
-// MACA liboperators) does own the slot: those registrations write the same
-// dispatcher/backend field and must survive. When this file overwrote them,
-// `flaggems_cpp` -- which backends_metax.conf names for bmm -- resolved to these
-// wrappers, so the hand-back returned to the kernel that made it and recursed
-// until the stack ran out: SIGSEGV in torch.bmm on float32 (4, 64, 128) x
-// (4, 128, 32), CI run 40242938356. Both sides use REGISTER_IMPL_TO_DISPATCHER,
-// so which one registered first was link order, and link order is not a way to
-// decide routing.
+// A build that also compiles flaggems_cpp_kernels.cc (MetaX's MACA
+// liboperators) owns the slot for real, and those registrations must survive:
+// both sides write the same dispatcher/backend field, so which one wins is link
+// order, and overwriting them resolved `flaggems_cpp` -- which
+// backends_metax.conf names for bmm -- to these wrappers. The hand-back then
+// returned to the kernel that made it and recursed until the stack ran out:
+// SIGSEGV in torch.bmm on float32, CI run 40242938356.
 //
-// The fallback dispatchers below are registered in both cases: comparing the
-// slot against them is how this file recognises a slot it filled itself (see
-// RefusingRoute), and on a file-owned slot they remain a route to the same
-// computation that cannot come back here.
+// The wrappers are registered as fallback dispatchers either way, so the
+// fallback path routes through the dispatcher like any other kernel rather
+// than calling OrdinaryMm/OrdinaryBmm around it. No other kernel registers on
+// them, so a fallback dispatcher is exactly where GetFn lands for flaggems_cpp
+// whatever its slot holds -- which is why nothing may route a call it makes
+// back through these dispatchers by their own key.
 void RegisterGemmKernels() {
   MmFn mm_fallback_fn = OrdinaryMmKernel;
   BmmFn bmm_fallback_fn = OrdinaryBmmKernel;

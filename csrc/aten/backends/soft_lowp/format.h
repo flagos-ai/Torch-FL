@@ -108,6 +108,33 @@ inline constexpr FormatSpec GetFormatSpec(FormatId id) {
           0.0F, false, false, false, false};
 }
 
+// The torch.dtype object an FP8 scalar type is named by, for the corner that
+// hands a dtype to Python.
+//
+// python_op_caller.cc's OptionalDtypeToPython names only the dtypes a FlagGems
+// call is made with, and an FP8 dtype is not one of them -- FlagGems does not
+// take FP8 here, and that pair failing loudly is right. The software path has
+// the one caller that does: torch's Python dispatcher reads the dtype of every
+// operand before deciding whether to enter the registered kernel at all, so an
+// FP8 operand under an FP8 unwrapping (detach, view, `__array__`) is looked up
+// there. This file is where the mapping lives; the Python objects themselves
+// belong to the FlagGems caller, which is the one that has pybind11, so the
+// relation is set at registration instead of being compiled in: the caller
+// module installs `resolve` once at load, and a build without that route --
+// every non-FlagGems wheel -- leaves it null and nothing changes.
+using Fp8DtypeResolver = void* (*)(c10::ScalarType dtype);
+// Declared here and defined in format.cc: one writer at load, readers on the
+// op path.
+extern Fp8DtypeResolver fp8_dtype_resolver;
+void RegisterFp8DtypeResolver(Fp8DtypeResolver resolve);
+
+// The object for `dtype`, a borrowed reference, or nullptr when there is no
+// resolver (no FlagGems caller in this build) or `dtype` is not an FP8 type.
+// Must be called with the GIL held.
+inline void* Fp8PythonDtype(c10::ScalarType dtype) {
+  return fp8_dtype_resolver != nullptr ? fp8_dtype_resolver(dtype) : nullptr;
+}
+
 inline std::string_view FormatName(FormatId id) {
   switch (id) {
     case FormatId::kFloat8E4M3FN:

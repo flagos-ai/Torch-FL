@@ -16,13 +16,13 @@
 namespace at::native::flagos {
 
 // How many Python op calls this process has made through the callers below.
-// soft_lowp::PythonRouteResolved asks it (see DispatchConfiguredForSoftLowp in
-// aten/dispatcher.h): zero means no FlagGems callable has been resolved yet, so
-// the next call can be the one doing the resolving.
+// A counter only: nothing routes on it today, it is what a profile or a bug
+// report reads to tell "FlagGems ran" from "the C++ routes answered".
 uint64_t PythonOpCallsStarted();
 
 // Called by every caller below and by the generated kernels.
 void NotePythonOpCall();
+
 
 // Call a FlagGems Python op by function name.
 // All variants acquire the GIL internally and look up the function
@@ -91,15 +91,24 @@ struct PyKwarg {
 // `args` are the aten args gems takes positionally; `kwargs` are the trailing
 // aten args gems declares keyword-only. Covers functional_pure/inplace via the
 // single-tensor return.
+//
+// `python_dtype_for_fp8` lets an `is_dtype` keyword carry one of the four FP8
+// types. OptionalDtypeToPython names only the dtypes a FlagGems call is made
+// with and FP8 is not one of them, so it raises; only the software
+// low-precision path asks for this, and only for the torch.dtype objects its
+// resolver builds (soft_lowp/format.h). Off by default, so a FlagGems kernel is
+// never silently handed an FP8 dtype here.
 at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<c10::IValue>& args,
-                                  const std::vector<PyKwarg>& kwargs);
+                                  const std::vector<PyKwarg>& kwargs,
+                                  bool python_dtype_for_fp8 = false);
 
 // Like CallPythonOp_GenericTuple, but with keyword args (e.g. sort.stable,
 // var_mean.correction). Returns the N tensors in order.
 std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
     const char* func_name, const std::vector<c10::IValue>& args,
-    const std::vector<PyKwarg>& kwargs, int64_t n);
+    const std::vector<PyKwarg>& kwargs, int64_t n,
+    bool python_dtype_for_fp8 = false);
 
 // Factory caller (arange/eye/full/ones/zeros/linspace/...). `args` are the
 // shape/scalar positionals; the tensor-options are injected as kwargs:

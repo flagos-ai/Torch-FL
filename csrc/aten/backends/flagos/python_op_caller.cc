@@ -11,11 +11,17 @@
 #include <ATen/core/ivalue.h>
 #include <c10/core/DeviceGuard.h>
 
+// soft_lowp::Fp8PythonDtype, for the keyword dtypes a decoded FP8 pair carries:
+// python_dtype_for_fp8 on the generic callers below.
+#include "../soft_lowp/format.h"
 #include "runtime/functions.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace py = pybind11;
 using namespace pybind11::literals;
@@ -102,6 +108,9 @@ struct PythonOpCache {
     return candidate;
   }
 
+  // `name` is a bare function name or a dotted "module.submodule.func", and it
+  // is also the cache key. Callers that reach one function through two
+  // spellings use GetFuncBare below, which keys it under the bare name.
   py::object GetFunc(const char* name) {
     std::lock_guard<std::mutex> lock(init_mutex);
     auto it = func_cache.find(name);
@@ -152,7 +161,109 @@ struct PythonOpCache {
     func_cache[name] = func;
     return func;
   }
+
+  // The callable for a keyword-arg call (CallPythonOp_GenericKw and the tuple
+  // form), keyed by the bare function name whichever spelling asks for it. The
+  // generated table and a hand-written caller can name the same kernel both
+  // ways ("mm" and "flag_gems.ops.mm.mm"), and GetFunc would cache those as two
+  // entries that must be the same callable. The kernel is resolved from the
+  // bare name exactly as a bare-name lookup always has been -- flag_gems.ops --
+  // so a keyword-arg call cannot take a different module's function depending
+  // on the caller; GetFunc keeps the dotted path for its own callers.
+  py::object GetFuncBare(const char* name) {
+    std::lock_guard<std::mutex> lock(init_mutex);
+    std::string bare(name);
+    auto dot = bare.rfind('.');
+    if (dot != std::string::npos) bare = bare.substr(dot + 1);
+    auto it = func_cache.find(bare);
+    if (it != func_cache.end()) return it->second;
+    py::object func = OpsModule().attr(bare.c_str());
+    func_cache[bare] = func;
+    return func;
+  }
 };
+
+// torch.dtype objects for the four FP8 scalar types: the resolver the software
+// low-precision path installs (soft_lowp/format.h). It lives here because this
+// file is compiled only with the FlagGems route, is the file that has pybind11,
+// and holds the function cache a keyword-arg call is made through.
+//
+// The path handling exists because importing torch from C++ starts a fresh
+// interpreter into which torch has NOT been imported: `torch` is then whatever
+// sits first on the path, not the torch this process is running on. Its own
+// modules fail to import (`No module named 'torch._strobelight'`) or it is a
+// different build's copy. The sibling directories of torch_fl -- the
+// site-packages holding it and one level above, plus the interpreter home --
+// reach the same install the rest of the process uses. An entry already on the
+// path is left where it is, and the additions are taken back if the import
+// fails.
+namespace {
+
+std::vector<std::string> SiblingDirs(const std::string& module_file) {
+  std::vector<std::string> dirs;
+  auto end = module_file.size();
+  for (int up = 1; up <= 2; ++up) {
+    end = module_file.rfind('/', end == 0 ? 0 : end - 1);
+    if (end == std::string::npos) return dirs;
+    dirs.push_back(module_file.substr(0, end));
+  }
+  if (const char* home = std::getenv("PYTHONHOME")) {
+    dirs.push_back(std::string(home) + "/lib");
+  }
+  return dirs;
+}
+
+void* Fp8DtypeObjectImpl(c10::ScalarType dtype) {
+  const char* name = nullptr;
+  switch (dtype) {
+    case c10::kFloat8_e4m3fn:   name = "float8_e4m3fn"; break;
+    case c10::kFloat8_e5m2:     name = "float8_e5m2"; break;
+    case c10::kFloat8_e4m3fnuz: name = "float8_e4m3fnuz"; break;
+    case c10::kFloat8_e5m2fnuz: name = "float8_e5m2fnuz"; break;
+    default:                    return nullptr;
+  }
+  // The same call scope as every other entry into FlagGems, so the resolution
+  // of the dtype object counts as a Python op having been reached.
+  const CallScope call;
+  static py::object cached;
+  if (!cached) {
+    py::object torch_fl = py::module_::import("torch_fl");
+    py::object sys_path = py::module_::import("sys").attr("path");
+    std::size_t added = 0;
+    for (const auto& dir :
+         SiblingDirs(torch_fl.attr("__file__").cast<std::string>())) {
+      if (!sys_path.attr("__contains__")(dir).cast<bool>()) {
+        sys_path.attr("insert")(0, dir);
+        ++added;
+      }
+    }
+    try {
+      cached = py::module_::import("torch").attr(name);
+    } catch (...) {
+      sys_path.attr("__delitem__")(py::slice(0, static_cast<py::ssize_t>(added), 1));
+      throw;
+    }
+  }
+  return cached.ptr();
+}
+
+// Registered at load rather than linked directly, so a build that compiles the
+// software path without this module still links: it keeps its ordinary dtypes,
+// and handing an FP8 dtype to Python is the error it was before.
+const bool fp8_dtype_resolver_registered = [] {
+  soft_lowp::RegisterFp8DtypeResolver(&Fp8DtypeObjectImpl);
+  return true;
+}();
+
+// The FP8 keyword dtype for a call that opted in (python_dtype_for_fp8): the
+// resolver above when it has one, the strict conversion otherwise.
+py::object KeywordDtype(at::ScalarType dtype, bool python_dtype_for_fp8) {
+  void* fp8 = python_dtype_for_fp8 ? soft_lowp::Fp8PythonDtype(dtype) : nullptr;
+  return fp8 != nullptr ? py::reinterpret_borrow<py::object>(fp8)
+                        : OptionalDtypeToPython(dtype);
+}
+
+} // namespace
 
 PythonOpCache& GetCache() {
   // Intentionally leaked: prevent destructor from running after Python
@@ -567,14 +678,18 @@ namespace {
 // Build the **kwargs dict for a keyword-arg call. `is_dtype` kwargs convert the
 // int ScalarType payload to a torch.dtype (see PyKwarg); `is_none` kwargs pass
 // Python None (an absent optional the IValue can't otherwise represent).
-py::dict BuildPyKwargs(const std::vector<PyKwarg>& kwargs, const char* func_name) {
+//
+// `python_dtype_for_fp8` sends the four FP8 types to soft_lowp::Fp8PythonDtype
+// instead of raising; no other dtype is affected, and nothing else turns it on.
+py::dict BuildPyKwargs(const std::vector<PyKwarg>& kwargs, const char* func_name,
+                       bool python_dtype_for_fp8) {
   py::dict d;
   for (const auto& kw : kwargs) {
     if (kw.is_none) {
       d[kw.name] = py::none();
     } else if (kw.is_dtype) {
-      d[kw.name] = OptionalDtypeToPython(
-          static_cast<at::ScalarType>(kw.value.toInt()));
+      d[kw.name] = KeywordDtype(
+          static_cast<at::ScalarType>(kw.value.toInt()), python_dtype_for_fp8);
     } else {
       d[kw.name] = IValueToPython(kw.value, func_name);
     }
@@ -586,16 +701,17 @@ py::dict BuildPyKwargs(const std::vector<PyKwarg>& kwargs, const char* func_name
 
 at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<c10::IValue>& args,
-                                  const std::vector<PyKwarg>& kwargs) {
+                                  const std::vector<PyKwarg>& kwargs,
+                                  bool python_dtype_for_fp8) {
   const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));
 
   py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
+  auto func = cache.GetFuncBare(func_name);
   py::tuple py_args = BuildPyArgs(args, func_name);
-  py::dict py_kwargs = BuildPyKwargs(kwargs, func_name);
+  py::dict py_kwargs = BuildPyKwargs(kwargs, func_name, python_dtype_for_fp8);
   return PythonToTensor(func(*py_args, **py_kwargs));
 }
 
@@ -691,16 +807,16 @@ at::Tensor CallPythonOp_RandomInplace(const char* func_name,
 
 std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
     const char* func_name, const std::vector<c10::IValue>& args,
-    const std::vector<PyKwarg>& kwargs, int64_t n) {
+    const std::vector<PyKwarg>& kwargs, int64_t n, bool python_dtype_for_fp8) {
   const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
   const c10::OptionalDeviceGuard device_guard(DeviceOfArgs(args));
 
   py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
+  auto func = cache.GetFuncBare(func_name);
   py::tuple py_args = BuildPyArgs(args, func_name);
-  py::dict py_kwargs = BuildPyKwargs(kwargs, func_name);
+  py::dict py_kwargs = BuildPyKwargs(kwargs, func_name, python_dtype_for_fp8);
   py::object result = func(*py_args, **py_kwargs);
 
   py::sequence seq = py::reinterpret_borrow<py::sequence>(result);
