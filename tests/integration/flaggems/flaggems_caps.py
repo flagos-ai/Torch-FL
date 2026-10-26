@@ -154,7 +154,27 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: Number of ``flaggems`` routes each platform's conf is measured to hold.
+#: The two seeded-drawout operators: an op whose boxing kernel is ATen's own
+#: ``native_dropout``, which draws from a generator ``torch.manual_seed`` cannot
+#: write on a CPU-torch wheel. Every day-0 boxing variant routes them to FlagGems
+#: for that reason (see ``BOXING_VARIANT_FLAGGEMS_OPS`` in
+#: ``scripts/codegen/gen_vendor_confs.py``), and the default confs do too.
+#:
+#: They are the one place where a conf's ``flaggems`` route is about the kernel
+#: rather than coverage, and not every conf routes them there -- NVIDIA's default
+#: conf sends ``native_dropout_backward`` to its own kernel. A count that folded
+#: them in would read that difference as coverage. ``flaggems_route_count`` still
+#: counts them, because the conf does route them; ``flaggems_coverage_count`` --
+#: the number ``EXPECTED_FLAGGEMS_ROUTES`` holds and the conformance test
+#: compares -- does not. Nor could it: neither op is in
+#: ``FLAGGEMS_ROUTING_CALLS``, so ``test_flaggems_routing.py``, the test that
+#: proves a route on device, never visits one.
+SEEDED_DRAWOPS = frozenset({"native_dropout", "native_dropout_backward"})
+
+#: Number of ``flaggems`` routes each platform's conf is measured to hold -- the
+#: raw tally, as ``flaggems_route_count`` counts it. The conformance test
+#: compares ``flaggems_coverage_count``, which is this less a ``flaggems`` route
+#: for a ``SEEDED_DRAWOPS`` operator on the confs that have one.
 #:
 #: A regression guard rather than an exact contract: the count only moves when an
 #: operator is added, removed or re-measured, and each of those changes the
@@ -193,21 +213,23 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # two seeded-drawout ops (native_dropout, native_dropout_backward): the
     # boxing kernel there is ATen's own draw, which torch.manual_seed cannot
     # reach on a CPU-torch wheel (run 40255168276). It was 0 before those two
-    # moved; the suite's FlagGems cases skip by the conf's own route on this
-    # lane, which is the designed behaviour (see ``flaggems_route_count``).
+    # moved, and it is 0 again for this suite's purposes: those are the
+    # variant's only two routes, neither op is in ``FLAGGEMS_ROUTING_CALLS``,
+    # and ``flaggems_coverage_count`` leaves them out (see ``SEEDED_DRAWOPS``).
+    # The suite's FlagGems cases skip by the conf's own route on this lane,
+    # which is the designed behaviour.
     #
-    # Both counts count `flaggems` only, the way ``flaggems_route_count`` does:
-    # `backends_metax.conf` also carries 15 `flaggems_cpp` routes and
-    # `backends_metax_boxing.conf` 12, which neither number below includes.
+    # All counts are `flaggems` only: `backends_metax.conf` also carries 15
+    # `flaggems_cpp` routes and `backends_metax_boxing.conf` 12, which neither
+    # metax number includes.
     "nvidia": 549,
-    "nvidia_boxing": 2,
+    "nvidia_boxing": 0,
     # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
     # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
     # FlagGems coverage and boxes the rest. Counted from the shipped confs the
-    # same way ``flaggems_route_count`` counts (``= flaggems`` only). The two
-    # seeded-drawout ops the day-0 confs route to FlagGems (native_dropout and
-    # native_dropout_backward) are part of that count on every variant.
-    "metax_boxing": 595,
+    # same way ``flaggems_route_count`` counts (``= flaggems`` only); the two
+    # ``native_dropout`` rows are part of that count on every variant.
+    "metax_boxing": 583,
     "dcu_boxing": 453,
     # TsingMicro's conf is the other hand-maintained one: 81 routes, of which 65
     # are the plain `flaggems` key, 2 spell it `flagos_python` (a log name this
@@ -392,6 +414,24 @@ def flaggems_kernel_compiled() -> bool:
 def flaggems_route_count() -> int:
     """How many operators this conf routes with the plain ``flaggems`` key."""
     return sum(1 for value in load_routes().values() if value == "flaggems")
+
+
+def flaggems_coverage_count() -> int:
+    """``flaggems_route_count()`` less the routes the call table cannot bill.
+
+    A ``SEEDED_DRAWOPS`` route is a statement about the kernel (the boxing kernel
+    cannot honour a seed), not about how much of the model FlagGems covers, and
+    no call in ``FLAGGEMS_ROUTING_CALLS`` exercises a dropout -- so
+    ``test_flaggems_routing.py``, which is what proves a route on device, never
+    visits one. This is the set it can reach: the conformance guard compares
+    this number, and the raw count stays available for the conf's own tally.
+    """
+    routes = load_routes()
+    return sum(
+        1
+        for op, value in routes.items()
+        if value == "flaggems" and op not in SEEDED_DRAWOPS
+    )
 
 
 def flaggems_runtime_unavailable() -> str:
