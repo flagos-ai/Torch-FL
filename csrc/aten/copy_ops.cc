@@ -931,19 +931,36 @@ at::Tensor _to_copy(
         at::native::copy_(result, self_contig, false);
       }
 #else
-      // CUDA platform without the boxing kernels. `DeviceBoxingGuard` does not
-      // need them: it only rewrites a tensor's device metadata to CUDA, and a
-      // build that gets here links a real libtorch_cuda, so the native
-      // TensorIterator copy kernel is available to dispatch to. Without this
-      // arm every dtype cast was a D2H -> host cast -> H2D round trip. Measured
-      // on the OCR-RM Qwen3.5-VL 2B value head (8x H100): 4333 `_to_copy` calls
-      // and 8826 blocking cudaMemcpy per forward against 574 async ones on
-      // stock CUDA, 2.0 s of the 4.2 s forward spent blocked in cudaMemcpy.
+      // CUDA platform without the boxing kernels. `DeviceBoxingGuard` only
+      // rewrites a tensor's device metadata to CUDA, so the on-device cast it
+      // enables is ATen's native TensorIterator strided copy -- and that is a
+      // DispatchStub kernel. It is only present when the process linked a real
+      // libtorch_cuda. The default NVIDIA wheel does not: it builds against the
+      // CPU-only pip torch on purpose, so the CUDA stub is empty and the first
+      // cast aborts the process. Measured on the CI lane (run 40285867035,
+      // `test_compile_dtypes[float16]`): `model.to("flagos").to(torch.float16)`
+      // reached `at::native::copy_impl` here and died with
+      // "DispatchStub: missing kernel for cuda" at DispatchStub.cpp:275.
+      //
+      // Where libtorch_cuda *is* linked the on-device cast is worth keeping.
+      // Without it every dtype cast is a D2H -> host cast -> H2D round trip:
+      // measured on the OCR-RM Qwen3.5-VL 2B value head (8x H100, torch built
+      // with CUDA) 4333 `_to_copy` calls and 8826 blocking cudaMemcpy per
+      // forward against 574 async ones, 2.0 s of the 4.2 s forward blocked in
+      // cudaMemcpy. So the choice is made at link time: `torch_cpu_library`
+      // pulls libtorch_cuda in only when the torch it found has one.
+      //
+      // The native copy kernel has no UInt16/UInt32/UInt64 case either way, so
+      // those casts take the host round-trip on both builds.
       if (cast_needs_cpu_roundtrip(self_contig.scalar_type(), dtype)) {
         strided_copy_cast_via_cpu(self_contig, result);
       } else {
+#if defined(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
         DeviceBoxingGuard guard(self_contig, result);
         at::native::copy_(result, self_contig, false);
+#else
+        strided_copy_cast_via_cpu(self_contig, result);
+#endif
       }
 #endif
 #endif

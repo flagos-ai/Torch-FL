@@ -532,6 +532,33 @@ elseif(_flagos_is_dcu)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_INDEX_BOUNDS_CHECK=1)
 endif()
 
+# Does this wheel's torch carry ATen's CUDA kernels? A CPU-only pip torch -- the
+# default NVIDIA build, and the one CI measures -- has an empty CUDA
+# DispatchStub, so a cast that boxes a flagos tensor to CUDA and calls
+# at::native::copy_ aborts with "DispatchStub: missing kernel for cuda"
+# (copy_ops.cc::_to_copy, run 40285867035 test_compile_dtypes[float16]). When
+# the found torch does ship libtorch_cuda.so the same cast is served on-device,
+# which is worth a lot of cudaMemcpy (see the comment at the call site). The
+# probe reads the directory of the torch this link actually uses, so it answers
+# for the torch in the build environment rather than for a directory the
+# conditions below might fall back to.
+set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)
+get_target_property(_flagos_torch_cpu_location torch_cpu_library IMPORTED_LOCATION)
+get_target_property(_flagos_torch_python_location torch_python_library IMPORTED_LOCATION)
+foreach(_flagos_torch_location IN ITEMS
+    "${_flagos_torch_cpu_location}" "${_flagos_torch_python_location}")
+  if(_flagos_torch_location)
+    get_filename_component(_flagos_torch_dir "${_flagos_torch_location}" DIRECTORY)
+    if(EXISTS "${_flagos_torch_dir}/libtorch_cuda.so")
+      set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
+    endif()
+  endif()
+endforeach()
+message(STATUS "torch_fl: torch links libtorch_cuda.so: ${FLAGOS_TORCH_LINKS_LIBTORCH_CUDA}")
+if(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TORCH_LINKS_LIBTORCH_CUDA=1)
+endif()
+
 set(_torch_fl_link_libs torch_cpu_library torch_python_library flagos ${CUDA_RUNTIME_LIB})
 if(FLAGOS_BUILD_FLAGGEMS_CPP)
   if(TARGET FlagGems::operators)

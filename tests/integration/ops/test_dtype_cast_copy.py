@@ -23,18 +23,26 @@ layernorm, softmax and the gated delta rule, plus the fp32 -> bf16 back.
   * boxing  -- boxes to CUDA and runs the native TensorIterator copy kernel;
   * default -- used to cast through host memory unconditionally.
 
-The default arm is what the shipped FlagGems-primary wheel compiles, and on a
-CUDA-ABI platform it can reach the same native kernel: `DeviceBoxingGuard` only
-rewrites the tensor's device metadata, and a build that reaches this arm links a
-real libtorch_cuda. Casting through the host turned every cast into three
-blocking `cudaMemcpy` calls -- 8826 per forward on the OCR-RM Qwen3.5-VL 2B
-value head, 2.0 s of a 4.2 s forward.
+The default arm is what the shipped FlagGems-primary wheel compiles, and it
+uses the same native kernel only when the torch it was built against ships one:
+`DeviceBoxingGuard` only rewrites the tensor's device metadata, and the cast it
+enables is ATen's TensorIterator strided copy, a CUDA DispatchStub kernel. The
+default NVIDIA wheel is built against the CPU-only pip torch, which has no such
+kernel -- a cast on that arm aborted the process with "DispatchStub: missing
+kernel for cuda" (run 40285867035, `test_compile_dtypes[float16]`). So
+`csrc/CMakeLists.txt` detects libtorch_cuda.so next to the torch it links and
+defines `FLAGOS_TORCH_LINKS_LIBTORCH_CUDA`; the arm boxes only when it is set
+and casts through the host otherwise. Where it is set, casting through the host
+would turn every cast into three blocking `cudaMemcpy` calls -- 8826 per forward
+on the OCR-RM Qwen3.5-VL 2B value head, 2.0 s of a 4.2 s forward.
 
 These tests pin the *observable* properties: the cast is correct, it returns a
 tensor on the source device, and it does not move the data through host memory.
 The host round-trip is detected by counting `cudaMemcpy` in a profiler window,
 which is device-agnostic and needs no weight file.
 """
+
+from pathlib import Path
 
 import pytest
 import torch
@@ -127,12 +135,12 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     kernel. This asserts on the source so it runs on any host -- the runtime
     check below only runs where a device is present.
 
-    The regression this guards: the default (non-boxing) arm called
-    `strided_copy_cast_via_cpu` unconditionally, so the shipped wheel for the
-    CUDA-ABI platforms paid a host round trip for every dtype cast.
+    The regressions this guards, in both directions: the default (non-boxing)
+    arm first called `strided_copy_cast_via_cpu` unconditionally, so a build
+    that did link libtorch_cuda paid a host round trip for every dtype cast;
+    then it boxed unconditionally, which on the CPU-only torch the NVIDIA wheel
+    ships is a call into an empty CUDA DispatchStub (run 40285867035).
     """
-    from pathlib import Path
-
     source_root = Path(__file__).resolve().parents[3]
     copy_ops = source_root / "csrc/aten/copy_ops.cc"
     if not copy_ops.is_file():
@@ -155,13 +163,19 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
         "the non-boxing CUDA cast arm is gone; decouple this test from the source "
         "if the arm was deliberately removed"
     )
-    arm = src[start : start + 1400]
+    arm = src[start : start + 2400]
+    assert "FLAGOS_TORCH_LINKS_LIBTORCH_CUDA" in arm, (
+        f"{platform}: the non-boxing CUDA cast arm boxes unconditionally again, "
+        "which calls into an empty CUDA DispatchStub on the CPU-only torch the "
+        "default wheel builds against"
+    )
     assert "DeviceBoxingGuard" in arm, (
-        f"{platform}: the non-boxing CUDA cast arm no longer boxes to CUDA, so a "
-        "dtype cast is a host round trip again"
+        f"{platform}: the non-boxing CUDA cast arm no longer boxes to CUDA at all, "
+        "so a build that links libtorch_cuda pays a host round trip per cast"
     )
     assert "strided_copy_cast_via_cpu(self_contig, result);" in arm, (
-        f"{platform}: the unsigned-dtype escape hatch is missing from the arm"
+        f"{platform}: the host round-trip the arm takes without libtorch_cuda "
+        "is missing, or the unsigned-dtype escape hatch is"
     )
 
 
@@ -170,7 +184,17 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
 )
 def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype):
-    """End to end: the bf16<->fp32 cast must not move data between host and device."""
+    """End to end: the bf16<->fp32 cast must not move data between host and device.
+
+    Only meaningful where torch links libtorch_cuda.so -- that is the build
+    whose cast arm boxes to CUDA, and it is tied to the torch the wheel was
+    built against, not to one a test can install. The default NVIDIA wheel is
+    built against the CPU-only torch, where the host round trip is the correct
+    behaviour, so the property does not hold there by design.
+    """
+    torch_lib = Path(torch.__file__).resolve().parent / "lib"
+    if not (torch_lib / "libtorch_cuda.so").is_file():
+        pytest.skip("torch has no libtorch_cuda.so; the cast arm is the host one")
     src = torch.randn(512, 1024, dtype=src_dtype, device=_device())
     src.to(dst_dtype)  # warm: the first cast may compile the kernel
     n = _memcpy_count(lambda: src.to(dst_dtype))
