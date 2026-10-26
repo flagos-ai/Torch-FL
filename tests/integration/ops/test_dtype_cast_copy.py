@@ -57,10 +57,49 @@ def _device():
     return torch.device("flagos:0")
 
 
-pytestmark = [
+def _cuda_abi_build():
+    """Whether this build dispatches flagos copies to CUDA's native copy kernel.
+
+    The on-device arms below are compiled for the CUDA-ABI platforms (cuda, dcu,
+    metax, ppu) and only those. Iluvatar is a PrivateUse1 device whose tensor
+    operations this repository does not own -- its `copy_` reaches corex through
+    the vendor layer and, as measured on the Iluvatar lane, gathers through host
+    memory. `CUDA_ABI_PLATFORMS` is also the set the source pins below assert on,
+    so the two cannot drift apart silently.
+    """
+    try:
+        import torch_fl  # noqa: F401  -- already imported at module scope
+        from torch_fl import _build_config
+
+        accelerator = getattr(_build_config, "ACCELERATOR", None)
+    except Exception:
+        return False
+    if accelerator is None:
+        # Builds predating _build_config: the device name is the only signal.
+        accelerator = (
+            torch.accelerator.current_accelerator()
+            if hasattr(torch, "accelerator")
+            else None
+        )
+        accelerator = str(accelerator) if accelerator is not None else ""
+    return accelerator in CUDA_ABI_PLATFORMS
+
+
+_pytest_marks = [
     pytest.mark.anyplatform,
     pytest.mark.skipif(not _flagos_available(), reason="no flagos device"),
 ]
+
+pytestmark = _pytest_marks
+
+# A transfer count is only a statement about *this* repository's copy arms. On a
+# build that executes copies elsewhere the count says nothing about the change
+# these tests guard, and asserting zero there reports the vendor's behaviour as
+# our regression.
+requires_on_device_copy_arms = pytest.mark.skipif(
+    not _cuda_abi_build(),
+    reason="copy_ is not served by this repository's CUDA-ABI arms on this build",
+)
 
 
 # (source dtype, target dtype). bf16 <-> fp32 is the pair a transformer hits on
@@ -165,6 +204,7 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     )
 
 
+@requires_on_device_copy_arms
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
@@ -180,6 +220,7 @@ def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype):
     )
 
 
+@requires_on_device_copy_arms
 @pytest.mark.parametrize("src_dtype,dst_dtype", CASTS)
 def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
     """`copy_` into a non-contiguous destination must stay on device.
@@ -204,6 +245,7 @@ def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
     )
 
 
+@requires_on_device_copy_arms
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
