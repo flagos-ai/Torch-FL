@@ -150,8 +150,17 @@ AT_OP = {
 
 
 def _gemm_call(
-    alpha, beta, a_ptr, b_ptr, c_ptr, compute_type, m, n, k,
-    op_b="CUBLAS_OP_N", ld_b="n",
+    alpha,
+    beta,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    compute_type,
+    m,
+    n,
+    k,
+    op_b="CUBLAS_OP_N",
+    ld_b="n",
 ):
     """The column-major cublas call computing a row-major C(m,n) = A(m,k)*B(k,n).
 
