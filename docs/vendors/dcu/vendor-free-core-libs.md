@@ -72,7 +72,9 @@ codegen, because the DTK-only schemas do not exist on other platforms. The shim
 therefore satisfies the loader without pretending the ops work.
 
 It builds as `libflagos_dtk_core_compat.so` (~16 KB) and installs into
-`torch_fl/lib_hygon/`.
+`torch_fl/lib_hygon/` (or `torch_fl/lib_dcu/` when the bundle was assembled
+under the vendor's name; the loader probes both spellings and uses the one the
+package has).
 
 ### 2. A build-time ABI guard
 
