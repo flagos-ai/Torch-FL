@@ -158,11 +158,55 @@ def _parse_conf(path: Path) -> dict[str, str]:
 def _soft_lowp_claims() -> set[str]:
     """The matrix ops register.cc claims from source for the soft-lowp path."""
     register_cc = (ATEN_DIR / "register.cc").read_text()
+    # Comment lines count as neither a claim nor a duplicate: the block's own
+    # explanation names the ops it holds back.
+    code_lines = [
+        line for line in register_cc.splitlines() if not line.lstrip().startswith("//")
+    ]
     return set(
         re.findall(
-            r'^\s*m\.impl\("((?:mm|bmm|addmm)[^"]*|_scaled_[^"]*)",', register_cc, re.M
+            r'^\s*m\.impl\("((?:mm|bmm|addmm)[^"]*|_scaled_[^"]*)",',
+            "\n".join(code_lines),
+            re.M,
         )
     )
+
+
+def _dropped_on(line: str, platform: str) -> bool:
+    """Whether a claim line is excluded from ``platform``'s build by its guard.
+
+    Only the one guard the block uses: ``#if !defined(FLAGOS_ACCEL_<X>)``.
+    """
+    match = re.match(r"\s*#if !defined\((FLAGOS_ACCEL_\w+)\)", line)
+    return bool(match) and match.group(1) == SOFT_LOWP_PLATFORMS[platform]
+
+
+def _lines_kept_on(block: str, platform: str) -> list[str]:
+    """The lines of ``block`` compiled for ``platform``.
+
+    Only the one guard the claim block uses is honoured: an
+    ``#if !defined(<macro>)`` region is dropped when ``<macro>`` is the
+    platform's own ``FLAGOS_ACCEL_*`` (and kept for every other platform).
+    """
+    own = SOFT_LOWP_PLATFORMS[platform]
+    kept: list[str] = []
+    guarded_on: str | None = None
+    for line in block.splitlines():
+        stripped = line.strip()
+        match = re.match(r"#if !defined\((\w+)\)", stripped)
+        if guarded_on is None and match:
+            guarded_on = match.group(1)
+            if guarded_on != own:
+                kept.append(line)
+            continue
+        if guarded_on is not None and stripped == "#endif":
+            if guarded_on != own:
+                kept.append(line)
+            guarded_on = None
+            continue
+        if guarded_on is None or guarded_on != own:
+            kept.append(line)
+    return kept
 
 
 def _registered_ops(inc_path: Path) -> set[str]:
@@ -683,13 +727,25 @@ SOFT_LOWP_PLATFORMS = {"hygon": "FLAGOS_ACCEL_DCU", "metax": "FLAGOS_ACCEL_METAX
 @pytest.mark.anyplatform
 @pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
 def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
-    """A platform that compiles the prelude must also claim the ops it serves."""
+    """A platform that compiles the prelude must also reach it for every op.
+
+    Reached means registered, from either list: ``register.cc`` claims the ops
+    the conf leaves on ``none``, and the generated FlagGems list names the same
+    ``Wrapper*`` symbols for the ops the conf routes to a FlagGems backend
+    (which is why ``register.cc`` must not claim those again). An op in
+    neither list has no PrivateUse1 kernel at all, so the prelude inside its
+    wrapper never runs.
+    """
     register_cc = (ATEN_DIR / "register.cc").read_text()
-    missing = sorted(op for op in SOFT_LOWP_CLAIMS if op not in register_cc)
+    listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    missing = sorted(
+        op for op in SOFT_LOWP_CLAIMS if op not in register_cc and op not in listed
+    )
     assert not missing, (
-        f"{platform}: the software low-precision matrix ops {missing} are not "
-        "claimed anywhere in register.cc, so a FlagGems-primary build never "
-        "reaches the FLAGOS_SOFT_LOWP prelude for them"
+        f"{platform}: the software low-precision matrix ops {missing} are "
+        "registered on PrivateUse1 by neither register.cc nor the generated "
+        "FlagGems list, so a FlagGems-primary build never reaches the "
+        "FLAGOS_SOFT_LOWP prelude for them"
     )
 
 
@@ -719,8 +775,15 @@ def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
     op is guarded out by name, on every platform: a guard that only excludes
     the platform it was written for still duplicates on the other one.
     """
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    start = register_cc.rfind("#if defined(FLAGOS_ACCEL_METAX) ||")
+    block = register_cc[start : register_cc.find("\n  #endif", start)]
+    on_platform = [line for line in _lines_kept_on(block, platform)]
+    claimed_here = set(
+        re.findall(r'^\s*m\.impl\("([^"]+)",', "\n".join(on_platform), re.M)
+    )
     listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
-    duplicated = sorted(SOFT_LOWP_CLAIMS & listed)
+    duplicated = sorted(claimed_here & listed)
     assert not duplicated, (
         f"{platform}: {duplicated} are claimed by register.cc and already named "
         "by the generated FlagGems list; the second m.impl does not compile"
