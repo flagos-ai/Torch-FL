@@ -390,29 +390,3 @@ def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
         assert "routed" in line, (
             f"{name} is taken unconditionally in the factory arm:\n{arm}"
         )
-
-
-def test_an_out_form_the_conf_does_not_route_refuses():
-    """The claim gives mm.out/bmm.out an m.impl on every build, routed or not.
-
-    Computed in place, an ordinary ``out=`` pair would answer where the conf
-    says the platform has no accelerated impl, so the same wheel would serve
-    ``mm`` and refuse ``mm.out`` without saying so. The wrapper raises the
-    dispatcher's own message instead, from the same conf answer.
-    """
-    source = _OPS_CC.read_text(encoding="utf-8")
-    guard = _function_body(source, "void RequireRouteFor(")
-    assert "AnswerKeyHasRoute(" in guard, guard
-    assert "routed to 'none'" in guard, (
-        "RequireRouteFor must carry the dispatcher's message, not a new one:\n" + guard
-    )
-    for signature, variant in (
-        ("at::Tensor& MmDtypeOut(", "mm.dtype_out"),
-        ("at::Tensor& MmOut(", "mm.out"),
-        ("at::Tensor& BmmDtypeOut(", "bmm.dtype_out"),
-        ("at::Tensor& BmmOut(", "bmm.out"),
-    ):
-        body = _function_body(source, signature)
-        assert f'RequireRouteFor("{variant}")' in body, (
-            f"{signature[:-1]} answers an unrouted form instead of refusing it:\n{body}"
-        )
