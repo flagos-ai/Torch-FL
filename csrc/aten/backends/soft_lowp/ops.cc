@@ -435,6 +435,11 @@ bool RoutesOrdinaryKey(const char* ordinary_key) {
 }
 
 // Two keys are tried, the call's own first, then the mm/bmm one.
+//
+// Every shape falls back to kFactory, including the ones that write `out`:
+// the pair is computed here and then stored into `out`, which covers the case
+// the conf leaves these keys `none`. Only a key the mm/bmm one cannot take
+// either -- `none` on both -- leaves the pair unrouted.
 OrdinaryRoute Pick(const bool own,
                    const char* ordinary_key,
                    const OrdinaryRoute own_route) {
@@ -1175,7 +1180,8 @@ void RequireRouteFor(const char* variant) {
       variant,
       ": routed to 'none' (no accelerated impl on this platform) but the op "
       "is registered on PrivateUse1 -- regenerate the vendor conf so "
-      "registration and routing agree");
+      "registration and routing agree, map the call to one the conf holds, "
+      "or take the call back (drop the key from the claim)");
 }
 
 at::Tensor& MmDtypeOut(
