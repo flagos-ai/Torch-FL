@@ -93,11 +93,12 @@ struct PyKwarg {
 // single-tensor return.
 //
 // `python_dtype_for_fp8` lets an `is_dtype` keyword carry one of the four FP8
-// types. OptionalDtypeToPython names only the dtypes a FlagGems call is made
-// with and FP8 is not one of them, so it raises; only the software
-// low-precision path asks for this, and only for the torch.dtype objects its
-// resolver builds (soft_lowp/format.h). Off by default, so a FlagGems kernel is
-// never silently handed an FP8 dtype here.
+// types: only the software low-precision path asks for this, and only by
+// naming one of the torch.dtype objects its resolver builds
+// (soft_lowp/format.h). Off by default, so a FlagGems kernel is never silently
+// handed an FP8 dtype here. OptionalDtypeToPython names those four itself --
+// the dedicated dtype-conversion callers reach it too -- so the flag now only
+// decides whether this call may see an FP8 keyword at all.
 at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<c10::IValue>& args,
                                   const std::vector<PyKwarg>& kwargs,

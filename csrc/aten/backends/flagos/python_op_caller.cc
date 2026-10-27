@@ -222,9 +222,9 @@ void* Fp8DtypeObjectImpl(c10::ScalarType dtype) {
     case c10::kFloat8_e5m2fnuz: name = "float8_e5m2fnuz"; break;
     default:                    return nullptr;
   }
-  // The same call scope as every other entry into FlagGems, so the resolution
-  // of the dtype object counts as a Python op having been reached.
-  const CallScope call;
+  // Resolution of a dtype object is not a routed op, so it takes the GIL but
+  // does not count as a Python op call.
+  py::gil_scoped_acquire gil;
   static py::object cached;
   if (!cached) {
     py::object torch_fl = py::module_::import("torch_fl");
@@ -245,22 +245,6 @@ void* Fp8DtypeObjectImpl(c10::ScalarType dtype) {
     }
   }
   return cached.ptr();
-}
-
-// Registered at load rather than linked directly, so a build that compiles the
-// software path without this module still links: it keeps its ordinary dtypes,
-// and handing an FP8 dtype to Python is the error it was before.
-const bool fp8_dtype_resolver_registered = [] {
-  soft_lowp::RegisterFp8DtypeResolver(&Fp8DtypeObjectImpl);
-  return true;
-}();
-
-// The FP8 keyword dtype for a call that opted in (python_dtype_for_fp8): the
-// resolver above when it has one, the strict conversion otherwise.
-py::object KeywordDtype(at::ScalarType dtype, bool python_dtype_for_fp8) {
-  void* fp8 = python_dtype_for_fp8 ? soft_lowp::Fp8PythonDtype(dtype) : nullptr;
-  return fp8 != nullptr ? py::reinterpret_borrow<py::object>(fp8)
-                        : OptionalDtypeToPython(dtype);
 }
 
 } // namespace
@@ -430,6 +414,13 @@ py::object OptionalIntArrayRefToPython(at::OptionalIntArrayRef arr) {
 // FlagGems instead of returning a real tensor for a complex request.
 py::object OptionalDtypeToPython(std::optional<at::ScalarType> dtype) {
   if (!dtype.has_value()) return py::none();
+  // A decoded low-precision pair carries one of the four FP8 dtypes to every
+  // route that takes its dtype -- a FlagGems keyword and the dedicated
+  // dtype-conversion callers alike -- so the FP8 objects are named here rather
+  // than at each of those calls.
+  if (void* fp8 = soft_lowp::Fp8PythonDtype(*dtype)) {
+    return py::reinterpret_borrow<py::object>(static_cast<PyObject*>(fp8));
+  }
   // Import torch and get the dtype object
   static py::module_ torch_mod = py::module_::import("torch");
   switch (*dtype) {
@@ -453,6 +444,23 @@ py::object OptionalDtypeToPython(std::optional<at::ScalarType> dtype) {
                   "default dtype");
       return py::none();  // unreachable: TORCH_CHECK above always throws
   }
+}
+
+// Registered at load rather than linked directly, so a build that compiles the
+// software path without this module still links: it keeps its ordinary dtypes,
+// and handing an FP8 dtype to Python is the error it was before.
+const bool fp8_dtype_resolver_registered = [] {
+  soft_lowp::RegisterFp8DtypeResolver(&Fp8DtypeObjectImpl);
+  return true;
+}();
+
+// The FP8 keyword dtype for a call that opted in (python_dtype_for_fp8): the
+// resolver above when it has one, the strict conversion otherwise.
+py::object KeywordDtype(at::ScalarType dtype, bool python_dtype_for_fp8) {
+  void* fp8 = python_dtype_for_fp8 ? soft_lowp::Fp8PythonDtype(dtype) : nullptr;
+  return fp8 != nullptr ? py::reinterpret_borrow<py::object>(
+                             static_cast<PyObject*>(fp8))
+                        : OptionalDtypeToPython(dtype);
 }
 
 // Convert a single IValue to a Python object, covering the argument types the

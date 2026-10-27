@@ -108,16 +108,15 @@ inline constexpr FormatSpec GetFormatSpec(FormatId id) {
           0.0F, false, false, false, false};
 }
 
-// The torch.dtype object an FP8 scalar type is named by, for the corner that
-// hands a dtype to Python.
+// The torch.dtype object an FP8 scalar type is named by, for the corners that
+// hand a dtype to Python.
 //
-// python_op_caller.cc's OptionalDtypeToPython names only the dtypes a FlagGems
-// call is made with, and an FP8 dtype is not one of them -- FlagGems does not
-// take FP8 here, and that pair failing loudly is right. The software path has
-// the one caller that does: torch's Python dispatcher reads the dtype of every
-// operand before deciding whether to enter the registered kernel at all, so an
-// FP8 operand under an FP8 unwrapping (detach, view, `__array__`) is looked up
-// there. This file is where the mapping lives; the Python objects themselves
+// A decoded FP8 pair carries that dtype to whatever route the conf names, and
+// the FlagGems route is reached through a C++ caller that converts the dtype to
+// a Python object before gems sees it (python_op_caller.cc). That conversion
+// names only the dtypes a FlagGems call is made with, so this file says which
+// FP8 types have an object and the caller asks before it converts. This file is
+// where the mapping lives; the Python objects themselves
 // belong to the FlagGems caller, which is the one that has pybind11, so the
 // relation is set at registration instead of being compiled in: the caller
 // module installs `resolve` once at load, and a build without that route --

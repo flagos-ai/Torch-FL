@@ -215,10 +215,8 @@ def test_generated_bmm_out_is_gated():
     _assert_bmm_out_gated(register_inc)
 
 
-_ADDMM_OUT_CALL = re.compile(r"RunMatrixOut\(\"addmm\.out\",([^;]*)\);\n\}")
-_ADDMM_OUT_SPREAD = re.compile(
-    r"CallDecodedOut\(AddmmOutOf\(shape\),\s*(\w+)\.key,\s*out,([^;]*?)\);", re.S
-)
+_ADDMM_OUT_CALL = re.compile(r"RunMatrixOut\(\"addmm\.out\",\s*(.*?)\);\n\}", re.S)
+_ADDMM_OUT_ROUTE = re.compile(r"case DecodedShape::kAddmmOut: \{\n(.*?)\n    \}", re.S)
 
 
 def _argument_list(source: str) -> list[str]:
@@ -239,64 +237,102 @@ def _argument_list(source: str) -> list[str]:
 def test_addmm_out_passes_its_bias_where_the_bias_goes():
     """``addmm.out`` is ``RunMatrixOut(variant, self, mat2, dtype, rank, bias, ...)``.
 
-    The op's one input tensor is its *bias*; the soft call is handed ``self`` as
-    it, which decodes that operand (it is dense, so nothing changes for it) and
-    gives the bias the const ``self`` -- while ``mat1`` and ``mat2`` take the
-    bias's place. It compiled on every target whose ``ScalarType`` is an enum
-    class, and stopped at the signature on DCU, where the enum converts to int.
+    The op's one input tensor is its *bias*; the soft call was handed ``self``
+    as it, which decodes that operand (it is dense, so nothing changes for it)
+    and gives the bias the const ``self`` -- while ``mat1`` and ``mat2`` took
+    the bias's place. It compiled on every target whose ``ScalarType`` is an
+    enum class, and stopped at the signature on DCU, where the enum converts to
+    int.
     """
     match = _ADDMM_OUT_CALL.search(_OPS_CC.read_text(encoding="utf-8"))
     assert match is not None, "soft_lowp::AddmmOut no longer calls RunMatrixOut"
     args = _argument_list(match.group(1))
-    assert len(args) == 9, args
-    self_, mat1, mat2, out_dtype, rank, bias = args[:6]
-    assert (self_, mat1, rank) == ("self", "mat1", "2"), (
+    assert len(args) == 8, args
+    self_, mat2, out_dtype, rank, bias = args[:5]
+    assert (self_, mat2, rank) == ("mat1", "mat2", "2"), (
         f"soft_lowp::AddmmOut no longer hands addmm.out its own operands: {args}"
     )
     assert out_dtype == "out.scalar_type()", args
-    assert bias == "mat1", (
-        "soft_lowp::AddmmOut must pass mat1 as the bias (addmm's `self`), "
+    assert bias == "self", (
+        "soft_lowp::AddmmOut must pass self as the bias (addmm's `self`), "
         f"got {bias!r}: {args}"
     )
+    assert args[7] == "out", args
 
 
 def test_addmm_out_routes_through_a_dispatcher_that_writes_out():
     """The decoded pair may only be routed where ``out`` is what the kernel writes.
 
-    ``DispatchDecodedOut`` asks ``*_Of(shape)`` for a dispatcher and calls it
-    with the bias, both operands and ``out``; every arm before addmm's hands
-    ``out`` to a kernel that writes it. Passing anything else (a re-bound
-    ``self``, the const operand of the general route) either writes the wrong
-    tensor or binds a const tensor to ``Tensor&``.
+    ``DispatchDecodedOut``'s addmm.out arm asks ``addmm_out_dispatcher``, whose
+    kernel takes the bias, both operands, both scalars and ``out``; every arm
+    before it hands ``out`` to a kernel that writes it. Passing anything else
+    (a re-bound ``self``, the general route's const operand) either writes the
+    wrong tensor or binds a const tensor to ``Tensor&``.
     """
     source = _OPS_CC.read_text(encoding="utf-8")
-    match = _ADDMM_OUT_SPREAD.search(source)
+    match = _ADDMM_OUT_ROUTE.search(source)
     assert match is not None, "DispatchDecodedOut no longer routes addmm.out"
-    args = _argument_list(match.group(2))
+    arm = match.group(1)
+    assert "addmm_out_dispatcher" in arm, arm
+    call = re.search(r"AddmmOutCall call\{(\w+)\}", arm)
+    assert call is not None and call.group(1) == "addmm_out_dispatcher", arm
+    called = re.search(r"call\.Call\(call\.Select\(key\), (.*?)\);", arm, re.S)
+    assert called is not None, arm
+    args = _argument_list(called.group(1))
     assert args == [
-        f"{match.group(1)}.bias",
-        f"{match.group(1)}.lhs",
-        f"{match.group(1)}.rhs",
+        "pair.bias",
+        "pair.lhs",
+        "pair.rhs",
         "beta",
         "alpha",
+        "out",
     ], args
 
 
-def test_addmm_inplace_asks_its_own_dispatcher_for_a_route():
-    """``addmm_`` has only the in-place signature, and a dispatcher of its own.
+def test_addmm_inplace_computes_through_the_out_writer():
+    """``addmm_`` has only the in-place signature, and keeps no route of its own.
 
     The const-``out`` general addmm dispatcher can resolve for a conf key whose
     in-place slot holds nothing -- on a build without FlagGems C++ kernels the
     fallback wrappers fill the former and not the latter -- and a yes there
-    routes to a kernel that is not there.
+    routes to a kernel that is not there. So ``addmm_`` has no variant entry
+    and no route check, and reaches the conf's route through
+    ``RunMatrixOut``'s addmm.out arm, whose kernel writes the caller's tensor.
     """
     source = _OPS_CC.read_text(encoding="utf-8")
     handlers = source[source.find("bool DecodedPairHasRoute(") :]
     handlers = handlers[: handlers.find("\n}\n")]
-    assert "addmm_inplace_dispatcher.RouteAcceptsDecoded" in handlers, (
-        "DecodedPairHasRoute must ask addmm_inplace_dispatcher about addmm_; "
-        "the general addmm dispatcher answers for a different signature"
+    assert "addmm_inplace_dispatcher.RouteAcceptsDecoded" not in handlers, (
+        "DecodedPairHasRoute must not ask addmm_inplace_dispatcher about "
+        "addmm_: the general addmm dispatcher answers for a different "
+        "signature, and its slot is the one that can be filled"
     )
-    calls = source[source.find("at::Tensor& DispatchDecodedOut(") :]
-    calls = calls[: calls.find("\n}\n")]
-    assert "AddmmInplaceOf(shape)" in calls, calls
+    body = source[source.find("at::Tensor& AddmmInplace(") :]
+    body = body[: body.find("\n}\n")]
+    assert 'RunMatrixOut("addmm_"' in body, body
+
+
+_PYTHON_CALLER = REPO_ROOT / "csrc/aten/backends/flagos/python_op_caller.cc"
+
+
+def test_a_decoded_fp8_out_dtype_reaches_the_python_route():
+    """An FP8 ``out_dtype`` gets past the Python route's dtype conversion.
+
+    The FlagGems route is reached through ``python_op_caller.cc``, which
+    converts a dtype to a Python object before gems sees the call. It used to
+    name only the dtypes a FlagGems call is made with, so an FP8 ``out_dtype``
+    raised there (``OptionalDtypeToPython has no Python dtype for ScalarType
+    24``) on every DCU ``addmm`` the conf routes to FlagGems -- through the
+    keyword path and through ``CallPythonOp_TD`` alike. Each of those call
+    sites would have needed the same opt-in, so the conversion itself now names
+    the four FP8 types (soft_lowp/format.h) and every caller gets them.
+    """
+    source = _PYTHON_CALLER.read_text(encoding="utf-8")
+    start = source.find("py::object OptionalDtypeToPython(")
+    assert start != -1, "python_op_caller.cc no longer defines OptionalDtypeToPython"
+    body = source[start:]
+    body = body[: body.find("\n}\n")]
+    assert "soft_lowp::Fp8PythonDtype(*dtype)" in body, (
+        "OptionalDtypeToPython must name the FP8 dtypes; otherwise an FP8 "
+        "out_dtype raises here before the route runs:\n" + body
+    )

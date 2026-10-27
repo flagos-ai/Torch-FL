@@ -193,10 +193,9 @@ class Dispatcher {
   // conf names -- the vendor slot, boxing -- rather than to one hard-coded
   // slot.
   //
-  // A decoded FP8 pair goes to the same place but asks first
-  // (RouteAcceptsDecoded), and then through DispatchDecodedOnRoute: the two
-  // names can disagree, and that route is not reachable with an FP8 call's
-  // operands.
+  // A decoded FP8 pair asks first (RouteAcceptsDecoded) and then goes through
+  // DecodedKernel: the two names can disagree, and the route a decoded pair
+  // takes is not reachable with an FP8 call's operands.
   template <typename... Args>
   decltype(auto) DispatchConfigured(Args&&... args) const {
     return operator()(std::forward<Args>(args)...);
@@ -214,7 +213,12 @@ class Dispatcher {
   // kernel the route lands on must exist. Where it does not -- an empty
   // flaggems_cpp slot on a build without liboperators -- GetFn degrades to
   // whatever else is registered, and that is not the route the conf named.
+  // And the name must be the conf's: an op the table does not hold answers
+  // kFlagGems, which the second test already refuses.
   bool RouteAcceptsDecoded(const char* route_key) const {
+    if (!HasBackendForOp(route_key)) {
+      return false;
+    }
     const auto configured = GetBackendForOp(route_key);
     if (configured == Backend::kNone || configured == Backend::kFlagGems) {
       return false;
@@ -222,43 +226,50 @@ class Dispatcher {
     return GetFn(configured) != nullptr;
   }
 
-  // Hand a *decoded* pair to the route the conf names for `route_key`, and
-  // nowhere else.
+  // The kernel a decoded ordinary-dtype pair goes to: the conf's route for
+  // `route_key`, or the slot FLAGOS_SOFT_LOWP_STAY_ON_ROUTE names, or a
+  // runtime_error saying why neither. The only place that raises
+  // runtime_error rather than TORCH_CHECK; the software path's callers expect
+  // that.
   //
-  // DispatchAs resolves the key correctly but its kernel comes out of GetFn,
-  // which degrades an empty slot to whatever else is registered: a conf naming
+  // DispatchAs resolves the key but its kernel comes out of GetFn, which
+  // degrades an empty slot to whatever else is registered: a conf naming
   // flaggems for a key whose C++ slot is empty -- Medusa GPU, no liboperators --
   // lands on this file's own fallback wrappers, which answers with the pair
-  // again. This is the one caller for which that degradation is the wrong
-  // answer, so the fall-through is opt-in by naming a slot:
-  // FLAGOS_SOFT_LOWP_STAY_ON_ROUTE=boxing (or flaggems_cpp) takes a pair the
-  // named route cannot run and hands it to that slot instead of raising.
+  // again. That degradation is the wrong answer here, so the fall-through is
+  // opt-in by naming a slot: FLAGOS_SOFT_LOWP_STAY_ON_ROUTE=boxing (or
+  // flaggems_cpp) hands a pair the named route cannot run to that slot instead
+  // of raising. A slot is not a conf key -- no conf names `boxing` -- so the
+  // flag is read here, where the difference is known.
   //
-  // It is spelled out here, rather than left to DispatchAs, because a slot is
-  // not a conf key: no conf names `boxing`, and the flag that asked for it has
-  // to be read somewhere that knows the difference.
-  template <typename... Args>
-  decltype(auto) DispatchDecodedOnRoute(const char* route_key,
-                                        Args&&... args) const {
-    const std::string op_name(route_key);
-    auto backend = GetBackendForOp(op_name);
-    if (backend == Backend::kNone || backend == Backend::kFlagGems) {
-      throw std::runtime_error(op_name + DecodedRouteRefusal(backend));
+  // The kernel is returned rather than called here: the call belongs at the
+  // call site, made on the kernel's own type (soft_lowp/ops.cc).
+  FnPtr DecodedKernel(const std::string& route_key) const {
+    auto backend = GetBackendForOp(route_key);
+    if (!HasBackendForOp(route_key) || backend == Backend::kNone ||
+        backend == Backend::kFlagGems) {
+      throw std::runtime_error(DecodedRefusalFor(route_key, backend));
     }
     auto fn = GetFn(backend);
     if (!fn) {
       const std::string stay =
           flagos_env::EnvValue("FLAGOS_SOFT_LOWP_STAY_ON_ROUTE");
       if (stay.empty()) {
-        throw std::runtime_error(op_name + DecodedRouteRefusal(backend));
+        throw std::runtime_error(DecodedRefusalFor(route_key, backend));
       }
       backend = ParseBackendName(stay);
       fn = DecodedFallbackFn(backend);
-      if (!fn) throw std::runtime_error(op_name + DecodedRouteRefusal(backend));
+      if (!fn) throw std::runtime_error(DecodedRefusalFor(route_key, backend));
     }
-    LogDispatch(op_name, backend);
-    return fn(std::forward<Args>(args)...);
+    LogDispatch(route_key, backend);
+    return fn;
   }
+
+
+  // The key this dispatcher routes by -- op_name_ -- for a caller that has to
+  // name it before it can call: DecodedKernel takes the key, and the kernel it
+  // returns then takes it as its first argument.
+  const char* OpKey() const { return op_name_; }
 
   // Route exactly as operator() would, but by `op`'s conf key instead of this
   // dispatcher's own ("mm.out", "addmm.dtype", ...): one dispatcher answers
@@ -456,26 +467,19 @@ class Dispatcher {
     return message;
   }
 
-  // Why a decoded pair will not be handed to a route: the conf's answer for the
-  // key, and what was registered for it.
-  static std::string DecodedRouteRefusal(Backend backend) {
-    if (backend == Backend::kNone) {
-      return ": the backend config routes this op to 'none', so there is no "
-             "accelerated implementation for a decoded pair to go to";
+  // That slot's kernel, or nullptr when the build has none.
+  FnPtr DecodedFallbackFn(Backend backend) const {
+    switch (backend) {
+      case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
+      case Backend::kBoxing:      return cuda_fn_;
+      default:                    return nullptr;
     }
-    if (backend == Backend::kFlagGems) {
-      return ": the backend config routes this op to FlagGems, which resolves "
-             "the operand dtype against torch's own dtype objects before any "
-             "kernel runs and cannot take a pair decoded in place of an "
-             "FP8/FP4 one";
-    }
-    return std::string(": the backend config routes this op to '") +
-           NameOf(backend) + "' but no kernel is registered for it";
   }
 
-  // The slots a decoded pair may be asked for by FLAGOS_SOFT_LOWP_STAY_ON_ROUTE,
-  // spelled the way a conf spells them. Only the two that can answer a decoded
-  // pair: a C++ FlagGems kernel (real, and does not run Python), or boxing.
+  // The slots a decoded pair may be asked for by
+  // FLAGOS_SOFT_LOWP_STAY_ON_ROUTE, spelled the way a conf spells them. Only
+  // the two that can answer a decoded pair: a C++ FlagGems kernel (real, and
+  // does not run Python), or boxing.
   static Backend ParseBackendName(const std::string& raw) {
     const char* boxing[] = {"boxing", "cuda", "nvidia"};
     for (const char* name : boxing) {
@@ -492,13 +496,35 @@ class Dispatcher {
                 "flaggems_cpp");
   }
 
-  // That slot's kernel, or nullptr when the build has none.
-  FnPtr DecodedFallbackFn(Backend backend) const {
-    switch (backend) {
-      case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
-      case Backend::kBoxing:      return cuda_fn_;
-      default:                    return nullptr;
+  // Why a decoded pair will not be handed to a route: the conf's answer for
+  // the key, and what was registered for it. An unstated key is its own
+  // answer: GetBackendForOp answers FlagGems for a key the table does not hold,
+  // and says in its own comment that this means the running conf and the
+  // compiled registration disagree, so the message says that rather than claim
+  // the conf asked for FlagGems.
+  static std::string DecodedRefusalFor(const std::string& op_name,
+                                       Backend backend) {
+    if (!HasBackendForOp(op_name)) {
+      return op_name +
+             ": the backend config does not name this op, so the loaded conf "
+             "and the compiled registration disagree and there is no route to "
+             "hand a decoded pair to";
     }
+    if (backend == Backend::kNone) {
+      return op_name +
+             ": the backend config routes this op to 'none', so there is no "
+             "accelerated implementation for a decoded pair to go to";
+    }
+    if (backend == Backend::kFlagGems) {
+      return op_name +
+             ": the backend config routes this op to FlagGems, which resolves "
+             "the operand dtype against torch's own dtype objects before any "
+             "kernel runs and cannot take a pair decoded in place of an "
+             "FP8/FP4 one";
+    }
+    return op_name +
+           ": the backend config routes this op to a backend no kernel was "
+           "registered for";
   }
 
   // Which kernel set provides a backend, named the way setup.py::KERNEL_SET_NAME

@@ -293,7 +293,7 @@ struct TensorPair {
 //   * mm.out, bmm.out, the .dtype.out forms
 //                                      -> that form's own out dispatcher
 //   * addmm                           -> the addmm dispatcher, bias and all
-//   * addmm.out/addmm_                -> the addmm out/in-place dispatchers,
+//   * addmm.out                      -> the addmm out dispatcher,
 //                                         writing the caller's tensor
 //
 // `addmm.dtype` and `addmm.dtype_out` are not here: no conf names a kernel for
@@ -312,7 +312,6 @@ enum class DecodedShape {
   kBmmDtypeOut,     // Dispatcher<BmmDtypeOutFn>(lhs, rhs, out_dtype, out)
   kAddmm,           // Dispatcher<AddmmFn>(bias, lhs, rhs, beta, alpha)
   kAddmmOut,        // Dispatcher<AddmmOutFn>(bias, lhs, rhs, beta, alpha, out)
-  kAddmmInplace,    // Dispatcher<AddmmInplaceFn>(bias, lhs, rhs, beta, alpha)
 };
 
 struct DecodedVariant {
@@ -333,7 +332,6 @@ const DecodedVariant* LookupVariant(const char* variant) {
       {"bmm.dtype_out", DecodedShape::kBmmDtypeOut, true},
       {"addmm", DecodedShape::kAddmm, false},
       {"addmm.out", DecodedShape::kAddmmOut, false},
-      {"addmm_", DecodedShape::kAddmmInplace, false},
   };
   for (const auto& entry : variants) {
     if (std::strcmp(entry.key, variant) == 0) {
@@ -360,79 +358,130 @@ c10::ScalarType RouteAnswerDtype(c10::ScalarType requested) {
   return requested;
 }
 
-// The `*_dispatcher` of the signature each writing form needs. Each is a
-// Dispatcher<FnPtr> over a different pointer type, so which one to ask is part
-// of the variant rather than something one return type could carry. A form
-// that has no writing dispatcher of its own gets null and its caller raises.
-const Dispatcher<MmOutFn>* MmOutOf(DecodedShape shape) {
-  return shape == DecodedShape::kMmOut ? &mm_out_dispatcher : nullptr;
-}
-
-const Dispatcher<BmmOutFn>* BmmOutOf(DecodedShape shape) {
-  return shape == DecodedShape::kBmmOut ? &bmm_out_dispatcher : nullptr;
-}
-
-const Dispatcher<MmDtypeOutFn>* MmDtypeOutOf(DecodedShape shape) {
-  return shape == DecodedShape::kMmDtypeOut ? &mm_dtype_out_dispatcher : nullptr;
-}
-
-const Dispatcher<BmmDtypeOutFn>* BmmDtypeOutOf(DecodedShape shape) {
-  return shape == DecodedShape::kBmmDtypeOut ? &bmm_dtype_out_dispatcher
-                                             : nullptr;
-}
-
-const Dispatcher<AddmmOutFn>* AddmmOutOf(DecodedShape shape) {
-  return shape == DecodedShape::kAddmmOut ? &addmm_out_dispatcher : nullptr;
-}
-
-const Dispatcher<AddmmInplaceFn>* AddmmInplaceOf(DecodedShape shape) {
-  return shape == DecodedShape::kAddmmInplace ? &addmm_inplace_dispatcher
-                                              : nullptr;
-}
-
-// The route a decoded pair is handed to, and the caller's tensor it writes.
+// How a route's kernel is called here.
 //
-// addmm_'s kernel accumulates into `self` and takes that as `Tensor&`, while
-// the caller's accumulator reaches this call as a const reference. The
-// reference is made from an object that is this function's own -- a copy of the
-// caller's `out`, which is a handle to the same storage -- so a kernel can be
-// bound to it without touching the meaning of the argument the caller passed.
-struct WrittenAs {
-  const Dispatcher<AddmmInplaceFn>* inplace;  // writes its first operand
-  at::Tensor owned;                           // the caller's tensor, here
+// The dispatcher answers with the kernel (DecodedKernel) and this file calls
+// it. Every call binds the kernel to a parameter of the kernel's own type in a
+// member of a struct built for that signature, then calls it from there; the
+// struct's name says which signature. Binding the kernel to `auto`, or calling
+// through a member of a class template, does not build on GCC 11 once a
+// translation unit holds more than one kernel signature: it checks each such
+// call against the first one it saw, and the calls that write into a caller's
+// tensor then get the wrong signature's diagnostics. A call whose callee is a
+// typed pointer parameter of a non-template member is not that call, on any
+// compiler, and it is what these call sites are. The dispatcher's own call
+// (operator()) is the first of the shape GCC 11 checks against, so a decoded
+// call cannot go through it either: it passes the op name as the kernel's
+// first operand.
+
+// One route's kernel, selected for one key and called on one signature.
+//
+// Select takes the key the conf routes the call by and runs once, before the
+// kernel is used, so a refusal is raised where the call would have been made.
+// The call site names the dispatcher once (`const MmDtypeCall call{...}`) and
+// passes its Select() result to its Call().
+struct MmDtypeCall {
+  const Dispatcher<MmDtypeFn>& dispatcher;
+  MmDtypeFn Select(const char* key) const {
+    return static_cast<MmDtypeFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(MmDtypeFn kernel, const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       c10::ScalarType out_dtype) const {
+    return kernel(self, mat2, out_dtype);
+  }
 };
 
-// DispatchDecodedOnRoute asks the conf by key, so the pair's key is what the
-// dispatcher is given; the dispatcher itself only has to be the one whose
-// kernel signature matches the call.
-template <typename FnPtr, typename... Args>
-at::Tensor& CallDecodedOut(const Dispatcher<FnPtr>* dispatcher,
-                           const char* key,
-                           at::Tensor& out,
-                           Args&&... args) {
-  TORCH_CHECK(dispatcher != nullptr,
-              "soft-lowp ",
-              key,
-              " has no dispatcher that writes the caller's tensor");
-  return (*dispatcher)
-      .DispatchDecodedOnRoute(key, std::forward<Args>(args)..., out);
-}
+struct BmmDtypeCall {
+  const Dispatcher<BmmDtypeFn>& dispatcher;
+  BmmDtypeFn Select(const char* key) const {
+    return static_cast<BmmDtypeFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(BmmDtypeFn kernel, const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       c10::ScalarType out_dtype) const {
+    return kernel(self, mat2, out_dtype);
+  }
+};
 
-// The same for the in-place form, whose kernel takes the tensor it accumulates
-// into first, as `Tensor&`.
-at::Tensor& CallDecodedInplace(const TensorPair& pair,
-                               WrittenAs route,
-                               const char* key,
-                               const at::Scalar& beta,
-                               const at::Scalar& alpha) {
-  TORCH_CHECK(pair.bias.defined(), "soft-lowp decoded addmm needs its bias");
-  TORCH_CHECK(route.inplace != nullptr,
-              "soft-lowp ",
-              key,
-              " has no dispatcher that writes the caller's tensor");
-  return route.inplace->DispatchDecodedOnRoute(key, route.owned, pair.bias,
-                                               pair.lhs, pair.rhs, beta, alpha);
-}
+struct AddmmCall {
+  const Dispatcher<AddmmFn>& dispatcher;
+  AddmmFn Select(const char* key) const {
+    return static_cast<AddmmFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(AddmmFn kernel, const at::Tensor& bias,
+                       const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       const c10::Scalar& beta,
+                       const c10::Scalar& alpha) const {
+    return kernel(bias, self, mat2, beta, alpha);
+  }
+};
+
+struct MmOutCall {
+  const Dispatcher<MmOutFn>& dispatcher;
+  MmOutFn Select(const char* key) const {
+    return static_cast<MmOutFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(MmOutFn kernel, const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       at::Tensor& out) const {
+    return kernel(self, mat2, out);
+  }
+};
+
+struct BmmOutCall {
+  const Dispatcher<BmmOutFn>& dispatcher;
+  BmmOutFn Select(const char* key) const {
+    return static_cast<BmmOutFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(BmmOutFn kernel, const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       at::Tensor& out) const {
+    return kernel(self, mat2, out);
+  }
+};
+
+struct MmDtypeOutCall {
+  const Dispatcher<MmDtypeOutFn>& dispatcher;
+  MmDtypeOutFn Select(const char* key) const {
+    return static_cast<MmDtypeOutFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(MmDtypeOutFn kernel, const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       c10::ScalarType out_dtype,
+                       at::Tensor& out) const {
+    return kernel(self, mat2, out_dtype, out);
+  }
+};
+
+struct BmmDtypeOutCall {
+  const Dispatcher<BmmDtypeOutFn>& dispatcher;
+  BmmDtypeOutFn Select(const char* key) const {
+    return static_cast<BmmDtypeOutFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(BmmDtypeOutFn kernel, const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       c10::ScalarType out_dtype,
+                       at::Tensor& out) const {
+    return kernel(self, mat2, out_dtype, out);
+  }
+};
+
+struct AddmmOutCall {
+  const Dispatcher<AddmmOutFn>& dispatcher;
+  AddmmOutFn Select(const char* key) const {
+    return static_cast<AddmmOutFn>(dispatcher.DecodedKernel(key));
+  }
+  decltype(auto) Call(AddmmOutFn kernel, const at::Tensor& bias,
+                       const at::Tensor& self,
+                       const at::Tensor& mat2,
+                       const c10::Scalar& beta,
+                       const c10::Scalar& alpha,
+                       at::Tensor& out) const {
+    return kernel(bias, self, mat2, beta, alpha, out);
+  }
+};
 
 // The decoded operands, ready for the route the conf names for `variant`.
 TensorPair DecodeForRoute(
@@ -469,16 +518,25 @@ at::Tensor DispatchDecoded(
     const at::Scalar& alpha) {
   const auto shape = LookupVariant(pair.key)->shape;
   output_dtype = RouteAnswerDtype(output_dtype);
+  const char* const key = pair.key;
   const c10::OptionalDeviceGuard guard(pair.lhs.device());
   switch (shape) {
     case DecodedShape::kDtype:
-      return mm_dtype_dispatcher.DispatchDecodedOnRoute(
-          pair.key, pair.lhs, pair.rhs, output_dtype);
-    case DecodedShape::kAddmm:
-    case DecodedShape::kAddmmInplace:
+      // mm and bmm are both kDtype, told apart by their entry's rank.
+      if (LookupVariant(pair.key)->batch) {
+        const BmmDtypeCall call{bmm_dtype_dispatcher};
+        return call.Call(call.Select(key), pair.lhs, pair.rhs, output_dtype);
+      }
+      {
+        const MmDtypeCall call{mm_dtype_dispatcher};
+        return call.Call(call.Select(key), pair.lhs, pair.rhs, output_dtype);
+      }
+    case DecodedShape::kAddmm: {
       TORCH_CHECK(pair.bias.defined(), "soft-lowp decoded addmm needs its bias");
-      return addmm_dispatcher.DispatchDecodedOnRoute(
-          pair.key, pair.bias, pair.lhs, pair.rhs, beta, alpha);
+      const AddmmCall call{addmm_dispatcher};
+      return call.Call(call.Select(key), pair.bias, pair.lhs, pair.rhs,
+                       beta, alpha);
+    }
     case DecodedShape::kVoid:
     case DecodedShape::kMmOut:
     case DecodedShape::kBmmOut:
@@ -501,28 +559,32 @@ at::Tensor& DispatchDecodedOut(
     at::Tensor& out) {
   const auto shape = LookupVariant(pair.key)->shape;
   output_dtype = RouteAnswerDtype(output_dtype);
+  const char* const key = pair.key;
   const c10::OptionalDeviceGuard guard(pair.lhs.device());
   switch (shape) {
-    case DecodedShape::kMmOut:
-      return CallDecodedOut(MmOutOf(shape), pair.key, out, pair.lhs, pair.rhs);
-    case DecodedShape::kBmmOut:
-      return CallDecodedOut(BmmOutOf(shape), pair.key, out, pair.lhs, pair.rhs);
-    case DecodedShape::kMmDtypeOut:
-      return CallDecodedOut(MmDtypeOutOf(shape), pair.key, out, pair.lhs,
-                            pair.rhs, output_dtype);
-    case DecodedShape::kBmmDtypeOut:
-      return CallDecodedOut(BmmDtypeOutOf(shape), pair.key, out, pair.lhs,
-                            pair.rhs, output_dtype);
-    case DecodedShape::kAddmmOut:
-      TORCH_CHECK(pair.bias.defined(), "soft-lowp decoded addmm needs its bias");
-      return CallDecodedOut(AddmmOutOf(shape), pair.key, out, pair.bias, pair.lhs,
-                            pair.rhs, beta, alpha);
-    case DecodedShape::kAddmmInplace:
-      TORCH_CHECK(pair.bias.defined(), "soft-lowp decoded addmm needs its bias");
-      TORCH_CHECK(out.is_contiguous(),
-                  "soft-lowp addmm_ writes the caller's tensor contiguously");
-      return CallDecodedInplace(pair, WrittenAs{AddmmInplaceOf(shape), out},
-                                pair.key, beta, alpha);
+    case DecodedShape::kMmOut: {
+      const MmOutCall call{mm_out_dispatcher};
+      return call.Call(call.Select(key), pair.lhs, pair.rhs, out);
+    }
+    case DecodedShape::kBmmOut: {
+      const BmmOutCall call{bmm_out_dispatcher};
+      return call.Call(call.Select(key), pair.lhs, pair.rhs, out);
+    }
+    case DecodedShape::kMmDtypeOut: {
+      const MmDtypeOutCall call{mm_dtype_out_dispatcher};
+      return call.Call(call.Select(key), pair.lhs, pair.rhs, output_dtype, out);
+    }
+    case DecodedShape::kBmmDtypeOut: {
+      const BmmDtypeOutCall call{bmm_dtype_out_dispatcher};
+      return call.Call(call.Select(key), pair.lhs, pair.rhs, output_dtype, out);
+    }
+    case DecodedShape::kAddmmOut: {
+      TORCH_CHECK(pair.bias.defined(),
+                  "soft-lowp decoded addmm needs its bias");
+      const AddmmOutCall call{addmm_out_dispatcher};
+      return call.Call(call.Select(key), pair.bias, pair.lhs, pair.rhs, beta,
+                       alpha, out);
+    }
     case DecodedShape::kDtype:
     case DecodedShape::kVoid:
     case DecodedShape::kAddmm:
@@ -546,8 +608,11 @@ at::Tensor ComputeDecoded(
   const c10::OptionalDeviceGuard guard(pair.lhs.device());
   at::Tensor result;
   if (pair.bias.defined()) {
-    result = addmm_dispatcher.DispatchBackend(
-        Backend::kBoxing, pair.bias, pair.lhs, pair.rhs, beta, alpha);
+    // Called through AddmmCall, not the dispatcher: see the note above it.
+    const AddmmFn kernel = static_cast<AddmmFn>(
+        addmm_dispatcher.KernelFor(Backend::kBoxing));
+    const AddmmCall call{addmm_dispatcher};
+    result = call.Call(kernel, pair.bias, pair.lhs, pair.rhs, beta, alpha);
   } else if (pair.rank == 2) {
     result = at::mm(pair.lhs, pair.rhs);
   } else {
@@ -571,11 +636,6 @@ void CheckOutShape(
 // and RouteAcceptsDecoded is where that question is answered.
 bool DecodedPairHasRoute(const char* variant) {
   const auto& entry = *LookupVariant(variant);
-  if (entry.shape == DecodedShape::kAddmmInplace) {
-    // addmm_ has only the in-place signature (no const `out`) and its own
-    // dispatcher, so whether the conf names a kernel for it is asked there.
-    return addmm_inplace_dispatcher.RouteAcceptsDecoded(variant);
-  }
   switch (entry.shape) {
     case DecodedShape::kMmOut:
     case DecodedShape::kMmDtypeOut:
@@ -589,9 +649,9 @@ bool DecodedPairHasRoute(const char* variant) {
     case DecodedShape::kVoid:
       return false;
     case DecodedShape::kAddmm:
-    case DecodedShape::kAddmmOut:
-    case DecodedShape::kAddmmInplace:
       return addmm_dispatcher.RouteAcceptsDecoded(variant);
+    case DecodedShape::kAddmmOut:
+      return addmm_out_dispatcher.RouteAcceptsDecoded(variant);
   }
   return false;
 }
@@ -615,24 +675,24 @@ at::Tensor RunMatrix(
     const at::Scalar& beta,
     const at::Scalar& alpha) {
   const bool has_bias = bias.defined();
+  const char* const key = variant;
   const auto& entry = *LookupVariant(variant);
   if (IsOrdinaryMatrixPair(self, mat2)) {
     // Some composite callers (notably linear_out) reach addmm with ordinary
     // operands after their own boxing/decomposition; those keep the fused
     // addmm kernel rather than the low-precision validation below.
     if (entry.shape == DecodedShape::kDtype && !entry.batch) {
-      return mm_dtype_dispatcher(variant, self, mat2, out_dtype);
+      const MmDtypeCall call{mm_dtype_dispatcher};
+      return call.Call(call.Select(key), self, mat2, out_dtype);
     }
     if (entry.shape == DecodedShape::kDtype) {
-      return bmm_dtype_dispatcher(variant, self, mat2, out_dtype);
+      const BmmDtypeCall call{bmm_dtype_dispatcher};
+      return call.Call(call.Select(key), self, mat2, out_dtype);
     }
     const auto output_dtype = DefaultOutputDtype(self, out_dtype);
-    at::Tensor result;
-    if (entry.shape == DecodedShape::kAddmm) {
-      result = addmm_dispatcher(variant, bias, self, mat2, beta, alpha);
-    } else {
-      result = addmm_inplace_dispatcher(variant, bias, self, mat2, beta, alpha);
-    }
+    const AddmmCall call{addmm_dispatcher};
+    const at::Tensor result =
+        call.Call(call.Select(key), bias, self, mat2, beta, alpha);
     return output_dtype == result.scalar_type() ? result
                                                 : result.to(output_dtype);
   }
@@ -794,12 +854,17 @@ at::Tensor AddmmDtype(
   // key, and dispatching by it would be "backend not registered"). An ordinary
   // pair keeps its fused call, the way it always has.
   if (IsOrdinaryMatrixPair(mat1, mat2)) {
+    // `addmm.dtype` has no variant entry, so its route is the key the
+    // dispatcher answers for, asked of it by name.
     const auto output_dtype = DefaultOutputDtype(mat1, out_dtype);
-    auto result = addmm_dispatcher(self, mat1, mat2, beta, alpha);
+    const char* const key = addmm_dispatcher.OpKey();
+    const AddmmCall call{addmm_dispatcher};
+    const auto result =
+        call.Call(call.Select(key), self, mat1, mat2, beta, alpha);
     return output_dtype == result.scalar_type() ? result
                                                 : result.to(output_dtype);
   }
-  return RunMatrix("addmm", self, mat1, mat2, out_dtype, 2, self, beta, alpha);
+  return RunMatrix("addmm", mat1, mat2, out_dtype, 2, self, beta, alpha);
 }
 
 at::Tensor& AddmmDtypeOut(
@@ -823,8 +888,8 @@ at::Tensor& AddmmOut(
     const at::Scalar& beta,
     const at::Scalar& alpha,
     at::Tensor& out) {
-  return RunMatrixOut("addmm.out", self, mat1, mat2, out.scalar_type(), 2,
-                      mat1, beta, alpha, out);
+  return RunMatrixOut("addmm.out", mat1, mat2, out.scalar_type(), 2, self, beta,
+                      alpha, out);
 }
 
 at::Tensor& AddmmInplace(
