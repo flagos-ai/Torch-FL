@@ -878,13 +878,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // (metax, dcu): without it the claim would route every dtype through a
   // wrapper that does not know the low-precision path.
   //
-  // The generated FlagGems list is included in this same body, and a
-  // duplicate m.impl for one op is a compile error, so the ops that list
-  // already names are not claimed here: those are exactly the ones its conf
-  // routes to a FlagGems backend (metax's `bmm`, `bmm.out` and `addmm*`;
-  // DCU's `addmm*`). What is left is the matrix ops the conf leaves on `none`
-  // or routes to a vendor slot -- the ops no other route serves for a
-  // low-precision operand.
+  // What is claimed is the matrix ops the conf leaves on `none`, or routes to
+  // a slot nothing fills -- the ops no route serves for a low-precision
+  // operand. The generated FlagGems list is included in this same body and a
+  // duplicate m.impl is a compile error, so an op whose conf route is FlagGems
+  // (metax `bmm`/`bmm.out`; both platforms' `addmm*`) is not claimed here: its
+  // wrapper still runs, because the generated list names the same
+  // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
   #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
   m.impl("mm", WrapperMm);
   m.impl("mm.dtype", WrapperMmDtype);
@@ -893,8 +893,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("bmm.dtype", WrapperBmmDtype);
   m.impl("bmm.dtype_out", WrapperBmmDtypeOut);
   #if !defined(FLAGOS_ACCEL_METAX)
-  // `bmm` and `bmm.out` are FlagGems-routed on metax (its conf says
-  // flaggems_cpp), so the generated list claims those there.
+  // Metax's conf routes these two to flaggems_cpp, so its generated list
+  // claims the same wrappers already.
   m.impl("bmm", WrapperBmm);
   m.impl("bmm.out", WrapperBmmOut);
   #endif
