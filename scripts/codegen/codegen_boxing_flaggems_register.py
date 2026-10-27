@@ -76,6 +76,20 @@ CONFIGS = REPO / "torch_fl/configs"
 # the --check report order; each writes the file named after it.
 PLATFORMS = ("nvidia", "metax", "hygon", "thead", "tsingmicro")
 
+# Ops whose PrivateUse1 claim register.cc makes itself rather than through the
+# generated list, with the reason each one is not a claim this file can emit.
+#
+# ``mm`` / ``bmm`` on dcu: the soft-lowp matrix prelude is claimed in
+# register.cc beside the generated include, and its conf routes them to FlagGems
+# (gen_vendor_confs.py, SOFT_LOWP_FLAGGEMS_MEASURED). Emitting the claim here as
+# well is a duplicate m.impl in one TORCH_LIBRARY_IMPL body -- a compile error --
+# and leaving the op unmentioned reads as "routed but unregistered", which is
+# the list below. `_scaled_dot_product_attention` on metax/dcu is the same shape
+# with a whole-op override (csrc/aten/sdp_choice_stub.cc).
+HAND_REGISTERED_CLAIMS = {
+    "hygon": {"mm", "bmm"},
+}
+
 # Conf values that are not a FlagGems backend: `cuda` is the boxing kernel,
 # `none` is cpu_fallback, and the empty value is a malformed line.
 # (`cuda` is the pre-rename spelling of the NVIDIA boxing key; a conf written
@@ -234,14 +248,18 @@ def boxing_target_ops(platform, wrappers, kernel_ops):
     unkerneled = {
         op for op, value in routes.items() if value == "boxing" and op not in kernel_ops
     }
+    by_hand = HAND_REGISTERED_CLAIMS.get(platform, set())
     claimed = sorted(
         op
         for op, value in routes.items()
         if value != "none"
+        and op not in by_hand
         and op in wrappers
         and (value != "boxing" or op in kernel_ops)
     )
-    unwrapped = {op for op, value in routes.items() if value != "none"} - set(wrappers)
+    unwrapped = (
+        {op for op, value in routes.items() if value != "none"} - set(wrappers)
+    ) - by_hand
     return claimed, sorted(unserved | unkerneled | unwrapped)
 
 
@@ -263,6 +281,9 @@ def target_ops(platform, wrappers, kernel_ops):
     routes = conf_routes(platform)
     non_flaggems = NON_FLAGGEMS_ROUTES + VENDOR_ROUTES.get(platform, ())
     flaggems_routed = {op for op, value in routes.items() if value not in non_flaggems}
+    # Claimed by register.cc, not here: neither registered nor excluded (see
+    # HAND_REGISTERED_CLAIMS).
+    flaggems_routed -= HAND_REGISTERED_CLAIMS.get(platform, set())
     registered = sorted(flaggems_routed & set(wrappers) & kernel_ops)
     unserved = sorted(flaggems_routed & kernel_ops - set(wrappers))
     no_kernel = sorted(flaggems_routed - kernel_ops)
