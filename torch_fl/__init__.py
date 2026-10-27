@@ -187,6 +187,21 @@ def _select_backend_config() -> None:
     conf_path = os.path.join(os.path.dirname(__file__), "configs", conf_name)
     if os.path.exists(conf_path):
         _BACKEND_CONFIG_PATH = conf_path
+        return
+    # A vendor conf named for the build's own accelerator but shipped under the
+    # other of its names: `musa` and `mthreads` are the same vendor (the record,
+    # the CI platform and the conf generator each use one of them). Without the
+    # fallback no conf is selected at all, which leaves every op unclaimed while
+    # the build still has its vendor and FlagGems kernels -- the call reaches
+    # the dispatcher from the other side. The `[flagos] loading backend config`
+    # line names the file that was taken.
+    alias_path = os.path.join(
+        os.path.dirname(__file__),
+        "configs",
+        f"backends_{_platform.vendor_alias(_build_accelerator())}.conf",
+    )
+    if alias_path != conf_path and os.path.exists(alias_path):
+        _BACKEND_CONFIG_PATH = alias_path
 
 
 def backend_config_path() -> str:

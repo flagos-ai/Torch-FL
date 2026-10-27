@@ -385,19 +385,35 @@ elseif(_flagos_is_musa)
   # object layout, which pinned the plugin to one exact torch build --
   # sizeof(c10::MessageLogger) changed 408 -> 400 between 2.9.1 and 2.10 and
   # corrupted the vendor .so's stack. mudnn has no such coupling.)
+  # A toolkit image may ship the mudnn runtime without its C++ headers: the
+  # 5.2 image on the MTT S5000 CI runner has ${MUSA_HOME}/lib/libmudnn.so and no
+  # ${MUSA_HOME}/include/mudnncxx/, and the 4.3 toolkit beside it with headers
+  # declares another library. The MUSA vendor slot is then not buildable at
+  # all, which is a property of the environment rather than of this tree: leave
+  # it unbuilt and let the FlagGems routes serve the ops -- they are the conf's
+  # primary route anyway. The one thing the build must not do is keep the
+  # vendor slot's registrations, which would claim ops whose kernels do not
+  # exist. Set -DFLAGOS_MUSA_REQUIRE_VENDOR=ON to make the absence fatal.
+  set(FLAGOS_MUSA_VENDOR_SLOT OFF)
   if(FLAGOS_BUILD_VENDOR)
     find_library(MUDNN_LIB mudnn PATHS "${MUSA_HOME}/lib" NO_DEFAULT_PATH)
-    if(NOT MUDNN_LIB)
+    if(MUDNN_LIB AND EXISTS "${MUSA_HOME}/include/mudnncxx/mudnn.h")
+      set(FLAGOS_MUSA_VENDOR_SLOT ON)
+    elseif(FLAGOS_MUSA_REQUIRE_VENDOR)
       message(FATAL_ERROR
-          "FLAGOS_BUILD_VENDOR=ON but libmudnn.so was not found under ${MUSA_HOME}/lib. "
-          "Install the mudnn component of the MUSA toolkit, or build with "
-          "-DFLAGOS_BUILD_VENDOR=OFF to fall back to CPU for compute ops.")
+          "FLAGOS_MUSA_REQUIRE_VENDOR=ON but this MUSA toolkit has no mudnn "
+          "C++ SDK (libmudnn.so under ${MUSA_HOME}/lib: '${MUDNN_LIB}'; C++ "
+          "headers ${MUSA_HOME}/include/mudnncxx/mudnn.h missing).")
+    else()
+      message(WARNING
+          "this MUSA toolkit has no mudnn C++ SDK (libmudnn.so under "
+          "${MUSA_HOME}/lib: '${MUDNN_LIB}'; C++ headers "
+          "${MUSA_HOME}/include/mudnncxx/mudnn.h). Building without the vendor "
+          "kernel slot: backends/mthreads/ and its registrations are left "
+          "out, and every op the conf routes to the vendor falls back to CPU.")
     endif()
-    if(NOT EXISTS "${MUSA_HOME}/include/mudnncxx/mudnn.h")
-      message(FATAL_ERROR
-          "FLAGOS_BUILD_VENDOR=ON but the mudnn C++ headers were not found "
-          "(no ${MUSA_HOME}/include/mudnncxx/mudnn.h).")
-    endif()
+  endif()
+  if(FLAGOS_MUSA_VENDOR_SLOT)
     message(STATUS "mudnn op library: ${MUDNN_LIB}")
     find_library(MURAND_LIB murand PATHS "${MUSA_HOME}/lib" NO_DEFAULT_PATH)
     if(NOT MURAND_LIB)

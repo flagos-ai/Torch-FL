@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import gc
 import importlib
 import os
 import sys
@@ -2546,6 +2547,99 @@ def _launch_in_fitted_space(original_run, tuner, configs, args, kwargs):
         tuner.__dict__.pop("kernel_hash", None)
 
 
+def _tune_space_run(original_run):
+    """``LibTuner.run`` with the refused-space repair in front of ``original_run``.
+
+    The repair is applied to the class rather than to an instance, so a tuner
+    built later (a kernel module imported after this patch ran) is covered too.
+    See ``_patch_flaggems_tune_space`` for why the repair only runs after a
+    refusal.
+    """
+
+    def run(self, *args, **kwargs):
+        try:
+            return original_run(self, *args, **kwargs)
+        except Exception as refused:
+            limit = _musa_shared_memory_limit()
+            configs = (
+                None
+                if limit is None
+                else _fitted_tune_space(
+                    getattr(self, "configs", None) or [], args, kwargs, limit
+                )
+            )
+            if configs is None:
+                raise
+            try:
+                return _launch_in_fitted_space(
+                    original_run, self, configs, args, kwargs
+                )
+            except Exception:
+                raise refused from None
+
+    run.__wrapped__ = original_run
+    run.__name__ = getattr(original_run, "__name__", "run")
+    return run
+
+
+def _rewrap_flaggems_tuners(class_patch=None):
+    """Point every FlagGems tuner policy subclass at ``LibTuner.run``, then patch it.
+
+    FlagGems does not call ``LibTuner.run`` at a launch. ``@LibTuner.register``
+    builds a policy subclass on every ``libtuner`` decoration, and that subclass
+    gets its *own* ``run``: a copy of whatever ``LibTuner.run`` was when the
+    subclass was created. ``flag_gems.ops`` is imported after ``flagos.init()``
+    in a fresh process (dispatch imports it lazily), and much of it later still,
+    so a patch written to ``LibTuner.run`` alone is never reached -- measured on
+    the MTT S5000: with only ``LibTuner.run`` patched, float64 ``mm`` at
+    33x33x33 kept ending on the refused 64x64x64 space.
+
+    A subclass created before the patch therefore has to be re-pointed at
+    ``LibTuner.run`` itself, which is what ``class_patch`` does; instances
+    already built keep the subclass's previous ``run`` as an instance attribute
+    and are re-wrapped in place. Subclasses created after the patch inherit the
+    patched class method and need nothing.
+    """
+    libentry = importlib.import_module("flag_gems.utils.libentry")
+    libtuner = getattr(libentry, "LibTuner", None)
+    if libtuner is None:
+        return False
+    patched_run = libtuner.run
+    for subclass in _subclasses_in_order(libtuner):
+        if subclass.__dict__.get("run") is not None and (
+            class_patch is not None
+            and not getattr(subclass.__dict__["run"], _TUNE_SPACE_PATCHED, False)
+        ):
+            class_patch(subclass)
+        subclass_run = subclass.run
+        if getattr(subclass_run, _TUNE_SPACE_PATCHED, False):
+            continue
+        for referrer in gc.get_referrers(subclass_run):
+            # ``new`` wraps the function and runs the subclass body before
+            # ``__init__``, so a tuner is seen here mid-construction. Its
+            # ``run`` is then still the unpatched one to repair.
+            if not isinstance(referrer, libtuner) or type(referrer) is not subclass:
+                continue
+            declared = referrer.__dict__.get("run", subclass_run)
+            if getattr(declared, _TUNE_SPACE_PATCHED, False):
+                continue
+            repaired = _tune_space_run(declared)
+            setattr(repaired, _TUNE_SPACE_PATCHED, True)
+            referrer.run = repaired
+    return getattr(patched_run, _TUNE_SPACE_PATCHED, False)
+
+
+def _subclasses_in_order(cls):
+    for subclass in cls.__subclasses__():
+        yield subclass
+        yield from _subclasses_in_order(subclass)
+
+
+#: Set on ``LibTuner`` once its ``__init_subclass__`` installs the repair on
+#: every policy subclass it sees.
+_SUBCLASS_PATCHED = "_flagos_tune_space_subclass_patch"
+
+
 def _patch_flaggems_tune_space():
     """Repair a FlagGems tune space the MUSA device has refused, and only then.
 
@@ -2602,36 +2696,43 @@ def _patch_flaggems_tune_space():
 
         libentry = importlib.import_module("flag_gems.utils.libentry")
         libtuner = libentry.LibTuner
-        if getattr(libtuner, _TUNE_SPACE_PATCHED, False):
-            return
-        original_run = libtuner.run
 
-        def run(self, *args, **kwargs):
-            try:
-                return original_run(self, *args, **kwargs)
-            except Exception as refused:
-                limit = _musa_shared_memory_limit()
-                configs = (
-                    None
-                    if limit is None
-                    else _fitted_tune_space(
-                        getattr(self, "configs", None) or [], args, kwargs, limit
-                    )
-                )
-                if configs is None:
-                    raise
-                try:
-                    return _launch_in_fitted_space(
-                        original_run, self, configs, args, kwargs
-                    )
-                except Exception:
-                    raise refused from None
+        # Every policy subclass gets its own copy of ``LibTuner.run`` at class
+        # creation (``LibTuner.register`` builds one per ``libtuner`` call), and
+        # that copy is what a launch calls. Wrapping the base class alone reaches
+        # none of them; see ``_rewrap_flaggems_tuners``. Also, ``tune_speed`` and
+        # ``LibEntry.run`` were already read from the module by kernels that were
+        # imported before this ran, so the *class* has to be the binding, not the
+        # module attribute this function could no longer change.
+        if not getattr(libtuner, _SUBCLASS_PATCHED, False):
 
-        run.__wrapped__ = original_run
-        libtuner.run = run
-        setattr(libtuner, _TUNE_SPACE_PATCHED, True)
+            def __init_subclass__(cls, **kwargs):
+                super(libtuner, cls).__init_subclass__(**kwargs)
+                _tune_space_subclass_patch(cls)
+
+            libtuner.__init_subclass__ = __init_subclass__
+            setattr(libtuner, _SUBCLASS_PATCHED, True)
+
+        if not getattr(libtuner.run, _TUNE_SPACE_PATCHED, False):
+            repaired = _tune_space_run(libtuner.run)
+            setattr(repaired, _TUNE_SPACE_PATCHED, True)
+            libtuner.run = repaired
+
+        _rewrap_flaggems_tuners(class_patch=_tune_space_subclass_patch)
     except Exception:
         pass
+
+
+def _tune_space_subclass_patch(subclass):
+    """``class_patch`` for ``_rewrap_flaggems_tuners``: repair one stale subclass.
+
+    A policy subclass made before the ``__init_subclass__`` arm was installed
+    still holds its own copy of the unpatched ``run``; rebinding the method is
+    what every instance -- and any code reaching ``Sub.run`` -- will then see.
+    """
+    repaired = _tune_space_run(subclass.__dict__["run"])
+    setattr(repaired, _TUNE_SPACE_PATCHED, True)
+    subclass.run = repaired
 
 
 def _stand_down_foreign_triton_drivers():

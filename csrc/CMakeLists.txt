@@ -231,6 +231,14 @@ else()
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
   endforeach()
+  # MUSA's toolkit may ship no buildable mudnn (CMakeLists.txt decides). The
+  # vendor trees go after the loop above, so this does not depend on which
+  # directory names the MUSA row lists.
+  if(_flagos_is_musa AND NOT FLAGOS_MUSA_VENDOR_SLOT)
+    list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/mthreads/.*")
+    add_compile_definitions(FLAGOS_MUSA_NO_VENDOR_SLOT=1)
+    message(STATUS "MUSA build without the vendor kernel slot (no mudnn C++ SDK)")
+  endif()
   message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR} (vendor ${FLAGOS_PLATFORM_VENDOR})")
 endif()
 
@@ -643,7 +651,7 @@ elseif(_flagos_is_iluvatar)
   endif()
 elseif(_flagos_is_musa)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
-  if(FLAGOS_BUILD_VENDOR)
+  if(FLAGOS_BUILD_VENDOR AND FLAGOS_MUSA_VENDOR_SLOT)
     # FLAGOS_MUSA_KERNEL gates the m.impl subset in register.cc, mirroring
     # FLAGOS_GCU_KERNEL.
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_MUSA_KERNEL=1)

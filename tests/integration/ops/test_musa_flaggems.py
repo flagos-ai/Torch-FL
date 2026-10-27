@@ -199,11 +199,33 @@ def test_the_space_the_tuner_is_given_fits_the_device():
     refusal this shape raises was computed to be repairable. The arithmetic is
     written out here rather than called from the module under test, so "fits" is
     not being asserted in the fix's own terms.
+
+    The metric op is warmed up at a shape this test does not use first, and the
+    spy is installed after that. Two things make the warm-up load-bearing:
+
+    * ``LibEntry.run`` caches the compiled launch per *specialized* key
+      (``align32`` on M, N and K for ``mm``), so 97x95x99 and 33x33x33 share the
+      entry 64x64x64 was compiled under -- a second float64 shape never reaches
+      its tuner at all once any float64 ``mm`` has run in the process.
+    * a repaired launch hands the declared space back, so a repair later in the
+      session cannot be seen through the tuner from the outside.
+
+    Before that warm-up, the arithmetic still reproduces the refused shape at a
+    cache-miss key: it lands on the narrow tile 33x32x32, where 64x64x64 at five
+    stages asks 262144 B. A fixed shape would then be testing what the
+    ConfigCache happens to hold rather than the fit.
     """
     _require_flaggems_mthreads()
     limit = torch_fl.flagos._musa_shared_memory_limit()
     if limit is None:
         pytest.skip("this backend does not report a static shared-memory limit")
+
+    # Float64 ``mm`` is the only space this platform declares tighter than the
+    # device allows, and it runs before the spy goes in (see the docstring).
+    torch.mm(
+        torch.randn(48, 48, dtype=torch.float64).to(DEVICE),
+        torch.randn(48, 48, dtype=torch.float64).to(DEVICE),
+    )
 
     seen = []
     fit = torch_fl.flagos._fitted_tune_space
@@ -215,15 +237,23 @@ def test_the_space_the_tuner_is_given_fits_the_device():
 
     torch_fl.flagos._fitted_tune_space = spy
     try:
-        # A shape no other test in the session uses, so the ConfigCache cannot
-        # answer with a configuration tuned before the spy was installed.
-        a = torch.randn(97, 95, dtype=torch.float64)
-        b = torch.randn(95, 99, dtype=torch.float64)
-        got = torch.mm(a.to(DEVICE), b.to(DEVICE)).cpu()
+        # (M, K, N), also the tuner's specialized key. 97x95x99 is the one shape
+        # an empty ConfigCache cannot have answered for; 33x32x32 is the first
+        # key whose 64x64x64 tile cannot be narrowed below the limit, so its fit
+        # is looked at rather than the repaired launch that follows it.
+        for m, k, n in ((33, 32, 32), (97, 95, 99)):
+            a = torch.randn(m, k, dtype=torch.float64)
+            b = torch.randn(k, n, dtype=torch.float64)
+            got = torch.mm(a.to(DEVICE), b.to(DEVICE)).cpu()
+            torch.testing.assert_close(
+                got,
+                torch.mm(a, b),
+                rtol=1e-12,
+                atol=1e-12,
+                msg=f"float64 mm at {m}x{k}x{n}",
+            )
     finally:
         torch_fl.flagos._fitted_tune_space = fit
-
-    torch.testing.assert_close(got, torch.mm(a, b), rtol=1e-12, atol=1e-12)
 
     # float64 operands throughout, hence 8 bytes per element.
     def ask(config):
@@ -238,9 +268,12 @@ def test_the_space_the_tuner_is_given_fits_the_device():
 
     assert seen, "the mm route never sized a tune space"
 
+    over_limit = False
     for declared, fitted, limit_bytes in seen:
         assert limit_bytes == limit
-        if any(ask(config) >= limit_bytes for config in declared):
+        refused = [ask(config) >= limit_bytes for config in declared]
+        if any(refused):
+            over_limit = True
             assert fitted is not None, (
                 "a declared configuration asks more than the device can give and"
                 f" was handed over unchanged: {[ask(c) for c in declared]}"
@@ -250,3 +283,4 @@ def test_the_space_the_tuner_is_given_fits_the_device():
                 f"num_stages={config.num_stages} on {config.kwargs} asks"
                 f" {ask(config)} B against a {limit_bytes} B limit"
             )
+    assert over_limit, "no declared space reached the limit, so the fit was untested"

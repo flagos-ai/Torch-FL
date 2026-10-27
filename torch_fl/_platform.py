@@ -185,6 +185,25 @@ def vendor_for(platform: str) -> str:
     return PLATFORM_VENDOR.get(platform, "")
 
 
+def vendor_alias(name: str) -> str:
+    """The other name a conf for ``name``'s vendor is shipped under.
+
+    ``musa`` is the accelerator id in the build record and ``mthreads`` is what
+    ``vendor_for`` answers, which is also the spelling every conf file in
+    ``torch_fl/configs`` uses; a record written with the platform id therefore
+    names a conf file that does not exist. The mapping table is one line, so
+    both spellings are answered from it rather than reversed by hand. Returns ""
+    for a name that names no platform or whose two halves are the same word.
+    """
+    key = name.strip().lower()
+    platform = _ACCELERATOR_TO_PLATFORM.get(key)
+    if platform is None:
+        return ""
+    if key == platform:
+        return PLATFORM_VENDOR.get(platform, "")
+    return platform
+
+
 def _resolved_conf() -> str:
     """The conf torch_fl resolved, or the FLAGOS_BACKEND_CONFIG the user set.
 
