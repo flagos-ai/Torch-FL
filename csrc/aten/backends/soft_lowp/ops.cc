@@ -985,6 +985,9 @@ at::Tensor RunMatrix(
                   MmDtypeKernelFor(key), self, mat2, out_dtype);
         break;
       case OrdinaryRoute::kAddmm: {
+        // Select runs DecodedKernel, which raises where the conf names no
+        // route -- so an addmm key Pick chose on the mm/bmm key's say needs
+        // its own route too, or the call raises instead of being computed.
         const AddmmCall call{addmm_dispatcher};
         result = call.Call(call.Select(key), bias, self, mat2, beta, alpha);
         break;
