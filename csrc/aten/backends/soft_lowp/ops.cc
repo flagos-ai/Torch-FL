@@ -274,6 +274,111 @@ at::Tensor OrdinaryBmm(const at::Tensor& self, const at::Tensor& mat2) {
 
 namespace {
 
+// The kernel the soft-lowp path would hand an ordinary pair to: the conf's
+// answer for `route_key`, unless GetFn would resolve it to `fallback` -- for the
+// same reason RouteAcceptsDecoded refuses an empty slot, GetFn degrades an
+// empty slot to whatever else is registered, and for mm/bmm that is this file's
+// own wrapper (soft_lowp/dispatch.cc), which a hand-back must not return to.
+// So N/A when the conf names FlagGems (Python, not a route a decoded pair
+// takes), does not hold the key, or names `none`.
+template <typename Kernel, typename Fn>
+Kernel Fitted(const Dispatcher<Fn>& route,
+              const char* route_key,
+              Kernel fallback) {
+  const Backend configured = route.ConfiguredBackend(route_key);
+  if (configured == Backend::kNone || configured == Backend::kFlagGems) {
+    return nullptr;
+  }
+  const Kernel fn = route.KernelFor(configured);
+  return fn == fallback ? nullptr : fn;
+}
+
+// The call's own key first, then the mm/bmm key, which a conf may name for a
+// pair the call's own key has no kernel for (hygon routes `mm = flaggems`,
+// `mm.out = flaggems_cpp`). The mm/bmm dispatcher is where dispatch.cc
+// registers OrdinaryMm/OrdinaryBmm, and it hands a pair it receives there to
+// those wrappers directly, so the mm/bmm key is a route and is answered with
+// kFactory: the same plain GEMM the pair asked for.
+template <typename Fn, typename OtherFn>
+OrdinaryRoute RouteOf(const Dispatcher<Fn>& route,
+                      const char* key,
+                      const char* ordinary_key,
+                      Fn own_fallback,
+                      OtherFn ordinary_fallback,
+                      OrdinaryRoute own) {
+  if (Fitted(route, key, own_fallback) != nullptr) {
+    return own;
+  }
+  if (Fitted(route, ordinary_key, ordinary_fallback) != nullptr) {
+    return OrdinaryRoute::kFactory;
+  }
+  return OrdinaryRoute::kNone;
+}
+
+OrdinaryRoute OrdinaryRouteFor(const char* key, DecodedShape shape) {
+  switch (shape) {
+    case DecodedShape::kDtype: {
+      const bool batched = std::strcmp(key, "bmm") == 0 ||
+          std::strcmp(key, "bmm.dtype") == 0;
+      return batched
+          ? RouteOf(bmm_dtype_dispatcher, key, "bmm",
+                    bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                    bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                    OrdinaryRoute::kDtype)
+          : RouteOf(mm_dtype_dispatcher, key, "mm",
+                    mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                    mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                    OrdinaryRoute::kDtype);
+    }
+    case DecodedShape::kMmOut:
+      return RouteOf(mm_out_dispatcher, key, "mm",
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     OrdinaryRoute::kMmOut);
+    case DecodedShape::kBmmOut:
+      return RouteOf(bmm_out_dispatcher, key, "bmm",
+                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     OrdinaryRoute::kBmmOut);
+    case DecodedShape::kMmDtypeOut:
+      return RouteOf(mm_dtype_out_dispatcher, key, "mm",
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     OrdinaryRoute::kMmDtypeOut);
+    case DecodedShape::kBmmDtypeOut:
+      return RouteOf(bmm_dtype_out_dispatcher, key, "bmm",
+                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     OrdinaryRoute::kBmmDtypeOut);
+    case DecodedShape::kAddmm:
+      return RouteOf(addmm_dispatcher, key, "mm",
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     OrdinaryRoute::kAddmm);
+    case DecodedShape::kAddmmOut:
+      return RouteOf(addmm_out_dispatcher, key, "mm",
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
+                     OrdinaryRoute::kAddmmOut);
+    case DecodedShape::kVoid:
+      return OrdinaryRoute::kNone;
+  }
+  return OrdinaryRoute::kNone;
+}
+
+// The kernel the conf names for the mm/bmm key of a pair reaching RunMatrix,
+// which carries no dtype and no `out`: MmFn or BmmFn on the dispatcher the key
+// belongs to. nullptr when the conf names none.
+FnPtr OrdinaryKernel(const char* key, bool batched) {
+  return batched
+      ? static_cast<FnPtr>(Fitted(bmm_dispatcher, key,
+                                  bmm_fallback_dispatcher.KernelFor(
+                                      Backend::kFlagGemsCpp)))
+      : static_cast<FnPtr>(Fitted(mm_dispatcher, key,
+                                  mm_fallback_dispatcher.KernelFor(
+                                      Backend::kFlagGemsCpp)));
+}
+
 // The decoded operands of one call and the conf key they are routed by.
 struct TensorPair {
   const char* key = nullptr;  // the conf key this call routes by
@@ -680,19 +785,45 @@ at::Tensor RunMatrix(
   if (IsOrdinaryMatrixPair(self, mat2)) {
     // Some composite callers (notably linear_out) reach addmm with ordinary
     // operands after their own boxing/decomposition; those keep the fused
-    // addmm kernel rather than the low-precision validation below.
-    if (entry.shape == DecodedShape::kDtype && !entry.batch) {
-      const MmDtypeCall call{mm_dtype_dispatcher};
-      return call.Call(call.Select(key), self, mat2, out_dtype);
-    }
-    if (entry.shape == DecodedShape::kDtype) {
-      const BmmDtypeCall call{bmm_dtype_dispatcher};
-      return call.Call(call.Select(key), self, mat2, out_dtype);
-    }
+    // addmm kernel rather than the low-precision validation below. Where the
+    // pair goes is OrdinaryRoute's question: the conf's kernel for the call's
+    // own key where there is one this file can call as this form asks, and
+    // otherwise the pair computed here.
     const auto output_dtype = DefaultOutputDtype(self, out_dtype);
-    const AddmmCall call{addmm_dispatcher};
-    const at::Tensor result =
-        call.Call(call.Select(key), bias, self, mat2, beta, alpha);
+    const auto route = OrdinaryRouteFor(key, entry.shape);
+    at::Tensor result;
+    switch (route) {
+      case OrdinaryRoute::kFactory:
+        result = entry.batch
+            ? static_cast<BmmFn>(OrdinaryKernel(key, true))(self, mat2)
+            : static_cast<MmFn>(OrdinaryKernel(key, false))(self, mat2);
+        break;
+      case OrdinaryRoute::kDtype:
+        result = entry.batch
+            ? static_cast<BmmDtypeFn>(OrdinaryKernel(key, true))(
+                  self, mat2, out_dtype)
+            : static_cast<MmDtypeFn>(OrdinaryKernel(key, false))(
+                  self, mat2, out_dtype);
+        break;
+      case OrdinaryRoute::kAddmm: {
+        const AddmmCall call{addmm_dispatcher};
+        result = call.Call(call.Select(key), bias, self, mat2, beta, alpha);
+        break;
+      }
+      case OrdinaryRoute::kMmOut:
+      case OrdinaryRoute::kBmmOut:
+      case OrdinaryRoute::kMmDtypeOut:
+      case OrdinaryRoute::kBmmDtypeOut:
+      case OrdinaryRoute::kAddmmOut:
+        TORCH_CHECK(false,
+                    "soft-lowp ",
+                    variant,
+                    " writes the caller's tensor, so it is RunMatrixOut's call");
+        break;
+      case OrdinaryRoute::kNone:
+        result = ComputeOrdinary(entry.batch, self, mat2);
+        break;
+    }
     return output_dtype == result.scalar_type() ? result
                                                 : result.to(output_dtype);
   }
@@ -740,6 +871,7 @@ at::Tensor& RunMatrixOut(
     at::Tensor& out) {
   const bool has_bias = bias.defined();
   const bool ordinary = IsOrdinaryMatrixPair(self, mat2);
+  const auto& entry = *LookupVariant(variant);
   // The answer the caller asked of this form, before the pair is looked at:
   // `out`'s own dtype when the form does not take one, the .dtype form's when
   // it does, and the decoded operands' default when neither.
