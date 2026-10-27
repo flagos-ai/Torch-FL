@@ -2603,7 +2603,7 @@ def _tune_space_run(original_run):
     return run
 
 
-def _rewrap_flaggems_tuners(class_patch=None):
+def _rewrap_flaggems_tuners(class_patch=None, only_in=None):
     """Point every FlagGems tuner policy subclass at ``LibTuner.run``, then patch it.
 
     FlagGems does not call ``LibTuner.run`` at a launch. ``@LibTuner.register``
@@ -2625,6 +2625,12 @@ def _rewrap_flaggems_tuners(class_patch=None):
     libtuner = getattr(libentry, "LibTuner", None)
     if libtuner is None:
         return False
+    if only_in is not None and getattr(libtuner, _TUNING_MODULE_PATCHED, None) is (
+        only_in
+    ):
+        # This FlagGems instance has already been repaired against this module;
+        # see ``_musa_tune_space_ready``.
+        return getattr(libtuner.run, _TUNE_SPACE_PATCHED, False)
     patched_run = libtuner.run
     for subclass in _subclasses_in_order(libtuner):
         if subclass.__dict__.get("run") is not None and (
@@ -2648,6 +2654,8 @@ def _rewrap_flaggems_tuners(class_patch=None):
             setattr(repaired, _TUNE_SPACE_PATCHED, True)
             referrer.run = repaired
     _rewrap_libentry_tuners(libtuner)
+    if only_in is not None:
+        setattr(libtuner, _TUNING_MODULE_PATCHED, only_in)
     return getattr(patched_run, _TUNE_SPACE_PATCHED, False)
 
 
@@ -2690,6 +2698,12 @@ def _subclasses_in_order(cls):
 #: Set on ``LibTuner`` once its ``__init_subclass__`` installs the repair on
 #: every policy subclass it sees.
 _SUBCLASS_PATCHED = "_flagos_tune_space_subclass_patch"
+
+#: The ``flag_gems.runtime`` module instance a ``LibTuner`` was repaired for.
+#: device_finder.py reloads the whole ``flag_gems`` package when
+#: ``GEMS_VENDOR`` names another vendor, and a reload builds a new
+#: ``LibTuner``; see ``_musa_tune_space_ready``.
+_TUNING_MODULE_PATCHED = "_flagos_tune_space_runtime"
 
 
 def _patch_flaggems_tune_space():
@@ -2775,7 +2789,10 @@ def _patch_flaggems_tune_space():
             setattr(repaired, _TUNE_SPACE_PATCHED, True)
             libtuner.run = repaired
 
-        _rewrap_flaggems_tuners(class_patch=_tune_space_subclass_patch)
+        _rewrap_flaggems_tuners(
+            class_patch=_tune_space_subclass_patch,
+            only_in=importlib.import_module("flag_gems.runtime"),
+        )
     except Exception:
         pass
 
@@ -2783,13 +2800,14 @@ def _patch_flaggems_tune_space():
 def _musa_tune_space_ready() -> None:
     """Re-install the tune-space repair on every device bring-up after the first.
 
-    ``flagos.init`` patches once, and by then only the FlagGems modules imported
-    so far have entries; ``flag_gems.ops.mm`` is imported on the first ``mm``
-    call, so its ``LibEntry`` is built afterwards and holds the unpatched tuner.
-    Calling this from ``_lazy_init`` -- every bring-up repeats it -- makes the
-    repair cover the kernels that exist by the time they are used. It is a no-op
-    until ``flag_gems.ops`` is imported, so no earlier bring-up does the work.
-    See ``_patch_flaggems_tune_space``.
+    ``flagos.init`` patches once, and by then only the FlagGems modules already
+    imported are covered: ``flag_gems.ops`` is imported on the first routed op
+    (and ``mm`` with it, building the entries that hold the tuner afterwards), so
+    those entries are built after the one repair the import performs. Calling
+    this from ``_lazy_init`` -- every bring-up repeats it -- re-applies the repair
+    to whatever exists by then, and only once per ``flag_gems.runtime`` instance
+    a reload may replace. It is a no-op until ``flag_gems.runtime`` and
+    ``flag_gems.ops`` are both imported. See ``_patch_flaggems_tune_space``.
     """
     from .. import _build_accelerator
 
