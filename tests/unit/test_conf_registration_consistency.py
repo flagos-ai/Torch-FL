@@ -714,13 +714,13 @@ def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
     """A second m.impl for one op in one TORCH_LIBRARY_IMPL body is a compile error.
 
     The generated FlagGems list is included in the same body as the claims
-    above, so an op it already names -- metax's ``bmm``, ``bmm.out`` and
-    ``addmm*``, whose conf routes them to a FlagGems backend -- must not be
-    claimed again. Nothing may overlap without a guard that keeps the two
-    apart on every platform compiling the list.
+    above, so an op it already names -- metax's ``bmm`` and ``bmm.out``, whose
+    conf routes them to ``flaggems_cpp`` -- must not be claimed again. Such an
+    op is guarded out by name, on every platform: a guard that only excludes
+    the platform it was written for still duplicates on the other one.
     """
     listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
-    duplicated = sorted(_soft_lowp_claims() & listed)
+    duplicated = sorted(SOFT_LOWP_CLAIMS & listed)
     assert not duplicated, (
         f"{platform}: {duplicated} are claimed by register.cc and already named "
         "by the generated FlagGems list; the second m.impl does not compile"

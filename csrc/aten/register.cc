@@ -893,14 +893,10 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("bmm.dtype", WrapperBmmDtype);
   m.impl("bmm.dtype_out", WrapperBmmDtypeOut);
   #if !defined(FLAGOS_ACCEL_METAX)
-  // FlagGems-routed on metax, so claimed by the generated list there.
+  // `bmm` and `bmm.out` are FlagGems-routed on metax (its conf says
+  // flaggems_cpp), so the generated list claims those there.
   m.impl("bmm", WrapperBmm);
   m.impl("bmm.out", WrapperBmmOut);
-  m.impl("addmm", WrapperAddmm);
-  m.impl("addmm.dtype", WrapperAddmmDtype);
-  m.impl("addmm.dtype_out", WrapperAddmmDtypeOut);
-  m.impl("addmm.out", WrapperAddmmOut);
-  m.impl("addmm_", WrapperAddmmInplace);
   #endif
   m.impl("_scaled_mm", WrapperPrivScaledMm);
   m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
