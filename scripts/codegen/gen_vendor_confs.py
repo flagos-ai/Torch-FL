@@ -378,6 +378,26 @@ BOXING_FALLBACK = "boxing"
 # masks -- test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible,
 # failing on main (run 40255168276) and on the PR that followed it.
 BOXING_VARIANT_FLAGGEMS_OPS = frozenset({"native_dropout", "native_dropout_backward"})
+# The day-0 variant of a platform whose default conf routes mm/bmm to FlagGems
+# (DCU). The variant is FlagGems + boxing and applies no measured
+# composite routes, but mm/bmm keep the FlagGems route here for a build-graph
+# reason rather than a measured one: the DCU build compiles the soft-lowp
+# matrix prelude, so every dtype of mm/bmm has one PrivateUse1 entry and cannot
+# be left to cpu_fallback behind it. Boxing the key would send an ordinary pair
+# to the CUDA kernel and an FP8/FP4 pair to the prelude's in-wrapper
+# computation -- two routes under one key, the divergence the default conf's
+# claim already covers.
+BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS = frozenset({"hygon"})
+BOXING_VARIANT_FLAGGEMS_ROUTE_NOTE = (
+    "mm/bmm route to flaggems, as in the default conf, rather than to boxing:",
+    "the DCU build compiles the soft-lowp matrix prelude, and a claim on these",
+    "ops carries every dtype through it. Boxing the key would put an ordinary",
+    "pair on the CUDA kernel and an FP8/FP4 pair on the prelude at once.",
+    "FlagGems issue #6227 measured mm hanging on this backend; the route is",
+    "kept because the alternative is the same gap the default conf closes, and",
+    "tracked there.",
+)
+
 BOXING_VARIANT_FLAGGEMS_NOTE = (
     "native_dropout and native_dropout_backward are routed to flaggems rather",
     "than boxing: the boxing kernel is ATen's native_dropout, so it draws from",
@@ -396,8 +416,16 @@ BOXING_VARIANT_FLAGGEMS_NOTE = (
 # issue reference instead of erasing a hand-edited comment.
 BOXING_GAP_NOTES = {
     "hygon": (
-        "mm/bmm are pinned to cuda: FlagGems issue #6227 (first profiled",
-        "mm hangs until the 50-minute CI timeout on the DCU HCU backend).",
+        "mm/bmm route to flaggems although FlagGems issue #6227 measured them",
+        "hanging until the 50-minute CI timeout on the DCU HCU backend. The DCU",
+        "build compiles the soft-lowp matrix prelude, which routes a decoded",
+        "pair through the conf, so the claim on mm/bmm carries their ordinary",
+        "dtypes too: there is one PrivateUse1 entry per op and nothing can be",
+        "left to cpu_fallback behind it. mm is the route the outage was",
+        "measured against, and it is recorded here as a failure rather than a",
+        "pass -- `none` would put an FP8 mm back on the prelude's in-wrapper",
+        "computation, which is the gap the claim exists to close. The first",
+        "DCU lane after this change is what measures the hang here.",
         "mse_loss is pinned to cuda: FlagGems issue #6221 (mse_loss_backward",
         "is not implemented on DCU).",
         "transpose.int is pinned to cuda: FlagGems issue #6219 (transpose is",
@@ -2606,6 +2634,39 @@ METAX_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 # for what is still unmeasured on the shapes this route does not take.
 DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 
+# FlagGems Python routes on the platforms that compile the soft-lowp matrix
+# prelude, measured on their own hardware.
+#
+# The prelude routes a decoded (ordinary) pair by asking the conf; with nothing
+# of its own there, the pair used to be computed in the wrapper whatever the
+# conf said, which made the op's ordinary dtypes unroutable below the claim.
+# The claim on these platforms therefore carries the route for every dtype, and
+# what is recorded here is that route.
+#
+# DCU: FlagGems issue #6227 -- mm hangs until the 50-minute CI timeout on the
+# HCU backend. The op is routed to FlagGems on the strength of the measured
+# outage, not of a measured pass: a hang fails the lane it runs in, and no case
+# in CI exercises the Python path for it today. This is the one entry in the
+# file that records a failure instead of a pass, and it says so. bmm is the
+# batched spelling of the same kernel and rides with it. `_scaled_mm` is still
+# unmeasured on this platform and stays on none until it is.
+SOFT_LOWP_FLAGGEMS_MEASURED = {
+    "hygon": {"mm", "bmm"},
+}
+
+# The keys in that table whose PrivateUse1 entry the soft-lowp claim itself
+# makes, rather than the platform's generated FlagGems list.
+#
+# Those ops are the ones the conf leaves on `none` and the claim exists for, so
+# the generated list has no row for them, and the variant's "every flaggems row
+# is registered" check reads the FlagGems sets. register.cc claims the plain
+# mm/bmm beside that list, so the conf row is covered; anything added here needs
+# the same m.impl before it can route. `_scaled_mm` is the obvious next entry
+# and is deliberately not one: it has no claim yet and is unmeasured on DCU.
+SOFT_LOWP_CLAIMED_OPS = {
+    "hygon": {"mm", "bmm"},
+}
+
 # FlagGems Python routes a native-kernel vendor measured on top of the shared
 # coverage ceiling. The native twin of boxing_measured_python_ops(): same rule
 # -- a cohort claim only the platform holding the matching FlagGems build can
@@ -2970,7 +3031,8 @@ def boxing_measured_python_ops(filename: str) -> set:
     if filename == "backends_metax.conf":
         return METAX_FLAGGEMS_MEASURED | METAX_COMPOSITE_FLAGGEMS
     if filename == "backends_hygon.conf":
-        return DCU_COMPOSITE_FLAGGEMS
+        platform = _platform_from_conf(filename)
+        return DCU_COMPOSITE_FLAGGEMS | SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
     return set()
 
 
@@ -3232,6 +3294,10 @@ def render(
         notes = boxing_to_none_notes(notes)
     if variant and _variant_routes_flaggems_override(routes):
         notes = (list(notes) if notes else []) + list(BOXING_VARIANT_FLAGGEMS_NOTE)
+    if variant and platform in BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS:
+        notes = (list(notes) if notes else []) + list(
+            BOXING_VARIANT_FLAGGEMS_ROUTE_NOTE
+        )
     if notes:
         lines += ["#"] + [f"# Note: {line}" for line in notes]
     for backend in ("flaggems_cpp", "flaggems", "tileops", vendor, "none"):
@@ -3517,6 +3583,13 @@ def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
         # FlagGems route reads the shared flagos one, which torch.manual_seed
         # does write.
         routes.update({op: "flaggems" for op in BOXING_VARIANT_FLAGGEMS_OPS})
+        # The platform's own FlagGems-routed keys, kept for the claim reason in
+        # BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS rather than for the RNG one
+        # above. Applied from the platform's measured set, so the variant cannot
+        # route a key the default conf does not.
+        if platform in BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS:
+            measured = boxing_measured_python_ops(sparse_conf)
+            routes.update({op: "flaggems" for op in measured if op in routes})
         out[platform] = (
             render(
                 platform,
