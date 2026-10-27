@@ -599,22 +599,18 @@ const DecodedVariant* LookupVariant(const char* variant) {
 }
 
 // The conf's answer for the key a call of this shape is routed by: whether
-// that key names a route at all.
-//
-// addmm has a dispatcher of its own. The mm and bmm families each have one for
-// all four of their schemas, so for them the family's dispatcher holds the key.
+// that key names a route at all. `none` is a route of sorts -- the dispatcher
+// answers it with nothing -- so this is "held AND not none" folded into one
+// question, which RouteAcceptsDecoded asks as two.
 //
 // This is the key RunMatrix's factory arm hands the pair to (`Fitted`), and it
 // is not always the key the pair was routed by: a pair this file decoded was
 // refused because the conf names no route for `bmm`, and the factory arm would
 // then hand it to whatever the conf's `bmm` slot degrades to. A pair with no
 // route of its own has no route here either.
-bool AnswerKeyHasRoute(const DecodedVariant& entry, const char* variant) {
-  if (entry.shape == DecodedShape::kAddmm) {
-    return HasBackendForOp(variant);
-  }
-  return (entry.batch ? bmm_dispatcher : mm_dispatcher)
-      .HasBackendForOp(variant);
+bool AnswerKeyHasRoute(const char* variant) {
+  return HasBackendForOp(variant) &&
+      GetBackendForOp(variant) != Backend::kNone;
 }
 
 // The dtype the call is made under, spelled out.
@@ -1010,7 +1006,7 @@ at::Tensor RunMatrix(
         // this file's own wrapper for the key: `mm` resolves to
         // OrdinaryMmKernel -- the hand-back -- and calling it here is the
         // recursion, not a route.
-        const bool routed = AnswerKeyHasRoute(entry, TensorFormKey(key));
+        const bool routed = AnswerKeyHasRoute(TensorFormKey(key));
         const auto wrapper = [](const void* fn) {
           return fn == reinterpret_cast<const void*>(&OrdinaryMmKernel) ||
               fn == reinterpret_cast<const void*>(&OrdinaryBmmKernel);
