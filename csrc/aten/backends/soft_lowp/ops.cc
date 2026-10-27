@@ -611,7 +611,7 @@ const DecodedVariant* LookupVariant(const char* variant) {
 // route of its own has no route here either.
 bool AnswerKeyHasRoute(const DecodedVariant& entry, const char* variant) {
   if (entry.shape == DecodedShape::kAddmm) {
-    return addmm_dispatcher.HasBackendForOp(variant);
+    return HasBackendForOp(variant);
   }
   return (entry.batch ? bmm_dispatcher : mm_dispatcher)
       .HasBackendForOp(variant);
@@ -940,7 +940,7 @@ bool DecodedPairHasRoute(const char* variant) {
       // the table's answer for it is kFlagGems -- the Python route, not one a
       // decoded pair takes.
       const auto& route = entry.batch ? bmm_dispatcher : mm_dispatcher;
-      if (!route.HasBackendForOp(variant) ||
+      if (!HasBackendForOp(variant) ||
           route.ConfiguredBackend(variant) == Backend::kNone) {
         return false;
       }
