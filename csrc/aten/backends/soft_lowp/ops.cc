@@ -1157,11 +1157,33 @@ at::Tensor MmDtype(
                    at::Scalar(1), at::Scalar(1));
 }
 
+// RunMatrix, then the conf's own refusal for the form asked.
+//
+// The claim in register.cc gives mm.dtype_out and mm.out their own m.impl on
+// every build that compiles this file, on a conf that may route them to
+// nothing. A wrapper is not a route: computed in place, an ordinary .out pair
+// would answer where the conf says the platform has no accelerated impl, and
+// the same wheel would serve mm and refuse mm.out without saying so. The
+// dispatcher's own message is what a user was getting -- keyed on the form
+// asked rather than on the op -- and this reproduces it from the same conf.
+void RequireRouteFor(const char* variant) {
+  if (AnswerKeyHasRoute(variant)) {
+    return;
+  }
+  TORCH_CHECK(
+      false,
+      variant,
+      ": routed to 'none' (no accelerated impl on this platform) but the op "
+      "is registered on PrivateUse1 -- regenerate the vendor conf so "
+      "registration and routing agree");
+}
+
 at::Tensor& MmDtypeOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
+  RequireRouteFor("mm.dtype_out");
   return RunMatrixOut("mm.dtype", self, mat2, out_dtype, 2, at::Tensor(),
                       at::Scalar(1), at::Scalar(1), out);
 }
@@ -1170,6 +1192,7 @@ at::Tensor& MmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
+  RequireRouteFor("mm.out");
   return RunMatrixOut("mm.out", self, mat2, c10::ScalarType::Undefined, 2,
                       at::Tensor(), at::Scalar(1), at::Scalar(1), out);
 }
@@ -1191,6 +1214,7 @@ at::Tensor& BmmDtypeOut(
     const at::Tensor& mat2,
     c10::ScalarType out_dtype,
     at::Tensor& out) {
+  RequireRouteFor("bmm.dtype_out");
   return RunMatrixOut("bmm.dtype", self, mat2, out_dtype, 3, at::Tensor(),
                       at::Scalar(1), at::Scalar(1), out);
 }
@@ -1199,6 +1223,7 @@ at::Tensor& BmmOut(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
+  RequireRouteFor("bmm.out");
   return RunMatrixOut("bmm.out", self, mat2, c10::ScalarType::Undefined, 3,
                       at::Tensor(), at::Scalar(1), at::Scalar(1), out);
 }
