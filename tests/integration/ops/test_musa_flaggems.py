@@ -38,38 +38,69 @@ def _require_flaggems_mthreads():
     # lift_fresh, whose vendor-device check rejects flagos tensors.
 
 
+def _flag_gems_call_site(qualname):
+    """The module and attribute the generated kernel's qualname resolves to.
+
+    The codegen freezes the *package-level* name -- ``flag_gems.<fn>``, see
+    ``_normalize_flaggems_qualname`` in scripts/codegen_ops.py -- and
+    ``PythonOpCache::GetFunc`` resolves it by importing the prefix and taking
+    the attribute, so ``flag_gems.<fn>`` is the call site.
+
+    Vendors override some ops by rebinding that package attribute, and the
+    keyword-argument caller (``GetFuncBare``) goes to ``flag_gems.ops.<fn>``
+    instead; ``flag_gems.ops.<op>.<fn>`` also exists but is a different slot
+    holding the same object when nothing overrides it. Both entry points the
+    caller can reach are patched, so the test counts the call whichever one the
+    dispatcher takes.
+    """
+    _, _, function_name = qualname.rpartition(".")
+    return [
+        (importlib.import_module("flag_gems"), function_name),
+        (importlib.import_module("flag_gems.ops"), function_name),
+    ]
+
+
+def _track(monkeypatch, qualname, calls):
+    """Count every call to ``qualname`` through the entry point it reaches."""
+    function_name = qualname.rpartition(".")[2]
+    for module, attribute in _flag_gems_call_site(qualname):
+        if not hasattr(module, attribute):
+            continue
+        original = getattr(module, attribute)
+        if getattr(original, "_musa_counts_calls", False):
+            continue
+
+        def wrapper(*args, _original=original, _name=function_name, **kwargs):
+            calls.append(_name)
+            return _original(*args, **kwargs)
+
+        wrapper._musa_counts_calls = True
+        monkeypatch.setattr(module, attribute, wrapper)
+
+
+#: The generated kernels' qualname for each op this test drives, in call order.
+ROUTED_OPS = [
+    "flag_gems.all",
+    "flag_gems.all_dims",
+    "flag_gems.any",
+    "flag_gems.any_dims",
+    "flag_gems.repeat_interleave_tensor",
+    "flag_gems.index_add",
+    "flag_gems.index_add_",
+]
+
+
 def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
+    """Each routed op runs its FlagGems kernel, not the CPU fallback.
+
+    The counted calls are an assertion on the route and the CPU comparison
+    after each one is an assertion on the result, so a route that runs the
+    wrong kernel fails here rather than in a downstream model.
+    """
     _require_flaggems_mthreads()
     calls = []
-
-    def track(qualname):
-        """Patch the entry point the generated kernel actually calls.
-
-        The codegen freezes the *package-level* name -- ``flag_gems.<fn>``, see
-        ``_normalize_flaggems_qualname`` in scripts/codegen_ops.py -- and
-        ``PythonOpCache::GetFunc`` resolves it by importing the prefix and taking
-        the attribute. So the observable call site is ``flag_gems.<fn>``.
-        Patching ``flag_gems.ops.<module>.<fn>`` instead writes to a different
-        attribute slot that happens to hold the same object, and the wrapper is
-        never entered.
-        """
-        module_path, _, function_name = qualname.rpartition(".")
-        module = importlib.import_module(module_path)
-        original = getattr(module, function_name)
-
-        def wrapper(*args, **kwargs):
-            calls.append(function_name)
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(module, function_name, wrapper)
-
-    track("flag_gems.all")
-    track("flag_gems.all_dims")
-    track("flag_gems.any")
-    track("flag_gems.any_dims")
-    track("flag_gems.repeat_interleave_tensor")
-    track("flag_gems.index_add")
-    track("flag_gems.index_add_")
+    for qualname in ROUTED_OPS:
+        _track(monkeypatch, qualname, calls)
 
     values = torch.tensor([[1, 0, 1], [1, 1, 1]], device=DEVICE)
     assert torch.equal(torch.all(values).cpu(), torch.all(values.cpu()))
@@ -96,15 +127,8 @@ def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
     inplace = torch.zeros(4, 3, device=DEVICE)
     inplace.index_add_(0, index, source)
     assert torch.equal(inplace.cpu(), expected)
-    assert calls == [
-        "all",
-        "all_dims",
-        "any",
-        "any_dims",
-        "repeat_interleave_tensor",
-        "index_add",
-        "index_add_",
-    ]
+
+    assert calls == [name.rpartition(".")[2] for name in ROUTED_OPS]
 
 
 def test_flaggems_randn_shares_native_generator_reservations():
