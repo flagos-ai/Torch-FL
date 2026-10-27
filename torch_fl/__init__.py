@@ -1081,9 +1081,11 @@ def _patch_flaggems_codegen_config():
       card is present.
 
     - Hygon DCU (DTK): set GEMS_VENDOR=hygon so FlagGems uses its _hygon
-      codegen config (triton hcu backend, triton_extra_name="hip"). No
-      torch.cuda shim is needed -- DTK ships a hipified torch with a real,
-      working torch.cuda. This branch must precede the generic-NVIDIA one:
+      codegen config (triton hcu backend, triton_extra_name="hip"). A decoupled
+      wheel puts a stock torch+cpu in front of DTK's device libraries, so
+      torch.version.hip is restored from the bundle and torch.cuda is shimmed
+      onto the driver; with a real DTK torch in front both are no-ops. This
+      branch must precede the generic-NVIDIA one:
       is_nvidia_cuda_available() is False on DTK (there is no libcuda.so, only
       libgalaxyhip), so without it DCU would reach the ascend fallback and get
       GEMS_VENDOR=ascend -- which also breaks the comm layer, since that vendor
