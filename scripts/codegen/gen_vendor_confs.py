@@ -2654,6 +2654,22 @@ SOFT_LOWP_FLAGGEMS_MEASURED = {
     "hygon": {"mm", "bmm"},
 }
 
+# The keys those platforms keep off the FlagGems route: a depth in the prelude
+# that no FlagGems route reaches on its own.
+#
+# `mm.dtype_out` / `mm.out` take an operand form (an explicit out_dtype, a
+# caller's tensor) that the Python route is reached with by converting them to
+# a Python object, and the prelude is what a decoded pair that cannot take a
+# route is computed in. Measured on bw1100: flag_gems' mm kernel raises
+# CompilationError ("Loop-carried variable ... has initial type fp32 but is
+# reassigned to fp64") for a float64 pair, and `bmm` -- same kernel family --
+# answered a float64 pair on the FlagGems route, so the depth a route is asked
+# for is the one the conf names. They are routed `none` and reached through the
+# prelude's own entry, which is the only other registered one.
+SOFT_LOWP_NONE_KEYS = {
+    "hygon": {"mm.dtype_out", "mm.out"},
+}
+
 # The keys in that table whose PrivateUse1 entry the soft-lowp claim itself
 # makes, rather than the platform's generated FlagGems list.
 #
@@ -3464,6 +3480,7 @@ def build_all(conf_dir: Path) -> dict:
         py_here = (
             fg_py_here if platform in FLAGGEMS_PYTHON_PLATFORMS else set()
         ) | measured
+        py_here -= SOFT_LOWP_NONE_KEYS.get(platform, set())
         # Only the C++-runtime conf routes to flaggems_cpp; elsewhere the slot is
         # unused and every C++ op is reached through the Python path instead.
         cpp_here = (
@@ -3589,7 +3606,13 @@ def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
         # route a key the default conf does not.
         if platform in BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS:
             measured = boxing_measured_python_ops(sparse_conf)
-            routes.update({op: "flaggems" for op in measured if op in routes})
+            pinned = SOFT_LOWP_NONE_KEYS.get(platform, set())
+            routes.update(
+                {op: "flaggems" for op in measured if op in routes and op not in pinned}
+            )
+            # A key pinned off FlagGems goes back to the fallback here: the
+            # variant boxes a `none`, and the conf's fallback is boxing.
+            routes.update({op: "boxing" for op in pinned if op in routes})
         out[platform] = (
             render(
                 platform,
