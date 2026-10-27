@@ -867,9 +867,16 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // named for. An ordinary pair still follows the conf inside the wrapper.
   //
   // Two consequences for the ordinary pair, and both are on DCU:
-  //   * an op the conf leaves on `none` is computed by the wrapper's hand-back
-  //     -- a plain GEMM on the operands, which `none` (cpu_fallback) never
-  //     served on this device either;
+  //   * an op the conf leaves on `none` is still the conf's to answer: the
+  //     wrapper sees no FP8/FP4 operand and hands the pair to its route, which
+  //     the dispatcher now asks for by key first. `none` and "not in the conf"
+  //     are refusals, and the pair is computed on the device (a plain GEMM),
+  //     which `none` (cpu_fallback) never served on this device either. It is
+  //     NOT answered with the other operand form's kernel: `bmm` on a conf that
+  //     routes `mm` would otherwise reach the `mm` row, because the factory
+  //     arm's lookup takes the plain key's slot whatever the pair was refused
+  //     for (see AnswerKeyHasRoute in soft_lowp/ops.cc). An ordinary pair that
+  //     reaches the wrapper directly is not this case -- nothing refused it;
   //   * an op the conf routes to a FlagGems kernel now reaches this wrapper
   //     before that kernel, which is the trade #655's revert chose to avoid --
   //     and the reason the ops that list already claims are held back below.

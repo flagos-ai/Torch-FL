@@ -344,3 +344,49 @@ def test_a_decoded_fp8_out_dtype_reaches_the_python_route():
         "OptionalDtypeToPython must name the FP8 dtypes; otherwise an FP8 "
         "out_dtype raises here before the route runs:\n" + body
     )
+
+
+def _function_body(source: str, signature: str) -> str:
+    """One definition's body, from its signature to its closing brace."""
+    start = source.find(signature)
+    assert start != -1, f"ops.cc no longer defines {signature}"
+    body = source[start:]
+    return body[: body.find("\n}\n")]
+
+
+def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
+    """A pair the conf gives no route still has none once it is decoded.
+
+    The mm and bmm families answer for four keys each through one dispatcher,
+    and a pair this file decoded is refused by the key it was routed by --
+    but ``RunMatrix``'s factory arm then takes ``Fitted``'s answer for the
+    plain key, which returns whatever the conf's slot holds even after it
+    degrades. On a conf that routes ``mm`` and leaves ``bmm`` on ``none``, an
+    ordinary bmm reached the ``mm`` kernel that way; the rail is that the key
+    the call is really routed by has a route, read from the conf, before the
+    family's dispatcher is asked anything.
+    """
+    source = _OPS_CC.read_text(encoding="utf-8")
+    helper = _function_body(source, "bool AnswerKeyHasRoute(")
+    assert "HasBackendForOp(" in helper, (
+        "AnswerKeyHasRoute must read the conf for the key, not the resolved "
+        "kernel:\n" + helper
+    )
+    assert "HasBackendForOp(" in _function_body(source, "bool DecodedPairHasRoute("), (
+        "DecodedPairHasRoute must refuse a key the conf has no route for "
+        "before asking the family's dispatcher"
+    )
+    factory = _function_body(source, "at::Tensor RunMatrix(")
+    start = factory.find("case OrdinaryRoute::kFactory:")
+    assert start != -1, factory
+    arm = factory[start:]
+    arm = arm[: arm.find("case OrdinaryRoute::kDtype:")]
+    assert "AnswerKeyHasRoute(" in arm, (
+        "the factory arm must not take the plain key's kernel for a pair that "
+        "was refused its own key:\n" + arm
+    )
+    for name in ("BmmKernelFor(key)", "MmKernelFor(key)"):
+        line = next((ln for ln in arm.splitlines() if name in ln), "")
+        assert "routed" in line, (
+            f"{name} is taken unconditionally in the factory arm:\n{arm}"
+        )
