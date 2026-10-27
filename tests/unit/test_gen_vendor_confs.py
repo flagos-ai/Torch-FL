@@ -578,7 +578,7 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
         g.METAX_FLAGGEMS_MEASURED | g.METAX_COMPOSITE_FLAGGEMS
     )
     assert g.boxing_measured_python_ops("backends_hygon.conf") == (
-        g.DCU_COMPOSITE_FLAGGEMS
+        g.DCU_COMPOSITE_FLAGGEMS | g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
     )
     # Named the other way round on purpose: a platform that never measured the
     # op gets nothing, and backends_metax.conf's set must not arrive here.
@@ -836,6 +836,14 @@ def test_boxing_variant_routes_only_ops_flaggems_registers():
             for op, value in routes.items()
             if value.startswith("flaggems") and op not in held
         }
+        # Plain mm/bmm are claimed by the soft-lowp prelude's own m.impl in
+        # register.cc, not by the generated list (see SOFT_LOWP_CLAIMED_OPS),
+        # and scaled_dot_product_attention is a whole-op override in
+        # csrc/aten/sdp_choice_stub.cc rather than a FlagGems kernel. Neither
+        # is a FlagGems row of this check's kind.
+        claimed -= g.SOFT_LOWP_CLAIMED_OPS.get(platform, set()) | {
+            "scaled_dot_product_attention"
+        }
         assert not claimed - registered, (
             f"{platform}: routed to flaggems but not registered: "
             f"{sorted(claimed - registered)}"
@@ -876,10 +884,22 @@ def test_boxing_variant_uses_only_the_flaggems_ceiling_every_platform_measured()
 
 def test_boxing_variant_does_not_apply_measured_composite_routes():
     """DCU's measured scaled_dot_product_attention route belongs to the default
-    conf; the variant's premise is that FlagGems is not what it trusts."""
+    conf; the variant's premise is that FlagGems is not what it trusts.
+
+    The mm/bmm route is the one exception, and it is not a measurement: the DCU
+    build compiles the soft-lowp matrix prelude, so every dtype of those two
+    ops goes through one PrivateUse1 entry and none of them can be left to
+    cpu_fallback. Boxing the key would send an ordinary pair and an FP8/FP4
+    pair down two different paths under one name.
+    """
     assert "scaled_dot_product_attention" in g.DCU_COMPOSITE_FLAGGEMS
     routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["hygon"][1]
-    assert routes["scaled_dot_product_attention"] == "boxing"
+    # Not boxing: hygon is now FlagGems-first on this composite too, so the
+    # variant routes what the default conf routes and boxes nothing back.
+    assert routes["scaled_dot_product_attention"] == "flaggems"
+    assert set(g.BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS) == {"hygon"}
+    for op in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]:
+        assert routes[op] == "flaggems", op
 
 
 @pytest.mark.parametrize("platform", ["metax", "hygon", "thead"])
@@ -900,6 +920,11 @@ def test_boxing_variant_keeps_the_platforms_triton_gaps(platform):
         g.flaggems_cpp_ops(CONF_DIR),
     )
     assert gaps, f"{platform} has no measured gaps to preserve"
-    for op in gaps:
+    # A key the variant routes to flaggems for the claim reason (DCU's mm/bmm)
+    # is not held on boxing: that route is what the prelude's decoded pair
+    # follows, and boxing it puts an ordinary pair on a kernel an FP8 pair
+    # never reaches.
+    kept = g.SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
+    for op in gaps - kept:
         if op in fg:
             assert variant[op] == "boxing", op
