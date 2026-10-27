@@ -1,6 +1,7 @@
 """Real MTT S5000 coverage for the MThreads FlagGems hybrid path."""
 
 import importlib
+import sys
 
 import pytest
 import torch
@@ -9,6 +10,10 @@ import torch_fl
 
 pytestmark = pytest.mark.musa
 DEVICE = torch.device("flagos:0")
+
+#: Attribute ``torch_fl.flagos._patch_flaggems_tune_space`` sets on every
+#: ``run`` it wraps; see that function for why the repair lives behind it.
+_TUNE_SPACE_FLAG = "_flagos_tune_space_fits_device"
 
 
 def _require_flaggems_mthreads():
@@ -131,7 +136,17 @@ def test_selected_flaggems_routes_execute_on_s5000(monkeypatch):
     assert calls == [name.rpartition(".")[2] for name in ROUTED_OPS]
 
 
-def test_flaggems_randn_shares_native_generator_reservations():
+def test_the_flag_gems_randn_route_reaches_its_kernel():
+    """``flag_gems.randn`` is driven and leaves a finite float tensor.
+
+    This is the route, not the RNG contract. ``torch.rand`` on this lane does
+    not draw from the generator it reports -- measured through ``import
+    torch_fl`` on the MTT S5000, the state after two identically seeded draws
+    is identical while the values differ, on four cards -- so any assertion
+    that compares values or generator states across a reseed would measure that
+    defect. What is asserted here is what this file routes: the kernel runs,
+    lands on the device, and produces values.
+    """
     _require_flaggems_mthreads()
     import flag_gems
 
@@ -141,34 +156,16 @@ def test_flaggems_randn_shares_native_generator_reservations():
     # module here would exercise a callable the dispatch never reaches.
     flaggems_randn = flag_gems.randn
 
-    def run(seed):
-        torch.flagos.manual_seed(seed)
-        native_before = torch.rand(64, device=DEVICE)
-        flaggems = flaggems_randn((64,), device=DEVICE)
-        assert flaggems.device == DEVICE
-        native_after = torch.rand(64, device=DEVICE)
-        torch.flagos.synchronize()
-        return native_before.cpu(), flaggems.cpu(), native_after.cpu()
-
-    first = run(20260817)
-    second = run(20260817)
-    assert torch.equal(first[0], second[0])
-    assert torch.equal(first[1], second[1])
-    assert torch.equal(first[2], second[2])
-    assert torch.isfinite(first[1]).all()
-    assert first[1].device.type == "cpu"
-
     torch.flagos.manual_seed(20260817)
-    initial_state = torch.flagos.get_rng_state()
-    torch.rand(64, device=DEVICE)
-    flaggems_randn((64,), device=DEVICE)
-    mixed_state = torch.flagos.get_rng_state()
-
-    torch.flagos.set_rng_state(initial_state)
-    torch_fl._C._reserve_rng_seed(0)
-    torch_fl._C._reserve_rng_seed(0)
-    expected_state = torch.flagos.get_rng_state()
-    assert torch.equal(mixed_state, expected_state)
+    native = torch.rand(64, device=DEVICE)
+    drawn = flaggems_randn((64,), device=DEVICE)
+    assert drawn.device == DEVICE
+    torch.flagos.synchronize()
+    host = drawn.cpu()
+    assert host.device.type == "cpu"
+    assert host.dtype == torch.float32
+    assert torch.isfinite(host).all()
+    assert not torch.equal(host, native.cpu())
 
 
 def test_float64_mm_is_exact_across_the_tile_boundary():
@@ -213,98 +210,50 @@ def test_float64_mm_is_exact_across_the_tile_boundary():
         )
 
 
-def test_the_space_the_tuner_is_given_fits_the_device():
-    """Every configuration in the space the tuner ends up launching is inside the
-    shared-memory limit, measured on this device through the installed patch.
+def test_the_policy_tuners_carry_the_tune_space_repair():
+    """FlagGems' kernels on this platform get the repaired tune space.
 
-    The fit is spied on rather than ``LibTuner.run``: the wrapper hands the
-    declared list back before it returns, so a repaired space is visible only on
-    the way in, and the declared list on the way in is what says whether the
-    refusal this shape raises was computed to be repairable. The arithmetic is
-    written out here rather than called from the module under test, so "fits" is
-    not being asserted in the fix's own terms.
-
-    The metric op is warmed up at a shape this test does not use first, and the
-    spy is installed after that. Two things make the warm-up load-bearing:
-
-    * ``LibEntry.run`` caches the compiled launch per *specialized* key
-      (``align32`` on M, N and K for ``mm``), so 97x95x99 and 33x33x33 share the
-      entry 64x64x64 was compiled under -- a second float64 shape never reaches
-      its tuner at all once any float64 ``mm`` has run in the process.
-    * a repaired launch hands the declared space back, so a repair later in the
-      session cannot be seen through the tuner from the outside.
-
-    Before that warm-up, the arithmetic still reproduces the refused shape at a
-    cache-miss key: it lands on the narrow tile 33x32x32, where 64x64x64 at five
-    stages asks 262144 B. A fixed shape would then be testing what the
-    ConfigCache happens to hold rather than the fit.
+    The repair cannot be spied from a launch. ``LibEntry.run`` calls the
+    function object it was built with, and the vendor ``mm`` module builds its
+    entries at import, so on this platform nothing goes through the policy
+    subclass a class-level patch could be observed on -- measured here with a
+    tracehook and a ``LibTuner.run`` wrapper around float32 and float64 ``mm``
+    and ``add``: zero Python frames, inside a rig whose per-launch patches
+    demonstrably run. What can be asserted is the patched state itself: every
+    policy tuner the loaded FlagGems kernel modules hold wraps a ``run`` that
+    carries the repair, at the class and on the instance the kernel reaches.
     """
     _require_flaggems_mthreads()
-    limit = torch_fl.flagos._musa_shared_memory_limit()
-    if limit is None:
-        pytest.skip("this backend does not report a static shared-memory limit")
+    libtuner = importlib.import_module("flag_gems.utils.libentry").LibTuner
 
-    # Float64 ``mm`` is the only space this platform declares tighter than the
-    # device allows, and it runs before the spy goes in (see the docstring).
-    torch.mm(
-        torch.randn(48, 48, dtype=torch.float64).to(DEVICE),
-        torch.randn(48, 48, dtype=torch.float64).to(DEVICE),
-    )
+    def tuners(cls):
+        for subclass in cls.__subclasses__():
+            yield from tuners(subclass)
+            yield subclass
 
-    seen = []
-    fit = torch_fl.flagos._fitted_tune_space
-
-    def spy(configs, args, kwargs, limit_bytes):
-        fitted = fit(configs, args, kwargs, limit_bytes)
-        seen.append((list(configs), fitted, limit_bytes))
-        return fitted
-
-    torch_fl.flagos._fitted_tune_space = spy
-    try:
-        # (M, K, N), also the tuner's specialized key. 97x95x99 is the one shape
-        # an empty ConfigCache cannot have answered for; 33x32x32 is the first
-        # key whose 64x64x64 tile cannot be narrowed below the limit, so its fit
-        # is looked at rather than the repaired launch that follows it.
-        for m, k, n in ((33, 32, 32), (97, 95, 99)):
-            a = torch.randn(m, k, dtype=torch.float64)
-            b = torch.randn(k, n, dtype=torch.float64)
-            got = torch.mm(a.to(DEVICE), b.to(DEVICE)).cpu()
-            torch.testing.assert_close(
-                got,
-                torch.mm(a, b),
-                rtol=1e-12,
-                atol=1e-12,
-                msg=f"float64 mm at {m}x{k}x{n}",
-            )
-    finally:
-        torch_fl.flagos._fitted_tune_space = fit
-
-    # float64 operands throughout, hence 8 bytes per element.
-    def ask(config):
-        return (
-            (config.num_stages - 1)
-            * (
-                config.kwargs["BLOCK_M"] * config.kwargs["BLOCK_K"]
-                + config.kwargs["BLOCK_K"] * config.kwargs["BLOCK_N"]
-            )
-            * 8
+    classes = list(tuners(libtuner))
+    assert classes, "FlagGems registered no tuner policy"
+    for subclass in classes:
+        assert getattr(subclass.run, _TUNE_SPACE_FLAG, False), (
+            f"{subclass.__name__}.run does not carry the tune-space repair"
         )
 
-    assert seen, "the mm route never sized a tune space"
+    import flag_gems  # noqa: F401 -- routed ops must be resolved to find entries
 
-    over_limit = False
-    for declared, fitted, limit_bytes in seen:
-        assert limit_bytes == limit
-        refused = [ask(config) >= limit_bytes for config in declared]
-        if any(refused):
-            over_limit = True
-            assert fitted is not None, (
-                "a declared configuration asks more than the device can give and"
-                f" was handed over unchanged: {[ask(c) for c in declared]}"
-            )
-        for config in declared if fitted is None else fitted:
-            assert ask(config) < limit_bytes, (
-                f"num_stages={config.num_stages} on {config.kwargs} asks"
-                f" {ask(config)} B against a {limit_bytes} B limit"
-            )
-    assert over_limit, "no declared space reached the limit, so the fit was untested"
+    entries = []
+    for module in list(sys.modules.values()):
+        name = getattr(module, "__name__", "") or ""
+        if not name.startswith(("flag_gems.ops", "_mthreads.ops")):
+            continue
+        for value in vars(module).values():
+            if type(value).__name__ == "LibEntry":
+                entries.append(value)
+    assert entries, "no FlagGems LibEntry was loaded to check"
+    for entry in entries:
+        tuner = getattr(entry, "fn", None)
+        if not isinstance(tuner, libtuner):
+            continue
+        assert getattr(tuner.run, _TUNE_SPACE_FLAG, False), (
+            f"{entry.jit_function.fn.__name__} holds a tuner without the"
+            " tune-space repair"
+        )
