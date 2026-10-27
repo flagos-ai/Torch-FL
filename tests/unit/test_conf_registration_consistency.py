@@ -155,6 +155,16 @@ def _parse_conf(path: Path) -> dict[str, str]:
     return routes
 
 
+def _soft_lowp_claims() -> set[str]:
+    """The matrix ops register.cc claims from source for the soft-lowp path."""
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    return set(
+        re.findall(
+            r'^\s*m\.impl\("((?:mm|bmm|addmm)[^"]*|_scaled_[^"]*)",', register_cc, re.M
+        )
+    )
+
+
 def _registered_ops(inc_path: Path) -> set[str]:
     """Read ``m.impl("op", ...)`` names from a registration ``.inc``."""
     if not inc_path.exists():
@@ -630,6 +640,91 @@ def test_conf_route_counts_are_stable():
             f"{platform} route counts drifted: expected {exp}, got {counts}. "
             "If an op moved routes deliberately, update this snapshot."
         )
+
+
+# ---------------------------------------------------------------------------
+# The software low-precision matrix path: claimed from source, like conv
+# ---------------------------------------------------------------------------
+
+# The matrix ops whose generated wrapper opens with the ``FLAGOS_SOFT_LOWP``
+# prelude, and the ``_scaled_mm`` family that prelude's gate must keep
+# fail-closed. A wrapper is not a route: an op the conf leaves on ``none``
+# reaches ATen's CompositeExplicitAutograd arm instead of the wrapper, so on a
+# FlagGems-primary build the prelude is unreachable unless register.cc claims
+# the op. The gate beside it (``_scaled_mm`` failing closed on an FP8 pair) is
+# then the inconsistency: the same wheel gated one fingerprint and not the
+# other, and an FP8 mm answered through the conf's route instead (measured on
+# DCU, bw1100).
+SOFT_LOWP_CLAIMS = {
+    "addmm",
+    "addmm.dtype",
+    "addmm.dtype_out",
+    "addmm.out",
+    "addmm_",
+    "bmm",
+    "bmm.dtype",
+    "bmm.dtype_out",
+    "bmm.out",
+    "mm",
+    "mm.dtype",
+    "mm.dtype_out",
+    "mm.out",
+    "_scaled_grouped_mm",
+    "_scaled_grouped_mm_v2",
+    "_scaled_mm",
+    "_scaled_mm.out",
+    "_scaled_mm_v2",
+}
+
+# The CUDA-ABI platforms whose FlagGems-primary build defines FLAGOS_SOFT_LOWP.
+SOFT_LOWP_PLATFORMS = {"hygon": "FLAGOS_ACCEL_DCU", "metax": "FLAGOS_ACCEL_METAX"}
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
+def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
+    """A platform that compiles the prelude must also claim the ops it serves."""
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    missing = sorted(op for op in SOFT_LOWP_CLAIMS if op not in register_cc)
+    assert not missing, (
+        f"{platform}: the software low-precision matrix ops {missing} are not "
+        "claimed anywhere in register.cc, so a FlagGems-primary build never "
+        "reaches the FLAGOS_SOFT_LOWP prelude for them"
+    )
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
+def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
+    """The claim must sit under a macro the platform defining the prelude sets."""
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    expected = SOFT_LOWP_PLATFORMS[platform]
+    idx = register_cc.rfind('m.impl("bmm.dtype",')
+    assert idx != -1, "bmm.dtype is not claimed from register.cc"
+    guard_block = register_cc[max(0, idx - 1600) : idx]
+    assert expected in guard_block, (
+        f"{platform}: the soft-lowp matrix claim is not gated on {expected}. "
+        f"Guard text found:\n{guard_block}"
+    )
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
+def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
+    """A second m.impl for one op in one TORCH_LIBRARY_IMPL body is a compile error.
+
+    The generated FlagGems list is included in the same body as the claims
+    above, so an op it already names -- metax's ``bmm``, ``bmm.out`` and
+    ``addmm*``, whose conf routes them to a FlagGems backend -- must not be
+    claimed again. Nothing may overlap without a guard that keeps the two
+    apart on every platform compiling the list.
+    """
+    listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    duplicated = sorted(_soft_lowp_claims() & listed)
+    assert not duplicated, (
+        f"{platform}: {duplicated} are claimed by register.cc and already named "
+        "by the generated FlagGems list; the second m.impl does not compile"
+    )
 
 
 # ---------------------------------------------------------------------------

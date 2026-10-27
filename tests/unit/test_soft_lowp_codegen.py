@@ -268,6 +268,10 @@ def test_addmm_out_routes_through_a_dispatcher_that_writes_out():
     before it hands ``out`` to a kernel that writes it. Passing anything else
     (a re-bound ``self``, the general route's const operand) either writes the
     wrong tensor or binds a const tensor to ``Tensor&``.
+
+    ``Select`` names the key the dispatcher answers for (``addmm``), not the
+    caller's: ``addmm_`` reaches this arm too and has no key of its own, and a
+    key it names no kernel for runs Select once for nothing.
     """
     source = _OPS_CC.read_text(encoding="utf-8")
     match = _ADDMM_OUT_ROUTE.search(source)
@@ -276,7 +280,11 @@ def test_addmm_out_routes_through_a_dispatcher_that_writes_out():
     assert "addmm_out_dispatcher" in arm, arm
     call = re.search(r"AddmmOutCall call\{(\w+)\}", arm)
     assert call is not None and call.group(1) == "addmm_out_dispatcher", arm
-    called = re.search(r"call\.Call\(call\.Select\(key\), (.*?)\);", arm, re.S)
+    called = re.search(
+        r"call\.Call\(call\.Select\(addmm_dispatcher\.OpKey\(\)\), (.*?)\);",
+        arm,
+        re.S,
+    )
     assert called is not None, arm
     args = _argument_list(called.group(1))
     assert args == [

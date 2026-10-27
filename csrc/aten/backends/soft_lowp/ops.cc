@@ -274,120 +274,6 @@ at::Tensor OrdinaryBmm(const at::Tensor& self, const at::Tensor& mat2) {
 
 namespace {
 
-// The kernel the soft-lowp path would hand an ordinary pair to: the conf's
-// answer for `route_key`, unless GetFn would resolve it to `fallback` -- for the
-// same reason RouteAcceptsDecoded refuses an empty slot, GetFn degrades an
-// empty slot to whatever else is registered, and for mm/bmm that is this file's
-// own wrapper (soft_lowp/dispatch.cc), which a hand-back must not return to.
-// So N/A when the conf names FlagGems (Python, not a route a decoded pair
-// takes), does not hold the key, or names `none`.
-template <typename Kernel, typename Fn>
-Kernel Fitted(const Dispatcher<Fn>& route,
-              const char* route_key,
-              Kernel fallback) {
-  const Backend configured = route.ConfiguredBackend(route_key);
-  if (configured == Backend::kNone || configured == Backend::kFlagGems) {
-    return nullptr;
-  }
-  const Kernel fn = route.KernelFor(configured);
-  return fn == fallback ? nullptr : fn;
-}
-
-// The call's own key first, then the mm/bmm key, which a conf may name for a
-// pair the call's own key has no kernel for (hygon routes `mm = flaggems`,
-// `mm.out = flaggems_cpp`). The mm/bmm dispatcher is where dispatch.cc
-// registers OrdinaryMm/OrdinaryBmm, and it hands a pair it receives there to
-// those wrappers directly, so the mm/bmm key is a route and is answered with
-// kFactory: the same plain GEMM the pair asked for.
-template <typename Fn, typename OtherFn>
-OrdinaryRoute RouteOf(const Dispatcher<Fn>& route,
-                      const char* key,
-                      const char* ordinary_key,
-                      Fn own_fallback,
-                      OtherFn ordinary_fallback,
-                      OrdinaryRoute own) {
-  if (Fitted(route, key, own_fallback) != nullptr) {
-    return own;
-  }
-  if (Fitted(route, ordinary_key, ordinary_fallback) != nullptr) {
-    return OrdinaryRoute::kFactory;
-  }
-  return OrdinaryRoute::kNone;
-}
-
-OrdinaryRoute OrdinaryRouteFor(const char* key, DecodedShape shape) {
-  switch (shape) {
-    case DecodedShape::kDtype: {
-      const bool batched = std::strcmp(key, "bmm") == 0 ||
-          std::strcmp(key, "bmm.dtype") == 0;
-      return batched
-          ? RouteOf(bmm_dtype_dispatcher, key, "bmm",
-                    bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                    bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                    OrdinaryRoute::kDtype)
-          : RouteOf(mm_dtype_dispatcher, key, "mm",
-                    mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                    mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                    OrdinaryRoute::kDtype);
-    }
-    case DecodedShape::kMmOut:
-      return RouteOf(mm_out_dispatcher, key, "mm",
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     OrdinaryRoute::kMmOut);
-    case DecodedShape::kBmmOut:
-      return RouteOf(bmm_out_dispatcher, key, "bmm",
-                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     OrdinaryRoute::kBmmOut);
-    case DecodedShape::kMmDtypeOut:
-      return RouteOf(mm_dtype_out_dispatcher, key, "mm",
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     OrdinaryRoute::kMmDtypeOut);
-    case DecodedShape::kBmmDtypeOut:
-      return RouteOf(bmm_dtype_out_dispatcher, key, "bmm",
-                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     bmm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     OrdinaryRoute::kBmmDtypeOut);
-    case DecodedShape::kAddmm:
-      return RouteOf(addmm_dispatcher, key, "mm",
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     OrdinaryRoute::kAddmm);
-    case DecodedShape::kAddmmOut:
-      return RouteOf(addmm_out_dispatcher, key, "mm",
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     mm_fallback_dispatcher.KernelFor(Backend::kFlagGemsCpp),
-                     OrdinaryRoute::kAddmmOut);
-    case DecodedShape::kVoid:
-      return OrdinaryRoute::kNone;
-  }
-  return OrdinaryRoute::kNone;
-}
-
-// The kernel the conf names for the mm/bmm key of a pair reaching RunMatrix,
-// which carries no dtype and no `out`: MmFn or BmmFn on the dispatcher the key
-// belongs to. nullptr when the conf names none.
-FnPtr OrdinaryKernel(const char* key, bool batched) {
-  return batched
-      ? static_cast<FnPtr>(Fitted(bmm_dispatcher, key,
-                                  bmm_fallback_dispatcher.KernelFor(
-                                      Backend::kFlagGemsCpp)))
-      : static_cast<FnPtr>(Fitted(mm_dispatcher, key,
-                                  mm_fallback_dispatcher.KernelFor(
-                                      Backend::kFlagGemsCpp)));
-}
-
-// The decoded operands of one call and the conf key they are routed by.
-struct TensorPair {
-  const char* key = nullptr;  // the conf key this call routes by
-  int64_t rank = 2;
-  at::Tensor lhs;  // decoded, ordinary dtype
-  at::Tensor rhs;  // decoded, ordinary dtype
-  at::Tensor bias;  // decoded (addmm); undefined otherwise
-};
-
 // What the decoded pair is handed to, keyed the way the conf keys it.
 //
 // One op name routes several schemas and the conf routes each by its own name,
@@ -419,6 +305,271 @@ enum class DecodedShape {
   kAddmmOut,        // Dispatcher<AddmmOutFn>(bias, lhs, rhs, beta, alpha, out)
 };
 
+// Where an ordinary pair reaching RunMatrix goes.
+//
+// The dispatch key is the call's own -- `mm.out` is served by the mm.out
+// dispatcher -- and the kernel is the conf's answer for that key. What makes
+// this a question is GetFn's degradation: a build without liboperators fills
+// the flaggems_cpp slot of mm/bmm with this file's own wrappers
+// (soft_lowp/dispatch.cc), and hygon's conf names `flaggems_cpp` for `bmm` and
+// `mm.out`. Handing the pair to that kernel landed on the wrapper that handed
+// it back, which is the recursion RunMatrix's own comment describes, so a key
+// that answers with the wrapper is not a route and the pair is computed here.
+enum class OrdinaryRoute {
+  kNone,          // no key names a kernel this file can call: compute it here
+  kFactory,       // the call's own key, mm/bmm answering a new tensor
+  kDtype,         // the call's own key, the .dtype form
+  kMmOut,         // the call's own key, mm.out
+  kBmmOut,        // the call's own key, bmm.out
+  kMmDtypeOut,    // the call's own key, mm.dtype_out
+  kBmmDtypeOut,   // the call's own key, bmm.dtype_out
+  kAddmm,         // the call's own key, the fused addmm
+  kAddmmOut,      // the call's own key, the fused addmm writing `out`
+};
+
+// The wrappers soft_lowp/dispatch.cc installs in this file's name, as
+// file-local forwarders: RegisterGemmKernels' flaggems_cpp slots for mm/bmm
+// (around OrdinaryMm/OrdinaryBmm) and its REGISTER_IMPL_TO_DISPATCHER entries
+// for every matrix schema's own dispatcher (around the public Mm/Bmm/Addmm and
+// their .dtype/.out forms). A slot that resolves to one of them is not a
+// route: it is this file, and calling it re-enters the call that asked.
+//
+// The dtype and .out wrappers are the same recursion as the plain ones, one
+// schema over, and they are what a conf that routes mm.dtype says,
+//   Mm -> MmDtype -> RunMatrix("mm.dtype") -> MmDtypeKernel -> MmDtype -> ...
+// until the stack runs out. Measured on DCU with the soft-lowp prelude on: mm
+// on an FP8 pair took 4 rows of the 30-case suite down with SIGSEGV.
+at::Tensor OrdinaryMmKernel(const at::Tensor& self, const at::Tensor& mat2) {
+  return OrdinaryMm(self, mat2);
+}
+
+at::Tensor OrdinaryBmmKernel(const at::Tensor& self, const at::Tensor& mat2) {
+  return OrdinaryBmm(self, mat2);
+}
+
+at::Tensor SelfMmDtypeKernel(const at::Tensor& self,
+                             const at::Tensor& mat2,
+                             c10::ScalarType out_dtype) {
+  return MmDtype(self, mat2, out_dtype);
+}
+
+at::Tensor SelfBmmDtypeKernel(const at::Tensor& self,
+                              const at::Tensor& mat2,
+                              c10::ScalarType out_dtype) {
+  return BmmDtype(self, mat2, out_dtype);
+}
+
+at::Tensor& SelfMmDtypeOutKernel(const at::Tensor& self,
+                                 const at::Tensor& mat2,
+                                 c10::ScalarType out_dtype,
+                                 at::Tensor& out) {
+  return MmDtypeOut(self, mat2, out_dtype, out);
+}
+
+at::Tensor& SelfBmmDtypeOutKernel(const at::Tensor& self,
+                                  const at::Tensor& mat2,
+                                  c10::ScalarType out_dtype,
+                                  at::Tensor& out) {
+  return BmmDtypeOut(self, mat2, out_dtype, out);
+}
+
+at::Tensor& SelfMmOutKernel(const at::Tensor& self,
+                            const at::Tensor& mat2,
+                            at::Tensor& out) {
+  return MmOut(self, mat2, out);
+}
+
+at::Tensor& SelfBmmOutKernel(const at::Tensor& self,
+                             const at::Tensor& mat2,
+                             at::Tensor& out) {
+  return BmmOut(self, mat2, out);
+}
+
+// Whether a kernel is one of those wrappers.
+bool IsFallbackWrapper(const void* kernel) {
+  return kernel == reinterpret_cast<const void*>(&OrdinaryMmKernel) ||
+      kernel == reinterpret_cast<const void*>(&OrdinaryBmmKernel) ||
+      kernel == reinterpret_cast<const void*>(&SelfMmDtypeKernel) ||
+      kernel == reinterpret_cast<const void*>(&SelfBmmDtypeKernel) ||
+      kernel == reinterpret_cast<const void*>(&SelfMmDtypeOutKernel) ||
+      kernel == reinterpret_cast<const void*>(&SelfBmmDtypeOutKernel) ||
+      kernel == reinterpret_cast<const void*>(&SelfMmOutKernel) ||
+      kernel == reinterpret_cast<const void*>(&SelfBmmOutKernel);
+}
+
+// The kernel a decoded ordinary pair would land on for `route_key`, or nullptr.
+//
+// GetFn's answer is not always the route's: a slot nothing filled degrades to
+// whatever else is registered, and soft_lowp/dispatch.cc registers its wrappers
+// (OrdinaryMmKernel/OrdinaryBmmKernel here) in the flaggems_cpp slot of
+// mm/bmm. A key that resolves to a wrapper is not a route, so it answers
+// nullptr -- signature-independent, which is what GetFn's degradation is: it
+// answers whatever the slot holds, whatever type the caller asked as.
+//
+// So N/A when the conf names FlagGems (Python, not a route a decoded pair
+// takes), does not hold the key, or names `none`.
+template <typename Fn>
+Fn Fitted(const Dispatcher<Fn>& route, const char* route_key) {
+  const Backend configured = route.ConfiguredBackend(route_key);
+  if (configured == Backend::kNone || configured == Backend::kFlagGems) {
+    return nullptr;
+  }
+  const Fn fn = route.KernelFor(configured);
+  if (fn == nullptr) {
+    return nullptr;
+  }
+  if (IsFallbackWrapper(reinterpret_cast<const void*>(fn))) {
+    return nullptr;
+  }
+  return fn;
+}
+
+// Whether the conf's answer for the mm/bmm key (mm or bmm, which dispatch.cc
+// registers OrdinaryMm/OrdinaryBmm on) is a kernel this file can call. Not the
+// wrapper: dispatch.cc hands a pair it receives there to the wrapper directly,
+// so a key whose answer is the wrapper is the plain GEMM the pair asked for.
+bool RoutesOrdinaryKey(const char* ordinary_key) {
+  return std::strcmp(ordinary_key, "bmm") == 0
+      ? Fitted(bmm_dispatcher, ordinary_key) != nullptr
+      : Fitted(mm_dispatcher, ordinary_key) != nullptr;
+}
+
+// Two keys are tried, the call's own first, then the mm/bmm one.
+OrdinaryRoute Pick(const bool own,
+                   const char* ordinary_key,
+                   const OrdinaryRoute own_route) {
+  if (own) {
+    return own_route;
+  }
+  return RoutesOrdinaryKey(ordinary_key) ? OrdinaryRoute::kFactory
+                                         : OrdinaryRoute::kNone;
+}
+
+// The conf kernel this file can hand a decoded pair to for `key`'s own
+// `.dtype` / `.out` schema, or nullptr.
+//
+// Only the boxing slot is trusted here. Every other slot of mm.dtype,
+// mm.dtype_out, mm.out and their bmm twins is written by this file:
+// soft_lowp/dispatch.cc registers Self*Kernel there, and a conf that names
+// `flaggems_cpp` resolves to exactly that wrapper -- Fitted's wrapper test
+// cannot tell it apart from a real one, because the wrapper lives in another
+// translation unit and the two files' signatures must stay swappable. Calling
+// it is the recursion this file exists to stop:
+//   Mm -> MmDtype -> RunMatrix("mm.dtype") -> MmDtypeKernel -> MmDtype -> ...
+// Measured on DCU (job 2ef55348's build, bw1100): an FP8 mm on a conf that
+// routes `mm.dtype` recursed until the stack ran out, SIGSEGV in LookupVariant.
+//
+// The plain mm/bmm keys are not in that position: their flaggems_cpp slots hold
+// OrdinaryMmKernel/OrdinaryBmmKernel, which Fitted knows by address, and every
+// other backend there is someone else's. So this override covers exactly the
+// schemas whose slots this file writes, and leaves kFactory alone.
+template <typename Fn>
+Fn OwnKernelFor(const Dispatcher<Fn>& route, const char* route_key) {
+  const Backend configured = route.ConfiguredBackend(route_key);
+  if (configured != Backend::kBoxing) {
+    return nullptr;
+  }
+  const Fn fn = route.KernelFor(configured);
+  return IsFallbackWrapper(reinterpret_cast<const void*>(fn)) ? nullptr : fn;
+}
+
+// Whether the call's own key names a kernel this file can call.
+template <typename Dispatcher>
+bool OwnRoute(const Dispatcher& route, const char* key) {
+  return OwnKernelFor(route, key) != nullptr;
+}
+
+OrdinaryRoute OrdinaryRouteFor(const char* key, DecodedShape shape) {
+  switch (shape) {
+    case DecodedShape::kDtype:
+      return std::strcmp(key, "bmm") == 0 ||
+              std::strcmp(key, "bmm.dtype") == 0
+          ? Pick(OwnRoute(bmm_dtype_dispatcher, key), "bmm",
+                 OrdinaryRoute::kDtype)
+          : Pick(OwnRoute(mm_dtype_dispatcher, key), "mm",
+                 OrdinaryRoute::kDtype);
+    case DecodedShape::kMmOut:
+      return Pick(OwnRoute(mm_out_dispatcher, key), "mm",
+                  OrdinaryRoute::kMmOut);
+    case DecodedShape::kBmmOut:
+      return Pick(OwnRoute(bmm_out_dispatcher, key), "bmm",
+                  OrdinaryRoute::kBmmOut);
+    case DecodedShape::kMmDtypeOut:
+      return Pick(OwnRoute(mm_dtype_out_dispatcher, key), "mm",
+                  OrdinaryRoute::kMmDtypeOut);
+    case DecodedShape::kBmmDtypeOut:
+      return Pick(OwnRoute(bmm_dtype_out_dispatcher, key),
+                  "bmm", OrdinaryRoute::kBmmDtypeOut);
+    case DecodedShape::kAddmm:
+      return Pick(OwnRoute(addmm_dispatcher, key), "mm",
+                  OrdinaryRoute::kAddmm);
+    case DecodedShape::kAddmmOut:
+      return Pick(OwnRoute(addmm_out_dispatcher, key), "mm",
+                  OrdinaryRoute::kAddmmOut);
+    case DecodedShape::kVoid:
+      return OrdinaryRoute::kNone;
+  }
+  return OrdinaryRoute::kNone;
+}
+
+// The kernels the conf names for the call's own key, on the .dtype schema.
+// nullptr where only this file's own wrapper holds the slot (see OwnKernelFor).
+BmmDtypeFn BmmDtypeKernelFor(const char* key) {
+  return OwnKernelFor(bmm_dtype_dispatcher, key);
+}
+
+MmDtypeFn MmDtypeKernelFor(const char* key) {
+  return OwnKernelFor(mm_dtype_dispatcher, key);
+}
+
+// The kernel the conf names for the mm/bmm key of a pair reaching RunMatrix,
+// which carries no dtype and no `out`: MmFn or BmmFn on the dispatcher the key
+// belongs to. nullptr when the conf names none.
+BmmFn BmmKernelFor(const char* key) {
+  return Fitted(bmm_dispatcher, key);
+}
+
+MmFn MmKernelFor(const char* key) {
+  return Fitted(mm_dispatcher, key);
+}
+
+// The ordinary pair computed here: mm/bmm on PrivateUse1 operands, after the
+// decode. Same result as the route gives where a route exists, on the device,
+// with nothing left on the host.
+at::Tensor ComputeOrdinary(bool batched,
+                           const at::Tensor& self,
+                           const at::Tensor& mat2) {
+  return batched ? OrdinaryBmm(self, mat2) : OrdinaryMm(self, mat2);
+}
+
+// The key that answers a new tensor for a form that writes `out`.
+//
+// mm.out and its twins spell the `.out` schema, which only writes the caller's
+// tensor; the same call answering a new tensor is made under the plain key.
+// addmm_ already names a form that answers (`addmm`, its own key is the conf's
+// `addmm`), so it is its own.
+const char* TensorFormKey(const char* variant) {
+  if (std::strcmp(variant, "mm.out") == 0) {
+    return "mm";
+  }
+  if (std::strcmp(variant, "bmm.out") == 0) {
+    return "bmm";
+  }
+  if (std::strcmp(variant, "addmm.out") == 0) {
+    return "addmm";
+  }
+  return variant;
+}
+
+// The decoded operands of one call and the conf key they are routed by.
+struct TensorPair {
+  const char* key = nullptr;  // the conf key this call routes by
+  int64_t rank = 2;
+  at::Tensor lhs;  // decoded, ordinary dtype
+  at::Tensor rhs;  // decoded, ordinary dtype
+  at::Tensor bias;  // decoded (addmm); undefined otherwise
+};
+
 struct DecodedVariant {
   const char* key;
   DecodedShape shape;
@@ -437,6 +588,7 @@ const DecodedVariant* LookupVariant(const char* variant) {
       {"bmm.dtype_out", DecodedShape::kBmmDtypeOut, true},
       {"addmm", DecodedShape::kAddmm, false},
       {"addmm.out", DecodedShape::kAddmmOut, false},
+      {"addmm_", DecodedShape::kAddmm, false},
   };
   for (const auto& entry : variants) {
     if (std::strcmp(entry.key, variant) == 0) {
@@ -604,9 +756,14 @@ TensorPair DecodeForRoute(
   // Decoded, the pair is handed back to the conf's route for this call's own
   // key: the vendor slot where a build has one, boxing elsewhere. FlagGems is
   // the route it cannot take (RouteAcceptsDecoded).
-  auto lhs = DecodeIfNeeded(self, false);
-  auto rhs = rank == 3 ? DecodeBatchIfNeeded(mat2, true)
-                       : DecodeIfNeeded(mat2, true);
+  // Both sides are the form the call asks for: a bmm decodes a batched pair,
+  // and the decoding is tried on both operands -- decoding one side for the
+  // batched form and the other for the plane one rejected every rank-3 bmm
+  // ("decode supports only rank-2 tensors") before it reached the route.
+  auto lhs = entry.batch ? DecodeBatchIfNeeded(self, false)
+                         : DecodeIfNeeded(self, false);
+  auto rhs = entry.batch ? DecodeBatchIfNeeded(mat2, true)
+                         : DecodeIfNeeded(mat2, true);
   auto pair = TensorPair{variant, rank, lhs, rhs, at::Tensor()};
   if (bias != nullptr) {
     pair.bias = IsLowPrecision(bias->scalar_type()) ? DecodeIfNeeded(*bias)
@@ -686,9 +843,13 @@ at::Tensor& DispatchDecodedOut(
     case DecodedShape::kAddmmOut: {
       TORCH_CHECK(pair.bias.defined(),
                   "soft-lowp decoded addmm needs its bias");
+      // The key the dispatcher answers for, not this call's own: `addmm_`
+      // reaches this arm too (RunMatrixOut, its own tensor as `out`) and has
+      // no entry of its own, and the fused key routes as `addmm`. Asking by
+      // `addmm_` runs Select once with a key that names no kernel.
       const AddmmOutCall call{addmm_out_dispatcher};
-      return call.Call(call.Select(key), pair.bias, pair.lhs, pair.rhs, beta,
-                       alpha, out);
+      return call.Call(call.Select(addmm_dispatcher.OpKey()), pair.bias,
+                       pair.lhs, pair.rhs, beta, alpha, out);
     }
     case DecodedShape::kDtype:
     case DecodedShape::kVoid:
@@ -787,23 +948,41 @@ at::Tensor RunMatrix(
     // operands after their own boxing/decomposition; those keep the fused
     // addmm kernel rather than the low-precision validation below. Where the
     // pair goes is OrdinaryRoute's question: the conf's kernel for the call's
-    // own key where there is one this file can call as this form asks, and
-    // otherwise the pair computed here.
+    // own key where there is one this file can call as this form asks, the
+    // plain GEMM when only the mm/bmm key is served, and the pair computed
+    // here when neither is.
     const auto output_dtype = DefaultOutputDtype(self, out_dtype);
     const auto route = OrdinaryRouteFor(key, entry.shape);
     at::Tensor result;
     switch (route) {
-      case OrdinaryRoute::kFactory:
-        result = entry.batch
-            ? static_cast<BmmFn>(OrdinaryKernel(key, true))(self, mat2)
-            : static_cast<MmFn>(OrdinaryKernel(key, false))(self, mat2);
+      case OrdinaryRoute::kFactory: {
+        // Either this call's own mm/bmm key, or the plain mm/bmm the conf
+        // serves when only that key has a kernel. Never this file's own
+        // wrapper for the key: `mm` resolves to OrdinaryMmKernel -- the
+        // hand-back -- and calling it here is the recursion, not a route.
+        const auto wrapper = [](const void* fn) {
+          return fn == reinterpret_cast<const void*>(&OrdinaryMmKernel) ||
+              fn == reinterpret_cast<const void*>(&OrdinaryBmmKernel);
+        };
+        if (entry.batch) {
+          const BmmFn kernel = BmmKernelFor(key);
+          result = kernel != nullptr && !wrapper(reinterpret_cast<const void*>(kernel))
+              ? kernel(self, mat2)
+              : ComputeOrdinary(true, self, mat2);
+        } else {
+          const MmFn kernel = MmKernelFor(key);
+          result = kernel != nullptr && !wrapper(reinterpret_cast<const void*>(kernel))
+              ? kernel(self, mat2)
+              : ComputeOrdinary(false, self, mat2);
+        }
         break;
+      }
       case OrdinaryRoute::kDtype:
         result = entry.batch
-            ? static_cast<BmmDtypeFn>(OrdinaryKernel(key, true))(
-                  self, mat2, out_dtype)
-            : static_cast<MmDtypeFn>(OrdinaryKernel(key, false))(
-                  self, mat2, out_dtype);
+            ? BmmDtypeCall{bmm_dtype_dispatcher}.Call(
+                  BmmDtypeKernelFor(key), self, mat2, out_dtype)
+            : MmDtypeCall{mm_dtype_dispatcher}.Call(
+                  MmDtypeKernelFor(key), self, mat2, out_dtype);
         break;
       case OrdinaryRoute::kAddmm: {
         const AddmmCall call{addmm_dispatcher};
@@ -815,10 +994,10 @@ at::Tensor RunMatrix(
       case OrdinaryRoute::kMmDtypeOut:
       case OrdinaryRoute::kBmmDtypeOut:
       case OrdinaryRoute::kAddmmOut:
-        TORCH_CHECK(false,
-                    "soft-lowp ",
-                    variant,
-                    " writes the caller's tensor, so it is RunMatrixOut's call");
+        // Asked for a new tensor on a key the conf routes as a form that
+        // writes `out`: the shape the call asked for is not one the route has
+        // a kernel for, so it is the plain GEMM this file computes.
+        result = ComputeOrdinary(entry.batch, self, mat2);
         break;
       case OrdinaryRoute::kNone:
         result = ComputeOrdinary(entry.batch, self, mat2);
@@ -898,8 +1077,17 @@ at::Tensor& RunMatrixOut(
       return DispatchDecodedOut(pair, requested, beta, alpha, out);
     }
   }
-  auto result =
-      RunMatrix(variant, self, mat2, requested, rank, bias, beta, alpha);
+  // An ordinary pair is RunMatrix's: the conf's kernel where its key has one
+  // this file can call in that form, the plain GEMM where it has not, and the
+  // pair computed here otherwise. Its answer is what is copied into `out`.
+  //
+  // The tensor form is asked for by the key that has one: mm.out, addmm.out and
+  // the in-place forms spell the `.out` schema, which only writes `out`, so a
+  // call that answers a new tensor has to be made under the plain key
+  // (`mm`, `addmm_`). Asking under `mm.out` raised "cannot answer a new
+  // tensor" on every one of these forms.
+  auto result = RunMatrix(TensorFormKey(variant), self, mat2, requested, rank,
+                          bias, beta, alpha);
   CheckOutShape(out, result, variant);
   out.copy_(result);
   return out;

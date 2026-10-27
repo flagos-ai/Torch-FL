@@ -848,6 +848,66 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_flaggems_tsingmicro.inc"
   #endif
+  // The software low-precision matrix path is not an op the conf has to route.
+  //
+  // Its wrappers make the call themselves whenever an operand is FP8/FP4 (the
+  // `#if defined(FLAGOS_SOFT_LOWP)` prelude every matrix wrapper opens with),
+  // and only hand an ordinary pair to this op's conf route. But a wrapper is
+  // not a route: on a FlagGems-primary build an op the conf leaves on `none`
+  // -- mm, bmm and their variants on DCU -- lands on ATen's
+  // CompositeExplicitAutograd arm instead, which is `at::mm(decoded...)` and
+  // never sees the prelude. So an FP8 mm on DCU answered through the conf (or
+  // raised from the route's own slot) while `_scaled_mm` had to stay
+  // fail-closed beside it: the same wheel gating one fingerprint and not the
+  // other (measured on bw1100, job a91aa314's build).
+  //
+  // Claiming them follows the rule this arm already states -- the claim follows
+  // the route -- because these ops' route IS this path for a low-precision
+  // operand, whatever the conf says about the ordinary dtypes the route is
+  // named for. An ordinary pair still follows the conf inside the wrapper.
+  //
+  // Two consequences for the ordinary pair, and both are on DCU:
+  //   * an op the conf leaves on `none` is computed by the wrapper's hand-back
+  //     -- a plain GEMM on the operands, which `none` (cpu_fallback) never
+  //     served on this device either;
+  //   * an op the conf routes to a FlagGems kernel now reaches this wrapper
+  //     before that kernel, which is the trade #655's revert chose to avoid --
+  //     and the reason the ops that list already claims are held back below.
+  //
+  // Only where the prelude exists, so only where FLAGOS_SOFT_LOWP does
+  // (metax, dcu): without it the claim would route every dtype through a
+  // wrapper that does not know the low-precision path.
+  //
+  // The generated FlagGems list is included in this same body, and a
+  // duplicate m.impl for one op is a compile error, so the ops that list
+  // already names are not claimed here: those are exactly the ones its conf
+  // routes to a FlagGems backend (metax's `bmm`, `bmm.out` and `addmm*`;
+  // DCU's `addmm*`). What is left is the matrix ops the conf leaves on `none`
+  // or routes to a vendor slot -- the ops no other route serves for a
+  // low-precision operand.
+  #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
+  m.impl("mm", WrapperMm);
+  m.impl("mm.dtype", WrapperMmDtype);
+  m.impl("mm.dtype_out", WrapperMmDtypeOut);
+  m.impl("mm.out", WrapperMmOut);
+  m.impl("bmm.dtype", WrapperBmmDtype);
+  m.impl("bmm.dtype_out", WrapperBmmDtypeOut);
+  #if !defined(FLAGOS_ACCEL_METAX)
+  // FlagGems-routed on metax, so claimed by the generated list there.
+  m.impl("bmm", WrapperBmm);
+  m.impl("bmm.out", WrapperBmmOut);
+  m.impl("addmm", WrapperAddmm);
+  m.impl("addmm.dtype", WrapperAddmmDtype);
+  m.impl("addmm.dtype_out", WrapperAddmmDtypeOut);
+  m.impl("addmm.out", WrapperAddmmOut);
+  m.impl("addmm_", WrapperAddmmInplace);
+  #endif
+  m.impl("_scaled_mm", WrapperPrivScaledMm);
+  m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
+  m.impl("_scaled_mm_v2", WrapperPrivScaledMmV2);
+  m.impl("_scaled_grouped_mm", WrapperPrivScaledGroupedMm);
+  m.impl("_scaled_grouped_mm_v2", WrapperPrivScaledGroupedMmV2);
+  #endif
   // The *_overrideable conv ops are the exception the generic cpu_fallback
   // cannot serve (see the wrapper comment above): ATen's only other kernel for
   // them raises, and a fallback re-dispatches the *same* op, so it lands back on
