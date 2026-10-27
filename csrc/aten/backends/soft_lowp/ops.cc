@@ -598,6 +598,25 @@ const DecodedVariant* LookupVariant(const char* variant) {
   TORCH_CHECK(false, "soft-lowp has no decoded variant ", variant);
 }
 
+// The conf's answer for the key a call of this shape is routed by: whether
+// that key names a route at all.
+//
+// addmm has a dispatcher of its own. The mm and bmm families each have one for
+// all four of their schemas, so for them the family's dispatcher holds the key.
+//
+// This is the key RunMatrix's factory arm hands the pair to (`Fitted`), and it
+// is not always the key the pair was routed by: a pair this file decoded was
+// refused because the conf names no route for `bmm`, and the factory arm would
+// then hand it to whatever the conf's `bmm` slot degrades to. A pair with no
+// route of its own has no route here either.
+bool AnswerKeyHasRoute(const DecodedVariant& entry, const char* variant) {
+  if (entry.shape == DecodedShape::kAddmm) {
+    return addmm_dispatcher.HasBackendForOp(variant);
+  }
+  return (entry.batch ? bmm_dispatcher : mm_dispatcher)
+      .HasBackendForOp(variant);
+}
+
 // The dtype the call is made under, spelled out.
 //
 // The decoded operands are bf16, and a kernel must not take the answer's dtype
@@ -902,6 +921,34 @@ void CheckOutShape(
 // and RouteAcceptsDecoded is where that question is answered.
 bool DecodedPairHasRoute(const char* variant) {
   const auto& entry = *LookupVariant(variant);
+  // A key that is not in the conf, or that the conf routes `none`, has no
+  // route -- whatever the dispatcher would hand back. RouteAcceptsDecoded
+  // refuses both on its own path, but the mm and bmm families each answer for
+  // four keys through one dispatcher, and its kDtype, .out and .dtype_out
+  // arms do not all look for the case at hand. So the same refusal is read
+  // once here, from the conf itself, before any of them. Both fail closed:
+  // the pair is computed on the device instead of being handed to a slot
+  // nothing filled, which the dispatchers degrade to whatever else they hold
+  // (soft_lowp/dispatch.cc's own hand-back among it).
+  switch (entry.shape) {
+    case DecodedShape::kMmOut:
+    case DecodedShape::kMmDtypeOut:
+    case DecodedShape::kBmmOut:
+    case DecodedShape::kBmmDtypeOut:
+    case DecodedShape::kDtype: {
+      // Both are refusals: an absent key is one the conf does not hold, and
+      // the table's answer for it is kFlagGems -- the Python route, not one a
+      // decoded pair takes.
+      const auto& route = entry.batch ? bmm_dispatcher : mm_dispatcher;
+      if (!route.HasBackendForOp(variant) ||
+          route.ConfiguredBackend(variant) == Backend::kNone) {
+        return false;
+      }
+      break;
+    }
+    default:
+      break;
+  }
   switch (entry.shape) {
     case DecodedShape::kMmOut:
     case DecodedShape::kMmDtypeOut:
@@ -957,20 +1004,24 @@ at::Tensor RunMatrix(
     switch (route) {
       case OrdinaryRoute::kFactory: {
         // Either this call's own mm/bmm key, or the plain mm/bmm the conf
-        // serves when only that key has a kernel. Never this file's own
-        // wrapper for the key: `mm` resolves to OrdinaryMmKernel -- the
-        // hand-back -- and calling it here is the recursion, not a route.
+        // serves when only that key has a kernel -- and only when the key this
+        // call is really routed by has one (see AnswerKeyHasRoute: the plain
+        // key asked here is not the key a decoded pair was routed by). Never
+        // this file's own wrapper for the key: `mm` resolves to
+        // OrdinaryMmKernel -- the hand-back -- and calling it here is the
+        // recursion, not a route.
+        const bool routed = AnswerKeyHasRoute(entry, TensorFormKey(key));
         const auto wrapper = [](const void* fn) {
           return fn == reinterpret_cast<const void*>(&OrdinaryMmKernel) ||
               fn == reinterpret_cast<const void*>(&OrdinaryBmmKernel);
         };
         if (entry.batch) {
-          const BmmFn kernel = BmmKernelFor(key);
+          const BmmFn kernel = routed ? BmmKernelFor(key) : nullptr;
           result = kernel != nullptr && !wrapper(reinterpret_cast<const void*>(kernel))
               ? kernel(self, mat2)
               : ComputeOrdinary(true, self, mat2);
         } else {
-          const MmFn kernel = MmKernelFor(key);
+          const MmFn kernel = routed ? MmKernelFor(key) : nullptr;
           result = kernel != nullptr && !wrapper(reinterpret_cast<const void*>(kernel))
               ? kernel(self, mat2)
               : ComputeOrdinary(false, self, mat2);
