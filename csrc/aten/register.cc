@@ -894,12 +894,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
   #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
   // The plain pair is claimed where the conf does not route it to a list that
-  // serves it. Metax routes `bmm` to flaggems_cpp, which its list does claim,
-  // so only `mm` is left to this block there (its conf leaves `mm` `none`).
-  // DCU routes both to a FlagGems key its list reaches no dispatcher for, so
-  // both are its.
-  m.impl("mm", WrapperMm);
+  // serves it -- and only there, because a claim on a `none` route raises for
+  // every ordinary call. DCU routes both to a FlagGems key its list reaches no
+  // dispatcher for, so both are its. Metax is not: its conf leaves `mm`
+  // `none`, so claiming it turns every `torch.mm` into "routed to 'none' ...
+  // but the op is registered on PrivateUse1" (run 40629858404, nine cases).
+  // Metax's `bmm` is on `flaggems_cpp`, which its list does claim.
   #if !defined(FLAGOS_ACCEL_METAX)
+  m.impl("mm", WrapperMm);
   m.impl("bmm", WrapperBmm);
   #endif
   // The other matrix forms are not claimed here: their generated list claims

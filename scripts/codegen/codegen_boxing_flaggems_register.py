@@ -101,6 +101,16 @@ HAND_REGISTERED_CLAIMS = {
 #     made every `mm.out` raise "routed to 'none' ... but the op is registered"
 #     on DCU (run 40615250313, test_mm_out): the wrapper calls the
 #     whole-op dispatcher, which answers by the key the call is made under.
+#
+# Only DCU takes it. The claim is worth nothing without the plain `mm` / `bmm`
+# claim beside it in register.cc, and on metax that claim is what raises: its
+# conf leaves `mm` (and `mm.dtype` / `mm.dtype_out` / `mm.out`) `none`, and a
+# registered `mm` on a `none` route is the dispatcher's "routed to 'none' ...
+# but the op is registered on PrivateUse1" raise for every ordinary call --
+# nine cases on the metax lane (run 40629858404, test_mm / test_mm_out /
+# test_matmul / the dtype-coverage matmuls). Metax's low-precision matrix path
+# stays where it was: `mm` reaches its prelude only once the conf routes `mm`
+# to a backend that serves it, which is a conf decision, not a second claim.
 SOFT_LOWP_PAIR_CLAIMS = {
     platform: {
         "mm.dtype": "mm",
@@ -110,7 +120,7 @@ SOFT_LOWP_PAIR_CLAIMS = {
         "bmm.dtype_out": "bmm",
         "bmm.out": "bmm",
     }
-    for platform in ("hygon", "metax")
+    for platform in ("hygon",)
 }
 
 # The forwarders a soft-lowp pair claim names for a key the conf leaves `none`,

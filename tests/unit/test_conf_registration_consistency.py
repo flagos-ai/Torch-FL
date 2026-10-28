@@ -794,8 +794,17 @@ def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
     # guard above is there to withhold.
     claimed_here = _claim_block(register_cc, platform)
     listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
     forms = {
-        op for op, key in SOFT_LOWP_PAIR_FORMS.items() if key in claimed_here
+        op
+        for op, key in SOFT_LOWP_PAIR_FORMS.items()
+        if key in claimed_here
+        # A form the conf leaves `none` belongs to the pair arm above, and that
+        # arm runs on DCU only (see SOFT_LOWP_PAIR_CLAIMS in the list
+        # generator): metax's `mm` family is genuinely unreachable, which is
+        # what its conf says, and the way to change that is the conf's `mm`
+        # route -- never a claim, which raises on every ordinary call.
+        or routes.get(key) != "none"
     } | SOFT_LOWP_CLAIMS
     missing = sorted(op for op in forms if op not in claimed_here and op not in listed)
     assert not missing, (
@@ -812,24 +821,36 @@ def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
     """The claim must sit under a macro the platform defining the prelude sets."""
     register_cc = (ATEN_DIR / "register.cc").read_text()
     expected = SOFT_LOWP_PLATFORMS[platform]
-    # The claims this block makes itself: `mm`, and `bmm` where the generated
-    # list cannot reach it. The other matrix forms are the list's (see
-    # SOFT_LOWP_PAIR_CLAIMS), so they are checked there.
-    claims = ['m.impl("mm", WrapperMm);', 'm.impl("bmm", WrapperBmm);']
-    idx = max(register_cc.rfind(claim) for claim in claims)
-    assert idx != -1, "neither mm nor bmm is claimed from register.cc"
-    guard_block = register_cc[max(0, idx - 1600) : idx]
-    assert expected in guard_block, (
-        f"{platform}: the soft-lowp matrix claim is not gated on {expected}. "
-        f"Guard text found:\n{guard_block}"
-    )
-    # Where the conf leaves a form `none`, the generated list must claim it by
-    # the mm/bmm key; where it names a FlagGems backend the plain wrapper is
-    # the claim (and an `mm.out` route under that name would raise).
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    # The claims this block makes itself: `mm` and `bmm` where the conf does not
+    # route the pair to a list that serves it. The other matrix forms are the
+    # list's (see SOFT_LOWP_PAIR_CLAIMS), so they are checked there.
+    paired = routes.get("mm") == "none"
+    claims = ['m.impl("mm", WrapperMm);', 'm.impl("bmm", WrapperBmm);']
+    if not paired:
+        idx = register_cc.rfind(claims[0])
+        assert idx != -1, "mm is not claimed from register.cc"
+        guard_block = register_cc[max(0, idx - 1600) : idx]
+        assert expected in guard_block, (
+            f"{platform}: the soft-lowp matrix claim is not gated on {expected}. "
+            f"Guard text found:\n{guard_block}"
+        )
+    else:
+        # Nothing to gate: `mm` is on `none` here, so the block must not claim
+        # it at all -- a claim on a `none` route is the dispatcher's raise for
+        # every ordinary call (metax, run 40629858404).
+        assert 'm.impl("mm", WrapperMm);' not in register_cc, (
+            f"{platform}: the conf routes `mm` to `none`, so register.cc must "
+            'not claim it -- the claim turns every torch.mm into "routed to '
+            "'none' ... but the op is registered on PrivateUse1\""
+        )
+    # Where the conf leaves a form `none` AND the pair is claimed, the generated
+    # list must claim it by the mm/bmm key; where it names a FlagGems backend
+    # the plain wrapper is the claim (and an `mm.out` route under that name
+    # would raise).
     listed = (GEN_DIR / f"register_flaggems_{platform}.inc").read_text()
     for op, key in SOFT_LOWP_PAIR_FORMS.items():
-        if routes.get(op) != "none":
+        if routes.get(op) != "none" or not paired:
             continue
         forwarder = {
             "mm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsMm",
