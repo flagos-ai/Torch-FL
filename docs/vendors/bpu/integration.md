@@ -42,6 +42,10 @@ convolution, so there is nothing for a `PrivateUse1` kernel to call. This
 mirrors `tsingmicro`: `csrc/aten/register.cc` skips the generated
 `register.inc` under `USE_BPU`, and every aten op reaches `cpu_fallback`.
 
+An **operator library** supplies that layer without one: a directory of
+single-operator artifacts, built once with hbdk4 and loaded by the board's
+native runtime. See *Eager operator library* below.
+
 Convolution is the one exception, and not by choice. `aten::convolution`
 dispatches `PrivateUse1` to `convolution_overrideable`, whose only other kernel
 is a `CompositeExplicitAutograd` stub that raises `NotImplementedError`. The
@@ -49,6 +53,64 @@ boxed fallback cannot rescue it — moving the arguments to CPU and redispatchin
 the *same* op lands back on the stub — so `register.cc` registers two small
 wrappers that cross to CPU and call `at::convolution` instead. Without them
 `conv2d` on a flagos tensor raises rather than falling back.
+
+## Eager operator library
+
+The BPU has no per-operator entry point, but it does not need one to run
+aten ops eagerly: `scripts/vendor/build_bpu_oplib.py` compiles a set of
+one-operator graphs into `.hbm` artifacts on the build host, and
+`torch_fl/accelerator/bpu/eager.py` loads and dispatches them on the board.
+**Nothing is compiled on the device.**
+
+```
+build host (hbdk4)                    board (native runtime)
+op x bucket -> one .hbm each    ->     manifest.json + artifacts
+                                      EagerDispatcher -> hbDNNInferV2
+```
+
+Currently 15 ops: `relu neg abs exp tanh sigmoid sqrt rsqrt log` and
+`add sub mul max min div`. All 15 were verified on the board to match their
+host reference within 3e-2 relative on f32.
+
+### Shapes are bucketed, not dynamic
+
+A dynamic axis compiles — `{dynamic_dims = [-1]}` is accepted by hbdk4 and
+survives into the artifact — but it cannot be executed on HBRT 4.7.5. The
+loader declares the dynamic axis with stride 0, the task validator requires
+at least 64, and it separately rejects any buffer that is not exactly the
+stride extent, so no caller can satisfy both. The full trace, including the
+attribute form that parses and the two error messages that close the door, is
+in `docs/vendors/bpu/dynamic-shape-probe.md`.
+
+Buckets are therefore exact: `relu` compiled at `[1, 64]` serves a `[1, 64]`
+request and nothing else. A larger artifact cannot substitute for a smaller
+request because the shape is compiled into the graph — a 999-wide tensor fed to
+a 64-wide artifact returns 64 values. A request that misses every bucket falls
+back to the NumPy reference, and `EagerDispatcher.summary()` reports the hit
+rate, so a silent degradation to the host is visible rather than assumed.
+
+### Why the count matters
+
+The artifacts execute on the BPU; the measurement that shows it is the
+latency plateau. `hbm_runtime.run` on these kernels costs ~0.15 ms regardless
+of width (0.145 ms at 64 elements, 0.152 ms at 512), which is a fixed
+submission cost rather than work. A host implementation of the same op is
+`numpy.maximum` at 0.0017 ms — faster in absolute terms at these sizes, because
+a 512-element op cannot amortize a 0.15 ms submit. The library is worth it on
+throughput across many small ops, not on per-call latency.
+
+### Building the library
+
+```bash
+# on the build host, with hbdk4 and FLAGOS_BPU_MLIR_LIBS pointing at its _mlir_libs
+python scripts/vendor/build_bpu_oplib.py --out ./oplib --shapes 1x64 1x128 1x256 1x512
+```
+
+That emits `oplib/manifest.json` plus one `.hbm` per op per bucket (60 files
+for the 15 ops above). `compile()` ends by loading its own artifact back
+through hbrt4, which claims BPU memory; off-board that read-back throws
+`ResourceExhausted` *after* a complete file has been written, and the script
+treats any complete file as success.
 
 ## Compile pipeline
 
