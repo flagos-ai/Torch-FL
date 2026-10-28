@@ -33,6 +33,7 @@ import pytest
 import torch
 
 from torch_fl import _build_accelerator, flagos
+from torch_fl._platform import platform_for
 
 
 def _roundtrip(x, indices, values, accumulate=False):
@@ -148,14 +149,17 @@ class TestGate:
     """The patch is scoped to the builds and confs it was measured on."""
 
     def test_does_not_register_off_the_measured_builds(self):
-        if _build_accelerator() in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+        if platform_for(_build_accelerator()) in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
             pytest.skip("a build the gate opens on")
         before = len(flagos._PATCH_LIBS)
         flagos._patch_flaggems_index_put()
         assert len(flagos._PATCH_LIBS) == before
 
     def test_registers_on_a_measured_build(self):
-        if _build_accelerator() not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+        if (
+            platform_for(_build_accelerator())
+            not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS
+        ):
             pytest.skip("not a build the gate opens on")
         flag_gems = pytest.importorskip("flag_gems")
         if getattr(flag_gems, "index_put_", None) is None:

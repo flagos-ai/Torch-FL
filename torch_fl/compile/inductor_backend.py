@@ -39,6 +39,23 @@ import torch.cuda
 from torch_fl import _env
 
 
+def _platform_of_record() -> str:
+    """The platform id a build record's accelerator names.
+
+    ``_build_config.ACCELERATOR`` carries the *vendor* spelling of a platform
+    (setup.py writes it), while the branches in this file name the platform id
+    CMake, the confs and the CI lanes use: "mthreads" for what they call "musa",
+    "enflame" for "gcu", "hygon" for "dcu". Resolving once here keeps those
+    branches in one vocabulary. A name the table does not know -- a test stub, a
+    record older than the table -- is returned as it is, so they answer for it
+    as they did before.
+    """
+    from torch_fl._build_config import ACCELERATOR as recorded
+    from torch_fl._platform import platform_for
+
+    return platform_for(recorded) or recorded
+
+
 def _patch_native_triton_autotune() -> None:
     """Select the first compiled config without CUDA benchmarking.
 
@@ -48,7 +65,7 @@ def _patch_native_triton_autotune() -> None:
     configuration for each kernel. Selecting the first compiled configuration
     keeps execution native; it does not claim autotuning performance parity.
     """
-    from torch_fl._build_config import ACCELERATOR
+    platform = _platform_of_record()
     from torch_fl.compile.device_interface import is_native_accelerator
 
     if not is_native_accelerator():
@@ -60,14 +77,14 @@ def _patch_native_triton_autotune() -> None:
     if getattr(CachingAutotuner, "_flagos_native_patched", False):
         return
 
-    vendor = "MThreads FlagTree" if ACCELERATOR == "mthreads" else "triton_gcu"
+    vendor = "MThreads FlagTree" if platform == "musa" else "triton_gcu"
     # triton_gcu miscompiles a persistent reduction at XBLOCK=1: the cross-row
     # `tl.sum(..., 1)` silently returns wrong values (XBLOCK=2 fails to compile
     # outright, XBLOCK>=4 is correct). It is the first config Inductor generates
     # for every persistent reduction, so taking launchers[0] would ship the
     # broken one -- and being wrong rather than failing, it only surfaces as bad
     # gradients, since dim-0 reductions are mostly a backward-pass shape.
-    min_xblock = 4 if ACCELERATOR == "enflame" else 0
+    min_xblock = 4 if platform == "gcu" else 0
 
     def _usable(launcher) -> bool:
         if not min_xblock:
@@ -143,9 +160,9 @@ def _bind_musa_flagtree_runtime() -> None:
     and one stream. This must run before any Triton driver instance exists, hence
     module load time.
     """
-    from torch_fl._build_config import ACCELERATOR
+    platform = _platform_of_record()
 
-    if ACCELERATOR != "mthreads":
+    if platform != "musa":
         return
     try:
         from torch_fl.compile.flagtree_shim import bind_flagtree_musa_driver
@@ -185,7 +202,7 @@ def _patch_native_cache_system_key() -> None:
     import hashlib
     import json
 
-    from torch_fl._build_config import ACCELERATOR
+    platform = _platform_of_record()
 
     @staticmethod
     @functools.cache
@@ -208,9 +225,7 @@ def _patch_native_cache_system_key() -> None:
             system["device"]["arch"] = str(driver.active.get_current_target().arch)
         except Exception:
             pass
-        system["version"][ACCELERATOR] = getattr(
-            torch.flagos, "__version__", ACCELERATOR
-        )
+        system["version"][platform] = getattr(torch.flagos, "__version__", platform)
         system["hash"] = hashlib.sha256(
             json.dumps(system, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -346,16 +361,16 @@ def pin_compile_threads() -> bool:
     if os.environ.get(_COMPILE_THREADS_ENV) is not None:
         return False
 
-    from torch_fl._build_config import ACCELERATOR
+    platform = _platform_of_record()
     from torch_fl.compile.device_interface import _torch_has_cuda_kernels
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
-    if ACCELERATOR == "enflame":
+    if platform == "gcu":
         vendor_pinned = True
     else:
         backend = flagtree_backend()
         vendor_pinned = backend == "ppu" or (
-            ACCELERATOR == "mthreads" and backend == "mthreads"
+            platform == "musa" and backend == "mthreads"
         )
 
     # The default FlagGems-primary CUDA wheel links the CPU-only pip torch, where
@@ -372,7 +387,7 @@ def pin_compile_threads() -> bool:
     # Scoped to the cuda platform: every non-CUDA build's torch answers False to
     # this probe as well, so gating on the probe alone would pin the vendors that
     # are deliberately left parallel.
-    if not vendor_pinned and ACCELERATOR == "cuda" and not _torch_has_cuda_kernels():
+    if not vendor_pinned and platform == "cuda" and not _torch_has_cuda_kernels():
         vendor_pinned = True
     if not vendor_pinned:
         return False
@@ -442,7 +457,7 @@ def _resolve_config_patches(
         # turn it back off; the kernels still compile and run, just untuned.
         patches["coordinate_descent_tuning"] = False
 
-    from torch_fl._build_config import ACCELERATOR
+    platform = _platform_of_record()
 
     # 2D tiling is what makes Inductor emit a transposed load (`in_ptr0 + (y0 +
     # 128*x1)` against an x-major store), and Triton lowers that pair to
@@ -455,7 +470,7 @@ def _resolve_config_patches(
     # indexing linear and sidesteps it; the transpose then costs an extra kernel
     # rather than a tiled load. Only a default -- an explicit
     # options={"triton.max_tiles": ...} above still wins.
-    if ACCELERATOR == "enflame":
+    if platform == "gcu":
         patches.setdefault("triton.max_tiles", 1)
 
     # CUDA graphs need torch.cuda.CUDAGraph, a dummy base class in the CPU torch
@@ -491,15 +506,15 @@ def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> No
     if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
         return
 
-    from torch_fl._build_config import ACCELERATOR
+    platform = _platform_of_record()
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
-    if ACCELERATOR == "enflame":
+    if platform == "gcu":
         config_patches["compile_threads"] = 1
         return
 
     backend = flagtree_backend()
-    if backend == "ppu" or (ACCELERATOR == "mthreads" and backend == "mthreads"):
+    if backend == "ppu" or (platform == "musa" and backend == "mthreads"):
         config_patches["compile_threads"] = 1
 
 

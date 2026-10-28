@@ -170,11 +170,18 @@ _TSINGMICRO_PROFILE = PlatformProfile(
     vendor="tsingmicro",
 )
 
+# Both spellings of a platform are keys: the platform id, and the vendor name
+# setup.py writes into the build record where the two differ (hygon/dcu,
+# mthreads/musa, nvidia/cuda, thead/ppu). nvidia/cuda and thead/ppu are absent
+# on purpose -- they fall back to _CUDA_PROFILE, which is what they are.
 _PROFILES = {
+    "dcu": _DCU_PROFILE,
     "hygon": _DCU_PROFILE,
     "metax": _METAX_PROFILE,
     "ascend": _ASCEND_PROFILE,
+    "musa": _MUSA_PROFILE,
     "mthreads": _MUSA_PROFILE,
+    "gcu": _GCU_PROFILE,
     "enflame": _GCU_PROFILE,
     "kunlunxin": _KUNLUNXIN_PROFILE,
     "iluvatar": _ILUVATAR_PROFILE,
@@ -183,7 +190,15 @@ _PROFILES = {
 
 
 def platform_profile() -> PlatformProfile:
-    """Return the compile profile for the accelerator this build targets."""
+    """Return the compile profile for the accelerator this build targets.
+
+    The build record may name either spelling and so may a caller: setup.py
+    writes the *vendor* name where it differs from the platform id (hygon/dcu,
+    mthreads/musa, nvidia/cuda, thead/ppu), while CMake, the confs and the CI
+    lanes use the id. Reading only the id sent a DCU wheel to the CUDA fallback
+    -- Triton target "cuda", backend key "nvidia", no vendor -- which is the
+    `dcu` case of test_compile_platform_profile going red on every hygon lane.
+    """
     from torch_fl._build_config import ACCELERATOR
 
     return _PROFILES.get(ACCELERATOR, _CUDA_PROFILE)

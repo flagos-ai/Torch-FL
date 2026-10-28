@@ -40,6 +40,7 @@ import pytest
 import torch
 
 from torch_fl import _build_accelerator, flagos
+from torch_fl._platform import platform_for
 
 libentry = None
 try:
@@ -263,7 +264,7 @@ class TestGate:
         torch.broadcast_shapes = broadcast_shapes
 
     def test_does_not_install_off_the_measured_builds(self):
-        if _build_accelerator() in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+        if platform_for(_build_accelerator()) in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
             pytest.skip("a build the gate opens on")
         before = (
             libentry.LibEntry.run,
@@ -280,7 +281,10 @@ class TestGate:
         ) == before
 
     def test_installs_on_a_measured_build_and_is_idempotent(self):
-        if _build_accelerator() not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+        if (
+            platform_for(_build_accelerator())
+            not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS
+        ):
             pytest.skip("not a build the gate opens on")
         saved = (
             libentry.LibEntry.run,
