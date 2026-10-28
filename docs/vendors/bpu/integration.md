@@ -265,10 +265,21 @@ torch-side view is what you want.
   a scheduling policy, and UCP memory is SoC-wide, so cores are a scheduling
   detail rather than separate devices. `GetDeviceCount` returns 1, and 0 when
   the driver is absent (`hb_bpu_core_num() == 0`).
-- **Submission is synchronous** (`hbUCPSubmitTask` + `WaitTaskDone`), so there
-  is no async copy engine: `MemcpyAsync` is a synchronous copy, streams are a
-  single sentinel handle, and event timestamps are real `steady_clock` readings
-  — which makes `EventElapsedTime` genuinely meaningful here.
+- **Submission is synchronous at the `hbm_runtime` layer, not at the driver
+  layer.** `HB_HBMRuntime::InferSingleModel` runs `hbDNNInferV2` →
+  `hbUCPSubmitTask` → `hbUCPWaitTaskDone(handle, 0)` → flush → release inline,
+  so that API parks the caller for the whole graph. The task underneath is
+  already async: `libdnn` allocates it as `TASK_TYPE_TRIG_TASK` and registers a
+  completion callback, and nothing stops a caller from submitting several
+  before waiting on any. `BPUSubmitter`
+  (`torch_fl/accelerator/bpu/submit.py`) does exactly that and measured
+  **1.91x** on ResNet-18 (927 → 1771 inf/s at depth 8), bit-identical to
+  `run()` on every input tried. There is still **no stream object**: ordering
+  is per-task completion only, and `hb_bpu_core_bufcnt_*` is a hardware
+  semaphore for in-graph dependencies rather than a submission queue.
+  `MemcpyAsync` remains a synchronous copy and streams remain a single sentinel
+  handle, so event timestamps are real `steady_clock` readings — which is what
+  makes `EventElapsedTime` genuinely meaningful here.
 - **Cached blocks leak at process exit, deliberately.** The caching allocator is
   a function-local static, so its destructor runs from `__run_exit_handlers`, by
   which point `libhbucp`'s own `FINI_ARRAY` teardown may have released the heap
@@ -309,6 +320,32 @@ offload happened.
 | official `resnet18_224x224_nv12.hbm` | **1.075 ms** | 1.060 | 1.136 | 74 KB NV12 uint8 |
 | eager CPU float32 | 26.095 ms | 23.952 | 62.456 | 588 KB f32 NCHW |
 | ours, `torch.compile(backend="bpu")` | **1.356 ms** | 1.315 | 1.454 | 588 KB f32 NCHW |
+
+#### Submit-ahead
+
+`hbm_runtime.run()` waits inline, so one graph is ever in flight. Submitting
+several task handles before waiting on any of them costs nothing in
+correctness and feeds the four cores from a producer that is no longer
+parked:
+
+| depth | throughput | vs `run()` |
+| ---: | ---: | ---: |
+| 1 (`run()`) | 927 inf/s | 1.00x |
+| 1 (`BPUSubmitter`) | 1015 inf/s | 1.09x |
+| 2 | 1505 inf/s | 1.62x |
+| 4 | 1542 inf/s | 1.66x |
+| 8 | **1771 inf/s** | **1.91x** |
+
+Outputs are bit-identical to `run()` on zeros, a constant field and random
+noise. The submit side costs 0.33 ms and reclaim 0.24 ms per call; the BPU
+itself is around 0.37 ms, which is what the ceiling at depth 8 reflects.
+
+Two things this path has to get right and `run()` hides. The artifact's device
+layout is padded — its `[1, 224, 224, 1]` Y plane goes out at `stride[1] == 256`
+for 224 pixels of width — so a flat memmove of the numpy array shifts every row
+and the model returns a confident, wrong answer with no error at all. And
+`hbUCPReleaseTask` is expensive enough that it is deferred one step rather than
+done inline.
 
 **19.2x vs eager, 1.26x off the vendor artifact.** Accuracy against eager float:
 cosine 0.990, top-1 agreement 5/5 over random inputs, relative error 0.14 — the

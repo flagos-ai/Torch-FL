@@ -326,18 +326,20 @@ class BPUSubmitter:
         row_bytes = int(np.prod(dims[2:])) * itemsize if nd > 2 else dims[-1] * itemsize
         pitch = int(props.stride[1]) * itemsize
         rows = int(np.prod(dims[:2]))
-        src = np.frombuffer(memoryview(arr.reshape(-1)), dtype=np.uint8)
         if pitch == row_bytes:
             ctypes.memmove(
                 ctypes.c_void_p(mem.virAddr),
                 ctypes.c_void_p(arr.ctypes.data),
-                src.nbytes,
+                arr.nbytes,
             )
             return
+        # A contiguous view in bytes: `np.frombuffer(memoryview(...))` over a
+        # reshaped array starts one element late, which shifted the first row.
+        src = np.ascontiguousarray(arr).reshape(-1).view(np.uint8)
         dst = np.frombuffer(
             (ctypes.c_char * (rows * pitch)).from_address(mem.virAddr), dtype=np.uint8
         ).reshape(rows, pitch)
-        dst[:, :row_bytes] = src.reshape(rows, row_bytes)
+        dst[:, :row_bytes] = src[: rows * row_bytes].reshape(rows, row_bytes)
 
     # -- execution -------------------------------------------------------
 
