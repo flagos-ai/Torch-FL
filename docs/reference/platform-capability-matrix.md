@@ -174,6 +174,6 @@ build opts into boxing.
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: apple, ascend, bpu, cuda, dcu, enflame, gcu, hygon, iluvatar, kunlunxin, metax, mthreads, musa, nvidia, tsingmicro
-- `csrc/aten/backends/`: apple, ascend, bpu, enflame, flagos, gcu, iluvatar, kunlunxin, mthreads, musa, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu, tsingmicro
+- `csrc/runtime/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
+- `csrc/aten/backends/`: apple, ascend, bpu, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
+- `torch_fl/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro
