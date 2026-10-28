@@ -49,7 +49,9 @@ std::string DefaultConfigPath() {
 #elif defined(USE_MUSA)
       platform = "mthreads";
 #elif defined(USE_BPU)
-      platform = "bpu";
+      // The vendor name, matching backends_drobotics.conf: AGENTS.md spells a
+      // conf after the vendor, and the BPU is D-Robotics' part, not a vendor.
+      platform = "drobotics";
 #elif defined(USE_ILUVATAR)
       platform = "iluvatar";
 #elif defined(USE_MPS)

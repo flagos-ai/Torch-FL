@@ -477,7 +477,9 @@ class DirectKernel:
 
         self._model = ctypes.c_void_p()
         rc = _dnn.hbDNNGetModelHandle(
-            ctypes.byref(self._model), self._packed, ctypes.c_char_p(model_name.encode())
+            ctypes.byref(self._model),
+            self._packed,
+            ctypes.c_char_p(model_name.encode()),
         )
         if rc:
             raise RuntimeError(f"hbDNNGetModelHandle({model_name}) rc={rc}")

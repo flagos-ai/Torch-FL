@@ -466,12 +466,13 @@
     "bpu": {
       "vendor": "drobotics",
       "_comment": [
-        "D-Robotics RDK BPU: no per-op kernels, only the runtime layer (UCP",
-        "allocator, device/stream stubs) is native. FLAGOS_BUILD_VENDOR stays at the",
-        "ON default but compiles nothing (backends/bpu/ does not exist).",
-        "FLAGOS_BUILD_BOXING is off: backends_bpu.conf names no `cuda` entry and the",
-        "platform registers no compute ops at all, so the boxing kernels were",
-        "compiled but never reachable. Acceleration is the torch.compile backend."
+        "D-Robotics RDK BPU: the runtime layer (UCP allocator, device/stream stubs)",
+        "is native, and so is the generated operator layer in backends/bpu/.",
+        "Those kernels submit single-operator .hbm artifacts from the library named",
+        "by FLAGOS_BPU_OPLIB; without that variable each one takes its own CPU",
+        "round-trip, so the route is correct but unaccelerated.",
+        "FLAGOS_BUILD_BOXING is off: the BPU has no CUDA ABI to box onto.",
+        "Whole-graph acceleration is the torch.compile backend."
       ],
       "project_languages": [
         "CXX",

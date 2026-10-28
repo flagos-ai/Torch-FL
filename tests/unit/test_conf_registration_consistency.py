@@ -78,7 +78,9 @@ PLATFORM_REGISTRATION = {
         "backends/mthreads/generated/musa_register.inc",
         "backends/mthreads/generated/musa_flaggems_register.inc",
     ],
-    "bpu": [],  # BPU registers no compute ops (register.cc:591-613)
+    # The BPU is native like apple, under the vendor's conf name: the generated
+    # kernels submit single-operator .hbm artifacts from FLAGOS_BPU_OPLIB.
+    "drobotics": ["backends/bpu/generated/bpu_register.inc"],
     # Kunlunxin is a native vendor backend like musa/gcu/ascend: it compiles its
     # own generated registration, which claims exactly the ops it routes to the
     # vendor XPU SDK operator library.  It no longer falls through to
@@ -231,8 +233,9 @@ def test_full_coverage_confs_share_one_op_set():
     # FlagGems-primary conf (iluvatar) and the CUDA-boxing confs (dcu, metax,
     # ppu).  ``backends_nvidia.conf`` is the *base*
     list (the one ``codegen_ops.py`` rewrites) and therefore lacks the three
-    widened ops; ``backends_bpu.conf`` is empty and ``backends_tsingmicro.conf``
-    is hand-written and sparse.  Those three are asserted separately.
+    widened ops; ``backends_drobotics.conf`` routes 34 ops to its own kernel
+    and ``backends_tsingmicro.conf`` is hand-written and sparse.  Those two are
+    asserted separately.
     """
     full_coverage = {
         "ascend",
@@ -393,15 +396,28 @@ def test_boxing_platforms_have_no_none_entries(platform):
 
 
 @pytest.mark.anyplatform
-def test_bpu_conf_is_empty():
-    """BPU registers no compute ops (register.cc:591-613), so its conf must
-    list no routes: every op falls through to ``cpu_fallback`` and acceleration
-    comes from the ``torch.compile`` backend.
+def test_drobotics_conf_matches_its_register_file():
+    """Every op ``backends_drobotics.conf`` routes has a kernel in the .inc.
+
+    The BPU is native like apple: the conf routes exactly the ops
+    backends/bpu/generated/bpu_register.inc claims, and nothing else. A route
+    without a kernel behind it would fail the dispatcher's "backend not
+    registered" check instead of falling back, so the two must agree.
     """
-    routes = _parse_conf(CONF_DIR / "backends_bpu.conf")
-    assert not routes, (
-        f"backends_bpu.conf lists {len(routes)} routes but BPU registers none"
+    routes = _parse_conf(CONF_DIR / "backends_drobotics.conf")
+    registered = _registered_ops(
+        REPO_ROOT / "csrc/aten/backends/bpu/generated/bpu_register.inc"
     )
+    routed_to_kernel = {op for op, backend in routes.items() if backend == "drobotics"}
+    assert routed_to_kernel == registered, (
+        "backends_drobotics.conf and bpu_register.inc disagree: "
+        f"conf-only={sorted(routed_to_kernel - registered)} "
+        f"kernel-only={sorted(registered - routed_to_kernel)}"
+    )
+    assert routed_to_kernel, "drobotics conf routes nothing to its own kernel"
+    # Everything else is explicitly `none` (cpu_fallback), as a full-coverage
+    # conf states rather than omitting.
+    assert set(routes.values()) <= {"drobotics", "none"}
 
 
 @pytest.mark.anyplatform
@@ -523,7 +539,11 @@ def test_conf_route_counts_are_stable():
         # the FlagTree 0.7.0 Ascend MLIR pipeline cannot lower the rank-2
         # copy_func kernel the FlagGems `_ascend` flip override builds.
         "ascend": {"flaggems": 221, "none": 1659, "ascend": 157},
-        "bpu": {},
+        # The BPU is native: 34 ops route to the generated kernel layer, the
+        # rest to `none`. Those kernels submit .hbm artifacts from
+        # FLAGOS_BPU_OPLIB; without it each takes its own CPU round-trip, which
+        # a routing table cannot express.
+        "drobotics": {"drobotics": 34, "none": 2003},
         # Measured on H100 after rebasing onto the main that carries #340.
         # #340 added three exception groups (cuda_route_exceptions for
         # contract/compile defects, measured_flaggems_rollback for ops that

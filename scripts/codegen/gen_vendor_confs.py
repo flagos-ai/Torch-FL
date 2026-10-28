@@ -160,6 +160,18 @@ VENDORS = {
     # `unary`, `binary`, `binary_scalar` and `reduce` categories; see
     # scripts/codegen/codegen_mps.py.
     "apple": ("backends/apple/generated/mps_register.inc", ()),
+    # D-Robotics RDK BPU. Like apple this is native with a single registration
+    # .inc and no FlagGems file: the BPU has no FlagTree/Triton line, so
+    # backends_drobotics.conf routes the ops
+    # backends/bpu/generated/bpu_register.inc claims to the `drobotics` kernel
+    # and everything else to `none` (cpu_fallback).
+    #
+    # Those kernels submit single-operator .hbm artifacts from the library named
+    # by FLAGOS_BPU_OPLIB. Without that variable each kernel takes its own CPU
+    # round-trip, so the route is correct but unaccelerated -- which is the
+    # state the conf cannot express, since it is a routing table and not a
+    # capability probe.
+    "drobotics": ("backends/bpu/generated/bpu_register.inc", ()),
     # Iluvatar is still FlagGems-primary, but it now has a native (non-boxing)
     # .inc for the first cohort of corex ixdnn/ixblas kernels, so the native slot
     # is no longer empty. backends_iluvatar.conf routes an op to `flaggems` where

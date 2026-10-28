@@ -509,7 +509,18 @@ def _offload(
 
 
 def register() -> None:
-    """Register the backend so torch.compile(backend="bpu") resolves."""
+    """Register the backend so torch.compile(backend="bpu") resolves.
+
+    Also installs the eager operator library when FLAGOS_BPU_OPLIB names one.
+    The two paths are independent: the compile backend handles whole graphs,
+    the operator library serves individual aten ops, and a board with neither
+    keeps its cpu_fallback behaviour.
+    """
     from torch._dynamo import register_backend
 
     register_backend(name="bpu", compiler_fn=bpu_backend)
+
+    from .eager import oplib_root, register_eager
+
+    if oplib_root() is not None:
+        register_eager()

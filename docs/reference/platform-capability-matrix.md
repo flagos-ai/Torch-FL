@@ -23,7 +23,7 @@ when a platform gains or loses one.
 | `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2037 | yes |
 | `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2037 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
-| `drobotics` | no per-op kernels (graph compile) | `bpu` | — | `bpu` | 0 | no |
+| `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2037 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
 | `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2037 | yes |
 
@@ -174,6 +174,6 @@ build opts into boxing.
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
-- `csrc/aten/backends/`: apple, ascend, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro
+- `csrc/runtime/accelerator/`: apple, ascend, bpu, cuda, dcu, enflame, gcu, hygon, iluvatar, kunlunxin, metax, mthreads, musa, nvidia, tsingmicro
+- `csrc/aten/backends/`: apple, ascend, bpu, enflame, flagos, gcu, iluvatar, kunlunxin, mthreads, musa, soft_lowp, tsingmicro
+- `torch_fl/accelerator/`: ascend, bpu, cuda, dcu, gcu, iluvatar, metax, mps, musa, ppu, tsingmicro
