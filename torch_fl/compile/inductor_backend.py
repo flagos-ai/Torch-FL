@@ -371,8 +371,10 @@ def pin_compile_threads() -> bool:
     #
     # Scoped to the cuda platform: every non-CUDA build's torch answers False to
     # this probe as well, so gating on the probe alone would pin the vendors that
-    # are deliberately left parallel.
-    if not vendor_pinned and ACCELERATOR == "cuda" and not _torch_has_cuda_kernels():
+    # are deliberately left parallel. The name is the vendor ("nvidia"), which is
+    # what the build record holds; "cuda" is the platform id and only reaches
+    # setup.py, where it is normalised into this value.
+    if not vendor_pinned and ACCELERATOR == "nvidia" and not _torch_has_cuda_kernels():
         vendor_pinned = True
     if not vendor_pinned:
         return False

@@ -53,7 +53,7 @@ def as_cuda(monkeypatch):
             lambda: pp._CUDA_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "nvidia")
     return pp._CUDA_PROFILE
 
 
