@@ -1284,6 +1284,12 @@ at::Tensor& AddmmInplace(
 // the answer rather than writing through that key's `out` slot.
 namespace {
 
+// Whether a call carries a low-precision operand: one definition, so no form of
+// the pair can drift from the others.
+bool PairIsLowPrecision(const at::Tensor& self, const at::Tensor& mat2) {
+  return IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type());
+}
+
 template <typename Fn>
 at::Tensor OrMmRoute(
     const at::Tensor& self,
@@ -1332,11 +1338,7 @@ at::Tensor& WrapperMmOutAsBoxing(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
-  if (IsDispatchSuppressed()) {
-    out.copy_(at::mm(self, mat2));
-    return out;
-  }
-  if (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type())) {
+  if (PairIsLowPrecision(self, mat2) && !IsDispatchSuppressed()) {
     return MmOut(self, mat2, out);
   }
   out.copy_(at::mm(self, mat2));
@@ -1409,10 +1411,7 @@ at::Tensor& WrapperBmmOutAsBoxing(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out) {
-  if (IsDispatchSuppressed()) {
-    return BmmDtype(self, mat2, out_dtype);
-  }
-  if (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type())) {
+  if (PairIsLowPrecision(self, mat2) && !IsDispatchSuppressed()) {
     return BmmOut(self, mat2, out);
   }
   out.copy_(at::bmm(self, mat2));
