@@ -893,19 +893,20 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // wrapper still runs, because the generated list names the same
   // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
   #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
+  // The plain pair is claimed where the conf does not route it to a list that
+  // serves it. Metax routes `bmm` to flaggems_cpp, which its list does claim,
+  // so only `mm` is left to this block there (its conf leaves `mm` `none`).
+  // DCU routes both to a FlagGems key its list reaches no dispatcher for, so
+  // both are its.
   m.impl("mm", WrapperMm);
-  // DCU's conf routes `bmm` to a FlagGems backend the generated list reaches
-  // no dispatcher for, so the list leaves it unclaimed and this block is its
-  // only claim. Metax's is a FlagGems key the list does serve, which is why it
-  // is guarded out there.
   #if !defined(FLAGOS_ACCEL_METAX)
   m.impl("bmm", WrapperBmm);
   #endif
   // The other matrix forms are not claimed here: their generated list claims
   // them (see SOFT_LOWP_PAIR_CLAIMS in the boxing/FlagGems list generator),
   // because which wrapper a form takes depends on its conf route, which the
-  // list already reads. A second m.impl for one of them in this body is a
-  // duplicate.
+  // list already reads. The generated list is included above this block, so a
+  // second m.impl for one of them here is a duplicate.
   m.impl("_scaled_mm", WrapperPrivScaledMm);
   m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
   m.impl("_scaled_mm_v2", WrapperPrivScaledMmV2);
