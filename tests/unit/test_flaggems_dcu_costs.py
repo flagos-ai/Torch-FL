@@ -531,6 +531,8 @@ def tkey(monkeypatch):
 
 
 def _gate(monkeypatch, accelerator, routed):
+    # The build record names the vendor ("hygon"), not the platform id
+    # ("dcu"); that is the spelling every runtime gate compares against.
     monkeypatch.setattr("torch_fl._build_accelerator", lambda: accelerator)
     monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: routed)
 
@@ -539,7 +541,7 @@ class TestPrewarmTritonKey:
     """The key is hashed on a side thread, on the builds it was measured on."""
 
     def test_the_key_is_computed_on_a_daemon_thread(self, monkeypatch, tkey):
-        _gate(monkeypatch, "dcu", True)
+        _gate(monkeypatch, "hygon", True)
 
         flagos._prewarm_triton_key()
 
@@ -553,8 +555,8 @@ class TestPrewarmTritonKey:
 
     @pytest.mark.parametrize(
         "accelerator,routed",
-        [("cuda", True), ("dcu", False), ("ascend", False), ("cuda", False)],
-        ids=["not-dcu", "not-routed", "ascend", "neither"],
+        [("cuda", True), ("hygon", False), ("ascend", False), ("cuda", False)],
+        ids=["not-hygon", "not-routed", "ascend", "neither"],
     )
     def test_nothing_starts_off_the_measured_configuration(
         self, monkeypatch, tkey, accelerator, routed
@@ -568,7 +570,7 @@ class TestPrewarmTritonKey:
 
     def test_a_key_that_cannot_be_computed_is_swallowed(self, monkeypatch, tkey):
         """Best-effort: an unwarmed cache is slow, not broken."""
-        _gate(monkeypatch, "dcu", True)
+        _gate(monkeypatch, "hygon", True)
 
         def boom():
             raise RuntimeError("no key for you")
@@ -582,7 +584,7 @@ class TestPrewarmTritonKey:
 
     def test_a_triton_without_the_function_is_swallowed(self, monkeypatch, tkey):
         """The module can be importable and still not have the name."""
-        _gate(monkeypatch, "dcu", True)
+        _gate(monkeypatch, "hygon", True)
         del sys.modules["triton.runtime.cache"].triton_key
 
         flagos._prewarm_triton_key()

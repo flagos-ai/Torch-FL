@@ -39,9 +39,10 @@ import pytest
 import torch_fl
 import torch
 from torch.profiler import ProfilerActivity, profile
+from torch_fl._platform import platform_for
 
 
-_CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "metax")
+_CUPTI_BUILD = platform_for(torch_fl._build_accelerator()) in ("", "cuda", "metax")
 
 # Mirrors csrc/runtime/guard.h. Three tail branches build a flagos stream, and
 # only two of them carry a real handle: USE_ASCEND wraps the aclrtStream pointer
@@ -50,8 +51,14 @@ _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "metax")
 # `c10::Stream(UNSAFE, d, 0)`, an id of exactly zero. DCU is the clearest case:
 # its hipified wheel exports c10::hip::HIPCachingAllocator with zero c10::cuda
 # symbols, so the c10::cuda delegation at the top of that function cannot even
-# link there.
-_GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
+# link there. Kunlunxin and Iluvatar have their own arms there and keep real
+# stream handles, so they are absent from this list.
+#
+# Spelled as the platform ids the C++ macros are named after, reached through
+# platform_for() because the build record holds the vendor (hygon, enflame,
+# mthreads, drobotics, apple) -- either half resolves, so the list stays correct
+# for records written before the rename.
+_GUARD_STREAM_IS_SYNTHETIC = platform_for(torch_fl._build_accelerator()) in (
     "tsingmicro",
     "dcu",
     "gcu",
@@ -139,7 +146,7 @@ def test_cupti_library_locatable():
     # The wheel's own answer, not os.environ: FLAGOS_ACCELERATOR is a build
     # input and no longer overrides the build record, so reading the shell here
     # could look for MetaX's library on a CUDA build.
-    accelerator = torch_fl._build_accelerator() or "cuda"
+    accelerator = torch_fl._build_accelerator() or "nvidia"
     if accelerator == "metax":
         candidates = ["libmcpti.so"]
         metax_path = os.environ.get("MACA_PATH", "/opt/maca")

@@ -72,7 +72,7 @@ def as_musa(monkeypatch):
             lambda: pp._MUSA_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "musa")
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
     return pp._MUSA_PROFILE
 
 
@@ -159,11 +159,17 @@ def as_tsingmicro(monkeypatch):
 @pytest.mark.parametrize(
     "accelerator,expected",
     [
+        # The build record's ACCELERATOR is the vendor (hygon, mthreads,
+        # enflame, ...), because that is the name every runtime reader compares
+        # against; the platform id (dcu, musa, gcu, ...) stays the build table's
+        # key and is normalised to the vendor by setup.py, so it never reaches
+        # this lookup. "cuda" and "ppu" are here as the unknown-name fallback,
+        # not as the CUDA platform's own vocabulary.
         ("ascend", pp._ASCEND_PROFILE),
         ("metax", pp._METAX_PROFILE),
-        ("dcu", pp._DCU_PROFILE),
-        ("musa", pp._MUSA_PROFILE),
-        ("gcu", pp._GCU_PROFILE),
+        ("hygon", pp._DCU_PROFILE),
+        ("mthreads", pp._MUSA_PROFILE),
+        ("enflame", pp._GCU_PROFILE),
         ("kunlunxin", pp._KUNLUNXIN_PROFILE),
         ("iluvatar", pp._ILUVATAR_PROFILE),
         ("tsingmicro", pp._TSINGMICRO_PROFILE),
