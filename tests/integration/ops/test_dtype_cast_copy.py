@@ -314,13 +314,18 @@ def test_contiguous_matches_cpu_after_the_on_device_gather():
 
 
 @pytest.mark.parametrize("platform", CUDA_ABI_PLATFORMS)
-def test_copy_arm_boxes_instead_of_going_host(platform):
+def test_copy_arm_boxes_only_when_libtorch_cuda_is_linked(platform):
     """Pin the `copy_` arm in the source, so this runs without a device.
 
-    The regression: the non-boxing arm called `strided_copy_cast_via_cpu`
-    unconditionally, on the premise that the wheel has no native CUDA copy
-    kernel. It has one -- `DeviceBoxingGuard` reaches it, and the boxing
-    kernels are not involved.
+    The arm has two regressions in its history, and this pins the second one.
+    It first called `strided_copy_cast_via_cpu` unconditionally, which cost a
+    host round trip on a wheel that does link libtorch_cuda. It then boxed
+    unconditionally, on the premise that a build which reaches here links a
+    real libtorch_cuda -- false for the default CUDA and PPU wheels, which link
+    the CPU-only pip torch, where `DeviceBoxingGuard` + `at::native::copy_`
+    dies in an empty CUDA DispatchStub ("missing kernel for cuda", run
+    40656617119). The choice is therefore made by the CMake probe, as in
+    `_to_copy` above.
     """
     src = _copy_ops_source()
     # The flagos -> flagos branch of _copy_from, told apart from its
@@ -328,14 +333,25 @@ def test_copy_arm_boxes_instead_of_going_host(platform):
     marker = "// Fast path: both contiguous, same shape and dtype"
     branch = src.find(marker)
     assert branch != -1, "the same-device copy fast path is gone"
-    arm = src[branch : branch + 2200]
-    fast = arm.find("CrossDeviceMemcpy")
-    assert fast != -1, "the contiguous fast path is gone"
-    tail = arm[fast:]
-    assert "DeviceBoxingGuard guard(self, dst);" in tail, (
-        f"{platform}: the non-boxing copy_ arm no longer boxes to CUDA, so a "
-        "strided or dtype-changing copy is a host round trip again"
+    start = src.find("// CUDA platform without the boxing kernels", branch)
+    assert start != -1, "the non-boxing copy_ arm is gone"
+    assert "CrossDeviceMemcpy" in src[branch:start], (
+        f"{platform}: the contiguous fast path is gone, so every same-device "
+        "copy would take the strided arm"
     )
-    assert "strided_copy_cast_via_cpu(self, dst);" in tail, (
-        f"{platform}: the unsigned-dtype escape hatch is missing from the arm"
+    end = src.find("// Ascend copies on-device via aclnnInplaceCopy", start)
+    assert end != -1, "the de-boxed sibling arm is gone"
+    arm = src[start:end]
+    assert "FLAGOS_TORCH_LINKS_LIBTORCH_CUDA" in arm, (
+        f"{platform}: the non-boxing copy_ arm boxes unconditionally again, "
+        "which calls into an empty CUDA DispatchStub on the CPU-only torch the "
+        "default wheel builds against"
+    )
+    assert "DeviceBoxingGuard guard(self, dst);" in arm, (
+        f"{platform}: the non-boxing copy_ arm no longer boxes to CUDA, so a "
+        "build that links libtorch_cuda pays a host round trip per copy"
+    )
+    assert "strided_copy_cast_via_cpu(self, dst);" in arm, (
+        f"{platform}: the host round-trip the arm takes without libtorch_cuda "
+        "is missing, or the unsigned-dtype escape hatch is"
     )

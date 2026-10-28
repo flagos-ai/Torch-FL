@@ -29,23 +29,31 @@
 #include "backends/mthreads/mudnn_common.h"
 #endif
 
-// Which backends are the CUDA ones, for the arms of contiguous()/clone() below.
+// Which backends are the CUDA ones, and whether their arms of contiguous()/
+// clone() below may hand the strided gather to ATen's native CUDA copy kernel.
+// Both halves are needed: DeviceBoxingGuard is header-only and gated on
+// nothing, but the kernel it makes reachable is ATen's TensorIterator strided
+// copy, a CUDA DispatchStub that lives in libtorch_cuda.so.
 //
-// It used to also record whether those arms may hand the strided gather to
-// ATen's native CUDA copy kernel: the default FlagGems-primary wheel links the
-// CPU-only pip torch, so the reasoning went, libtorch_cuda.so -- and with it the
-// native copy kernel -- is absent, and the gather goes through
-// copy_strided_via_host instead. The premise is wrong. That wheel is shipped for
-// a CUDA device, links a real libtorch_cuda (the FlagGems-primary build reaches
-// the same CUDA TensorIterator kernels for its dtype casts), and
-// DeviceBoxingGuard is header-only and gated on nothing. Both CUDA builds now
-// take the on-device gather; FLAGOS_BOXING_BUILD no longer selects between them.
+// FLAGOS_BOXING_BUILD answers it for a boxing wheel: that wheel is built and
+// run against the vendor's libtorch, so the stub is populated.
+//
+// The FlagGems-primary wheel answers it with FLAGOS_TORCH_LINKS_LIBTORCH_CUDA,
+// the CMake probe that records whether the torch this wheel links ships
+// libtorch_cuda.so beside it. The default CUDA and PPU wheels link the CPU-only
+// pip torch on purpose (`.github/configs/nvidia.yml` and `thead.yml` both pin
+// `torch_version_prefix: "2.10.0+cpu"`), so theirs is empty and a boxed call
+// aborts with "DispatchStub: missing kernel for cuda" -- measured on upstream
+// main, CI run 40656617119: PPU job 122709780467 (`clone(memory_format=...)`,
+// which took this file's clone() arm) and NVIDIA job 122709772556. A wheel
+// built against a torch that does ship the stub keeps the on-device gather;
+// that is the build this arm was measured on (8x H100, PR #674).
+//
 // The de-boxed non-CUDA backends (Ascend, GCU, Kunlunxin, MUSA, ...) keep using
 // copy_strided_via_host, and the USE_* exclusions below match the ones on the
-// arms. csrc/CMakeLists.txt defines FLAGOS_BOXING_BUILD only for a wheel built
-// with FLAGOS_BUILD_BOXING=ON -- the switch register.cc reads before claiming the
-// generated CUDA kernels.
-#if defined(FLAGOS_BOXING_BUILD) && !defined(USE_ASCEND) && \
+// arms.
+#if (defined(FLAGOS_BOXING_BUILD) || defined(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)) && \
+    !defined(USE_ASCEND) && \
     !defined(USE_TSINGMICRO) && !defined(USE_GCU) && !defined(USE_MUSA) && \
     !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && !defined(USE_ILUVATAR) && \
     !defined(USE_MPS)
@@ -222,21 +230,22 @@ at::Tensor contiguous(
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
-      // Both CUDA builds reach the native strided copy kernel. The boxing
-      // build has the generated boxing kernels registered in the CUDA slot;
-      // the FlagGems-primary build does not, but `DeviceBoxingGuard` does not
-      // need them -- it only rewrites device metadata to CUDA, and a build that
-      // gets here links a real libtorch_cuda, so the native TensorIterator copy
-      // kernel is reachable either way.
-      //
-      // The de-boxed build used to gather through host memory here, on the
-      // strength of "there is no native CUDA copy kernel in this wheel". That
-      // is true of the boxing kernels and false of the native copy kernel, and
-      // the cost was two blocking cudaMemcpy per call on the arm `_to_copy`
-      // hits for every non-contiguous source -- before it even reaches its
-      // dtype cast.
+      // The CUDA gather: hand it to the native TensorIterator strided copy
+      // kernel. `DeviceBoxingGuard` only rewrites device metadata to CUDA --
+      // the kernel behind it is a CUDA DispatchStub, so the arm is chosen by
+      // whether this build's torch has one (see FLAGOS_CONTIGUOUS_CUDA_BOXING
+      // above), not by whether the boxing kernels were compiled. Where they are
+      // both there it is worth a lot of cudaMemcpy: `_to_copy` hits this arm for
+      // every non-contiguous source before it even reaches its dtype cast.
+#if FLAGOS_CONTIGUOUS_CUDA_BOXING
       DeviceBoxingGuard guard(self, result);
       at::native::copy_(result, self, false);
+#else
+      // No native CUDA copy kernel in this wheel's torch: gather through host
+      // memory. The vendor arms below do the same when their on-device path
+      // declines.
+      copy_strided_via_host(self, result, memory_format);
+#endif
 #elif defined(USE_MPS)
       const bool copied_on_device =
           copy_strided_to_contiguous(self, result, memory_format);
@@ -320,11 +329,16 @@ at::Tensor clone(
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
     // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
-    // instead of an expensive CPU round-trip. Both CUDA builds have it: the
-    // boxing kernels are not required for the native TensorIterator copy, only
-    // for the generated ones (see the note above FLAGOS_CONTIGUOUS_CUDA_BOXING).
+    // instead of an expensive CPU round-trip -- but only in a wheel whose torch
+    // actually ships that kernel. See the note above
+    // FLAGOS_CONTIGUOUS_CUDA_BOXING: the guard only rewrites device metadata,
+    // the kernel behind it is a CUDA DispatchStub.
+#if FLAGOS_CONTIGUOUS_CUDA_BOXING
     DeviceBoxingGuard guard(self, result);
     at::native::copy_(result, self, false);
+#else
+    copy_strided_via_host(self, result, memory_format);
+#endif
 #else
     // MUSA joins the non-boxing group: copy_ reaches _copy_from, which
     // torch_musa implements for strided/dtype-casting copies on device.
