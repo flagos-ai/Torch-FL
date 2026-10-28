@@ -101,6 +101,33 @@ at::Tensor& WrapperMoutAsMm(
     const at::Tensor& self,
     const at::Tensor& mat2,
     at::Tensor& out);
+// The boxing build's claim for a matrix form whose conf route is `boxing` (see
+// PAIR_FORWARDERS_BOXING in the list generator). The `...AsMm`/`...AsBmm`
+// forwarders above cannot serve it: they hand an ordinary pair to the mm/bmm
+// dispatch path, and on a boxing build that path is `kBoxing`, which re-enters
+// the very wrapper the claim is for. These run the prelude for a low-precision
+// pair and the plain ATen op otherwise.
+at::Tensor WrapperMmDtypeAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype);
+at::Tensor& WrapperMmDtypeOutAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype,
+    at::Tensor& out);
+at::Tensor& WrapperMmOutAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out);
+at::Tensor WrapperBmmAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype);
+at::Tensor& WrapperBmmOutAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out);
 at::Tensor WrapperBdtypeAsBmm(
     const at::Tensor& self,
     const at::Tensor& mat2,

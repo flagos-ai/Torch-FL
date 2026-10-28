@@ -1290,7 +1290,7 @@ at::Tensor OrMmRoute(
     const at::Tensor& mat2,
     Fn&& compute) {
   if (!IsDispatchSuppressed() &&
-      (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type()))) {
+      (PairIsLowPrecision(self, mat2))) {
     return compute();
   }
   return at::mm(self, mat2);
@@ -1302,7 +1302,7 @@ at::Tensor OrBmmRoute(
     const at::Tensor& mat2,
     Fn&& compute) {
   if (!IsDispatchSuppressed() &&
-      (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type()))) {
+      (PairIsLowPrecision(self, mat2))) {
     return compute();
   }
   return at::bmm(self, mat2);
@@ -1328,6 +1328,21 @@ at::Tensor& WrapperMdtypeOutAsMm(
   return out;
 }
 
+at::Tensor& WrapperMmOutAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out) {
+  if (IsDispatchSuppressed()) {
+    out.copy_(at::mm(self, mat2));
+    return out;
+  }
+  if (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type())) {
+    return MmOut(self, mat2, out);
+  }
+  out.copy_(at::mm(self, mat2));
+  return out;
+}
+
 at::Tensor& WrapperMoutAsMm(
     const at::Tensor& self,
     const at::Tensor& mat2,
@@ -1335,6 +1350,41 @@ at::Tensor& WrapperMoutAsMm(
   out.copy_(OrMmRoute(self, mat2,
       [&] { return Mm(self, mat2); }));
   return out;
+}
+
+at::Tensor WrapperMmDtypeAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype) {
+  if (!IsLowPrecision(self.scalar_type()) && !IsLowPrecision(mat2.scalar_type()) &&
+      !IsDispatchSuppressed()) {
+    return at::mm(self, mat2).to(out_dtype);
+  }
+  return MmDtype(self, mat2, out_dtype);
+}
+
+at::Tensor& WrapperMmDtypeOutAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype,
+    at::Tensor& out) {
+  if (!IsLowPrecision(self.scalar_type()) && !IsLowPrecision(mat2.scalar_type()) &&
+      !IsDispatchSuppressed()) {
+    out.copy_(at::mm(self, mat2).to(out_dtype));
+    return out;
+  }
+  return MmDtypeOut(self, mat2, out_dtype, out);
+}
+
+at::Tensor WrapperBmmAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype) {
+  if (!IsLowPrecision(self.scalar_type()) && !IsLowPrecision(mat2.scalar_type()) &&
+      !IsDispatchSuppressed()) {
+    return at::bmm(self, mat2).to(out_dtype);
+  }
+  return BmmDtype(self, mat2, out_dtype);
 }
 
 at::Tensor WrapperBdtypeAsBmm(
@@ -1352,6 +1402,20 @@ at::Tensor& WrapperBdtypeOutAsBmm(
     at::Tensor& out) {
   out.copy_(OrBmmRoute(self, mat2,
       [&] { return BmmDtype(self, mat2, out_dtype); }));
+  return out;
+}
+
+at::Tensor& WrapperBmmOutAsBoxing(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out) {
+  if (IsDispatchSuppressed()) {
+    return BmmDtype(self, mat2, out_dtype);
+  }
+  if (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type())) {
+    return BmmOut(self, mat2, out);
+  }
+  out.copy_(at::bmm(self, mat2));
   return out;
 }
 

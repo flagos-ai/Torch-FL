@@ -240,6 +240,30 @@ def _claim_block(register_cc: str, platform: str) -> set[str]:
     )
 
 
+# The matrix claims register.cc's soft-lowp block makes from source, keyed by
+# the macro a build defines when it compiles the prelude (csrc/CMakeLists.txt).
+PRELUDE_PLATFORMS = {"metax": "FLAGOS_ACCEL_METAX", "hygon": "FLAGOS_ACCEL_DCU"}
+
+
+def _prelude_matrix_claims(platform: str) -> set[str]:
+    """The matrix ops register.cc claims from source on ``platform``, or none."""
+    if platform not in PRELUDE_PLATFORMS:
+        return set()
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    start = register_cc.rfind("#if defined(FLAGOS_ACCEL_METAX) ||")
+    end = register_cc.index("#endif", start)
+    # The block's guards name the platform macro directly; the plain pair sits
+    # in a nested `#if !defined(FLAGOS_ACCEL_METAX)`, so read the lines the
+    # platform's own build keeps rather than the block's text.
+    return set(
+        re.findall(
+            r'^\s*m\.impl\("([^"]+)",',
+            "\n".join(_lines_kept_on(register_cc[start:end], platform)),
+            re.M,
+        )
+    )
+
+
 def _registered_ops(inc_path: Path) -> set[str]:
     """Read ``m.impl("op", ...)`` names from a registration ``.inc``."""
     if not inc_path.exists():
@@ -252,7 +276,9 @@ def _registered_ops(inc_path: Path) -> set[str]:
 def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
     """The boxed list is the conf's route set, not a superset or a subset.
 
-    register.cc's boxing arm claims exactly ``register_boxing_<platform>.inc``.
+    register.cc's boxing arm claims exactly ``register_boxing_<platform>.inc``
+    (plus the matrix ops the soft-lowp prelude claims from source in the same
+    body, where that prelude's platform macro is defined).
     A claim with no route is "routed to 'none' ... but the op is registered on
     PrivateUse1", and a route with no claim -- an op the conf routes to
     ``boxing`` that nothing registered -- is "backend not registered" the first
@@ -261,6 +287,7 @@ def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
     `empty_like` the other way round before the boxed list existed.
     """
     boxed = _registered_ops(GEN_DIR / f"register_boxing_{platform}.inc")
+    boxed |= _prelude_matrix_claims(platform)
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
     assert boxed, f"{platform} claims no boxed op"
     left_at_none = sorted(op for op in boxed if routes.get(op) == "none")
@@ -795,23 +822,27 @@ def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
     claimed_here = _claim_block(register_cc, platform)
     listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    # The pair's own keys have a route on every platform (dcu's `mm`/`bmm` to
+    # FlagGems, metax's `bmm` to `flaggems_cpp`; metax's `mm` is `none` and so
+    # owes nothing, which is what its conf says).
     forms = {
-        op
-        for op, key in SOFT_LOWP_PAIR_FORMS.items()
-        if key in claimed_here
-        or routes.get(key) != "none"
-        # An mm/bmm form the pair's own key leaves `none` belongs to the pair
-        # arm -- and that arm runs on DCU only (see SOFT_LOWP_PAIR_CLAIMS in the
-        # list generator). On metax it is genuinely unreachable, which is what
-        # the conf says, and the way to change that is the conf's `mm` route,
-        # never a claim, which raises on every ordinary call.
-        or routes.get(op) != "none"
+        op for op, key in SOFT_LOWP_PAIR_FORMS.items() if routes.get(key) != "none"
     } | {
         op
         for op in SOFT_LOWP_CLAIMS
         if routes.get(op) != "none" or op in claimed_here or op in listed
     }
-    missing = sorted(op for op in forms if op not in claimed_here and op not in listed)
+    claimed = claimed_here | _prelude_matrix_claims(platform)
+    # The list's plain entry for the pair's own key serves every form of that
+    # key (metax's `bmm` on `flaggems_cpp`): a `none` out form takes the pair
+    # forwarder, whose route is that key. A form with a route of its own is the
+    # list's plain wrapper.
+    plain_served = {op for op, key in SOFT_LOWP_PAIR_FORMS.items() if key in listed}
+    missing = sorted(
+        op
+        for op in forms
+        if op not in claimed and op not in listed and op not in plain_served
+    )
     assert not missing, (
         f"{platform}: the software low-precision matrix ops {missing} are "
         "registered on PrivateUse1 by neither register.cc nor the generated "
@@ -831,6 +862,7 @@ def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
     # route the pair to a list that serves it. The other matrix forms are the
     # list's (see SOFT_LOWP_PAIR_CLAIMS), so they are checked there.
     paired = routes.get("mm") == "none"
+    claimed_here = _claim_block(register_cc, platform)
     claims = ['m.impl("mm", WrapperMm);', 'm.impl("bmm", WrapperBmm);']
     if not paired:
         idx = register_cc.rfind(claims[0])
@@ -846,25 +878,35 @@ def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
         # raise for every ordinary call (metax, run 40629858404). Read through
         # the guard, not the file: the line is still there for the platforms
         # that do want it.
-        claimed_here = _claim_block(register_cc, platform)
         assert "mm" not in claimed_here and "bmm" not in claimed_here, (
             f"{platform}: the conf routes `mm` to `none`, so register.cc must "
             "not claim mm/bmm for it -- the claim turns every torch.mm into "
             "\"routed to 'none' ... but the op is registered on PrivateUse1\""
         )
-    # Where the conf leaves a form `none` AND the pair is claimed, the generated
-    # list must claim it by the mm/bmm key; where it names a FlagGems backend
-    # the plain wrapper is the claim (and an `mm.out` route under that name
-    # would raise).
-    listed = (GEN_DIR / f"register_flaggems_{platform}.inc").read_text()
+    # Where the conf leaves a form `none`, the pair must be claimed (or, for
+    # `bmm`/`bmm.out`, served by the list under its own key) -- and the claim
+    # must follow the pair's route, not the form's slot. Where the form names a
+    # FlagGems backend the plain wrapper is already the list's claim.
+    listed_text = (GEN_DIR / f"register_flaggems_{platform}.inc").read_text()
+    listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
     for op, key in SOFT_LOWP_PAIR_FORMS.items():
-        if routes.get(op) != "none" or not paired:
+        if routes.get(op) != "none":
+            continue
+        # Every route the pair can answer by: a claim register.cc makes, a
+        # route of its own, or its plain key already claimed by the list.
+        served = (
+            key in claimed_here
+            or key in _prelude_matrix_claims(platform)
+            or routes.get(key) != "none"
+            or key in listed
+        )
+        if not served:
             continue
         forwarder = {
             "mm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsMm",
             "bmm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsBmm",
         }[key]
-        assert f'm.impl("{op}", {forwarder});' in listed, (
+        assert f'm.impl("{op}", {forwarder});' in listed_text, (
             f"{platform}: {op} is routed `none` and the generated list does not "
             "claim it by the mm/bmm key, so the call refuses before the prelude"
         )
