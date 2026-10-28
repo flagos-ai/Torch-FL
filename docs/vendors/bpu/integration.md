@@ -82,12 +82,30 @@ stride extent, so no caller can satisfy both. The full trace, including the
 attribute form that parses and the two error messages that close the door, is
 in `docs/vendors/bpu/dynamic-shape-probe.md`.
 
-Buckets are therefore exact: `relu` compiled at `[1, 64]` serves a `[1, 64]`
-request and nothing else. A larger artifact cannot substitute for a smaller
-request because the shape is compiled into the graph — a 999-wide tensor fed to
-a 64-wide artifact returns 64 values. A request that misses every bucket falls
-back to the NumPy reference, and `EagerDispatcher.summary()` reports the hit
-rate, so a silent degradation to the host is visible rather than assumed.
+Buckets are **inclusive-upward**: a request routes to the smallest bucket at or
+above its width, is zero-padded into it, and the result is cropped back. That
+is safe because every op in the library is elementwise — the padded lanes
+cannot influence the ones before them. Verified on the board for all 15 ops:
+a 37-element request served by a 256-lane artifact returns the right values,
+with the tail coming back as the op's own result for zeros.
+
+The bucket ladder is dense where widths are small and sparse where they are
+large — `8 16 32 48 64 96 128 192 256 384 512`. With round-up routing this
+keeps the worst-case pad under 8x in 11 rungs, i.e. 165 artifacts (~760 KB) for
+15 ops. A 16-step ladder to 256 would pad more tightly but needs 17 rungs, and
+it buys nothing: the BPU's cost is flat in width (0.141 ms at 64 lanes,
+0.152 ms at 512), so the extra lanes are free and only the rung count would go
+up. Nor does the hardware want aligned widths — odd sizes like 33 and 37
+compile and execute correctly, so alignment is a bookkeeping choice, not a
+constraint.
+
+Exact matching was the first rule and it was needlessly strict: it sent every
+off-bucket shape to the host. Round-up routing took a 72-case unary sweep and
+a 30-case binary sweep to **102/102 on device**, from whatever the exact rule
+managed to cover. A request still misses when it is wider than the largest
+bucket (or carries a batch dimension), and a miss falls back to the NumPy
+reference and is counted, so a silent degradation to the host is visible in
+`EagerDispatcher.summary()` rather than assumed away.
 
 ### Why the count matters
 
@@ -103,11 +121,12 @@ throughput across many small ops, not on per-call latency.
 
 ```bash
 # on the build host, with hbdk4 and FLAGOS_BPU_MLIR_LIBS pointing at its _mlir_libs
-python scripts/vendor/build_bpu_oplib.py --out ./oplib --shapes 1x64 1x128 1x256 1x512
+python scripts/vendor/build_bpu_oplib.py --out ./oplib
+# --shapes overrides the default ladder, e.g. --shapes 1x64 1x128 1x256
 ```
 
-That emits `oplib/manifest.json` plus one `.hbm` per op per bucket (60 files
-for the 15 ops above). `compile()` ends by loading its own artifact back
+That emits `oplib/manifest.json` plus one `.hbm` per op per bucket (165 files
+for the 15 ops above at the default 11 rungs). `compile()` ends by loading its own artifact back
 through hbrt4, which claims BPU memory; off-board that read-back throws
 `ResourceExhausted` *after* a complete file has been written, and the script
 treats any complete file as success.

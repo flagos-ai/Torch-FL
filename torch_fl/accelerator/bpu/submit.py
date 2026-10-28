@@ -443,3 +443,119 @@ class BPUSubmitter:
             self.close()
         except Exception:  # noqa: BLE001 - a failing destructor is noise
             pass
+
+
+class DirectKernel:
+    """One artifact with its device buffers held open across calls.
+
+    `HB_HBMRuntime.run()` allocates both buffers and frees them on every call.
+    That is the right shape for a model you invoke occasionally, but the eager
+    path invokes the same op thousands of times at one fixed bucket width, so
+    the allocation is pure overhead. Measured on the board for a 512-lane relu:
+    0.139 ms through `run()`, 0.045 ms here, with `hbDNNInferV2` itself at
+    0.0036 ms. The remaining floor is the driver's submit/wait, which does not
+    shrink.
+
+    Reused tightly like this, the kernel is not reentrant: one instance must
+    not be driven from two threads at once, which `KernelLibrary` guarantees by
+    keeping a single instance per artifact behind its lock.
+    """
+
+    def __init__(self, hbm_path: str, model_name: str, width: int, dtype):
+        if _dnn is None or _ucp is None:
+            raise RuntimeError("BPU libraries are unavailable")
+
+        self.width = int(width)
+        self.dtype = np.dtype(dtype)
+        self.nbytes = self.width * self.dtype.itemsize
+
+        self._packed = ctypes.c_void_p()
+        paths = (ctypes.c_char_p * 1)(ctypes.c_char_p(hbm_path.encode()))
+        rc = _dnn.hbDNNInitializeFromFiles(ctypes.byref(self._packed), paths, 1)
+        if rc:
+            raise RuntimeError(f"hbDNNInitializeFromFiles rc={rc}")
+
+        self._model = ctypes.c_void_p()
+        rc = _dnn.hbDNNGetModelHandle(
+            ctypes.byref(self._model), self._packed, ctypes.c_char_p(model_name.encode())
+        )
+        if rc:
+            raise RuntimeError(f"hbDNNGetModelHandle({model_name}) rc={rc}")
+
+        self._in_props = DNNTensorProperties()
+        self._out_props = DNNTensorProperties()
+        rc = _dnn.hbDNNGetInputTensorProperties(
+            ctypes.byref(self._in_props), self._model, 0
+        )
+        if rc:
+            raise RuntimeError(f"hbDNNGetInputTensorProperties rc={rc}")
+        rc = _dnn.hbDNNGetOutputTensorProperties(
+            ctypes.byref(self._out_props), self._model, 0
+        )
+        if rc:
+            raise RuntimeError(f"hbDNNGetOutputTensorProperties rc={rc}")
+
+        self._in_mem = UCPSysMem()
+        self._out_mem = UCPSysMem()
+        if _ucp.hbUCPMallocCached(ctypes.byref(self._in_mem), self.nbytes, 0):
+            raise RuntimeError("input hbUCPMallocCached failed")
+        if _ucp.hbUCPMallocCached(ctypes.byref(self._out_mem), self.nbytes, 0):
+            _ucp.hbUCPFree(ctypes.byref(self._in_mem))
+            raise RuntimeError("output hbUCPMallocCached failed")
+
+        self._sched = UCPSchedParam(
+            priority=0, customId=0, backend=BPU_CORE_ANY, deviceId=0
+        )
+        # A flat view of each device buffer, so copies are one memmove.
+        self._in_view = np.ctypeslib.as_array(
+            (ctypes.c_char * self.nbytes).from_address(self._in_mem.virAddr)
+        )
+        self._out_view = np.ctypeslib.as_array(
+            (ctypes.c_char * self.nbytes).from_address(self._out_mem.virAddr)
+        )
+
+    def _tensors(self):
+        in_t = (DNNTensor * 1)()
+        out_t = (DNNTensor * 1)()
+        in_t[0].sysMem = self._in_mem
+        in_t[0].properties = self._in_props
+        out_t[0].sysMem = self._out_mem
+        out_t[0].properties = self._out_props
+        return in_t, out_t
+
+    def run(self, arrays) -> np.ndarray:
+        """Copy the inputs in, execute, and return the flat output values."""
+        for index, array in enumerate(arrays):
+            flat = np.ascontiguousarray(array, dtype=self.dtype).reshape(-1)[
+                : self.width
+            ]
+            if flat.size < self.width:
+                self._in_view.fill(b"\x00")
+            offset = index * self.nbytes
+            self._in_view[offset : offset + self.nbytes] = flat.view(np.uint8)
+        return self._execute()
+
+    def _execute(self) -> np.ndarray:
+        _ucp.hbUCPMemFlush(ctypes.byref(self._in_mem), CACHE_CLEAN)
+        in_t, out_t = self._tensors()
+        handle = ctypes.c_void_p()
+        rc = _dnn.hbDNNInferV2(ctypes.byref(handle), out_t, in_t, self._model)
+        if rc:
+            raise RuntimeError(f"hbDNNInferV2 rc={rc}")
+        rc = _ucp.hbUCPSubmitTask(handle, ctypes.byref(self._sched))
+        if rc:
+            raise RuntimeError(f"hbUCPSubmitTask rc={rc}")
+        rc = _ucp.hbUCPWaitTaskDone(handle, -1)
+        _ucp.hbUCPReleaseTask(handle)
+        if rc:
+            raise RuntimeError(f"hbUCPWaitTaskDone rc={rc}")
+        _ucp.hbUCPMemFlush(ctypes.byref(self._out_mem), CACHE_INVALIDATE)
+        return np.frombuffer(self._out_view, dtype=self.dtype).copy()
+
+    def close(self) -> None:
+        if getattr(self, "_in_mem", None) is not None:
+            _ucp.hbUCPFree(ctypes.byref(self._in_mem))
+            self._in_mem = None
+        if getattr(self, "_out_mem", None) is not None:
+            _ucp.hbUCPFree(ctypes.byref(self._out_mem))
+            self._out_mem = None

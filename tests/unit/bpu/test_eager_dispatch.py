@@ -80,14 +80,40 @@ def test_rank_one_entries_are_ignored(library):
     assert lib.lookup("relu", 1, (64,)) is None
 
 
-def test_lookup_is_exact_on_shape(library):
+def test_lookup_rounds_up_to_the_next_bucket(library):
     lib = E.KernelLibrary(library)
-    assert lib.lookup("relu", 1, (1, 64)) is not None
-    # A wider or narrower request must not borrow the 64-wide artifact: the
-    # shape is compiled into the graph, so a 999-wide tensor fed to a 64-wide
-    # artifact would come back as 64 values.
+    assert lib.lookup("relu", 1, (1, 64))["name"] == "relu_1x64_f32"
+    # 37 lanes fit in the 64-lane artifact: padded up, cropped back.
+    assert lib.lookup("relu", 1, (1, 37))["name"] == "relu_1x64_f32"
+    # Widths past the largest bucket have nowhere to go.
+    assert lib.lookup("relu", 1, (1, 65)) is None
     assert lib.lookup("relu", 1, (1, 999)) is None
+    # A batch dimension is not something the library serves.
     assert lib.lookup("relu", 1, (2, 64)) is None
+
+
+def test_lookup_picks_the_smallest_covering_bucket(tmp_path):
+    def entry(width):
+        return {
+            "name": f"relu_1x{width}_f32",
+            "op": "relu",
+            "nargs": 1,
+            "shape": [1, width],
+            "file": f"relu_1x{width}_f32.hbm",
+        }
+
+    manifest = {
+        "dtype": "f32",
+        "numpy_dtype": "float32",
+        "kernels": [entry(64), entry(256), entry(512)],
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    lib = E.KernelLibrary(tmp_path)
+    assert lib.lookup("relu", 1, (1, 10))["name"] == "relu_1x64_f32"
+    assert lib.lookup("relu", 1, (1, 64))["name"] == "relu_1x64_f32"
+    assert lib.lookup("relu", 1, (1, 65))["name"] == "relu_1x256_f32"
+    assert lib.lookup("relu", 1, (1, 300))["name"] == "relu_1x512_f32"
+    assert lib.lookup("relu", 1, (1, 513)) is None
 
 
 def test_missing_manifest_names_the_path(tmp_path):
@@ -117,7 +143,7 @@ def test_unknown_op_is_tallied_as_miss():
     # An op with no library entry and no reference must raise, not silently
     # return something plausible.
     with pytest.raises(NotImplementedError):
-        d.dispatch("aten.sin", [a])
+        d.dispatch("aten.sort", [a])
 
 
 def test_shape_miss_is_tallied_and_served_by_reference(library):
@@ -164,3 +190,48 @@ def test_summary_reports_the_split(library):
     text = d.summary()
     assert "0/1 on device" in text
     assert "miss_shape=1" in text
+
+
+def test_every_target_has_a_reference():
+    """A target with no reference turns a shape miss into an exception."""
+    for target in list(E._UNARY) + list(E._BINARY):
+        op = E._UNARY.get(target) or E._BINARY.get(target)
+        assert op in E._REFERENCE, f"{target} -> {op} has no reference"
+
+
+def test_op_tables_are_internally_consistent():
+    assert set(E._UNARY.values()) <= set(E._REFERENCE)
+    assert set(E._BINARY.values()) <= set(E._REFERENCE)
+    # Everything the dispatcher can serve has to come from the library too,
+    # otherwise the reference is doing the work under a "hit" label.
+    for op in set(E._UNARY.values()) | set(E._BINARY.values()):
+        assert op in E._REFERENCE
+
+
+def test_aliases_point_at_the_right_op():
+    assert E._UNARY["aten.negative"] == "neg"
+    assert E._UNARY["aten.relu"] == "relu"
+    assert E._UNARY["aten.relu.default"] == "relu"
+    assert E._BINARY["aten.pow.Tensor_Tensor"] == "pow"
+    assert E._BINARY["aten.maximum"] == "max"
+
+
+def test_reference_matches_torch_for_the_extended_ops():
+    import torch
+
+    d = E.EagerDispatcher(None)
+    x = np.array([[-1.5, -0.5, 0.0, 0.5, 1.5]], dtype=np.float32)
+    checks = {
+        "aten.ceil": torch.ceil,
+        "aten.floor": torch.floor,
+        "aten.sign": torch.sign,
+        "aten.erf": torch.erf,
+        "aten.gelu": torch.nn.functional.gelu,
+        "aten.mish": torch.nn.functional.mish,
+        "aten.elu": torch.nn.functional.elu,
+        "aten.reciprocal": torch.reciprocal,
+    }
+    for target, fn in checks.items():
+        want = fn(torch.from_numpy(x)).numpy()
+        got = d.dispatch(target, [x])
+        assert np.allclose(got, want, atol=1e-5), target
