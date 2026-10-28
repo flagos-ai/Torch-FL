@@ -52,6 +52,22 @@ import torch_fl  # noqa: F401  -- registers the device
 CUDA_ABI_PLATFORMS = ("cuda", "dcu", "metax", "ppu")
 
 
+def _copy_ops_source():
+    """``csrc/aten/copy_ops.cc``, or skip when this job has no checkout.
+
+    The source pins below read the arm out of the tree rather than measuring it,
+    so they answer on a host with no device. What they cannot answer on is a job
+    that installed the wheel and runs the suite from a temporary directory: the
+    sources are in the workspace that job checked out, not three levels above
+    this file's copy. Reading them there is a ``FileNotFoundError``, which reads
+    as the regression the pin looks for and is not one -- so it is a skip.
+    """
+    copy_ops = Path(__file__).resolve().parents[3] / "csrc/aten/copy_ops.cc"
+    if not copy_ops.is_file():
+        pytest.skip(f"no source checkout to read {copy_ops} from")
+    return copy_ops.read_text()
+
+
 def _flagos_available():
     try:
         return (
@@ -180,15 +196,7 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     then it boxed unconditionally, which on the CPU-only torch the NVIDIA wheel
     ships is a call into an empty CUDA DispatchStub (run 40285867035).
     """
-    source_root = Path(__file__).resolve().parents[3]
-    copy_ops = source_root / "csrc/aten/copy_ops.cc"
-    if not copy_ops.is_file():
-        # The group runs on the installed wheel, not the checkout: the sources
-        # are in the workspace the job checked out, not beside this file's copy
-        # in the job's temporary directory. Nothing to read means this pin
-        # cannot answer -- which is a skip, not the regression it looks for.
-        pytest.skip(f"no source checkout to read {copy_ops} from")
-    src = copy_ops.read_text()
+    src = _copy_ops_source()
     # The non-boxing arm is the second `#else` of the FLAGOS_BOXING_BUILD pair
     # inside the same-device flagos->flagos branch.
     # Anchor on the _to_copy dtype branch specifically: the file also has a
@@ -314,9 +322,7 @@ def test_copy_arm_boxes_instead_of_going_host(platform):
     kernel. It has one -- `DeviceBoxingGuard` reaches it, and the boxing
     kernels are not involved.
     """
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parents[3] / "csrc/aten/copy_ops.cc").read_text()
+    src = _copy_ops_source()
     # The flagos -> flagos branch of _copy_from, told apart from its
     # device <-> host siblings by the fast-path comment above it.
     marker = "// Fast path: both contiguous, same shape and dtype"
