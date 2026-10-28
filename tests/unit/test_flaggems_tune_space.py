@@ -265,12 +265,15 @@ def fitted_tuner(as_musa, stub_libentry):
     """The stub with the real patch installed on it, as device init leaves it.
 
     Installed per test rather than once per session because the marker lives on
-    the stub class, and a class built per test has no marker -- sharing one
-    instance across tests would also make the patch's own once-only guard the
-    thing under test instead of the wrapper.
+    the stub's ``run``, and a class built per test has a fresh one -- sharing a
+    single instance across tests would also make the patch's own once-only
+    guard the thing under test instead of the wrapper.
     """
     flagos._patch_flaggems_tune_space()
-    assert getattr(stub_libentry.LibTuner, flagos._TUNE_SPACE_PATCHED, False)
+    # The marker lives on ``run``, not on the class: the patch wraps the method
+    # so every policy subclass inherits it, and a class-level marker would stop
+    # a subclass built after this point from being repaired.
+    assert getattr(stub_libentry.LibTuner.run, flagos._TUNE_SPACE_PATCHED, False)
     return stub_libentry
 
 
@@ -283,7 +286,7 @@ def test_off_the_measured_backend_nothing_is_patched(monkeypatch, stub_libentry)
     flagos._patch_flaggems_tune_space()
 
     assert stub_libentry.LibTuner.run is before
-    assert not getattr(stub_libentry.LibTuner, flagos._TUNE_SPACE_PATCHED, False)
+    assert not getattr(stub_libentry.LibTuner.run, flagos._TUNE_SPACE_PATCHED, False)
 
 
 def test_a_launch_the_device_takes_is_never_refitted(monkeypatch, fitted_tuner):
