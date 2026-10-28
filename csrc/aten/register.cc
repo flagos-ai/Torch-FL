@@ -894,11 +894,41 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
   #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
   m.impl("mm", WrapperMm);
+  #if !defined(FLAGOS_ACCEL_DCU)
   m.impl("mm.dtype", WrapperMmDtype);
   m.impl("mm.dtype_out", WrapperMmDtypeOut);
   m.impl("mm.out", WrapperMmOut);
   m.impl("bmm.dtype", WrapperBmmDtype);
   m.impl("bmm.dtype_out", WrapperBmmDtypeOut);
+  #else
+  // On DCU these keys are `none` in the conf (a claim cannot cpu_fallback), so
+  // their own wrapper must not be what is claimed: it calls the whole.op
+  // dispatcher, which answers by the key the CALL is made under, and the
+  // dispatcher refuses that before the prelude runs (run 40615250313,
+  // test_mm_out). The claim follows the mm/bmm route the dispatcher follows
+  // instead -- a form that answers a new tensor is the plain mm/bmm, and one
+  // that writes `out` stores that answer, which is what Pick in
+  // soft_lowp/ops.cc does for a decoded pair.
+  m.impl("mm.dtype", WrapperMmDtype);
+  m.impl("mm.dtype_out",
+         [](const at::Tensor& self, const at::Tensor& mat2,
+            c10::ScalarType out_dtype, at::Tensor& out) -> at::Tensor& {
+           out.copy_(WrapperMmDtype(self, mat2, out_dtype));
+           return out;
+         });
+  m.impl("mm.out", [](const at::Tensor& self, const at::Tensor& mat2,
+                      at::Tensor& out) -> at::Tensor& {
+    out.copy_(WrapperMm(self, mat2));
+    return out;
+  });
+  m.impl("bmm.dtype", WrapperBmmDtype);
+  m.impl("bmm.dtype_out",
+         [](const at::Tensor& self, const at::Tensor& mat2,
+            c10::ScalarType out_dtype, at::Tensor& out) -> at::Tensor& {
+           out.copy_(WrapperBmmDtype(self, mat2, out_dtype));
+           return out;
+         });
+  #endif
   #if !defined(FLAGOS_ACCEL_METAX)
   // Metax's conf routes these two to flaggems_cpp, so its generated list
   // claims the same wrappers already.

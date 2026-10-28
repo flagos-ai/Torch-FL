@@ -90,6 +90,35 @@ HAND_REGISTERED_CLAIMS = {
     "hygon": {"mm", "bmm"},
 }
 
+# Ops register.cc claims on every FlagGems-primary build that compiles the
+# soft-lowp prelude (its `mm`/`bmm` block), whatever their conf route. The
+# op's own claim then follows whatever the conf says about its own key:
+#
+#   * a key the conf routes to a backend -- claim the generated wrapper;
+#   * a key the conf routes `none` -- claim SoftLowpRoutedByPair instead, which
+#     hands an ordinary call to the mm/bmm key the conf does route, so
+#     registration and that route agree. Claiming the plain wrapper instead
+#     made every `mm.out` raise "routed to 'none' ... but the op is registered"
+#     on DCU (run 40615250313, test_mm_out): the wrapper calls the
+#     whole-op dispatcher, which answers by the key the call is made under.
+SOFT_LOWP_PAIR_CLAIMS = {
+    "hygon": {
+        "mm.dtype": "mm",
+        "mm.dtype_out": "mm",
+        "mm.out": "mm",
+        "bmm.dtype": "bmm",
+        "bmm.dtype_out": "bmm",
+        "bmm.out": "bmm",
+    },
+}
+
+# The wrapper a soft-lowp pair claim emits for a key the conf leaves `none`,
+# one entry per route key the pair is followed to.
+CLAIM_MACROS = {
+    "mm": "FLAGOS_SOFT_LOWP_CLAIM_AS_MM",
+    "bmm": "FLAGOS_SOFT_LOWP_CLAIM_AS_BMM",
+}
+
 # Conf values that are not a FlagGems backend: `cuda` is the boxing kernel,
 # `none` is cpu_fallback, and the empty value is a malformed line.
 # (`cuda` is the pre-rename spelling of the NVIDIA boxing key; a conf written
@@ -292,15 +321,42 @@ def target_ops(platform, wrappers, kernel_ops):
             f"backends_{platform}.conf routes these to a FlagGems backend but "
             f"{REGISTER_INC.relative_to(REPO)} has no wrapper: " + ", ".join(unserved)
         )
+    # A matrix form the conf leaves `none` is still claimed, by the wrapper
+    # that follows the pair's own route (see SOFT_LOWP_PAIR_CLAIMS). The op
+    # comes off the excluded list and the route key is out of `none`.
+    paired = SOFT_LOWP_PAIR_CLAIMS.get(platform, {})
+    no_kernel = [op for op in no_kernel if op not in paired]
     return registered, no_kernel
+
+
+def soft_lowp_pair_claimed(platform, wrappers):
+    """The matrix forms this list claims for a conf that routes them `none`.
+
+    Only a form the conf leaves `none` is claimed here; one the conf routes to
+    a FlagGems backend is already in the plain list and needs nothing.
+    """
+    routes = conf_routes(platform)
+    paired = SOFT_LOWP_PAIR_CLAIMS.get(platform, {})
+    out = {}
+    for op, key in paired.items():
+        if routes.get(op) != "none":
+            continue
+        if op not in wrappers:
+            raise SystemExit(
+                f"backends_{platform}.conf: {op} is a soft-lowp pair claim but "
+                f"{REGISTER_INC.relative_to(REPO)} has no wrapper for it"
+            )
+        out[op] = key
+    return out
 
 
 def render(platform, wrappers, kernel_ops):
     ops, no_kernel = target_ops(platform, wrappers, kernel_ops)
+    paired = soft_lowp_pair_claimed(platform, wrappers)
     lines = [
         HEADER.format(
             platform=platform,
-            count=len(ops),
+            count=len(ops) + len(paired),
             extra="",
         )
     ]
@@ -309,6 +365,16 @@ def render(platform, wrappers, kernel_ops):
         lines.extend(f"//   - {op}\n" for op in no_kernel)
     lines.append("\n")
     lines.extend(f'  m.impl("{op}", {wrappers[op]});\n' for op in ops)
+    if paired:
+        lines.append(
+            "\n// Matrix forms the conf leaves `none`: claimed by the pair's\n"
+            "// route, not by the slot this key names (see register.cc's\n"
+            "// mm/bmm block).\n"
+        )
+        lines.extend(
+            f'  {CLAIM_MACROS[key]}("{op}", {wrappers[op]});\n'
+            for op, key in sorted(paired.items())
+        )
     return "".join(lines)
 
 
