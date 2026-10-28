@@ -799,13 +799,18 @@ def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
         op
         for op, key in SOFT_LOWP_PAIR_FORMS.items()
         if key in claimed_here
-        # A form the conf leaves `none` belongs to the pair arm above, and that
-        # arm runs on DCU only (see SOFT_LOWP_PAIR_CLAIMS in the list
-        # generator): metax's `mm` family is genuinely unreachable, which is
-        # what its conf says, and the way to change that is the conf's `mm`
-        # route -- never a claim, which raises on every ordinary call.
         or routes.get(key) != "none"
-    } | SOFT_LOWP_CLAIMS
+        # An mm/bmm form the pair's own key leaves `none` belongs to the pair
+        # arm -- and that arm runs on DCU only (see SOFT_LOWP_PAIR_CLAIMS in the
+        # list generator). On metax it is genuinely unreachable, which is what
+        # the conf says, and the way to change that is the conf's `mm` route,
+        # never a claim, which raises on every ordinary call.
+        or routes.get(op) != "none"
+    } | {
+        op
+        for op in SOFT_LOWP_CLAIMS
+        if routes.get(op) != "none" or op in claimed_here or op in listed
+    }
     missing = sorted(op for op in forms if op not in claimed_here and op not in listed)
     assert not missing, (
         f"{platform}: the software low-precision matrix ops {missing} are "
@@ -836,13 +841,16 @@ def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
             f"Guard text found:\n{guard_block}"
         )
     else:
-        # Nothing to gate: `mm` is on `none` here, so the block must not claim
-        # it at all -- a claim on a `none` route is the dispatcher's raise for
-        # every ordinary call (metax, run 40629858404).
-        assert 'm.impl("mm", WrapperMm);' not in register_cc, (
+        # Nothing to gate: `mm` is on `none` here, so this platform's build must
+        # not compile the claim -- a claim on a `none` route is the dispatcher's
+        # raise for every ordinary call (metax, run 40629858404). Read through
+        # the guard, not the file: the line is still there for the platforms
+        # that do want it.
+        claimed_here = _claim_block(register_cc, platform)
+        assert "mm" not in claimed_here and "bmm" not in claimed_here, (
             f"{platform}: the conf routes `mm` to `none`, so register.cc must "
-            'not claim it -- the claim turns every torch.mm into "routed to '
-            "'none' ... but the op is registered on PrivateUse1\""
+            "not claim mm/bmm for it -- the claim turns every torch.mm into "
+            "\"routed to 'none' ... but the op is registered on PrivateUse1\""
         )
     # Where the conf leaves a form `none` AND the pair is claimed, the generated
     # list must claim it by the mm/bmm key; where it names a FlagGems backend
