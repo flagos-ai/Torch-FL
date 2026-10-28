@@ -1230,6 +1230,19 @@ FLAGGEMS_PYTHON_PLATFORMS = {
 # cached tuned config is not the reason, and in a fresh process whose
 # `[flagos dispatch]` line reads `mm -> flaggems`.
 #
+# `mm` specifically survives the *other* way, independently of that filter: it
+# is a dotted call, and the caller re-resolves dotted FlagGems targets through
+# the package top level (flag_gems' SpecOpRegistrar), so `mm` reaches
+# _ascend.ops.mm, whose kernel declares SPLIT_K. The `.out` spelling is a
+# keyword call and used not to take that step, so it reached
+# flag_gems.ops.mm:mm_out -> mm_kernel_general, which does not declare SPLIT_K,
+# and the autotuner's benchmark call goes to the triton JIT function directly --
+# the CI traceback (Ascend lane, run 40656617119 at 0a2a74b3,
+# `torch.mm(a, b, out=out)`) ends in jit.py:699 _pack_args, where no libentry
+# filter sits in the way. So the pin's symptom was still live for `mm.out`;
+# it is fixed in the caller (GetFuncBare) rather than by routing, because the
+# route was always the right one and the callable was the wrong one.
+#
 # Routing them here also fixes numerics the runtime-conformance suite reads. At
 # 64x64 with a fixed seed, FlagGems matches an fp32 CPU reference to 8.6e-6
 # max-abs; the aclnn route returns 4.7e-3, which misses a rtol=atol=1e-3
