@@ -228,7 +228,23 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         # record rather than the platform name for the same reason as the
         # `cuda` marker gate in tests/integration/ops/conftest.py: the two
         # stopped being interchangeable when boxing became an opt-in.
-        memset=device and platform in {"cuda", "metax"} and _boxing_built(),
+        #
+        # DCU is in the set on the same terms. The emission path exists: the
+        # roctracer tracer classifies a device memset as
+        # `EventKind::Memset` (csrc/profiler/roctracer_device_tracer.cc:374)
+        # and the kineto layer maps that to `GPU_MEMSET`
+        # (csrc/profiler/flagos_kineto_profiler.cc:202-203), so a DCU trace can
+        # carry the category the parity baseline expects. What produces the
+        # event is DTK's rocBLAS zeroing its gemm workspace through hipMemset,
+        # which only a boxing wheel's route reaches -- hence `_boxing_built()`
+        # here, same as cuda and metax. The vendor build still answers False:
+        # `backends_hygon.conf` leaves the probe op `none`, so it reaches
+        # cpu_fallback and no rocBLAS call is made.
+        #
+        # The event count on a boxing DCU wheel is not pinned here because it
+        # is a property of DTK's rocBLAS, not of this tree; the parity test only
+        # asserts the category is present and its arg keys are a superset.
+        memset=device and platform in {"cuda", "metax", "dcu"} and _boxing_built(),
         flow=device,
         linkage=device,
         metadata=device,
