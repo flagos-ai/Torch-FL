@@ -36,7 +36,13 @@ def _install_fake_flag_gems(monkeypatch, original=_fallback_seed_offset):
             "flag_gems.utils.random_utils": random_utils,
         },
     )
-    monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "musa")
+    # The record holds the vendor, which is what the bridge's gate reads; the
+    # platform id "musa" is normalised to it at build time.
+    monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "mthreads")
+    # The other half of that gate reads the installed conf, which is this host's
+    # and has nothing to do with the bridge under test. Stand it up explicitly
+    # so the test is the same on a host whose conf routes no op to FlagGems.
+    monkeypatch.setattr(torch_fl, "_conf_routes_to_flaggems", lambda: True)
     return random_utils
 
 
