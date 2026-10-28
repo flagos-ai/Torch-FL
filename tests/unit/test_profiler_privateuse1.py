@@ -41,7 +41,9 @@ import torch
 from torch.profiler import ProfilerActivity, profile
 
 
-_CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "metax")
+# Both spellings of the build's platform: setup.py writes the vendor name
+# ("nvidia", "metax") and CMake the platform id ("cuda").
+_CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "nvidia", "metax")
 
 # Mirrors csrc/runtime/guard.h. Three tail branches build a flagos stream, and
 # only two of them carry a real handle: USE_ASCEND wraps the aclrtStream pointer
