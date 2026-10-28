@@ -602,9 +602,15 @@ def test_device_properties_follow_the_torch_cuda_availability(
     record = DeviceProperties.create(torch.device("flagos", 0))
     if torch_cuda_kernels:
         # CUDA-enabled vendor builds receive the equivalent torch.cuda device,
-        # whose index must match the flagos device.
+        # whose index must match the flagos device. The expectation is built
+        # with the same constructor the patch calls rather than with a literal
+        # "cuda": on a CUDA-like build whose torch has no CUDA runtime behind
+        # it, torch_fl installs the cuda->flagos device alias on purpose (see
+        # _alias_cuda_to_flagos in torch_fl/__init__.py), so torch.device
+        # ("cuda", 0) *is* the flagos device there and a literal type check
+        # would assert the opposite of what the package does.
         assert len(delegated) == 1
-        assert delegated[0].type == "cuda"
+        assert delegated[0] == torch.device("cuda", 0)
         assert delegated[0].index == 0
         assert flagos_properties == []
     else:
