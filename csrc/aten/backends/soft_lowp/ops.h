@@ -79,6 +79,42 @@ at::Tensor& BmmOut(
     const at::Tensor& mat2,
     at::Tensor& out);
 
+// The same forms, claimed by the mm/bmm key rather than by their own slot.
+//
+// Registration says which key an op is made under; these say which route the
+// call takes. They exist for a conf that routes `mm`/`bmm` and leaves their
+// out forms `none`: the form's own wrapper calls the whole-op dispatcher,
+// which answers by the key the CALL is made under, and the dispatcher refuses
+// that before the prelude runs. Following the pair's route here is what Pick
+// does for a decoded pair -- an answer-shaped form is the plain mm/bmm, and a
+// form that writes `out` stores that answer.
+at::Tensor WrapperMdtypeAsMm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype);
+at::Tensor& WrapperMdtypeOutAsMm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype,
+    at::Tensor& out);
+at::Tensor& WrapperMoutAsMm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out);
+at::Tensor WrapperBdtypeAsBmm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype);
+at::Tensor& WrapperBdtypeOutAsBmm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype,
+    at::Tensor& out);
+at::Tensor& WrapperBoutAsBmm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out);
+
 at::Tensor Addmm(
     const at::Tensor& self,
     const at::Tensor& mat1,

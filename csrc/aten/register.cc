@@ -894,47 +894,18 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
   #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
   m.impl("mm", WrapperMm);
-  #if !defined(FLAGOS_ACCEL_DCU)
-  m.impl("mm.dtype", WrapperMmDtype);
-  m.impl("mm.dtype_out", WrapperMmDtypeOut);
-  m.impl("mm.out", WrapperMmOut);
-  m.impl("bmm.dtype", WrapperBmmDtype);
-  m.impl("bmm.dtype_out", WrapperBmmDtypeOut);
-  #else
-  // On DCU these keys are `none` in the conf (a claim cannot cpu_fallback), so
-  // their own wrapper must not be what is claimed: it calls the whole.op
-  // dispatcher, which answers by the key the CALL is made under, and the
-  // dispatcher refuses that before the prelude runs (run 40615250313,
-  // test_mm_out). The claim follows the mm/bmm route the dispatcher follows
-  // instead -- a form that answers a new tensor is the plain mm/bmm, and one
-  // that writes `out` stores that answer, which is what Pick in
-  // soft_lowp/ops.cc does for a decoded pair.
-  m.impl("mm.dtype", WrapperMmDtype);
-  m.impl("mm.dtype_out",
-         [](const at::Tensor& self, const at::Tensor& mat2,
-            c10::ScalarType out_dtype, at::Tensor& out) -> at::Tensor& {
-           out.copy_(WrapperMmDtype(self, mat2, out_dtype));
-           return out;
-         });
-  m.impl("mm.out", [](const at::Tensor& self, const at::Tensor& mat2,
-                      at::Tensor& out) -> at::Tensor& {
-    out.copy_(WrapperMm(self, mat2));
-    return out;
-  });
-  m.impl("bmm.dtype", WrapperBmmDtype);
-  m.impl("bmm.dtype_out",
-         [](const at::Tensor& self, const at::Tensor& mat2,
-            c10::ScalarType out_dtype, at::Tensor& out) -> at::Tensor& {
-           out.copy_(WrapperBmmDtype(self, mat2, out_dtype));
-           return out;
-         });
-  #endif
+  // DCU's conf routes `bmm` to a FlagGems backend the generated list reaches
+  // no dispatcher for, so the list leaves it unclaimed and this block is its
+  // only claim. Metax's is a FlagGems key the list does serve, which is why it
+  // is guarded out there.
   #if !defined(FLAGOS_ACCEL_METAX)
-  // Metax's conf routes these two to flaggems_cpp, so its generated list
-  // claims the same wrappers already.
   m.impl("bmm", WrapperBmm);
-  m.impl("bmm.out", WrapperBmmOut);
   #endif
+  // The other matrix forms are not claimed here: their generated list claims
+  // them (see SOFT_LOWP_PAIR_CLAIMS in the boxing/FlagGems list generator),
+  // because which wrapper a form takes depends on its conf route, which the
+  // list already reads. A second m.impl for one of them in this body is a
+  // duplicate.
   m.impl("_scaled_mm", WrapperPrivScaledMm);
   m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
   m.impl("_scaled_mm_v2", WrapperPrivScaledMmV2);

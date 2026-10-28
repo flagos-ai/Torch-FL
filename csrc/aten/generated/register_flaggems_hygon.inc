@@ -477,9 +477,9 @@
 // Matrix forms the conf leaves `none`: claimed by the pair's
 // route, not by the slot this key names (see register.cc's
 // mm/bmm block).
-  FLAGOS_SOFT_LOWP_CLAIM_AS_BMM("bmm.dtype", WrapperBmmDtype);
-  FLAGOS_SOFT_LOWP_CLAIM_AS_BMM("bmm.dtype_out", WrapperBmmDtypeOut);
-  FLAGOS_SOFT_LOWP_CLAIM_AS_BMM("bmm.out", WrapperBmmOut);
-  FLAGOS_SOFT_LOWP_CLAIM_AS_MM("mm.dtype", WrapperMmDtype);
-  FLAGOS_SOFT_LOWP_CLAIM_AS_MM("mm.dtype_out", WrapperMmDtypeOut);
-  FLAGOS_SOFT_LOWP_CLAIM_AS_MM("mm.out", WrapperMmOut);
+  m.impl("bmm.dtype", native::flagos::soft_lowp::WrapperBdtypeAsBmm);
+  m.impl("bmm.dtype_out", native::flagos::soft_lowp::WrapperBdtypeOutAsBmm);
+  m.impl("bmm.out", native::flagos::soft_lowp::WrapperBoutAsBmm);
+  m.impl("mm.dtype", native::flagos::soft_lowp::WrapperMdtypeAsMm);
+  m.impl("mm.dtype_out", native::flagos::soft_lowp::WrapperMdtypeOutAsMm);
+  m.impl("mm.out", native::flagos::soft_lowp::WrapperMoutAsMm);

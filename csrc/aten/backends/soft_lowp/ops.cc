@@ -1277,4 +1277,91 @@ at::Tensor& AddmmInplace(
                       alpha, self);
 }
 
+// The mm/bmm-keyed claims (see ops.h). Each runs the low-precision prelude
+// first, so an FP8/FP4 operand still reaches the software path, then takes the
+// mm/bmm route -- the one the dispatcher picks for the pair, and not the key
+// this claim is made under, which the conf leaves `none`. An out form stores
+// the answer rather than writing through that key's `out` slot.
+namespace {
+
+template <typename Fn>
+at::Tensor OrMmRoute(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    Fn&& compute) {
+  if (!IsDispatchSuppressed() &&
+      (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type()))) {
+    return compute();
+  }
+  return at::mm(self, mat2);
+}
+
+template <typename Fn>
+at::Tensor OrBmmRoute(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    Fn&& compute) {
+  if (!IsDispatchSuppressed() &&
+      (IsLowPrecision(self.scalar_type()) || IsLowPrecision(mat2.scalar_type()))) {
+    return compute();
+  }
+  return at::bmm(self, mat2);
+}
+
+} // namespace
+
+at::Tensor WrapperMdtypeAsMm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype) {
+  return OrMmRoute(self, mat2,
+      [&] { return MmDtype(self, mat2, out_dtype); });
+}
+
+at::Tensor& WrapperMdtypeOutAsMm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype,
+    at::Tensor& out) {
+  out.copy_(OrMmRoute(self, mat2,
+      [&] { return MmDtype(self, mat2, out_dtype); }));
+  return out;
+}
+
+at::Tensor& WrapperMoutAsMm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out) {
+  out.copy_(OrMmRoute(self, mat2,
+      [&] { return Mm(self, mat2); }));
+  return out;
+}
+
+at::Tensor WrapperBdtypeAsBmm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype) {
+  return OrBmmRoute(self, mat2,
+      [&] { return BmmDtype(self, mat2, out_dtype); });
+}
+
+at::Tensor& WrapperBdtypeOutAsBmm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    c10::ScalarType out_dtype,
+    at::Tensor& out) {
+  out.copy_(OrBmmRoute(self, mat2,
+      [&] { return BmmDtype(self, mat2, out_dtype); }));
+  return out;
+}
+
+at::Tensor& WrapperBoutAsBmm(
+    const at::Tensor& self,
+    const at::Tensor& mat2,
+    at::Tensor& out) {
+  out.copy_(OrBmmRoute(self, mat2,
+      [&] { return Bmm(self, mat2); }));
+  return out;
+}
+
 } // namespace at::native::flagos::soft_lowp

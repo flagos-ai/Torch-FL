@@ -102,21 +102,29 @@ HAND_REGISTERED_CLAIMS = {
 #     on DCU (run 40615250313, test_mm_out): the wrapper calls the
 #     whole-op dispatcher, which answers by the key the call is made under.
 SOFT_LOWP_PAIR_CLAIMS = {
-    "hygon": {
+    platform: {
         "mm.dtype": "mm",
         "mm.dtype_out": "mm",
         "mm.out": "mm",
         "bmm.dtype": "bmm",
         "bmm.dtype_out": "bmm",
         "bmm.out": "bmm",
-    },
+    }
+    for platform in ("hygon", "metax")
 }
 
-# The wrapper a soft-lowp pair claim emits for a key the conf leaves `none`,
-# one entry per route key the pair is followed to.
-CLAIM_MACROS = {
-    "mm": "FLAGOS_SOFT_LOWP_CLAIM_AS_MM",
-    "bmm": "FLAGOS_SOFT_LOWP_CLAIM_AS_BMM",
+# The forwarders a soft-lowp pair claim names for a key the conf leaves `none`,
+# one per route key the pair is followed to. soft_lowp/ops.cc defines them:
+# each runs the low-precision prelude and then takes the mm/bmm route, storing
+# an out form's answer, which is the route the dispatcher itself follows for
+# such a pair.
+PAIR_FORWARDERS = {
+    "mm.dtype": "native::flagos::soft_lowp::WrapperMdtypeAsMm",
+    "mm.dtype_out": "native::flagos::soft_lowp::WrapperMdtypeOutAsMm",
+    "mm.out": "native::flagos::soft_lowp::WrapperMoutAsMm",
+    "bmm.dtype": "native::flagos::soft_lowp::WrapperBdtypeAsBmm",
+    "bmm.dtype_out": "native::flagos::soft_lowp::WrapperBdtypeOutAsBmm",
+    "bmm.out": "native::flagos::soft_lowp::WrapperBoutAsBmm",
 }
 
 # Conf values that are not a FlagGems backend: `cuda` is the boxing kernel,
@@ -372,7 +380,7 @@ def render(platform, wrappers, kernel_ops):
             "// mm/bmm block).\n"
         )
         lines.extend(
-            f'  {CLAIM_MACROS[key]}("{op}", {wrappers[op]});\n'
+            f'  m.impl("{op}", {PAIR_FORWARDERS[op]});\n'
             for op, key in sorted(paired.items())
         )
     return "".join(lines)

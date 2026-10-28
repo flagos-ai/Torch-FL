@@ -209,6 +209,37 @@ def _lines_kept_on(block: str, platform: str) -> list[str]:
     return kept
 
 
+def _claim_block(register_cc: str, platform: str) -> set[str]:
+    """The matrix-op claims register.cc makes for ``platform``, guard honoured.
+
+    The block runs from its ``#if defined(FLAGOS_ACCEL_METAX) ||`` guard to the
+    matching ``#endif`` -- nested guards and all -- not to the first one, which
+    closes a nested region.
+    """
+    start = register_cc.rfind("#if defined(FLAGOS_ACCEL_METAX) ||")
+    assert start != -1, "register.cc no longer opens the soft-lowp claim block"
+    depth = 0
+    offset = start
+    end = None
+    for line in register_cc[start:].splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("#if"):
+            depth += 1
+        elif stripped.startswith("#endif"):
+            depth -= 1
+            if depth == 0:
+                end = offset + len(line)
+                break
+        offset += len(line)
+    assert end is not None, "the soft-lowp claim block is not closed"
+    block = register_cc[start:end]
+    return set(
+        re.findall(
+            r'^\s*m\.impl\("([^"]+)",', "\n".join(_lines_kept_on(block, platform)), re.M
+        )
+    )
+
+
 def _registered_ops(inc_path: Path) -> set[str]:
     """Read ``m.impl("op", ...)`` names from a registration ``.inc``."""
     if not inc_path.exists():
@@ -699,6 +730,26 @@ def test_conf_route_counts_are_stable():
 # then the inconsistency: the same wheel gated one fingerprint and not the
 # other, and an FP8 mm answered through the conf's route instead (measured on
 # DCU, bw1100).
+# The forms a decoded pair can be routed by where the conf leaves the form's
+# own key `none`: claimed under the mm/bmm key, which is where the dispatcher
+# sends the call (SOFT_LOWP_PAIR_CLAIMS in the registration list generator).
+SOFT_LOWP_PAIR_FORMS = {
+    "mm.dtype": "mm",
+    "mm.dtype_out": "mm",
+    "mm.out": "mm",
+    "bmm.dtype": "bmm",
+    "bmm.dtype_out": "bmm",
+    "bmm.out": "bmm",
+}
+_FORM_SUFFIX = {
+    "mm.dtype": "Mdtype",
+    "mm.dtype_out": "MdtypeOut",
+    "mm.out": "Mout",
+    "bmm.dtype": "Bdtype",
+    "bmm.dtype_out": "BdtypeOut",
+    "bmm.out": "Bout",
+}
+
 SOFT_LOWP_CLAIMS = {
     "addmm",
     "addmm.dtype",
@@ -737,10 +788,16 @@ def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
     wrapper never runs.
     """
     register_cc = (ATEN_DIR / "register.cc").read_text()
+    # The block the claim sits in, not the whole file: `mm.out` is named by
+    # every one of these guards (the conv crossing and the pair claims), and a
+    # substring search of the file would credit a platform with a claim the
+    # guard above is there to withhold.
+    claimed_here = _claim_block(register_cc, platform)
     listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
-    missing = sorted(
-        op for op in SOFT_LOWP_CLAIMS if op not in register_cc and op not in listed
-    )
+    forms = {
+        op for op, key in SOFT_LOWP_PAIR_FORMS.items() if key in claimed_here
+    } | SOFT_LOWP_CLAIMS
+    missing = sorted(op for op in forms if op not in claimed_here and op not in listed)
     assert not missing, (
         f"{platform}: the software low-precision matrix ops {missing} are "
         "registered on PrivateUse1 by neither register.cc nor the generated "
@@ -755,13 +812,33 @@ def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
     """The claim must sit under a macro the platform defining the prelude sets."""
     register_cc = (ATEN_DIR / "register.cc").read_text()
     expected = SOFT_LOWP_PLATFORMS[platform]
-    idx = register_cc.rfind('m.impl("bmm.dtype",')
-    assert idx != -1, "bmm.dtype is not claimed from register.cc"
+    # The claims this block makes itself: `mm`, and `bmm` where the generated
+    # list cannot reach it. The other matrix forms are the list's (see
+    # SOFT_LOWP_PAIR_CLAIMS), so they are checked there.
+    claims = ['m.impl("mm", WrapperMm);', 'm.impl("bmm", WrapperBmm);']
+    idx = max(register_cc.rfind(claim) for claim in claims)
+    assert idx != -1, "neither mm nor bmm is claimed from register.cc"
     guard_block = register_cc[max(0, idx - 1600) : idx]
     assert expected in guard_block, (
         f"{platform}: the soft-lowp matrix claim is not gated on {expected}. "
         f"Guard text found:\n{guard_block}"
     )
+    # Where the conf leaves a form `none`, the generated list must claim it by
+    # the mm/bmm key; where it names a FlagGems backend the plain wrapper is
+    # the claim (and an `mm.out` route under that name would raise).
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    listed = (GEN_DIR / f"register_flaggems_{platform}.inc").read_text()
+    for op, key in SOFT_LOWP_PAIR_FORMS.items():
+        if routes.get(op) != "none":
+            continue
+        forwarder = {
+            "mm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsMm",
+            "bmm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsBmm",
+        }[key]
+        assert f'm.impl("{op}", {forwarder});' in listed, (
+            f"{platform}: {op} is routed `none` and the generated list does not "
+            "claim it by the mm/bmm key, so the call refuses before the prelude"
+        )
 
 
 @pytest.mark.anyplatform
@@ -770,18 +847,14 @@ def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
     """A second m.impl for one op in one TORCH_LIBRARY_IMPL body is a compile error.
 
     The generated FlagGems list is included in the same body as the claims
-    above, so an op it already names -- metax's ``bmm`` and ``bmm.out``, whose
-    conf routes them to ``flaggems_cpp`` -- must not be claimed again. Such an
-    op is guarded out by name, on every platform: a guard that only excludes
-    the platform it was written for still duplicates on the other one.
+    above, so an op it already names -- metax's ``bmm``, whose conf routes it
+    to ``flaggems_cpp``, and every matrix form the soft-lowp pair claims -- must
+    not be claimed again. Such an op is guarded out by name, on every platform:
+    a guard that only excludes the platform it was written for still
+    duplicates on the other one.
     """
     register_cc = (ATEN_DIR / "register.cc").read_text()
-    start = register_cc.rfind("#if defined(FLAGOS_ACCEL_METAX) ||")
-    block = register_cc[start : register_cc.find("\n  #endif", start)]
-    on_platform = [line for line in _lines_kept_on(block, platform)]
-    claimed_here = set(
-        re.findall(r'^\s*m\.impl\("([^"]+)",', "\n".join(on_platform), re.M)
-    )
+    claimed_here = _claim_block(register_cc, platform)
     listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
     duplicated = sorted(claimed_here & listed)
     assert not duplicated, (
