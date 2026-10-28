@@ -628,11 +628,17 @@ elseif(_flagos_is_musa)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${MUDNN_LIB} ${MURAND_LIB})
   endif()
 elseif(_flagos_is_bpu)
-  # Selects backends/bpu_memory.h and skips the generated PrivateUse1 op
-  # registrations: the BPU executes whole compiled graphs, so there is no per-op
-  # kernel to register and every aten call reaches cpu_fallback. Acceleration
-  # comes from the torch.compile backend instead.
-  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  # Selects backends/bpu_memory.h and skips the full generated PrivateUse1 op
+  # list, replacing it with the ops that have a BPU kernel behind them
+  # (backends/bpu/generated/bpu_register.inc). Those kernels submit compiled
+  # artifacts from the operator library named by FLAGOS_BPU_OPLIB; a board
+  # without it keeps the old behaviour, where every aten call reaches
+  # cpu_fallback. Whole-graph acceleration is the torch.compile backend.
+  #
+  # The operator layer (backends/bpu/bpu_oplib.cc) opens libdnn.so and
+  # libhbucp.so with dlopen rather than linking them: the board ships the
+  # libraries without headers, and a build host without them still links.
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs} ${CMAKE_DL_LIBS})
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
       PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)
   if(HOBOT_UCP_INCLUDE_DIR)

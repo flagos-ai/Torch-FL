@@ -135,7 +135,7 @@ string(JSON FLAGOS_PLATFORM_VENDOR GET "${_flagos_platforms}"
 # passes the table id -- and it compared an unquoted string (`STREQUAL
 # _vendor_dir`), which is the literal "_vendor_dir" and never a key, so the
 # filter excluded nothing and an apple build compiled every vendor's .cc.
-set(FLAGOS_ATEN_VENDOR_DIRS ascend;enflame;iluvatar;kunlunxin;mthreads;apple;tsingmicro)
+set(FLAGOS_ATEN_VENDOR_DIRS ascend;enflame;gcu;iluvatar;kunlunxin;mthreads;apple;tsingmicro;bpu;musa)
 
 # The aten/backends trees this platform's own op wrappers live in. Not always a
 # name the build was given: a row whose kernels are another platform's names
@@ -148,7 +148,24 @@ string(JSON _flagos_aten_dirs ERROR_VARIABLE _flagos_aten_dirs_err GET
 if(_flagos_aten_dirs_err)
   set(FLAGOS_PLATFORM_ATEN_DIRS "")
 else()
-  set(FLAGOS_PLATFORM_ATEN_DIRS ${_flagos_aten_dirs})
+  # string(JSON) returns a JSON array literal; split it into a cmake list,
+  # otherwise a single-element ["bpu"] stays one string and no vendor dir
+  # matches it, so nothing is excluded.
+  string(JSON _flagos_aten_count ERROR_VARIABLE _flagos_aten_n_err LENGTH
+         "${_flagos_platforms}" accelerators "${FLAGOS_ACCELERATOR}" aten_backends)
+  if(_flagos_aten_n_err)
+    set(FLAGOS_PLATFORM_ATEN_DIRS "")
+  else()
+    set(FLAGOS_PLATFORM_ATEN_DIRS "")
+    if(_flagos_aten_count GREATER 0)
+      math(EXPR _flagos_aten_last "${_flagos_aten_count} - 1")
+      foreach(_i RANGE ${_flagos_aten_last})
+        string(JSON _flagos_aten_item GET "${_flagos_platforms}" accelerators
+               "${FLAGOS_ACCELERATOR}" aten_backends ${_i})
+        list(APPEND FLAGOS_PLATFORM_ATEN_DIRS ${_flagos_aten_item})
+      endforeach()
+    endif()
+  endif()
 endif()
 if(NOT FLAGOS_PLATFORM_ATEN_DIRS)
   set(FLAGOS_PLATFORM_ATEN_DIRS metax)
