@@ -1539,14 +1539,16 @@ def _keep_device_identity_checks_working(real_device, shim):
 _cuda_alias_active = False
 
 
-# Device strings that have to mean the flagos device on this build, keyed by
-# accelerator. "cuda" is on every row: it is the name the ecosystem hardcodes.
+# Device strings that have to mean the flagos device on this build, keyed by the
+# accelerator the build record holds -- the vendor, which is also what the
+# lookup below passes. "cuda" is on every row: it is the name the ecosystem
+# hardcodes.
 # The second entry on a row is the vendor's *own* torch device name, which the
 # vendor's Triton/FlagGems integration hands to torch.device but which is not
 # registered here -- torch_fl claims PrivateUse1 as "flagos" and never imports
 # the vendor package (torch_musa / torch_txda) that would register it.
 #
-#   musa       torch_musa's device, and FlagGems' own device.name.
+#   mthreads   torch_musa's device, and FlagGems' own device.name.
 #   tsingmicro FlagTree's TsingMicro Triton driver resolves its active device as
 #              torch.device("txda", ...) (triton/backends/tsingmicro/driver.py),
 #              and FlagGems' tsingmicro VendorDescriptor names the device "txda"
@@ -1555,7 +1557,7 @@ _cuda_alias_active = False
 #              tensor: `import flag_gems` raises and every flaggems-routed op
 #              on TsingMicro is unreachable.
 _VENDOR_DEVICE_ALIASES = {
-    "musa": ("cuda", "musa"),
+    "mthreads": ("cuda", "musa"),
     "tsingmicro": ("cuda", "txda"),
 }
 

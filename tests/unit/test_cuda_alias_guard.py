@@ -119,7 +119,9 @@ def test_vendor_device_aliases_cover_every_native_vendor():
     Triton's hint manager is imported, and FlagGems' tsingmicro descriptor names
     the device "txda" too, so an unmapped name makes `import flag_gems` raise.
     """
-    assert torch_fl._VENDOR_DEVICE_ALIASES["musa"] == ("cuda", "musa")
+    # Keyed by what the build record holds, which is the vendor; the platform
+    # ids (musa, ...) are what setup.py normalises into these keys.
+    assert torch_fl._VENDOR_DEVICE_ALIASES["mthreads"] == ("cuda", "musa")
     assert torch_fl._VENDOR_DEVICE_ALIASES["tsingmicro"] == ("cuda", "txda")
     # Every accelerator with a vendor-private device name is listed; the rest
     # (nvidia/ascend/...) only ever see "cuda" or a name torch already knows.
@@ -166,7 +168,7 @@ _CHILD = textwrap.dedent(
         # rather than read from _VENDOR_DEVICE_ALIASES: the test has to state
         # what "txda" *should* resolve to, not ask the code under test.
         "vendor_device": device_type(
-            {"musa": "musa", "tsingmicro": "txda"}.get(
+            {"mthreads": "musa", "tsingmicro": "txda"}.get(
                 torch_fl._build_accelerator(), "cuda"
             )
         ),
