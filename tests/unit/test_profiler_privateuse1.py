@@ -53,13 +53,25 @@ _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "nvidia", "metax")
 # its hipified wheel exports c10::hip::HIPCachingAllocator with zero c10::cuda
 # symbols, so the c10::cuda delegation at the top of that function cannot even
 # link there.
+#
+# Spelled with both halves for the same reason as _CUPTI_BUILD above: the
+# record holds the vendor, and only `tsingmicro` spells its platform id the
+# same way. Keyed on the platform id alone this gate answered False on every
+# one of these builds -- the Hygon lane ran the test and failed on the
+# synthetic id the comment above predicts, which is how the omission surfaced
+# (run 40818353562, job artifact pytest-hygon-1).
 _GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
     "tsingmicro",
     "dcu",
+    "hygon",
     "gcu",
+    "enflame",
     "musa",
+    "mthreads",
     "bpu",
+    "drobotics",
     "mps",
+    "apple",
 )
 
 
