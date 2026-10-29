@@ -164,20 +164,50 @@ struct PythonOpCache {
 
   // The callable for a keyword-arg call (CallPythonOp_GenericKw and the tuple
   // form), keyed by the bare function name whichever spelling asks for it. The
-  // generated table and a hand-written caller can name the same kernel both
-  // ways ("mm" and "flag_gems.ops.mm.mm"), and GetFunc would cache those as two
-  // entries that must be the same callable. The kernel is resolved from the
-  // bare name exactly as a bare-name lookup always has been -- flag_gems.ops --
-  // so a keyword-arg call cannot take a different module's function depending
-  // on the caller; GetFunc keeps the dotted path for its own callers.
+  // generated tables and a hand-written caller can name the same kernel more
+  // than one way ("flag_gems.mm_out" and "flag_gems.ops.mm.mm_out"), and GetFunc
+  // would cache those as separate entries that must be the same callable. Every
+  // caller in this tree passes a qualified name, and both qualifying spellings
+  // of a flag_gems kernel start with "flag_gems", so they take the same path
+  // below and the one cache entry stays right. A bare name carries no qualifier
+  // to classify -- this cache is shared with the TileOPs shims, which must not
+  // import flag_gems on a host that lacks it -- so it resolves from flag_gems.ops
+  // as before.
+  //
+  // A flag_gems target resolves through the active backend first, for the same
+  // reason GetFunc's dotted path does. The generated keyword-arg wrappers were
+  // discovered against the callable `_FULL_CONFIG` held, which is the
+  // vendor-resolved one, so their parameter names are the vendor's -- and the
+  // tuned META their op is handed is the vendor's too. Resolving to the stock
+  // flag_gems.ops implementation is then not "the generic kernel with the same
+  // arguments": it is the generic kernel with a config schema it does not
+  // declare. That is how `mm.out` dies on Ascend (CI 40656617119 at 0a2a74b3):
+  // the Ascend tune config for `mm` carries BLOCK_*/GROUP_M/SPLIT_K/EVEN_K, the
+  // vendor kernel `_ascend.ops.mm` declares them, and
+  // flag_gems/ops/mm.py:mm_kernel_general does not -- so the tuner's own
+  // benchmark run raises "KeyError: 'Keyword argument SPLIT_K was specified but
+  // unrecognised'" from triton's _pack_args before any kernel is compiled.
+  // `mm` itself is unaffected only because it is a dotted call and goes
+  // through GetFunc, which already asks VendorOpByName; the `.out` spelling is
+  // a keyword call and did not.
+  // It is not Ascend-specific: tsingmicro routes mm.out and bmm.out to FlagGems
+  // over the same kind of divergent kernel.
+  //
+  // flag_gems.ops stays the fallback (a few private helpers exist only there),
+  // and a non-flag_gems qualname -- the TileOPs shims -- is left alone, so a
+  // host with TileOPs but no FlagGems still never imports flag_gems here.
   py::object GetFuncBare(const char* name) {
     std::lock_guard<std::mutex> lock(init_mutex);
-    std::string bare(name);
-    auto dot = bare.rfind('.');
-    if (dot != std::string::npos) bare = bare.substr(dot + 1);
+    std::string qual(name);
+    auto dot = qual.rfind('.');
+    std::string bare = dot == std::string::npos ? qual : qual.substr(dot + 1);
     auto it = func_cache.find(bare);
     if (it != func_cache.end()) return it->second;
-    py::object func = OpsModule().attr(bare.c_str());
+    py::object func;
+    if (qual.rfind("flag_gems", 0) == 0) {
+      func = VendorOpByName(bare.c_str());
+    }
+    if (!func) func = OpsModule().attr(bare.c_str());
     func_cache[bare] = func;
     return func;
   }
