@@ -52,6 +52,22 @@ import torch_fl  # noqa: F401  -- registers the device
 CUDA_ABI_PLATFORMS = ("cuda", "dcu", "metax", "ppu")
 
 
+def _copy_ops_source():
+    """``csrc/aten/copy_ops.cc``, or skip when this job has no checkout.
+
+    The source pins below read the arm out of the tree rather than measuring it,
+    so they answer on a host with no device. What they cannot answer on is a job
+    that installed the wheel and runs the suite from a temporary directory: the
+    sources are in the workspace that job checked out, not three levels above
+    this file's copy. Reading them there is a ``FileNotFoundError``, which reads
+    as the regression the pin looks for and is not one -- so it is a skip.
+    """
+    copy_ops = Path(__file__).resolve().parents[3] / "csrc/aten/copy_ops.cc"
+    if not copy_ops.is_file():
+        pytest.skip(f"no source checkout to read {copy_ops} from")
+    return copy_ops.read_text()
+
+
 def _flagos_available():
     try:
         return (
@@ -65,10 +81,49 @@ def _device():
     return torch.device("flagos:0")
 
 
-pytestmark = [
+def _cuda_abi_build():
+    """Whether this build dispatches flagos copies to CUDA's native copy kernel.
+
+    The on-device arms below are compiled for the CUDA-ABI platforms (cuda, dcu,
+    metax, ppu) and only those. Iluvatar is a PrivateUse1 device whose tensor
+    operations this repository does not own -- its `copy_` reaches corex through
+    the vendor layer and, as measured on the Iluvatar lane, gathers through host
+    memory. `CUDA_ABI_PLATFORMS` is also the set the source pins below assert on,
+    so the two cannot drift apart silently.
+    """
+    try:
+        import torch_fl  # noqa: F401  -- already imported at module scope
+        from torch_fl import _build_config
+
+        accelerator = getattr(_build_config, "ACCELERATOR", None)
+    except Exception:
+        return False
+    if accelerator is None:
+        # Builds predating _build_config: the device name is the only signal.
+        accelerator = (
+            torch.accelerator.current_accelerator()
+            if hasattr(torch, "accelerator")
+            else None
+        )
+        accelerator = str(accelerator) if accelerator is not None else ""
+    return accelerator in CUDA_ABI_PLATFORMS
+
+
+_pytest_marks = [
     pytest.mark.anyplatform,
     pytest.mark.skipif(not _flagos_available(), reason="no flagos device"),
 ]
+
+pytestmark = _pytest_marks
+
+# A transfer count is only a statement about *this* repository's copy arms. On a
+# build that executes copies elsewhere the count says nothing about the change
+# these tests guard, and asserting zero there reports the vendor's behaviour as
+# our regression.
+requires_on_device_copy_arms = pytest.mark.skipif(
+    not _cuda_abi_build(),
+    reason="copy_ is not served by this repository's CUDA-ABI arms on this build",
+)
 
 
 # (source dtype, target dtype). bf16 <-> fp32 is the pair a transformer hits on
@@ -141,15 +196,7 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     then it boxed unconditionally, which on the CPU-only torch the NVIDIA wheel
     ships is a call into an empty CUDA DispatchStub (run 40285867035).
     """
-    source_root = Path(__file__).resolve().parents[3]
-    copy_ops = source_root / "csrc/aten/copy_ops.cc"
-    if not copy_ops.is_file():
-        # The group runs on the installed wheel, not the checkout: the sources
-        # are in the workspace the job checked out, not beside this file's copy
-        # in the job's temporary directory. Nothing to read means this pin
-        # cannot answer -- which is a skip, not the regression it looks for.
-        pytest.skip(f"no source checkout to read {copy_ops} from")
-    src = copy_ops.read_text()
+    src = _copy_ops_source()
     # The non-boxing arm is the second `#else` of the FLAGOS_BOXING_BUILD pair
     # inside the same-device flagos->flagos branch.
     # Anchor on the _to_copy dtype branch specifically: the file also has a
@@ -179,6 +226,7 @@ def test_cuda_abi_cast_does_not_route_through_host(platform):
     )
 
 
+@requires_on_device_copy_arms
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
@@ -201,4 +249,109 @@ def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype):
     assert n <= len(CUDA_ABI_PLATFORMS), (
         f"{src_dtype} -> {dst_dtype} performed {n} host/device transfers; the cast "
         "is routing through host memory instead of the native copy kernel"
+    )
+
+
+@requires_on_device_copy_arms
+@pytest.mark.parametrize("src_dtype,dst_dtype", CASTS)
+def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
+    """`copy_` into a non-contiguous destination must stay on device.
+
+    The same-device fast path in `_copy_from` only covers a contiguous source
+    into a contiguous destination of equal shape and dtype. Everything else --
+    a dtype change, a strided destination, a transposed source -- used to fall
+    through to `strided_copy_cast_via_cpu` on the non-boxing build, which is two
+    blocking `cudaMemcpy` per call. This is the arm `_to_copy` lands on after its
+    own `contiguous()`, so the cost showed up under `_to_copy` and not here.
+    """
+    src = torch.randn(64, 96, dtype=src_dtype, device=_device())
+    dst = torch.empty(96, 64, dtype=dst_dtype, device=_device()).t()
+
+    def run():
+        dst.copy_(src)
+
+    n = _memcpy_count(run)
+    assert n == 0, (
+        f"copy_({src_dtype} -> {dst_dtype}) into a strided destination performed "
+        f"{n} host/device transfers; the copy is going through host memory"
+    )
+
+
+@requires_on_device_copy_arms
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype",
+    [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
+)
+def test_contiguous_of_transposed_source_is_transfer_free(src_dtype, dst_dtype):
+    """`contiguous()` on a strided source must gather on device.
+
+    `_to_copy` calls it before its cast, so a host gather here costs the round
+    trip twice: once to make the source contiguous, once for the cast.
+    """
+    src = torch.randn(64, 96, dtype=src_dtype, device=_device()).t()
+    assert not src.is_contiguous()
+
+    out = src.contiguous()
+
+    assert out.is_contiguous()
+    assert out.device.type == "flagos"
+    n = _memcpy_count(lambda: src.contiguous())
+    assert n == 0, (
+        f"contiguous() of a transposed {src_dtype} source performed {n} "
+        "host/device transfers; the gather is going through host memory"
+    )
+
+
+def test_contiguous_matches_cpu_after_the_on_device_gather():
+    """The on-device gather must produce the same values as ATen's."""
+    torch.manual_seed(0)
+    base = torch.randn(48, 72, dtype=torch.float32)
+    src = base.to(_device()).t()
+    expected = base.t().contiguous()
+    torch.cuda.synchronize()
+    got = src.contiguous().cpu()
+    assert torch.equal(got, expected)
+
+
+@pytest.mark.parametrize("platform", CUDA_ABI_PLATFORMS)
+def test_copy_arm_boxes_only_when_libtorch_cuda_is_linked(platform):
+    """Pin the `copy_` arm in the source, so this runs without a device.
+
+    The arm has two regressions in its history, and this pins the second one.
+    It first called `strided_copy_cast_via_cpu` unconditionally, which cost a
+    host round trip on a wheel that does link libtorch_cuda. It then boxed
+    unconditionally, on the premise that a build which reaches here links a
+    real libtorch_cuda -- false for the default CUDA and PPU wheels, which link
+    the CPU-only pip torch, where `DeviceBoxingGuard` + `at::native::copy_`
+    dies in an empty CUDA DispatchStub ("missing kernel for cuda", run
+    40656617119). The choice is therefore made by the CMake probe, as in
+    `_to_copy` above.
+    """
+    src = _copy_ops_source()
+    # The flagos -> flagos branch of _copy_from, told apart from its
+    # device <-> host siblings by the fast-path comment above it.
+    marker = "// Fast path: both contiguous, same shape and dtype"
+    branch = src.find(marker)
+    assert branch != -1, "the same-device copy fast path is gone"
+    start = src.find("// CUDA platform without the boxing kernels", branch)
+    assert start != -1, "the non-boxing copy_ arm is gone"
+    assert "CrossDeviceMemcpy" in src[branch:start], (
+        f"{platform}: the contiguous fast path is gone, so every same-device "
+        "copy would take the strided arm"
+    )
+    end = src.find("// Ascend copies on-device via aclnnInplaceCopy", start)
+    assert end != -1, "the de-boxed sibling arm is gone"
+    arm = src[start:end]
+    assert "FLAGOS_TORCH_LINKS_LIBTORCH_CUDA" in arm, (
+        f"{platform}: the non-boxing copy_ arm boxes unconditionally again, "
+        "which calls into an empty CUDA DispatchStub on the CPU-only torch the "
+        "default wheel builds against"
+    )
+    assert "DeviceBoxingGuard guard(self, dst);" in arm, (
+        f"{platform}: the non-boxing copy_ arm no longer boxes to CUDA, so a "
+        "build that links libtorch_cuda pays a host round trip per copy"
+    )
+    assert "strided_copy_cast_via_cpu(self, dst);" in arm, (
+        f"{platform}: the host round-trip the arm takes without libtorch_cuda "
+        "is missing, or the unsigned-dtype escape hatch is"
     )

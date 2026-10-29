@@ -10,9 +10,7 @@
     "which default install dir) stays in the CMakeLists files; that is the",
     "SDK-roots phase of issue #376, tracked separately."
   ],
-
   "default_accelerator": "cuda",
-
   "kernel_switches": [
     "FLAGOS_BUILD_VENDOR",
     "FLAGOS_BUILD_FLAGGEMS",
@@ -20,7 +18,6 @@
     "FLAGOS_BUILD_FLAGGEMS_CPP",
     "FLAGOS_BUILD_TILEOPS"
   ],
-
   "kernel_set_names": {
     "FLAGOS_BUILD_VENDOR": "vendor",
     "FLAGOS_BUILD_FLAGGEMS": "flaggems",
@@ -28,7 +25,6 @@
     "FLAGOS_BUILD_FLAGGEMS_CPP": "flaggems_cpp",
     "FLAGOS_BUILD_TILEOPS": "tileops"
   },
-
   "_accelerators_comment": [
     "kernel_defaults: what the platform builds before any explicit FLAGOS_BUILD_*",
     "environment value. Every platform starts from all-ON; the entries below are",
@@ -69,7 +65,8 @@
     "all key on it; the chip layer (Ascend 310B/910B, ...) is source-only and",
     "never appears in a conf or an accelerator name. drobotics is spelled",
     "without the hyphen Nexus uses (d-robotics) so it stays an identifier.",
-    "",    "pypi_lane: the flagos-pypi-<lane> repository this platform's wheel is",
+    "",
+    "pypi_lane: the flagos-pypi-<lane> repository this platform's wheel is",
     "published to -- the {vendor} that build-infra's pypi_base expands to",
     "(https://resource.flagos.net/repository/flagos-pypi-{vendor}/). This is the",
     "publishing target and is deliberately not derived from wheel_local: that",
@@ -82,7 +79,6 @@
     "gate on boxing); setup.py writes the resolved value into the compatibility",
     "manifest and CMake ignores it."
   ],
-
   "accelerators": {
     "cuda": {
       "vendor": "nvidia",
@@ -94,7 +90,11 @@
         "available as an explicit opt-in (-DFLAGOS_BUILD_BOXING=ON /",
         "FLAGOS_BUILD_BOXING=1), which is what a boxing wheel is built with."
       ],
-      "project_languages": ["CUDA", "CXX", "C"],
+      "project_languages": [
+        "CUDA",
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "nvidia",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": true,
@@ -113,9 +113,7 @@
       },
       "pins": {}
     },
-
     "ppu": {
-
       "vendor": "thead",
       "_comment": [
         "T-Head PPU: CUDA toolchain + a bundled PPU libtorch, no native kernel",
@@ -123,7 +121,11 @@
         "the default wheel needs no PPU libtorch bundle and routes to FlagGems",
         "(cpu_fallback for the rest). A boxing wheel is an explicit opt-in."
       ],
-      "project_languages": ["CUDA", "CXX", "C"],
+      "project_languages": [
+        "CUDA",
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "nvidia",
       "bundle_libdir": "lib_thead",
       "vendor_torch_libraries": true,
@@ -142,9 +144,7 @@
       },
       "pins": {}
     },
-
     "metax": {
-
       "vendor": "metax",
       "_comment": [
         "MetaX is a CUDA-boxing build: the generated CUDA boxing kernels",
@@ -159,9 +159,15 @@
         "FLAGOS_BUILD_BOXING=1); the default wheel compiles no boxing kernels and",
         "needs neither the MACA libtorch bundle nor a vendor torch package."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "metax",
-      "aten_backends": ["metax", "cuda"],
+      "aten_backends": [
+        "metax",
+        "cuda"
+      ],
       "bundle_libdir": "lib_metax",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
@@ -179,9 +185,7 @@
       },
       "pins": {}
     },
-
     "kunlunxin": {
-
       "vendor": "kunlunxin",
       "_comment": [
         "Kunlunxin XPU: a native PrivateUse1 backend. The ops live in the vendor",
@@ -194,7 +198,10 @@
         "routes around. No FlagGems liboperators exists for the XPU SDK, so the",
         "C++ wrappers stay off."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "kunlunxin",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": true,
@@ -221,9 +228,7 @@
         }
       }
     },
-
     "iluvatar": {
-
       "vendor": "iluvatar",
       "_comment": [
         "Iluvatar BI-V150 (Tianshu), corex 4.5.0 SDK. The SDK is CUDA-shaped",
@@ -245,7 +250,10 @@
         "the self-hosted CI lane builds and tests the wheel without publishing",
         "it to a package index."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "iluvatar",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -276,16 +284,17 @@
         }
       }
     },
-
     "ascend": {
-
       "vendor": "ascend",
       "_comment": [
         "Huawei CANN: ACLNN is the only operator library, FlagGems Python is on by",
         "default (FlagTree Triton), boxing is off (the conf routes nothing to the",
         "CUDA boxing kernels)."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "ascend",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -308,9 +317,7 @@
         }
       }
     },
-
     "tsingmicro": {
-
       "vendor": "tsingmicro",
       "_comment": [
         "TsingMicro Kuiper: FlagGems Python is the operator path; boxing is an explicit",
@@ -328,7 +335,10 @@
         "this platform into a configure failure unless the user has built FlagGems",
         "from source. Nothing routes to flaggems_cpp here either. Same as dcu/musa/bpu."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "tsingmicro",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -351,9 +361,7 @@
         }
       }
     },
-
     "dcu": {
-
       "vendor": "hygon",
       "_comment": [
         "Hygon DTK: the vendor torch is a hipified build registering its HIP",
@@ -363,7 +371,10 @@
         "wheel needs no vendor torch package and routes to FlagGems (cpu_fallback",
         "for the rest). A boxing wheel is an explicit opt-in."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "nvidia",
       "bundle_libdir": "lib_hygon",
       "vendor_torch_libraries": true,
@@ -387,16 +398,17 @@
         }
       }
     },
-
     "gcu": {
-
       "vendor": "enflame",
       "_comment": [
         "Enflame GCU: no CUDA runtime, topsaten provides the native compute ops",
         "(FLAGOS_BUILD_VENDOR), ops without a topsaten kernel fall back to CPU.",
         "FlagGems Python shares the same dispatcher; boxing is off."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "enflame",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -414,16 +426,17 @@
       },
       "pins": {}
     },
-
     "musa": {
-
       "vendor": "mthreads",
       "_comment": [
         "Moore Threads MUSA: native operator route (mudnn), no CUDA runtime, so",
         "boxing is off and the vendor kernels are mandatory. FlagGems Python is on",
         "for the hybrid path."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "mthreads",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -450,19 +463,21 @@
         }
       }
     },
-
     "bpu": {
-
       "vendor": "drobotics",
       "_comment": [
-        "D-Robotics RDK BPU: no per-op kernels, only the runtime layer (UCP",
-        "allocator, device/stream stubs) is native. FLAGOS_BUILD_VENDOR stays at the",
-        "ON default but compiles nothing (backends/bpu/ does not exist).",
-        "FLAGOS_BUILD_BOXING is off: backends_bpu.conf names no `cuda` entry and the",
-        "platform registers no compute ops at all, so the boxing kernels were",
-        "compiled but never reachable. Acceleration is the torch.compile backend."
+        "D-Robotics RDK BPU: the runtime layer (UCP allocator, device/stream stubs)",
+        "is native, and so is the generated operator layer in backends/bpu/.",
+        "Those kernels submit single-operator .hbm artifacts from the library named",
+        "by FLAGOS_BPU_OPLIB; without that variable each one takes its own CPU",
+        "round-trip, so the route is correct but unaccelerated.",
+        "FLAGOS_BUILD_BOXING is off: the BPU has no CUDA ABI to box onto.",
+        "Whole-graph acceleration is the torch.compile backend."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "bpu",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -483,11 +498,12 @@
           "value": false,
           "reason": "the BPU executes compiled graphs and has no per-operator kernels at all"
         }
-      }
+      },
+      "aten_backends": [
+        "bpu"
+      ]
     },
-
     "mps": {
-
       "vendor": "apple",
       "_comment": [
         "Apple Silicon (M-series) via Metal. A native backend, not a boxing one:",
@@ -499,7 +515,11 @@
         "MPSGraph-first wrapper set) compiles; it is Objective-C++ and links",
         "MetalPerformanceShadersGraph on top of the runtime's Metal/Foundation."
       ],
-      "project_languages": ["OBJCXX", "CXX", "C"],
+      "project_languages": [
+        "OBJCXX",
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "apple",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,

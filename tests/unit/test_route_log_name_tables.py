@@ -51,6 +51,8 @@ LOGGED_AS = {
     "flagos": "flagos",
     "apple": "mps",
     "mps": "mps",
+    "drobotics": "drobotics",
+    "bpu": "drobotics",
     "enflame": "gcu",
     "gcu": "gcu",
     "mthreads": "musa",

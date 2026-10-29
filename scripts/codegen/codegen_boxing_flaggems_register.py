@@ -76,6 +76,92 @@ CONFIGS = REPO / "torch_fl/configs"
 # the --check report order; each writes the file named after it.
 PLATFORMS = ("nvidia", "metax", "hygon", "thead", "tsingmicro")
 
+# Ops whose PrivateUse1 claim register.cc makes itself rather than through the
+# generated list, with the reason each one is not a claim this file can emit.
+#
+# ``mm`` / ``bmm`` on dcu: the soft-lowp matrix prelude is claimed in
+# register.cc beside the generated include, and its conf routes them to FlagGems
+# (gen_vendor_confs.py, SOFT_LOWP_FLAGGEMS_MEASURED). Emitting the claim here as
+# well is a duplicate m.impl in one TORCH_LIBRARY_IMPL body -- a compile error --
+# and leaving the op unmentioned reads as "routed but unregistered", which is
+# the list below. `_scaled_dot_product_attention` on metax/dcu is the same shape
+# with a whole-op override (csrc/aten/sdp_choice_stub.cc).
+HAND_REGISTERED_CLAIMS = {
+    "hygon": {"mm", "bmm"},
+}
+
+# Ops register.cc claims on every FlagGems-primary build that compiles the
+# soft-lowp prelude (its `mm`/`bmm` block), whatever their conf route. The
+# op's own claim then follows whatever the conf says about its own key:
+#
+#   * a key the conf routes to a backend -- claim the generated wrapper;
+#   * a key the conf routes `none` -- claim the pair forwarder below instead,
+#     which hands an ordinary call to the mm/bmm key and runs the prelude for a
+#     low-precision pair, so registration and that route agree. Claiming the
+#     plain wrapper instead made every `mm.out` raise "routed to 'none' ... but
+#     the op is registered" on DCU (run 40615250313, test_mm_out): the wrapper
+#     calls the whole-op dispatcher, which answers by the key the call is made
+#     under.
+#
+# The form is owed a claim only where the pair's own key has a route: that key
+# is the forwarder's whole path, and on metax `mm` is `none` (a claim on it
+# raises for every ordinary call, run 40629858404), so the `mm` family stays
+# unclaimed there until its conf routes it. `bmm` is claimed by metax's list
+# under its own key (`flaggems_cpp`); its `none` forms are the pair's.
+SOFT_LOWP_PAIR_CLAIMS = {
+    platform: forms
+    for platform, forms in {
+        "hygon": {
+            "mm.dtype": "mm",
+            "mm.dtype_out": "mm",
+            "mm.out": "mm",
+            "bmm.dtype": "bmm",
+            "bmm.dtype_out": "bmm",
+            "bmm.out": "bmm",
+        },
+        "metax": {
+            "bmm.dtype": "bmm",
+            "bmm.dtype_out": "bmm",
+        },
+    }.items()
+}
+
+# The forwarders a soft-lowp pair claim names for a key the conf leaves `none`,
+# one per route key the pair is followed to. soft_lowp/ops.cc defines them:
+# each runs the low-precision prelude and then takes the mm/bmm route, storing
+# an out form's answer, which is the route the dispatcher itself follows for
+# such a pair.
+PAIR_FORWARDERS = {
+    "mm.dtype": "native::flagos::soft_lowp::WrapperMdtypeAsMm",
+    "mm.dtype_out": "native::flagos::soft_lowp::WrapperMdtypeOutAsMm",
+    "mm.out": "native::flagos::soft_lowp::WrapperMoutAsMm",
+    "bmm.dtype": "native::flagos::soft_lowp::WrapperBdtypeAsBmm",
+    "bmm.dtype_out": "native::flagos::soft_lowp::WrapperBdtypeOutAsBmm",
+    "bmm.out": "native::flagos::soft_lowp::WrapperBoutAsBmm",
+}
+
+# The same, for the boxing build's pair claim (render_boxing): a form the
+# boxing conf routes `boxing` still cannot be claimed by its own wrapper --
+# that wrapper enters the whole-op dispatcher, whose `boxing` route then calls
+# this same wrapper. These run the prelude for a low-precision pair and the
+# plain ATen op otherwise; only `bmm.out` has a plain wrapper to take instead.
+PAIR_FORWARDERS_BOXING = {
+    "mm.dtype": "native::flagos::soft_lowp::WrapperMmDtypeAsBoxing",
+    "mm.dtype_out": "native::flagos::soft_lowp::WrapperMmDtypeOutAsBoxing",
+    "mm.out": "native::flagos::soft_lowp::WrapperMmOutAsBoxing",
+    "bmm.dtype": "native::flagos::soft_lowp::WrapperBmmAsBoxing",
+    "bmm.dtype_out": "native::flagos::soft_lowp::WrapperBmmOutAsBoxing",
+}
+
+# The ops a boxing build has in register.inc that a `boxing` MMKey form cannot
+# take: the plain forms the prelude owns (m.impl'd in register.cc) and
+# `bmm.out`, whose plain `bmm` route the wrapper follows without re-entering.
+BOXING_PLAIN_FORMS = ("mm", "bmm", "bmm.out")
+
+# The plain wrapper the prelude defines for each pair's own key (register.inc's
+# `WrapperMm` enters the prelude on a platform that compiles it).
+PLAIN_PAIR_WRAPPER = {"mm": "WrapperMm", "bmm": "WrapperBmm"}
+
 # Conf values that are not a FlagGems backend: `cuda` is the boxing kernel,
 # `none` is cpu_fallback, and the empty value is a malformed line.
 # (`cuda` is the pre-rename spelling of the NVIDIA boxing key; a conf written
@@ -234,27 +320,72 @@ def boxing_target_ops(platform, wrappers, kernel_ops):
     unkerneled = {
         op for op, value in routes.items() if value == "boxing" and op not in kernel_ops
     }
+    by_hand = HAND_REGISTERED_CLAIMS.get(platform, set())
     claimed = sorted(
         op
         for op, value in routes.items()
         if value != "none"
+        and op not in by_hand
         and op in wrappers
         and (value != "boxing" or op in kernel_ops)
     )
-    unwrapped = {op for op, value in routes.items() if value != "none"} - set(wrappers)
+    unwrapped = (
+        {op for op, value in routes.items() if value != "none"} - set(wrappers)
+    ) - by_hand
     return claimed, sorted(unserved | unkerneled | unwrapped)
+
+
+def boxing_pair_claimed(platform, wrappers):
+    """The matrix forms this boxing list claims by the prelude, keyed by pair.
+
+    A form is taken only where the prelude is reachable for its pair: the
+    plain key must be claimed by this list or by register.cc, which hands an
+    ordinary call back through the pair. Metax's `mm` is neither.
+    """
+    routes = conf_routes(platform)
+    by_hand = HAND_REGISTERED_CLAIMS.get(platform, set())
+    out = {}
+    for op, forwarder in PAIR_FORWARDERS_BOXING.items():
+        key = "bmm" if op.startswith("bmm") else "mm"
+        if routes.get(op) != "boxing" or op in BOXING_PLAIN_FORMS:
+            continue
+        if key not in by_hand and routes.get(key) == "none":
+            raise SystemExit(
+                f"backends_{platform}.conf routes {op} `boxing` but its pair's "
+                f"plain key `{key}` none, so no claim can reach the prelude for it"
+            )
+        if op not in wrappers:
+            raise SystemExit(
+                f"backends_{platform}.conf: {op} is a boxing pair claim but "
+                f"{REGISTER_INC.relative_to(REPO)} has no wrapper for it"
+            )
+        out[op] = forwarder
+    return out
 
 
 def render_boxing(platform, wrappers, kernel_ops):
     ops, unserved = boxing_target_ops(platform, wrappers, kernel_ops)
+    paired = boxing_pair_claimed(platform, wrappers)
+    ops = [op for op in ops if op not in paired]
+    unserved = [op for op in unserved if op not in paired]
     lines = [
-        BOXING_HEADER.format(platform=platform, count=len(ops)),
+        BOXING_HEADER.format(platform=platform, count=len(ops) + len(paired)),
         "//\n// Held back from the boxing claim: the conf routes them to `none`, or",
         "\n// `register.inc` has no wrapper for them:\n",
     ]
     lines.extend(f"//   - {op}\n" for op in unserved)
     lines.append("\n")
     lines.extend(f'  m.impl("{op}", {wrappers[op]});\n' for op in ops)
+    if paired:
+        lines.append(
+            "\n// Matrix forms the conf routes `boxing`: claimed by the prelude,\n"
+            "// which answers a low-precision pair itself and the plain ATen op\n"
+            "// otherwise (their own wrapper would re-enter through `boxing`).\n"
+        )
+        lines.extend(
+            f'  m.impl("{op}", {forwarder});\n'
+            for op, forwarder in sorted(paired.items())
+        )
     return "".join(lines)
 
 
@@ -263,6 +394,9 @@ def target_ops(platform, wrappers, kernel_ops):
     routes = conf_routes(platform)
     non_flaggems = NON_FLAGGEMS_ROUTES + VENDOR_ROUTES.get(platform, ())
     flaggems_routed = {op for op, value in routes.items() if value not in non_flaggems}
+    # Claimed by register.cc, not here: neither registered nor excluded (see
+    # HAND_REGISTERED_CLAIMS).
+    flaggems_routed -= HAND_REGISTERED_CLAIMS.get(platform, set())
     registered = sorted(flaggems_routed & set(wrappers) & kernel_ops)
     unserved = sorted(flaggems_routed & kernel_ops - set(wrappers))
     no_kernel = sorted(flaggems_routed - kernel_ops)
@@ -271,15 +405,42 @@ def target_ops(platform, wrappers, kernel_ops):
             f"backends_{platform}.conf routes these to a FlagGems backend but "
             f"{REGISTER_INC.relative_to(REPO)} has no wrapper: " + ", ".join(unserved)
         )
+    # A matrix form the conf leaves `none` is still claimed, by the wrapper
+    # that follows the pair's own route (see SOFT_LOWP_PAIR_CLAIMS). The op
+    # comes off the excluded list and the route key is out of `none`.
+    paired = SOFT_LOWP_PAIR_CLAIMS.get(platform, {})
+    no_kernel = [op for op in no_kernel if op not in paired]
     return registered, no_kernel
+
+
+def soft_lowp_pair_claimed(platform, wrappers):
+    """The matrix forms this list claims for a conf that routes them `none`.
+
+    Only a form the conf leaves `none` is claimed here; one the conf routes to
+    a FlagGems backend is already in the plain list and needs nothing.
+    """
+    routes = conf_routes(platform)
+    paired = SOFT_LOWP_PAIR_CLAIMS.get(platform, {})
+    out = {}
+    for op, key in paired.items():
+        if routes.get(op) != "none" or routes.get(key) == "none":
+            continue
+        if op not in wrappers:
+            raise SystemExit(
+                f"backends_{platform}.conf: {op} is a soft-lowp pair claim but "
+                f"{REGISTER_INC.relative_to(REPO)} has no wrapper for it"
+            )
+        out[op] = key
+    return out
 
 
 def render(platform, wrappers, kernel_ops):
     ops, no_kernel = target_ops(platform, wrappers, kernel_ops)
+    paired = soft_lowp_pair_claimed(platform, wrappers)
     lines = [
         HEADER.format(
             platform=platform,
-            count=len(ops),
+            count=len(ops) + len(paired),
             extra="",
         )
     ]
@@ -288,6 +449,16 @@ def render(platform, wrappers, kernel_ops):
         lines.extend(f"//   - {op}\n" for op in no_kernel)
     lines.append("\n")
     lines.extend(f'  m.impl("{op}", {wrappers[op]});\n' for op in ops)
+    if paired:
+        lines.append(
+            "\n// Matrix forms the conf leaves `none`: claimed by the pair's\n"
+            "// route, not by the slot this key names (see register.cc's\n"
+            "// mm/bmm block).\n"
+        )
+        lines.extend(
+            f'  m.impl("{op}", {PAIR_FORWARDERS[op]});\n'
+            for op, key in sorted(paired.items())
+        )
     return "".join(lines)
 
 

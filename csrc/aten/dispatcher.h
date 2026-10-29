@@ -201,6 +201,14 @@ class Dispatcher {
     return operator()(std::forward<Args>(args)...);
   }
 
+  // The backend the conf names for `route_key`, and what it resolves to.
+  // `KernelFor` is the accessor soft_lowp/ops.cc needs to ask whether the
+  // answer is that file's own fallback wrapper; `ConfiguredBackend` is
+  // kFlagGems when the conf does not hold the key.
+  Backend ConfiguredBackend(const char* route_key) const {
+    return GetBackendForOp(route_key);
+  }
+
   // Can a decoded ordinary-dtype pair be handed to this route?
   //
   // Three noes. The dispatcher's own routing key must have a kernel at all --
@@ -547,6 +555,7 @@ class Dispatcher {
       case Backend::kKunlunxin:   return "vendor";
       case Backend::kIluvatar:    return "vendor";
       case Backend::kApple:       return "vendor";
+      case Backend::kDrobotics:   return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -581,6 +590,7 @@ class Dispatcher {
       case Backend::kIluvatar:      name = "iluvatar"; break;
       case Backend::kTileOps:       name = "tileops"; break;
       case Backend::kApple:         name = "mps"; break;
+      case Backend::kDrobotics:     name = "drobotics"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }

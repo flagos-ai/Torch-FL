@@ -679,7 +679,6 @@
 //   - blackman_window.periodic_out
 //   - block_diag
 //   - block_diag.out
-//   - bmm
 //   - bmm.dtype
 //   - bmm.dtype_out
 //   - bmm.out
@@ -1098,7 +1097,6 @@
 //   - mkldnn_reorder_conv3d_weight.out
 //   - mkldnn_rnn_layer.out
 //   - mkldnn_rnn_layer_backward.out
-//   - mm
 //   - mm.dtype
 //   - mm.dtype_out
 //   - mm.out

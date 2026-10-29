@@ -51,12 +51,17 @@ def _flag_gems_call_site(qualname):
     ``PythonOpCache::GetFunc`` resolves it by importing the prefix and taking
     the attribute, so ``flag_gems.<fn>`` is the call site.
 
-    Vendors override some ops by rebinding that package attribute, and the
-    keyword-argument caller (``GetFuncBare``) goes to ``flag_gems.ops.<fn>``
-    instead; ``flag_gems.ops.<op>.<fn>`` also exists but is a different slot
-    holding the same object when nothing overrides it. Both entry points the
-    caller can reach are patched, so the test counts the call whichever one the
-    dispatcher takes.
+    Vendors override some ops by rebinding that package attribute, and both
+    callers now reach it: the keyword-argument caller (``GetFuncBare``) strips
+    the qualname only to key its cache, and resolves a ``flag_gems`` target
+    through the package top level the same way, falling back to
+    ``flag_gems.ops.<fn>`` when the name is not a package-level function.
+    (A non-``flag_gems`` qualname -- the TileOPs shims -- is left on its own
+    module, so a TileOPs-only host still never imports ``flag_gems`` here.)
+    ``flag_gems.ops.<op>.<fn>`` also exists but is a different slot holding the
+    same object when nothing overrides it. Both entry points the caller can
+    reach are patched, so the test counts the call whichever one the dispatcher
+    takes.
     """
     _, _, function_name = qualname.rpartition(".")
     return [

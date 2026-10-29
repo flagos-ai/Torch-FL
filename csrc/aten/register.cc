@@ -88,6 +88,10 @@ namespace at::native::flagos {
 }
 #endif
 
+#if defined(USE_BPU)
+#include "backends/bpu/generated/bpu_kernels.h"
+#endif
+
 namespace at::flagos {
 
 namespace {
@@ -711,15 +715,21 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
     m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_BPU)
-    // BPU registers no compute ops. The BPU's unit of execution is a whole
-    // compiled graph (a .hbm produced by hbdk4), so there is no per-operator
-    // kernel to claim -- and claiming an op on PrivateUse1 without a kernel
-    // behind it raises "backend not registered" instead of falling back.
-    // Leaving the list out routes every op to cpu_fallback below; acceleration
-    // comes from the torch.compile backend in torch_fl/backends/bpu/.
+    // The BPU's unit of execution is a whole compiled artifact (a .hbm from
+    // hbdk4), not an individual operator, so a kernel here submits an artifact
+    // from the operator library named by FLAGOS_BPU_OPLIB rather than calling
+    // into a driver. Without that variable every kernel takes its CPU
+    // round-trip, which is the behaviour this branch had before any kernel
+    // existed; whole-graph acceleration still comes from the torch.compile
+    // backend in torch_fl/backends/bpu/.
     //
-    // The *_overrideable ops are the exception, and the generic fallback cannot
-    // serve them (see the wrapper block above).
+    // The list is generated (scripts/codegen/codegen_bpu.py) and contains
+    // exactly the ops with a kernel behind them: claiming an op on PrivateUse1
+    // without one raises "backend not registered" instead of falling back.
+    #include "backends/bpu/generated/bpu_register.inc"
+    //
+    // The *_overrideable ops need their own wrapper, since the generic fallback
+    // cannot serve them (see the wrapper block above).
     m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
     m.impl("convolution_backward_overrideable",
         FlagosWrapperConvolutionBackwardOverrideable);
@@ -847,6 +857,73 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #include "generated/register_flaggems_thead.inc"
   #elif defined(FLAGOS_ACCEL_TSINGMICRO)
   #include "generated/register_flaggems_tsingmicro.inc"
+  #endif
+  // The software low-precision matrix path is not an op the conf has to route.
+  //
+  // Its wrappers make the call themselves whenever an operand is FP8/FP4 (the
+  // `#if defined(FLAGOS_SOFT_LOWP)` prelude every matrix wrapper opens with),
+  // and only hand an ordinary pair to this op's conf route. But a wrapper is
+  // not a route: on a FlagGems-primary build an op the conf leaves on `none`
+  // -- mm, bmm and their variants on DCU -- lands on ATen's
+  // CompositeExplicitAutograd arm instead, which is `at::mm(decoded...)` and
+  // never sees the prelude. So an FP8 mm on DCU answered through the conf (or
+  // raised from the route's own slot) while `_scaled_mm` had to stay
+  // fail-closed beside it: the same wheel gating one fingerprint and not the
+  // other (measured on bw1100, job a91aa314's build).
+  //
+  // Claiming them follows the rule this arm already states -- the claim follows
+  // the route -- because these ops' route IS this path for a low-precision
+  // operand, whatever the conf says about the ordinary dtypes the route is
+  // named for. An ordinary pair still follows the conf inside the wrapper.
+  //
+  // Two consequences for the ordinary pair, and both are on DCU:
+  //   * an op the conf leaves on `none` is still the conf's to answer: the
+  //     wrapper sees no FP8/FP4 operand and hands the pair to its route, which
+  //     the dispatcher now asks for by key first. `none` and "not in the conf"
+  //     are refusals, and the pair is computed on the device (a plain GEMM),
+  //     which `none` (cpu_fallback) never served on this device either. It is
+  //     NOT answered with the other operand form's kernel: `bmm` on a conf that
+  //     routes `mm` would otherwise reach the `mm` row, because the factory
+  //     arm's lookup takes the plain key's slot whatever the pair was refused
+  //     for (see AnswerKeyHasRoute in soft_lowp/ops.cc). An ordinary pair that
+  //     reaches the wrapper directly is not this case -- nothing refused it;
+  //   * an op the conf routes to a FlagGems kernel now reaches this wrapper
+  //     before that kernel, which is the trade #655's revert chose to avoid --
+  //     and the reason the ops that list already claims are held back below.
+  //
+  // Only where the prelude exists, so only where FLAGOS_SOFT_LOWP does
+  // (metax, dcu): without it the claim would route every dtype through a
+  // wrapper that does not know the low-precision path.
+  //
+  // What is claimed is the matrix ops the conf leaves on `none`, or routes to
+  // a slot nothing fills -- the ops no route serves for a low-precision
+  // operand. The generated FlagGems list is included in this same body and a
+  // duplicate m.impl is a compile error, so an op whose conf route is FlagGems
+  // (metax `bmm`/`bmm.out`; both platforms' `addmm*`) is not claimed here: its
+  // wrapper still runs, because the generated list names the same
+  // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
+  #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
+  // The plain pair is claimed where the conf does not route it to a list that
+  // serves it -- and only there, because a claim on a `none` route raises for
+  // every ordinary call. DCU routes both to a FlagGems key its list reaches no
+  // dispatcher for, so both are its. Metax is not: its conf leaves `mm`
+  // `none`, so claiming it turns every `torch.mm` into "routed to 'none' ...
+  // but the op is registered on PrivateUse1" (run 40629858404, nine cases).
+  // Metax's `bmm` is on `flaggems_cpp`, which its list does claim.
+  #if !defined(FLAGOS_ACCEL_METAX)
+  m.impl("mm", WrapperMm);
+  m.impl("bmm", WrapperBmm);
+  #endif
+  // The other matrix forms are not claimed here: their generated list claims
+  // them (see SOFT_LOWP_PAIR_CLAIMS in the boxing/FlagGems list generator),
+  // because which wrapper a form takes depends on its conf route, which the
+  // list already reads. The generated list is included above this block, so a
+  // second m.impl for one of them here is a duplicate.
+  m.impl("_scaled_mm", WrapperPrivScaledMm);
+  m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
+  m.impl("_scaled_mm_v2", WrapperPrivScaledMmV2);
+  m.impl("_scaled_grouped_mm", WrapperPrivScaledGroupedMm);
+  m.impl("_scaled_grouped_mm_v2", WrapperPrivScaledGroupedMmV2);
   #endif
   // The *_overrideable conv ops are the exception the generic cpu_fallback
   // cannot serve (see the wrapper comment above): ATen's only other kernel for
