@@ -568,6 +568,10 @@ PyObject* _flagos_identity_view(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+#ifdef USE_BPU
+#include <ATen/ops/from_blob.h>
+#include <flagos.h>
+
 // Adopt memory the caller already owns as a flagos tensor, without copying.
 //
 // The BPU kernel only accepts addresses inside a hbUCPMallocCached allocation
@@ -615,6 +619,7 @@ PyObject* _flagos_from_blob(PyObject* self, PyObject* args) {
   return THPVariable_Wrap(tensor);
   END_HANDLE_TH_ERRORS
 }
+#endif  // USE_BPU
 
 // --- Caching Allocator APIs ---
 
@@ -765,7 +770,9 @@ static PyMethodDef methods[] = {
     {"_flagos_to_cuda_view", _flagos_to_cuda_view, METH_O, nullptr},
     {"_cuda_to_flagos_view", _cuda_to_flagos_view, METH_VARARGS, nullptr},
     {"_flagos_identity_view", _flagos_identity_view, METH_O, nullptr},
+#ifdef USE_BPU
     {"_flagos_from_blob", _flagos_from_blob, METH_VARARGS, nullptr},
+#endif
     {"_empty_cache", _empty_cache, METH_NOARGS, nullptr},
     {"_shutdown_allocator", _shutdown_allocator, METH_NOARGS, nullptr},
     {"_memory_stats", _memory_stats, METH_O, nullptr},

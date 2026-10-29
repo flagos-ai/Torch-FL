@@ -20,7 +20,13 @@ file(GLOB_RECURSE SOURCE_FILES
 
 add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
 
-if(FLAGOS_ACCELERATOR STREQUAL "metax")
+if(FLAGOS_ACCELERATOR STREQUAL "bpu")
+  # module.cc's _flagos_from_blob is the only caller of the runtime's Borrow,
+  # which the BPU memory manager implements and no other platform defines. The
+  # binding has to be gated on the same switch or every non-BPU build fails to
+  # link with `symbol not found in flat namespace '_Borrow'`.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_BPU=1)
+elseif(FLAGOS_ACCELERATOR STREQUAL "metax")
   # maca torch headers are gated on USE_MACA (see csrc/CMakeLists.txt).
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MACA=1)
 elseif(FLAGOS_ACCELERATOR STREQUAL "iluvatar")
