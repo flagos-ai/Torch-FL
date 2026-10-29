@@ -157,6 +157,115 @@ def _parse_conf(path: Path) -> dict[str, str]:
     return routes
 
 
+def _soft_lowp_claims() -> set[str]:
+    """The matrix ops register.cc claims from source for the soft-lowp path."""
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    # Comment lines count as neither a claim nor a duplicate: the block's own
+    # explanation names the ops it holds back.
+    code_lines = [
+        line for line in register_cc.splitlines() if not line.lstrip().startswith("//")
+    ]
+    return set(
+        re.findall(
+            r'^\s*m\.impl\("((?:mm|bmm|addmm)[^"]*|_scaled_[^"]*)",',
+            "\n".join(code_lines),
+            re.M,
+        )
+    )
+
+
+def _dropped_on(line: str, platform: str) -> bool:
+    """Whether a claim line is excluded from ``platform``'s build by its guard.
+
+    Only the one guard the block uses: ``#if !defined(FLAGOS_ACCEL_<X>)``.
+    """
+    match = re.match(r"\s*#if !defined\((FLAGOS_ACCEL_\w+)\)", line)
+    return bool(match) and match.group(1) == SOFT_LOWP_PLATFORMS[platform]
+
+
+def _lines_kept_on(block: str, platform: str) -> list[str]:
+    """The lines of ``block`` compiled for ``platform``.
+
+    Only the one guard the claim block uses is honoured: an
+    ``#if !defined(<macro>)`` region is dropped when ``<macro>`` is the
+    platform's own ``FLAGOS_ACCEL_*`` (and kept for every other platform).
+    """
+    own = SOFT_LOWP_PLATFORMS[platform]
+    kept: list[str] = []
+    guarded_on: str | None = None
+    for line in block.splitlines():
+        stripped = line.strip()
+        match = re.match(r"#if !defined\((\w+)\)", stripped)
+        if guarded_on is None and match:
+            guarded_on = match.group(1)
+            if guarded_on != own:
+                kept.append(line)
+            continue
+        if guarded_on is not None and stripped == "#endif":
+            if guarded_on != own:
+                kept.append(line)
+            guarded_on = None
+            continue
+        if guarded_on is None or guarded_on != own:
+            kept.append(line)
+    return kept
+
+
+def _claim_block(register_cc: str, platform: str) -> set[str]:
+    """The matrix-op claims register.cc makes for ``platform``, guard honoured.
+
+    The block runs from its ``#if defined(FLAGOS_ACCEL_METAX) ||`` guard to the
+    matching ``#endif`` -- nested guards and all -- not to the first one, which
+    closes a nested region.
+    """
+    start = register_cc.rfind("#if defined(FLAGOS_ACCEL_METAX) ||")
+    assert start != -1, "register.cc no longer opens the soft-lowp claim block"
+    depth = 0
+    offset = start
+    end = None
+    for line in register_cc[start:].splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("#if"):
+            depth += 1
+        elif stripped.startswith("#endif"):
+            depth -= 1
+            if depth == 0:
+                end = offset + len(line)
+                break
+        offset += len(line)
+    assert end is not None, "the soft-lowp claim block is not closed"
+    block = register_cc[start:end]
+    return set(
+        re.findall(
+            r'^\s*m\.impl\("([^"]+)",', "\n".join(_lines_kept_on(block, platform)), re.M
+        )
+    )
+
+
+# The matrix claims register.cc's soft-lowp block makes from source, keyed by
+# the macro a build defines when it compiles the prelude (csrc/CMakeLists.txt).
+PRELUDE_PLATFORMS = {"metax": "FLAGOS_ACCEL_METAX", "hygon": "FLAGOS_ACCEL_DCU"}
+
+
+def _prelude_matrix_claims(platform: str) -> set[str]:
+    """The matrix ops register.cc claims from source on ``platform``, or none."""
+    if platform not in PRELUDE_PLATFORMS:
+        return set()
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    start = register_cc.rfind("#if defined(FLAGOS_ACCEL_METAX) ||")
+    end = register_cc.index("#endif", start)
+    # The block's guards name the platform macro directly; the plain pair sits
+    # in a nested `#if !defined(FLAGOS_ACCEL_METAX)`, so read the lines the
+    # platform's own build keeps rather than the block's text.
+    return set(
+        re.findall(
+            r'^\s*m\.impl\("([^"]+)",',
+            "\n".join(_lines_kept_on(register_cc[start:end], platform)),
+            re.M,
+        )
+    )
+
+
 def _registered_ops(inc_path: Path) -> set[str]:
     """Read ``m.impl("op", ...)`` names from a registration ``.inc``."""
     if not inc_path.exists():
@@ -169,7 +278,9 @@ def _registered_ops(inc_path: Path) -> set[str]:
 def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
     """The boxed list is the conf's route set, not a superset or a subset.
 
-    register.cc's boxing arm claims exactly ``register_boxing_<platform>.inc``.
+    register.cc's boxing arm claims exactly ``register_boxing_<platform>.inc``
+    (plus the matrix ops the soft-lowp prelude claims from source in the same
+    body, where that prelude's platform macro is defined).
     A claim with no route is "routed to 'none' ... but the op is registered on
     PrivateUse1", and a route with no claim -- an op the conf routes to
     ``boxing`` that nothing registered -- is "backend not registered" the first
@@ -178,6 +289,7 @@ def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
     `empty_like` the other way round before the boxed list existed.
     """
     boxed = _registered_ops(GEN_DIR / f"register_boxing_{platform}.inc")
+    boxed |= _prelude_matrix_claims(platform)
     routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
     assert boxed, f"{platform} claims no boxed op"
     left_at_none = sorted(op for op in boxed if routes.get(op) == "none")
@@ -560,7 +672,7 @@ def test_conf_route_counts_are_stable():
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        "hygon": {"flaggems": 454, "none": 1583},
+        "hygon": {"flaggems": 456, "none": 1581},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -650,6 +762,196 @@ def test_conf_route_counts_are_stable():
             f"{platform} route counts drifted: expected {exp}, got {counts}. "
             "If an op moved routes deliberately, update this snapshot."
         )
+
+
+# ---------------------------------------------------------------------------
+# The software low-precision matrix path: claimed from source, like conv
+# ---------------------------------------------------------------------------
+
+# The matrix ops whose generated wrapper opens with the ``FLAGOS_SOFT_LOWP``
+# prelude, and the ``_scaled_mm`` family that prelude's gate must keep
+# fail-closed. A wrapper is not a route: an op the conf leaves on ``none``
+# reaches ATen's CompositeExplicitAutograd arm instead of the wrapper, so on a
+# FlagGems-primary build the prelude is unreachable unless register.cc claims
+# the op. The gate beside it (``_scaled_mm`` failing closed on an FP8 pair) is
+# then the inconsistency: the same wheel gated one fingerprint and not the
+# other, and an FP8 mm answered through the conf's route instead (measured on
+# DCU, bw1100).
+# The forms a decoded pair can be routed by where the conf leaves the form's
+# own key `none`: claimed under the mm/bmm key, which is where the dispatcher
+# sends the call (SOFT_LOWP_PAIR_CLAIMS in the registration list generator).
+SOFT_LOWP_PAIR_FORMS = {
+    "mm.dtype": "mm",
+    "mm.dtype_out": "mm",
+    "mm.out": "mm",
+    "bmm.dtype": "bmm",
+    "bmm.dtype_out": "bmm",
+    "bmm.out": "bmm",
+}
+_FORM_SUFFIX = {
+    "mm.dtype": "Mdtype",
+    "mm.dtype_out": "MdtypeOut",
+    "mm.out": "Mout",
+    "bmm.dtype": "Bdtype",
+    "bmm.dtype_out": "BdtypeOut",
+    "bmm.out": "Bout",
+}
+
+SOFT_LOWP_CLAIMS = {
+    "addmm",
+    "addmm.dtype",
+    "addmm.dtype_out",
+    "addmm.out",
+    "addmm_",
+    "bmm",
+    "bmm.dtype",
+    "bmm.dtype_out",
+    "bmm.out",
+    "mm",
+    "mm.dtype",
+    "mm.dtype_out",
+    "mm.out",
+    "_scaled_grouped_mm",
+    "_scaled_grouped_mm_v2",
+    "_scaled_mm",
+    "_scaled_mm.out",
+    "_scaled_mm_v2",
+}
+
+# The CUDA-ABI platforms whose FlagGems-primary build defines FLAGOS_SOFT_LOWP.
+SOFT_LOWP_PLATFORMS = {"hygon": "FLAGOS_ACCEL_DCU", "metax": "FLAGOS_ACCEL_METAX"}
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
+def test_soft_lowp_matrix_ops_are_claimed_on_flaggems_primary_builds(platform):
+    """A platform that compiles the prelude must also reach it for every op.
+
+    Reached means registered, from either list: ``register.cc`` claims the ops
+    the conf leaves on ``none``, and the generated FlagGems list names the same
+    ``Wrapper*`` symbols for the ops the conf routes to a FlagGems backend
+    (which is why ``register.cc`` must not claim those again). An op in
+    neither list has no PrivateUse1 kernel at all, so the prelude inside its
+    wrapper never runs.
+    """
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    # The block the claim sits in, not the whole file: `mm.out` is named by
+    # every one of these guards (the conv crossing and the pair claims), and a
+    # substring search of the file would credit a platform with a claim the
+    # guard above is there to withhold.
+    claimed_here = _claim_block(register_cc, platform)
+    listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    # The pair's own keys have a route on every platform (dcu's `mm`/`bmm` to
+    # FlagGems, metax's `bmm` to `flaggems_cpp`; metax's `mm` is `none` and so
+    # owes nothing, which is what its conf says).
+    forms = {
+        op for op, key in SOFT_LOWP_PAIR_FORMS.items() if routes.get(key) != "none"
+    } | {
+        op
+        for op in SOFT_LOWP_CLAIMS
+        if routes.get(op) != "none" or op in claimed_here or op in listed
+    }
+    claimed = claimed_here | _prelude_matrix_claims(platform)
+    # The list's plain entry for the pair's own key serves every form of that
+    # key (metax's `bmm` on `flaggems_cpp`): a `none` out form takes the pair
+    # forwarder, whose route is that key. A form with a route of its own is the
+    # list's plain wrapper.
+    plain_served = {op for op, key in SOFT_LOWP_PAIR_FORMS.items() if key in listed}
+    missing = sorted(
+        op
+        for op in forms
+        if op not in claimed and op not in listed and op not in plain_served
+    )
+    assert not missing, (
+        f"{platform}: the software low-precision matrix ops {missing} are "
+        "registered on PrivateUse1 by neither register.cc nor the generated "
+        "FlagGems list, so a FlagGems-primary build never reaches the "
+        "FLAGOS_SOFT_LOWP prelude for them"
+    )
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
+def test_soft_lowp_claims_are_gated_on_the_platform_macro(platform):
+    """The claim must sit under a macro the platform defining the prelude sets."""
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    expected = SOFT_LOWP_PLATFORMS[platform]
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
+    # The claims this block makes itself: `mm` and `bmm` where the conf does not
+    # route the pair to a list that serves it. The other matrix forms are the
+    # list's (see SOFT_LOWP_PAIR_CLAIMS), so they are checked there.
+    paired = routes.get("mm") == "none"
+    claimed_here = _claim_block(register_cc, platform)
+    claims = ['m.impl("mm", WrapperMm);', 'm.impl("bmm", WrapperBmm);']
+    if not paired:
+        idx = register_cc.rfind(claims[0])
+        assert idx != -1, "mm is not claimed from register.cc"
+        guard_block = register_cc[max(0, idx - 1600) : idx]
+        assert expected in guard_block, (
+            f"{platform}: the soft-lowp matrix claim is not gated on {expected}. "
+            f"Guard text found:\n{guard_block}"
+        )
+    else:
+        # Nothing to gate: `mm` is on `none` here, so this platform's build must
+        # not compile the claim -- a claim on a `none` route is the dispatcher's
+        # raise for every ordinary call (metax, run 40629858404). Read through
+        # the guard, not the file: the line is still there for the platforms
+        # that do want it.
+        assert "mm" not in claimed_here and "bmm" not in claimed_here, (
+            f"{platform}: the conf routes `mm` to `none`, so register.cc must "
+            "not claim mm/bmm for it -- the claim turns every torch.mm into "
+            "\"routed to 'none' ... but the op is registered on PrivateUse1\""
+        )
+    # Where the conf leaves a form `none`, the pair must be claimed (or, for
+    # `bmm`/`bmm.out`, served by the list under its own key) -- and the claim
+    # must follow the pair's route, not the form's slot. Where the form names a
+    # FlagGems backend the plain wrapper is already the list's claim.
+    listed_text = (GEN_DIR / f"register_flaggems_{platform}.inc").read_text()
+    listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    for op, key in SOFT_LOWP_PAIR_FORMS.items():
+        if routes.get(op) != "none":
+            continue
+        # Every route the pair can answer by: a claim register.cc makes, a
+        # route of its own, or its plain key already claimed by the list.
+        served = (
+            key in claimed_here
+            or key in _prelude_matrix_claims(platform)
+            or routes.get(key) != "none"
+            or key in listed
+        )
+        if not served:
+            continue
+        forwarder = {
+            "mm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsMm",
+            "bmm": f"native::flagos::soft_lowp::Wrapper{_FORM_SUFFIX[op]}AsBmm",
+        }[key]
+        assert f'm.impl("{op}", {forwarder});' in listed_text, (
+            f"{platform}: {op} is routed `none` and the generated list does not "
+            "claim it by the mm/bmm key, so the call refuses before the prelude"
+        )
+
+
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", sorted(SOFT_LOWP_PLATFORMS))
+def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
+    """A second m.impl for one op in one TORCH_LIBRARY_IMPL body is a compile error.
+
+    The generated FlagGems list is included in the same body as the claims
+    above, so an op it already names -- metax's ``bmm``, whose conf routes it
+    to ``flaggems_cpp``, and every matrix form the soft-lowp pair claims -- must
+    not be claimed again. Such an op is guarded out by name, on every platform:
+    a guard that only excludes the platform it was written for still
+    duplicates on the other one.
+    """
+    register_cc = (ATEN_DIR / "register.cc").read_text()
+    claimed_here = _claim_block(register_cc, platform)
+    listed = _registered_ops(GEN_DIR / f"register_flaggems_{platform}.inc")
+    duplicated = sorted(claimed_here & listed)
+    assert not duplicated, (
+        f"{platform}: {duplicated} are claimed by register.cc and already named "
+        "by the generated FlagGems list; the second m.impl does not compile"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -287,8 +287,18 @@ PY
 - `relu`/`relu_`: FlagGems' `relu_forward_kernel_rank_1` displaces ATen's `at::native::vectorized_elementwise_kernel` from the profiler-parity workload's trace, and `tests/integration/test_profiler_parity.py` requires that trace to carry an `at::native` template kernel; only the boxing kernel launches one
 
 The complete pinned set, with its per-op diagnosis, is in `backends_hygon.conf`'s own
-header note (`mm`/`bmm` -- FlagGems issue #6227 -- plus `mse_loss` #6221 and
-`transpose.int` #6219).
+header note (`mse_loss` #6221, `transpose.int` #6219, and the rest).
+
+`mm` and `bmm` are the exception in the other direction. This build compiles the
+soft-lowp matrix prelude, which registers `mm`/`bmm` on PrivateUse1 for the
+FP8/FP4 path, and one op cannot be partly on `cpu_fallback`: the default conf
+therefore routes them to FlagGems and `mm.out`/`mm.dtype_out` to `none`, which
+the prelude answers. That route is recorded in `gen_vendor_confs.py` as a
+measured **failure** rather than a pass -- FlagGems issue #6227 measured `mm`
+hanging on the `hcu` backend, and a short float32 `mm` no longer reproduces
+that on DTK 26.04 with flag_gems 5.4.0. The FlagGems `mm` kernel also rejects
+`float64` (`CompilationError`, fp32 accumulator re-assigned fp64), so a float64
+`mm` fails on this platform until a route that takes it exists.
 
 Override per-op routing with `FLAGOS_OP_<name>=flagos_python|cuda`. A DCU boxing wheel that needs the held ops on the CUDA kernel (rather than CPU) selects the opt-in day-0 table: `FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_hygon_boxing.conf`.
 

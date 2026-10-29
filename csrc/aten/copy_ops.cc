@@ -509,20 +509,31 @@ at::Tensor _copy_from(
       }
 #else
       // CUDA platform without the boxing kernels. `DeviceBoxingGuard` does not
-      // need them: it only rewrites a tensor's device metadata to CUDA, and a
-      // build that gets here links a real libtorch_cuda, so the native
-      // TensorIterator copy kernel is reachable. Sending these copies through
-      // host memory instead costs two blocking cudaMemcpy per call, and this is
-      // the arm a dtype cast or a strided copy lands on for every flagos
-      // `copy_` -- including the ones `_to_copy` performs internally after its
-      // `contiguous()`. Measured on the OCR-RM Qwen3.5-VL 2B value head
-      // (8x H100): 2409 Memcpy per forward at 894 ms of a 1926 ms device
+      // need them: it only rewrites a tensor's device metadata to CUDA, and the
+      // kernel it makes reachable is ATen's native TensorIterator strided copy
+      // -- a CUDA DispatchStub that lives in libtorch_cuda.so. That stub exists
+      // only in a torch that ships the library: the default CUDA and PPU wheels
+      // link the CPU-only pip torch, so on them a boxed call aborts with
+      // "DispatchStub: missing kernel for cuda". The choice is therefore made
+      // at link time, the same probe the dtype-cast arm above uses.
+      //
+      // Where libtorch_cuda *is* linked the on-device copy is worth keeping:
+      // this is the arm a dtype cast or a strided copy lands on for every
+      // flagos `copy_` -- including the ones `_to_copy` performs internally
+      // after its `contiguous()`. Measured on the OCR-RM Qwen3.5-VL 2B value
+      // head (8x H100): 2409 Memcpy per forward at 894 ms of a 1926 ms device
       // profile, against 2.48 ms of `copy_` device time on stock CUDA.
       if (cast_needs_cpu_roundtrip(self.scalar_type(), dst.scalar_type())) {
         strided_copy_cast_via_cpu(self, dst);
       } else {
+#if defined(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
         DeviceBoxingGuard guard(self, dst);
         at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
+#else
+        // No native CUDA copy kernel in this wheel's torch: one host round-trip
+        // handles strides, storage offsets and the dtype change together.
+        strided_copy_cast_via_cpu(self, dst);
+#endif
       }
 #endif
 #else

@@ -268,6 +268,10 @@ def test_addmm_out_routes_through_a_dispatcher_that_writes_out():
     before it hands ``out`` to a kernel that writes it. Passing anything else
     (a re-bound ``self``, the general route's const operand) either writes the
     wrong tensor or binds a const tensor to ``Tensor&``.
+
+    ``Select`` names the key the dispatcher answers for (``addmm``), not the
+    caller's: ``addmm_`` reaches this arm too and has no key of its own, and a
+    key it names no kernel for runs Select once for nothing.
     """
     source = _OPS_CC.read_text(encoding="utf-8")
     match = _ADDMM_OUT_ROUTE.search(source)
@@ -276,7 +280,11 @@ def test_addmm_out_routes_through_a_dispatcher_that_writes_out():
     assert "addmm_out_dispatcher" in arm, arm
     call = re.search(r"AddmmOutCall call\{(\w+)\}", arm)
     assert call is not None and call.group(1) == "addmm_out_dispatcher", arm
-    called = re.search(r"call\.Call\(call\.Select\(key\), (.*?)\);", arm, re.S)
+    called = re.search(
+        r"call\.Call\(call\.Select\(addmm_dispatcher\.OpKey\(\)\), (.*?)\);",
+        arm,
+        re.S,
+    )
     assert called is not None, arm
     args = _argument_list(called.group(1))
     assert args == [
@@ -336,3 +344,49 @@ def test_a_decoded_fp8_out_dtype_reaches_the_python_route():
         "OptionalDtypeToPython must name the FP8 dtypes; otherwise an FP8 "
         "out_dtype raises here before the route runs:\n" + body
     )
+
+
+def _function_body(source: str, signature: str) -> str:
+    """One definition's body, from its signature to its closing brace."""
+    start = source.find(signature)
+    assert start != -1, f"ops.cc no longer defines {signature}"
+    body = source[start:]
+    return body[: body.find("\n}\n")]
+
+
+def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
+    """A pair the conf gives no route still has none once it is decoded.
+
+    The mm and bmm families answer for four keys each through one dispatcher,
+    and a pair this file decoded is refused by the key it was routed by --
+    but ``RunMatrix``'s factory arm then takes ``Fitted``'s answer for the
+    plain key, which returns whatever the conf's slot holds even after it
+    degrades. On a conf that routes ``mm`` and leaves ``bmm`` on ``none``, an
+    ordinary bmm reached the ``mm`` kernel that way; the rail is that the key
+    the call is really routed by has a route, read from the conf, before the
+    family's dispatcher is asked anything.
+    """
+    source = _OPS_CC.read_text(encoding="utf-8")
+    helper = _function_body(source, "bool AnswerKeyHasRoute(")
+    assert "HasBackendForOp(" in helper, (
+        "AnswerKeyHasRoute must read the conf for the key, not the resolved "
+        "kernel:\n" + helper
+    )
+    assert "HasBackendForOp(" in _function_body(source, "bool DecodedPairHasRoute("), (
+        "DecodedPairHasRoute must refuse a key the conf has no route for "
+        "before asking the family's dispatcher"
+    )
+    factory = _function_body(source, "at::Tensor RunMatrix(")
+    start = factory.find("case OrdinaryRoute::kFactory:")
+    assert start != -1, factory
+    arm = factory[start:]
+    arm = arm[: arm.find("case OrdinaryRoute::kDtype:")]
+    assert "AnswerKeyHasRoute(" in arm, (
+        "the factory arm must not take the plain key's kernel for a pair that "
+        "was refused its own key:\n" + arm
+    )
+    for name in ("BmmKernelFor(key)", "MmKernelFor(key)"):
+        line = next((ln for ln in arm.splitlines() if name in ln), "")
+        assert "routed" in line, (
+            f"{name} is taken unconditionally in the factory arm:\n{arm}"
+        )
