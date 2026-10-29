@@ -650,7 +650,8 @@ def test_conf_route_counts_are_stable():
         # flip moved from the flaggems route to ascend for the same reason;
         # the FlagTree 0.7.0 Ascend MLIR pipeline cannot lower the rank-2
         # copy_func kernel the FlagGems `_ascend` flip override builds.
-        "ascend": {"flaggems": 221, "none": 1659, "ascend": 157},
+        # Real-valued sgn now reaches ACLNN Sign for abs backward.
+        "ascend": {"flaggems": 221, "none": 1658, "ascend": 158},
         # The BPU is native: 34 ops route to the generated kernel layer, the
         # rest to `none`. Those kernels submit .hbm artifacts from
         # FLAGOS_BPU_OPLIB; without it each takes its own CPU round-trip, which

@@ -561,6 +561,34 @@ at::Tensor SignKernelAscend(const at::Tensor& self) {
 
 REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kAscend, SignKernelAscend)
 
+at::Tensor SgnKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
+    auto cpu_result = at::sgn(self.cpu());
+    return ascend::MoveCpuResultToDevice(std::move(cpu_result), self);
+  }
+  auto out = ascend::OpPreparation::apply_tensor_without_format(
+      self.sizes(), self.options());
+
+  static void* opApiFuncAddr = nullptr;
+  static void* getWsFuncAddr = nullptr;
+  ascend::SigHasher hsh; hsh.tensor(self);
+  ascend::ExecAscendCached(
+      "aclnnSign", "aclnnSignGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
+      {&self}, {&out},
+      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
+         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+        return gws(in[0].acl_tensor, out_t[0].acl_tensor, pws, pex);
+      });
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SgnFn, sgn_dispatcher, Backend::kAscend, SgnKernelAscend)
+
 at::Tensor ReluKernelAscend(const at::Tensor& self) {
   // Issue #326: make the primary tensor's device current, so the
   // workspace, launch stream and executor cache below all agree on it.

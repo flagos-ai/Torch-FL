@@ -122,17 +122,9 @@ class TestArithmetic:
 
 
 class TestMatrixOps:
-    # Issue #409: `mm` here is compared against a float32 CPU reference, and on
-    # Ascend that reference is *more* precise than the kernel it checks. The
-    # vendor cube takes HF32 (a 10-bit mantissa input format) by request --
-    # `get_cube_math_type(true)` in csrc/aten/backends/ascend/matmul.cc, the same
-    # switch scripts/tools/verify_flaggems_ascend.py documents as "~5e-3 on a
-    # K=128 matmul". Measured on a 910 over 10 seeds: max_abs 6.0e-3 and a flat
-    # ~1.5e-4 relative error, unchanged in kind from K=8 (3.5e-3) to K=512
-    # (1.1e-2) -- the loss is the input rounding, not the summation order, so a
-    # tighter bound would be asserting full float32 precision that this backend
-    # does not compute and does not claim. 1e-3/1e-2 leaves ~5e-3 of headroom
-    # while still catching a wrong product by orders of magnitude.
+    # These shape checks admit an explicitly requested reduced-precision mode.
+    # test_dtype_coverage and test_ascend_matmul_precision separately enforce
+    # full FP32 arithmetic when PyTorch's matmul policy is "highest".
     MM_RTOL = 1e-3
     MM_ATOL = 1e-2
 

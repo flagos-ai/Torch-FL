@@ -895,15 +895,23 @@ def test_boxing_variant_does_not_apply_measured_composite_routes():
     ops goes through one PrivateUse1 entry and none of them can be left to
     cpu_fallback. Boxing the key would send an ordinary pair and an FP8/FP4
     pair down two different paths under one name.
+
+    That exception is why the two halves are asserted separately below. #672
+    added the mm/bmm override by taking the whole of
+    boxing_measured_python_ops(), which also carries the composite, and this
+    assertion was relaxed to `flaggems` to match rather than the override being
+    narrowed -- so the composite rode into the day-0 conf and the boxing lane
+    reported it as test_sdpa_route_matches_the_recorded_one. The override now
+    reads SOFT_LOWP_FLAGGEMS_MEASURED, which is the set its own note defends.
     """
     assert "scaled_dot_product_attention" in g.DCU_COMPOSITE_FLAGGEMS
     routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["hygon"][1]
-    # Not boxing: hygon is now FlagGems-first on this composite too, so the
-    # variant routes what the default conf routes and boxes nothing back.
-    assert routes["scaled_dot_product_attention"] == "flaggems"
+    assert routes["scaled_dot_product_attention"] == "boxing"
     assert set(g.BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS) == {"hygon"}
     for op in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]:
         assert routes[op] == "flaggems", op
+    # The composite is not in that set, which is what keeps the two apart.
+    assert "scaled_dot_product_attention" not in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
 
 
 @pytest.mark.parametrize("platform", ["metax", "hygon", "thead"])

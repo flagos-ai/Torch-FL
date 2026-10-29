@@ -331,6 +331,7 @@
   m.impl("scalar_tensor", WrapperScalarTensor);
   m.impl("scatter.src", WrapperScatterSrc);
   m.impl("select.int", WrapperSelectInt);
+  m.impl("sgn", WrapperSgn);
   m.impl("sigmoid", WrapperSigmoid);
   m.impl("sigmoid_", WrapperSigmoidInplace);
   m.impl("sigmoid_backward", WrapperSigmoidBackward);
