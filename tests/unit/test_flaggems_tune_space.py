@@ -225,7 +225,7 @@ def as_musa(monkeypatch):
     """Force the configuration the patch is gated on rather than assuming it:
     this suite also runs on the MTT S5000, where the real detector agrees, and on
     hosts where it answers something else."""
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "musa")
+    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "mthreads")
     monkeypatch.setattr(flagos, "_musa_shared_memory_limit", lambda: LIMIT_S5000)
 
 

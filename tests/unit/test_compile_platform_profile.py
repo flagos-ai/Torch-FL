@@ -72,7 +72,10 @@ def as_musa(monkeypatch):
             lambda: pp._MUSA_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "musa")
+    # The record carries the *vendor* name setup.py writes for a MUSA build;
+    # `platform_profile()` accepts either, and the generated-code branches key
+    # on this one.
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
     return pp._MUSA_PROFILE
 
 

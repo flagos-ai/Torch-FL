@@ -1260,8 +1260,12 @@ def _patch_flaggems_vector_norm():
     """
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
+        from .._platform import platform_for
 
-        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
+        # The build record names the vendor ("hygon"); the platform is "dcu".
+        if platform_for(_build_accelerator()) != "dcu":
+            return
+        if not _conf_routes_to_flaggems():
             return
         import flag_gems.ops as _gems_ops
 
@@ -1373,8 +1377,12 @@ def _patch_flaggems_pow_scalar_square():
     """
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
+        from .._platform import platform_for
 
-        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
+        # The build record names the vendor ("hygon"); the platform is "dcu".
+        if platform_for(_build_accelerator()) != "dcu":
+            return
+        if not _conf_routes_to_flaggems():
             return
         import flag_gems
         import flag_gems.ops as _gems_ops
@@ -1520,8 +1528,12 @@ def _patch_flaggems_mean_last_dim():
     """
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
+        from .._platform import platform_for
 
-        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
+        # The build record names the vendor ("hygon"); the platform is "dcu".
+        if platform_for(_build_accelerator()) != "dcu":
+            return
+        if not _conf_routes_to_flaggems():
             return
         import flag_gems
         import flag_gems.ops as _gems_ops
@@ -1715,7 +1727,9 @@ def _patch_flaggems_index_put():
 # same measurement was taken on an H100 (see the section header) -- an external
 # libtorch_cuda.so behind a CPU torch changes how the vendor kernels are reached,
 # not how FlagGems launches its own.
-_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("hygon", "nvidia")
+# Platform ids, not the record's vendor spelling: ``_flagos_launch_patches_apply``
+# resolves the record through ``platform_for`` before looking here.
+_FLAGGEMS_LAUNCH_PATCH_BUILDS = ("dcu", "cuda")
 
 
 def _flagos_launch_patches_apply():
@@ -1729,9 +1743,10 @@ def _flagos_launch_patches_apply():
     cheaper.
     """
     from .. import _build_accelerator, _conf_routes_to_flaggems
+    from .._platform import platform_for
 
     return (
-        _build_accelerator() in _FLAGGEMS_LAUNCH_PATCH_BUILDS
+        platform_for(_build_accelerator()) in _FLAGGEMS_LAUNCH_PATCH_BUILDS
         and _conf_routes_to_flaggems()
     )
 
@@ -2091,7 +2106,12 @@ def _align_flagtree_autotuning_knobs():
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
 
-        if _build_accelerator() != "ascend" or not _conf_routes_to_flaggems():
+        from .._platform import platform_for
+
+        # The record names either spelling; the platform is "ascend".
+        if platform_for(_build_accelerator()) != "ascend":
+            return
+        if not _conf_routes_to_flaggems():
             return
 
         triton_knobs = importlib.import_module("triton.knobs")
@@ -2235,8 +2255,12 @@ def _prewarm_triton_key():
     """
     try:
         from .. import _build_accelerator, _conf_routes_to_flaggems
+        from .._platform import platform_for
 
-        if _build_accelerator() != "hygon" or not _conf_routes_to_flaggems():
+        # The build record names the vendor ("hygon"); the platform is "dcu".
+        if platform_for(_build_accelerator()) != "dcu":
+            return
+        if not _conf_routes_to_flaggems():
             return
 
         import threading
@@ -2759,12 +2783,18 @@ def _patch_flaggems_tune_space():
     Best-effort, like the patches around it: this must not be able to take down
     device init, and an unfitted tune space is the status quo, not a new failure.
     """
+    from .. import _build_accelerator
+    from .._platform import platform_for
+
+    # The record names the vendor ("mthreads"); the platform is "musa". The gate
+    # sits outside the ``try`` so a patched import fails loudly instead of being
+    # swallowed into "this build is not MUSA" -- the patches below are the ones
+    # whose failures are best-effort, and a test holding a stub in
+    # ``sys.modules`` has to see that they ran.
+    if platform_for(_build_accelerator()) != "musa":
+        return
+
     try:
-        from .. import _build_accelerator
-
-        if _build_accelerator() != "mthreads":
-            return
-
         libentry = importlib.import_module("flag_gems.utils.libentry")
         libtuner = libentry.LibTuner
 
@@ -2788,6 +2818,7 @@ def _patch_flaggems_tune_space():
             repaired = _tune_space_run(libtuner.run)
             setattr(repaired, _TUNE_SPACE_PATCHED, True)
             libtuner.run = repaired
+        setattr(libtuner, _TUNE_SPACE_PATCHED, True)
 
         _rewrap_flaggems_tuners(
             class_patch=_tune_space_subclass_patch,
@@ -2810,8 +2841,9 @@ def _musa_tune_space_ready() -> None:
     ``flag_gems.ops`` are both imported. See ``_patch_flaggems_tune_space``.
     """
     from .. import _build_accelerator
+    from .._platform import platform_for
 
-    if _build_accelerator() != "mthreads":
+    if platform_for(_build_accelerator()) != "musa":
         return
     if "flag_gems.utils.libentry" not in sys.modules:
         return

@@ -1193,15 +1193,20 @@ def test_the_isolated_run_keeps_the_repository_importable(tmp_path, monkeypatch)
     tree rather than dropped, because the source tree has to own
     ``tests.models...`` and the repository root has to provide ``torch_fl``."""
     source = isolated_source(tmp_path)
+    # Built under tmp_path rather than spelled "/tmp/elsewhere": isolated_env
+    # resolves every entry, so a literal /tmp is a symlink on macOS and would be
+    # rewritten to /private/tmp, and the assertion below would look for a string
+    # the function is right not to return.
+    elsewhere = tmp_path / "elsewhere"
     monkeypatch.setenv(
-        "PYTHONPATH", os.pathsep.join([str(verify.REPO_ROOT), "/tmp/elsewhere"])
+        "PYTHONPATH", os.pathsep.join([str(verify.REPO_ROOT), str(elsewhere)])
     )
     entries = verify.isolated_env(source, tmp_path / "work")["PYTHONPATH"].split(
         os.pathsep
     )
     assert str(verify.REPO_ROOT) in entries
     assert entries.index(str(source)) < entries.index(str(verify.REPO_ROOT))
-    assert entries.index("/tmp/elsewhere") < entries.index(str(verify.REPO_ROOT))
+    assert entries.index(str(elsewhere)) < entries.index(str(verify.REPO_ROOT))
     assert entries[0] == str(tmp_path / "work")
 
 
