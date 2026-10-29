@@ -3610,10 +3610,23 @@ def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
         routes.update({op: "flaggems" for op in BOXING_VARIANT_FLAGGEMS_OPS})
         # The platform's own FlagGems-routed keys, kept for the claim reason in
         # BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS rather than for the RNG one
-        # above. Applied from the platform's measured set, so the variant cannot
-        # route a key the default conf does not.
+        # above: a claim on these ops carries every dtype through the soft-lowp
+        # prelude, so boxing the key would serve one key by two paths.
+        #
+        # Read from SOFT_LOWP_FLAGGEMS_MEASURED and not from
+        # boxing_measured_python_ops(): that function also returns the
+        # platform's composite measurements (DCU_COMPOSITE_FLAGGEMS, i.e.
+        # `scaled_dot_product_attention`), which the branch above deliberately
+        # removes from this variant. Taking the whole set here put SDPA back on
+        # `flaggems` in the day-0 conf, against the premise that a day-0 model
+        # is not trusted to FlagGems -- the boxing lane caught it as
+        # `test_sdpa_route_matches_the_recorded_one` ("routes
+        # scaled_dot_product_attention to 'flaggems'; dcu_boxing was recorded at
+        # 'boxing'"). The claim reason above is specific to the soft-lowp matrix
+        # ops, so the override is too. `if op in routes` still holds the rule
+        # that the variant cannot route a key the default conf does not.
         if platform in BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS:
-            measured = boxing_measured_python_ops(sparse_conf)
+            measured = SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
             routes.update({op: "flaggems" for op in measured if op in routes})
         out[platform] = (
             render(

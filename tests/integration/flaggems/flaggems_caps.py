@@ -183,7 +183,11 @@ SEEDED_DRAWOPS = frozenset({"native_dropout", "native_dropout_backward"})
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "ascend": 221,
-    "dcu": 452,
+    # 454: #672 routed DCU's `mm` and `bmm` to FlagGems (the soft-lowp matrix
+    # claim carries every dtype through the prelude, so the key cannot box), and
+    # left this count at the pre-reroute 452. The hygon lane reported the two it
+    # had gained as `assert 454 == 452`.
+    "dcu": 454,
     "gcu": 251,
     # The iluvatar lane's landing: the conf routes 585 ops to FlagGems, eleven
     # to the native slot (six ixdnn/ixblas kernels -- `_convolution`, `addmm`,
@@ -233,7 +237,13 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # ``SEEDED_DRAWOPS`` routes (583 - 2 on metax, and the same - 2 on DCU's 453:
     # the seeded ops reach FlagGems in the day-0 tables of every platform).
     "metax_boxing": 581,
-    "dcu_boxing": 451,
+    # 453: the same two soft-lowp matrix routes as `dcu` above, which the day-0
+    # variant keeps for the same claim reason, less the
+    # `scaled_dot_product_attention` route that variant never meant to carry
+    # (see BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS in
+    # scripts/codegen/gen_vendor_confs.py). The boxing lane reported the gap as
+    # `assert 454 == 451` while that composite was still routed.
+    "dcu_boxing": 453,
     # TsingMicro's conf is the other hand-maintained one: 81 routes, of which 65
     # are the plain `flaggems` key, 2 spell it `flagos_python` (a log name this
     # conf uses as a route value) and 14 are metadata-view routes on the vendor.
