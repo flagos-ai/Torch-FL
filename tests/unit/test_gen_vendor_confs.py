@@ -542,6 +542,9 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     mps is likewise a native-kernel vendor: its generated registration
     (backends/mps/generated/mps_register.inc) claims only the MPSGraph kernels
     it ships, so it is a generated full-coverage conf too.
+    drobotics joins them for the same reason: backends/bpu/generated/
+    bpu_register.inc claims only the ops with a kernel behind them, so a `none`
+    route there falls back instead of raising.
     """
     assert set(g.VENDORS) == {
         "mthreads",
@@ -550,6 +553,7 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
         "kunlunxin",
         "iluvatar",
         "apple",
+        "drobotics",
     }
     assert "metax" not in g.VENDORS
     assert "tsingmicro" not in g.VENDORS

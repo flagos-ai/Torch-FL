@@ -88,6 +88,10 @@ namespace at::native::flagos {
 }
 #endif
 
+#if defined(USE_BPU)
+#include "backends/bpu/generated/bpu_kernels.h"
+#endif
+
 namespace at::flagos {
 
 namespace {
@@ -711,15 +715,21 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
     m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_BPU)
-    // BPU registers no compute ops. The BPU's unit of execution is a whole
-    // compiled graph (a .hbm produced by hbdk4), so there is no per-operator
-    // kernel to claim -- and claiming an op on PrivateUse1 without a kernel
-    // behind it raises "backend not registered" instead of falling back.
-    // Leaving the list out routes every op to cpu_fallback below; acceleration
-    // comes from the torch.compile backend in torch_fl/backends/bpu/.
+    // The BPU's unit of execution is a whole compiled artifact (a .hbm from
+    // hbdk4), not an individual operator, so a kernel here submits an artifact
+    // from the operator library named by FLAGOS_BPU_OPLIB rather than calling
+    // into a driver. Without that variable every kernel takes its CPU
+    // round-trip, which is the behaviour this branch had before any kernel
+    // existed; whole-graph acceleration still comes from the torch.compile
+    // backend in torch_fl/backends/bpu/.
     //
-    // The *_overrideable ops are the exception, and the generic fallback cannot
-    // serve them (see the wrapper block above).
+    // The list is generated (scripts/codegen/codegen_bpu.py) and contains
+    // exactly the ops with a kernel behind them: claiming an op on PrivateUse1
+    // without one raises "backend not registered" instead of falling back.
+    #include "backends/bpu/generated/bpu_register.inc"
+    //
+    // The *_overrideable ops need their own wrapper, since the generic fallback
+    // cannot serve them (see the wrapper block above).
     m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
     m.impl("convolution_backward_overrideable",
         FlagosWrapperConvolutionBackwardOverrideable);

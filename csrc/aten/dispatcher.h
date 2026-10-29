@@ -555,6 +555,7 @@ class Dispatcher {
       case Backend::kKunlunxin:   return "vendor";
       case Backend::kIluvatar:    return "vendor";
       case Backend::kApple:       return "vendor";
+      case Backend::kDrobotics:   return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -589,6 +590,7 @@ class Dispatcher {
       case Backend::kIluvatar:      name = "iluvatar"; break;
       case Backend::kTileOps:       name = "tileops"; break;
       case Backend::kApple:         name = "mps"; break;
+      case Backend::kDrobotics:     name = "drobotics"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }

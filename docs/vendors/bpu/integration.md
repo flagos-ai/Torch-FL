@@ -42,6 +42,10 @@ convolution, so there is nothing for a `PrivateUse1` kernel to call. This
 mirrors `tsingmicro`: `csrc/aten/register.cc` skips the generated
 `register.inc` under `USE_BPU`, and every aten op reaches `cpu_fallback`.
 
+An **operator library** supplies that layer without one: a directory of
+single-operator artifacts, built once with hbdk4 and loaded by the board's
+native runtime. See *Eager operator library* below.
+
 Convolution is the one exception, and not by choice. `aten::convolution`
 dispatches `PrivateUse1` to `convolution_overrideable`, whose only other kernel
 is a `CompositeExplicitAutograd` stub that raises `NotImplementedError`. The
@@ -49,6 +53,83 @@ boxed fallback cannot rescue it — moving the arguments to CPU and redispatchin
 the *same* op lands back on the stub — so `register.cc` registers two small
 wrappers that cross to CPU and call `at::convolution` instead. Without them
 `conv2d` on a flagos tensor raises rather than falling back.
+
+## Eager operator library
+
+The BPU has no per-operator entry point, but it does not need one to run
+aten ops eagerly: `scripts/vendor/build_bpu_oplib.py` compiles a set of
+one-operator graphs into `.hbm` artifacts on the build host, and
+`torch_fl/accelerator/bpu/eager.py` loads and dispatches them on the board.
+**Nothing is compiled on the device.**
+
+```
+build host (hbdk4)                    board (native runtime)
+op x bucket -> one .hbm each    ->     manifest.json + artifacts
+                                      EagerDispatcher -> hbDNNInferV2
+```
+
+Currently 15 ops: `relu neg abs exp tanh sigmoid sqrt rsqrt log` and
+`add sub mul max min div`. All 15 were verified on the board to match their
+host reference within 3e-2 relative on f32.
+
+### Shapes are bucketed, not dynamic
+
+A dynamic axis compiles — `{dynamic_dims = [-1]}` is accepted by hbdk4 and
+survives into the artifact — but it cannot be executed on HBRT 4.7.5. The
+loader declares the dynamic axis with stride 0, the task validator requires
+at least 64, and it separately rejects any buffer that is not exactly the
+stride extent, so no caller can satisfy both. The full trace, including the
+attribute form that parses and the two error messages that close the door, is
+in `docs/vendors/bpu/dynamic-shape-probe.md`.
+
+Buckets are **inclusive-upward**: a request routes to the smallest bucket at or
+above its width, is zero-padded into it, and the result is cropped back. That
+is safe because every op in the library is elementwise — the padded lanes
+cannot influence the ones before them. Verified on the board for all 15 ops:
+a 37-element request served by a 256-lane artifact returns the right values,
+with the tail coming back as the op's own result for zeros.
+
+The bucket ladder is dense where widths are small and sparse where they are
+large — `8 16 32 48 64 96 128 192 256 384 512`. With round-up routing this
+keeps the worst-case pad under 8x in 11 rungs, i.e. 165 artifacts (~760 KB) for
+15 ops. A 16-step ladder to 256 would pad more tightly but needs 17 rungs, and
+it buys nothing: the BPU's cost is flat in width (0.141 ms at 64 lanes,
+0.152 ms at 512), so the extra lanes are free and only the rung count would go
+up. Nor does the hardware want aligned widths — odd sizes like 33 and 37
+compile and execute correctly, so alignment is a bookkeeping choice, not a
+constraint.
+
+Exact matching was the first rule and it was needlessly strict: it sent every
+off-bucket shape to the host. Round-up routing took a 72-case unary sweep and
+a 30-case binary sweep to **102/102 on device**, from whatever the exact rule
+managed to cover. A request still misses when it is wider than the largest
+bucket (or carries a batch dimension), and a miss falls back to the NumPy
+reference and is counted, so a silent degradation to the host is visible in
+`EagerDispatcher.summary()` rather than assumed away.
+
+### Why the count matters
+
+The artifacts execute on the BPU; the measurement that shows it is the
+latency plateau. `hbm_runtime.run` on these kernels costs ~0.15 ms regardless
+of width (0.145 ms at 64 elements, 0.152 ms at 512), which is a fixed
+submission cost rather than work. A host implementation of the same op is
+`numpy.maximum` at 0.0017 ms — faster in absolute terms at these sizes, because
+a 512-element op cannot amortize a 0.15 ms submit. The library is worth it on
+throughput across many small ops, not on per-call latency.
+
+### Building the library
+
+```bash
+# on the build host, with hbdk4 and FLAGOS_BPU_MLIR_LIBS pointing at its _mlir_libs
+python scripts/vendor/build_bpu_oplib.py --out ./oplib
+# --shapes overrides the default ladder, e.g. --shapes 1x64 1x128 1x256
+```
+
+That emits `oplib/manifest.json` plus one `.hbm` per op per bucket (165 files
+for the 15 ops above at the default 11 rungs). `compile()` ends by loading its own artifact back
+through hbrt4, which claims BPU memory; off-board that read-back throws
+`ResourceExhausted` *after* a complete file has been written, and the script
+treats any complete file as success.
 
 ## Compile pipeline
 
@@ -265,10 +346,21 @@ torch-side view is what you want.
   a scheduling policy, and UCP memory is SoC-wide, so cores are a scheduling
   detail rather than separate devices. `GetDeviceCount` returns 1, and 0 when
   the driver is absent (`hb_bpu_core_num() == 0`).
-- **Submission is synchronous** (`hbUCPSubmitTask` + `WaitTaskDone`), so there
-  is no async copy engine: `MemcpyAsync` is a synchronous copy, streams are a
-  single sentinel handle, and event timestamps are real `steady_clock` readings
-  — which makes `EventElapsedTime` genuinely meaningful here.
+- **Submission is synchronous at the `hbm_runtime` layer, not at the driver
+  layer.** `HB_HBMRuntime::InferSingleModel` runs `hbDNNInferV2` →
+  `hbUCPSubmitTask` → `hbUCPWaitTaskDone(handle, 0)` → flush → release inline,
+  so that API parks the caller for the whole graph. The task underneath is
+  already async: `libdnn` allocates it as `TASK_TYPE_TRIG_TASK` and registers a
+  completion callback, and nothing stops a caller from submitting several
+  before waiting on any. `BPUSubmitter`
+  (`torch_fl/accelerator/bpu/submit.py`) does exactly that and measured
+  **1.91x** on ResNet-18 (927 → 1771 inf/s at depth 8), bit-identical to
+  `run()` on every input tried. There is still **no stream object**: ordering
+  is per-task completion only, and `hb_bpu_core_bufcnt_*` is a hardware
+  semaphore for in-graph dependencies rather than a submission queue.
+  `MemcpyAsync` remains a synchronous copy and streams remain a single sentinel
+  handle, so event timestamps are real `steady_clock` readings — which is what
+  makes `EventElapsedTime` genuinely meaningful here.
 - **Cached blocks leak at process exit, deliberately.** The caching allocator is
   a function-local static, so its destructor runs from `__run_exit_handlers`, by
   which point `libhbucp`'s own `FINI_ARRAY` teardown may have released the heap
@@ -309,6 +401,32 @@ offload happened.
 | official `resnet18_224x224_nv12.hbm` | **1.075 ms** | 1.060 | 1.136 | 74 KB NV12 uint8 |
 | eager CPU float32 | 26.095 ms | 23.952 | 62.456 | 588 KB f32 NCHW |
 | ours, `torch.compile(backend="bpu")` | **1.356 ms** | 1.315 | 1.454 | 588 KB f32 NCHW |
+
+#### Submit-ahead
+
+`hbm_runtime.run()` waits inline, so one graph is ever in flight. Submitting
+several task handles before waiting on any of them costs nothing in
+correctness and feeds the four cores from a producer that is no longer
+parked:
+
+| depth | throughput | vs `run()` |
+| ---: | ---: | ---: |
+| 1 (`run()`) | 927 inf/s | 1.00x |
+| 1 (`BPUSubmitter`) | 1015 inf/s | 1.09x |
+| 2 | 1505 inf/s | 1.62x |
+| 4 | 1542 inf/s | 1.66x |
+| 8 | **1771 inf/s** | **1.91x** |
+
+Outputs are bit-identical to `run()` on zeros, a constant field and random
+noise. The submit side costs 0.33 ms and reclaim 0.24 ms per call; the BPU
+itself is around 0.37 ms, which is what the ceiling at depth 8 reflects.
+
+Two things this path has to get right and `run()` hides. The artifact's device
+layout is padded — its `[1, 224, 224, 1]` Y plane goes out at `stride[1] == 256`
+for 224 pixels of width — so a flat memmove of the numpy array shifts every row
+and the model returns a confident, wrong answer with no error at all. And
+`hbUCPReleaseTask` is expensive enough that it is deferred one step rather than
+done inline.
 
 **19.2x vs eager, 1.26x off the vendor artifact.** Accuracy against eager float:
 cosine 0.990, top-1 agreement 5/5 over random inputs, relative error 0.14 — the

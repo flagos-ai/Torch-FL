@@ -49,7 +49,9 @@ std::string DefaultConfigPath() {
 #elif defined(USE_MUSA)
       platform = "mthreads";
 #elif defined(USE_BPU)
-      platform = "bpu";
+      // The vendor name, matching backends_drobotics.conf: AGENTS.md spells a
+      // conf after the vendor, and the BPU is D-Robotics' part, not a vendor.
+      platform = "drobotics";
 #elif defined(USE_ILUVATAR)
       platform = "iluvatar";
 #elif defined(USE_MPS)
@@ -146,6 +148,8 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kTileOps;
   } else if (val == "apple" || val == "mps") {  // mps: the SDK-era spelling
     *out = Backend::kApple;
+  } else if (val == "drobotics" || val == "bpu") {  // bpu: the platform id
+    *out = Backend::kDrobotics;
   } else if (val == "flaggems_cpp" || val == "flagos") {
     *out = Backend::kFlagGemsCpp;
   } else if (val == "flaggems" || val == "flaggems_python" ||
@@ -173,6 +177,7 @@ const char* BackendName(Backend b) {
     case Backend::kIluvatar:     return "iluvatar";
     case Backend::kTileOps:      return "tileops";
     case Backend::kApple:        return "apple";
+    case Backend::kDrobotics:    return "drobotics";
     case Backend::kNone:         return "none";
     default:                     return "unknown";
   }
