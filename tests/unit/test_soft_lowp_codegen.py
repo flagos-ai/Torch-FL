@@ -390,3 +390,168 @@ def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
         assert "routed" in line, (
             f"{name} is taken unconditionally in the factory arm:\n{arm}"
         )
+
+
+_COMMON_CC = REPO_ROOT / "csrc/aten/common.cc"
+_COMMON_H = REPO_ROOT / "csrc/aten/common.h"
+
+
+def test_the_dot_floor_is_declared_platform_neutrally():
+    """The contracted-extent floor is a build fact, not a chip or conf fact.
+
+    The project's naming rule keeps chip names in source only and never in a
+    conf or an accelerator id, and this constraint is imposed by the platform's
+    triton backend rather than by any chip -- so it belongs next to the other
+    FlagGems escapes in common.cc, keyed on the FLAGOS_ACCEL_* build define.
+    """
+    header = _COMMON_H.read_text(encoding="utf-8")
+    assert "int64_t TritonMinDotContractExtent();" in header, (
+        "the floor must be declared in common.h beside the other FlagGems escapes"
+    )
+    body = _function_body(
+        _COMMON_CC.read_text(encoding="utf-8"), "int64_t TritonMinDotContractExtent("
+    )
+    assert "FLAGOS_ACCEL_METAX" in body, (
+        "the floor must be keyed on the build define:\n" + body
+    )
+    assert "return 16;" in body, "MetaX's measured floor is 16:\n" + body
+    assert "return 0;" in body, (
+        "every other platform must answer 0 so the padding is a no-op there:\n" + body
+    )
+    # The expiry has to be written down: this is a shim for a vendor-wheel gap.
+    assert "5.6" in body, (
+        "the comment must record that FlagGems pads K itself from 5.6, so the "
+        "shim can be retired when the pinned cohort moves:\n" + body
+    )
+
+
+def test_the_pad_touches_only_the_contracted_axis():
+    """M and N are never padded, because the `.out` forms cannot take it.
+
+    Padding M or N changes the output shape, and the routed `.out` spellings
+    write the caller's tensor -- CheckOutShape would reject the result. The dot
+    intrinsic bounds M and N at 1 everywhere anyway, so only K ever needs it.
+    This is the invariant most at risk from a later "pad to the min dot size"
+    edit, which reads as all three dimensions.
+    """
+    source = _OPS_CC.read_text(encoding="utf-8")
+    pad = _function_body(source, "void PadPairForDot(")
+    assert "ContractDim(" in pad, (
+        "the pad must read the contracted extent, not a shape element:\n" + pad
+    )
+    assert "size(0)" not in pad and "size(1)" not in pad, (
+        "absolute dimension indices in the pad risk touching M or N:\n" + pad
+    )
+    contract = _function_body(source, "int64_t ContractDim(")
+    assert "size(-2)" in contract and "size(-1)" in contract, (
+        "the contracted axis is the last of the left operand and the "
+        "second-to-last of the right one, at either rank:\n" + contract
+    )
+
+
+def test_the_pad_has_an_early_out_and_avoids_a_routed_pad_op():
+    """Zero cost on the common path, and no dependence on a conf route.
+
+    A real FP8/FP4 GEMM has a large contracted extent and must pay only an
+    integer compare. The fill also must not use ``at::constant_pad_nd``: both
+    platforms that compile this decode route that op to FlagGems, whose triton
+    is the thing being worked around, so the pad would bounce off the same
+    defect. ``at::empty``/``copy_`` carry no conf key.
+    """
+    source = _OPS_CC.read_text(encoding="utf-8")
+    pad = _function_body(source, "void PadPairForDot(")
+    assert "return;" in pad, "the pad must early-out:\n" + pad
+    assert "floor" in pad, "the early-out must compare against the floor:\n" + pad
+    build = _function_body(source, "at::Tensor PadContractDim(")
+    assert "constant_pad_nd" not in build, (
+        "constant_pad_nd is routed to FlagGems on both soft-lowp platforms:\n" + build
+    )
+    assert "at::empty(" in build and "copy_(" in build, (
+        "the fill must be built from empty + copy_, which carry no conf key:\n" + build
+    )
+
+
+def test_the_pad_is_applied_at_the_one_chokepoint():
+    """Every matrix form, including the packed-FP4 path that cannot route.
+
+    DecodeForRoute builds the TensorPair that RunMatrix, RunMatrixOut and
+    ComputeDecoded all consume, so padding there covers mm, bmm, addmm, every
+    .out/.dtype spelling and the FP4 case that is computed rather than routed.
+    Padding inside the dispatch helpers instead would leave FP4 broken.
+    """
+    body = _function_body(
+        _OPS_CC.read_text(encoding="utf-8"), "TensorPair DecodeForRoute("
+    )
+    assert "PadPairForDot(" in body, (
+        "DecodeForRoute is the chokepoint the pad belongs at:\n" + body
+    )
+    pad_at = body.find("PadPairForDot(")
+    pair_at = body.find("TensorPair{")
+    assert pad_at < pair_at, (
+        "the pad must run before the pair is built, or the pair holds the "
+        "unpadded operands:\n" + body
+    )
+    assert "pair.bias" in body, body
+    assert body.find("pair.bias") > pad_at, (
+        "the bias is (M, N) and must not be handed to the pad"
+    )
+
+
+# The padding identity itself, run rather than parsed. The C++ helper cannot be
+# called from here, so this mirrors it exactly -- if the two ever disagree, the
+# source-level tests above are what catch it.
+def _pad_contract(tensor, is_rhs, target):
+    import torch
+
+    shape = list(tensor.shape)
+    axis = len(shape) - 2 if is_rhs else len(shape) - 1
+    extent = shape[axis]
+    shape[axis] = target
+    out = torch.empty(shape, dtype=tensor.dtype)
+    out.zero_()
+    out.narrow(axis, 0, extent).copy_(tensor)
+    return out
+
+
+@pytest.mark.parametrize(
+    "lhs_shape,rhs_shape",
+    [
+        ((4, 4), (4, 4)),  # the failing MetaX case
+        ((3, 5), (5, 7)),  # non-square, M != N != K
+        ((2, 4, 4), (2, 4, 4)),  # batched
+        ((1, 2), (2, 1)),  # K = 2, the fp4 numerics shape
+    ],
+)
+def test_zero_padding_the_contracted_axis_is_exact(lhs_shape, rhs_shape):
+    """Widening K with zeros leaves the product bit-for-bit unchanged.
+
+    This is the premise the shim rests on: the added lanes are 0 on both sides
+    and contribute 0 * 0 to every sum. The output shape is unchanged too, which
+    is what lets the routed ``.out`` forms take it.
+    """
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    lhs = torch.randn(*lhs_shape, dtype=torch.bfloat16)
+    rhs = torch.randn(*rhs_shape, dtype=torch.bfloat16)
+    matmul = torch.bmm if len(lhs_shape) == 3 else torch.mm
+
+    want = matmul(lhs, rhs)
+    got = matmul(_pad_contract(lhs, False, 16), _pad_contract(rhs, True, 16))
+
+    assert got.shape == want.shape, "padding K must not change the output shape"
+    assert torch.equal(got, want), f"max abs diff {(got - want).abs().max().item():.3e}"
+
+
+def test_zero_padding_leaves_an_addmm_bias_alone():
+    """The bias has no contracted axis, so beta * bias is untouched."""
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    lhs = torch.randn(4, 4, dtype=torch.bfloat16)
+    rhs = torch.randn(4, 4, dtype=torch.bfloat16)
+    bias = torch.randn(4, 4, dtype=torch.bfloat16)
+    padded = (_pad_contract(lhs, False, 16), _pad_contract(rhs, True, 16))
+
+    for beta, alpha in ((1.0, 1.0), (0.5, 2.0), (0.0, 1.0), (1.0, 0.0)):
+        want = torch.addmm(bias, lhs, rhs, beta=beta, alpha=alpha)
+        got = torch.addmm(bias, *padded, beta=beta, alpha=alpha)
+        assert torch.equal(got, want), f"beta={beta} alpha={alpha}"

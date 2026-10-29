@@ -220,6 +220,27 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype);
 // only for the calls dispatched under one -- not the ATen schema name.
 bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype);
 
+// The smallest contracted extent (the K of an M x K by K x N matmul) this
+// platform's triton `tl.dot` will compile, or 0 where it has no such floor.
+//
+// Third shape of the same escape as the two predicates above, and the one
+// neither of them can state: this is not a dtype question and not an op
+// question, it is a *shape* floor, and it is the platform's triton backend
+// that imposes it rather than any kernel's own guard.
+//
+// A caller below the floor must widen K itself; zero-filling the contracted
+// axis is exact for a matmul, because the added lanes contribute 0 * 0 to
+// every sum. Only K: `min_dot_size` bounds M and N at 1 everywhere, and
+// padding those would change the output shape, which the `.out` forms cannot
+// have.
+//
+// This belongs to the build, not to a chip: a wheel is built against exactly
+// one FlagTree (.github/version-pins.env), so the floor its triton imposes is
+// fixed for the life of the wheel. It also fails safe -- a FlagTree that
+// lowers the floor turns the padding into a small wasted copy, never a wrong
+// answer.
+int64_t TritonMinDotContractExtent();
+
 // Memory guard to ensure proper synchronization when accessing device memory
 class MemoryGuard {
  public:

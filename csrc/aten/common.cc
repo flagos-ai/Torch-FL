@@ -714,4 +714,49 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
 #endif
 }
 
+int64_t TritonMinDotContractExtent() {
+#if defined(FLAGOS_ACCEL_METAX)
+  // 16, measured. FlagTree's adaptive block size (AABS) shrinks a block that
+  // is wider than the tensor -- `if bs > ts: updated_bs = next_power_of_2(ts)`
+  // in triton/runtime/adjust_kernel_param.py -- so FlagGems' BLOCK_K of 32
+  // becomes next_power_of_2(K) for a small K. Its `metax` arm then restores M
+  // and N to >= 16 and leaves K where the shrink put it, while the `iluvatar`
+  // and `sunrise` arms next to it restore all three. The dot intrinsic then
+  // refuses the tile:
+  //
+  //   triton/spec/metax/triton/language/semantic.py: in dot
+  //     assert lhs.shape[-2].value >= min_dot_size[0] and ...
+  //   AssertionError: Input shapes should have M >= 1, N >= 1 and K >= 16
+  //
+  // Measured on a MetaX C550 (torch 2.10.0+metax3.8.1.0, flag_gems 5.4.0),
+  // calling FlagGems' mm directly with a cold FLAGGEMS_CACHE_DIR:
+  //
+  //   (4, 4) x (4, 4)    CompilationError, the assertion above
+  //   (4, 8) x (8, 4)    CompilationError, the assertion above
+  //   (4, 16) x (16, 4)  OK, max_abs 4.4e-07 against a CPU fp64 reference
+  //   (4, 32) x (32, 4)  OK, max_abs 1.8e-06
+  //
+  // The floor is 16 and not `next_power_of_2(K) < 16`: AABS only shrinks when
+  // the block exceeds the extent, so a config that already carries a small
+  // BLOCK_K trips the same assertion at a K the power-of-two rule would pass
+  // (the thead measurement in scripts/codegen/gen_vendor_confs.py records
+  // K = 4/8/8 failing while 8/8/15 passes -- which config the tuner draws
+  // decides it). Padding every K below 16 costs a copy of a tensor with fewer
+  // than 16 columns and removes the dependence on that draw.
+  //
+  // This is a shim for a vendor-wheel gap, and it has an expiry: FlagGems pads
+  // K itself from 5.6, and FlagTree's metax arm should restore K the way its
+  // iluvatar arm does. When either lands in the pinned cohort, delete this
+  // value and the padding that reads it.
+  return 16;
+#else
+  // No other platform that compiles a soft-lowp decode is known to impose a
+  // contracted-extent floor. Hygon DCU's FlagTree arm also restores only M and
+  // N, but its HIP dot intrinsic has not been measured to refuse a small K --
+  // if its lane ever raises the assertion above, that is this same shim with
+  // its own measurement, not a reason to widen this one on a guess.
+  return 0;
+#endif
+}
+
 } // namespace at::native::flagos
