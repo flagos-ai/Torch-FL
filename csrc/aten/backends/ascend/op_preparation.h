@@ -3,6 +3,7 @@
 #pragma once
 
 #include <ATen/ATen.h>
+#include <ATen/Context.h>
 #include <c10/core/DeviceType.h>
 
 namespace at::native::flagos::ascend {
@@ -23,7 +24,10 @@ class OpPreparation {
   }
 
   static int8_t get_cube_math_type(bool allow_hf32 = false) {
-    return allow_hf32 ? 1 : 0;
+    // A kernel's HF32 capability is not permission to reduce FP32 precision.
+    // Share PyTorch's matmul policy with CUDA so "highest" applies to both
+    // the forward ACLNN call and the fused matmul backward.
+    return allow_hf32 && at::globalContext().allowTF32CuBLAS() ? 1 : 0;
   }
 
   static void check_tensor(

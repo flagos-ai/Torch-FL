@@ -84,6 +84,25 @@ flagos devices: 1  (or more, depending on your NPU count)
 abs matches CPU: True
 ```
 
+## FP32 matmul precision
+
+Torch-FL's Ascend ACLNN kernels honor PyTorch's matmul precision policy in
+both forward and backward. Use full FP32 arithmetic for scientific workloads:
+
+```python
+import torch_fl
+import torch
+
+torch.set_float32_matmul_precision("highest")
+```
+
+The kernel may use HF32 only when the caller permits reduced FP32 precision.
+Earlier builds enabled HF32 unconditionally, including inside the fused
+`matmul_backward` implementation. A forward-only FlagGems route override did
+not correct that backward path. Verify an older installation with
+`tests/integration/ops/test_ascend_matmul_precision.py` before using it for
+numerically sensitive training.
+
 ## Testing
 
 Run the Ascend operator suite:

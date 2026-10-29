@@ -189,25 +189,6 @@ def _masked_select_is_routed() -> bool:
 # ~26x below the best reduced-precision one.
 FP32_MATMUL_RELATIVE_ERROR = 1e-5
 
-# Ascend is the one backend that cannot meet that bound, and it does not claim
-# to: the cube takes an HF32 (10-bit mantissa) input format by request --
-# `get_cube_math_type(true)` in `csrc/aten/backends/ascend/matmul.cc`, the
-# switch `scripts/tools/verify_flaggems_ascend.py` reads as "~5e-3 on a K=128
-# matmul" and this file's TestMatrixOps sibling in `tests/integration/test_ops.py`
-# carries as its `MM_RTOL`/`MM_ATOL` comment, flat at ~1.5e-4 relative. The
-# switch the cases below are about -- `torch.backends.cuda.matmul.allow_tf32`
-# and the `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` that seeds it -- has no effect on
-# that path, so xfail rather than assert: a precision mode the backend chose is
-# not a contract worth reddening its job over, and xfail turns into an XPASS the
-# day Ascend starts computing fp32 in fp32.
-_ASCEND = detect_platform() == "ascend"
-
-_ASCEND_HF32_REASON = (
-    "Ascend's cube takes the reduced-precision HF32 input format by request "
-    "(get_cube_math_type(true) in csrc/aten/backends/ascend/matmul.cc), and "
-    "the TF32 switches this case is about do not reach that path"
-)
-
 
 def _relative_error(got, reference):
     """Frobenius relative error of an fp32 device result over its fp64 CPU pair.
@@ -378,7 +359,6 @@ class TestBinaryDtypeSupport:
         result = torch.matmul(a.to(DEVICE), b.to(DEVICE)).cpu()
         torch.testing.assert_close(result, torch.matmul(a, b), rtol=1e-12, atol=1e-12)
 
-    @pytest.mark.xfail(_ASCEND, reason=_ASCEND_HF32_REASON, strict=False)
     def test_float32_mm_is_computed_in_float32(self):
         """An fp32 `mm` is an fp32 computation, not a reduced-precision one.
 
@@ -399,7 +379,6 @@ class TestBinaryDtypeSupport:
         relative = _relative_error(got, torch.mm(a.double(), b.double()))
         assert relative < FP32_MATMUL_RELATIVE_ERROR, _precision_failure("mm", relative)
 
-    @pytest.mark.xfail(_ASCEND, reason=_ASCEND_HF32_REASON, strict=False)
     def test_float32_bmm_is_computed_in_float32(self):
         """The batched case, which is where attention loses the bits it needs.
 

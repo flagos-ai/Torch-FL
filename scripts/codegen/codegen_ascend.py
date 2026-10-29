@@ -123,6 +123,8 @@ OPS = {
     "trunc": ("unary", None),
     "frac": ("unary", None),
     "sign": ("unary", None),
+    # Real abs backward uses sgn; ACLNN Sign has the same real-valued contract.
+    "sgn": ("unary", "Sign"),
     "relu": ("unary", None),
     "cosh": ("unary", None),
     "sinh": ("unary", None),
@@ -4903,7 +4905,22 @@ def _handwritten_dispatchers() -> set:
         if not d.is_dir():
             continue
         for path in sorted(d.glob("*.cc")):
-            found |= set(pat.findall(path.read_text()))
+            source = path.read_text().replace("\\\n", "")
+            # Shared metadata views register through a one-argument macro.
+            # Read that definition rather than duplicating its operator list;
+            # otherwise regeneration silently removes working view kernels.
+            for macro, parameter, body in re.findall(
+                r"^#define\s+(\w+)\((\w+)\)(.*)$", source, re.MULTILINE
+            ):
+                if re.search(
+                    rf"^\s*{re.escape(macro)}\(Backend::kAscend\)",
+                    source,
+                    re.MULTILINE,
+                ):
+                    source += "\n" + re.sub(
+                        rf"\b{re.escape(parameter)}\b", "Backend::kAscend", body
+                    )
+            found |= set(pat.findall(source))
     return found
 
 
