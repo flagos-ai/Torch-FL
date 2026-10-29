@@ -44,6 +44,10 @@ struct Block {
   int device = -1;
   hbUCPSysMem mem{};  // phyAddr/virAddr/memSize as returned by the UCP allocator
   size_t size = 0;
+  // False for a borrowed block: the memory was handed to us by a caller that
+  // keeps owning it, so Free must drop the registry entry without releasing
+  // the UCP allocation underneath.
+  bool owned = true;
 };
 
 class MemoryManager {
@@ -51,6 +55,41 @@ class MemoryManager {
   static MemoryManager& getInstance() {
     static MemoryManager instance;
     return instance;
+  }
+
+  // Register memory the caller already holds as device memory.
+  //
+  // The UCP kernel does not accept an arbitrary pointer: hbDNNInferV2 rejects
+  // a plain malloc'd buffer with rc=-100001 and only takes addresses inside a
+  // hbUCPMallocCached allocation. Everything flagos allocates is registered
+  // here, so a tensor that already lives in UCP memory (the output of
+  // hbm_runtime.run, or a view over a device tensor) can be adopted without
+  // copying it. `phy` is optional; pass 0 and the block is looked up by
+  // virtual address only, which is all cache maintenance needs.
+  Error_t borrow(void* ptr, size_t size, uint64_t phy) {
+    if (!ptr || size == 0) {
+      return ErrorUnknown;
+    }
+    int device = 0;
+    GetDevice(&device);
+
+    hbUCPSysMem mem{};
+    mem.virAddr = ptr;
+    mem.phyAddr = phy;
+    mem.memSize = size;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_registry.find(ptr) != m_registry.end()) {
+      return Success;  // already known
+    }
+    Block block;
+    block.type = MemoryType::MemoryTypeDevice;
+    block.device = device;
+    block.mem = mem;
+    block.size = size;
+    block.owned = false;
+    m_registry[ptr] = block;
+    return Success;
   }
 
   Error_t allocate(void** ptr, size_t size, MemoryType type) {
@@ -93,6 +132,7 @@ class MemoryManager {
     }
 
     hbUCPSysMem mem{};
+    bool owned = true;
     {
       std::lock_guard<std::mutex> lock(m_mutex);
       auto it = m_registry.find(ptr);
@@ -100,9 +140,13 @@ class MemoryManager {
         return ErrorUnknown;
       }
       mem = it->second.mem;
+      owned = it->second.owned;
       m_registry.erase(it);
     }
 
+    if (!owned) {
+      return Success;
+    }
     return (hbUCPFree(&mem) == 0) ? Success : ErrorUnknown;
   }
 
@@ -219,6 +263,10 @@ Error_t Malloc(void** devPtr, size_t size) {
 
 Error_t Free(void* devPtr) {
   return MemoryManager::getInstance().free(devPtr);
+}
+
+Error_t Borrow(void* devPtr, size_t size, uint64_t phyAddr) {
+  return MemoryManager::getInstance().borrow(devPtr, size, phyAddr);
 }
 
 Error_t MallocHost(void** hostPtr, size_t size) {

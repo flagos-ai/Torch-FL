@@ -52,6 +52,21 @@ struct HooksInterface : public at::PrivateUse1HooksInterface {
     return true;
   }
 
+  // at::from_blob asks the hooks for the device a raw pointer belongs to, and
+  // PrivateUse1 raises unless this is overridden. This backend has one device
+  // and every pointer the runtime manages is on it, so the answer is always 0;
+  // the registry check exists so a stray pointer is still rejected rather than
+  // silently treated as device memory.
+  at::Device getDeviceFromPtr(void* data) const override {
+    PointerAttributes attr{};
+#if defined(USE_DCU)
+    DcuPointerGetAttributes(&attr, data);
+#else
+    ::PointerGetAttributes(&attr, data);
+#endif
+    return at::Device(c10::DeviceType::PrivateUse1, 0);
+  }
+
   at::Allocator* getPinnedMemoryAllocator() const override {
     return GetHostAllocator();
   }

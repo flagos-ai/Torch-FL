@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <ATen/Context.h>
+#include <ATen/ops/from_blob.h>
+#include <vector>
 #include <ATen/core/TensorBase.h>
 #include <c10/core/Storage.h>
 #include <c10/core/TensorImpl.h>
@@ -566,6 +568,54 @@ PyObject* _flagos_identity_view(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+// Adopt memory the caller already owns as a flagos tensor, without copying.
+//
+// The BPU kernel only accepts addresses inside a hbUCPMallocCached allocation
+// (a plain buffer is rejected with rc=-100001), and hbm_runtime hands its
+// output back as exactly such a mapping. Without this entry point the eager
+// path has to copy that output into a fresh device tensor before the next op
+// can read it -- one full tensor-width memcpy per operator, which measured
+// 5.6 ms for a 3.2 MB activation against 0.23 ms for the copy-free wrap.
+//
+// Borrowed storage is not owned by the tensor: the caller keeps the bytes alive
+// for as long as the tensor is used. `borrowed` registers the block with the
+// runtime allocator so cache maintenance and PointerGetAttributes see it, and
+// so a Free of this pointer never releases memory it did not allocate.
+PyObject* _flagos_from_blob(PyObject* self, PyObject* args) {
+  HANDLE_TH_ERRORS
+  void* ptr = nullptr;
+  PyObject* sizes_obj = nullptr;
+  int dtype = 0;
+  int borrowed = 1;
+  if (!PyArg_ParseTuple(
+          args, "KO!i|p", &ptr, &PyTuple_Type, &sizes_obj, &dtype, &borrowed)) {
+    return nullptr;
+  }
+  TORCH_CHECK(ptr != nullptr, "from_blob: null pointer");
+
+  std::vector<int64_t> sizes;
+  const Py_ssize_t ndim = PyTuple_Size(sizes_obj);
+  int64_t numel = 1;
+  for (Py_ssize_t i = 0; i < ndim; ++i) {
+    const int64_t dim = PyLong_AsLongLong(PyTuple_GetItem(sizes_obj, i));
+    TORCH_CHECK(dim >= 0, "from_blob: negative size");
+    sizes.push_back(dim);
+    numel *= dim;
+  }
+  const auto scalar_type = static_cast<c10::ScalarType>(dtype);
+
+  if (borrowed) {
+    Borrow(ptr, static_cast<size_t>(numel) * c10::elementSize(scalar_type), 0);
+  }
+
+  auto options = at::TensorOptions()
+                     .dtype(scalar_type)
+                     .device(c10::Device(c10::DeviceType::PrivateUse1, 0));
+  auto tensor = at::from_blob(ptr, at::IntArrayRef(sizes), options);
+  return THPVariable_Wrap(tensor);
+  END_HANDLE_TH_ERRORS
+}
+
 // --- Caching Allocator APIs ---
 
 PyObject* _empty_cache(PyObject* self, PyObject* noargs) {
@@ -715,6 +765,7 @@ static PyMethodDef methods[] = {
     {"_flagos_to_cuda_view", _flagos_to_cuda_view, METH_O, nullptr},
     {"_cuda_to_flagos_view", _cuda_to_flagos_view, METH_VARARGS, nullptr},
     {"_flagos_identity_view", _flagos_identity_view, METH_O, nullptr},
+    {"_flagos_from_blob", _flagos_from_blob, METH_VARARGS, nullptr},
     {"_empty_cache", _empty_cache, METH_NOARGS, nullptr},
     {"_shutdown_allocator", _shutdown_allocator, METH_NOARGS, nullptr},
     {"_memory_stats", _memory_stats, METH_O, nullptr},

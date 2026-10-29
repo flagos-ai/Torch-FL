@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstddef>
+#include <stdint.h>
 
 #ifndef FLAGOS_EXPORT
 #ifdef _WIN32
@@ -73,6 +74,17 @@ typedef struct Event* Event_t;
 // Memory
 FLAGOS_EXPORT Error_t Malloc(void** devPtr, size_t size);
 FLAGOS_EXPORT Error_t Free(void* devPtr);
+
+// Adopt caller-owned memory as device memory so a BPU kernel accepts it.
+//
+// hbDNNInferV2 only takes addresses inside a hbUCPMallocCached allocation
+// (a plain buffer is rejected with rc=-100001), and hbm_runtime returns its
+// output as exactly such a mapping. Registering that address lets the eager
+// path use it in place instead of copying a whole tensor per operator.
+//
+// The block is not owned: Free drops the registry entry without releasing
+// the allocation, which stays the caller's to manage. phyAddr may be 0.
+FLAGOS_EXPORT Error_t Borrow(void* devPtr, size_t size, uint64_t phyAddr);
 FLAGOS_EXPORT Error_t MallocHost(void** hostPtr, size_t size);
 FLAGOS_EXPORT Error_t FreeHost(void* hostPtr);
 FLAGOS_EXPORT Error_t

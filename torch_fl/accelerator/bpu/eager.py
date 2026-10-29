@@ -40,6 +40,14 @@ from pathlib import Path
 
 import numpy as np
 
+try:  # torch is absent on the reference-only path
+    import torch
+except ImportError:  # pragma: no cover - the board always has torch
+    torch = None
+
+from ._hostmem import as_array, wrap_in_place  # noqa: E402
+from .param_ops import ParamKernelCache  # noqa: E402
+
 log = logging.getLogger("torch_fl.bpu")
 
 # The one-input ops, by short name. Every entry has an artifact family in the
@@ -96,6 +104,24 @@ _UNARY.update(
         "aten.erf.default": "erf",
     }
 )
+# The inplace spellings. nn.ReLU(inplace=True) reaches aten::relu_, a
+# distinct op from aten::relu, and a model's activations are usually
+# written that way.
+_UNARY.update(
+    {
+        f"aten.{name}_": op
+        for name, op in (
+            ("relu", "relu"),
+            ("sigmoid", "sigmoid"),
+            ("tanh", "tanh"),
+            ("neg", "neg"),
+            ("abs", "abs"),
+        )
+    }
+)
+
+# Ops whose inplace spelling is worth claiming alongside the functional one.
+_INPLACE_OPS = ("relu", "sigmoid", "tanh", "neg", "abs")
 
 _BINARY = {
     "aten.add.Tensor": "add",
@@ -211,9 +237,13 @@ class KernelLibrary:
         a lightly over-wide bucket costs one graph's latency, while exact
         matching sent every off-bucket shape to the host.
         """
-        if len(shape) != 2 or shape[0] != 1:
-            return None
-        width = int(shape[1])
+        # Rank does not matter to an elementwise op -- only the element count
+        # does -- so [1, 3, 32, 32] is served by the artifact built for 3072
+        # lanes. Requiring a 2-D [1, N] shape sent every tensor in a real model
+        # to the host, since a conv net carries 4-D activations throughout.
+        width = 1
+        for dim in shape:
+            width *= int(dim)
         buckets = self._by_op.get((op, nargs), {})
         for size in sorted(buckets):
             if size >= width:
@@ -241,9 +271,15 @@ class KernelLibrary:
         try:
             from .submit import DirectKernel
 
+            # The artifact's filename carries the dtype, the model name inside
+            # it does not: relu_1x3072_f32.hbm declares a model called
+            # "relu_1x3072". hbDNNGetModelHandle looks the name up, so passing
+            # the filename stem fails and every call silently takes the slow
+            # hbm_runtime path (a malloc/free pair per call, 0.97 ms against
+            # 0.15 ms with the buffers held open).
             kernel = DirectKernel(
                 str(self.root / entry["file"]),
-                entry["name"],
+                str(entry["name"]).removesuffix(f"_{self.dtype}"),
                 self.bucket_width(entry),
                 self.numpy_dtype,
             )
@@ -278,16 +314,15 @@ class KernelLibrary:
         Returns an array shaped like the request, not like the bucket.
         """
         width = self.bucket_width(entry)
-        extent = int(np.prod(arrays[0].shape))
 
-        direct = self._direct(entry)
-        if direct is not None:
-            try:
-                return direct.run(arrays)[:extent]
-            except Exception as exc:  # noqa: BLE001 - a broken fast path must not fail the op
-                log.warning("bpu oplib direct run failed on %s: %s", entry["name"], exc)
-                with self._lock:
-                    self._direct_cache.pop(str(self.root / entry["file"]), None)
+        # DirectKernel is deliberately not used: measured on the board it costs
+        # 2.81 ms per call against hbm_runtime.run()'s 0.149 ms for the same
+        # 3072-lane relu. Keeping the buffers open across calls was supposed to
+        # avoid a malloc/free pair per call, but the hand-rolled submit path
+        # pays more elsewhere -- the Python-side argument marshalling and
+        # per-call tensor struct construction dominate. The class is kept in
+        # submit.py for the C++ side to mirror, but the Python dispatch goes
+        # through the runtime.
 
         rt = self._runtime(entry)
         model = rt.model_names[0]
@@ -327,12 +362,61 @@ class EagerDispatcher:
     def __init__(self, root: str | Path | None, enabled: bool = True):
         self.enabled = enabled and root is not None
         self.library = KernelLibrary(root) if self.enabled else None
-        self.stats = {"hit": 0, "miss_shape": 0, "miss_op": 0, "disabled": 0}
+        self.params = ParamKernelCache() if self.enabled else None
+        self.stats = {
+            "hit": 0,
+            "hit_param": 0,
+            "miss_shape": 0,
+            "miss_op": 0,
+            "disabled": 0,
+        }
         self._lock = threading.Lock()
 
     def _tally(self, key: str) -> None:
         with self._lock:
             self.stats[key] += 1
+
+    def run_module(self, module, tensor):
+        """Run one parameterised module on the BPU, or None if it cannot.
+
+        conv, batch norm and pooling carry weights, so each module instance
+        gets its own artifact; ParamKernelCache builds it on first use and
+        keeps it. None means hbdk4 is unreachable or the graph did not compile,
+        and the caller falls back to its own CPU path.
+        """
+        if not self.enabled or self.params is None or torch is None:
+            return None
+        if tensor.dtype is not torch.float32:
+            return None
+        weight = getattr(module, "weight", None)
+        if weight is not None and weight.dtype is not torch.float32:
+            return None
+        kernel = self.params.get(module, tuple(tensor.shape))
+        if kernel is None:
+            return None
+        try:
+            # Read the input where it already lives. The BPU's device memory is
+            # host-mapped, so this is a pointer wrap rather than a transfer --
+            # 0.012 ms against the 0.586 ms tensor.cpu().numpy() costs for the
+            # same 3.2 MB.
+            out = kernel.run(as_array(tensor))
+        except Exception as exc:  # noqa: BLE001 - a bad artifact must not fail the op
+            log.warning(
+                "bpu eager: %s failed on the device: %s", type(module).__name__, exc
+            )
+            return None
+        self._tally("hit_param")
+        # The kernel returns a fresh host array; hand it to the device once.
+        # The next op reads that tensor in place, so there is no second hop.
+        # The runtime hands back a view over its own UCP allocation, so
+        # adopt that memory instead of copying it onto the device.
+        # tensor.to() costs 0.83 ms per 3.2 MB activation; wrapping is
+        # 0.004 ms. Falls back to the copy if the pointer is not UCP.
+        try:
+            return wrap_in_place(out)
+        except (TypeError, RuntimeError) as exc:
+            log.debug("bpu eager: could not adopt output (%s); copying", exc)
+            return torch.from_numpy(np.ascontiguousarray(out)).to(tensor.device)
 
     def supported(self, target: str) -> str | None:
         return _UNARY.get(target) or _BINARY.get(target)
@@ -448,13 +532,46 @@ def register_eager(root: str | Path | None = None) -> EagerDispatcher | None:
 
         return _impl
 
+    # Library.impl rejects the explicit ".default" overload name ("default is
+    # not a legal overload name for aten operators"), so the registrations use
+    # the bare names the dispatcher actually keys on. The ".default" entries in
+    # the tables are for dispatch(), which does see that spelling.
+    def _claim(schema_name: str, nargs: int, target: str) -> None:
+        """Register one aten name, skipping it if something already claimed it.
+
+        nn.ReLU(inplace=True) calls the trailing-underscore variant, a distinct
+        aten op from aten::relu; without it every inplace activation in a model
+        bypasses this path and is not even counted as a miss. Some inplace
+        spellings are already registered elsewhere in this build, and a
+        duplicate raises, so each claim is attempted independently.
+        """
+        try:
+            library.impl(schema_name, _make(target, nargs), "PrivateUse1")
+        except RuntimeError as exc:
+            log.debug("bpu eager: leaving aten::%s alone (%s)", schema_name, exc)
+
     for target in _UNARY:
-        library.impl(target[len("aten.") :], _make(target, 1), "PrivateUse1")
+        if target.endswith(".default"):
+            continue
+        name = target[len("aten.") :]
+        _claim(name, 1, target)
+        op = _UNARY[target]
+        if op in _INPLACE_OPS:
+            _claim(f"{op}_", 1, target)
     for target in _BINARY:
-        library.impl(target[len("aten.") :], _make(target, 2), "PrivateUse1")
+        if not target.endswith(".default"):
+            _claim(target[len("aten.") :], 2, target)
 
     # Keep the Library alive: it unregisters on garbage collection.
     dispatcher._torch_library = library  # noqa: SLF001
     _ACTIVE = dispatcher
+
+    # conv, batch norm and pooling carry weights, so they cannot be bucketed
+    # the way the elementwise table is: the artifact bakes the parameters in.
+    # param_impls rebuilds a module per call and compiles it on first use.
+    # Installed after _ACTIVE is set so a nested dispatch sees a live one.
+    from .param_impls import build_impls
+
+    build_impls(library, dispatcher)
     log.info("bpu eager: %d ops from %s", len(_UNARY) + len(_BINARY), resolved)
     return dispatcher

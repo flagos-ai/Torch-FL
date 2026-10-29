@@ -75,9 +75,19 @@ def test_buckets_are_indexed_by_width(library):
     assert lib.buckets("exp", 1) == []
 
 
-def test_rank_one_entries_are_ignored(library):
+def test_rank_does_not_decide_lookup(library):
+    """Any rank is served by the bucket matching its element count.
+
+    An elementwise op only cares how many lanes it has, so a 1-D (64,), a 2-D
+    (1, 64) and a 4-D (1, 8, 8, 1) request all land on the same artifact.
+    Keying on a 2-D [1, N] shape instead sent every 4-D activation in a conv
+    net -- which is all of them -- to the host.
+    """
     lib = E.KernelLibrary(library)
-    assert lib.lookup("relu", 1, (64,)) is None
+    assert lib.lookup("relu", 1, (64,))["name"] == "relu_1x64_f32"
+    assert lib.lookup("relu", 1, (1, 8, 8, 1))["name"] == "relu_1x64_f32"
+    # Still bucket-bounded: 65 lanes have nowhere to go in this fixture.
+    assert lib.lookup("relu", 1, (65,)) is None
 
 
 def test_lookup_rounds_up_to_the_next_bucket(library):
