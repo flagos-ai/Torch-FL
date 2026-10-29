@@ -390,3 +390,103 @@ def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
         assert "routed" in line, (
             f"{name} is taken unconditionally in the factory arm:\n{arm}"
         )
+
+
+def _decoder_body() -> str:
+    """The FP4 nibble decoder, which is where the operand overloads are chosen."""
+    return _function_body(
+        _OPS_CC.read_text(encoding="utf-8"), "at::Tensor DecodeFp4Nibbles("
+    )
+
+
+def _default_confs() -> list[Path]:
+    return sorted(
+        p
+        for p in (REPO_ROOT / "torch_fl/configs").glob("backends_*.conf")
+        if not p.name.endswith("_boxing.conf")
+    )
+
+
+def _route(conf: Path, key: str) -> str | None:
+    """The conf's route for one key, or None when the key is absent."""
+    pattern = re.compile(rf"^{re.escape(key)} = (\S+)$", re.MULTILINE)
+    found = pattern.search(conf.read_text(encoding="utf-8"))
+    return found.group(1) if found else None
+
+
+# The platforms whose build defines FLAGOS_SOFT_LOWP, i.e. the ones that compile
+# the decoder at all. Spelled as the conf vendor names (csrc/CMakeLists.txt
+# names the platforms: _flagos_is_metax, _flagos_is_dcu).
+_SOFT_LOWP_CONFS = ("backends_metax.conf", "backends_hygon.conf")
+
+
+def test_the_fp4_decoder_shifts_by_a_tensor_not_a_scalar():
+    """``bitwise_right_shift`` is called in the spelling the confs route.
+
+    ``bitwise_right_shift.Tensor_Scalar`` is ``none`` in every default conf
+    that compiles this decoder, so a Scalar shift amount reached the FlagGems
+    bridge, which converts a non-tensor IValue to a Python int and hands it to
+    ``pointwise_dynamic``'s tensor slot:
+
+        ValueError: Element at index 1 is incorrect. Expected True, but got False
+
+    That took out every FP4 case of ``bmm``, ``addmm`` and ``addmm_`` on the
+    MetaX lane (run 40817979024). ``bitwise_right_shift.Tensor`` is the
+    overload FlagGems ships and the confs route, and the two are bitwise
+    identical over all 256 byte values.
+    """
+    body = _decoder_body()
+    shifts = re.findall(r"at::bitwise_right_shift\(([^;]*?)\);", body, re.DOTALL)
+    assert shifts, "the decoder no longer calls bitwise_right_shift:\n" + body
+    for call in shifts:
+        assert "at::Scalar(" not in call, (
+            "a Scalar shift amount binds bitwise_right_shift.Tensor_Scalar, "
+            "which no conf that compiles this decoder routes:\n" + call
+        )
+    assert "scalar_to_tensor(" in body, (
+        "the shift amount must be built as a tensor so the call binds "
+        "bitwise_right_shift.Tensor:\n" + body
+    )
+
+
+@pytest.mark.parametrize("conf_name", _SOFT_LOWP_CONFS)
+def test_the_overload_the_fp4_decoder_uses_is_routed_or_falls_back(conf_name):
+    """The premise of the fix above, read from the confs rather than assumed.
+
+    This is the assertion that would have caught the defect: the overload the
+    decoder binds must be one the platform either routes to a kernel or can
+    serve through ``cpu_fallback``. ``Tensor_Scalar`` cannot be served that way
+    once FlagGems answers for it, which is why its ``none`` was not harmless.
+    """
+    conf = REPO_ROOT / "torch_fl/configs" / conf_name
+    assert conf.is_file(), conf
+    scalar_form = _route(conf, "bitwise_right_shift.Tensor_Scalar")
+    tensor_form = _route(conf, "bitwise_right_shift.Tensor")
+    assert scalar_form == "none", (
+        f"{conf_name} now routes bitwise_right_shift.Tensor_Scalar to "
+        f"{scalar_form!r}; if that is a real kernel the decoder may use the "
+        "Scalar overload again, and this test and its sibling should be "
+        "retired together"
+    )
+    assert tensor_form is not None, (
+        f"{conf_name} has no bitwise_right_shift.Tensor key at all, so the "
+        "decoder's call cannot be routed; regenerate the vendor confs"
+    )
+
+
+def test_bitwise_and_keeps_its_scalar_overload():
+    """The other operand op is left alone, and this records why.
+
+    ``bitwise_and.Scalar`` is routed where the decoder runs, so changing it
+    would be churn. Pinning it keeps a future "make them consistent" edit from
+    moving a call that has a kernel onto one that may not.
+    """
+    body = _decoder_body()
+    assert "at::bitwise_and(" in body, body
+    for conf_name in _SOFT_LOWP_CONFS:
+        conf = REPO_ROOT / "torch_fl/configs" / conf_name
+        assert _route(conf, "bitwise_and.Scalar") == "flaggems", (
+            f"{conf_name} no longer routes bitwise_and.Scalar to flaggems; the "
+            "decoder's Scalar bitwise_and calls need the same treatment as the "
+            "shift did"
+        )
