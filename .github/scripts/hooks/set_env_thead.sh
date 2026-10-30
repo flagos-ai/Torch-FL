@@ -41,6 +41,17 @@ CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # image's own pip.conf points at an internal mirror that 503s, so the explicit
 # index-url here bypasses it. Both stay overridable via env: flip to the
 # Tsinghua mirrors once the pod proxy allows them.
+#
+# Setting this is not enough on its own, and that is why these lanes still saw
+# Tsinghua. install_cpu_torch probes a *second* index -- the shared
+# CPU_TORCH_MIRROR_INDEX_URL_DEFAULT, mirror.sjtu.edu.cn -- and prefers it when
+# it measures faster. SJTU does not hold the blobs it indexes: it 302s to
+# mirrors.tuna.tsinghua.edu.cn, the one host this comment set out to avoid. So
+# the pin below was being bypassed by a redirect, which is how a filelock 403
+# failed 6 of 14 consecutive runs across the thead and thead-boxing lanes. The
+# fallback in install_cpu_torch now returns to this pin when that happens; the
+# mirror stays enabled, because it is also what keeps the 146-190 MB CPU-torch
+# wheel from taking 17-21 minutes.
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 PIP_INDEX_URL="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 
