@@ -189,15 +189,18 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # had gained as `assert 454 == 452`.
     "dcu": 454,
     "gcu": 251,
-    # The iluvatar lane's landing: the conf routes 585 ops to FlagGems, eleven
+    # The iluvatar lane's landing: the conf routes 586 ops to FlagGems, eleven
     # to the native slot (six ixdnn/ixblas kernels -- `_convolution`, `addmm`,
     # `bmm`, `convolution`, `mm`, `native_batch_norm` -- plus `_conj`,
     # `view_as_real`, `add_.Scalar`, `add_.Tensor` and `div_.Tensor` served
     # from register.cc) and the rest to `none`. Recorded because the lane runs
     # this suite on the platform and the count is what the conf states -- it is
-    # not an on-device measurement yet. 583 is that tally less the two
-    # ``SEEDED_DRAWOPS`` routes, which CI run 40341912173 measured on the lane.
-    "iluvatar": 583,
+    # not an on-device measurement yet. 584 is that tally less the two
+    # ``SEEDED_DRAWOPS`` routes; it was 583 until
+    # `scaled_dot_product_attention` joined on its own BI-V150 measurement
+    # (ILUVATAR_COMPOSITE_FLAGGEMS in scripts/codegen/gen_vendor_confs.py), and
+    # CI run 40341912173 measured the earlier figure on the lane.
+    "iluvatar": 584,
     "kunlunxin": 0,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow. The day-0 variant
@@ -269,10 +272,13 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "ascend": "none",
     "dcu": "flaggems",
     "gcu": "none",
-    # The same `none` the other FlagGems-primary non-boxing platforms record:
-    # the composite reaches the privateuseone kernel on every platform, and on
-    # this conf it has no FlagGems route to branch to.
-    "iluvatar": "none",
+    # The first FlagGems-primary platform to take the route, and the only one
+    # where the arm it branches to is not a boxing kernel: on a non-boxing build
+    # the wrapper's tail is ATen's own math decomposition, so this entry is the
+    # difference between one fused Triton kernel and a materialised NxN score
+    # matrix. Measured on a BI-V150 -- see ILUVATAR_COMPOSITE_FLAGGEMS in
+    # scripts/codegen/gen_vendor_confs.py for the table.
+    "iluvatar": "flaggems",
     "kunlunxin": "none",
     "metax": "flaggems",
     "apple": "none",

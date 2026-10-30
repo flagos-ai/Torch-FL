@@ -247,6 +247,22 @@ EXTRA_NATIVE = {
 # query.device().type(), so on PrivateUse1 the leaves are never consulted.
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
 
+# The native-kernel vendors (VENDORS) whose build compiles that wrapper, i.e.
+# the ones NOT excluded by the `#if` at csrc/aten/sdp_choice_stub.cc:99. For
+# them EXTRA_ROUTED is a real PrivateUse1 claim and belongs in the registration
+# set, exactly as EXTRA_NATIVE's register.cc claims do: route() returns `none`
+# for an unregistered op, so without this the measured route below could not be
+# written at all.
+#
+# Only iluvatar qualifies today. Ascend and Enflame are excluded there because
+# each registers its own _fused_sdp_choice stub; TsingMicro, BPU, MPS and
+# Kunlunxin because they compile no FlagGems Python path for the wrapper's only
+# arm; MUSA because the route is unmeasured on that chip. A platform joining
+# this set must also be dropped from that `#if`, and the two cannot be checked
+# against each other from here -- the macro list is C++ -- so
+# tests/unit/test_gen_vendor_confs.py pins both halves.
+COMPOSITE_WRAPPER_VENDORS = {"iluvatar"}
+
 # Native kernels that exist behind an op FlagGems currently *wins*, so they
 # claim no m.impl of their own and the .inc scan cannot see them: the FlagGems
 # .inc is included into the same PrivateUse1 TORCH_LIBRARY_IMPL body, and a
@@ -2792,6 +2808,45 @@ NATIVE_FLAGGEMS_MEASURED = {
     "kunlunxin": KUNLUNXIN_FLAGGEMS_MEASURED,
 }
 
+# The hand-registered composite (EXTRA_ROUTED) on a native-kernel vendor. The
+# native twin of METAX_COMPOSITE_FLAGGEMS / DCU_COMPOSITE_FLAGGEMS, and held the
+# same way: per platform, on that platform's own measurement, because the op is
+# outside the FlagGems coverage ceiling (it is a composite no coverage scan can
+# see) and csrc/aten/sdp_choice_stub.cc is the only thing that can route it.
+#
+# It cannot go in NATIVE_FLAGGEMS_MEASURED above: that set is intersected with
+# the platform's FlagGems ceiling, which by construction does not contain this
+# op, so an entry there is silently dropped.
+#
+# Iluvatar is the entry. On a BI-V150 (corex 4.5.0, FlagGems 5.3.5, torch
+# 2.10.0+cpu) the shipped `none` route runs ATen's CompositeImplicitAutograd
+# math decomposition, which materialises the whole NxN score matrix; the
+# wrapper's FlagGems route replaces it with one fused Triton kernel. Measured
+# bf16, head_dim 64 unless stated, against an fp32 CPU reference, 20 reps after
+# 5 warmups (u180, container lvyufeng-torch-fl):
+#
+#   shape                      math route   FlagGems route   speedup
+#   (1,16,336,64)                 6.936 ms         0.181 ms     38.3x
+#   (1,16,896,64)                35.590 ms         0.300 ms    118.8x
+#   (1,16,1944,64)              165.204 ms         0.814 ms    202.9x
+#   (1,16,1944,64) + key mask   165.407 ms         2.510 ms     65.9x
+#   (1,24,1024,128)              91.133 ms         0.592 ms    154.1x
+#
+# Deviation from the CPU reference stays in bf16's own range and the masked call
+# is the most accurate of the five: max 0.0011 / mean 8.7e-05 against an |ref|
+# max of 0.3754, where the unmasked rows are max 0.041-0.087 / mean 3e-04-2.5e-03.
+# The mask row is the one the wrapper converts (RouteMask); measured through that
+# conversion, not around it, which is why it does not reproduce the NaN that
+# issue #667's own A/B saw when it re-registered the slot directly.
+#
+# The shapes are Qwen3.5-VL 2B's, from issue #667, where this op is 38.5% of the
+# model's op time and the single largest cost in its forward.
+ILUVATAR_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
+
+NATIVE_COMPOSITE_FLAGGEMS = {
+    "iluvatar": ILUVATAR_COMPOSITE_FLAGGEMS,
+}
+
 # FlagGems coverage that arrived from a discovery widening rather than from a
 # measurement on the native-kernel vendors, and the vendors that therefore keep
 # the routes their own last FlagGems run measured.
@@ -3010,12 +3065,19 @@ def vendor_registered_ops(vendor: str) -> set:
     through the conf-driven dispatcher to the FlagGems Python slot, so those ops
     are registered without being native kernels. Anything outside this set is
     unregistered and therefore genuinely reaches cpu_fallback.
+
+    Two sets are added to what the ``.inc`` scan can see, for the same reason:
+    a hand-written wrapper's ``m.impl`` is in no ``.inc`` at all. EXTRA_NATIVE
+    is register.cc's, COMPOSITE_WRAPPER_VENDORS is sdp_choice_stub.cc's.
     """
     native_inc, extra_incs = VENDORS[vendor]
     ops = registered_impls(CSRC_DIR / native_inc)
     for inc in extra_incs:
         ops |= registered_impls(CSRC_DIR / inc)
-    return ops | EXTRA_NATIVE.get(vendor, set())
+    ops |= EXTRA_NATIVE.get(vendor, set())
+    if vendor in COMPOSITE_WRAPPER_VENDORS:
+        ops |= EXTRA_ROUTED
+    return ops
 
 
 def _platform_from_conf(filename: str) -> str:
@@ -3514,6 +3576,13 @@ def build_all(conf_dir: Path) -> dict:
         # Intersected with fg_py so an op dropped from the FlagGems set cannot
         # linger here, the same guard boxing_cpp_ops() applies.
         py_here |= NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & fg_py_here
+        # The hand-registered composite, on the platform that measured it. Held
+        # outside the intersection above on purpose: the op is not in any
+        # FlagGems ceiling (see NATIVE_COMPOSITE_FLAGGEMS), so `& fg_py_here`
+        # would drop it. Its PrivateUse1 claim comes from
+        # COMPOSITE_WRAPPER_VENDORS, which vendor_registered_ops() already
+        # applied, so route() sees it as registered and can move it.
+        py_here |= NATIVE_COMPOSITE_FLAGGEMS.get(vendor, set())
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(

@@ -565,19 +565,25 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     assert " = none" not in text, "tsingmicro registers every op; none would raise"
 
 
-def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
+def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
     """``scaled_dot_product_attention`` is a hand-held measurement, per platform.
 
     The op is a composite whose fused-backend selection runs inside it, so it is
-    outside the FlagGems coverage ceiling no coverage scan can see, and
-    ``boxing_measured_python_ops`` is the only thing that can route it at all.
-    That makes it exactly the kind of route that leaks: widening the function to
-    hand back one set for every platform would route MetaX's measurement on DCU
-    and DCU's on MetaX, and routing it on a third platform would claim a kernel
-    nobody measured there.
+    outside the FlagGems coverage ceiling no coverage scan can see, and the two
+    measured sets are the only thing that can route it at all. That makes it
+    exactly the kind of route that leaks: one set handed back for every platform
+    would route MetaX's measurement on DCU and DCU's on MetaX, and routing it on
+    an unmeasured platform claims a kernel nobody ran there.
+
+    Three platforms have measured it, through two different functions because
+    they sit in different halves of the generator: ``boxing_measured_python_ops``
+    for the CUDA-ABI platforms read from BOXING_PLATFORMS (metax, hygon) and
+    ``NATIVE_COMPOSITE_FLAGGEMS`` for the native-kernel vendors read from
+    VENDORS (iluvatar).
     """
     assert g.METAX_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
     assert g.DCU_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
+    assert g.ILUVATAR_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
     assert g.boxing_measured_python_ops("backends_metax.conf") == (
         g.METAX_FLAGGEMS_MEASURED | g.METAX_COMPOSITE_FLAGGEMS
     )
@@ -587,14 +593,56 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
     # Named the other way round on purpose: a platform that never measured the
     # op gets nothing, and backends_metax.conf's set must not arrive here.
     assert g.boxing_measured_python_ops("backends_mthreads.conf") == set()
+    assert g.NATIVE_COMPOSITE_FLAGGEMS == {"iluvatar": g.ILUVATAR_COMPOSITE_FLAGGEMS}
 
     built = g.build_all(CONF_DIR)
     for platform, (_, routes, _) in built.items():
         route = routes["scaled_dot_product_attention"].split("#", 1)[0].strip()
-        if platform in ("hygon", "metax"):
+        if platform in ("hygon", "metax", "iluvatar"):
             assert route == "flaggems", f"{platform} routes the op to {route}"
         else:
             assert route != "flaggems", f"{platform} took a route it never measured"
+
+
+def test_the_composite_wrapper_set_matches_the_macro_guard_it_depends_on():
+    """``COMPOSITE_WRAPPER_VENDORS`` and ``sdp_choice_stub.cc``'s ``#if`` agree.
+
+    The set says "this vendor's build compiles that wrapper, so EXTRA_ROUTED is
+    a real PrivateUse1 claim there"; the ``#if`` is what decides whether it
+    actually does. They are in different languages and nothing but this test
+    reads both. Disagreement is silent in each direction and wrong in both: a
+    vendor in the set but excluded by the macro gets a conf route to a kernel
+    that was never compiled ("backend not registered" mid-model), and a vendor
+    dropped from the macro but not added here keeps the op at ``none`` while the
+    wrapper sits compiled and unreachable.
+    """
+    import json
+    import re
+
+    stub = (REPO_ROOT / "csrc" / "aten" / "sdp_choice_stub.cc").read_text()
+    guard = re.search(r"^#if !defined\(USE_\w+\)(?:.|\n)*?\n\n", stub, re.MULTILINE)
+    assert guard, "the file no longer opens with the platform guard this test reads"
+    excluded_macros = set(re.findall(r"!defined\((USE_\w+)\)", guard.group(0)))
+    assert excluded_macros, "found the guard but no USE_* macros in it"
+
+    table = json.loads((REPO_ROOT / "cmake" / "flagos_platforms.json").read_text())[
+        "accelerators"
+    ]
+    compiled_vendors = {
+        info["vendor"]
+        for info in table.values()
+        if info.get("use_macro") not in excluded_macros
+    }
+    # The native-kernel vendors among them: a CUDA-ABI platform is routed
+    # through BOXING_PLATFORMS and does not read COMPOSITE_WRAPPER_VENDORS.
+    assert g.COMPOSITE_WRAPPER_VENDORS == compiled_vendors & set(g.VENDORS), (
+        "COMPOSITE_WRAPPER_VENDORS is "
+        f"{sorted(g.COMPOSITE_WRAPPER_VENDORS)} but sdp_choice_stub.cc compiles "
+        f"for {sorted(compiled_vendors & set(g.VENDORS))}"
+    )
+    # Every vendor that may route the op must be one whose build has the
+    # wrapper: the route is what the wrapper reads, and nothing else reads it.
+    assert set(g.NATIVE_COMPOSITE_FLAGGEMS) <= g.COMPOSITE_WRAPPER_VENDORS
 
 
 def test_metax_routes_mm_to_flaggems_only_in_the_default_conf():

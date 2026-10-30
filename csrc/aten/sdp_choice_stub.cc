@@ -64,20 +64,40 @@
 // a graph. A Python TorchDispatchMode is what forces the second registration --
 // it is measured and explained at the registrations at the end of this file.
 //
-// Compiled for the CUDA-ABI platforms, in both build states. On a boxing build
+// Compiled for the CUDA-ABI platforms, in both build states, and for a
+// FlagGems-primary platform whose conf names this op. On a boxing build
 // (FLAGOS_BOXING_BUILD) the default tail boxes q/k/v and calls the composite on
 // the vendor's CUDA kernels. On a FlagGems-primary build there is nothing to box
 // onto, so the tail calls the composite on the flagos tensors and lets it
-// decompose onto the PrivateUse1 FlagGems leaf kernels. Ascend (USE_ASCEND)
-// keeps its own PrivateUse1 _fused_sdp_choice stub (returns efficient_attention
-// for its aclnn kernel) in backends/ascend/scaled_dot_product_attention.cc;
-// MUSA, GCU, TsingMicro, BPU and Kunlunxin do not run CUDA-compatible kernels
-// and must keep their own paths. Kunlunxin registers nothing here: xdnn_pytorch
-// exposes no fused attention op, so it is left to ATen's decomposition (matmul,
-// softmax and the rest all route to the native XPU kernels), which is the same
-// answer MUSA's backend gives.
-// Without this guard the PrivateUse1 stub registration below would collide with
-// Ascend's registration of the same DispatchStub slot.
+// decompose onto the PrivateUse1 FlagGems leaf kernels.
+//
+// The excluded platforms are the ones that own this op some other way, not the
+// ones that are not CUDA-ABI: the FlagGems arm needs FLAGOS_FLAGGEMS_PYTHON and
+// nothing else, and the tail below is the composite body ATen would have run
+// anyway, so compiling the wrapper where the conf says `none` changes no call.
+//   * Ascend (USE_ASCEND) keeps its own PrivateUse1 _fused_sdp_choice stub
+//     (returns efficient_attention for its aclnn kernel) in
+//     backends/ascend/scaled_dot_product_attention.cc, and Enflame (USE_GCU) a
+//     stub of its own into the same slot for topsatenScaledDotProductFlash-
+//     Attention. Taking the composite over whole here would run ahead of both
+//     selectors; GCU also measured FlagGems' kernel *slower* than the math path
+//     it would replace (133.84 ms against 90.54), see
+//     docs/vendors/gcu/scaled-dot-product-attention.md.
+//   * TsingMicro, BPU, MPS and Kunlunxin compile no FlagGems Python path
+//     (FLAGGEMS_PYTHON_PLATFORMS in scripts/codegen/gen_vendor_confs.py), so
+//     the only arm the wrapper would offer them does not exist. Kunlunxin's
+//     xdnn_pytorch exposes no fused attention op either, so it is left to
+//     ATen's decomposition (matmul, softmax and the rest all route to the
+//     native XPU kernels).
+//   * MUSA (USE_MUSA) compiles the FlagGems path and has no stub of its own, so
+//     it is the one exclusion kept on no evidence either way. The route is
+//     unmeasured on that chip and the lane is red for unrelated reasons, so the
+//     guard stays until someone runs it there; dropping USE_MUSA from this line
+//     and adding a `mthreads` row to NATIVE_COMPOSITE_FLAGGEMS is the whole
+//     change when they do.
+// Iluvatar (USE_ILUVATAR) was excluded for the same "not CUDA-compatible"
+// reading and is the platform that measured the route out of it; see
+// NATIVE_COMPOSITE_FLAGGEMS in scripts/codegen/gen_vendor_confs.py.
 
 #include <ATen/core/Tensor.h>
 #include <ATen/core/grad_mode.h>
@@ -98,7 +118,7 @@
 
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+    !defined(USE_MPS)
 
 namespace at::flagos {
 namespace {

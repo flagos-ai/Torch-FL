@@ -65,6 +65,12 @@ EXTRA_NATIVE = {
 }
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
 
+# The native-kernel platforms whose build compiles that wrapper, so for them
+# EXTRA_ROUTED is a real PrivateUse1 claim. Mirrors
+# ``COMPOSITE_WRAPPER_VENDORS`` in ``scripts/codegen/gen_vendor_confs.py``; the
+# `#if` it has to agree with is at csrc/aten/sdp_choice_stub.cc:99.
+COMPOSITE_WRAPPER_PLATFORMS = {"iluvatar"}
+
 # Platform -> registration ``.inc`` set that ``csrc/aten/register.cc`` compiles
 # for that platform (the ``#include`` lines under each ``USE_*`` guard,
 # register.cc:549-614).  Paths are relative to ``csrc/aten``.
@@ -313,10 +319,14 @@ def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
 def _platform_registered(platform: str) -> set[str]:
     """Union of ops registered by every ``.inc`` this platform compiles.
 
-    Includes the ops registered straight from ``register.cc`` (EXTRA_NATIVE),
-    which are invisible to the ``m.impl`` scan of any ``.inc``.
+    Includes the two sets of hand-written claims that are invisible to the
+    ``m.impl`` scan of any ``.inc``: ``register.cc``'s (EXTRA_NATIVE) and
+    ``sdp_choice_stub.cc``'s (EXTRA_ROUTED, where that file is compiled --
+    COMPOSITE_WRAPPER_PLATFORMS).
     """
     ops: set[str] = set(EXTRA_NATIVE.get(platform, set()))
+    if platform in COMPOSITE_WRAPPER_PLATFORMS:
+        ops |= EXTRA_ROUTED
     for rel in PLATFORM_REGISTRATION[platform]:
         ops |= _registered_ops(ATEN_DIR / rel)
     return ops
@@ -619,7 +629,10 @@ def _derived_iluvatar_counts() -> dict[str, int]:
     native ``.inc`` claims the ``iluvatar`` routes, and because FlagGems wins any
     overlap the native set is the native-minus-FlagGems difference; the ops
     register.cc claims directly (EXTRA_NATIVE, e.g. ``_conj``) belong to that
-    same native slot; every other op the conf lists is ``none``. A conf that disagrees with the registrations
+    same native slot; the composite ``sdp_choice_stub.cc`` claims
+    (COMPOSITE_WRAPPER_PLATFORMS) belongs to the ``flaggems`` slot, since its
+    route is what that wrapper reads to take the FlagGems path; every other op
+    the conf lists is ``none``. A conf that disagrees with the registrations
     is caught by test_vendor_routes_are_registered / _accelerated_routes_are_
     registered / test_registered_ops_are_never_left_at_none above.
     """
@@ -627,6 +640,8 @@ def _derived_iluvatar_counts() -> dict[str, int]:
     flaggems = _registered_ops(
         ATEN_DIR / "backends/iluvatar/generated/iluvatar_flaggems_register.inc"
     )
+    if "iluvatar" in COMPOSITE_WRAPPER_PLATFORMS:
+        flaggems |= EXTRA_ROUTED
     native = _registered_ops(
         ATEN_DIR / "backends/iluvatar/generated/iluvatar_register.inc"
     )
