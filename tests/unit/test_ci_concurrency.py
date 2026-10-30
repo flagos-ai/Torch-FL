@@ -317,11 +317,13 @@ def test_lifecycle_step_runs_the_cleanup_script(tmp_path, source, selectors):
         env={
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT_NAME": "pull_request" if source == "pr" else "push",
             "SOURCE": source,
             "GITHUB_REPOSITORY": REPOSITORY,
             "REVISION": SHA,
             "PR_NUMBER": "42",
             "BRANCH": "main",
+            "DISPATCH_PR": "",
             "GITHUB_RUN_ID": "123",
             "RECORD_PATH": str(output),
         },
@@ -335,3 +337,95 @@ def test_lifecycle_step_runs_the_cleanup_script(tmp_path, source, selectors):
     assert recorded[2:4] == ["--repository", REPOSITORY]
     assert all(selector in recorded for selector in selectors)
     assert recorded[-2:] == ["--current-run", "123"]
+
+
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_lifecycle_step_is_a_no_op_where_nothing_is_superseded(tmp_path, event):
+    """An event with no earlier run has to leave the step green, not red.
+
+    The nightly schedule has no newer head of a PR and no older push to the
+    same branch, and a workflow_dispatch without `pr_number` is a platforms-only
+    rerun of whatever it was dispatched on. Neither supersedes anything, and
+    neither may fail: every job in ci.yml `needs` this one and the required gate
+    reads a non-success dependency as an error, so a failure here is a run that
+    tests nothing and reports red. Run against the step's real body, with a
+    `python3` that fails if it is called at all.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["ci-lifecycle"]["steps"]
+        if "ci_concurrency.py" in step.get("run", "")
+    )
+
+    stub = tmp_path / "python3"
+    stub.write_text("#!/bin/sh\necho 'cleanup ran' >&2\nexit 9\n")
+    stub.chmod(0o755)
+    process = subprocess.run(
+        ["bash", "-e", "-c", run],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT_NAME": event,
+            # What resolve-checkout emits for these events: no pull request, so
+            # the selector would fall through to the push branch and use the
+            # ref it happens to be on.
+            "SOURCE": "push",
+            "GITHUB_REPOSITORY": REPOSITORY,
+            "REVISION": SHA,
+            "PR_NUMBER": "",
+            "BRANCH": "main",
+            "DISPATCH_PR": "",
+            "GITHUB_RUN_ID": "123",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode == 0, process.stderr
+    assert "cleanup ran" not in process.stderr, (
+        f"the cleanup script ran on {event}, which supersedes no earlier run"
+    )
+
+
+def test_lifecycle_step_still_cleans_up_a_dispatched_pull_request(tmp_path):
+    """A workflow_dispatch carrying `pr_number` does supersede the PR's runs.
+
+    The same event name is both a no-op and a cleanup depending on that input,
+    so the early exit has to read it rather than the event name alone.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["ci-lifecycle"]["steps"]
+        if "ci_concurrency.py" in step.get("run", "")
+    )
+    output = tmp_path / "record"
+    stub = tmp_path / "python3"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "pathlib.Path(os.environ['RECORD_PATH']).write_text('\\n'.join(sys.argv[1:]))\n"
+    )
+    stub.chmod(0o755)
+    process = subprocess.run(
+        ["bash", "-e", "-c", run],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT_NAME": "workflow_dispatch",
+            "SOURCE": "pr",
+            "GITHUB_REPOSITORY": REPOSITORY,
+            "REVISION": SHA,
+            "PR_NUMBER": "42",
+            "BRANCH": "main",
+            "DISPATCH_PR": "42",
+            "GITHUB_RUN_ID": "123",
+            "RECORD_PATH": str(output),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode == 0, process.stderr
+    assert "--pull-request=42" in output.read_text().splitlines()

@@ -74,6 +74,41 @@ def test_shared_checks_and_platforms_follow_lifecycle_cleanup(job):
     assert "ci-lifecycle" in jobs[job]["needs"]
 
 
+def test_lifecycle_cleanup_runs_on_every_event_that_runs_tests():
+    """Cleanup must not gate itself off an event, because everything needs it.
+
+    Every job above depends on `ci-lifecycle` and the required gate reads a
+    skipped dependency as a failure, so a job-level `if` on the cleanup job
+    takes the whole pipeline with it: the nightly schedule and a
+    platforms-only workflow_dispatch would run no tests and report red. The
+    events with nothing to supersede are decided inside the step, which exits
+    0, so this asserts the job carries no condition at all.
+    """
+    lifecycle = _workflow("ci.yml")["jobs"]["ci-lifecycle"]
+    assert "if" not in lifecycle, (
+        "ci-lifecycle carries a job-level condition; every job below `needs` "
+        "it, so skipping it skips them and the gate fails the run"
+    )
+    cleanup = next(
+        step
+        for step in lifecycle["steps"]
+        if "ci_concurrency.py" in step.get("run", "")
+    )
+    for variable in ("EVENT_NAME", "DISPATCH_PR"):
+        assert variable in lifecycle["env"], (
+            f"the step decides the no-op events from ${variable}, which the "
+            "job does not set"
+        )
+        assert f'"${variable}"' in cleanup["run"], (
+            f"${variable} is set but the step does not read it, so an event "
+            "with nothing to supersede reaches the selector and fails"
+        )
+    assert "exit 0" in cleanup["run"], (
+        "the step has no early exit, so an event with no PR and no push "
+        "reaches the `::error::` branch and fails the run"
+    )
+
+
 def test_shared_checks_and_platform_queues_are_independent():
     jobs = _workflow("ci.yml")["jobs"]
     groups = {

@@ -120,9 +120,15 @@ jobs:
 
   # Lifecycle cleanup has a queue of its own. Sharing it with tests or the gate
   # would let cancelling an older run also remove the newer run's jobs.
+  #
+  # The job runs on every event, including the ones with nothing to supersede,
+  # and decides that in its own step. A job-level `if` would be the obvious
+  # spelling and is the wrong one: every job below `needs` this one, a skipped
+  # dependency skips them in turn, and the gate reads a skip as a failure -- so
+  # the nightly schedule and a platforms-only workflow_dispatch would run no
+  # tests at all and report red.
   ci-lifecycle:
     name: Cancel superseded runs
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || inputs.pr_number != '' }}
     needs: resolve-checkout
     concurrency:
       group: ci-lifecycle-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}-${{ github.run_id }}
@@ -134,10 +140,12 @@ jobs:
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
+      EVENT_NAME: ${{ github.event_name }}
       SOURCE: ${{ needs.resolve-checkout.outputs.pull_request && 'pr' || 'push' }}
       PR_NUMBER: ${{ needs.resolve-checkout.outputs.pull_request }}
       BRANCH: ${{ needs.resolve-checkout.outputs.branch }}
       REVISION: ${{ needs.resolve-checkout.outputs.ref }}
+      DISPATCH_PR: ${{ inputs.pr_number }}
     steps:
       - name: Check out the resolved revision
         uses: actions/checkout@v4
@@ -149,8 +157,20 @@ jobs:
       - name: Cancel active runs replaced by this revision
         # Selector arguments are passed as separate shell words so a branch
         # name cannot inject an option into the Python command.
+        #
+        # The nightly schedule and a platforms-only workflow_dispatch have
+        # nothing to supersede: there is no newer head of the same PR and no
+        # older push to the same branch. They are reported and skipped here
+        # rather than through a job-level `if`, so the jobs that depend on this
+        # one still run.
         run: |
           set -euo pipefail
+          if [[ "$EVENT_NAME" != "pull_request" \
+             && "$EVENT_NAME" != "push" \
+             && -z "$DISPATCH_PR" ]]; then
+            echo "$EVENT_NAME supersedes no earlier run; nothing to cancel."
+            exit 0
+          fi
           if [[ "$SOURCE" = "pr" ]]; then
             PYTHONPATH=.github/scripts/ci python3 \
               .github/scripts/ci/ci_concurrency.py \
