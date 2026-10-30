@@ -227,7 +227,7 @@ def is_cuda_alias_vendor(vendor: str) -> bool:
 # (torch_gcu, torch_txda), which on a flagos-only host either pulls in a second,
 # foreign PrivateUse1 provider or fails outright. The two halves of the switch
 # therefore have to agree, and this is the half torch_fl can supply.
-_FLAGCX_FLAGOS_VENDORS = ("enflame", "tsingmicro")
+_FLAGCX_FLAGOS_VENDORS = ("ascend", "enflame", "tsingmicro")
 
 
 def _configure_flagcx_torch_backend(vendor: str) -> None:
@@ -293,14 +293,14 @@ def _stage_to_host(obj, staged):
     return obj
 
 
-def _completed_work():
+def _completed_work(result=None):
     """A Work object for a collective this process already finished itself.
 
     The staging copy-back happens before the caller sees the Work, so the Work
     only has to be waitable; c10d's future-backed Work is exactly that.
     """
     future = torch.futures.Future()
-    future.set_result(None)
+    future.set_result(result)
     return _c10d._create_work_from_future(future)
 
 
@@ -426,10 +426,10 @@ def _warn_staged_gloo() -> None:
 # folklore: FlagCX creates its comm stream lazily on whatever device is current
 # (``getStreamByIndex`` runs *before* ``initComm`` binds the tensor's device) and
 # caches it for the life of the process, so a wrong first binding poisons the
-# communicator -- operations then no-op or produce zeros. Enflame GCU and
-# TsingMicro both behave this way. The remaining profiles either bind the device
+# communicator -- operations then no-op or produce zeros. Ascend, Enflame GCU and
+# TsingMicro behave this way. The remaining profiles either bind the device
 # inside the backend or keep no per-device stream state to poison.
-_DEVICE_SCOPED_VENDORS = ("enflame", "tsingmicro")
+_DEVICE_SCOPED_VENDORS = ("ascend", "enflame", "tsingmicro")
 
 
 def _device_scoped_guard(func):
@@ -883,6 +883,107 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         _warn_staged_gloo()
         return True
 
+    def _uses_ascend_flagcx(self, tensor):
+        return (
+            os.environ.get("GEMS_VENDOR") == "ascend"
+            and tensor.device.type in _HOST_STAGED_TYPES
+            and self._inner.name() == "flagcx"
+        )
+
+    def _ascend_double_transport(self, tensor):
+        return self._uses_ascend_flagcx(tensor) and tensor.dtype in (
+            torch.float64,
+            torch.complex128,
+        )
+
+    def _needs_ascend_composite(self, tensor, operation):
+        operation = getattr(operation, "op", operation)
+        return self._ascend_double_transport(tensor) or (
+            operation == dist.ReduceOp.AVG and self._uses_ascend_flagcx(tensor)
+        )
+
+    def _reduction_view(self, tensor):
+        if self._uses_ascend_flagcx(tensor) and tensor.is_complex():
+            tensor = torch.view_as_real(tensor)
+        return _to_comm(tensor, self._view_fn)
+
+    def _transport_view(self, tensor):
+        # HCCL transports all 64 bits as integers; this is a storage view,
+        # never a numeric cast. Reductions are handled separately below.
+        if self._ascend_double_transport(tensor):
+            if tensor.is_complex():
+                tensor = torch.view_as_real(tensor)
+            return tensor.view(torch.int64)
+        return _to_comm(tensor, self._view_fn)
+
+    def _allreduce_ascend_composite(self, tensor, operation):
+        # PyTorch 2.10 options expose a ReduceOp wrapper; newer releases may
+        # return its RedOpType directly.
+        operation = getattr(operation, "op", operation)
+        supported = (
+            dist.ReduceOp.SUM,
+            dist.ReduceOp.AVG,
+            dist.ReduceOp.PRODUCT,
+            dist.ReduceOp.MIN,
+            dist.ReduceOp.MAX,
+        )
+        if operation not in supported:
+            raise RuntimeError("unsupported floating-point reduction operation")
+        if tensor.is_complex() and operation in (dist.ReduceOp.MIN, dist.ReduceOp.MAX):
+            raise RuntimeError("MIN and MAX do not support complex tensors")
+        if operation == dist.ReduceOp.AVG and not (
+            tensor.is_floating_point() or tensor.is_complex()
+        ):
+            raise RuntimeError("AVG requires floating-point or complex tensors")
+        if operation == dist.ReduceOp.AVG and tensor.dtype not in (
+            torch.float64,
+            torch.complex128,
+        ):
+            options = _c10d.AllreduceOptions()
+            options.reduceOp = dist.ReduceOp.SUM
+            self._inner.allreduce([self._reduction_view(tensor)], options).wait()
+            tensor.div_(self.size())
+            torch.flagos.synchronize(tensor.device)
+            return _completed_work([tensor])
+        if not getattr(self, "_ascend_double_reduction_warned", False):
+            warnings.warn(
+                "[ProcessGroupFlagOS] HCCL does not support FP64 reduction; "
+                "using device FP64 arithmetic over lossless int64 broadcasts "
+                "(world_size broadcasts per tensor, bounded device scratch)."
+            )
+            self._ascend_double_reduction_warned = True
+        result = torch.empty_like(tensor)
+        for root in range(self.size()):
+            payload = (
+                tensor.clone() if root == self.rank() else torch.empty_like(tensor)
+            )
+            # The caching allocator may recycle a previous payload while its
+            # arithmetic consumer is still queued on the compute stream. FlagCX
+            # writes the next payload on a separate communication stream. Drain
+            # pending producers/consumers before transferring ownership of that
+            # storage; the composite already has blocking Work semantics.
+            torch.flagos.synchronize(tensor.device)
+            options = _c10d.BroadcastOptions()
+            options.rootRank = root
+            self._inner.broadcast([self._transport_view(payload)], options).wait()
+            if root == 0:
+                result.copy_(payload)
+            elif operation in (dist.ReduceOp.SUM, dist.ReduceOp.AVG):
+                result.add_(payload)
+            elif operation == dist.ReduceOp.PRODUCT:
+                result.mul_(payload)
+            elif operation == dist.ReduceOp.MIN:
+                result.copy_(torch.minimum(result, payload))
+            else:
+                result.copy_(torch.maximum(result, payload))
+        if operation == dist.ReduceOp.AVG:
+            result.div_(self.size())
+        tensor.copy_(result)
+        # Return a completed Work only after every device write has finished.
+        # This preserves wait/future and cross-stream consumption semantics.
+        torch.flagos.synchronize(tensor.device)
+        return _completed_work([tensor])
+
     # ------------------------------------------------------------------
     # Collective virtuals
     #
@@ -902,13 +1003,39 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def allreduce(self, tensors, opts=None):
         if opts is None:
             opts = _c10d.AllreduceOptions()
-        return self._inner.allreduce(_tl(tensors, self._view_fn), opts)
+        if any(
+            self._needs_ascend_composite(tensor, opts.reduceOp) for tensor in tensors
+        ):
+            for tensor in tensors:
+                if self._needs_ascend_composite(tensor, opts.reduceOp):
+                    self._allreduce_ascend_composite(tensor, opts.reduceOp)
+                else:
+                    options = _c10d.AllreduceOptions()
+                    options.reduceOp = opts.reduceOp
+                    self._inner.allreduce(
+                        _tl([tensor], self._reduction_view), options
+                    ).wait()
+            return _completed_work(tensors)
+        return self._inner.allreduce(_tl(tensors, self._reduction_view), opts)
 
     @_device_scoped_guard
     def allreduce_coalesced(self, tensors, opts=None):
         if opts is None:
             opts = _c10d.AllreduceCoalescedOptions()
-        return self._inner.allreduce_coalesced(_tl(tensors, self._view_fn), opts)
+        if any(
+            self._needs_ascend_composite(tensor, opts.reduceOp) for tensor in tensors
+        ):
+            for tensor in tensors:
+                if self._needs_ascend_composite(tensor, opts.reduceOp):
+                    self._allreduce_ascend_composite(tensor, opts.reduceOp)
+                else:
+                    options = _c10d.AllreduceOptions()
+                    options.reduceOp = opts.reduceOp
+                    self._inner.allreduce(
+                        _tl([tensor], self._reduction_view), options
+                    ).wait()
+            return _completed_work(tensors)
+        return self._inner.allreduce_coalesced(_tl(tensors, self._reduction_view), opts)
 
     @_device_scoped_guard
     def allgather(self, output_tensors, input_tensors, opts=None):
@@ -916,8 +1043,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.AllgatherOptions()
         return self._inner.allgather(
-            _tll(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
+            _tll(output_tensors, self._transport_view),
+            _tl(input_tensors, self._transport_view),
             opts,
         )
 
@@ -926,8 +1053,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.AllgatherOptions()
         return self._inner.allgather_coalesced(
-            _tll(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
+            _tll(output_tensors, self._transport_view),
+            _tl(input_tensors, self._transport_view),
             opts,
         )
 
@@ -936,8 +1063,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.AllgatherOptions()
         return self._inner.allgather_into_tensor_coalesced(
-            _tl(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
+            _tl(output_tensors, self._transport_view),
+            _tl(input_tensors, self._transport_view),
             opts,
         )
 
@@ -951,8 +1078,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.AllgatherOptions()
         return self._inner._allgather_base(
-            _to_comm(output_tensor, self._view_fn),
-            _to_comm(input_tensor, self._view_fn),
+            _to_comm(output_tensor, self._transport_view),
+            _to_comm(input_tensor, self._transport_view),
             opts,
         )
 
@@ -960,22 +1087,58 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def broadcast(self, tensors, opts=None):
         if opts is None:
             opts = _c10d.BroadcastOptions()
-        return self._inner.broadcast(_tl(tensors, self._view_fn), opts)
+        return self._inner.broadcast(_tl(tensors, self._transport_view), opts)
 
     @_device_scoped_guard
     def reduce(self, tensors, opts=None):
         if opts is None:
             opts = _c10d.ReduceOptions()
-        return self._inner.reduce(_tl(tensors, self._view_fn), opts)
+        if any(
+            self._needs_ascend_composite(tensor, opts.reduceOp) for tensor in tensors
+        ):
+            for tensor in tensors:
+                if self._needs_ascend_composite(tensor, opts.reduceOp):
+                    temporary = tensor.clone()
+                    self._allreduce_ascend_composite(temporary, opts.reduceOp)
+                    if self.rank() == opts.rootRank:
+                        tensor.copy_(temporary)
+                    torch.flagos.synchronize(tensor.device)
+                else:
+                    self._inner.reduce(_tl([tensor], self._reduction_view), opts).wait()
+            return _completed_work(tensors)
+        return self._inner.reduce(_tl(tensors, self._reduction_view), opts)
 
     @_device_scoped_guard
     def reduce_scatter(self, output_tensors, input_tensors, opts=None):
         # output: List[Tensor], input: List[List[Tensor]]
         if opts is None:
             opts = _c10d.ReduceScatterOptions()
+        if any(
+            self._needs_ascend_composite(tensor, opts.reduceOp)
+            for tensor in output_tensors
+        ):
+            for output, inputs in zip(output_tensors, input_tensors, strict=True):
+                if len(inputs) != self.size():
+                    raise RuntimeError(
+                        "reduce_scatter requires world_size input chunks"
+                    )
+                if self._needs_ascend_composite(output, opts.reduceOp):
+                    for owner, chunk in enumerate(inputs):
+                        temporary = chunk.clone()
+                        self._allreduce_ascend_composite(temporary, opts.reduceOp)
+                        if self.rank() == owner:
+                            output.copy_(temporary)
+                    torch.flagos.synchronize(output.device)
+                else:
+                    self._inner.reduce_scatter(
+                        _tl([output], self._reduction_view),
+                        _tll([inputs], self._reduction_view),
+                        opts,
+                    ).wait()
+            return _completed_work(output_tensors)
         return self._inner.reduce_scatter(
-            _tl(output_tensors, self._view_fn),
-            _tll(input_tensors, self._view_fn),
+            _tl(output_tensors, self._reduction_view),
+            _tll(input_tensors, self._reduction_view),
             opts,
         )
 
@@ -983,9 +1146,16 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
     def reduce_scatter_tensor_coalesced(self, output_tensors, input_tensors, opts=None):
         if opts is None:
             opts = _c10d.ReduceScatterOptions()
+        if any(
+            self._needs_ascend_composite(tensor, opts.reduceOp)
+            for tensor in output_tensors
+        ):
+            for output, source in zip(output_tensors, input_tensors, strict=True):
+                self._reduce_scatter_base(output, source, opts).wait()
+            return _completed_work(output_tensors)
         return self._inner.reduce_scatter_tensor_coalesced(
-            _tl(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
+            _tl(output_tensors, self._reduction_view),
+            _tl(input_tensors, self._reduction_view),
             opts,
         )
 
@@ -996,9 +1166,17 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         # _allgather_base above. Hot path for FSDP gradient reduction.
         if opts is None:
             opts = _c10d.ReduceScatterOptions()
+        if self._needs_ascend_composite(output_tensor, opts.reduceOp):
+            if input_tensor.numel() != output_tensor.numel() * self.size():
+                raise RuntimeError(
+                    "reduce_scatter input size must be world_size * output size"
+                )
+            chunks = list(input_tensor.reshape(-1).chunk(self.size()))
+            shaped = [chunk.reshape(output_tensor.shape) for chunk in chunks]
+            return self.reduce_scatter([output_tensor], [shaped], opts)
         return self._inner._reduce_scatter_base(
-            _to_comm(output_tensor, self._view_fn),
-            _to_comm(input_tensor, self._view_fn),
+            _to_comm(output_tensor, self._reduction_view),
+            _to_comm(input_tensor, self._reduction_view),
             opts,
         )
 
@@ -1007,8 +1185,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.AllToAllOptions()
         return self._inner.alltoall(
-            _tl(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
+            _tl(output_tensors, self._transport_view),
+            _tl(input_tensors, self._transport_view),
             opts,
         )
 
@@ -1023,8 +1201,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.AllToAllOptions()
         return self._inner.alltoall_base(
-            _to_comm(output_tensor, self._view_fn),
-            _to_comm(input_tensor, self._view_fn),
+            _to_comm(output_tensor, self._transport_view),
+            _to_comm(input_tensor, self._transport_view),
             output_split_sizes,
             input_split_sizes,
             opts,
@@ -1036,8 +1214,8 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.GatherOptions()
         return self._inner.gather(
-            _tll(output_tensors, self._view_fn),
-            _tl(input_tensors, self._view_fn),
+            _tll(output_tensors, self._transport_view),
+            _tl(input_tensors, self._transport_view),
             opts,
         )
 
@@ -1047,22 +1225,22 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
         if opts is None:
             opts = _c10d.ScatterOptions()
         return self._inner.scatter(
-            _tl(output_tensors, self._view_fn),
-            _tll(input_tensors, self._view_fn),
+            _tl(output_tensors, self._transport_view),
+            _tll(input_tensors, self._transport_view),
             opts,
         )
 
     @_device_scoped_guard
     def send(self, tensors, dst_rank: int, tag: int):
-        return self._inner.send(_tl(tensors, self._view_fn), dst_rank, tag)
+        return self._inner.send(_tl(tensors, self._transport_view), dst_rank, tag)
 
     @_device_scoped_guard
     def recv(self, tensors, src_rank: int, tag: int):
-        return self._inner.recv(_tl(tensors, self._view_fn), src_rank, tag)
+        return self._inner.recv(_tl(tensors, self._transport_view), src_rank, tag)
 
     @_device_scoped_guard
     def recv_anysource(self, tensors, tag: int):
-        return self._inner.recv_anysource(_tl(tensors, self._view_fn), tag)
+        return self._inner.recv_anysource(_tl(tensors, self._transport_view), tag)
 
     @_device_scoped_guard
     def barrier(self, opts=None):

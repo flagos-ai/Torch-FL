@@ -650,13 +650,15 @@ def test_conf_route_counts_are_stable():
         # flip moved from the flaggems route to ascend for the same reason;
         # the FlagTree 0.7.0 Ascend MLIR pipeline cannot lower the rank-2
         # copy_func kernel the FlagGems `_ascend` flip override builds.
-        # Real-valued sgn now reaches ACLNN Sign for abs backward.
-        "ascend": {"flaggems": 221, "none": 1658, "ascend": 158},
+        # Complex storage, spectral decomposition, seeded sampling and shift
+        # aliases now have measured Ascend implementations. Five aliases extend
+        # the global op universe and remain none on unrelated vendor builds.
+        "ascend": {"ascend": 206, "flaggems": 215, "none": 1621},
         # The BPU is native: 34 ops route to the generated kernel layer, the
         # rest to `none`. Those kernels submit .hbm artifacts from
         # FLAGOS_BPU_OPLIB; without it each takes its own CPU round-trip, which
         # a routing table cannot express.
-        "drobotics": {"drobotics": 34, "none": 2003},
+        "drobotics": {"none": 2008, "drobotics": 34},
         # Measured on H100 after rebasing onto the main that carries #340.
         # #340 added three exception groups (cuda_route_exceptions for
         # contract/compile defects, measured_flaggems_rollback for ops that
@@ -673,7 +675,7 @@ def test_conf_route_counts_are_stable():
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        "hygon": {"flaggems": 456, "none": 1581},
+        "hygon": {"none": 1586, "flaggems": 456},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -686,7 +688,7 @@ def test_conf_route_counts_are_stable():
         # kernel is rejected by the Enflame front end (64-bit data type not
         # supported on GCU300), so they are served by the native topsaten kernel
         # instead. See NATIVE_TRITON_GAPS["enflame"].
-        "enflame": {"none": 1603, "enflame": 183, "flaggems": 251},
+        "enflame": {"none": 1608, "enflame": 183, "flaggems": 251},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``) or is left at ``none`` -- there is no ``cuda``
         # route.  The count is exactly what
@@ -696,7 +698,7 @@ def test_conf_route_counts_are_stable():
         # scripts/codegen/codegen_kunlunxin.py).  Without that route the RNG ops
         # fell through to cpu_fallback, which the flagos PrivateUse1 generator
         # cannot steer -- the two failures the CI lane reported.
-        "kunlunxin": {"kunlunxin": 57, "none": 1980},
+        "kunlunxin": {"none": 1985, "kunlunxin": 57},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         # 8 ops moved flaggems -> boxing (594 -> 586 / 1433 -> 1441) because
         # route_boxing now consults codegen_ops.py's FlagGems holds. These were
@@ -719,10 +721,10 @@ def test_conf_route_counts_are_stable():
         # matrix claim needs the key registered, and a default conf may not route
         # boxing. The day-0 variant keeps `boxing`. Measured on a C550; see
         # METAX_FLAGGEMS_MEASURED in gen_vendor_confs.py.
-        "metax": {"flaggems": 587, "none": 1435, "flaggems_cpp": 15},
+        "metax": {"flaggems": 587, "none": 1440, "flaggems_cpp": 15},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
-        "mthreads": {"flaggems": 466, "none": 1518, "mthreads": 53},
-        "thead": {"flaggems": 592, "none": 1445},
+        "mthreads": {"none": 1523, "flaggems": 466, "mthreads": 53},
+        "thead": {"none": 1450, "flaggems": 592},
         # Iluvatar adds a native, non-boxing vendor slot on top of FlagGems
         # (scripts/codegen/codegen_iluvatar.py). Its counts are DERIVED, not
         # pinned: the native cohort is a moving measurement -- the first landing
@@ -752,7 +754,7 @@ def test_conf_route_counts_are_stable():
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"apple": 66, "none": 1971},
+        "apple": {"none": 1976, "apple": 66},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then
@@ -976,13 +978,13 @@ def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
 # TORCH_LIBRARY_IMPL body -- a compile error).
 CONV_CPU_CROSSING = {
     "nvidia": {"convolution_overrideable", "convolution_backward_overrideable"},
-    "hygon": {"convolution_overrideable", "convolution_backward_overrideable"},
+    "hygon": {"none": 1586, "flaggems": 456},
     "tsingmicro": {
         "convolution_overrideable",
         "convolution_backward_overrideable",
     },
-    "metax": {"convolution_backward_overrideable"},
-    "thead": {"convolution_backward_overrideable"},
+    "metax": {"none": 1441, "flaggems": 586, "flaggems_cpp": 15},
+    "thead": {"none": 1450, "flaggems": 592},
 }
 
 

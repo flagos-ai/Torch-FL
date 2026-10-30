@@ -9,6 +9,13 @@
 
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
+#include <ATen/ATen.h>
+#include <ATen/WrapDimUtils.h>
+#include <ATen/ops/_conj_native.h>
+#include <ATen/ops/_neg_view_native.h>
+#include <ATen/ops/diagonal_native.h>
+#include <ATen/ops/view_as_real_native.h>
+#include <ATen/ops/view_as_complex_native.h>
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
@@ -49,13 +56,820 @@
 #include <ATen/ops/tanh.h>
 #include <ATen/ops/trunc.h>
 #include <c10/core/Scalar.h>
+#include <c10/core/DefaultDtype.h>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <vector>
 #include "../op_preparation.h"
 #include "../op_api_common.h"
 #include "../dtype_support.h"
+#include "runtime/generator.h"
 
 namespace at::native::flagos {
+
+
+namespace ascend {
+
+static std::pair<at::Tensor, at::Tensor> ComplexParts(const at::Tensor& tensor) {
+  if (!tensor.is_complex()) return {tensor, at::zeros_like(tensor)};
+  auto storage = tensor;
+  if (tensor.is_conj()) storage = at::native::_conj(storage);
+  if (tensor.is_neg()) storage = at::native::_neg_view(storage);
+  auto parts = at::native::view_as_real(storage);
+  // Real kernels may be selected from either ACLNN or FlagGems. Normalize
+  // interleaved component strides before arithmetic, including offset views.
+  auto real = parts.select(-1, 0).clone(at::MemoryFormat::Contiguous);
+  auto imag = parts.select(-1, 1).clone(at::MemoryFormat::Contiguous);
+  if (tensor.is_neg()) { real = at::neg(real); imag = at::neg(imag); }
+  if (tensor.is_conj()) imag = at::neg(imag);
+  return {real, imag};
+}
+
+static at::Tensor PackComplex(const at::Tensor& real, const at::Tensor& imag) {
+  TORCH_CHECK(real.scalar_type() == imag.scalar_type(),
+              "complex: real and imaginary dtypes must match");
+  TORCH_CHECK(real.device() == imag.device(),
+              "complex: real and imaginary devices must match");
+  TORCH_CHECK(real.scalar_type() == at::kFloat ||
+              real.scalar_type() == at::kDouble || real.scalar_type() == at::kHalf,
+              "complex: expected float32, float64 or float16 components");
+  auto shape = at::infer_size(real.sizes(), imag.sizes());
+  auto output = at::empty(shape, real.options().dtype(c10::toComplexType(real.scalar_type())));
+  auto parts = at::native::view_as_real(output);
+  parts.select(-1, 0).copy_(real.expand(shape));
+  parts.select(-1, 1).copy_(imag.expand(shape));
+  return output;
+}
+
+static at::Tensor ComplexMagnitude(const at::Tensor& real, const at::Tensor& imag) {
+  auto high = at::maximum(at::abs(real), at::abs(imag));
+  auto low = at::minimum(at::abs(real), at::abs(imag));
+  auto ratio = low / high;
+  auto result = high * at::sqrt(1 + ratio * ratio);
+  result = at::where(high == 0, at::zeros_like(result), result);
+  return at::where(high == std::numeric_limits<double>::infinity(), high, result);
+}
+
+// ACLNN GEMM has no FP64 instantiation. Retain FP64 arithmetic and storage
+// through real device operations instead of demoting or returning to the host.
+// This correctness path bounds intermediate storage independently of K.
+at::Tensor RealMatmulDouble(const at::Tensor& left, const at::Tensor& right) {
+  TORCH_CHECK(left.dim() > 0 && right.dim() > 0,
+              "matmul: both arguments must be at least one-dimensional");
+  const bool left_vector = left.dim() == 1;
+  const bool right_vector = right.dim() == 1;
+  auto a = left_vector ? left.unsqueeze(0) : left;
+  auto b = right_vector ? right.unsqueeze(-1) : right;
+  TORCH_CHECK(a.size(-1) == b.size(-2), "matmul: incompatible contraction sizes");
+  auto shape = at::infer_size(a.sizes().slice(0, a.dim() - 2),
+                              b.sizes().slice(0, b.dim() - 2));
+  shape.push_back(a.size(-2));
+  shape.push_back(b.size(-1));
+  auto output = at::zeros(shape, a.options());
+  for (int64_t k = 0; k < a.size(-1); ++k) {
+    output = output + a.select(-1, k).unsqueeze(-1) *
+                      b.select(-2, k).unsqueeze(-2);
+  }
+  if (left_vector) output = output.squeeze(-2);
+  if (right_vector) output = output.squeeze(-1);
+  return output;
+}
+
+at::Tensor ComplexIndex(const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices) {
+  auto [real, imag] = ComplexParts(self);
+  return PackComplex(at::index(real, indices), at::index(imag, indices));
+}
+
+at::Tensor ComplexMatmul(const at::Tensor& left, const at::Tensor& right) {
+  TORCH_CHECK(left.dim() > 0 && right.dim() > 0,
+              "matmul: both arguments must be at least one-dimensional");
+  TORCH_CHECK(left.scalar_type() == right.scalar_type(),
+              "matmul: input dtypes must match");
+  TORCH_CHECK(left.device() == right.device(), "matmul: input devices must match");
+  auto [ar, ai] = ComplexParts(left);
+  auto [br, bi] = ComplexParts(right);
+  auto multiply = [](const at::Tensor& a, const at::Tensor& b) {
+    return a.scalar_type() == at::kDouble ? RealMatmulDouble(a, b) : at::matmul(a, b);
+  };
+  return PackComplex(multiply(ar, br) - multiply(ai, bi),
+                     multiply(ar, bi) + multiply(ai, br));
+}
+
+static at::ScalarType VectorNormDtype(
+    const at::Tensor& self, std::optional<at::ScalarType> dtype) {
+  auto target = dtype.value_or(self.scalar_type());
+  TORCH_CHECK(self.is_floating_point() || self.is_complex(),
+              "linalg.vector_norm: expected floating or complex input");
+  TORCH_CHECK(c10::isComplexType(target) == self.is_complex(),
+              "linalg.vector_norm: dtype must preserve real/complex kind");
+  TORCH_CHECK(c10::promoteTypes(self.scalar_type(), target) == target,
+              "linalg.vector_norm: dtype must not narrow the input");
+  return target;
+}
+
+static at::Tensor PreciseVectorNorm(
+    const at::Tensor& self, const at::Scalar& order, at::OptionalIntArrayRef dim,
+    bool keepdim, at::ScalarType target) {
+  TORCH_CHECK(!order.isComplex(), "linalg.vector_norm: order must be real");
+  const double p = order.toDouble();
+  const auto real_dtype = c10::toRealValueType(target);
+  auto input = self.to(target);
+  auto magnitude = at::abs(input);
+  std::vector<int64_t> axes;
+  if (dim.has_value() && !dim->empty()) {
+    for (int64_t axis : *dim) axes.push_back(at::maybe_wrap_dim(axis, self.dim()));
+  } else {
+    for (int64_t axis = 0; axis < self.dim(); ++axis) axes.push_back(axis);
+  }
+  std::sort(axes.begin(), axes.end());
+  TORCH_CHECK(std::adjacent_find(axes.begin(), axes.end()) == axes.end(),
+              "linalg.vector_norm: repeated reduction dimension");
+  if (self.dim() == 0) {
+    return p == 0 ? (magnitude != 0).to(real_dtype) : magnitude;
+  }
+  if (magnitude.numel() == 0) {
+    int64_t volume = 1;
+    for (int64_t axis : axes) volume *= magnitude.size(axis);
+    TORCH_CHECK(volume != 0 || (!std::isinf(p) && p >= 0),
+                "linalg.vector_norm: this order is undefined on an empty reduction");
+    std::vector<int64_t> shape;
+    for (int64_t axis = 0; axis < magnitude.dim(); ++axis) {
+      if (std::find(axes.begin(), axes.end(), axis) == axes.end()) {
+        shape.push_back(magnitude.size(axis));
+      } else if (keepdim) {
+        shape.push_back(1);
+      }
+    }
+    return at::zeros(shape, magnitude.options());
+  }
+  at::Tensor result;
+  if (p == 0) {
+    result = at::sum((magnitude != 0).to(real_dtype), axes, true, real_dtype);
+  } else if (std::isinf(p)) {
+    result = p > 0 ? at::amax(magnitude, axes, true) : at::amin(magnitude, axes, true);
+  } else if (p == 1) {
+    result = at::sum(magnitude, axes, true, real_dtype);
+  } else {
+    // Scaling avoids overflow in positive orders and loss of small values in
+    // negative orders. All reductions and coefficients stay on the device.
+    auto scale = p > 0 ? at::amax(magnitude, axes, true) : at::amin(magnitude, axes, true);
+    auto scaled = magnitude / scale;
+    result = scale * at::pow(at::sum(at::pow(scaled, p), axes, true, real_dtype), 1 / p);
+    result = at::where(scale == 0, at::zeros_like(result), result);
+    result = at::where(scale == std::numeric_limits<double>::infinity(), scale, result);
+  }
+  if (!keepdim) {
+    for (auto axis = axes.rbegin(); axis != axes.rend(); ++axis) result = result.squeeze(*axis);
+  }
+  return result;
+}
+
+} // namespace ascend
+
+
+namespace ascend {
+static void FillMatrixIdentity(at::Tensor& matrix) {
+  matrix.zero_();
+  auto diagonal = matrix.diagonal(0, -2, -1);
+  diagonal.copy_(at::ones(diagonal.sizes(), matrix.options()));
+}
+
+// Scaling and squaring with a degree-18 Taylor polynomial. All matrix data
+// stays on the device in its original precision; only the norm bound is read
+// for the scaling decision. The entrywise 1-norm bounds the matrix 1-norm.
+static at::Tensor MatrixExp(const at::Tensor& input) {
+  TORCH_CHECK(input.dim() >= 2 && input.size(-1) == input.size(-2),
+              "linalg.matrix_exp: expected batches of square matrices");
+  TORCH_CHECK(input.is_floating_point() || input.is_complex(),
+              "linalg.matrix_exp: expected floating or complex input");
+  if (input.numel() == 0) return input.clone();
+  const auto original_dtype = input.scalar_type();
+  auto source = (original_dtype == at::kHalf || original_dtype == at::kBFloat16)
+      ? input.to(at::kFloat) : input;
+  const int64_t n = input.size(-1);
+  auto matrices = source.reshape({-1, n, n});
+  std::vector<at::Tensor> outputs;
+  outputs.reserve(matrices.size(0));
+  for (int64_t index = 0; index < matrices.size(0); ++index) {
+    auto matrix = matrices[index];
+    const double bound = at::abs(matrix).sum().item<double>();
+    if (!std::isfinite(bound)) {
+      outputs.push_back(at::full_like(matrix, std::numeric_limits<double>::quiet_NaN()));
+      continue;
+    }
+    const int scaling = bound > 0.5
+        ? static_cast<int>(std::ceil(std::log2(bound) + 1.0)) : 0;
+    auto scaled = matrix * std::ldexp(1.0, -scaling);
+    auto identity = at::empty_like(matrix);
+    FillMatrixIdentity(identity);
+    auto result = identity.clone();
+    auto term = identity;
+    for (int degree = 1; degree <= 18; ++degree) {
+      term = at::mm(term, scaled) / degree;
+      result = result + term;
+    }
+    for (int step = 0; step < scaling; ++step) result = at::mm(result, result);
+    outputs.push_back(result);
+  }
+  return at::stack(outputs).reshape(input.sizes()).to(original_dtype);
+}
+} // namespace ascend
+
+
+namespace ascend {
+static at::Tensor DeviceLogit(const at::Tensor& self, std::optional<double> eps) {
+  TORCH_CHECK(!self.is_complex(), "logit: complex input is unsupported");
+  auto x = self.is_floating_point() ? self : self.to(at::kFloat);
+  if (eps.has_value() && eps.value() >= 0) {
+    auto low = at::full_like(x, eps.value());
+    auto high = at::full_like(x, 1 - eps.value());
+    // PyTorch 2.10's aarch64 CPU reference uses vectorized FP64 clipping
+    // and scalar FP32 clipping; keep its inverted-bound behavior observable.
+    x = x.scalar_type() == at::kDouble
+        ? at::minimum(at::maximum(x, low), high)
+        : at::where(x < eps.value(), low, at::where(x > 1 - eps.value(), high, x));
+  }
+  return at::log(x / (1 - x));
+}
+static at::Tensor DeviceLogitBackward(const at::Tensor& grad, const at::Tensor& self,
+                                     std::optional<double> eps) {
+  TORCH_CHECK(self.is_floating_point(), "logit_backward: expected floating input");
+  auto value = grad / (self * (1 - self));
+  const double bound = eps.value_or(-1);
+  if (bound < 0) {
+    return at::where((self < 0) | (self > 1),
+        at::full_like(value, std::numeric_limits<double>::quiet_NaN()), value);
+  }
+  // The same pinned reference returns zero for a clamped FP64 NaN and
+  // propagates the NaN in FP32. Neither choice changes finite-input gradients.
+  if (self.scalar_type() == at::kDouble) {
+    return at::where((self >= bound) & (self <= 1 - bound), value, at::zeros_like(value));
+  }
+  return at::where((self < bound) | (self > 1 - bound), at::zeros_like(value), value);
+}
+} // namespace ascend
+at::Tensor ViewAsRealKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  return at::native::view_as_real(self);
+}
+REGISTER_IMPL_TO_DISPATCHER(ViewAsRealFn, view_as_real_dispatcher, Backend::kAscend, ViewAsRealKernelAscend)
+
+at::Tensor ViewAsComplexKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  return at::native::view_as_complex(self);
+}
+REGISTER_IMPL_TO_DISPATCHER(ViewAsComplexFn, view_as_complex_dispatcher, Backend::kAscend, ViewAsComplexKernelAscend)
+
+at::Tensor ComplexKernelAscend(const at::Tensor& real, const at::Tensor& imag) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(real));
+  return ascend::PackComplex(real, imag);
+}
+REGISTER_IMPL_TO_DISPATCHER(ComplexFn, complex_dispatcher, Backend::kAscend, ComplexKernelAscend)
+
+at::Tensor PrivConjPhysicalKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  if (!self.is_complex()) return self.clone();
+  auto [real, imag] = ascend::ComplexParts(self);
+  return ascend::PackComplex(real, -imag);
+}
+REGISTER_IMPL_TO_DISPATCHER(PrivConjPhysicalFn, priv_conj_physical_dispatcher, Backend::kAscend, PrivConjPhysicalKernelAscend)
+
+at::Tensor& PrivConjPhysicalOutKernelAscend(const at::Tensor& self, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  if (!self.is_complex()) { out.copy_(self); return out; }
+  auto [real, imag] = ascend::ComplexParts(self);
+  out.copy_(ascend::PackComplex(real, -imag));
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(PrivConjPhysicalOutFn, priv_conj_physical_out_dispatcher, Backend::kAscend, PrivConjPhysicalOutKernelAscend)
+
+at::Tensor& ConjPhysicalOutKernelAscend(const at::Tensor& self, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  if (!self.is_complex()) { out.copy_(self); return out; }
+  auto [real, imag] = ascend::ComplexParts(self);
+  out.copy_(ascend::PackComplex(real, -imag));
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(ConjPhysicalOutFn, conj_physical_out_dispatcher, Backend::kAscend, ConjPhysicalOutKernelAscend)
+
+at::Tensor& PrivConjCopyOutKernelAscend(const at::Tensor& self, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  if (!self.is_complex()) { out.copy_(self); return out; }
+  auto [real, imag] = ascend::ComplexParts(self);
+  out.copy_(ascend::PackComplex(real, -imag));
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(PrivConjCopyOutFn, priv_conj_copy_out_dispatcher, Backend::kAscend, PrivConjCopyOutKernelAscend)
+
+at::Tensor DiagonalKernelAscend(const at::Tensor& self, int64_t offset, int64_t dim1, int64_t dim2) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  return at::native::diagonal(self, offset, dim1, dim2);
+}
+REGISTER_IMPL_TO_DISPATCHER(DiagonalFn, diagonal_dispatcher, Backend::kAscend, DiagonalKernelAscend)
+
+at::Tensor BitwiseRightShiftTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  auto result_dtype = ascend::BinaryResultType("aclnnRightShift", self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+  auto other_c = other.is_privateuseone()
+      ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
+      : other.to(self.options().dtype(result_dtype));
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto result_options = self.options().dtype(result_dtype);
+  // aclnn binary ops broadcast and honor strides internally (verified), so we
+  // pass self/other_c straight through instead of expand().contiguous(). This
+  // avoids up to two device strided-copies + host view construction per op on
+  // the eager decode hot path. Only materialize a contiguous copy when the
+  // tensor is genuinely non-contiguous AND the aclnn path would otherwise need
+  // it — measured unnecessary for the common same-shape/contiguous case, which
+  // is the overwhelming majority in Qwen3.
+  const at::Tensor& self_b = self_c;
+  const at::Tensor& other_b = other_c;
+  TORCH_CHECK(c10::isIntegralType(result_dtype, false),
+              "bitwise shift: expected integral inputs");
+  if (self_c.numel() == 0 || other_c.numel() == 0) {
+    return at::empty(out_shape, result_options);
+  }
+  const int64_t width = c10::elementSize(result_dtype) * 8;
+  auto invalid_shift = at::logical_or(other_c < 0, other_c >= width);
+  other_c = at::clamp(other_c, 0, width - 1);
+  auto out = ascend::OpPreparation::apply_tensor_without_format(
+      out_shape, result_options);
+
+  static void* opApiFuncAddr = nullptr;
+  static void* getWsFuncAddr = nullptr;
+  ascend::SigHasher hsh; hsh.tensor(self_b); hsh.tensor(other_b);
+  ascend::ExecAscendCached(
+      "aclnnRightShift", "aclnnRightShiftGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
+      {&self_b, &other_b}, {&out},
+      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
+         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+        return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
+      });
+  auto saturated = at::zeros_like(out);
+  if (c10::isSignedType(result_dtype)) {
+    saturated = at::where(self_b < 0, at::full_like(out, -1), saturated);
+  }
+  return at::where(invalid_shift, saturated, out);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseRightShiftTensorFn, bitwise_right_shift_tensor_dispatcher, Backend::kAscend, BitwiseRightShiftTensorKernelAscend)
+
+at::Tensor BitwiseLeftShiftTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  auto result_dtype = ascend::BinaryResultType("aclnnLeftShift", self, other);
+  auto self_c = self.scalar_type() == result_dtype
+      ? self
+      : self.to(self.options().dtype(result_dtype));
+  auto other_c = other.is_privateuseone()
+      ? (other.scalar_type() == result_dtype ? other : other.to(result_dtype))
+      : other.to(self.options().dtype(result_dtype));
+  auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  auto result_options = self.options().dtype(result_dtype);
+  // aclnn binary ops broadcast and honor strides internally (verified), so we
+  // pass self/other_c straight through instead of expand().contiguous(). This
+  // avoids up to two device strided-copies + host view construction per op on
+  // the eager decode hot path. Only materialize a contiguous copy when the
+  // tensor is genuinely non-contiguous AND the aclnn path would otherwise need
+  // it — measured unnecessary for the common same-shape/contiguous case, which
+  // is the overwhelming majority in Qwen3.
+  const at::Tensor& self_b = self_c;
+  const at::Tensor& other_b = other_c;
+  TORCH_CHECK(c10::isIntegralType(result_dtype, false),
+              "bitwise shift: expected integral inputs");
+  if (self_c.numel() == 0 || other_c.numel() == 0) {
+    return at::empty(out_shape, result_options);
+  }
+  const int64_t width = c10::elementSize(result_dtype) * 8;
+  auto invalid_shift = at::logical_or(other_c < 0, other_c >= width);
+  other_c = at::clamp(other_c, 0, width - 1);
+  auto out = ascend::OpPreparation::apply_tensor_without_format(
+      out_shape, result_options);
+
+  static void* opApiFuncAddr = nullptr;
+  static void* getWsFuncAddr = nullptr;
+  ascend::SigHasher hsh; hsh.tensor(self_b); hsh.tensor(other_b);
+  ascend::ExecAscendCached(
+      "aclnnLeftShift", "aclnnLeftShiftGetWorkspaceSize", opApiFuncAddr, getWsFuncAddr, hsh.h,
+      {&self_b, &other_b}, {&out},
+      [](ascend::GwsFunc gws, std::vector<ascend::AclTensorWrapper>& in,
+         std::vector<ascend::AclTensorWrapper>& out_t, uint64_t* pws, aclOpExecutor** pex) {
+        return gws(in[0].acl_tensor, in[1].acl_tensor, out_t[0].acl_tensor, pws, pex);
+      });
+  auto saturated = at::zeros_like(out);
+  return at::where(invalid_shift, saturated, out);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BitwiseLeftShiftTensorFn, bitwise_left_shift_tensor_dispatcher, Backend::kAscend, BitwiseLeftShiftTensorKernelAscend)
+
+at::Tensor BitwiseRightShiftTensorScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto dtype = at::result_type(self, other);
+  auto amount = at::scalar_tensor(other, self.options().dtype(dtype));
+  return at::bitwise_right_shift(self.to(dtype), amount);
+}
+REGISTER_IMPL_TO_DISPATCHER(BitwiseRightShiftTensorScalarFn, bitwise_right_shift_tensor_scalar_dispatcher, Backend::kAscend, BitwiseRightShiftTensorScalarKernelAscend)
+
+at::Tensor BitwiseLeftShiftTensorScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto dtype = at::result_type(self, other);
+  auto amount = at::scalar_tensor(other, self.options().dtype(dtype));
+  return at::bitwise_left_shift(self.to(dtype), amount);
+}
+REGISTER_IMPL_TO_DISPATCHER(BitwiseLeftShiftTensorScalarFn, bitwise_left_shift_tensor_scalar_dispatcher, Backend::kAscend, BitwiseLeftShiftTensorScalarKernelAscend)
+
+at::Tensor BitwiseRightShiftScalarTensorKernelAscend(const at::Scalar& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(other));
+  auto dtype = at::result_type(other, self);
+  auto value = at::scalar_tensor(self, other.options().dtype(dtype));
+  return at::bitwise_right_shift(value, other.to(dtype));
+}
+REGISTER_IMPL_TO_DISPATCHER(BitwiseRightShiftScalarTensorFn, bitwise_right_shift_scalar_tensor_dispatcher, Backend::kAscend, BitwiseRightShiftScalarTensorKernelAscend)
+
+at::Tensor BitwiseLeftShiftScalarTensorKernelAscend(const at::Scalar& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(other));
+  auto dtype = at::result_type(other, self);
+  auto value = at::scalar_tensor(self, other.options().dtype(dtype));
+  return at::bitwise_left_shift(value, other.to(dtype));
+}
+REGISTER_IMPL_TO_DISPATCHER(BitwiseLeftShiftScalarTensorFn, bitwise_left_shift_scalar_tensor_dispatcher, Backend::kAscend, BitwiseLeftShiftScalarTensorKernelAscend)
+
+std::tuple<at::Tensor, at::Tensor> LinalgQrKernelAscend(const at::Tensor& A, c10::string_view mode) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(A));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(A.dim() >= 2, "linalg.qr: input must have at least two dimensions");
+  TORCH_CHECK(mode == "reduced" || mode == "complete" || mode == "r",
+              "linalg.qr: expected reduced, complete, or r mode");
+  TORCH_CHECK(A.is_floating_point() || A.is_complex(), "linalg.qr: expected floating or complex input");
+  const int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
+  int64_t mode_value = mode == "complete" ? 1 : (mode == "r" ? 2 : 0);
+  auto q_shape = A.sizes().vec();
+  q_shape.back() = mode == "complete" ? m : k;
+  if (mode == "r") q_shape = {0};
+  auto r_shape = A.sizes().vec();
+  r_shape[r_shape.size() - 2] = mode == "complete" ? m : k;
+  auto q = at::empty(q_shape, A.options());
+  auto r = at::empty(r_shape, A.options());
+  if (A.numel() == 0) {
+    if (mode == "complete") ascend::FillMatrixIdentity(q);
+    r.zero_();
+    return std::make_tuple(q, r);
+  }
+  ascend::AclTensorWrapper input(A), q_out(q), r_out(r);
+  EXEC_ASCEND_CMD(aclnnLinalgQr, input.get(), mode_value, q_out.get(), r_out.get());
+  return std::make_tuple(q, r);
+}
+REGISTER_IMPL_TO_DISPATCHER(LinalgQrFn, linalg_qr_dispatcher, Backend::kAscend, LinalgQrKernelAscend)
+
+at::Tensor LogitKernelAscend(const at::Tensor& self, std::optional<double> eps) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto value = ascend::DeviceLogit(self, eps);
+  return value;
+}
+REGISTER_IMPL_TO_DISPATCHER(LogitFn, logit_dispatcher, Backend::kAscend, LogitKernelAscend)
+
+at::Tensor& LogitOutKernelAscend(const at::Tensor& self, std::optional<double> eps, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto value = ascend::DeviceLogit(self, eps);
+  TORCH_CHECK(out.device() == value.device() && at::canCast(value.scalar_type(), out.scalar_type()), "logit.out: incompatible output");
+  out.resize_(value.sizes());
+  out.copy_(value);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(LogitOutFn, logit_out_dispatcher, Backend::kAscend, LogitOutKernelAscend)
+
+at::Tensor& LogitInplaceKernelAscend(at::Tensor& self, std::optional<double> eps) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(self.is_floating_point(), "logit_: expected floating input");
+  auto value = ascend::DeviceLogit(self, eps);
+  self.copy_(value);
+  return self;
+}
+REGISTER_IMPL_TO_DISPATCHER(LogitInplaceFn, logit_inplace_dispatcher, Backend::kAscend, LogitInplaceKernelAscend)
+
+at::Tensor LogitBackwardKernelAscend(const at::Tensor& grad, const at::Tensor& self, std::optional<double> eps) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto value = ascend::DeviceLogitBackward(grad, self, eps);
+  return value;
+}
+REGISTER_IMPL_TO_DISPATCHER(LogitBackwardFn, logit_backward_dispatcher, Backend::kAscend, LogitBackwardKernelAscend)
+
+at::Tensor& LogitBackwardGradInputKernelAscend(const at::Tensor& grad, const at::Tensor& self, std::optional<double> eps, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto value = ascend::DeviceLogitBackward(grad, self, eps);
+  TORCH_CHECK(out.device() == value.device() && at::canCast(value.scalar_type(), out.scalar_type()), "logit.out: incompatible output");
+  out.resize_(value.sizes());
+  out.copy_(value);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(LogitBackwardGradInputFn, logit_backward_grad_input_dispatcher, Backend::kAscend, LogitBackwardGradInputKernelAscend)
+
+at::Tensor VdotKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(self.dim() == 1 && other.dim() == 1 && self.numel() == other.numel(), "vdot: expected equal-sized vectors");
+  TORCH_CHECK(self.device() == other.device() && self.scalar_type() == other.scalar_type(), "vdot: expected matching devices and dtypes");
+  TORCH_CHECK(self.scalar_type() != at::kBool, "reduction: bool input is unsupported");
+  return at::sum(at::conj(self) * other, self.scalar_type());
+}
+REGISTER_IMPL_TO_DISPATCHER(VdotFn, vdot_dispatcher, Backend::kAscend, VdotKernelAscend)
+
+at::Tensor& VdotOutKernelAscend(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(self.dim() == 1 && other.dim() == 1 && self.numel() == other.numel(), "vdot: expected equal-sized vectors");
+  TORCH_CHECK(self.device() == other.device() && self.scalar_type() == other.scalar_type(), "vdot: expected matching devices and dtypes");
+  TORCH_CHECK(self.scalar_type() != at::kBool, "reduction: bool input is unsupported");
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == self.scalar_type(), "reduction.out: expected matching device and dtype");
+  auto value = at::sum(at::conj(self) * other, self.scalar_type());
+  out.resize_({});
+  out.copy_(value);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(VdotOutFn, vdot_out_dispatcher, Backend::kAscend, VdotOutKernelAscend)
+
+at::Tensor TraceKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(self.dim() == 2, "trace: expected a matrix");
+  TORCH_CHECK(self.scalar_type() != at::kBool, "reduction: bool input is unsupported");
+  return at::sum(self.diagonal(), (self.is_floating_point() || self.is_complex() ? self.scalar_type() : at::kLong));
+}
+REGISTER_IMPL_TO_DISPATCHER(TraceFn, trace_dispatcher, Backend::kAscend, TraceKernelAscend)
+
+at::Tensor& TraceOutKernelAscend(const at::Tensor& self, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(self.dim() == 2, "trace: expected a matrix");
+  TORCH_CHECK(self.scalar_type() != at::kBool, "reduction: bool input is unsupported");
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == (self.is_floating_point() || self.is_complex() ? self.scalar_type() : at::kLong), "reduction.out: expected matching device and dtype");
+  auto value = at::sum(self.diagonal(), (self.is_floating_point() || self.is_complex() ? self.scalar_type() : at::kLong));
+  out.resize_({});
+  out.copy_(value);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(TraceOutFn, trace_out_dispatcher, Backend::kAscend, TraceOutKernelAscend)
+
+at::Tensor LinalgMatrixExpKernelAscend(const at::Tensor& self) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  return ascend::MatrixExp(self);
+}
+REGISTER_IMPL_TO_DISPATCHER(LinalgMatrixExpFn, linalg_matrix_exp_dispatcher, Backend::kAscend, LinalgMatrixExpKernelAscend)
+
+at::Tensor& LinalgMatrixExpOutKernelAscend(const at::Tensor& self, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(out.device() == self.device(), "matrix_exp.out: expected the same device");
+  TORCH_CHECK(at::canCast(self.scalar_type(), out.scalar_type()),
+              "matrix_exp.out: result cannot be cast to the output dtype");
+  auto result = ascend::MatrixExp(self);
+  out.resize_(result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(LinalgMatrixExpOutFn, linalg_matrix_exp_out_dispatcher, Backend::kAscend, LinalgMatrixExpOutKernelAscend)
+
+std::tuple<at::Tensor, at::Tensor> PrivLinalgEighKernelAscend(const at::Tensor& A,
+    c10::string_view UPLO, bool compute_v) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(A));
+  TORCH_CHECK(A.dim() >= 2 && A.size(-1) == A.size(-2), "linalg.eigh: expected square matrices");
+  TORCH_CHECK(A.scalar_type() == at::kFloat || A.scalar_type() == at::kDouble ||
+              A.scalar_type() == at::kComplexFloat || A.scalar_type() == at::kComplexDouble,
+              "linalg.eigh: expected float32, float64, complex64 or complex128");
+  const bool lower = UPLO == "L" || UPLO == "l";
+  TORCH_CHECK(lower || UPLO == "U" || UPLO == "u", "linalg.eigh: UPLO must be L or U");
+  auto value_shape = A.sizes().vec(); value_shape.pop_back();
+  auto values = at::empty(value_shape, A.options().dtype(c10::toRealValueType(A.scalar_type())));
+  auto vectors = compute_v ? at::empty(A.sizes(), A.options()) : at::empty({0}, A.options());
+  if (A.numel() == 0) return std::make_tuple(values, vectors);
+  auto triangle = lower ? at::tril(A, -1) : at::triu(A, 1);
+  auto hermitian = triangle + triangle.mH();
+  auto diagonal = hermitian.diagonal(0, -2, -1);
+  diagonal.copy_(at::real(A.diagonal(0, -2, -1)));
+  auto scale = at::amax(at::sum(at::abs(hermitian), {-1}, true), {-2}, true);
+  TORCH_CHECK(at::all(scale < std::numeric_limits<double>::infinity()).item<bool>(),
+              "linalg.eigh: input must contain finite values");
+  scale = at::where(scale == 0, at::ones_like(scale), scale);
+  auto shifted = hermitian / scale + 2 * at::eye(A.size(-1), A.options());
+  auto [u, singular, vh] = at::_linalg_svd(shifted, false, true, std::nullopt);
+  values = (at::flip(singular, {-1}) - 2) * scale.squeeze(-1);
+  if (compute_v) vectors = at::flip(u, {-1});
+  return std::make_tuple(values, vectors);
+}
+REGISTER_IMPL_TO_DISPATCHER(PrivLinalgEighFn, priv_linalg_eigh_dispatcher, Backend::kAscend, PrivLinalgEighKernelAscend)
+
+at::Tensor MultinomialKernelAscend(const at::Tensor& self, int64_t num_samples,
+    bool replacement, std::optional<at::Generator> generator) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(self.dim() == 1 || self.dim() == 2, "multinomial: expected one or two dimensions");
+  TORCH_CHECK(self.is_floating_point(), "multinomial: expected floating probabilities");
+  TORCH_CHECK(num_samples > 0, "multinomial: num_samples must be positive");
+  TORCH_CHECK(self.size(-1) > 0 && self.size(-1) <= (1 << 24), "multinomial: invalid number of categories");
+  TORCH_CHECK(replacement || num_samples <= self.size(-1), "multinomial: too many samples without replacement");
+  auto valid = (self >= 0) & (self < std::numeric_limits<double>::infinity());
+  TORCH_CHECK(at::all(valid).item<bool>(), "multinomial: probabilities must be finite and non-negative");
+  TORCH_CHECK(at::all(at::sum(self, -1) > 0).item<bool>(), "multinomial: each distribution must have positive sum");
+  auto shape = self.sizes().vec(); shape.back() = num_samples;
+  auto out = at::empty(shape, self.options().dtype(at::kLong));
+  auto seed = static_cast<int64_t>(c10::flagos::ReserveSeed(generator, self.device().index()));
+  if (out.numel() == 0) return out;
+  ascend::AclTensorWrapper input(self), result(out);
+  EXEC_ASCEND_CMD(aclnnMultinomial, input.get(), num_samples, replacement, seed, int64_t(0), result.get());
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(MultinomialFn, multinomial_dispatcher, Backend::kAscend, MultinomialKernelAscend)
+
+at::Tensor& MultinomialOutKernelAscend(const at::Tensor& self, int64_t num_samples,
+    bool replacement, std::optional<at::Generator> generator, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(out.scalar_type() == at::kLong, "multinomial: out dtype must be int64");
+  TORCH_CHECK(out.device() == self.device(), "multinomial: out device must match input");
+  auto result = at::multinomial(self, num_samples, replacement, generator);
+  out.resize_(result.sizes()); out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(MultinomialOutFn, multinomial_out_dispatcher, Backend::kAscend, MultinomialOutKernelAscend)
+
+at::Tensor LinalgSolveTriangularKernelAscend(const at::Tensor& self, const at::Tensor& B,
+    bool upper, bool left, bool unitriangular) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(self.dim() >= 2 && B.dim() >= 2, "linalg.solve_triangular: expected matrices");
+  TORCH_CHECK(self.size(-1) == self.size(-2), "linalg.solve_triangular: A must be square");
+  TORCH_CHECK(self.scalar_type() == B.scalar_type(), "linalg.solve_triangular: dtypes must match");
+  TORCH_CHECK(self.device() == B.device(), "linalg.solve_triangular: devices must match");
+  TORCH_CHECK(self.size(-1) == B.size(left ? -2 : -1),
+              "linalg.solve_triangular: incompatible matrix dimensions");
+  auto batch = at::infer_size(self.sizes().slice(0, self.dim() - 2),
+                              B.sizes().slice(0, B.dim() - 2));
+  auto a_shape = batch; a_shape.push_back(self.size(-2)); a_shape.push_back(self.size(-1));
+  auto b_shape = batch; b_shape.push_back(B.size(-2)); b_shape.push_back(B.size(-1));
+  auto a = self.resolve_conj().resolve_neg().expand(a_shape).contiguous();
+  auto b = B.resolve_conj().resolve_neg().expand(b_shape).contiguous();
+  if (!left) { a = a.transpose(-2, -1).contiguous(); b = b.transpose(-2, -1).contiguous(); }
+  // CANN's unitriangular variant rejects Double/complex on this SDK.
+  // Materialize the implicit diagonal without modifying caller-owned A.
+  if (unitriangular) {
+    a = a.clone();
+    auto diagonal = a.diagonal(0, -2, -1);
+    diagonal.copy_(at::ones(diagonal.sizes(), a.options()));
+  }
+  auto out = at::empty(b.sizes(), b.options());
+  if (out.numel() == 0) return left ? out : out.transpose(-2, -1);
+  auto a_copy = at::empty(a.sizes(), a.options());
+  ascend::AclTensorWrapper a_in(a), b_in(b), result(out), a_out(a_copy);
+  EXEC_ASCEND_CMD(aclnnTriangularSolve, b_in.get(), a_in.get(), left ? upper : !upper,
+                  false, false, result.get(), a_out.get());
+  return left ? out : out.transpose(-2, -1);
+}
+REGISTER_IMPL_TO_DISPATCHER(LinalgSolveTriangularFn, linalg_solve_triangular_dispatcher, Backend::kAscend, LinalgSolveTriangularKernelAscend)
+
+at::Tensor& LinalgSolveTriangularOutKernelAscend(const at::Tensor& self, const at::Tensor& B,
+    bool upper, bool left, bool unitriangular, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(out.scalar_type() == self.scalar_type(), "linalg.solve_triangular: out dtype must match");
+  TORCH_CHECK(out.device() == self.device(), "linalg.solve_triangular: out device must match");
+  auto result = at::linalg_solve_triangular(self, B, upper, left, unitriangular);
+  out.resize_(result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(LinalgSolveTriangularOutFn, linalg_solve_triangular_out_dispatcher, Backend::kAscend, LinalgSolveTriangularOutKernelAscend)
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> PrivLinalgSvdKernelAscend(
+    const at::Tensor& A, bool full_matrices, bool compute_uv,
+    std::optional<c10::string_view> driver) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(A));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(A.dim() >= 2, "linalg.svd: input must have at least two dimensions");
+  TORCH_CHECK(A.is_floating_point() || A.is_complex(), "linalg.svd: expected floating or complex input");
+  TORCH_CHECK(!driver.has_value(), "linalg.svd: CUDA driver selection is unavailable on Ascend");
+  const int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
+  auto s_shape = A.sizes().vec();
+  s_shape.pop_back();
+  s_shape.back() = k;
+  auto u_shape = A.sizes().vec();
+  u_shape.back() = full_matrices ? m : k;
+  auto v_shape = A.sizes().vec();
+  v_shape[v_shape.size() - 2] = n;
+  v_shape.back() = full_matrices ? n : k;
+  if (!compute_uv) { u_shape = {0}; v_shape = {0}; }
+  auto sigma = at::empty(s_shape, A.options());
+  auto u = at::empty(u_shape, A.options());
+  auto v = at::empty(v_shape, A.options());
+  if (A.numel() == 0) {
+    if (compute_uv && full_matrices) {
+      ascend::FillMatrixIdentity(u);
+      ascend::FillMatrixIdentity(v);
+    }
+  } else {
+    ascend::AclTensorWrapper input(A), s_out(sigma), u_out(u), v_out(v);
+    EXEC_ASCEND_CMD(aclnnSvd, input.get(), full_matrices, compute_uv,
+                    s_out.get(), u_out.get(), v_out.get());
+  }
+  auto singular_values = A.is_complex() ? at::real(sigma).contiguous() : sigma;
+  auto vh = compute_uv ? v.mH() : v;
+  return std::make_tuple(u, singular_values, vh);
+}
+REGISTER_IMPL_TO_DISPATCHER(PrivLinalgSvdFn, priv_linalg_svd_dispatcher, Backend::kAscend, PrivLinalgSvdKernelAscend)
 
 at::Tensor SqrtKernelAscend(const at::Tensor& self) {
   // Issue #326: make the primary tensor's device current, so the
@@ -90,6 +904,12 @@ at::Tensor ExpKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    if (self.dim() > 8) return at::exp(self.reshape({-1})).reshape(self.sizes());
+    auto [real, imag] = ascend::ComplexParts(self);
+    return ascend::PackComplex(at::exp(real) * at::cos(imag), at::exp(real) * at::sin(imag));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::exp(self.cpu());
@@ -566,6 +1386,13 @@ at::Tensor SgnKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    if (self.dim() > 8) return at::sgn(self.reshape({-1})).reshape(self.sizes());
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto norm = ascend::ComplexMagnitude(real, imag);
+    return ascend::PackComplex(at::where(norm == 0, at::zeros_like(real), real / norm), at::where(norm == 0, at::zeros_like(imag), imag / norm));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sgn(self.cpu());
@@ -902,6 +1729,12 @@ at::Tensor AbsKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    if (self.dim() > 8) return at::abs(self.reshape({-1})).reshape(self.sizes());
+    auto [real, imag] = ascend::ComplexParts(self);
+    return ascend::ComplexMagnitude(real, imag);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::abs(self.cpu());
@@ -958,6 +1791,12 @@ at::Tensor CosKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    if (self.dim() > 8) return at::cos(self.reshape({-1})).reshape(self.sizes());
+    auto [real, imag] = ascend::ComplexParts(self);
+    return ascend::PackComplex(at::cos(real) * at::cosh(imag), -at::sin(real) * at::sinh(imag));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::cos(self.cpu());
@@ -986,6 +1825,12 @@ at::Tensor SinKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    if (self.dim() > 8) return at::sin(self.reshape({-1})).reshape(self.sizes());
+    auto [real, imag] = ascend::ComplexParts(self);
+    return ascend::PackComplex(at::sin(real) * at::cosh(imag), at::cos(real) * at::sinh(imag));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::sin(self.cpu());
@@ -1014,6 +1859,12 @@ at::Tensor NegKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    if (self.dim() > 8) return at::neg(self.reshape({-1})).reshape(self.sizes());
+    auto [real, imag] = ascend::ComplexParts(self);
+    return ascend::PackComplex(-real, -imag);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (!ascend::IsUnaryDtypeSupported(self.scalar_type())) {
     auto cpu_result = at::neg(self.cpu());
@@ -1098,6 +1949,25 @@ at::Tensor DivTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8 || other.dim() > 8) {
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto target = at::result_type(self, other);
+  auto a = self.to(target).expand(shape).reshape({-1});
+  auto b = other.to(self.options().dtype(target)).expand(shape).reshape({-1});
+  return at::div(a, b).reshape(shape);
+}
+  if (self.is_complex() || other.is_complex()) {
+    auto dtype = at::result_type(self, other);
+    auto a = self.to(self.options().dtype(dtype));
+    auto b = other.to(self.options().dtype(dtype));
+    auto [ar, ai] = ascend::ComplexParts(a);
+    auto [br, bi] = ascend::ComplexParts(b);
+    auto scale = at::maximum(at::abs(br), at::abs(bi));
+    auto cr = br / scale; auto ci = bi / scale;
+    auto denominator = cr * cr + ci * ci;
+    return ascend::PackComplex(((ar / scale) * cr + (ai / scale) * ci) / denominator, ((ai / scale) * cr - (ar / scale) * ci) / denominator);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1157,6 +2027,22 @@ at::Tensor MulTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8 || other.dim() > 8) {
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto target = at::result_type(self, other);
+  auto a = self.to(target).expand(shape).reshape({-1});
+  auto b = other.to(self.options().dtype(target)).expand(shape).reshape({-1});
+  return at::mul(a, b).reshape(shape);
+}
+  if (self.is_complex() || other.is_complex()) {
+    auto dtype = at::result_type(self, other);
+    auto a = self.to(self.options().dtype(dtype));
+    auto b = other.to(self.options().dtype(dtype));
+    auto [ar, ai] = ascend::ComplexParts(a);
+    auto [br, bi] = ascend::ComplexParts(b);
+    return ascend::PackComplex(ar * br - ai * bi, ar * bi + ai * br);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1510,6 +2396,23 @@ at::Tensor SubTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8 || other.dim() > 8) {
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto target = at::result_type(self, other);
+  auto a = self.to(target).expand(shape).reshape({-1});
+  auto b = other.to(self.options().dtype(target)).expand(shape).reshape({-1});
+  return at::sub(a, b, alpha).reshape(shape);
+}
+  if (self.is_complex() || other.is_complex()) {
+    auto dtype = at::result_type(self, other);
+    auto a = self.to(self.options().dtype(dtype));
+    auto b = other.to(self.options().dtype(dtype));
+    auto [ar, ai] = ascend::ComplexParts(a);
+    auto [br, bi] = ascend::ComplexParts(b);
+    const auto value = alpha.toComplexDouble();
+    return ascend::PackComplex(ar - (br * value.real() - bi * value.imag()), ai - (br * value.imag() + bi * value.real()));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1572,6 +2475,23 @@ at::Tensor AddTensorKernelAscend(const at::Tensor& self, const at::Tensor& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8 || other.dim() > 8) {
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto target = at::result_type(self, other);
+  auto a = self.to(target).expand(shape).reshape({-1});
+  auto b = other.to(self.options().dtype(target)).expand(shape).reshape({-1});
+  return at::add(a, b, alpha).reshape(shape);
+}
+  if (self.is_complex() || other.is_complex()) {
+    auto dtype = at::result_type(self, other);
+    auto a = self.to(self.options().dtype(dtype));
+    auto b = other.to(self.options().dtype(dtype));
+    auto [ar, ai] = ascend::ComplexParts(a);
+    auto [br, bi] = ascend::ComplexParts(b);
+    const auto value = alpha.toComplexDouble();
+    return ascend::PackComplex(ar + (br * value.real() - bi * value.imag()), ai + (br * value.imag() + bi * value.real()));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   if (self.is_privateuseone() && !other.is_privateuseone() && other.numel() == 1) {
     at::Scalar sc = other.item();
@@ -1634,6 +2554,14 @@ at::Tensor MulScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8) return at::mul(self.reshape({-1}), other).reshape(self.sizes());
+  if (self.is_complex() || other.isComplex()) {
+    auto target = at::result_type(self, other);
+    auto [real, imag] = ascend::ComplexParts(self.to(target));
+    const auto value = other.toComplexDouble();
+    return ascend::PackComplex(real * value.real() - imag * value.imag(), real * value.imag() + imag * value.real());
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -1653,6 +2581,15 @@ at::Tensor DivScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8) return at::div(self.reshape({-1}), other).reshape(self.sizes());
+  if (self.is_complex() || other.isComplex()) {
+    auto target = at::result_type(self, other);
+    auto [real, imag] = ascend::ComplexParts(self.to(target));
+    const auto value = other.toComplexDouble();
+    auto denominator = value.real() * value.real() + value.imag() * value.imag();
+    return ascend::PackComplex((real * value.real() + imag * value.imag()) / denominator, (imag * value.real() - real * value.imag()) / denominator);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2023,6 +2960,16 @@ at::Tensor AddScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8) return at::add(self.reshape({-1}), other, alpha).reshape(self.sizes());
+  if (self.is_complex() || other.isComplex()) {
+    auto target = at::result_type(self, other);
+    auto [real, imag] = ascend::ComplexParts(self.to(target));
+    const auto value = other.toComplexDouble();
+    const auto scale = alpha.toComplexDouble();
+    const auto offset = value * scale;
+    return ascend::PackComplex(real + offset.real(), imag + offset.imag());
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2043,6 +2990,16 @@ at::Tensor SubScalarKernelAscend(const at::Tensor& self, const at::Scalar& other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8) return at::sub(self.reshape({-1}), other, alpha).reshape(self.sizes());
+  if (self.is_complex() || other.isComplex()) {
+    auto target = at::result_type(self, other);
+    auto [real, imag] = ascend::ComplexParts(self.to(target));
+    const auto value = other.toComplexDouble();
+    const auto scale = alpha.toComplexDouble();
+    const auto offset = value * scale;
+    return ascend::PackComplex(real - offset.real(), imag - offset.imag());
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2337,6 +3294,15 @@ at::Tensor IsinfKernelAscend(const at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    return at::logical_or(at::isinf(real), at::isinf(imag));
+  }
+  if (self.scalar_type() == at::kDouble) {
+    return at::logical_or(self == std::numeric_limits<double>::infinity(),
+                          self == -std::numeric_limits<double>::infinity());
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options().dtype(at::kBool));
@@ -2454,11 +3420,47 @@ at::Tensor FmodScalarKernelAscend(const at::Tensor& self, const at::Scalar& s) {
 
 REGISTER_IMPL_TO_DISPATCHER(FmodScalarFn, fmod_scalar_dispatcher, Backend::kAscend, FmodScalarKernelAscend)
 
+at::Tensor RemainderScalarKernelAscend(const at::Tensor& self, const at::Scalar& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  auto dtype = at::result_type(self, other);
+  auto compute_dtype = c10::isIntegralType(dtype, false) && c10::elementSize(dtype) < 4 ? at::kInt : dtype;
+  auto source = self.to(compute_dtype);
+  auto out = at::empty(self.sizes(), self.options().dtype(dtype));
+  ascend::AclTensorWrapper input(source), output(out);
+  ascend::AclScalarWrapper scalar(other, compute_dtype);
+  EXEC_ASCEND_CMD(aclnnRemainderTensorScalar, input.get(), scalar.get(), output.get());
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(RemainderScalarFn, remainder_scalar_dispatcher, Backend::kAscend, RemainderScalarKernelAscend)
+
+at::Tensor RemainderTensorKernelAscend(const at::Tensor& self, const at::Tensor& other) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(self));
+  TORCH_CHECK(self.device() == other.device(), "remainder: expected the same device");
+  auto dtype = at::result_type(self, other);
+  auto compute_dtype = c10::isIntegralType(dtype, false) && c10::elementSize(dtype) < 4 ? at::kInt : dtype;
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto left = self.to(compute_dtype).expand(shape).contiguous();
+  auto right = other.to(compute_dtype).expand(shape).contiguous();
+  auto out = at::empty(shape, self.options().dtype(dtype));
+  ascend::AclTensorWrapper a(left), b(right), result(out);
+  EXEC_ASCEND_CMD(aclnnRemainderTensorTensor, a.get(), b.get(), result.get());
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(RemainderTensorFn, remainder_tensor_dispatcher, Backend::kAscend, RemainderTensorKernelAscend)
+
 at::Tensor PowTensorScalarKernelAscend(const at::Tensor& self, const at::Scalar& s) {
   // Issue #326: make the primary tensor's device current, so the
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8 && !self.is_complex()) return at::pow(self.reshape({-1}), s).reshape(self.sizes());
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2525,6 +3527,12 @@ at::Tensor TrilKernelAscend(const at::Tensor& self, int64_t i) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto result = ascend::PackComplex(at::tril(real, i), at::tril(imag, i));
+    return result;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2543,6 +3551,12 @@ at::Tensor TriuKernelAscend(const at::Tensor& self, int64_t i) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto result = ascend::PackComplex(at::triu(real, i), at::triu(imag, i));
+    return result;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -2561,6 +3575,11 @@ at::Tensor FlipKernelAscend(const at::Tensor& self, at::IntArrayRef dims) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    return ascend::PackComplex(at::flip(real, dims), at::flip(imag, dims));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out = ascend::OpPreparation::apply_tensor_without_format(
       self.sizes(), self.options());
@@ -3348,6 +4367,18 @@ at::Tensor MmKernelAscend(const at::Tensor& self, const at::Tensor& mat2) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "mm: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "mm: incompatible contraction sizes");
+    return ascend::ComplexMatmul(self, mat2);
+  }
+  if (self.scalar_type() == at::kDouble && mat2.scalar_type() == at::kDouble &&
+      !ascend::IsFp16OnlyMatmulSoc(ascend::GetSocName())) {
+TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "mm: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "mm: incompatible contraction sizes");
+    return ascend::RealMatmulDouble(self, mat2);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
@@ -3374,6 +4405,18 @@ at::Tensor& MmOutKernelAscend(const at::Tensor& self, const at::Tensor& mat2, at
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "mm.out: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "mm.out: incompatible contraction sizes");
+    out.copy_(ascend::ComplexMatmul(self, mat2)); return out;
+  }
+  if (self.scalar_type() == at::kDouble && mat2.scalar_type() == at::kDouble &&
+      !ascend::IsFp16OnlyMatmulSoc(ascend::GetSocName())) {
+TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "mm.out: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "mm.out: incompatible contraction sizes");
+    out.copy_(ascend::RealMatmulDouble(self, mat2)); return out;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
@@ -3397,6 +4440,20 @@ at::Tensor BmmKernelAscend(const at::Tensor& self, const at::Tensor& mat2) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+TORCH_CHECK(self.dim() == 3 && mat2.dim() == 3, "bmm: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "bmm: incompatible contraction sizes");
+TORCH_CHECK(self.size(0) == mat2.size(0), "bmm: batch sizes must match");
+    return ascend::ComplexMatmul(self, mat2);
+  }
+  if (self.scalar_type() == at::kDouble && mat2.scalar_type() == at::kDouble &&
+      !ascend::IsFp16OnlyMatmulSoc(ascend::GetSocName())) {
+TORCH_CHECK(self.dim() == 3 && mat2.dim() == 3, "bmm: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "bmm: incompatible contraction sizes");
+TORCH_CHECK(self.size(0) == mat2.size(0), "bmm: batch sizes must match");
+    return ascend::RealMatmulDouble(self, mat2);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
@@ -3423,6 +4480,20 @@ at::Tensor& BmmOutKernelAscend(const at::Tensor& self, const at::Tensor& mat2, a
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+TORCH_CHECK(self.dim() == 3 && mat2.dim() == 3, "bmm.out: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "bmm.out: incompatible contraction sizes");
+TORCH_CHECK(self.size(0) == mat2.size(0), "bmm: batch sizes must match");
+    out.copy_(ascend::ComplexMatmul(self, mat2)); return out;
+  }
+  if (self.scalar_type() == at::kDouble && mat2.scalar_type() == at::kDouble &&
+      !ascend::IsFp16OnlyMatmulSoc(ascend::GetSocName())) {
+TORCH_CHECK(self.dim() == 3 && mat2.dim() == 3, "bmm.out: incorrect input rank");
+TORCH_CHECK(self.size(-1) == mat2.size(-2), "bmm.out: incompatible contraction sizes");
+TORCH_CHECK(self.size(0) == mat2.size(0), "bmm: batch sizes must match");
+    out.copy_(ascend::RealMatmulDouble(self, mat2)); return out;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
@@ -3446,6 +4517,19 @@ at::Tensor CatKernelAscend(const at::ITensorListRef& tensors, int64_t dim) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(tensors));
+  if (std::any_of(tensors.begin(), tensors.end(), [](const at::Tensor& t) { return t.is_complex(); })) {
+    auto dtype = (*tensors.begin()).scalar_type();
+    for (const auto& tensor : tensors) dtype = c10::promoteTypes(dtype, tensor.scalar_type());
+    auto component_dtype = c10::toRealValueType(dtype);
+    std::vector<at::Tensor> real, imag;
+    for (const auto& tensor : tensors) {
+      auto pair = ascend::ComplexParts(tensor);
+      real.push_back(pair.first.to(component_dtype));
+      imag.push_back(pair.second.to(component_dtype));
+    }
+    return ascend::PackComplex(at::cat(real, dim), at::cat(imag, dim));
+  }
+
   namespace ascend = at::native::flagos::ascend;
 
   auto materialized = tensors.materialize();
@@ -3565,6 +4649,23 @@ at::Tensor StackKernelAscend(at::TensorList tensors, int64_t dim) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(tensors));
+  if (std::any_of(tensors.begin(), tensors.end(), [](const at::Tensor& t) { return t.is_complex(); })) {
+    auto first = *tensors.begin();
+    auto dtype = first.scalar_type();
+    for (const auto& tensor : tensors) {
+      TORCH_CHECK(tensor.sizes() == first.sizes(), "stack: tensor shapes must match");
+      TORCH_CHECK(tensor.device() == first.device(), "stack: tensor devices must match");
+      dtype = c10::promoteTypes(dtype, tensor.scalar_type());
+    }
+    auto axis = at::maybe_wrap_dim(dim, first.dim() + 1);
+    auto shape = first.sizes().vec();
+    shape.insert(shape.begin() + axis, tensors.size());
+    auto result = at::empty(shape, first.options().dtype(dtype));
+    int64_t index = 0;
+    for (const auto& tensor : tensors) result.select(axis, index++).copy_(tensor);
+    return result;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   TORCH_CHECK(!tensors.empty(), "stack: expected a non-empty list of tensors");
 
@@ -3619,6 +4720,70 @@ at::Tensor ZerosKernelAscend(at::IntArrayRef size, ::std::optional<at::ScalarTyp
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ZerosFn, zeros_dispatcher, Backend::kAscend, ZerosKernelAscend)
+
+at::Tensor EyeKernelAscend(int64_t n, std::optional<at::ScalarType> dtype, std::optional<at::Layout> layout, std::optional<at::Device> device, std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
+  namespace ascend = at::native::flagos::ascend;
+  const int64_t m = n;
+  TORCH_CHECK(n >= 0 && m >= 0, "eye: dimensions must be non-negative");
+  auto options = at::TensorOptions()
+    .dtype(dtype.value_or(c10::get_default_dtype_as_scalartype()))
+    .layout(layout.value_or(at::kStrided))
+    .device(device.value_or(at::Device(at::kPrivateUse1, 0)))
+    .pinned_memory(pin_memory.value_or(false));
+  auto out = at::empty({n, m}, options);
+  ascend::FillMatrixIdentity(out);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(EyeFn, eye_dispatcher, Backend::kAscend, EyeKernelAscend)
+
+at::Tensor EyeMKernelAscend(int64_t n, int64_t m, std::optional<at::ScalarType> dtype, std::optional<at::Layout> layout, std::optional<at::Device> device, std::optional<bool> pin_memory) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(device));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(n >= 0 && m >= 0, "eye: dimensions must be non-negative");
+  auto options = at::TensorOptions()
+    .dtype(dtype.value_or(c10::get_default_dtype_as_scalartype()))
+    .layout(layout.value_or(at::kStrided))
+    .device(device.value_or(at::Device(at::kPrivateUse1, 0)))
+    .pinned_memory(pin_memory.value_or(false));
+  auto out = at::empty({n, m}, options);
+  ascend::FillMatrixIdentity(out);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(EyeMFn, eye_m_dispatcher, Backend::kAscend, EyeMKernelAscend)
+
+at::Tensor& EyeOutKernelAscend(int64_t n, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
+  namespace ascend = at::native::flagos::ascend;
+  const int64_t m = n;
+  TORCH_CHECK(n >= 0 && m >= 0, "eye: dimensions must be non-negative");
+  out.resize_({n, m});
+  ascend::FillMatrixIdentity(out);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(EyeOutFn, eye_out_dispatcher, Backend::kAscend, EyeOutKernelAscend)
+
+at::Tensor& EyeMOutKernelAscend(int64_t n, int64_t m, at::Tensor& out) {
+  // Issue #326: make the primary tensor's device current, so the
+  // workspace, launch stream and executor cache below all agree on it.
+  ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
+      ::at::native::flagos::ascend::DeviceOf(out));
+  namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(n >= 0 && m >= 0, "eye: dimensions must be non-negative");
+  out.resize_({n, m});
+  ascend::FillMatrixIdentity(out);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(EyeMOutFn, eye_m_out_dispatcher, Backend::kAscend, EyeMOutKernelAscend)
 
 at::Tensor OnesKernelAscend(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
   // Issue #326: make the primary tensor's device current, so the
@@ -4175,6 +5340,11 @@ at::Tensor MaskedFillScalarKernelAscend(const at::Tensor& self, const at::Tensor
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex() || self.scalar_type() == at::kDouble) {
+    auto result = at::where(mask, at::full_like(self, value), self);
+    return result;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = at::infer_size(self.sizes(), mask.sizes());
   // avoid clone()/empty_like (not registered for ascend): alloc + copy_.
@@ -4267,6 +5437,16 @@ at::Tensor& ZeroInplaceKernelAscend(at::Tensor& self) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8) {
+    auto dense = at::zeros({self.numel()}, self.options()).reshape(self.sizes());
+    self.copy_(dense); return self;
+  }
+  if (self.is_complex()) {
+    auto parts = at::native::view_as_real(self);
+    parts.copy_(at::zeros(parts.sizes(), parts.options()));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceZero, const_cast<aclTensor*>(acl_self.get()));
@@ -4280,6 +5460,19 @@ at::Tensor& FillInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& va
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8) {
+    auto dense = at::full({self.numel()}, value, self.options()).reshape(self.sizes());
+    self.copy_(dense); return self;
+  }
+  if (self.is_complex()) {
+    auto parts = at::native::view_as_real(self);
+    auto scalar = value.toComplexDouble();
+    auto real = parts.select(-1, 0); auto imag = parts.select(-1, 1);
+    real.copy_(at::full(real.sizes(), scalar.real(), real.options()));
+    imag.copy_(at::full(imag.sizes(), scalar.imag(), imag.options()));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_value(value, self.scalar_type());
@@ -4311,6 +5504,11 @@ at::Tensor& AddInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::add(self, other, alpha));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4330,6 +5528,11 @@ at::Tensor& AddInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::add(self, other, alpha));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4346,6 +5549,11 @@ at::Tensor& MulInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::mul(self, other));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4363,6 +5571,11 @@ at::Tensor& MulInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::mul(self, other));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -4377,6 +5590,11 @@ at::Tensor& DivInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::div(self, other));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -4994,6 +6212,11 @@ at::Tensor& DivInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::div(self, other));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -5377,6 +6600,11 @@ at::Tensor& SubInplaceTensorKernelAscend(at::Tensor& self, const at::Tensor& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::sub(self, other, alpha));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto other_c = other.is_privateuseone()
       ? (other.scalar_type() == self.scalar_type() ? other : other.to(self.scalar_type()))
@@ -5396,6 +6624,11 @@ at::Tensor& SubInplaceScalarKernelAscend(at::Tensor& self, const at::Scalar& oth
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    self.copy_(at::sub(self, other, alpha));
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   ascend::AclScalarWrapper acl_other(other, self.scalar_type());
@@ -5444,6 +6677,13 @@ at::Tensor& TrilInplaceKernelAscend(at::Tensor& self, int64_t n) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto result = ascend::PackComplex(at::tril(real, n), at::tril(imag, n));
+    self.copy_(result);
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTril, const_cast<aclTensor*>(acl_self.get()), n);
@@ -5457,6 +6697,13 @@ at::Tensor& TriuInplaceKernelAscend(at::Tensor& self, int64_t n) {
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex()) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto result = ascend::PackComplex(at::triu(real, n), at::triu(imag, n));
+    self.copy_(result);
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   ascend::AclTensorWrapper acl_self(self);
   EXEC_ASCEND_CMD(aclnnInplaceTriu, const_cast<aclTensor*>(acl_self.get()), n);
@@ -5487,6 +6734,12 @@ at::Tensor& MaskedFillInplaceScalarKernelAscend(at::Tensor& self, const at::Tens
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex() || self.scalar_type() == at::kDouble) {
+    auto result = at::where(mask, at::full_like(self, value), self);
+    self.copy_(result);
+    return self;
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto mask_b = mask.sizes().equals(self.sizes())
       ? mask.contiguous()
@@ -5768,6 +7021,11 @@ void ForeachMulInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& 
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] * scalar); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_mul_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -5806,6 +7064,11 @@ void ForeachAddInplaceScalarKernelAscend(at::TensorList self, const at::Scalar& 
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] + scalar); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_add_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -5821,6 +7084,12 @@ void ForeachAddInplaceListKernelAscend(at::TensorList self, at::TensorList other
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    TORCH_CHECK(self.size() == other.size(), "_foreach_add_.List: list sizes must match");
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] + alpha * other[i]); }
+    return;
+  }
+
   TORCH_CHECK(self.size() == other.size(), "foreach_add_inplace_list_dispatcher: tensor lists must match in length");
   for (size_t i = 0; i < self.size(); ++i) {
     at::Tensor dst = self[i];
@@ -5861,6 +7130,12 @@ void ForeachLerpInplaceScalarKernelAscend(at::TensorList self, at::TensorList te
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    TORCH_CHECK(self.size() == tensors1.size(), "_foreach_lerp_.Scalar: list sizes must match");
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] + weight * (tensors1[i] - self[i])); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_lerp_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == tensors1.size(), "foreach_lerp_inplace_scalar_dispatcher: tensor lists must match in length");
   for (size_t off = 0; off < self.size(); off += 32) {
@@ -5908,6 +7183,13 @@ void ForeachAddcmulInplaceScalarKernelAscend(at::TensorList self, at::TensorList
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    TORCH_CHECK(self.size() == tensor1.size(), "_foreach_addcmul_.Scalar: list sizes must match");
+    TORCH_CHECK(self.size() == tensor2.size(), "_foreach_addcmul_.Scalar: list sizes must match");
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] + value * tensor1[i] * tensor2[i]); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_addcmul_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == tensor1.size() && self.size() == tensor2.size(),
       "foreach_addcmul_inplace_scalar_dispatcher: tensor lists must match in length");
@@ -5948,6 +7230,12 @@ static void ForeachSqrtKernelAscendChunk(at::TensorList self, at::TensorList out
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    std::vector<at::Tensor> outs; outs.reserve(self.size());
+    for (size_t i = 0; i < self.size(); ++i) { outs.push_back(at::sqrt(self[i])); }
+    return outs;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_sqrt_dispatcher: expected a non-empty list of tensors");
   std::vector<at::Tensor> outs;
   outs.reserve(self.size());
@@ -5995,6 +7283,12 @@ void ForeachDivInplaceScalarlistKernelAscend(at::TensorList self, at::ArrayRef<a
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    TORCH_CHECK(self.size() == scalars.size(), "_foreach_div_.ScalarList: list sizes must match");
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] / scalars[i]); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_div_inplace_scalarlist_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == scalars.size(), "foreach_div_inplace_scalarlist_dispatcher: scalars must match tensor list length");
   for (size_t off = 0; off < self.size(); off += 32) {
@@ -6056,6 +7350,14 @@ void ForeachAddcdivInplaceScalarlistKernelAscend(at::TensorList self, at::Tensor
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    TORCH_CHECK(self.size() == tensor1.size(), "_foreach_addcdiv_.ScalarList: list sizes must match");
+    TORCH_CHECK(self.size() == tensor2.size(), "_foreach_addcdiv_.ScalarList: list sizes must match");
+    TORCH_CHECK(self.size() == scalars.size(), "_foreach_addcdiv_.ScalarList: list sizes must match");
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] + scalars[i] * (tensor1[i] / tensor2[i])); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_addcdiv_inplace_scalarlist_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(self.size() == tensor1.size() && self.size() == tensor2.size() && self.size() == scalars.size(),
       "foreach_addcdiv_inplace_scalarlist_dispatcher: tensor/scalar lists must match in length");
@@ -6098,6 +7400,12 @@ static void ForeachNormScalarKernelAscendChunk(at::TensorList self, at::TensorLi
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    std::vector<at::Tensor> outs; outs.reserve(self.size());
+    for (size_t i = 0; i < self.size(); ++i) { outs.push_back(at::linalg_vector_norm(self[i], ord, std::nullopt, false, dtype)); }
+    return outs;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_norm_scalar_dispatcher: expected a non-empty list of tensors");
   TORCH_CHECK(ord.toDouble() == 2.0,
       "foreach_norm_scalar_dispatcher: only ord=2 is supported on Ascend (aclnnForeachNorm), got ", ord.toDouble());
@@ -6144,6 +7452,11 @@ void ForeachClampMinInplaceScalarKernelAscend(at::TensorList self, const at::Sca
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(at::where(self[i] < scalar, at::full_like(self[i], scalar), self[i])); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_clamp_min_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -6180,6 +7493,11 @@ void ForeachClampMaxInplaceScalarKernelAscend(at::TensorList self, const at::Sca
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(at::where(self[i] > scalar, at::full_like(self[i], scalar), self[i])); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_clamp_max_inplace_scalar_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -6194,6 +7512,12 @@ at::Tensor LinalgVectorNormKernelAscend(const at::Tensor& self, const at::Scalar
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  auto norm_dtype = ascend::VectorNormDtype(self, dtype);
+  if (self.is_complex() || self.scalar_type() == at::kDouble ||
+      norm_dtype == at::kDouble || c10::isComplexType(norm_dtype)) {
+    return ascend::PreciseVectorNorm(self, ord, dim, keepdim, norm_dtype);
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out_dtype = dtype.value_or(
       at::isFloatingType(self.scalar_type()) ? self.scalar_type() : at::kFloat);
@@ -6267,6 +7591,11 @@ void ForeachMulInplaceTensorKernelAscend(at::TensorList self, const at::Tensor& 
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (std::any_of(self.begin(), self.end(), [](const at::Tensor& t) { return t.scalar_type() == at::kDouble; })) {
+    for (size_t i = 0; i < self.size(); ++i) { self[i].copy_(self[i] * other); }
+    return;
+  }
+
   TORCH_CHECK(!self.empty(), "foreach_mul_inplace_tensor_dispatcher: expected a non-empty list of tensors");
   for (size_t off = 0; off < self.size(); off += 32) {
     size_t n = std::min<size_t>(32, self.size() - off);
@@ -6602,6 +7931,14 @@ at::Tensor WhereSelfKernelAscend(const at::Tensor& condition, const at::Tensor& 
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex() || other.is_complex()) {
+    auto target = at::result_type(self, other);
+    auto options = condition.options().dtype(target);
+    auto [ar, ai] = ascend::ComplexParts(self.to(options));
+    auto [br, bi] = ascend::ComplexParts(other.to(options));
+    return ascend::PackComplex(at::where(condition, ar, br), at::where(condition, ai, bi));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   auto out_shape = at::infer_size(self.sizes(), other.sizes());
   out_shape = at::infer_size(condition.sizes(), out_shape);
@@ -6701,6 +8038,15 @@ at::Tensor SumDimIntlistKernelAscend(const at::Tensor& self, at::OptionalIntArra
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.is_complex() || (dtype.has_value() && c10::isComplexType(*dtype))) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto target = dtype.value_or(self.scalar_type());
+    auto real_dtype = c10::toRealValueType(target);
+    auto r = at::sum(real, dim, keepdim, real_dtype);
+    if (!c10::isComplexType(target)) return r;
+    return ascend::PackComplex(r, at::sum(imag, dim, keepdim, real_dtype));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   // Integral/bool inputs promote to int64 when no dtype given
   // (matches torch). aclnnReduceSum accepts the bool input against
@@ -6753,6 +8099,16 @@ at::Tensor SumKernelAscend(const at::Tensor& self, std::optional<at::ScalarType>
   // workspace, launch stream and executor cache below all agree on it.
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
+  if (self.dim() > 8 && !self.is_complex()) return at::sum(self.reshape({-1}), dtype);
+  if (self.is_complex() || (dtype.has_value() && c10::isComplexType(*dtype))) {
+    auto [real, imag] = ascend::ComplexParts(self);
+    auto target = dtype.value_or(self.scalar_type());
+    auto real_dtype = c10::toRealValueType(target);
+    auto r = at::sum(real, real_dtype);
+    if (!c10::isComplexType(target)) return r;
+    return ascend::PackComplex(r, at::sum(imag, real_dtype));
+  }
+
   namespace ascend = at::native::flagos::ascend;
   // Integral/bool inputs promote to int64 when no dtype given (matches torch).
   at::ScalarType out_dtype = dtype.has_value()

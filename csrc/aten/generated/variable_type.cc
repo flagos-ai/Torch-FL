@@ -27,6 +27,7 @@
 // See scripts/codegen/codegen_autograd.py for the full rationale.
 
 #include <ATen/RedispatchFunctions.h>
+#include "../backends/ascend/matmul.h"
 #include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/csrc/autograd/generated/Functions.h>
 #include <torch/library.h>
@@ -119,8 +120,15 @@ at::Tensor matmul(c10::DispatchKeySet ks, const at::Tensor & self, const at::Ten
   if (grad_fn) {
       set_history(flatten_tensor_args( result ), grad_fn);
   }
-  throw_error_for_complex_autograd(result, "matmul");
   return result;
+}
+
+
+std::tuple<at::Tensor, at::Tensor> matmul_backward(
+    c10::DispatchKeySet ks, const at::Tensor& grad, const at::Tensor& self,
+    const at::Tensor& other, std::array<bool, 2> mask) {
+  (void)ks;
+  return at::native::flagos::MatmulBackwardKernelAscend(grad, self, other, mask);
 }
 
 }  // namespace VariableType
@@ -132,6 +140,7 @@ TORCH_LIBRARY_IMPL(aten, AutogradPrivateUse1, m) {
        TORCH_FN(VariableType::matmul)
 );
 
+  m.impl("matmul_backward", TORCH_FN(VariableType::matmul_backward));
 }
 
 }  // namespace

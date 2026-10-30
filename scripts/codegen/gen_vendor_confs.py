@@ -1631,6 +1631,49 @@ FLAGGEMS_PYTHON_PLATFORMS = {
 # (5.4.0.dev0) + flagtree 0.6.1+enflame3.6.
 NATIVE_TRITON_GAPS = {
     "ascend": {
+        "remainder.Scalar",
+        "remainder.Tensor",
+        "logit",
+        "logit.out",
+        "logit_",
+        "logit_backward",
+        "logit_backward.grad_input",
+        "vdot",
+        "vdot.out",
+        "trace",
+        "trace.out",
+        # Native SWhere handles the scalar-broadcast FP32 norm backward.
+        "where.self",
+        # Device scaling and squaring preserves complex and FP64 arithmetic.
+        "linalg_matrix_exp",
+        "linalg_matrix_exp.out",
+        # FlagGems materializes conjugation and breaks the lazy alias contract.
+        # Native views preserve storage and enable complex real-pair lowering.
+        "_conj",
+        "view_as_real",
+        "view_as_complex",
+        # FlagGems neg reads incorrect values from an interleaved FP32 view
+        # with storage offset one. ACLNN preserves its strides and offset.
+        "neg",
+        # The derivative of a squared interleaved FP32 view uses pow(x, 1).
+        # FlagGems returns zeros for a two-dimensional view; ACLNN preserves
+        # its values and restores real/imag gradients in complex autograd.
+        "pow.Tensor_Scalar",
+        # The same interleaved FP32 layout reaches abs in the operator-profile
+        # loss. Its FlagGems route zeroes the gradient; ACLNN matches CPU.
+        "abs",
+        # SVD backward fills a non-contiguous matrix diagonal. FlagGems
+        # writes only its first element; ACLNN honors the diagonal stride.
+        "fill_.Scalar",
+        # FlagGems ignores its explicit generator for categorical draws.
+        # CANN consumes the caller-owned flagos RNG seed.
+        "multinomial",
+        # The FlagGems bindings drop explicit generators. Model initialization
+        # must consume the caller-owned generator, which the native RNG honors.
+        "uniform_",
+        "normal_",
+        "rand.generator",
+        "randn.generator",
         # `cumsum` is an Ascend-backend kernel defect in the installed
         # FlagGems, not a triton-lowering gap: its aclnn kernel is registered
         # below (ascend_register.inc: WrapperCumsum; ascend_kernels.cc:

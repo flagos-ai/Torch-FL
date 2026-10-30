@@ -34,6 +34,8 @@ namespace at::native::flagos::ascend {
 inline aclDataType ToAclDataType(at::ScalarType type) {
   switch (type) {
     case at::kDouble:  return ACL_DOUBLE;
+    case at::kComplexFloat: return ACL_COMPLEX64;
+    case at::kComplexDouble: return ACL_COMPLEX128;
     case at::kFloat:   return ACL_FLOAT;
     case at::kHalf:    return ACL_FLOAT16;
     case at::kBFloat16: return ACL_BF16;

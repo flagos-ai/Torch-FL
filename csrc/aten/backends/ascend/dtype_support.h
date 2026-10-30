@@ -8,6 +8,9 @@
 #include <ATen/ScalarOps.h>
 #include <c10/core/ScalarType.h>
 #include <string_view>
+#include <cstdio>
+
+#include "../../common.h"
 
 #include "runtime/accelerator/ascend/acl_stream.h"
 
@@ -77,6 +80,11 @@ inline c10::ScalarType BinaryResultType(
 inline at::Tensor MoveCpuResultToDevice(
     at::Tensor cpu_result,
     const at::Tensor& reference) {
+  if (::at::native::flagos::LogEnabled("fallback")) {
+    std::fprintf(stderr,
+        "[flagos cpu_fallback] ascend native dtype fallback (%s)\n",
+        c10::toString(reference.scalar_type()));
+  }
   return std::move(cpu_result).to(reference.device());
 }
 

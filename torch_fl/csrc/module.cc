@@ -682,6 +682,15 @@ PyObject* _memory_allocated(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+PyObject* _mem_get_info(PyObject* self, PyObject* arg) {
+  HANDLE_TH_ERRORS
+  const int device = THPUtils_unpackInt(arg);
+  auto [free, total] = c10::flagos::GetCachingAllocator()->get_memory_info(device);
+  return Py_BuildValue("(KK)", static_cast<unsigned long long>(free),
+                       static_cast<unsigned long long>(total));
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* _memory_reserved(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   int device = THPUtils_unpackInt(arg);
@@ -778,6 +787,7 @@ static PyMethodDef methods[] = {
     {"_memory_stats", _memory_stats, METH_O, nullptr},
     {"_memory_allocated", _memory_allocated, METH_O, nullptr},
     {"_memory_reserved", _memory_reserved, METH_O, nullptr},
+    {"_mem_get_info", _mem_get_info, METH_O, nullptr},
     {"_reset_peak_memory_stats", _reset_peak_memory_stats, METH_O, nullptr},
     {"_set_backend_config_path", _set_backend_config_path, METH_O, nullptr},
     {"_init_dataparallel_comm", _init_data_parallel_comm, METH_NOARGS, nullptr},
