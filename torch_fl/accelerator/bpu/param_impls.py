@@ -186,11 +186,48 @@ def build_impls(lib: torch.library.Library, dispatcher) -> None:
             raise NotImplementedError
         return out
 
+    def avg_pool_override(inp, kernel_size, stride):
+        # Served as a depthwise conv, not as nn.AvgPool2d.
+        #
+        # Both lower to the same operation, but only one of them survives the
+        # quantizer. Compiled through hbir's average pool the artifact is wrong
+        # by a relative L2 of 0.63 on inputs in [0, 1] -- not a scale that is
+        # merely coarse, since 0.529 quantises to 0.55 on a 0.05 grid and the
+        # kernel returns 0.85. With FLAGOS_BPU_QUANTIZE off the same graph is
+        # bit-exact, so the fault is in how Q/DQ is applied to that op, and
+        # there is no knob on this side to fix it.
+        #
+        # A conv whose weights are all 1/k^2 computes the same average, and its
+        # quantisation is the one the toolchain actually tunes: measured 0.0133
+        # at k=2 on 16x16, 0.0138 on 7x7 where the pool drops the tail, and
+        # 0.0094 at k=3 on 32x32 -- conv-grade error instead of 46x worse.
+        if inp.dim() != 4:
+            raise NotImplementedError
+        k = _pair(kernel_size)
+        s = _pair(stride) if stride else k
+        if k[0] != k[1] or s[0] != s[1]:
+            raise NotImplementedError
+        module = nn.Conv2d(
+            int(inp.shape[1]),
+            int(inp.shape[1]),
+            k[0],
+            stride=s[0],
+            bias=False,
+            groups=int(inp.shape[1]),
+        ).eval()
+        with torch.no_grad():
+            module.weight.fill_(1.0 / (k[0] * k[1]))
+        out = dispatcher.run_module(module, inp)
+        if out is None:
+            raise NotImplementedError
+        return out
+
     installed = []
     for name, fn in (
         ("convolution_overrideable", conv_override),
         ("batch_norm", batch_norm_override),
         ("max_pool2d", max_pool_override),
+        ("avg_pool2d", avg_pool_override),
     ):
         try:
             lib.impl(name, fn, "PrivateUse1")
