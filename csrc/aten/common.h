@@ -298,10 +298,24 @@ bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
 //   AssertionError("Loop-carried variable acc has initial type
 //   <['16', '16'], fp32> but is re-assigned to <['16', '16'], fp64> in loop!")
 //
-// On the development host the same call does not raise -- one autotune config
-// reports `PassManager::run failed`, the tuner silently picks another, and the
-// product comes back wrong by rel 0.97 to 1.77. A wrong answer with no
-// exception is the worse of the two outcomes, so this is not a CI workaround.
+// On the development host the same call does not raise at all, and the answer
+// it returns is wrong: measured rel 0.97 to 1.77 against a CPU reference. A
+// wrong answer with no exception is the worse of the two outcomes, so this is
+// not a CI workaround.
+//
+// The cause is not the accumulator, which is what the compile assertion above
+// made it look like and what this comment first claimed. Reduced to pure
+// triton -- no torch_fl, no FlagGems -- an fp64 `tl.dot` computes the product
+// correctly and then places it in the wrong rows: `A @ I` returns the rows of
+// `A` bit-exactly, permuted by `p(i) = (i % 4) * 4 + (i // 4)` within each
+// 16-row block. `sorted(p) == range(n)`, so it is a permutation rather than
+// arithmetic error, and fp32 on the identical kernel is correct. Filed upstream
+// as flagos-ai/FlagTree#1489.
+//
+// That distinction decides when this escape can be deleted: it comes out when
+// FlagTree#1489 is fixed, not when an autotune heuristic changes. It also says
+// why a smoke test will not catch the bug -- `ones @ ones` is uniform, so the
+// permutation is invisible and the case passes.
 //
 // Answers false everywhere else, so a platform without the gap pays one enum
 // compare. This is the same remedy Ascend applies for a dtype aclnn will not
