@@ -533,16 +533,19 @@ def test_the_pad_touches_only_the_contracted_axis():
     intrinsic bounds M and N at 1 everywhere anyway, so only K ever needs it.
     This is the invariant most at risk from a later "pad to the min dot size"
     edit, which reads as all three dimensions.
+
+    Read from common.cc: the pad lives beside the floor now, because an ordinary
+    fp32 `mm` routed to FlagGems hits the same assertion as a decoded FP8 one.
     """
-    source = _OPS_CC.read_text(encoding="utf-8")
-    pad = _function_body(source, "void PadPairForDot(")
-    assert "ContractDim(" in pad, (
+    source = _COMMON_CC.read_text(encoding="utf-8")
+    pad = _function_body(source, "bool PadMatmulPairForDot(")
+    assert "MatmulContractDim(" in pad, (
         "the pad must read the contracted extent, not a shape element:\n" + pad
     )
     assert "size(0)" not in pad and "size(1)" not in pad, (
         "absolute dimension indices in the pad risk touching M or N:\n" + pad
     )
-    contract = _function_body(source, "int64_t ContractDim(")
+    contract = _function_body(source, "int64_t MatmulContractDim(")
     assert "size(-2)" in contract and "size(-1)" in contract, (
         "the contracted axis is the last of the left operand and the "
         "second-to-last of the right one, at either rank:\n" + contract
@@ -552,22 +555,56 @@ def test_the_pad_touches_only_the_contracted_axis():
 def test_the_pad_has_an_early_out_and_avoids_a_routed_pad_op():
     """Zero cost on the common path, and no dependence on a conf route.
 
-    A real FP8/FP4 GEMM has a large contracted extent and must pay only an
-    integer compare. The fill also must not use ``at::constant_pad_nd``: both
-    platforms that compile this decode route that op to FlagGems, whose triton
-    is the thing being worked around, so the pad would bounce off the same
-    defect. ``at::empty``/``copy_`` carry no conf key.
+    A real GEMM has a large contracted extent and must pay only an integer
+    compare. The fill also must not use ``at::constant_pad_nd``: the platforms
+    with a floor route that op to FlagGems, whose triton is the thing being
+    worked around, so the pad would bounce off the same defect.
+    ``at::empty``/``copy_`` carry no conf key.
     """
-    source = _OPS_CC.read_text(encoding="utf-8")
-    pad = _function_body(source, "void PadPairForDot(")
-    assert "return;" in pad, "the pad must early-out:\n" + pad
+    source = _COMMON_CC.read_text(encoding="utf-8")
+    pad = _function_body(source, "bool PadMatmulPairForDot(")
+    assert "return false;" in pad, "the pad must early-out:\n" + pad
     assert "floor" in pad, "the early-out must compare against the floor:\n" + pad
-    build = _function_body(source, "at::Tensor PadContractDim(")
+    build = _function_body(source, "at::Tensor PadMatmulContractDim(")
     assert "constant_pad_nd" not in build, (
-        "constant_pad_nd is routed to FlagGems on both soft-lowp platforms:\n" + build
+        "constant_pad_nd is routed to FlagGems on the platforms with a floor:\n" + build
     )
     assert "at::empty(" in build and "copy_(" in build, (
         "the fill must be built from empty + copy_, which carry no conf key:\n" + build
+    )
+
+
+def test_the_floor_reaches_the_ordinary_flaggems_matmul_too():
+    """The pad is not only on the soft-lowp decode path.
+
+    The floor belongs to FlagGems' triton, not to low-precision arithmetic: an
+    ordinary fp32 4x4 `mm` routed to `flaggems` on MetaX raises the same
+    "M >= 1, N >= 1 and K >= 16" CompilationError. PR #688's first shape routed
+    `mm` without this and turned five green dtype_coverage cases red
+    (test_matmul_preserves_float_dtype[dtype0..3] and
+    test_float64_matmul_matches_cpu_reference, run 40980989423).
+
+    It is emitted into the *FlagGems* kernel rather than the shared PrivateUse1
+    wrapper because only that route has the limit -- the same cases pass on
+    MetaX both when `mm` is `boxing` and when it is `none`.
+    """
+    gen = (REPO_ROOT / "scripts/codegen/codegen_ops.py").read_text(encoding="utf-8")
+    assert "_DOT_CONTRACT_PADDED_OPS" in gen, (
+        "the generator must carry the per-op table that widens K"
+    )
+    assert '"mm": ("self", "mat2")' in gen, (
+        "`mm` is the op the MetaX lane measured; its operands are self/mat2"
+    )
+    kernels = (REPO_ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text(
+        encoding="utf-8"
+    )
+    body = _function_body(kernels, "at::Tensor MmKernelPython(")
+    assert "PadMatmulPairForDot(" in body, (
+        "the generated FlagGems mm kernel must widen K before calling gems:\n" + body
+    )
+    # The padded locals, not the raw arguments, are what gems receives.
+    assert "{self_dotpad, mat2_dotpad}" in body, (
+        "the padded operands must be the ones passed to gems:\n" + body
     )
 
 

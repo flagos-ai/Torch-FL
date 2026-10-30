@@ -125,6 +125,58 @@ _CONTIGUOUS_TENSOR_ARGS_BY_OP = {
 }
 
 
+# Matmul ops whose FlagGems Python kernel must widen its contracted axis before
+# calling gems, mapped to (left operand, right operand).
+#
+# Some platforms' triton refuses to compile a `tl.dot` whose K is below a floor
+# (16 on triton-metax), and FlagTree's adaptive block size can shrink BLOCK_K to
+# K for a small K and then not restore it. The result is a CompilationError, not
+# a wrong answer -- but it is raised for an ordinary fp32 4x4 matmul, which is a
+# shape a test suite and a model both produce.
+#
+# This is emitted into the *FlagGems* kernel rather than the shared PrivateUse1
+# wrapper on purpose. The floor belongs to FlagGems' triton: the same op reaching
+# a boxing kernel or cpu_fallback has no such limit (measured -- the five
+# dtype_coverage matmul cases pass on MetaX both when `mm` is `boxing` and when
+# it is `none`), so padding in the wrapper would tax every route for one route's
+# constraint. TritonMinDotContractExtent() returns 0 where there is no floor, so
+# every other platform pays one integer compare.
+#
+# Only the plain forms are listed. `mm.out` and the `.dtype` forms carry no
+# FlagGems kernel on the platforms with a floor, and `bmm` reaches the C++ slot
+# there; when that changes, the entry is a line each and the padding is already
+# rank-agnostic (it indexes the contracted axis from the end).
+_DOT_CONTRACT_PADDED_OPS = {
+    "mm": ("self", "mat2"),
+}
+
+
+def _dot_contract_prelude(op, args):
+    """Return (prelude_lines, rename_map) widening K for _DOT_CONTRACT_PADDED_OPS.
+
+    The locals shadow nothing: they are fresh names the generated body uses in
+    place of the operands. A platform with no floor leaves the pair untouched,
+    so the two locals alias the arguments and no copy happens.
+    """
+    operands = _DOT_CONTRACT_PADDED_OPS.get(op)
+    if not operands:
+        return "", {}
+    arg_names = {n for _, n in args}
+    for name in operands:
+        if name not in arg_names:
+            raise SystemExit(
+                f"{op}: dot-contract padding needs a `{name}` argument; "
+                f"the schema has {sorted(arg_names)}"
+            )
+    lhs, rhs = operands
+    lines = (
+        f"  at::Tensor {lhs}_dotpad = {lhs};\n"
+        f"  at::Tensor {rhs}_dotpad = {rhs};\n"
+        f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
+    )
+    return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
+
+
 # Ops whose index argument holds *positions* into `self`, mapped to the name of
 # the argument that names the dimension those positions address. The generated
 # PrivateUse1 wrapper validates the values against that dimension before the
@@ -1298,6 +1350,10 @@ def gen_flaggems_python_kernel(
         ] + [a.name for a in out_args]
     else:
         passed_names = [a.name for a in aten_args if a.name not in kw_names]
+    # Widen a contracted axis the platform's triton will not compile, before the
+    # operands are packed for the call. See _DOT_CONTRACT_PADDED_OPS.
+    dotpad_lines, dotpad_rename = _dot_contract_prelude(op, args)
+    passed_names = [dotpad_rename.get(n, n) for n in passed_names]
     ivalues = "{" + ", ".join(passed_names) + "}"
 
     # kwarg call selects the *Kw caller variant; positional-only uses the plain one.
@@ -1391,7 +1447,7 @@ def gen_flaggems_python_kernel(
     else:
         raise ValueError(f"unsupported flaggems-python category {category} for {op}")
 
-    return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+    return f"{ret_type} {kn}({args_decl(args)}) {{\n{dotpad_lines}{body}\n}}"
 
 
 # ============================================================================

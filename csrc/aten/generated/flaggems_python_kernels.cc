@@ -2745,7 +2745,10 @@ at::Tensor & MishInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = CallPythonOp_Generic("flag_gems.mm", {self, mat2});
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  auto result = CallPythonOp_Generic("flag_gems.mm", {self_dotpad, mat2_dotpad});
   UnboxToFlagos(result);
   return result;
 }

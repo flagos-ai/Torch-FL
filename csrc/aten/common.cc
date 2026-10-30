@@ -759,4 +759,42 @@ int64_t TritonMinDotContractExtent() {
 #endif
 }
 
+int64_t MatmulContractDim(const at::Tensor& operand, bool is_rhs) {
+  return is_rhs ? operand.size(-2) : operand.size(-1);
+}
+
+at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
+                                int64_t target) {
+  auto shape = operand.sizes().vec();
+  const auto axis = is_rhs ? shape.size() - 2 : shape.size() - 1;
+  const auto extent = shape[axis];
+  shape[axis] = target;
+  auto padded = at::empty(shape, operand.options());
+  padded.zero_();
+  padded.narrow(static_cast<int64_t>(axis), 0, extent).copy_(operand);
+  return padded;
+}
+
+bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
+  const auto floor = TritonMinDotContractExtent();
+  if (floor <= 0) {
+    return false;
+  }
+  // Early out on the path that matters: a real GEMM has a contracted extent in
+  // the hundreds or thousands and pays one integer compare here.
+  const auto extent = MatmulContractDim(lhs, false);
+  if (extent >= floor || extent == 0) {
+    return false;
+  }
+  if (MatmulContractDim(rhs, true) != extent) {
+    // Mismatched operands are the caller's error, and the kernel below reports
+    // it with the shapes in the message. Padding them to a common target here
+    // would turn that into a wrong answer.
+    return false;
+  }
+  lhs = PadMatmulContractDim(lhs, false, floor);
+  rhs = PadMatmulContractDim(rhs, true, floor);
+  return true;
+}
+
 } // namespace at::native::flagos

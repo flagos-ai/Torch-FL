@@ -10,7 +10,7 @@
 // claim without a route raises "routed to 'none' ... but the op is registered
 // on PrivateUse1" instead of reaching cpu_fallback.
 //
-// Total: 600 ops registered here.
+// Total: 601 ops registered here.
 //
 // Held back from the boxing claim: the conf routes them to `none`, or
 // `register.inc` has no wrapper for them:
@@ -983,7 +983,6 @@
 //   - mkldnn_reorder_conv3d_weight.out
 //   - mkldnn_rnn_layer.out
 //   - mkldnn_rnn_layer_backward.out
-//   - mm
 //   - mm.dtype
 //   - mm.dtype_out
 //   - mm.out
@@ -1849,6 +1848,7 @@
   m.impl("miopen_batch_norm_backward", WrapperMiopenBatchNormBackward);
   m.impl("mish", WrapperMish);
   m.impl("mish_", WrapperMishInplace);
+  m.impl("mm", WrapperMm);
   m.impl("mode", WrapperMode);
   m.impl("mse_loss", WrapperMseLoss);
   m.impl("mse_loss_backward", WrapperMseLossBackward);

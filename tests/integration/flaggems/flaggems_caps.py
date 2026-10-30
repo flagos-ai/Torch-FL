@@ -199,7 +199,10 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # ``SEEDED_DRAWOPS`` routes, which CI run 40341912173 measured on the lane.
     "iluvatar": 583,
     "kunlunxin": 0,
-    "metax": 584,
+    # 585 since `mm` joined: the default conf routes it to FlagGems so the
+    # soft-lowp matrix claim has a registered key to follow. The day-0 variant
+    # below is unchanged -- it keeps `mm` on the boxing kernel.
+    "metax": 585,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,

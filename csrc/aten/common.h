@@ -241,6 +241,34 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype);
 // answer.
 int64_t TritonMinDotContractExtent();
 
+// The contracted axis of a matmul operand: the columns of the left side, the
+// rows of the right one, at either rank.
+int64_t MatmulContractDim(const at::Tensor& operand, bool is_rhs);
+
+// Widen the contracted axis to `target` with zeros.
+//
+// Exact for a matmul: the added lanes are 0 on both sides and contribute
+// 0 * 0 = 0 to every element of the sum, so the product is unchanged. Only the
+// contracted axis is touched, so M and N -- and therefore the output shape --
+// are the same, which is what lets the `.out` forms take this unchanged.
+//
+// Built with empty + zero_ + narrow().copy_() rather than at::constant_pad_nd:
+// that op is itself routed to FlagGems on the platforms that have a floor, and
+// FlagGems' triton is the thing being worked around here. empty and copy_
+// carry no conf key, so this cannot bounce off a route.
+at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
+                                int64_t target);
+
+// Widen both operands together when the platform's dot intrinsic will not
+// compile their shared contracted extent. Returns whether it padded, so a
+// caller that has to narrow the result back knows to do it.
+//
+// Lives here rather than in the soft-lowp decode that first needed it because
+// the floor is a property of the platform's triton, not of low-precision
+// arithmetic: an ordinary fp32 `mm` routed to FlagGems hits the same assertion
+// with the same small K. See TritonMinDotContractExtent above.
+bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
+
 // Memory guard to ensure proper synchronization when accessing device memory
 class MemoryGuard {
  public:

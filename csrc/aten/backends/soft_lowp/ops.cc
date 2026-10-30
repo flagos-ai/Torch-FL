@@ -228,60 +228,16 @@ void CheckMatrixInputs(const at::Tensor& self, const at::Tensor& mat2) {
               "soft-lowp matrix kernel requires contiguous inputs");
 }
 
-// The contracted axis of a decoded operand: the columns of the left side, the
-// rows of the right one, at either rank.
-int64_t ContractDim(const at::Tensor& operand, bool is_rhs) {
-  return is_rhs ? operand.size(-2) : operand.size(-1);
-}
-
-// Widen the contracted axis to `target` with zeros.
-//
-// Exact for a matmul: the added lanes are 0 on both sides and contribute
-// 0 * 0 = 0 to every element of the sum, so the product is unchanged. Only the
-// contracted axis is touched, so M and N -- and therefore the output shape --
-// are the same, which is what lets the `.out` forms take this unchanged.
-//
-// Built with empty + zero_ + narrow().copy_() rather than at::constant_pad_nd:
-// that op is routed to FlagGems on both platforms that compile this decode,
-// and FlagGems' triton is the thing being worked around here. empty and copy_
-// carry no conf key, so this cannot bounce off a route.
-at::Tensor PadContractDim(const at::Tensor& operand, bool is_rhs, int64_t target) {
-  auto shape = operand.sizes().vec();
-  const auto axis = is_rhs ? shape.size() - 2 : shape.size() - 1;
-  const auto extent = shape[axis];
-  shape[axis] = target;
-  auto padded = at::empty(shape, operand.options());
-  padded.zero_();
-  padded.narrow(static_cast<int64_t>(axis), 0, extent).copy_(operand);
-  return padded;
-}
-
 // Both decoded operands, widened together when the platform's dot intrinsic
-// will not compile their contracted extent. See TritonMinDotContractExtent in
-// csrc/aten/common.h for the floor and the measurement behind it.
+// will not compile their contracted extent.
 //
-// The two sides share one contracted extent by construction (a matmul would
-// not typecheck otherwise), so this reads the left side's and pads both to the
-// same target.
+// The floor, the padding and the pair rule all live in
+// csrc/aten/common.{h,cc} now: an ordinary fp32 `mm` routed to FlagGems hits
+// the same assertion with the same small K, so the workaround cannot belong to
+// the low-precision decode that happened to need it first. This forwards so the
+// call sites below keep reading as the decode path they are.
 void PadPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
-  const auto floor = TritonMinDotContractExtent();
-  if (floor <= 0) {
-    return;
-  }
-  // Early out on the path that matters: a real FP8/FP4 GEMM has a contracted
-  // extent in the hundreds or thousands and pays one integer compare here.
-  const auto extent = ContractDim(lhs, false);
-  if (extent >= floor || extent == 0) {
-    return;
-  }
-  if (ContractDim(rhs, true) != extent) {
-    // Mismatched operands are the caller's error, and the GEMM below reports
-    // it with the shapes in the message. Padding them to a common target here
-    // would turn that into a wrong answer.
-    return;
-  }
-  lhs = PadContractDim(lhs, false, floor);
-  rhs = PadContractDim(rhs, true, floor);
+  PadMatmulPairForDot(lhs, rhs);
 }
 
 at::Tensor DecodeIfNeeded(const at::Tensor& input, bool packed_dim0 = false) {

@@ -843,7 +843,18 @@ BOXING_TRITON_GAPS = {
         "logit_backward",
         "lu_unpack.out",
         "mean.dim",
+        # `mm` stays here. The entry's own reason is gone -- flag_gems 5.4.0's
+        # ops/mm.py has no SPLIT_K kwarg at all, measured on a C550 -- but the
+        # route it produces is still the one the day-0 variant wants, and
+        # route_boxing() reads this set to decide that. METAX_FLAGGEMS_MEASURED
+        # is what lifts `mm` to `flaggems` in the *default* conf, where the
+        # soft-lowp claim needs it registered; boxing_measured_python_ops()
+        # subtracts that set here, so the variant keeps `boxing`. See the note
+        # on METAX_FLAGGEMS_MEASURED for the measurement and for why the two
+        # files deliberately differ on this op.
         "mm",
+        # `mm.out` is a real gap on both: FlagGems registers no out= matmul
+        # kernel on this build, the same reason DCU's conf leaves it `none`.
         "mm.out",
         "nansum.out",
         "reflection_pad2d",
@@ -2619,8 +2630,50 @@ METAX_CPP_MEASURED = {
 # the output size as the kernel size and returns a (1,2,6,6,6) tensor where the
 # boxing route returns (1,2,4,4,4). `cudnn_batch_norm_backward` was not
 # re-measured. See boxing_measured_python_ops().
+#
+# `mm` joins for a different reason than the seven above, and only in the
+# default conf. It is not held by the shared coverage ceiling; it is in
+# BOXING_TRITON_GAPS["metax"], and this set is what lifts it back out (route()
+# takes the gap set outside the coverage sets, and boxing_measured_python_ops()
+# is subtracted from the gaps). Three measurements put it here, all on a MetaX
+# C550 with torch 2.10.0+metax3.8.1.0, flag_gems 5.4.0 and a cold
+# FLAGGEMS_CACHE_DIR:
+#
+#   * The gap entry's stated reason is stale. It says gems' `mm` passes a
+#     SPLIT_K kwarg triton-metax rejects; `grep -c SPLIT_K flag_gems/ops/mm.py`
+#     is 0 at 5.4.0.
+#   * The route is correct, and more accurate than the boxing kernel it
+#     replaces. Square fp32 operands against a CPU fp64 reference: rel 1.04e-07
+#     at n=16 through 5.62e-07 at n=256, where boxing answers at TF32 grade.
+#   * It is what the soft-lowp matrix claim needs. With `mm` at `none`, codegen
+#     emits no `m.impl("mm", ...)`, so an fp8/fp4 `mm` never reaches the
+#     soft-lowp prelude and lands in cpu_fallback instead -- which multiplies
+#     the *undecoded* bytes and returns an fp8 tensor. That is the whole of the
+#     metax lane's `16 failed, 14 passed` in soft_lowp_matrix: measured as
+#     "Expected out tensor to have dtype c10::Float8_e4m3fn, but got
+#     c10::BFloat16", as `addmm_impl_cpu_ not implemented for
+#     'Float4_e2m1fn_x2'`, and as `aten::mm.dtype` falling to the CPU backend.
+#     A default conf may not route `boxing` (AGENTS.md) and MetaX registers no
+#     vendor matmul, so `flaggems` is the only route that gets it registered.
+#
+# Deliberately NOT in the day-0 variant, which is why this set and not the gap
+# set is the lever: that file's premise is that FlagGems is not what a day-0
+# model is trusted to, and `metax-boxing` passes all 30 soft_lowp cases today
+# with `mm = boxing` (run 40984981771, job 123834506145). Moving it there would
+# change a green lane for nothing.
+#
+# `mm.out` and the `.dtype` forms do not come along: FlagGems ships no out=
+# matmul here, so they stay `none` and the soft-lowp pair claims forward them to
+# the plain `mm` key, exactly as on DCU.
+#
+# One thing `flaggems` costs that `boxing` did not: FlagGems' triton will not
+# compile a `tl.dot` with K < 16 on this platform, and an ordinary fp32 4x4
+# matmul is below that. _DOT_CONTRACT_PADDED_OPS in codegen_ops.py widens the
+# contracted axis in the FlagGems kernel itself to pay for it; see
+# TritonMinDotContractExtent in csrc/aten/common.h.
 METAX_FLAGGEMS_MEASURED = {
     "_embedding_bag_per_sample_weights_backward",
+    "mm",
     "_native_batch_norm_legit_functional",
     "binary_cross_entropy_with_logits",
     "linalg_ldl_solve",
@@ -2658,6 +2711,24 @@ METAX_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 # See the DCU entry in docs/reference/operator-support.md for the measurement and
 # for what is still unmeasured on the shapes this route does not take.
 DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
+
+
+# Ops a platform routes to FlagGems in its default conf but must keep on the
+# boxing kernel in its day-0 variant, named per platform.
+#
+# These are measurements that are true and still deliberately not applied to the
+# day-0 file, which is the same judgement BOXING_VARIANT_PLATFORMS already makes
+# for the measured composites: a day-0 conf exists to bring a model up on the
+# vendor's real CUDA-ABI kernels, so an op only belongs on FlagGems there when
+# the variant has no boxing kernel for it.
+#
+# MetaX's `mm` is the one entry. It reaches `flaggems` in the default conf
+# because the soft-lowp matrix claim needs the key registered and a default conf
+# may not route boxing, while `metax-boxing` passes all 30 soft_lowp cases with
+# `mm = boxing` (run 40984981771, job 123834506145) and has nothing to gain.
+BOXING_VARIANT_KEEP_GAPPED = {
+    "metax": {"mm"},
+}
 
 # FlagGems Python routes on the platforms that compile the soft-lowp matrix
 # prelude, measured on their own hardware.
@@ -3592,7 +3663,21 @@ def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
             # because the default conf routes them to flaggems, though -- with
             # the measured route gone they are not gaps, they are boxing.
             #
-            gaps -= boxing_measured_python_ops(sparse_conf)
+            # Minus the ops this variant must keep boxed anyway. MetaX's `mm` is
+            # in METAX_FLAGGEMS_MEASURED for the *default* conf only (the
+            # soft-lowp claim needs it registered there, and a default conf may
+            # not route boxing); the day-0 file's premise is that FlagGems is
+            # not what a day-0 model is trusted to, and this lane passes all 30
+            # soft_lowp cases with `mm = boxing` today. Dropping it from `gaps`
+            # here would not even leave it on `boxing`: `mm` is in the shared
+            # FlagGems C++ set, and route_boxing() ranks that slot above both
+            # the Python slot and the fallback, so it would land on
+            # `flaggems_cpp` -- a route that raises "soft-lowp matrix kernel
+            # requires a low-precision input" on the fp32 operands aten::bmm
+            # must serve. Keep it a gap.
+            gaps -= boxing_measured_python_ops(
+                sparse_conf
+            ) - BOXING_VARIANT_KEEP_GAPPED.get(platform, set())
         cpp_here = fg_cpp if platform in FLAGGEMS_CPP_PLATFORMS else set()
         routes = {op: route_boxing(op, cpp_here, py_here, gaps) for op in sorted(ops)}
         if platform == "nvidia":

@@ -104,10 +104,14 @@ HAND_REGISTERED_CLAIMS = {
 #     under.
 #
 # The form is owed a claim only where the pair's own key has a route: that key
-# is the forwarder's whole path, and on metax `mm` is `none` (a claim on it
-# raises for every ordinary call, run 40629858404), so the `mm` family stays
-# unclaimed there until its conf routes it. `bmm` is claimed by metax's list
-# under its own key (`flaggems_cpp`); its `none` forms are the pair's.
+# is the forwarder's whole path. On metax `mm` used to be `none` -- a claim on it
+# raised for every ordinary call, run 40629858404 -- so the `mm` family stayed
+# unclaimed there "until its conf routes it". It does now
+# (METAX_FLAGGEMS_MEASURED in gen_vendor_confs.py routes it `flaggems` in the
+# default conf), so the three `none` forms take the forwarder and metax reaches
+# the same five-claim shape DCU has. `bmm` is claimed by metax's list under its
+# own key (`flaggems_cpp`); its `none` forms are the pair's, and `bmm.out` is not
+# among them because its conf route is `flaggems_cpp` rather than `none`.
 SOFT_LOWP_PAIR_CLAIMS = {
     platform: forms
     for platform, forms in {
@@ -120,6 +124,9 @@ SOFT_LOWP_PAIR_CLAIMS = {
             "bmm.out": "bmm",
         },
         "metax": {
+            "mm.dtype": "mm",
+            "mm.dtype_out": "mm",
+            "mm.out": "mm",
             "bmm.dtype": "bmm",
             "bmm.dtype_out": "bmm",
         },

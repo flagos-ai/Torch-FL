@@ -597,21 +597,43 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
             assert route != "flaggems", f"{platform} took a route it never measured"
 
 
-def test_metax_conf_keeps_mm_boxed():
-    """A measured exception, not a derivable one: mm is in the shared fg_cpp set
-    but was not measured servable on MetaX hardware, so it never entered
-    METAX_CPP_MEASURED and must stay off FlagGems.
+def test_metax_routes_mm_to_flaggems_only_in_the_default_conf():
+    """The two metax confs deliberately disagree about `mm`.
 
-    In the default conf that is `none` (cpu_fallback) -- MetaX has no vendor
-    kernel of its own on this tree -- and in the day-0 variant it is `boxing`.
+    Default conf: `flaggems`. The soft-lowp matrix claim needs the key
+    registered -- at `none` codegen emits no `m.impl("mm", ...)`, so an fp8/fp4
+    `mm` reaches cpu_fallback and multiplies the undecoded bytes -- and a default
+    conf may not route `boxing` (AGENTS.md), with no MetaX vendor matmul to take
+    instead. METAX_FLAGGEMS_MEASURED is the lever; see its note for the C550
+    measurements that retired the gap entry's stated SPLIT_K reason.
+
+    Day-0 variant: `boxing`, unchanged. That file's premise is that FlagGems is
+    not what a day-0 model is trusted to, and the lane passes all 30 soft_lowp
+    cases with `mm = boxing` already. BOXING_VARIANT_KEEP_GAPPED is what holds
+    it, and holding it in `gaps` specifically matters: `mm` is in the shared
+    FlagGems C++ set, which route_boxing() ranks above both the Python slot and
+    the boxing fallback, so merely dropping it from the measured set would land
+    it on `flaggems_cpp` rather than back on `boxing`.
+
+    `mm.out` is a real gap on both: FlagGems ships no out= matmul on this build.
     """
     routes = g.build_all(CONF_DIR)["metax"][1]
-    assert routes["mm"].split("#", 1)[0].strip() == "none"
+    assert routes["mm"].split("#", 1)[0].strip() == "flaggems"
+    assert routes["mm.out"].split("#", 1)[0].strip() == "none"
+
     variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["metax"][1]
     assert variant["mm"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
-    # Must exist in METAX_CPP_MEASURED (test_metax_conf_keeps_mm_boxed ensures it
-    # stays pinned to "mm not in the measured set")
+    assert variant["mm.out"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
+
+    # The route comes from the measured set, not from the C++ slot: `mm` was
+    # never verified servable through MetaX's FlagGems C++ path, and a
+    # flaggems_cpp route raises on the fp32 operands aten::bmm must serve.
     assert "mm" not in g.METAX_CPP_MEASURED
+    assert "mm" in g.METAX_FLAGGEMS_MEASURED
+    assert "mm" in g.BOXING_VARIANT_KEEP_GAPPED["metax"]
+    # Still a gap entry, which is what the variant reads.
+    assert "mm" in g.BOXING_TRITON_GAPS["metax"]
+    assert "mm.out" in g.BOXING_TRITON_GAPS["metax"]
 
 
 def test_iluvatar_570_gaps_leave_the_flaggems_path():

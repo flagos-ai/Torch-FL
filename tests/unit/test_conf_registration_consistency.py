@@ -714,7 +714,12 @@ def test_conf_route_counts_are_stable():
         # these 8 ops to `cuda` costs nothing there. If it does cost something,
         # the per-platform answer is NATIVE_TRITON_GAPS["metax"], not a
         # deletion from the shared holds.
-        "metax": {"flaggems": 586, "none": 1436, "flaggems_cpp": 15},
+        #
+        # `mm` moved none -> flaggems (586 -> 587 / 1436 -> 1435): the soft-lowp
+        # matrix claim needs the key registered, and a default conf may not route
+        # boxing. The day-0 variant keeps `boxing`. Measured on a C550; see
+        # METAX_FLAGGEMS_MEASURED in gen_vendor_confs.py.
+        "metax": {"flaggems": 587, "none": 1435, "flaggems_cpp": 15},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "mthreads": {"flaggems": 466, "none": 1518, "mthreads": 53},
         "thead": {"flaggems": 592, "none": 1445},
