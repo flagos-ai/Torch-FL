@@ -38,6 +38,7 @@
 #include <c10/util/Exception.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <flagos_env.h>
 
 namespace c10::flagos {
@@ -51,6 +52,47 @@ CachingDeviceAllocator* CachingDeviceAllocator::instance_ = nullptr;
 bool CachingDeviceAllocator::is_enabled() {
   static bool enabled = flagos_env::EnvFlag("FLAGOS_USE_CACHING_ALLOCATOR", true);
   return enabled;
+}
+
+// The byte every handed-out block is filled with, or -1 for "do not poison".
+//
+// Read once. FLAGOS_MEM_POISON is a diagnostic (see torch_fl/_env.py's entry):
+// with it on, an element a kernel never wrote keeps this value all the way to
+// the caller, so "the kernel did not write its whole output" becomes visible as
+// a NaN in the result rather than as a plausible number. That is the question
+// issue #617 needs answered and the one no amount of source reading can settle.
+//
+// 0xFF by default because it is NaN in every IEEE float dtype (bf16, fp16,
+// fp32, fp64) and -1 in every two's-complement integer dtype, so one value
+// covers the dtypes a broken kernel is likely to leave behind. Anything else in
+// 0-255 is used as a byte value.
+int CachingDeviceAllocator::poison_byte() {
+  static int byte = [] {
+    std::string raw;
+    if (!flagos_env::EnvRaw("FLAGOS_MEM_POISON", &raw)) {
+      return -1;
+    }
+    // Off: any spelling the boolean parser rejects (0/false/off/no), or the
+    // byte 0. EnvFlag answers "is this an on-value" for exactly those.
+    if (!flagos_env::EnvFlag("FLAGOS_MEM_POISON", false)) {
+      return -1;
+    }
+    // "1" is the boolean spelling of "on" as well as the byte 0x01, and the
+    // documented meaning of 1 is 0xFF (see torch_fl/_env.py), so it is resolved
+    // as the former. There is no spelling for the byte 0x01; nothing needs one.
+    if (flagos_env::EnvIs(raw.c_str(), "1")) {
+      return 0xFF;
+    }
+    // A plain decimal in 0-255 is the byte; anything else that is on means 0xFF.
+    char* end = nullptr;
+    const long value = std::strtol(raw.c_str(), &end, 10);
+    if (end != nullptr && end != raw.c_str() && *end == '\0' && value >= 0 &&
+        value <= 255) {
+      return static_cast<int>(value);
+    }
+    return 0xFF;
+  }();
+  return byte;
 }
 
 CachingDeviceAllocator::CachingDeviceAllocator(
@@ -239,6 +281,21 @@ Block* CachingDeviceAllocator::alloc_block(
   block->allocated = true;
   block->requested_size = size;
   state.active_blocks.insert(block);
+
+  // FLAGOS_MEM_POISON: overwrite the space the caller is about to receive, so
+  // an element no kernel writes keeps this value instead of whatever the block
+  // held last time. Only the requested range is filled -- the rest of a split
+  // block belongs to a neighbour.
+  //
+  // Blocking, deliberately. Allocation here already runs on stream `nullptr`
+  // (see allocate()), so there is no per-block stream to order an async fill
+  // against, and a fill left queued could be reordered with the caller's
+  // kernels. The cost is a serialised memset per allocation, which is the
+  // price of the diagnostic and the reason it is off by default.
+  const int poison = poison_byte();
+  if (poison >= 0) {
+    ::Memset(block->ptr, poison, size);
+  }
 
   // Update stats.
   state.stats.bytes_allocated += block->size;
