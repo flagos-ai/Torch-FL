@@ -177,6 +177,60 @@ def _dot_contract_prelude(op, args):
     return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
 
 
+# Matmul ops whose FlagGems Python kernel must leave the device entirely for the
+# dtypes FlagGemsMatmulNeedsHost() names, mapped to (left operand, right
+# operand). Emitted as an early return before any other prelude runs.
+#
+# Same table shape and the same reason as _DOT_CONTRACT_PADDED_OPS above, one
+# step further: there the kernel can be made to work by widening K, here it
+# cannot be made to work at all for the dtype, and the host is the only place
+# the requested precision exists. On MetaX the FlagGems `mm` accumulator is
+# declared from `dot_out_dtype` and re-assigned at the operand width inside the
+# K loop, which triton refuses for float64 -- and on a development host the same
+# call silently returns a wrong product instead of raising. See
+# FlagGemsMatmulNeedsHost in csrc/aten/common.h for both measurements and for
+# why neither dtype predicate nor a conf entry can express this.
+#
+# In the FlagGems kernel rather than the shared wrapper for the same reason the
+# padding is: the gap is this route's. `mm` on MetaX reaches float64 correctly
+# through both boxing and cpu_fallback (measured), so a wrapper-level escape
+# would send every route to the host for a dtype only one of them fails.
+_HOST_MATMUL_DTYPE_OPS = {
+    "mm": ("self", "mat2"),
+}
+
+
+def _host_matmul_prelude(op, args, ret_type):
+    """Return the early-return lines sending _HOST_MATMUL_DTYPE_OPS to the host.
+
+    Only the value-returning forms are emitted: a form that writes into `out`
+    would need the result copied into it rather than returned, and no `.out`
+    matmul carries a FlagGems kernel on the platforms with the gap. Raises if
+    one ever does, rather than emitting a kernel that drops the write.
+    """
+    operands = _HOST_MATMUL_DTYPE_OPS.get(op)
+    if not operands:
+        return ""
+    if ret_type.strip() != "at::Tensor":
+        raise SystemExit(
+            f"{op}: the host-matmul escape returns a value, but the schema "
+            f"returns `{ret_type}`; an out= form needs its own emission"
+        )
+    arg_names = {n for _, n in args}
+    for name in operands:
+        if name not in arg_names:
+            raise SystemExit(
+                f"{op}: the host-matmul escape needs a `{name}` argument; "
+                f"the schema has {sorted(arg_names)}"
+            )
+    lhs, rhs = operands
+    return (
+        f"  if (at::native::flagos::FlagGemsMatmulNeedsHost({lhs}.scalar_type())) {{\n"
+        f"    return at::native::flagos::MatmulOnHost({lhs}, {rhs});\n"
+        f"  }}\n"
+    )
+
+
 # Ops whose index argument holds *positions* into `self`, mapped to the name of
 # the argument that names the dimension those positions address. The generated
 # PrivateUse1 wrapper validates the values against that dimension before the
@@ -1447,7 +1501,12 @@ def gen_flaggems_python_kernel(
     else:
         raise ValueError(f"unsupported flaggems-python category {category} for {op}")
 
-    return f"{ret_type} {kn}({args_decl(args)}) {{\n{dotpad_lines}{body}\n}}"
+    # Ordered: the host escape returns before the padding runs, because a dtype
+    # this route cannot serve at all should not pay for a pad it will not use.
+    host_lines = _host_matmul_prelude(op, args, ret_type)
+    return (
+        f"{ret_type} {kn}({args_decl(args)}) {{\n{host_lines}{dotpad_lines}{body}\n}}"
+    )
 
 
 # ============================================================================

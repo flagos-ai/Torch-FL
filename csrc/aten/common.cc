@@ -797,4 +797,21 @@ bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
   return true;
 }
 
+bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {
+#if defined(FLAGOS_ACCEL_METAX)
+  // See the declaration in common.h for the compiler assertion, the silent
+  // wrong answer the same call produces on a development host, and why neither
+  // FlagGemsRejectsOpDtype nor FlagGemsRejectsDtype nor a conf entry can state
+  // this gap. float32 and below are correct on this route and stay on it.
+  return dtype == at::kDouble;
+#else
+  (void)dtype;
+  return false;
+#endif
+}
+
+at::Tensor MatmulOnHost(const at::Tensor& lhs, const at::Tensor& rhs) {
+  return at::mm(lhs.cpu(), rhs.cpu()).to(lhs.device());
+}
+
 } // namespace at::native::flagos

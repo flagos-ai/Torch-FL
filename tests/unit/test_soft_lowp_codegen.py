@@ -608,6 +608,57 @@ def test_the_floor_reaches_the_ordinary_flaggems_matmul_too():
     )
 
 
+def test_a_dtype_this_route_cannot_serve_leaves_the_device():
+    """float64 `mm` on MetaX must not reach FlagGems at all.
+
+    Widening K is not enough for every dtype: FlagGems' tiled `mm` declares its
+    accumulator from `dot_out_dtype` and re-assigns it at the operand width in
+    the K loop, which triton-metax refuses for float64 ("Loop-carried variable
+    acc has initial type fp32 but is re-assigned to fp64 in loop", metax lane
+    of run 41009417366). On a development host the same call does not raise --
+    it silently answers wrong by rel 0.97 to 1.77 -- so the escape is about
+    correctness, not about a red lane.
+
+    Neither dtype predicate can state this. FlagGemsRejectsOpDtype substitutes
+    VendorSlot()'s kernel and MetaX has none, so an entry there is inert;
+    FlagGemsRejectsDtype is dtype-wide and float64 works across MetaX's
+    pointwise family. And a conf entry routes the whole op, which would give up
+    the float32 case that measured *more* accurate than boxing.
+
+    In the FlagGems kernel, like the pad: float64 `mm` is correct on MetaX
+    through both boxing and cpu_fallback, so only this route needs to leave.
+    """
+    gen = (REPO_ROOT / "scripts/codegen/codegen_ops.py").read_text(encoding="utf-8")
+    assert "_HOST_MATMUL_DTYPE_OPS" in gen, (
+        "the generator must carry the per-op table that escapes to the host"
+    )
+    kernels = (REPO_ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text(
+        encoding="utf-8"
+    )
+    body = _function_body(kernels, "at::Tensor MmKernelPython(")
+    assert "FlagGemsMatmulNeedsHost(" in body, (
+        "the generated FlagGems mm kernel must ask whether the dtype can be "
+        "served at all:\n" + body
+    )
+    assert "MatmulOnHost(" in body, (
+        "the escape must compute on the host, not degrade the dtype:\n" + body
+    )
+    # Before the pad: a dtype that is leaving should not pay for a widening it
+    # will never use.
+    host_at = body.find("FlagGemsMatmulNeedsHost(")
+    pad_at = body.find("PadMatmulPairForDot(")
+    assert host_at < pad_at, "the host escape must return before the pad runs:\n" + body
+
+    common = (REPO_ROOT / "csrc/aten/common.cc").read_text(encoding="utf-8")
+    needs_host = _function_body(common, "bool FlagGemsMatmulNeedsHost(")
+    assert "FLAGOS_ACCEL_METAX" in needs_host, (
+        "the gap is MetaX's; it must be guarded to that build:\n" + needs_host
+    )
+    assert "at::kDouble" in needs_host, "float64 is the measured dtype:\n" + needs_host
+    # Every other platform answers false, so the compare is all they pay.
+    assert "return false;" in needs_host, needs_host
+
+
 def test_the_pad_is_applied_at_the_one_chokepoint():
     """Every matrix form, including the packed-FP4 path that cannot route.
 

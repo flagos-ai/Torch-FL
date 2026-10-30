@@ -2745,6 +2745,9 @@ at::Tensor & MishInplaceKernelPython(at::Tensor & self) {
 }
 
 at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
+  if (at::native::flagos::FlagGemsMatmulNeedsHost(self.scalar_type())) {
+    return at::native::flagos::MatmulOnHost(self, mat2);
+  }
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);

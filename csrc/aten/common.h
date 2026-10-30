@@ -269,6 +269,55 @@ at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
 // with the same small K. See TritonMinDotContractExtent above.
 bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
 
+// Whether this platform's FlagGems matmul must not be handed `dtype`, with the
+// host round-trip as the only alternative.
+//
+// Fourth shape of the escape the three predicates above describe, and the one
+// none of them can state. It is a (platform, op-family, dtype) gap where the
+// platform has no vendor kernel to divert to:
+//
+//   * FlagGemsRejectsOpDtype states exactly this intersection, but it works by
+//     *substituting* VendorSlot()'s kernel (see ResolveFn in dispatcher.h), and
+//     returns the FlagGems pointer unchanged when that slot is empty. MetaX
+//     registers no vendor matmul, so an entry there compiles and does nothing.
+//   * FlagGemsRejectsDtype is dtype-wide. float64 is not a dtype MetaX's
+//     FlagGems fails for in general -- the pointwise family serves it -- so a
+//     dtype-wide rule would move ops that work today.
+//   * A conf entry routes a whole op. `mm` over fp16/bf16/fp32 is correct and
+//     more accurate than boxing on this route (see METAX_FLAGGEMS_MEASURED),
+//     so moving the op would give up the float case to fix the float64 one.
+//
+// Measured on a MetaX C550 (torch 2.10.0+metax3.8.1.0, flag_gems 5.4.0):
+// FlagGems' tiled `mm` accumulator is declared from `dot_out_dtype` but the
+// `tl.dot` inside the K loop re-assigns it at the operand's own width, which
+// this triton refuses to compile:
+//
+//   triton.compiler.errors.CompilationError: at 75:4:
+//     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=dot_out_dtype)
+//     for k in range(0, tl.cdiv(K, BLOCK_K)):
+//   AssertionError("Loop-carried variable acc has initial type
+//   <['16', '16'], fp32> but is re-assigned to <['16', '16'], fp64> in loop!")
+//
+// On the development host the same call does not raise -- one autotune config
+// reports `PassManager::run failed`, the tuner silently picks another, and the
+// product comes back wrong by rel 0.97 to 1.77. A wrong answer with no
+// exception is the worse of the two outcomes, so this is not a CI workaround.
+//
+// Answers false everywhere else, so a platform without the gap pays one enum
+// compare. This is the same remedy Ascend applies for a dtype aclnn will not
+// take (`MatmulKernelAscend` runs `at::matmul` on a CPU copy, see
+// csrc/aten/backends/ascend/matmul.cc); the difference is only that MetaX has
+// no vendor kernel to host it in, so the generated FlagGems kernel carries it.
+bool FlagGemsMatmulNeedsHost(at::ScalarType dtype);
+
+// Run `mm` on the host and bring the answer back to `reference`'s device, for
+// the dtype FlagGemsMatmulNeedsHost names.
+//
+// Exact rather than a degradation: the host computes the matmul at the full
+// requested width, which is what the dtype asked for and what the device route
+// fails to deliver. Same shape as ascend::MoveCpuResultToDevice.
+at::Tensor MatmulOnHost(const at::Tensor& lhs, const at::Tensor& rhs);
+
 // Memory guard to ensure proper synchronization when accessing device memory
 class MemoryGuard {
  public:
