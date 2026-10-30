@@ -160,10 +160,11 @@ def _platforms_from_files_bare(
 ) -> list[str]:
     if changed is None:
         return all_platforms
+    documentation = (".md", ".rst")
     code = [
         path
         for path in changed
-        if not path.startswith("docs/") and not path.endswith((".md", ".rst"))
+        if not path.startswith("docs/") and not path.lower().endswith(documentation)
     ]
     if not code:
         return []
