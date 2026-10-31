@@ -33,6 +33,8 @@ takes the same link-time branch.
 """
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -82,29 +84,127 @@ def test_cast_arm_boxes_only_when_libtorch_cuda_is_linked():
     )
 
 
-@pytest.mark.anyplatform
-def test_cmake_defines_the_probe_from_libtorch_cuda():
+def _probe_text() -> str:
+    """The probe's own CMake lines, lifted out of ``csrc/CMakeLists.txt``.
+
+    Taken from the source rather than restated here, so the executable check
+    below runs the text the build runs.
+    """
     cmake = _read(CSRC_CMAKE)
-    assert "FLAGOS_TORCH_LINKS_LIBTORCH_CUDA" in cmake
-    # The only way the probe may be turned on is a real libtorch_cuda.so beside
-    # the torch_cpu_library the link uses -- not an accelerator name or an
-    # option, either of which guesses at a property of the torch build.
-    on_assignment = [
-        line
-        for line in cmake.splitlines()
-        if re.search(r"set\(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA\s+ON\)", line)
-    ]
-    assert on_assignment, "nothing ever turns FLAGOS_TORCH_LINKS_LIBTORCH_CUDA on"
-    probe_block = cmake[
-        cmake.find("set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)") : cmake.find(
-            on_assignment[0]
-        )
-    ]
-    assert "libtorch_cuda.so" in probe_block, (
+    start = cmake.find("set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)")
+    end = cmake.find('message(STATUS "torch_fl: torch links libtorch_cuda.so')
+    assert start != -1 and end != -1 and start < end, (
+        "could not locate the FLAGOS_TORCH_LINKS_LIBTORCH_CUDA probe in csrc/CMakeLists.txt"
+    )
+    return cmake[start:end]
+
+
+def _run_probe(tmp_path, *, ships_libtorch_cuda: bool) -> str:
+    """Configure a throwaway project against a fake torch prefix; return ON/OFF.
+
+    The probe's whole job is to answer a question about the torch that
+    ``find_package(Torch)`` resolved, which text inspection cannot check: the
+    previous version of this test asserted the probe named
+    ``torch_cpu_library``, and that is precisely what made it answer OFF
+    everywhere -- an INTERFACE IMPORTED target carries no IMPORTED_LOCATION. So
+    build two prefixes that differ only in whether ``libtorch_cuda.so`` is
+    present and let CMake decide.
+    """
+    cmake_exe = shutil.which("cmake")
+    if cmake_exe is None:
+        pytest.skip("cmake is not installed")
+
+    prefix = tmp_path / ("torch_cuda" if ships_libtorch_cuda else "torch_cpu")
+    (prefix / "lib").mkdir(parents=True)
+    (prefix / "share" / "cmake" / "Torch").mkdir(parents=True)
+    (prefix / "lib" / "libtorch_cpu.so").touch()
+    if ships_libtorch_cuda:
+        (prefix / "lib" / "libtorch_cuda.so").touch()
+
+    # A stand-in for the two things of torch's CMake export the probe can see.
+    #
+    # TORCH_INSTALL_PREFIX is derived from the config file's own location, as
+    # TorchConfig.cmake does it, which is what makes it name the torch that was
+    # found rather than a guess.
+    #
+    # The two library targets are declared with the shapes the real export uses,
+    # because the shape is the whole trap: `torch_cpu_library` is INTERFACE
+    # IMPORTED and so can never carry IMPORTED_LOCATION, while `torch_cpu` is
+    # SHARED IMPORTED and carries its path under IMPORTED_LOCATION_RELEASE. A
+    # probe that reads IMPORTED_LOCATION off either one gets nothing. Declaring
+    # them here means a probe written the old way configures successfully and
+    # answers OFF -- the real failure -- instead of erroring on a missing target.
+    (prefix / "share" / "cmake" / "Torch" / "TorchConfig.cmake").write_text(
+        "get_filename_component(TORCH_INSTALL_PREFIX\n"
+        '    "${CMAKE_CURRENT_LIST_DIR}/../../../" ABSOLUTE)\n'
+        "add_library(torch_cpu_library INTERFACE IMPORTED)\n"
+        "add_library(torch_python_library INTERFACE IMPORTED)\n"
+        "add_library(torch_cpu SHARED IMPORTED)\n"
+        "set_target_properties(torch_cpu PROPERTIES\n"
+        '    IMPORTED_LOCATION_RELEASE "${TORCH_INSTALL_PREFIX}/lib/libtorch_cpu.so")\n',
+        encoding="utf-8",
+    )
+
+    project = tmp_path / ("src_on" if ships_libtorch_cuda else "src_off")
+    project.mkdir()
+    (project / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.18)\n"
+        "project(probe NONE)\n"
+        "find_package(Torch REQUIRED)\n"
+        f"{_probe_text()}"
+        'message(STATUS "FLAGOS_PROBE=${FLAGOS_TORCH_LINKS_LIBTORCH_CUDA}")\n',
+        encoding="utf-8",
+    )
+
+    build = tmp_path / ("build_on" if ships_libtorch_cuda else "build_off")
+    done = subprocess.run(
+        [
+            cmake_exe,
+            "-S",
+            str(project),
+            "-B",
+            str(build),
+            f"-DCMAKE_PREFIX_PATH={prefix / 'share' / 'cmake'}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, f"cmake failed:\n{done.stdout}\n{done.stderr}"
+    match = re.search(r"FLAGOS_PROBE=(\w+)", done.stdout)
+    assert match, f"probe printed nothing:\n{done.stdout}"
+    return match.group(1)
+
+
+@pytest.mark.anyplatform
+def test_the_probe_answers_on_when_torch_ships_libtorch_cuda(tmp_path):
+    """A torch that carries the CUDA kernels must turn the define on.
+
+    This is the half that regressed silently: the probe read IMPORTED_LOCATION
+    off an INTERFACE IMPORTED target, got -NOTFOUND, and answered OFF even here,
+    leaving all four on-device arms dead on every wheel.
+    """
+    assert _run_probe(tmp_path, ships_libtorch_cuda=True) == "ON"
+
+
+@pytest.mark.anyplatform
+def test_the_probe_answers_off_on_a_cpu_only_torch(tmp_path):
+    """The CPU-only pip torch every CI lane pins must keep the host path."""
+    assert _run_probe(tmp_path, ships_libtorch_cuda=False) == "OFF"
+
+
+@pytest.mark.anyplatform
+def test_the_probe_keys_on_libtorch_cuda_and_not_on_a_name():
+    """Whatever the mechanism, the question asked must be about the library.
+
+    An accelerator name or a build option would guess at a property of the torch
+    that was found instead of reading it.
+    """
+    probe = _probe_text()
+    assert "libtorch_cuda.so" in probe, (
         "the probe does not look for libtorch_cuda.so before turning the define on"
     )
-    assert "torch_cpu_library" in probe_block, (
-        "the probe must resolve the directory of the torch it actually links"
+    assert re.search(r"set\(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA\s+ON\)", probe), (
+        "nothing ever turns FLAGOS_TORCH_LINKS_LIBTORCH_CUDA on"
     )
 
 
