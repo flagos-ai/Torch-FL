@@ -5,6 +5,7 @@
 #include <ATen/core/List.h>
 #include <set>
 #include "op_preparation.h"
+#include "complex_ops.h"
 #include "op_api_common.h"
 
 namespace at::native::flagos {
@@ -95,6 +96,8 @@ at::Tensor IndexTensorKernelAscend(const at::Tensor& self,
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
+
+  if (self.is_complex()) return ascend::ComplexIndex(self, indices);
 
   // Collect defined index tensors and their positions.
   //

@@ -370,6 +370,11 @@ def memory_reserved(device=None):
     return _C._memory_reserved(device)
 
 
+def mem_get_info(device=None):
+    """Return physical free and total device memory in bytes."""
+    return _C._mem_get_info(_device_index(device))
+
+
 def reset_peak_memory_stats(device=None):
     """Reset the peak memory statistics tracked by the allocator.
 
@@ -1089,7 +1094,7 @@ class _DeviceProperties:
         # backend. The module path is the same on FlagTree and triton-ascend.
         self.name = f"Ascend NPU {device_id}"
         self.multi_processor_count = _aicore_count()
-        self.total_memory = _C._memory_reserved(device_id)
+        self.total_memory = mem_get_info(device_id)[1]
         # CUDA-style sentinels required by torch.utils._triton probes.
         self.major = 8
         self.minor = 0
@@ -3159,6 +3164,7 @@ __all__ = [
     "memory_stats",
     "memory_allocated",
     "memory_reserved",
+    "mem_get_info",
     "reset_peak_memory_stats",
     "get_device_properties",
 ]

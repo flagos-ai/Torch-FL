@@ -83,6 +83,7 @@ try:
     )
     from torchgen.packaged.autograd.gen_trace_type import type_wrapper_name
     from torchgen.packaged.autograd.gen_variable_type import (
+        GRADIENT_IMPLEMENTED_FOR_COMPLEX,
         emit_body,
         gen_wrapper_registration,
     )
@@ -105,6 +106,24 @@ except ImportError as e:  # pragma: no cover
 AUTOGRAD_OPS = [
     "matmul",
 ]
+
+# torchgen omits composite matmul from this set because PyTorch normally
+# differentiates its decomposition. Ascend owns the fused derivative and now
+# implements its complex conjugate-transpose rules explicitly.
+COMPLEX_AUTOGRAD_OPS = {"matmul"}
+
+
+def emit_backend_body(function, name):
+    """Advertise implemented backend derivatives without changing torchgen globally."""
+    already_supported = name in GRADIENT_IMPLEMENTED_FOR_COMPLEX
+    if name in COMPLEX_AUTOGRAD_OPS:
+        GRADIENT_IMPLEMENTED_FOR_COMPLEX.add(name)
+    try:
+        return emit_body(function, "Default")
+    finally:
+        if not already_supported:
+            GRADIENT_IMPLEMENTED_FOR_COMPLEX.discard(name)
+
 
 # Preprocessor guard wrapped around the registrations. The ops above are re-owned
 # only because the Ascend backend has a fused kernel for them; on other backends
@@ -172,6 +191,7 @@ FILE_HEADER = """\
 // See scripts/codegen/codegen_autograd.py for the full rationale.
 
 #include <ATen/RedispatchFunctions.h>
+#include "../backends/ascend/matmul.h"
 #include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/csrc/autograd/generated/Functions.h>
 #include <torch/library.h>
@@ -267,7 +287,7 @@ def main() -> int:
             continue
 
         with native_function_manager(fn.func):
-            body = emit_body(fn, "Default")
+            body = emit_backend_body(fn, name)
             definition = METHOD_DEFINITION.substitute(
                 return_type=cpp.returns_type(fn.func.func.returns).cpp_type(),
                 type_wrapper_name=type_wrapper_name(fn.func),
@@ -286,6 +306,21 @@ def main() -> int:
     if missing:
         print(f"Error: no derivative found for {sorted(missing)}", file=sys.stderr)
         return 1
+
+    # The backward is composed from differentiable ATen tensor operations.
+    # Keep it above AutogradPrivateUse1 so create_graph records the second sweep
+    # needed by JVP and Hessian-vector products instead of installing NotImplemented.
+    definitions.append("""
+std::tuple<at::Tensor, at::Tensor> matmul_backward(
+    c10::DispatchKeySet ks, const at::Tensor& grad, const at::Tensor& self,
+    const at::Tensor& other, std::array<bool, 2> mask) {
+  (void)ks;
+  return at::native::flagos::MatmulBackwardKernelAscend(grad, self, other, mask);
+}
+""")
+    registrations.append(
+        'm.impl("matmul_backward", TORCH_FN(VariableType::matmul_backward));'
+    )
 
     out = out_dir / "variable_type.cc"
     body = "\n".join(definitions)

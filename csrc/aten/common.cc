@@ -597,10 +597,9 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype) {
   // failure) rather than changing route.
   return dtype == at::kComplexFloat || dtype == at::kComplexDouble;
 #elif defined(USE_ASCEND)
-  // See the declaration in common.h for the measurement. float64 is the only
-  // dtype FlagGems' Ascend route could not serve across the pointwise family;
-  // fp32/fp16/bf16/int64/bool all compile and run.
-  return dtype == at::kDouble;
+  // FlagTree cannot instantiate general complex kernels. The generated
+  // native route decomposes supported complex operations into real kernels.
+  return dtype == at::kDouble || c10::isComplexType(dtype);
 #elif defined(USE_GCU)
   // See the declaration in common.h for the measurement. int64 is the dtype
   // that matters: it fails inside the compiler for every flag_gems pointwise
@@ -685,6 +684,10 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   };
   static constexpr OpDtypeGap kGaps[] = {
       {at::kBool, "neg"},
+      // The Ascend where override cannot lower an int64 select for a scalar
+      // condition and a one-dimensional result (circuit basis indexing).
+      {at::kLong, "where.self"},
+      {at::kLong, "where.self_out"},
       // Integral matmul: the four dtypes the Ascend dot intrinsic refuses.
       // "mm.out" is its own conf key, so it needs its own entries.
       {at::kLong, "mm"},

@@ -29,6 +29,8 @@
 #include "op_preparation.h"
 #include "op_api_common.h"
 #include "dtype_support.h"
+#include "complex_ops.h"
+#include "matmul.h"
 #include <ATen/ops/matmul.h>
 
 namespace at::native::flagos {
@@ -58,6 +60,8 @@ static std::vector<int64_t> matmul_output_shape(
     int64_t ai = na - n + i, bi = nb - n + i;
     int64_t sa = (ai >= 0) ? a_sz[ai] : 1;
     int64_t sb = (bi >= 0) ? b_sz[bi] : 1;
+    TORCH_CHECK(sa == sb || sa == 1 || sb == 1,
+                "matmul: incompatible batch dimensions");
     out.push_back(sa == 1 ? sb : sa);
   }
   out.push_back(a_sz[na - 2]);  // M
@@ -74,10 +78,26 @@ at::Tensor MatmulKernelAscend(const at::Tensor& self,
   ::at::native::flagos::ascend::OpDeviceGuard device_guard_(
       ::at::native::flagos::ascend::DeviceOf(self));
   namespace ascend = at::native::flagos::ascend;
+  TORCH_CHECK(self.dim() > 0 && other.dim() > 0,
+              "matmul: both arguments must be at least one-dimensional");
+  TORCH_CHECK(self.device() == other.device(),
+              "matmul: input devices must match");
+  TORCH_CHECK(self.size(-1) == other.size(other.dim() == 1 ? -1 : -2),
+              "matmul: incompatible contraction sizes");
+  if (self.is_complex() && self.scalar_type() == other.scalar_type()) {
+    return ascend::ComplexMatmul(self, other);
+  }
+  if (self.scalar_type() == at::kDouble && other.scalar_type() == at::kDouble &&
+      !ascend::IsFp16OnlyMatmulSoc(ascend::GetSocName())) {
+    return ascend::RealMatmulDouble(self, other);
+  }
   if (!ascend::IsMatmulDtypeSupported(self.scalar_type()) ||
       self.scalar_type() != other.scalar_type()) {
     auto cpu_result = at::matmul(self.cpu(), other.cpu());
     return ascend::MoveCpuResultToDevice(std::move(cpu_result), self);
+  }
+  if (self.numel() == 0 || other.numel() == 0) {
+    return at::zeros(matmul_output_shape(self, other), self.options());
   }
   int8_t cube_math_type = ascend::OpPreparation::get_cube_math_type(true);
   auto out = ascend::OpPreparation::apply_tensor_without_format(
@@ -185,9 +205,9 @@ static at::Tensor matmul_mat1_backward(const at::Tensor& self,
     grad = grad.permute(perm).contiguous().reshape({m, -1});
     // The flattened contraction already summed over B, so this lands on
     // target directly and needs no further reduction.
-    return MatmulKernelAscend(grad, mat2).reshape(target);
+    return at::matmul(grad, mat2).reshape(target);
   }
-  return sum_to_shape(MatmulKernelAscend(grad, mat2.transpose(-2, -1)), target);
+  return sum_to_shape(at::matmul(grad, mat2.transpose(-2, -1)), target);
 }
 
 static at::Tensor matmul_mat2_backward(const at::Tensor& self,
@@ -214,9 +234,9 @@ static at::Tensor matmul_mat2_backward(const at::Tensor& self,
     // order on both sides.
     at::Tensor lhs = mat1.reshape({-1, mat1.size(-1)});
     at::Tensor rhs = grad.reshape({-1, grad.size(-1)});
-    return MatmulKernelAscend(lhs.transpose(-2, -1), rhs).reshape(target);
+    return at::matmul(lhs.transpose(-2, -1), rhs).reshape(target);
   }
-  return sum_to_shape(MatmulKernelAscend(mat1.transpose(-2, -1), grad), target);
+  return sum_to_shape(at::matmul(mat1.transpose(-2, -1), grad), target);
 }
 
 std::tuple<at::Tensor, at::Tensor> MatmulBackwardKernelAscend(
@@ -234,10 +254,10 @@ std::tuple<at::Tensor, at::Tensor> MatmulBackwardKernelAscend(
 
   at::Tensor self_grad, other_grad;
   if (mask[1]) {
-    other_grad = matmul_mat2_backward(self, other, grad);
+    other_grad = matmul_mat2_backward(self.conj(), other, grad);
   }
   if (mask[0]) {
-    self_grad = matmul_mat1_backward(self, other, grad);
+    self_grad = matmul_mat1_backward(self, other.conj(), grad);
   }
 
   // The 1-D promotions above leave a stray dim on the gradient of a 1-D

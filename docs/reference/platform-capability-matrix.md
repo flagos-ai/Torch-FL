@@ -15,17 +15,17 @@ when a platform gains or loses one.
 | lane (`FLAGOS_ACCELERATOR` id) | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
 | `nvidia` | native CUDA (FlagGems-primary; CUDA boxing opt-in) | `nvidia` | — (C++ / FlagGems / CUDA) | `nvidia` | 2034 | yes |
-| `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_thead/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2037 | yes |
-| `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2037 | yes |
-| `hygon` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `nvidia` (+ `hygon` DTK-core shim) | — (FlagGems / boxing opt-in) | `hygon` | 2037 | yes |
-| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2037 | yes |
-| `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2037 | yes |
-| `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2037 | yes |
-| `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2037 | yes |
+| `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_thead/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2042 | yes |
+| `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2042 | yes |
+| `hygon` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `nvidia` (+ `hygon` DTK-core shim) | — (FlagGems / boxing opt-in) | `hygon` | 2042 | yes |
+| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2042 | yes |
+| `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2042 | yes |
+| `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2042 | yes |
+| `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2042 | yes |
 | `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
-| `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2037 | no |
-| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2037 | yes |
-| `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2037 | yes |
+| `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2042 | no |
+| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
+| `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2042 | yes |
 
 Column notes:
 
@@ -61,10 +61,11 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
   runtime dtype escape has no `USE_ILUVATAR` arm), and the native kernels serve
   the ops FlagGems does not cover.
 - **conf routes** is the number of `op = backend` entries in
-  `torch_fl/configs/backends_<platform>.conf`. 2037 is the full-coverage set; 0
-  is the by-design BPU file and 81 the hand-written TsingMicro one. MPS reads
-  2037 routes: 37 reach its native kernels and the other 2000 resolve to `none`
-  (`cpu_fallback`).
+  `torch_fl/configs/backends_<platform>.conf`. The generated vendor set has
+  2042 entries, including five additional Ascend aliases that remain `none` on
+  other vendors. NVIDIA retains its 2034-entry base set and TsingMicro its
+  81-entry selection. These totals include `none`; they do not measure native
+  operator coverage.
 - **CI** is whether `.github/configs/<platform>.yml` and a platform pipeline job
   exist.
 
