@@ -74,6 +74,49 @@ def _module_cache_key(kind, weight, bias, *params):
     return "|".join(parts)
 
 
+class _FunctionalOp(nn.Module):
+    """A parameterised op expressed through the functional API.
+
+    aten's counterpart of this operator is a function, so its BPU form should
+    call the functional API too rather than build an nn.Module -- initialise,
+    copy weights in, and throw the scaffolding away on every call. This holds
+    only the tensors the function needs; symbolic_trace sees one conv2d call.
+    """
+
+    def __init__(self, weight, stride: int, groups: int):
+        super().__init__()
+        self.weight = nn.Parameter(weight, requires_grad=False)
+        self.stride = stride
+        self.groups = groups
+
+    def forward(self, x):
+        return torch.nn.functional.conv2d(
+            x, self.weight, None, self.stride, 0, 1, self.groups
+        )
+
+
+def _avg_pool_as_conv(channels: int, kernel: int, stride: int) -> nn.Module:
+    """Average pooling as the depthwise conv that computes the same mean.
+
+    Cached by shape: every avg_pool with the same channel count, window and
+    stride is the same operator, and its only weight is a constant. Building
+    the weight once also keeps the artifact cache warm, since the compiled
+    kernel is keyed on the module instance.
+    """
+    key = f"avgpool|{channels}|{kernel}|{stride}"
+    with _holder_lock:
+        cached = _holders.get(key)
+    if cached is not None:
+        return cached
+    weight = torch.full(
+        (channels, 1, kernel, kernel), 1.0 / (kernel * kernel), dtype=torch.float32
+    )
+    module = _FunctionalOp(weight, stride, channels)
+    with _holder_lock:
+        _holders[key] = module
+    return module
+
+
 def _cached_module(key, build):
     with _holder_lock:
         module = _holders.get(key)
@@ -207,17 +250,8 @@ def build_impls(lib: torch.library.Library, dispatcher) -> None:
         s = _pair(stride) if stride else k
         if k[0] != k[1] or s[0] != s[1]:
             raise NotImplementedError
-        module = nn.Conv2d(
-            int(inp.shape[1]),
-            int(inp.shape[1]),
-            k[0],
-            stride=s[0],
-            bias=False,
-            groups=int(inp.shape[1]),
-        ).eval()
-        with torch.no_grad():
-            module.weight.fill_(1.0 / (k[0] * k[1]))
-        out = dispatcher.run_module(module, inp)
+        op = _avg_pool_as_conv(int(inp.shape[1]), k[0], s[0])
+        out = dispatcher.run_module(op, inp)
         if out is None:
             raise NotImplementedError
         return out
