@@ -65,6 +65,7 @@ that environment already carries PyYAML for ``test_ci_pip_cache.py`` and for
 FlagGems' own dependencies (``PyYAML==6.0.1`` in ``set_env_hygon.sh``).
 """
 
+import ast
 import itertools
 import re
 import shlex
@@ -365,6 +366,7 @@ class _Selection(NamedTuple):
     paths: tuple[str, ...]
     marker: str | None
     ignored: tuple[str, ...]
+    keyword: str | None = None
 
 
 def _pytest_arguments(command: str) -> list[str]:
@@ -416,14 +418,18 @@ def _selection_of(command: str) -> _Selection | None:
     paths: list[str] = []
     ignored: list[str] = []
     marker: str | None = None
+    keyword: str | None = None
     index = 0
     while index < len(arguments):
         token = arguments[index]
         if token in _OPTIONS_WITH_VALUES:
-            # Every one of these takes the next token, but only `-m` says
-            # anything about which files the command runs.
+            # Every one of these takes the next token. `-m` says which files
+            # the command runs; `-k` says which cases inside them survive, and
+            # the case-level check below is the only reader that needs it.
             if token == "-m" and index + 1 < len(arguments):
                 marker = arguments[index + 1]
+            if token == "-k" and index + 1 < len(arguments):
+                keyword = arguments[index + 1]
             index += 2
             continue
         if token.startswith("--ignore="):
@@ -437,7 +443,7 @@ def _selection_of(command: str) -> _Selection | None:
         if target is not None:
             paths.append(target)
         index += 1
-    return _Selection(tuple(paths), marker, tuple(ignored))
+    return _Selection(tuple(paths), marker, tuple(ignored), keyword)
 
 
 def _manifest_selections(platform: str) -> list[_Selection]:
@@ -702,3 +708,482 @@ def test_the_known_unreachable_list_has_not_gone_stale():
     assert not vanished, (
         f"{vanished} are listed in _KNOWN_UNREACHABLE but do not exist any more"
     )
+
+
+# ---------------------------------------------------------------------------
+# Case-level reachability
+#
+# The check above is per file, and a file counts as reached when any one of its
+# cases is. That is the weaker half of the same question, and the gap between
+# the two halves is where coverage goes missing without a red build:
+#
+#   * `multi_device_contracts` deselects twenty case names with `-k`, and five
+#     of them are every case in `test_nonzero_device_dtype_cast.py`. The file
+#     is selected by that command, so the orphan check counts it -- and it has
+#     no record on any of the fourteen lanes. The manifest comment says `-k`
+#     was chosen over `--ignore` *because* `--ignore` trips the orphan check,
+#     which makes the bypass a documented one.
+#   * Fifty-four `cuda`- and `metax`-marked cases and twenty-seven
+#     `flaggems_python` ones live in files a sweep does select, under marks no
+#     sweep's `-m` accepts. Issue #555 registered five of them; the class is
+#     larger.
+#
+# So this half asks the question per case: for each test function, is there a
+# composed command whose paths cover its file, whose `-m` accepts its marks,
+# and whose `-k` keeps its name? Marks are read per case here rather than per
+# file, which needs the decorators a function and its enclosing class carry --
+# read off the AST, so this check still runs with no device and no imports.
+#
+# Parametrization is not expanded: a case is the function, and `-k` matching
+# against the id of one parameter set would need the parameters evaluated.
+# Every `-k` in the manifest names functions and classes, never parameter ids,
+# so the approximation costs nothing today and the check below says so if that
+# changes.
+# ---------------------------------------------------------------------------
+
+# Marks a decorator can carry that select nothing, same list as the file-level
+# reader uses.
+_PYTEST_MARK_PREFIX = ("pytest", "mark")
+
+
+def _decorator_marks(decorators: list[ast.expr]) -> set[str]:
+    """The `pytest.mark.<name>` marks in a decorator list."""
+    marks = set()
+    for decorator in decorators:
+        node = decorator.func if isinstance(decorator, ast.Call) else decorator
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+        parts.reverse()
+        if len(parts) >= 3 and tuple(parts[:2]) == _PYTEST_MARK_PREFIX:
+            marks.add(parts[2])
+    return marks - _NON_SELECTING_MARKS
+
+
+def _module_marks(tree: ast.Module) -> set[str]:
+    """The marks a module-level ``pytestmark`` applies to every case in it.
+
+    ``pytestmark`` is sometimes assigned a list the module built under another
+    name a few lines up -- ``ops/test_dtype_cast_copy.py`` does, and reading
+    only the right-hand side made its eight cases look unmarked and so
+    unreachable, when four lanes run all fifty-six of them. So module-level
+    list and tuple bindings are collected first and a bare ``Name`` on the
+    right is resolved through them.
+    """
+    bindings: dict[str, list[ast.expr]] = {}
+    marks: set[str] = set()
+
+    def items_of(value: ast.expr) -> list[ast.expr]:
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return list(value.elts)
+        if isinstance(value, ast.Name):
+            return bindings.get(value.id, [])
+        return [value]
+
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        if isinstance(node.value, (ast.List, ast.Tuple)):
+            for name in names:
+                bindings[name] = list(node.value.elts)
+        if "pytestmark" in names:
+            marks |= _decorator_marks(items_of(node.value))
+    return marks
+
+
+class _Case(NamedTuple):
+    """One test function: where it lives, its node id parts, and its marks."""
+
+    file: str
+    parts: tuple[str, ...]
+    marks: frozenset[str]
+
+    @property
+    def node_id(self) -> str:
+        return "::".join((self.file,) + self.parts)
+
+
+def _cases_of(relative: str) -> list[_Case]:
+    """Every test function in one file, with the marks it ends up carrying.
+
+    A case carries its own decorators, those of every class enclosing it, and
+    the module's ``pytestmark`` -- which is what pytest collects it under.
+    """
+    tree = ast.parse((_REPO_ROOT / relative).read_text(encoding="utf-8"))
+    found: list[_Case] = []
+
+    def walk(body, inherited: set[str], parts: tuple[str, ...]) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                walk(
+                    node.body,
+                    inherited | _decorator_marks(node.decorator_list),
+                    parts + (node.name,),
+                )
+            elif isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and node.name.startswith("test"):
+                found.append(
+                    _Case(
+                        relative,
+                        parts + (node.name,),
+                        frozenset(inherited | _decorator_marks(node.decorator_list)),
+                    )
+                )
+
+    walk(tree.body, _module_marks(tree), ())
+    return found
+
+
+def _all_cases() -> list[_Case]:
+    """Every test case under ``tests/integration/``."""
+    return [
+        case for relative in sorted(_test_file_paths()) for case in _cases_of(relative)
+    ]
+
+
+def _keeps(expression: str, parts: tuple[str, ...]) -> bool:
+    """What pytest's ``-k`` would answer for a case whose id ends in ``parts``.
+
+    Same grammar as ``-m``, with names matched as substrings of the node id's
+    components rather than as marks, which is what ``-k`` does.
+    """
+    marks = {
+        name
+        for name in _MARKER_TOKEN_RE.findall(expression)
+        if name not in ("and", "or", "not", "(", ")")
+        and any(name in part for part in parts)
+    }
+    return _evaluate(expression, marks)
+
+
+def _unselected_cases() -> list[_Case]:
+    """Every case no composed command collects."""
+    selections = {
+        platform: _manifest_selections(platform) for platform in _manifest_platforms()
+    }
+    unselected = []
+    for case in _all_cases():
+        if any(
+            not any(_names_target(case.file, skip) for skip in selection.ignored)
+            and any(_names_target(case.file, path) for path in selection.paths)
+            and (
+                selection.marker is None or _evaluate(selection.marker, set(case.marks))
+            )
+            and (selection.keyword is None or _keeps(selection.keyword, case.parts))
+            for platform_selections in selections.values()
+            for selection in platform_selections
+        ):
+            continue
+        unselected.append(case)
+    return unselected
+
+
+# Cases no composed command collects, grouped by the reason they are left that
+# way. This is the ratchet at case granularity: it has to match reality
+# exactly, so a `-k` that drops a case, or a mark no sweep accepts, is a
+# visible edit here rather than a quiet hole behind a green lane.
+#
+# Every file-level exclusion in _KNOWN_UNREACHABLE implies its cases, so those
+# files are not repeated below; what is left is the cases inside files that do
+# reach a job.
+_KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "cuda_reference": (
+        (
+            "asserts flagos against a live `cuda:0` reference, or overrides the "
+            "op to the boxing route, and no lane has both: every platform's "
+            "torch is CPU-only or vendor-CUDA-ABI, and `FLAGOS_OP_<op>=cuda` "
+            "needs a boxing wheel. The cases self-skip on "
+            "`torch.cuda.is_available()` where they can, so wiring them in on a "
+            "boxing lane is the fix rather than deleting them. Tracked by issue "
+            "#555"
+        ),
+        (
+            "tests/integration/ops/test_abs_dispatch.py::TestAbsCorrectness::test_abs_matches_cuda",
+            "tests/integration/ops/test_acos_dispatch.py::TestAcosCorrectness::test_acos_matches_cuda",
+            "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_add_dispatch.py::TestAddTensorCorrectness::test_add_matches_cuda",
+            "tests/integration/ops/test_all_dispatch.py::TestAllCorrectness::test_all_matches_cuda",
+            "tests/integration/ops/test_all_dispatch.py::TestAllDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatch::test_bmm_matches_cuda_ref",
+            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_bmm_out_cuda_override",
+            "tests/integration/ops/test_cat_dispatch.py::TestCatDispatch::test_cat_matches_cuda_ref",
+            "tests/integration/ops/test_constant_pad_nd_dispatch.py::TestConstantPadNdDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_cos_dispatch.py::TestCosCorrectness::test_cos_matches_cuda",
+            "tests/integration/ops/test_cos_dispatch.py::TestCosDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_div_scalar_dispatch.py::TestDivScalarCorrectness::test_div_scalar_matches_cuda",
+            "tests/integration/ops/test_embedding_dense_backward_dispatch.py::TestEmbeddingDenseBackwardDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_embedding_dispatch.py::TestEmbeddingDispatch::test_embedding_matches_cuda_ref",
+            "tests/integration/ops/test_le_dispatch.py::TestLeDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_mean_dispatch.py::TestMeanDimCorrectness::test_mean_matches_cuda",
+            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatch::test_mm_matches_cuda_ref",
+            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_mm_out_cuda_override",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorCorrectness::test_mul_matches_cuda",
+            "tests/integration/ops/test_mul_scalar_dispatch.py::TestMulScalarCorrectness::test_mul_scalar_matches_cuda",
+            "tests/integration/ops/test_neg_dispatch.py::TestNegCorrectness::test_neg_matches_cuda",
+            "tests/integration/ops/test_new_ones_dispatch.py::TestNewOnesDispatch::test_dispatch_log_cuda",
+            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_backward_cuda",
+            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_forward_cuda",
+            "tests/integration/ops/test_ones_like_dispatch.py::TestOnesLikeDispatch::test_dispatch_log_cuda",
+            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarCorrectness::test_pow_matches_cuda",
+            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtCorrectness::test_rsqrt_matches_cuda",
+            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_scalar_tensor_dispatch.py::TestScalarTensorDispatch::test_dispatch_log_cuda",
+            "tests/integration/ops/test_silu_backward_dispatch.py::TestSiluBackwardDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_silu_dispatch.py::TestSiluCorrectness::test_silu_matches_cuda",
+            "tests/integration/ops/test_sin_dispatch.py::TestSinCorrectness::test_sin_matches_cuda",
+            "tests/integration/ops/test_sin_dispatch.py::TestSinDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_slice_backward_dispatch.py::TestSliceBackwardDispatch::test_dispatch_log_cuda_override",
+            "tests/integration/ops/test_sum_dispatch.py::TestSumDimCorrectness::test_sum_dim_matches_cuda",
+            "tests/integration/ops/test_zeros_dispatch.py::TestZerosDispatch::test_dispatch_log_cuda",
+        ),
+    ),
+    "flaggems_python_override": (
+        (
+            "asserts `FLAGOS_OP_<op>=flaggems_python` emits a dispatch line, "
+            "which needs the op claimed on PrivateUse1; no lane's `-m` names "
+            "the marker, and on a default wheel an op the conf routes elsewhere "
+            "has no slot for the override to reach. This is issue #555's class "
+            "exactly"
+        ),
+        (
+            "tests/integration/ops/test_abs_dispatch.py::TestAbsDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_add_dispatch.py::TestAddTensorDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_all_dispatch.py::TestAllDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_cat_dispatch.py::TestCatDispatchLog::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_constant_pad_nd_dispatch.py::TestConstantPadNdDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_cos_dispatch.py::TestCosDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_embedding_dense_backward_dispatch.py::TestEmbeddingDenseBackwardDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_embedding_dispatch.py::TestEmbeddingDispatchLog::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_le_dispatch.py::TestLeDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_mean_dispatch.py::TestMeanDimDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_neg_dispatch.py::TestNegDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_backward_flaggems_python",
+            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_forward_flaggems_python",
+            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_silu_backward_dispatch.py::TestSiluBackwardDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_silu_dispatch.py::TestSiluDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_sin_dispatch.py::TestSinDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_slice_backward_dispatch.py::TestSliceBackwardDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_softmax_dispatch.py::TestSoftmaxDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_sum_dispatch.py::TestSumDimDispatch::test_dispatch_log_flaggems_python",
+            "tests/integration/ops/test_where_dispatch.py::TestWhereDispatch::test_dispatch_log_flaggems_python",
+        ),
+    ),
+    "multi_device_boxing_gaps": (
+        (
+            "deselected by name from `multi_device_contracts`, the one group "
+            "that sweeps `-m multi_device`, because each reaches an op the "
+            "boxing confs route to `none`. The `-k` was chosen over `--ignore` "
+            "so the file-level check above keeps counting the files as "
+            "selected, which is why the cases have to be named here. Five of "
+            "them are every case in test_nonzero_device_dtype_cast.py, so that "
+            "file runs nowhere at all"
+        ),
+        (
+            "tests/integration/test_allocator.py::TestCachingAllocatorOps::test_matmul",
+            "tests/integration/test_compute_device_index.py::test_binary_tensor_op",
+            "tests/integration/test_compute_device_index.py::test_binary_tensor_scalar_op",
+            "tests/integration/test_compute_device_index.py::test_cpu_scalar_operand_lands_on_operand_device",
+            "tests/integration/test_compute_device_index.py::test_current_device_is_restored",
+            "tests/integration/test_compute_device_index.py::test_kwarg_op",
+            "tests/integration/test_compute_device_index.py::test_multinomial_on_nonzero_device",
+            "tests/integration/test_compute_device_index.py::test_random_inplace_op",
+            "tests/integration/test_compute_device_index.py::test_tensor_list_op",
+            "tests/integration/test_compute_device_index.py::test_tensor_scalar_op",
+            "tests/integration/test_compute_device_index.py::test_ternary_tensor_op",
+            "tests/integration/test_compute_device_index.py::test_unary_inplace_op",
+            "tests/integration/test_compute_device_index.py::test_unary_op",
+            "tests/integration/test_factory_device_index.py::test_full_like_defaults_to_source_device",
+            "tests/integration/test_factory_device_index.py::test_like_factory_defaults_to_source_device",
+            "tests/integration/test_nonzero_device_dtype_cast.py::test_boxed_op_leaves_current_device_untouched",
+            "tests/integration/test_nonzero_device_dtype_cast.py::test_cast_on_nonzero_device_leaves_current_device_alone",
+            "tests/integration/test_nonzero_device_dtype_cast.py::test_cast_values_are_exact_on_nonzero_device",
+            "tests/integration/test_nonzero_device_dtype_cast.py::test_int64_to_bool_cast_on_nonzero_device",
+            "tests/integration/test_nonzero_device_dtype_cast.py::test_issue_313_repro_in_a_fresh_process",
+        ),
+    ),
+    "unmarked_in_swept_dir": (
+        (
+            "carries no selecting mark, and every command covering its file "
+            "filters by `-m`, so nothing collects the case. Giving it the mark "
+            "its siblings carry is the fix; it is listed rather than fixed here "
+            "so this ratchet lands without changing what any lane runs"
+        ),
+        (
+            "tests/integration/ops/test_cat_dispatch.py::TestCatDispatch::test_cat_kv_shape_dtypes",
+            "tests/integration/ops/test_cat_dispatch.py::TestCatKvCacheAppend::test_cat_kv_cache_append_preserves_prefill_prefix",
+            "tests/integration/ops/test_cat_dispatch.py::TestCatKvCacheAppend::test_cat_kv_cache_various_head_dims",
+            "tests/integration/ops/test_flaggems_conf_consistency.py::TestFlagGemsConfConsistency::test_python_kernels_use_runtime_resolved_names",
+            "tests/integration/ops/test_index_dispatch.py::TestBaseTensorSequenceProtocol::test_base_tensor_is_not_a_sequence",
+            "tests/integration/ops/test_index_dispatch.py::TestBaseTensorSequenceProtocol::test_cpu_scalar_list_after_device_init",
+            "tests/integration/ops/test_index_dispatch.py::TestBaseTensorSequenceProtocol::test_device_scalar_list_after_device_init",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorComplex64::test_a_transposed_complex64_operand_declines_the_decomposition",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorComplex64::test_complex64_broadcast_matches_cpu",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorComplex64::test_complex64_is_bit_identical_to_the_real_view_product",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorComplex64::test_complex64_matches_cpu",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorComplex64::test_complex64_takes_the_real_views",
+            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorComplex64::test_real_times_complex64_promotes_and_matches_cpu",
+        ),
+    ),
+    "metax_override": (
+        (
+            "asserts `FLAGOS_OP_<op>=metax` emits a dispatch line. "
+            "backends_metax.conf has no vendor slot, so the MetaX lane's own "
+            "sweep excludes the marker and no other platform can satisfy it"
+        ),
+        (
+            "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_metax",
+            "tests/integration/ops/test_cos_dispatch.py::TestCosDispatch::test_dispatch_log_metax",
+            "tests/integration/ops/test_new_ones_dispatch.py::TestNewOnesDispatch::test_dispatch_log_metax",
+            "tests/integration/ops/test_scalar_tensor_dispatch.py::TestScalarTensorDispatch::test_dispatch_log_metax",
+            "tests/integration/ops/test_sin_dispatch.py::TestSinDispatch::test_dispatch_log_metax",
+            "tests/integration/ops/test_where_dispatch.py::TestWhereDispatch::test_dispatch_log_metax",
+        ),
+    ),
+    "flaggems_runtime_route": (
+        (
+            "carries `flaggems` alone while every sweep that sets `-m` pairs it "
+            "with `main_ops`, so no lane collects it"
+        ),
+        (
+            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_bmm_out_flaggems_runtime",
+            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_mm_out_flaggems_runtime",
+            "tests/integration/ops/test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible_on_flaggems_path",
+        ),
+    ),
+}
+
+
+def test_the_case_reader_sees_the_cases_the_manifests_filter():
+    """A reader that found no cases, or no `-k`, would make the check vacuous.
+
+    Three things have to hold for the ratchet below to mean anything: cases are
+    found at all, their marks are read per case rather than per file, and the
+    `-k` filters are read. Each is asserted against a case that exists for its
+    own reasons, so losing any one of them is red here rather than silent.
+    """
+    cases = _all_cases()
+    assert len(cases) > 1000, f"the reader found only {len(cases)} cases"
+
+    marks = {case.node_id: case.marks for case in cases}
+    acos = "tests/integration/ops/test_acos_dispatch.py"
+    assert marks[f"{acos}::TestAcosCorrectness::test_acos_shape"] == frozenset(
+        {"anyplatform"}
+    ), "class-level marks are not reaching the cases under them"
+    assert marks[f"{acos}::TestAcosDispatch::test_dispatch_log_flaggems_python"] == (
+        frozenset({"flaggems_python"})
+    ), "a case is carrying its sibling class's marks, so marks are read per file"
+
+    keywords = [
+        selection.keyword
+        for platform in _manifest_platforms()
+        for selection in _manifest_selections(platform)
+        if selection.keyword is not None
+    ]
+    assert keywords, "no `-k` filter was read, so every deselected case reads as run"
+    assert _keeps("not test_matmul", ("TestCachingAllocatorOps", "test_allocator"))
+    assert not _keeps("not test_matmul", ("TestCachingAllocatorOps", "test_matmul"))
+
+
+def test_every_k_filter_still_names_something_that_exists():
+    """A `-k` name that matches nothing is a deselection nobody is getting.
+
+    The lists are maintained by hand against failures on one wheel, so a
+    renamed or deleted case leaves a token behind that reads as a live
+    exclusion while filtering nothing.
+    """
+    names = {path.rsplit("/", 1)[-1] for path in _test_file_paths()}
+    for case in _all_cases():
+        names.update(case.parts)
+    stale = sorted(
+        {
+            token
+            for platform in _manifest_platforms()
+            for selection in _manifest_selections(platform)
+            if selection.keyword is not None
+            for token in _MARKER_TOKEN_RE.findall(selection.keyword)
+            if token not in ("and", "or", "not")
+            and not any(token in name for name in names)
+        }
+    )
+    assert not stale, (
+        f"{stale} appear in a manifest `-k` but match no file, class or case "
+        "name; drop them from the filter they are in"
+    )
+
+
+def test_no_integration_case_is_collected_by_no_manifest():
+    """Every case under tests/integration/ has to be collected by some job.
+
+    The file-level check above passes as soon as one case in a file is
+    selected, so a `-k` that drops the rest, or a mark no sweep's `-m`
+    accepts, leaves cases that no lane runs and no check mentions. Five cases
+    of test_nonzero_device_dtype_cast.py were in exactly that state: the file
+    read as reachable and had no record on any of the fourteen lanes.
+    """
+    declared = {
+        node_id
+        for _reason, node_ids in _KNOWN_UNSELECTED_CASES.values()
+        for node_id in node_ids
+    }
+    covered_by_file = set(_KNOWN_UNREACHABLE)
+    undeclared = sorted(
+        case.node_id
+        for case in _unselected_cases()
+        if case.node_id not in declared and case.file not in covered_by_file
+    )
+    assert not undeclared, (
+        f"{undeclared} are collected by no manifest command, so no CI job runs "
+        "them; give each the mark a sweep selects, or add it to "
+        "_KNOWN_UNSELECTED_CASES under the reason it cannot be"
+    )
+
+
+def test_the_known_unselected_list_has_not_gone_stale():
+    """The exclusions have to be re-earned, the same way the file list's are.
+
+    An entry whose case a lane now collects documents a hole that has closed,
+    an entry naming a case that is gone is a stale id pretending to be a
+    decision, and an entry whose file is already excluded wholesale says
+    nothing the file-level list does not.
+    """
+    unselected = {case.node_id for case in _unselected_cases()}
+    existing = {case.node_id for case in _all_cases()}
+    for reason, node_ids in _KNOWN_UNSELECTED_CASES.values():
+        assert reason.strip(), "an entry carries no reason"
+        wired_in = sorted(
+            node_id
+            for node_id in node_ids
+            if node_id in existing and node_id not in unselected
+        )
+        assert not wired_in, (
+            f"{wired_in} are collected now, so their entries in "
+            "_KNOWN_UNSELECTED_CASES describe a hole that has closed; drop them"
+        )
+        vanished = sorted(node_id for node_id in node_ids if node_id not in existing)
+        assert not vanished, (
+            f"{vanished} are listed in _KNOWN_UNSELECTED_CASES but do not "
+            "exist any more"
+        )
+        shadowed = sorted(
+            node_id
+            for node_id in node_ids
+            if node_id.split("::", 1)[0] in _KNOWN_UNREACHABLE
+        )
+        assert not shadowed, (
+            f"{shadowed} sit in files _KNOWN_UNREACHABLE already excludes "
+            "whole; drop the case entries and leave the file entry"
+        )
