@@ -437,7 +437,7 @@ faster_cpu_torch_index() {
 # two mirror hostnames with no --extra-index-url anywhere in the path. The same
 # wheel is listed at the pin, so the retry below is the whole fix.
 install_cpu_torch() {
-  local mirror="${TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL:-${CPU_TORCH_MIRROR_INDEX_URL_DEFAULT:-}}"
+  local mirror="${TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL-${CPU_TORCH_MIRROR_INDEX_URL_DEFAULT:-}}"
   local index="$CPU_TORCH_INDEX_URL"
   if [[ -n "$mirror" && "$mirror" != "$CPU_TORCH_INDEX_URL" ]]; then
     index="$(faster_cpu_torch_index "$CPU_TORCH_INDEX_URL" "$mirror")"

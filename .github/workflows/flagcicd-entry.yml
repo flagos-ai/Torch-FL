@@ -17,6 +17,11 @@ name: FlagCICD Entry
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: pr or full nightly; weekly is reserved
+        type: choice
+        default: pr
+        options: [pr, nightly, weekly]
       pr_number:
         description: Optional open PR number; resolves the actual head and base SHAs
         type: string
@@ -70,14 +75,16 @@ concurrency:
 
 jobs:
   plan:
+    name: Plan and validate configuration
     runs-on: ubuntu-latest
     # Full-history source clone plus the comparison-commit fetch.
     timeout-minutes: 20
     outputs:
       context: ${{ steps.plan.outputs.context }}
+      plan_artifact: ${{ steps.plan.outputs.artifact_name }}
       test_level: ${{ steps.plan.outputs.test_level }}
+      profile: ${{ steps.plan.outputs.profile }}
       platforms: ${{ steps.plan.outputs.platforms }}
-      validated_platforms: ${{ steps.plan.outputs.validated_platforms }}
       source_repository: ${{ steps.resolve.outputs.source_repository }}
       source_sha: ${{ steps.resolve.outputs.source_sha }}
     steps:
@@ -123,7 +130,7 @@ jobs:
       - name: Retain plan
         uses: actions/upload-artifact@v4
         with:
-          name: flagcicd-plan-${{ github.run_attempt }}
+          name: ${{ steps.plan.outputs.artifact_name }}
           path: flagcicd-plan.json
           if-no-files-found: error
           retention-days: 14
@@ -135,21 +142,8 @@ jobs:
       checkout_repository: ${{ needs.plan.outputs.source_repository }}
       checkout_ref: ${{ needs.plan.outputs.source_sha }}
 
-  preflight:
-    name: Validate configuration (${{ matrix.platform }})
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: ${{ fromJSON(needs.plan.outputs.validated_platforms) }}
-    uses: ./.github/workflows/load-platform-config.yml
-    with:
-      platform: ${{ matrix.platform }}
-      checkout_repository: ${{ needs.plan.outputs.source_repository }}
-      checkout_ref: ${{ needs.plan.outputs.source_sha }}
-
   agnostic:
-    needs: [plan, lint, preflight]
+    needs: [plan, lint]
     if: needs.plan.outputs.test_level != 'L0'
     uses: ./.github/workflows/agnostic-checks.yml
     with:
@@ -157,7 +151,7 @@ jobs:
       checkout_ref: ${{ needs.plan.outputs.source_sha }}
 
   codegen:
-    needs: [plan, lint, preflight]
+    needs: [plan, lint]
     if: needs.plan.outputs.test_level != 'L0'
     uses: ./.github/workflows/codegen-checks.yml
     with:
@@ -165,7 +159,7 @@ jobs:
       checkout_ref: ${{ needs.plan.outputs.source_sha }}
 
   platforms:
-    needs: [plan, lint, preflight, agnostic, codegen]
+    needs: [plan, lint, agnostic, codegen]
     if: needs.plan.outputs.test_level == 'L2'
     strategy:
       fail-fast: false
@@ -176,14 +170,16 @@ jobs:
       FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ matrix.platform }}
+      test_profile: ${{ needs.plan.outputs.profile }}
       checkout_repository: ${{ needs.plan.outputs.source_repository }}
       checkout_ref: ${{ needs.plan.outputs.source_sha }}
-      flagcicd_plan: ${{ needs.plan.outputs.context }}
+      execution_plan_artifact: ${{ needs.plan.outputs.plan_artifact || 'missing-required-execution-plan' }}
+      execution_plan_context: ${{ needs.plan.outputs.context }}
 
   complete:
     name: FlagCICD complete
     if: always()
-    needs: [plan, lint, preflight, agnostic, codegen, platforms]
+    needs: [plan, lint, agnostic, codegen, platforms]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -192,6 +188,12 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - name: Download execution plan
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ needs.plan.outputs.plan_artifact || 'missing-required-execution-plan' }}
+          path: execution-plan
       - name: Download platform outcomes
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -204,6 +206,7 @@ jobs:
           JOB_RESULTS: ${{ toJSON(needs) }}
         run: >-
           python .github/scripts/flagcicd_report.py summary
+          --plan-file execution-plan/flagcicd-plan.json
           --directory platform-reports --output flagcicd-run-summary.json
       - name: Retain run summary
         if: always()

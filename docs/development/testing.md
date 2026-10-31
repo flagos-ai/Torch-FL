@@ -357,16 +357,17 @@ GitHub Actions CI runs a subset of tests based on pytest marks:
 
 To replicate CI behavior locally, use the same mark expressions shown above.
 
-`.github/configs/<platform>.yml` is the only place that defines what a platform runs. Ascend,
-cuda, dcu, gcu, metax, musa, ppu, and kunlunxin all use one parameterized pipeline,
-`integration-tests.yml`, dispatched as a matrix from `ci.yml` (one job per platform the discovery
-step reports). Each platform's job reads its config through `load-platform-config.yml`, an
-`ubuntu-latest` job that parses the config with `yq`, then builds, installs, and tests the wheel
-in the same hardware job without transferring a wheel artifact. The runner label, image, mounts,
-timeout, provisioning stage, and test manifest all come from the config, so adding or renaming a
-step means editing only the config: nothing lists tests inline, and there is no per-platform
-workflow to copy. Keeping `yq` off the vendor images is deliberate, so no accelerator container
-needs a YAML dependency.
+`.github/configs/<platform>.yml` defines platform-specific runner, image, mounts,
+timeouts and setup data; `.github/integration-manifest.yml` owns the ordered test
+groups. All platforms use `integration-tests.yml`, dispatched as a matrix from
+`ci.yml`. The plan job validates source configuration with the shared
+`platform_config.py` parser and snapshots final configuration and composed groups.
+`load-platform-config.yml` consumes that exact artifact on `ubuntu-latest`, then
+the hardware job builds, installs and tests the wheel without transferring a wheel
+artifact. Standalone integration and wheel builds use the same parser directly.
+There is no per-platform workflow to copy, and no YAML dependency is needed in
+accelerator images. See [execution plans](ci-controls.md#executable-plans) for
+identity checks, failed-job reruns and the remaining report-gate work.
 
 A platform that can build CUDA boxing runs **two lanes**: its vendor lane (`<platform>`) and
 its boxing lane (`<platform>-boxing`), scheduled together by `generate_matrix.py` from

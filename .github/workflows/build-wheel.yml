@@ -76,6 +76,7 @@ jobs:
       display_name: ${{ needs.configuration.outputs.display_name }}
       setup_script: ${{ needs.configuration.outputs.setup_script }}
       setup_platform: ${{ needs.configuration.outputs.setup_platform }}
+      boxing_lane: ${{ needs.configuration.outputs.boxing_lane }}
       image: ${{ needs.configuration.outputs.ci_image }}
       runs_on: ${{ needs.configuration.outputs.runner_labels }}
       container_volumes: ${{ needs.configuration.outputs.container_volumes }}

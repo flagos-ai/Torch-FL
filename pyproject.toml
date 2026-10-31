@@ -75,13 +75,11 @@ dev = [
     # `ruff` behaves identically to the gate.
     "ruff==0.15.12",
 ]
-# There was a `flagcx` extra here, declaring a bare `flagcx` for the
-# heterogeneous unified-comm inner backend. It is gone because the package is
-# now a pinned requirement on every platform that has a build for it (CUDA,
-# DCU, GCU, MetaX, MUSA -- see _flagos_sibling_requires in setup.py), and the
-# extra could not have worked where it was not: `flagcx` is not on PyPI, and the
-# build is per-vendor (`0.14.0rc2.post2+dtk2604`). The four platforms without a
-# pin have no FlagCX build at all and fall back to the NCCL-shaped route.
+# CUDA communication is separate from the base functional installation. This
+# extra is for CUDA wheels only and requires a matching toolkit/driver and the
+# NVIDIA FlagOS package index. test_ci_version_pins.py keeps this declaration
+# aligned with FLAGCX_VERSION_cuda; other vendors retain their existing pins.
+cuda-comm = ["flagcx==0.14.0+cuda13.3"]
 
 [tool.setuptools.packages.find]
 where = ["."]

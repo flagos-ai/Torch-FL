@@ -44,17 +44,28 @@ git push upstream v2.10.0
    build runner. It reads the target from the `pypi_lane` column of
    `cmake/flagos_platforms.json`:
 
-   | Platform | Lane | Wheel |
+   | Vendor/config | Lane | Wheel |
    |---|---|---|
-   | cuda | `flagos-pypi-nvidia` | `torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl` |
-   | dcu | `flagos-pypi-hygon` | `torch_fl-2.10.0+dtk2604-cp310-cp310-linux_x86_64.whl` |
-   | gcu | `flagos-pypi-enflame` | `torch_fl-2.10.0+tops1.9.10-cp312-cp312-linux_x86_64.whl` |
-   | musa | `flagos-pypi-mthreads` | `torch_fl-2.10.0+musa5.2.0-cp310-cp310-linux_x86_64.whl` |
-   | ppu | `flagos-pypi-thead` | `torch_fl-2.10.0+ppu2.0.0-cp312-cp312-linux_x86_64.whl` |
+   | nvidia | `flagos-pypi-nvidia` | `torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl` |
+   | hygon | `flagos-pypi-hygon` | `torch_fl-2.10.0+dtk2604-cp310-cp310-linux_x86_64.whl` |
+   | enflame | `flagos-pypi-enflame` | `torch_fl-2.10.0+tops1.9.10-cp312-cp312-linux_x86_64.whl` |
+   | mthreads | `flagos-pypi-mthreads` | `torch_fl-2.10.0+musa5.2.0-cp310-cp310-linux_x86_64.whl` |
+   | thead | `flagos-pypi-thead` | `torch_fl-2.10.0+ppu2.0.0-cp312-cp312-linux_x86_64.whl` |
    | ascend | `flagos-pypi-ascend` | `torch_fl-2.10.0+cann9.0.0-cp311-cp311-linux_aarch64.whl` |
    | metax | `flagos-pypi-metax` | `torch_fl-2.10.0+maca3.8.1.3-cp312-cp312-linux_x86_64.whl` |
 
    TsingMicro and BPU do not publish.
+
+   Matrix entries, config basenames and artifact directories use the vendor
+   name. The uploader derives vendor lanes from the same platform table. It
+   also recognizes older artifact directories named for an accelerator id when
+   recovering an old run, and refuses duplicate copies of the same wheel.
+
+   Independent wheel builds forward the loader's boxing mode to the existing
+   environment hook. Wheel verification reinstalls the fresh artifact and checks
+   its recorded kernel sets against the requested mode. Release matrix entries
+   above continue to select default builds; opting into a boxing build does not
+   add a second publishing lane.
 
    Uploading from the platform's own job, rather than collecting all seven wheels
    into one GitHub-hosted job, is a measured decision. On `v2.10.0rc1` the

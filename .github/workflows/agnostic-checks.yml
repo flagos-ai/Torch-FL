@@ -105,6 +105,12 @@ jobs:
           python -m pytest \
             tests/unit/test_ai_reviewer.py \
             tests/unit/test_backend_autoload_contract.py \
+            tests/unit/test_ci_fail_fast.py \
+            tests/unit/test_ci_functional_profiles.py \
+            tests/unit/test_conf_matches_codegen_routes.py \
+            tests/unit/test_backend_enum_naming.py \
+            tests/unit/test_backend_key_vendor_naming.py \
+            tests/unit/test_platform_vendor_naming.py \
             tests/unit/test_ci_pip_cache.py \
             tests/unit/test_ci_platform_routing.py \
             tests/unit/test_ci_matrix.py \
@@ -118,6 +124,7 @@ jobs:
             tests/unit/test_dcu_env_script.py \
             tests/unit/test_device_tracer_correlation.py \
             tests/unit/test_device_tracer_selection.py \
+            tests/unit/test_dtype_cast_arm_contract.py \
             tests/unit/test_env_registry.py \
             tests/unit/test_gen_vendor_confs.py \
             tests/unit/test_import_phase_order.py \
@@ -135,6 +142,7 @@ jobs:
             tests/unit/test_platform_support_detect.py \
             tests/unit/test_run_integration_tests.py \
             tests/unit/test_run_unit_tests.py \
+            tests/unit/test_route_log_name_tables.py \
             tests/unit/test_set_env_common.py \
             tests/unit/test_set_env_runner.py \
             tests/unit/test_startup_lifecycle.py \
@@ -152,6 +160,10 @@ jobs:
       - name: Run FlagCICD entry contract tests
         if: hashFiles('tests/unit/test_flagcicd_entry.py') != ''
         run: python -m pytest tests/unit/test_flagcicd_entry.py -v --tb=short -p no:cacheprovider
+
+      - name: Run execution plan contract tests
+        if: hashFiles('tests/unit/test_ci_plan_observation.py') != ''
+        run: python -m pytest tests/unit/test_ci_plan_observation.py -v --tb=short -p no:cacheprovider
 
       # Every vendor conf must be exactly what its generator emits. The
       # generator needs only the standard library (it reads codegen_ops.py and

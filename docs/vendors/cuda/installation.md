@@ -133,6 +133,25 @@ pytest tests/integration/test_factory_ops.py -v --tb=short
 
 ### Distributed (Multi-GPU)
 
+The CUDA wheel's base installation and functional CI do not require FlagCX.
+Operators, compilation, single-device models, and multi-device placement tests
+do not establish collective-communication support. The installation acceptance
+report records `flagcx_communication=not_validated`. The installed-wheel
+preflight remains mandatory for the base requirements; the global `pip check`
+audit runs only for release acceptance.
+
+For FlagCX communication, explicitly select the CUDA wheel's `cuda-comm` extra
+using the configured FlagOS NVIDIA package index. Its exact version follows
+`FLAGCX_VERSION_cuda` in `.github/version-pins.env`; it requires a separately
+verified matching toolkit and driver. Other vendors retain their existing
+dependency declarations.
+
+The CUDA setup hook only provisions FlagCX when
+`TORCH_FL_CUDA_FLAGCX_WHEEL=1` is explicitly set in a prepared CUDA 13.3
+environment. It does not copy an image's FlagCX package into functional CI.
+Installing the extra or enabling provisioning alone is not communication
+acceptance: run the collective and distributed workloads separately.
+
 Verify collective communication and DDP gradient sync:
 
 ```bash

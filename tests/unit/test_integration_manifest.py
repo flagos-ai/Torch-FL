@@ -80,6 +80,8 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    "cuda_flaggems_mul": tuple(p for p in _PLATFORMS if p != "nvidia"),
+    "cuda_dtype_cast_performance": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "iluvatar_runtime": (
         "apple",
         "ascend",
@@ -396,8 +398,8 @@ def test_a_boxing_platform_runs_the_same_groups_on_both_builds(platform):
 
     A group that only one build ran would be coverage nobody sees the other
     half of: the boxing build is the same model suite, built the other way.
-    `vendor_ops` is the one step whose entry names its build, so it is the one
-    group the vendor build does not run.
+    Explicit vendor-only groups are checked on the vendor build; vendor_ops
+    uses the boxing build's own selection.
     """
     vendor = composed_steps(platform)
     boxing = composed_steps(platform, boxing_lane=True)
@@ -409,7 +411,10 @@ def test_a_boxing_platform_runs_the_same_groups_on_both_builds(platform):
     boxing_ids = [group["manifest_id"] for group in boxing]
     assert vendor_ids.count("vendor_ops") == 0
     assert boxing_ids.count("vendor_ops") == 1
-    assert [i for i in boxing_ids if i != "vendor_ops"] == vendor_ids
+    vendor_only = {entry["id"] for entry in _entries() if entry.get("vendor_only")}
+    assert [i for i in boxing_ids if i != "vendor_ops"] == [
+        i for i in vendor_ids if i not in vendor_only
+    ]
 
 
 def test_the_only_substitution_is_the_display_name():
@@ -750,13 +755,8 @@ def test_a_manifest_that_leaves_a_platform_with_no_steps_is_refused():
         )
 
 
-def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
-    """Exercise the loader's own invocation, not just the functions.
-
-    `load-platform-config.yml` runs this script with `yq`-produced JSON and
-    takes the stdout as the pipeline's groups; a test that only called
-    `compose()` would not notice a broken CLI.
-    """
+def test_the_composer_json_cli_composes_the_same_groups(tmp_path, capsys):
+    """Keep the standalone JSON inspection CLI consistent with compose()."""
     manifest_json = tmp_path / "manifest.json"
     config_json = tmp_path / "cuda.json"
     manifest_json.write_text(json.dumps(manifest()))
@@ -765,6 +765,8 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
     assert (
         composer.main(
             [
+                "--profile",
+                "nightly",
                 "--platform",
                 "nvidia",
                 "--manifest",
@@ -794,6 +796,8 @@ def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
     assert (
         composer.main(
             [
+                "--profile",
+                "nightly",
                 "--platform",
                 "nvidia_h100",
                 "--manifest",

@@ -47,6 +47,11 @@ name: Platform integration tests
 on:
   workflow_call:
     inputs:
+      test_profile:
+        description: Functional test selection (pr or nightly; weekly is reserved)
+        type: string
+        required: false
+        default: pr
       platform:
         description: Config basename under .github/configs (without .yml)
         required: true
@@ -61,8 +66,13 @@ on:
         required: false
         type: string
         default: ''
-      flagcicd_plan:
-        description: Optional compact plan context for structured execution reporting
+      execution_plan_artifact:
+        description: Immutable execution plan artifact for this workflow run
+        required: false
+        type: string
+        default: ''
+      execution_plan_context:
+        description: Compact execution plan identity
         required: false
         type: string
         default: ''
@@ -85,8 +95,11 @@ jobs:
     uses: ./.github/workflows/load-platform-config.yml
     with:
       platform: ${{ inputs.platform }}
+      test_profile: ${{ inputs.test_profile || 'pr' }}
       checkout_repository: ${{ inputs.checkout_repository }}
       checkout_ref: ${{ inputs.checkout_ref }}
+      execution_plan_artifact: ${{ inputs.execution_plan_artifact }}
+      execution_plan_context: ${{ inputs.execution_plan_context }}
 
   integration-tests:
     name: Build and test (${{ needs.configuration.outputs.display_name }})
@@ -189,7 +202,7 @@ jobs:
 
       - name: Validate wheel compatibility manifest
         id: validate
-        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "${{ needs.configuration.outputs.setup_platform }}" --check-build-env
+        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
 
       - name: Install wheel
         id: install
@@ -217,6 +230,12 @@ jobs:
           REPORT_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-pytest.XXXXXX")
           printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
 
+      - name: Record hardware identity
+        run: >-
+          python .github/scripts/record_hardware_identity.py
+          --platform "${{ inputs.platform }}"
+          --output "$FLAGCICD_REPORT_DIR/hardware-${{ inputs.platform }}.json"
+
       - name: Install pytest JSON reporting
         run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
 
@@ -231,6 +250,8 @@ jobs:
       - name: Run ${{ needs.configuration.outputs.display_name }} integration tests
         id: integration-tests
         env:
+          CI_PLAN_CONTEXT: ${{ inputs.execution_plan_context }}
+          REPORT_PLATFORM: ${{ inputs.platform }}
           INTEGRATION_TESTS: ${{ needs.configuration.outputs.integration_tests }}
           INTEGRATION_ENVIRONMENT: ${{ needs.configuration.outputs.integration_environment }}
           METAL_DEVICE_WRAPPER_TYPE: ${{ env.METAL_DEVICE_WRAPPER_TYPE }}
@@ -260,10 +281,27 @@ jobs:
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
         run: >-
           python .github/scripts/merge_pytest_reports.py
-          --report-dir "$FLAGCICD_REPORT_DIR"
+          --report-dir "$FLAGCICD_REPORT_DIR" --require-execution
           --output "$GITHUB_WORKSPACE/pytest-${REPORT_PLATFORM}.json"
           --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
           --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+
+      - name: Check functional test evidence
+        if: inputs.execution_plan_context == ''
+        env:
+          REPORT_PLATFORM: ${{ inputs.platform }}
+        run: |
+          python - <<'PYCODE'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, ".github/scripts")
+          from merge_pytest_reports import validate_pytest_result
+          report = json.loads(Path(os.environ["GITHUB_WORKSPACE"], f"pytest-{os.environ['REPORT_PLATFORM']}.json").read_text())
+          assert report["flagcicd"]["complete"] is True, "test evidence is incomplete"
+          validate_pytest_result(report, require_success=True, require_passed=True)
+          PYCODE
 
       # Resolve report paths inside the job container; github.workspace may
       # contain the runner host's checkout path instead of its container mount.
@@ -289,6 +327,7 @@ jobs:
           TEST_OUTCOME: ${{ steps.integration-tests.outcome }}
           SOURCE_REPOSITORY: ${{ inputs.checkout_repository || github.repository }}
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+          CI_PLAN_CONTEXT: ${{ inputs.execution_plan_context }}
         run: >-
           python .github/scripts/python_coverage.py merge
           --report-dir "$FLAGCICD_COVERAGE_DIR"
@@ -363,7 +402,7 @@ jobs:
 
       - name: Record execution outcomes
         id: execution
-        if: always() && inputs.flagcicd_plan != ''
+        if: always() && inputs.execution_plan_context != ''
         env:
           SETUP_RESULT: ${{ steps.setup.outcome }}
           BUILD_RESULT: ${{ steps.build.outcome }}
@@ -397,7 +436,7 @@ jobs:
 
   flagcicd-report:
     name: FlagCICD outcome (${{ inputs.platform }})
-    if: always() && inputs.flagcicd_plan != ''
+    if: always() && inputs.execution_plan_context != ''
     needs: [configuration, integration-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -408,6 +447,11 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - name: Download execution plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.execution_plan_artifact || 'missing-required-execution-plan' }}
+          path: execution-plan
       - name: Download pytest data
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -422,11 +466,12 @@ jobs:
           path: raw/coverage
       - name: Describe platform execution
         env:
-          FLAGCICD_PLAN: ${{ inputs.flagcicd_plan }}
+          FLAGCICD_PLAN: ${{ inputs.execution_plan_context }}
           JOB_RESULTS: ${{ toJSON(needs) }}
           REPORT_PLATFORM: ${{ inputs.platform }}
         run: >-
           python3 .github/scripts/flagcicd_report.py platform
+          --plan-file execution-plan/flagcicd-plan.json
           --platform "$REPORT_PLATFORM" --directory raw
           --output "flagcicd-platform-${REPORT_PLATFORM}.json"
       - name: Retain platform outcome

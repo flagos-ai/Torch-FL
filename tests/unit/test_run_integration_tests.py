@@ -16,7 +16,10 @@
 
 import importlib.util
 import json
+import os
 import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +32,96 @@ _SPEC = importlib.util.spec_from_file_location("run_integration_tests", _RUNNER_
 assert _SPEC is not None and _SPEC.loader is not None
 _RUNNER = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_RUNNER)
+
+
+@pytest.mark.parametrize("mismatch", [None, "source_sha", "run_id"])
+def test_plan_identity_with_different_checkout_owner(tmp_path, mismatch):
+    source = tmp_path / "source"
+    script = source / ".github/scripts/run_integration_tests.py"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(_RUNNER_PATH.read_bytes())
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text("")
+    environment = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(global_config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    environment.pop("GIT_TEST_ASSUME_DIFFERENT_OWNER", None)
+    for args in (
+        ["init", "-q"],
+        ["add", "."],
+        [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "Test checkout",
+        ],
+    ):
+        subprocess.run(
+            ["git", "-C", str(source), *args],
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    git_head = ["git", "-C", str(source), "rev-parse", "HEAD"]
+    sha = subprocess.check_output(git_head, env=environment, text=True).strip()
+    context = {"source_sha": sha, "run_id": "42"}
+    if mismatch:
+        context[mismatch] = "different"
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    reports = tmp_path / "reports"
+    environment.update(
+        GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+        CI_PLAN_CONTEXT=json.dumps(context),
+        GITHUB_RUN_ID="42",
+        GITHUB_RUN_ATTEMPT="1",
+        REPORT_PLATFORM="nvidia",
+        INTEGRATION_TESTS=json.dumps(
+            [{"name": "probe", "command": "printf checked > executed"}]
+        ),
+        INTEGRATION_ENVIRONMENT="{}",
+        INTEGRATION_WORKDIR=str(workdir),
+        FLAGCICD_REPORT_DIR=str(reports),
+    )
+    rejected = subprocess.run(
+        git_head, env=environment, capture_output=True, text=True, timeout=15
+    )
+    assert rejected.returncode == 128
+    assert "dubious ownership" in rejected.stderr
+
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=workdir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if mismatch:
+        assert result.returncode != 0
+        assert "execution source or run differs from the plan" in result.stderr
+        assert not (workdir / "executed").exists()
+        assert not reports.exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (workdir / "executed").read_text() == "checked"
+        report = json.loads((reports / "groups.json").read_text())
+        assert report["context"] == context
+        assert report["groups"][0]["status"] == "passed"
+
+    # The exception must not persist beyond the runner's single Git invocation.
+    assert global_config.read_text() == ""
+    rejected = subprocess.run(
+        git_head, env=environment, capture_output=True, text=True, timeout=15
+    )
+    assert rejected.returncode == 128
+    assert "dubious ownership" in rejected.stderr
 
 
 def test_per_test_environment_is_expanded_and_scoped(monkeypatch, tmp_path):

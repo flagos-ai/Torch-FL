@@ -27,11 +27,9 @@ one platform ran look like a step every platform ran; here the deviation is a
 `platforms:` key in one file, and how much is still per-platform is a number
 the loader prints on every run.
 
-Input is JSON, not YAML: this runs in the loader job on ubuntu-latest, where
-`yq` is already the YAML reader, and the vendor images are not required to
-carry a Python YAML module. The parsing side of the seam is `yq -o=json`; this
-side is the standard library alone, so it can also be imported by the unit
-tests that hold the manifest's invariants.
+The composer uses only the standard library. The shared platform parser calls
+it with decoded YAML data on a CPU runner; the JSON CLI remains useful for
+local inspection and boundary tests. Vendor images need no YAML dependency.
 """
 
 import argparse
@@ -51,6 +49,8 @@ _ENTRY_KEYS = {
     "platforms",
     "environment",
     "environment_from_config",
+    "profiles",
+    "min_passed",
     "vendor_only",
     "boxing_variant",
 }
@@ -294,6 +294,18 @@ def validate_manifest(manifest, known, boxing=()):
         _require_string(entry.get("name"), f"steps[{index}].name")
         _require_string(entry.get("command"), f"steps[{index}].command")
         platforms = _entry_platforms(entry, known)
+        minimum = entry.get("min_passed", 0)
+        if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
+            raise ManifestError(
+                f"step {step_id!r}: min_passed must be a nonnegative integer"
+            )
+        profiles = entry.get("profiles", ["pr", "nightly"])
+        if (
+            not isinstance(profiles, list)
+            or not profiles
+            or any(profile not in ("pr", "nightly") for profile in profiles)
+        ):
+            raise ManifestError(f"step {step_id!r}: profiles must name pr or nightly")
         owner = _step_owner(entry, known)
         if owner is not None and owner not in boxing:
             raise ManifestError(
@@ -405,6 +417,11 @@ def validate_manifest(manifest, known, boxing=()):
             and platform in assigned[step_id]["vendor"]
             and platform not in scoped_owners
             and platform not in inline_owners
+            and not any(
+                entry.get("vendor_only") and platform in _entry_platforms(entry, known)
+                for entry in steps
+                if _step_id(entry) == step_id
+            )
         )
         if unscoped:
             raise ManifestError(
@@ -440,6 +457,7 @@ def compose(
     boxing_lane=False,
     environment_check=None,
     boxing=(),
+    profile="nightly",
 ):
     """The `integration_tests` list for one platform.
 
@@ -455,6 +473,8 @@ def compose(
     loader hands the boxing lane's ``boxing_environment_check`` here, because the
     two builds are held to different expectations from one config file.
     """
+    if profile not in ("pr", "nightly"):
+        raise ManifestError("weekly is reserved; supported profiles are pr and nightly")
     steps, _ids, _assigned, _named = validate_manifest(manifest, known, boxing)
     if platform not in known:
         raise ManifestError(
@@ -503,6 +523,8 @@ def compose(
 
     composed = []
     for entry in steps:
+        if profile not in entry.get("profiles", ["pr", "nightly"]):
+            continue
         if not applies(entry):
             continue
         environment = _environment(entry, f"step {entry['id']}.environment")
@@ -535,6 +557,8 @@ def compose(
             # step, so the group list alone cannot say which build produced it.
             "manifest_id": entry["id"],
         }
+        if entry.get("min_passed"):
+            step["min_passed"] = entry["min_passed"]
         if environment:
             step["environment"] = environment
         composed.append(step)
@@ -593,6 +617,7 @@ def coverage_report(assigned, named, known, boxing=()):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", required=True)
+    parser.add_argument("--profile", default="pr")
     parser.add_argument("--manifest", required=True, help="manifest as JSON")
     parser.add_argument("--platform-config", required=True, help="config as JSON")
     parser.add_argument(
@@ -634,6 +659,7 @@ def main(argv=None):
             boxing_lane=args.boxing_lane,
             environment_check=environment_check,
             boxing=boxing,
+            profile=args.profile,
         )
     except ManifestError as error:
         print(f"::error::{error}", file=sys.stderr)

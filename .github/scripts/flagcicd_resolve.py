@@ -60,6 +60,9 @@ def resolve(event, event_name, repository, event_sha):
         )
     if not isinstance(request, dict):
         raise ValueError("dispatch request must be an object")
+    profile = request.get("profile", "pr")
+    if profile not in ("pr", "nightly"):
+        raise ValueError("weekly is reserved; supported profiles are pr and nightly")
     number = str(request.get("pr_number", ""))
     checkout_ref = text(request.get("checkout_ref", ""), "checkout_ref")
     base_ref = text(request.get("base_ref", ""), "base_ref")
@@ -96,6 +99,7 @@ def resolve(event, event_name, repository, event_sha):
         "base_sha": base_sha,
         "platforms": request.get("platforms", "all"),
         "requested_level": requested_level,
+        "profile": profile,
         "task_id": text(request.get("task_id", ""), "task_id"),
         "parent_run_id": text(request.get("parent_run_id", ""), "parent_run_id"),
     }

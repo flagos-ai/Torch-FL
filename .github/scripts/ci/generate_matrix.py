@@ -67,8 +67,13 @@ def _load_platforms(configs_dir: pathlib.Path) -> list[str]:
     )
 
 
-def _platform_config(configs_dir: pathlib.Path, platform: str) -> dict:
+def _platform_config(
+    configs_dir: pathlib.Path, platform: str, platform_configs=None
+) -> dict:
     """One platform's config, or {} when it cannot be read."""
+    if platform_configs is not None:
+        cfg = platform_configs[platform]
+        return cfg if isinstance(cfg, dict) else {}
     try:
         cfg = yaml.safe_load((configs_dir / f"{platform}.yml").read_text())
     except (OSError, yaml.YAMLError):
@@ -76,7 +81,9 @@ def _platform_config(configs_dir: pathlib.Path, platform: str) -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
-def boxing_platforms(configs_dir: pathlib.Path, platforms: list[str]) -> list[str]:
+def boxing_platforms(
+    configs_dir: pathlib.Path, platforms: list[str], platform_configs=None
+) -> list[str]:
     """The platforms whose config opts into a second, CUDA-boxing lane.
 
     Read from ``boxing_lane: true`` in the platform's own config rather than
@@ -86,7 +93,8 @@ def boxing_platforms(configs_dir: pathlib.Path, platforms: list[str]) -> list[st
     return [
         platform
         for platform in platforms
-        if _platform_config(configs_dir, platform).get("boxing_lane") is True
+        if _platform_config(configs_dir, platform, platform_configs).get("boxing_lane")
+        is True
     ]
 
 
@@ -145,11 +153,15 @@ def _platforms_from_files(
     all_platforms: list[str],
     configs_dir: pathlib.Path,
     boxing: list[str] | None = None,
+    reasons: list[dict] | None = None,
+    platform_configs=None,
 ) -> list[str]:
     """The lanes a pull request's changed files select."""
-    platforms = _platforms_from_files_bare(changed, all_platforms, configs_dir)
+    platforms = _platforms_from_files_bare(
+        changed, all_platforms, configs_dir, reasons, platform_configs
+    )
     if boxing is None:
-        boxing = boxing_platforms(configs_dir, all_platforms)
+        boxing = boxing_platforms(configs_dir, all_platforms, platform_configs)
     return _schedule(platforms, boxing)
 
 
@@ -157,8 +169,15 @@ def _platforms_from_files_bare(
     changed: list[str] | None,
     all_platforms: list[str],
     configs_dir: pathlib.Path,
+    reasons: list[dict] | None = None,
+    platform_configs=None,
 ) -> list[str]:
+    def explain(kind, **details):
+        if reasons is not None:
+            reasons.append({"kind": kind, **details})
+
     if changed is None:
+        explain("diff_unavailable")
         return all_platforms
     code = [
         path
@@ -166,23 +185,30 @@ def _platforms_from_files_bare(
         if not path.startswith("docs/") and not path.endswith((".md", ".rst"))
     ]
     if not code:
+        explain("documentation_or_empty_diff")
         return []
     watches = {}
     for platform in all_platforms:
         try:
-            cfg = yaml.safe_load((configs_dir / f"{platform}.yml").read_text())
+            cfg = (
+                platform_configs[platform]
+                if platform_configs is not None
+                else yaml.safe_load((configs_dir / f"{platform}.yml").read_text())
+            )
             watch = cfg.get("paths_watch")
             if (
                 not isinstance(watch, list)
                 or not watch
                 or not all(isinstance(pattern, str) and pattern for pattern in watch)
             ):
+                explain("invalid_watch_paths", platform=platform)
                 return all_platforms
             watches[platform] = watch + [
                 f".github/configs/{platform}.yml",
                 f".github/workflows/integration-test-{platform}.yml",
             ]
         except (OSError, yaml.YAMLError, AttributeError):
+            explain("invalid_watch_paths", platform=platform)
             print(
                 f"::warning::Invalid watch paths for {platform}; running all platforms",
                 file=sys.stderr,
@@ -197,7 +223,9 @@ def _platforms_from_files_bare(
         }
         if not affected:
             # Unknown/shared code must never disappear behind one vendor match.
+            explain("unmatched_path", path=path)
             return all_platforms
+        explain("watch_paths", path=path, platforms=sorted(affected))
         selected.update(affected)
     return [platform for platform in all_platforms if platform in selected]
 
@@ -260,6 +288,49 @@ def _platforms_from_dispatch(
     return [lane for lane in lanes if _platform_of(lane, boxing) in platforms]
 
 
+def select_platforms(
+    event_name,
+    configs_dir,
+    changed=None,
+    labels=(),
+    dispatch_platforms="",
+    *,
+    platform_configs=None,
+):
+    """Use the existing routing rules, retaining their selection explanation."""
+    known = (
+        sorted(platform_configs)
+        if platform_configs is not None
+        else _load_platforms(configs_dir)
+    )
+    if not known:
+        raise ValueError(f"No platform configs found in {configs_dir}")
+    boxing = boxing_platforms(configs_dir, known, platform_configs)
+    reasons = []
+    if event_name == "workflow_dispatch":
+        selected = _platforms_from_dispatch(dispatch_platforms, known, boxing)
+        reasons.append({"kind": "dispatch", "requested": dispatch_platforms or "all"})
+    elif event_name != "pull_request":
+        selected = _schedule(known, boxing)
+        reasons.append({"kind": "full_event", "event_name": event_name})
+    else:
+        label_platforms = _platforms_from_labels(labels, known)
+        if label_platforms is not None:
+            selected = _schedule(label_platforms, boxing)
+            routing = sorted(label for label in labels if label.startswith("platform:"))
+            reasons.append({"kind": "labels", "labels": routing})
+            if any(
+                label.split(":", 1)[1].strip() not in (*known, "all")
+                for label in routing
+            ):
+                reasons[-1]["fallback"] = "unknown_platform_label"
+        else:
+            selected = _platforms_from_files(
+                changed, known, configs_dir, boxing, reasons, platform_configs
+            )
+    return selected, reasons
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event-name", required=True, help="GitHub event name")
@@ -299,47 +370,27 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-
-    all_platforms = _load_platforms(configs_dir)
-    boxing = boxing_platforms(configs_dir, all_platforms)
-    if not all_platforms:
-        print(
-            f"::error::No platform configs found in {configs_dir}",
-            file=sys.stderr,
-        )
+    if not _load_platforms(configs_dir):
+        print(f"::error::No platform configs found in {configs_dir}", file=sys.stderr)
         sys.exit(1)
 
-    if args.event_name == "workflow_dispatch":
-        try:
-            selected = _platforms_from_dispatch(
-                args.dispatch_platforms,
-                all_platforms,
-                boxing,
-            )
-        except ValueError as exc:
-            print(f"::error::{exc}", file=sys.stderr)
-            sys.exit(2)
-        print(f"platforms={json.dumps(selected)}")
-        return
-
-    # Other non-PR events always run the full matrix.
-    if args.event_name != "pull_request":
-        print(f"platforms={json.dumps(_schedule(all_platforms, boxing))}")
-        return
-
-    # PR: label routing takes priority over file-change filtering.
     labels = [lb.strip() for lb in args.pr_labels.split(",") if lb.strip()]
-    label_platforms = _platforms_from_labels(labels, all_platforms)
-    if label_platforms is not None:
-        print(f"platforms={json.dumps(_schedule(label_platforms, boxing))}")
-        return
-
-    # PR: compute reduced matrix from changed files.
-    if args.changed_files is not None:
-        changed = [f for f in args.changed_files.splitlines() if f.strip()]
-    else:
-        changed = _changed_files(args.base_ref, args.base_sha, args.head_sha)
-    selected = _platforms_from_files(changed, all_platforms, configs_dir, boxing)
+    changed = None
+    if args.event_name == "pull_request" and not any(
+        label.startswith("platform:") for label in labels
+    ):
+        changed = (
+            [f for f in args.changed_files.splitlines() if f.strip()]
+            if args.changed_files is not None
+            else _changed_files(args.base_ref, args.base_sha, args.head_sha)
+        )
+    try:
+        selected, _reasons = select_platforms(
+            args.event_name, configs_dir, changed, labels, args.dispatch_platforms
+        )
+    except ValueError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        sys.exit(2)
     print(f"platforms={json.dumps(selected)}")
 
 

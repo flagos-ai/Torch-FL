@@ -20,18 +20,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import yaml
 
 from ci.generate_matrix import (
     _changed_files,
-    _load_platforms,
+    _load_platforms as _load_platforms,
     _platforms_from_dispatch,
-    _platform_of,
     _platforms_from_files,
     boxing_platforms,
+    select_platforms,
 )
-from compose_integration_manifest import compose
+from platform_config import compile_platform, load_platform_data, plan_hash
 
 
 LEVELS = {"L0": 0, "L1": 1, "L2": 2}
@@ -69,7 +70,8 @@ def build_plan(request, contract, source, changed):
     if requested not in ("auto", *LEVELS):
         raise ValueError("unsupported test level")
     configs = source / ".github/configs"
-    known = _load_platforms(configs)
+    platform_configs, raw_configs = load_platform_data(source)
+    known = list(platform_configs)
     if not known:
         raise ValueError("no platform configurations found")
     selection = request["platforms"]
@@ -83,39 +85,40 @@ def build_plan(request, contract, source, changed):
         raise ValueError(
             "platforms must be all, a comma-separated list, or a JSON array"
         )
-    boxing = boxing_platforms(configs, known)
+    profile = request.get("profile", "pr")
+    if profile not in ("pr", "nightly"):
+        raise ValueError("weekly is reserved; supported profiles are pr and nightly")
+    if profile == "nightly" and selection.strip() != "all":
+        raise ValueError("nightly requires platforms=all")
+    boxing = boxing_platforms(configs, known, platform_configs)
+    reasons = [{"kind": "dispatch", "requested": selection}]
     selected = _platforms_from_dispatch(selection, known, boxing)
-    if selection.strip() == "all" and changed is not None:
-        selected = _platforms_from_files(changed, known, configs, boxing)
+    if profile == "pr" and selection.strip() == "all" and changed is not None:
+        reasons = []
+        selected = _platforms_from_files(
+            changed, known, configs, boxing, reasons, platform_configs
+        )
+    elif changed is None and profile == "pr" and selection.strip() == "all":
+        reasons = [{"kind": "diff_unavailable"}]
+    if profile == "nightly":
+        reasons = [{"kind": "nightly_full_matrix"}]
     inferred, risk, matched, diff_status = infer_level(changed, contract)
     level = max(
         (inferred, "L0" if requested == "auto" else requested), key=LEVELS.__getitem__
     )
+    if profile == "nightly":
+        level = "L2"
     if contract["levels"][level]["support"] != "supported":
         raise ValueError(f"test level {level} is not supported")
     # An explicit hardware request must not become an empty, passing matrix.
     if level == "L2" and not selected:
-        selected = known
-    manifest_path = source / ".github/integration-manifest.yml"
-    manifest = yaml.safe_load(manifest_path.read_text())
-    fingerprint = hashlib.sha256(manifest_path.read_bytes())
-    # `selected` names lanes, so a boxing platform arrives as both
-    # `<platform>` and `<platform>-boxing`; both read the platform's one config
-    # and compose a build of it, and the config counts once in the fingerprint.
-    for lane in selected or known:
-        platform = _platform_of(lane, boxing)
-        boxing_lane = lane != platform
-        path = configs / f"{platform}.yml"
-        config = yaml.safe_load(path.read_text())
-        compose(
-            manifest, config, platform, known, boxing_lane=boxing_lane, boxing=boxing
-        )
-        fingerprint.update(lane.encode())
-        fingerprint.update(path.read_bytes())
-    fingerprint.update(json.dumps(contract, sort_keys=True).encode())
-    return {
+        selected = _platforms_from_dispatch("all", known, boxing)
+        reasons.append({"kind": "l2_requires_hardware"})
+    plan = {
         "schema_version": "flagcicd.plan/v1",
         **request,
+        "entry": "flagcicd",
+        "profile": profile,
         "test_level": level,
         "scope": contract["levels"][level]["scope"],
         "risk_level": risk,
@@ -123,11 +126,101 @@ def build_plan(request, contract, source, changed):
         "diff_status": diff_status,
         "changed_files": changed,
         "matched_rules": matched,
-        "config_hash": fingerprint.hexdigest(),
         "platforms": selected,
         "validated_platforms": selected or known,
         "expected_platforms": selected if level == "L2" else [],
+        "expected_shared_checks": ["lint", "plan"]
+        + ([] if level == "L0" else ["agnostic", "codegen"]),
+        "selection_reasons": reasons,
     }
+    return complete_plan(plan, contract, source, platform_configs, raw_configs, boxing)
+
+
+def build_ci_plan(
+    request, contract, source, changed, event_name, labels=(), dispatch=""
+):
+    """Plan automatic CI without applying the external entry's level policy."""
+    profile = request.get("profile", "pr")
+    if profile not in ("pr", "nightly"):
+        raise ValueError("weekly is reserved; supported profiles are pr and nightly")
+    if profile == "nightly" and dispatch not in ("", "all"):
+        raise ValueError("nightly requires platforms=all")
+    platform_configs, raw_configs = load_platform_data(source)
+    selected, reasons = select_platforms(
+        event_name,
+        source / ".github/configs",
+        changed,
+        labels,
+        dispatch,
+        platform_configs=platform_configs,
+    )
+    boxing = boxing_platforms(
+        source / ".github/configs", list(platform_configs), platform_configs
+    )
+    _inferred, risk, matched, diff_status = infer_level(changed, contract)
+    # Ordinary CI always runs all three shared checks, including documentation
+    # PRs. An empty hardware matrix is valid here, even when risk inference
+    # would raise an explicit external request to L2.
+    level = "L2" if selected else "L1"
+    return complete_plan(
+        {
+            "schema_version": "flagcicd.plan/v1",
+            **request,
+            "profile": profile,
+            "entry": "ci",
+            "event_name": event_name,
+            "test_level": level,
+            "scope": contract["levels"][level]["scope"],
+            "risk_level": risk,
+            "risk_rule_version": contract["risk_rules"]["version"],
+            "diff_status": diff_status,
+            "changed_files": changed,
+            "matched_rules": matched,
+            "platforms": selected,
+            "expected_platforms": selected,
+            "validated_platforms": selected,
+            "expected_shared_checks": [
+                "resolve-checkout",
+                "lint",
+                "agnostic-checks",
+                "codegen-checks",
+                "discover-platforms",
+            ],
+            "selection_reasons": reasons,
+        },
+        contract,
+        source,
+        platform_configs,
+        raw_configs,
+        boxing,
+    )
+
+
+def complete_plan(plan, contract, source, platform_configs, raw_configs, boxing):
+    """Validate configuration and snapshot final executable lanes once."""
+    manifest_bytes = (source / ".github/integration-manifest.yml").read_bytes()
+    manifest = yaml.safe_load(manifest_bytes)
+    fingerprint = hashlib.sha256(manifest_bytes)
+    execution = []
+    for lane in plan["validated_platforms"]:
+        compiled = compile_platform(
+            source, lane, plan["profile"], manifest, platform_configs, boxing
+        )
+        platform = compiled["platform"]
+        fingerprint.update(lane.encode())
+        fingerprint.update(raw_configs[platform])
+        if lane in plan["expected_platforms"]:
+            execution.append(compiled)
+    fingerprint.update(json.dumps(contract, sort_keys=True).encode())
+    fingerprint.update(plan["profile"].encode())
+    plan.update(
+        config_hash=fingerprint.hexdigest(),
+        control_sha=plan.get("control_sha", ""),
+        diff_head_sha=plan.get("diff_head_sha", plan["source_sha"]),
+        execution_plan=execution,
+    )
+    plan["plan_hash"] = plan_hash(plan)
+    return plan
 
 
 def report_context(plan):
@@ -139,11 +232,15 @@ def report_context(plan):
         "base_sha",
         "test_level",
         "scope",
+        "profile",
         "risk_level",
         "risk_rule_version",
         "config_hash",
+        "control_sha",
+        "plan_hash",
         "platforms",
         "expected_platforms",
+        "expected_shared_checks",
         "run_id",
         "run_attempt",
         "task_id",
@@ -157,21 +254,60 @@ def report_context(plan):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--request", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--request", type=Path)
+    mode.add_argument("--ci", action="store_true", help="Plan ordinary CI routing")
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    request = json.loads(args.request.read_text())
-    contract = yaml.safe_load(
-        (Path(__file__).resolve().parents[2] / ".flagcicd/project.yaml").read_text()
-    )
+    args.source = args.source.resolve()
+    control = Path(__file__).resolve().parents[2]
+    control_sha = subprocess.check_output(
+        ["git", "-C", str(control), "rev-parse", "HEAD"], text=True
+    ).strip()
+    contract = yaml.safe_load((control / ".flagcicd/project.yaml").read_text())
+    if args.ci:
+        source_sha = subprocess.check_output(
+            ["git", "-C", str(args.source), "rev-parse", "HEAD"], text=True
+        ).strip()
+        request = {
+            "source_repository": os.environ["SOURCE_REPOSITORY"],
+            "source_sha": source_sha,
+            "base_sha": os.environ.get("BASE_SHA", ""),
+            "diff_head_sha": os.environ.get("HEAD_SHA") or source_sha,
+            "profile": os.environ.get("TEST_PROFILE", "pr"),
+            "task_id": "",
+            "parent_run_id": "",
+        }
+    else:
+        request = json.loads(args.request.read_text())
+    request["control_sha"] = control_sha
     previous = Path.cwd()
     try:
         os.chdir(args.source)
-        changed = _changed_files("main", request["base_sha"], request["source_sha"])
+        changed = (
+            _changed_files(
+                os.environ.get("BASE_REF", "main"),
+                request["base_sha"],
+                request.get("diff_head_sha", request["source_sha"]),
+            )
+            if not args.ci or os.environ["EVENT_NAME"] == "pull_request"
+            else None
+        )
     finally:
         os.chdir(previous)
-    plan = build_plan(request, contract, args.source, changed)
+    if args.ci:
+        plan = build_ci_plan(
+            request,
+            contract,
+            args.source,
+            changed,
+            os.environ["EVENT_NAME"],
+            json.loads(os.environ.get("PR_LABELS_JSON") or "[]") or [],
+            os.environ.get("DISPATCH_PLATFORMS", ""),
+        )
+    else:
+        plan = build_plan(request, contract, args.source, changed)
     plan.update(
         run_id=os.environ["GITHUB_RUN_ID"],
         run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
@@ -179,11 +315,10 @@ def main():
     args.output.write_text(json.dumps(plan, indent=2) + "\n")
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write("context=" + report_context(plan) + "\n")
+        output.write(f"artifact_name=flagcicd-plan-{plan['run_attempt']}\n")
         output.write(f"test_level={plan['test_level']}\n")
+        output.write(f"profile={plan['profile']}\n")
         output.write("platforms=" + json.dumps(plan["expected_platforms"]) + "\n")
-        output.write(
-            "validated_platforms=" + json.dumps(plan["validated_platforms"]) + "\n"
-        )
     print(
         f"Plan: {plan['test_level']} ({plan['risk_level']}), platforms={plan['expected_platforms']}"
     )
