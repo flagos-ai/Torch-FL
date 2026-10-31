@@ -14,6 +14,10 @@
 //
 // Held back from the boxing claim: the conf routes them to `none`, or
 // `register.inc` has no wrapper for them:
+//   - __lshift__.Scalar
+//   - __lshift__.Tensor
+//   - __rshift__.Scalar
+//   - __rshift__.Tensor
 //   - _adaptive_avg_pool2d.out
 //   - _adaptive_avg_pool2d_backward.out
 //   - _adaptive_avg_pool3d
@@ -666,6 +670,7 @@
 //   - col_indices_copy.out
 //   - complex
 //   - complex.out
+//   - conj_physical
 //   - conj_physical.out
 //   - constant_pad_nd.out
 //   - conv_depthwise3d
