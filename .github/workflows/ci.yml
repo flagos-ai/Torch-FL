@@ -17,6 +17,7 @@ name: CI
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 on:
   schedule:
@@ -28,6 +29,11 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
     inputs:
+      profile:
+        description: pr or full nightly; weekly is reserved
+        type: choice
+        default: pr
+        options: [pr, nightly, weekly]
       platforms:
         description: 'Comma-separated platforms to run, or all'
         required: false
@@ -147,11 +153,22 @@ jobs:
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms || '' }}
           EVENT_NAME: ${{ github.event_name }}
+          TEST_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || inputs.profile || 'pr' }}
           BASE_REF: ${{ github.base_ref || 'main' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+          case "$TEST_PROFILE" in
+            pr) ;;
+            nightly)
+              if [[ -n "$DISPATCH_PLATFORMS" && "$DISPATCH_PLATFORMS" != all ]]; then
+                echo "::error::nightly requires platforms=all"
+                exit 2
+              fi
+              ;;
+            *) echo "::error::weekly is reserved; choose pr or nightly"; exit 2 ;;
+          esac
           PR_LABELS=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             PR_LABELS=$(jq -r 'join(",")' <<<"$PR_LABELS_JSON")
@@ -192,6 +209,7 @@ jobs:
       FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ matrix.platform }}
+      test_profile: ${{ github.event_name == 'schedule' && 'nightly' || inputs.profile || 'pr' }}
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
 
@@ -207,6 +225,7 @@ jobs:
       - discover-platforms
       - platform-pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Verify shared checks and selected platforms passed
         env:
@@ -252,17 +271,17 @@ jobs:
                   raise ValueError("not in a GitHub run with a token")
               listing = subprocess.run(
                   [
-                      "gh", "api", "--paginate",
+                      "gh", "api", "--paginate", "--slurp",
                       f"repos/{repo}/actions/runs/{run_id}/jobs",
                   ],
                   check=True,
                   capture_output=True,
                   text=True,
+                  timeout=60,
               ).stdout
-              # --paginate joins the pages' objects; normalize either shape.
-              pages = json.loads(listing if listing.lstrip().startswith("[") else f"[{listing}]")
+              pages = json.loads(listing)
               listed = [job for page in pages for job in page.get("jobs", [])]
-          except (subprocess.CalledProcessError, ValueError, AttributeError) as exc:
+          except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, AttributeError) as exc:
               print(f"::warning::could not list job conclusions: {exc}")
               listed = []
 

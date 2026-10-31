@@ -32,7 +32,11 @@ SPEC = importlib.util.spec_from_file_location(
     "merge_reports", SCRIPTS / "merge_pytest_reports.py"
 )
 MERGER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MERGER)
+sys.path.insert(0, str(SCRIPTS))
+try:
+    SPEC.loader.exec_module(MERGER)
+finally:
+    sys.path.pop(0)
 PYTHON = shlex.quote(sys.executable)
 
 
@@ -305,6 +309,59 @@ def test_pre_pytest_failure_does_not_invent_an_empty_success_report(tmp_path):
         _merge(reports, "failure")
 
 
+def test_swallowed_pytest_failure_cannot_pass_functional_evidence(tmp_path):
+    workdir = tmp_path / "wheel-only"
+    workdir.mkdir()
+    (workdir / "test_mixed.py").write_text(
+        "def test_pass(): pass\ndef test_failure(): assert False\n"
+    )
+    process, reports = _integration(
+        tmp_path,
+        [
+            {
+                "name": "wrapper",
+                "command": f"{PYTHON} -m pytest test_mixed.py -q || true",
+            }
+        ],
+    )
+    assert process.returncode == 0
+    report = _merge(reports)
+    assert report["summary"]["failed"] == report["summary"]["passed"] == 1
+    assert report["flagcicd"]["complete"] is False
+    assert report["exitcode"] != 0
+    assert report["flagcicd"]["execution_errors"]
+
+
+@pytest.mark.parametrize(
+    "summary", [{"passed": 1, "failed": 1}, {"passed": 1, "error": 1}, {"passed": True}]
+)
+def test_shared_evidence_validator_rejects_contradictory_counts(summary):
+    with pytest.raises(ValueError):
+        MERGER.validate_pytest_result(
+            {"exitcode": 0, "summary": summary}, require_success=True
+        )
+
+
+def test_optional_skipped_session_does_not_invalidate_passing_evidence(tmp_path):
+    workdir = tmp_path / "wheel-only"
+    workdir.mkdir()
+    (workdir / "test_pass.py").write_text("def test_ok(): pass\n")
+    (workdir / "test_skip.py").write_text(
+        "import pytest\n@pytest.mark.skip(reason='not applicable')\ndef test_skip(): pass\n"
+    )
+    process, reports = _integration(
+        tmp_path,
+        [
+            {"name": "required", "command": f"{PYTHON} -m pytest test_pass.py -q"},
+            {"name": "conditional", "command": f"{PYTHON} -m pytest test_skip.py -q"},
+        ],
+    )
+    assert process.returncode == 0
+    report = _merge(reports)
+    assert report["flagcicd"]["complete"] is True
+    assert report["exitcode"] == 0
+
+
 def test_workflow_transfers_optional_token_and_uploads_the_generated_report():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/integration-tests.yml").read_text()
@@ -459,3 +516,59 @@ def test_missing_token_skips_upload_without_logging_credentials(
     assert result.returncode == 0, result.stderr
     assert output.read_text() == expected
     assert not token or token not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [("quiet", 0), ("skipped", 1), ("fake_stdout", 1), ("earlier_pass", 1)],
+)
+def test_early_minimum_uses_group_json_and_never_console_counts(
+    tmp_path, case, expected
+):
+    workdir = tmp_path / "wheel-only"
+    workdir.mkdir()
+    (workdir / "test_pass.py").write_text("def test_ok(): pass\n")
+    (workdir / "test_skip.py").write_text(
+        "import pytest\n@pytest.mark.skip(reason='capability unavailable')\ndef test_skip(): pass\n"
+    )
+    marker = tmp_path / "must-not-run"
+    if case == "fake_stdout":
+        command = "printf '100 passed in 1.0s\\n'"
+    else:
+        command = f"{PYTHON} -m pytest {'test_pass.py' if case == 'quiet' else 'test_skip.py'} -qq"
+    groups = [
+        {"name": "minimum", "group_id": "minimum", "command": command, "min_passed": 1}
+    ]
+    if case == "earlier_pass":
+        groups.insert(
+            0,
+            {
+                "name": "earlier",
+                "group_id": "earlier",
+                "command": f"{PYTHON} -m pytest test_pass.py -qq",
+            },
+        )
+    if expected:
+        groups.append(
+            {
+                "name": "later",
+                "group_id": "later",
+                "command": "touch " + shlex.quote(str(marker)),
+            }
+        )
+    run, reports = _integration(tmp_path, groups)
+    assert run.returncode == expected, run.stdout + run.stderr
+    execution = json.loads((reports / "groups.json").read_text())
+    current = next(
+        group for group in execution["groups"] if group["group_id"] == "minimum"
+    )
+    assert current["status"] == ("passed" if expected == 0 else "failed")
+    if expected:
+        assert current["error"]
+        assert "evidence check failed" in run.stdout
+        assert not marker.exists()
+        assert execution["groups"][-1]["status"] == "not_run"
+    if case == "quiet":
+        merged = _merge(reports)
+        assert merged["summary"]["passed"] == 1
+        assert merged["flagcicd"]["complete"] is True

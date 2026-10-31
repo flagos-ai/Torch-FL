@@ -35,8 +35,15 @@ Two things have to stay true for that to be safe:
 Pure text/json: no network.
 """
 
+import json
 import re
+import subprocess
+import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -101,3 +108,61 @@ def test_the_gate_can_call_the_api():
     assert "GH_TOKEN: ${{ github.token }}" in gate, (
         "gh api needs a token; the job-level env must carry it"
     )
+
+
+@pytest.mark.parametrize("api_timeout", [False, True])
+def test_gate_reads_all_job_pages_and_bounds_optional_diagnostics(
+    monkeypatch, capsys, api_timeout
+):
+    workflow = yaml.safe_load(CI.read_text())
+    gate = workflow["jobs"]["ci-complete"]
+    assert gate["timeout-minutes"] == 5
+    assert workflow["permissions"]["actions"] == "read"
+    results = {
+        name: {"result": "success"}
+        for name in [
+            "resolve-checkout",
+            "lint",
+            "agnostic-checks",
+            "codegen-checks",
+            "discover-platforms",
+            "platform-pipeline",
+        ]
+    }
+    results["discover-platforms"]["outputs"] = {
+        "platforms": '["nvidia","nvidia-boxing"]'
+    }
+    if not api_timeout:
+        results["platform-pipeline"]["result"] = "failure"
+    monkeypatch.setenv("RESULTS", json.dumps(results))
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GH_TOKEN", "fake-test-token")
+
+    def api(argv, **kwargs):
+        assert "--paginate" in argv and "--slurp" in argv
+        assert kwargs["timeout"] == 60
+        if api_timeout:
+            raise subprocess.TimeoutExpired(argv, 60)
+        return SimpleNamespace(
+            stdout=json.dumps(
+                [
+                    {"jobs": [{"name": "first page lane", "conclusion": "failure"}]},
+                    {"jobs": [{"name": "second page lane", "conclusion": "timed_out"}]},
+                ]
+            )
+        )
+
+    monkeypatch.setattr(subprocess, "run", api)
+    raw = gate["steps"][0]["run"]
+    script = textwrap.dedent(raw.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0])
+    if api_timeout:
+        exec(compile(script, "CI complete", "exec"), {})
+        assert "::warning::could not list job conclusions" in capsys.readouterr().out
+    else:
+        with pytest.raises(SystemExit) as error:
+            exec(compile(script, "CI complete", "exec"), {})
+        assert error.value.code == 1
+        output = capsys.readouterr().out
+        assert "first page lane: failure" in output
+        assert "second page lane: timed_out" in output

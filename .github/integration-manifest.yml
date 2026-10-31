@@ -383,6 +383,26 @@ steps:
       python -m pytest tests/integration/ops/ -m "flaggems and main_ops"
       -v -s --tb=short
 
+  # CUDA-only route regression: the profiler must own the device, and the
+  # default FlagGems-primary wheel does not require CUDA boxing kernels.
+  - id: cuda_flaggems_mul
+    name: CUDA FlagGems multiplication route regression
+    platforms: [nvidia]
+    vendor_only: true
+    profiles: [nightly]
+    min_passed: 1
+    command: python -m pytest tests/integration/ops/test_flaggems_mul_route.py -v -s --tb=short
+
+  # A measured CUDA performance contract, separate from portable cast correctness.
+  # CPU-only torch intentionally takes the host path; report that case as skipped.
+  # Profiling runs serially in nightly and never in the PR vendor sweep.
+  - id: cuda_dtype_cast_performance
+    name: CUDA dtype cast transfer regression
+    platforms: [nvidia]
+    vendor_only: true
+    profiles: [nightly]
+    command: python -m pytest tests/integration/ops/test_dtype_cast_performance.py -v -s --tb=short
+
   # The MUSA hybrid group is a file, not a marker: the MUSA vendor sweep above
   # deselects `-m flaggems`, and ops/test_musa_flaggems.py is the MUSA hardware
   # behaviour of that route rather than one more generically-selected case. It
@@ -667,19 +687,23 @@ steps:
     platforms: [mthreads]
     command: python -m pytest tests/integration/ops/test_musa_dispatch.py -m musa -v -s --tb=short
 
-  # tests/unit is a source-tree suite: seven of its files read scripts/, csrc/,
+  # tests/unit is a source-tree suite: its source checks read scripts/, csrc/,
   # .github/workflows/ and the rest of torch_fl/ relative to the repository root,
   # so it runs in the checkout rather than in the wheel-only workspace the other
   # groups use -- the `cd` is what makes that true, and
   # tests/unit/test_integration_workdir.py holds both ends of the arrangement.
   # UNIT_TESTS_ALLOW_TEARDOWN_CRASH forgives a fatal signal after a clean summary,
   # the same reading INTEGRATION_ALLOW_TEARDOWN_CRASH asks for above.
+  # Shared CPU workflows own their full-file checks. These two files also
+  # contain installed-wheel checks, so retain their hardware variants here.
   - id: unit_tests_per_file
     name: Run unit tests (per file)
     platforms: [hygon]
     command: >-
       cd "$GITHUB_WORKSPACE" && UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
-      python .github/scripts/run_unit_tests.py --timeout 300
+      python .github/scripts/run_unit_tests.py --timeout 300 --exclude-shared-cpu
+      --retain tests/unit/test_startup_subprocess.py
+      --retain tests/unit/test_vendor_libtorch_overlay.py
 
   - id: runtime_conformance
     name: Runtime conformance (hardware-agnostic)

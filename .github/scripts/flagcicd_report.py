@@ -20,6 +20,8 @@ import math
 import os
 from pathlib import Path
 
+from merge_pytest_reports import validate_pytest_result
+
 from flagcicd_resolve import text as request_text
 
 
@@ -101,6 +103,10 @@ def platform_report(plan, platform, jobs, raw, attempt):
         errors.append("the platform did not successfully complete all required stages")
     metrics = {"coverage": {"available": False}}
     try:
+        metrics["hardware"] = one_report(raw / "pytest", f"hardware-{platform}.json")
+    except (OSError, ValueError, TypeError):
+        metrics["hardware"] = {"available": False}
+    try:
         pytest = one_report(raw / "pytest", f"pytest-{platform}.json")
         metadata = pytest["flagcicd"]
         if (
@@ -113,21 +119,12 @@ def platform_report(plan, platform, jobs, raw, attempt):
             )
         if metadata["complete"] is not True:
             raise ValueError("pytest report is incomplete")
-        counts = pytest["summary"]
-        if not isinstance(counts, dict) or not all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0
-            for value in counts.values()
-        ):
-            raise ValueError("invalid pytest summary")
-        if status == "passed" and pytest["exitcode"] != 0:
-            raise ValueError("pytest report contradicts the successful job result")
-        if status == "passed" and any(
-            counts.get(key, 0) for key in ("failed", "error")
-        ):
-            raise ValueError(
-                "pytest failure counts contradict the successful job result"
-            )
-        metrics["tests"] = counts
+        validate_pytest_result(
+            pytest,
+            require_success=status == "passed",
+            require_passed=status == "passed",
+        )
+        metrics["tests"] = pytest["summary"]
     except (OSError, ValueError, TypeError, KeyError) as error:
         errors.append(str(error))
         if status == "passed":

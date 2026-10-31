@@ -1,6 +1,6 @@
 # CI selection and maintainer controls
 
-CI schedules nine configured hardware platforms through the shared integration
+CI schedules configured hardware platforms through the shared integration
 workflow. Runner labels, images and device access come from each platform config;
 test groups come from the shared integration manifest.
 
@@ -17,8 +17,8 @@ test groups come from the shared integration manifest.
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
 Routing labels take precedence over file filtering. Adding or removing labels
-reruns PR CI. Supported platform names are `ascend`, `cuda`, `dcu`, `gcu`,
-`iluvatar`, `kunlunxin`, `metax`, `mps`, `musa` and `ppu`.
+reruns PR CI. Supported platform names are `apple`, `ascend`, `enflame`, `hygon`,
+`iluvatar`, `kunlunxin`, `metax`, `mthreads`, `nvidia` and `thead`.
 
 Each `.github/configs/<platform>.yml` declares `paths_watch`: exact file names,
 directory prefixes ending in `/`, or shell-style globs. Its own configuration
@@ -33,6 +33,15 @@ CUDA runtime sources affect CUDA, DCU and PPU, while the CUDA allocator header
 also affects MetaX. Keep these relationships aligned with
 `cmake/flagos_platforms.json` and the runtime build configuration when adding or
 changing a platform.
+
+## Functional profiles
+
+The default `pr` profile preserves the platform selection above. The daily
+`nightly` profile runs every configured platform and all applicable existing
+functional groups, including the dedicated CUDA transfer regressions. Manual
+nightly requests require `platforms=all`. `weekly` is reserved and rejected
+before hardware dispatch. Both CI and FlagCICD Entry expose these profile names.
+See [Functional CI profiles](ci-test-tiers.md) for execution and evidence rules.
 
 ## One required check
 
@@ -105,6 +114,17 @@ and
 require their workflow definitions to exist on the default branch.
 
 ## Validation and rollout
+
+### Functional evidence validation
+
+The pytest merger, the ordinary hardware evidence check and the external platform
+reporter share `validate_pytest_result`. Successful outer commands cannot hide a
+nonzero pytest session exit code or failed/error counts. Conditional skipped
+sessions remain valid when other functional tests passed; existing explicit
+teardown-crash handling remains separate from assertion failures.
+
+The ordinary gate reads paginated job diagnostics as a JSON array, with a bounded
+API query. Optional diagnostic failures do not replace the required job verdicts.
 
 Platform-agnostic CI runs regression tests for selection, routing, required gate
 results, checkout resolution, comment dispatch, network classification and retry

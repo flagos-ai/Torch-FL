@@ -32,11 +32,13 @@ import json
 import re
 import subprocess
 import time
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLATFORM_TABLE = REPO_ROOT / "cmake" / "flagos_platforms.json"
@@ -50,9 +52,9 @@ def _table() -> dict:
 
 
 def publishing_platforms() -> dict:
-    """{platform: lane} for every platform that publishes a wheel."""
+    """{vendor/config name: lane} for every platform that publishes a wheel."""
     return {
-        name: row["pypi_lane"] for name, row in _table().items() if row["pypi_lane"]
+        row["vendor"]: row["pypi_lane"] for row in _table().values() if row["pypi_lane"]
     }
 
 
@@ -126,8 +128,8 @@ def test_every_publishing_platform_has_a_ci_config():
 
     The config is named for the lane, which is the platform's vendor -- not for
     the build-table id the wheel is published under."""
-    for platform, lane in publishing_platforms().items():
-        assert (CONFIGS / f"{lane}.yml").is_file(), platform
+    for platform in _release_matrix_platforms():
+        assert (CONFIGS / f"{platform}.yml").is_file(), platform
 
 
 def test_pypi_lanes_are_unique_across_platforms():
@@ -148,6 +150,123 @@ def test_the_publisher_reads_the_platform_out_of_the_artifact_directory(tmp_path
         (directory / "torch_fl-2.10.0+x-cp312-cp312-linux_x86_64.whl").touch()
     found = publisher.collect(tmp_path)
     assert {platform for platform, _ in found} == set(publishing_platforms())
+
+
+def test_release_config_artifact_and_publisher_names_agree(tmp_path, monkeypatch):
+    publisher = _publisher()
+    for platform in _release_matrix_platforms():
+        config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
+        directory = tmp_path / config["wheel_artifact_name"]
+        directory.mkdir()
+        (directory / "torch_fl-2.10.0+x-cp312-cp312-linux_x86_64.whl").touch()
+    assert {p for p, _ in publisher.collect(tmp_path)} == set(
+        _release_matrix_platforms()
+    )
+    queried = []
+
+    def unpublished(package, version, url):
+        queried.append(url)
+        return False
+
+    monkeypatch.setattr(publisher, "already_published", unpublished)
+    assert (
+        publisher.main(["--wheels", str(tmp_path), "--tag", "v2.10.0", "--dry-run"])
+        == 0
+    )
+    assert set(queried) == {
+        f"{publisher.WHEEL_ROOT}/flagos-pypi-{lane}/simple"
+        for lane in publishing_platforms().values()
+    }
+
+
+def test_old_artifact_names_remain_recoverable_from_the_same_platform_table(tmp_path):
+    for platform, row in _table().items():
+        if row["pypi_lane"]:
+            directory = tmp_path / f"wheel-{platform}"
+            directory.mkdir()
+            (directory / "torch_fl-2.10.0+x-cp312-cp312-linux_x86_64.whl").touch()
+    assert {p for p, _ in _publisher().collect(tmp_path)} == set(publishing_platforms())
+
+
+def test_duplicate_legacy_and_vendor_artifacts_cannot_upload_the_same_wheel(tmp_path):
+    for name in ("cuda", "nvidia"):
+        directory = tmp_path / f"wheel-{name}"
+        directory.mkdir()
+        (directory / "torch_fl-2.10.0+x-cp312-cp312-linux_x86_64.whl").touch()
+    with pytest.raises(SystemExit, match="duplicate wheel artifact"):
+        _publisher().collect(tmp_path)
+
+
+def test_wheel_builder_receives_the_loaders_boxing_mode():
+    wrapper = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/build-wheel.yml").read_text()
+    )
+    common = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/build-wheel-common.yml").read_text()
+    )
+    assert (
+        wrapper["jobs"]["build"]["with"]["boxing_lane"]
+        == "${{ needs.configuration.outputs.boxing_lane }}"
+    )
+    assert common[True]["workflow_call"]["inputs"]["boxing_lane"]["default"] == ""
+    setup = next(
+        s
+        for s in common["jobs"]["build"]["steps"]
+        if s.get("name") == "Prepare platform environment"
+    )
+    assert setup["env"]["BOXING_LANE"] == "${{ inputs.boxing_lane }}"
+
+
+@pytest.mark.parametrize(
+    "requested,compiled,accepted",
+    [("", False, True), ("1", True, True), ("", True, False), ("1", False, False)],
+)
+def test_installed_wheel_must_match_requested_boxing_mode(
+    tmp_path, monkeypatch, requested, compiled, accepted
+):
+    import importlib.metadata
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/build-wheel-common.yml").read_text()
+    )
+    step = next(
+        s for s in workflow["jobs"]["build"]["steps"] if s.get("name") == "Verify wheel"
+    )
+    assert "--force-reinstall" in step["run"]
+    assert step["env"]["EXPECTED_BOXING_LANE"] == "${{ inputs.boxing_lane }}"
+    script = textwrap.dedent(
+        step["run"].split("python - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    )
+    package = tmp_path / "torch_fl"
+    package.mkdir()
+    (package / "entry_points.txt").write_text("torch-fl-nvidia = stub:main\n")
+    manifest = package / "compatibility.json"
+    manifest.write_text(
+        json.dumps({"build": {"kernels": ["boxing"] if compiled else ["flaggems"]}})
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv("EXPECTED_BOXING_LANE", requested)
+    monkeypatch.setattr(
+        importlib.metadata,
+        "metadata",
+        lambda _: {"Name": "torch_fl", "Version": "2.10.0"},
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "files",
+        lambda _: ["torch_fl/__init__.py", "bin/torch-fl-nvidia"],
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "distribution",
+        lambda _: SimpleNamespace(locate_file=lambda _: manifest),
+    )
+    if accepted:
+        exec(compile(script, "Verify wheel", "exec"), {})
+    else:
+        with pytest.raises(AssertionError, match="kernel sets"):
+            exec(compile(script, "Verify wheel", "exec"), {})
 
 
 def test_an_unexpected_artifact_directory_is_refused(tmp_path):
@@ -359,7 +478,7 @@ def test_the_publish_step_runs_before_the_artifact_upload():
         encoding="utf-8"
     )
     build_at = text.index("python -m build --wheel --no-isolation")
-    verify_at = text.index("python -m pip install --no-deps dist/*.whl")
+    verify_at = text.index("name: Verify wheel")
     publish_at = text.index("name: Publish the wheel to its vendor lane")
     artifact_at = text.index("name: Upload wheel")
     assert build_at < verify_at < publish_at < artifact_at, (

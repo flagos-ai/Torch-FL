@@ -34,6 +34,11 @@ on:
       setup_platform:
         required: true
         type: string
+      boxing_lane:
+        description: '"1" for the opt-in boxing build, empty for the default build'
+        required: false
+        type: string
+        default: ''
       image:
         required: true
         type: string
@@ -148,6 +153,7 @@ jobs:
       - name: Prepare platform environment
         env:
           CI_STAGE: build
+          BOXING_LANE: ${{ inputs.boxing_lane }}
         run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
 
       - name: Install build tools
@@ -176,15 +182,22 @@ jobs:
         run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
 
       - name: Verify wheel
+        env:
+          EXPECTED_BOXING_LANE: ${{ inputs.boxing_lane }}
         run: |
-          python -m pip install --no-deps dist/*.whl
+          python -m pip install --force-reinstall --no-deps dist/*.whl
           python - <<'PY'
+          import json
           import os
-          from importlib.metadata import files, metadata
+          from importlib.metadata import distribution, files, metadata
           from pathlib import Path
 
           package_metadata = metadata("torch_fl")
           package_files = [str(path) for path in files("torch_fl")]
+          manifest = json.loads(distribution("torch_fl").locate_file("torch_fl/compatibility.json").read_text())
+          assert ("boxing" in manifest["build"]["kernels"]) == (os.environ["EXPECTED_BOXING_LANE"] == "1"), (
+              "Wheel kernel sets do not match the requested boxing lane"
+          )
           assert any("torch_fl" in path for path in package_files), (
               "torch_fl module not found in wheel"
           )

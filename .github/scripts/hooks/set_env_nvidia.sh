@@ -429,22 +429,20 @@ echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
 
 install_flagtree
 
-# Keep only vendor packages that are not provided by FlagTree. In particular,
-# do not copy vendor `triton` or `triton_kernels`: either would contaminate the
-# source-free FlagTree installation with a potentially incompatible Triton.
-VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-FLAGCX_COPIED=0
+# CUDA functional CI does not exercise FlagCX collectives. Keep the native
+# plugin out of the isolated environment unless communication is requested.
 export FLAGCX_TORCH_BACKEND="${FLAGCX_TORCH_BACKEND:-vendor}"
-if [[ "${CUDA_VERSION:-}" == 13.3.* ]]; then
-  # Only a CUDA 13.3 toolkit can load this published native wheel. Current CI
-  # still runs 13.0; the matching image remains gated on its host driver.
+if [[ "${TORCH_FL_CUDA_FLAGCX_WHEEL:-0}" == "1" ]]; then
+  if [[ "${CUDA_VERSION:-}" != 13.3.* ]]; then
+    echo "::error::CUDA FlagCX requires a verified CUDA 13.3 toolkit/driver environment" >&2
+    exit 1
+  fi
   PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: \
     --index-url "$FLAGGEMS_INDEX_URL" "flagcx===$FLAGCX_VERSION"
   export FLAGCX_TORCH_BACKEND=flagos
   # The wheel build runs in a separate step without an importable torch_fl;
   # keep FlagCX auto-loading off across steps and import it on demand for comm.
   export TORCH_DEVICE_BACKEND_AUTOLOAD=0
-  FLAGCX_COPIED=1
 else
   # FlagTree 0.7.0rc2 probes its TLE distributed runtime while FlagGems is
   # imported. That probe can find a libflagcx.so even when no flagcx Python
@@ -452,23 +450,7 @@ else
   # libcudart.so.12, whereas this job uses CUDA 13.0; disable only TLE's
   # optional distributed loader until a toolkit-matched FlagCX wheel is used.
   export USE_TLE_DIST=0
-  for package in flagcx; do
-    if [[ -d "$VENDOR_SITE/$package" ]]; then
-      cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
-      FLAGCX_COPIED=1
-    fi
-    for metadata in "$VENDOR_SITE"/"$package"-*.dist-info; do
-      [[ -e "$metadata" ]] || continue
-      cp -a "$metadata" "$VENV_SITE/"
-    done
-  done
-fi
-# FlagCX backs the distributed paths only (`torch_fl.comm` imports it lazily),
-# and no test in the CUDA manifest builds a process group. A bootstrapped
-# environment therefore runs without it instead of paying for a source build;
-# `tests/manual/` covers the FlagCX paths where it is present.
-if [[ "$FLAGCX_COPIED" == "0" ]]; then
-  echo "::notice::flagcx is not installed in this environment; the distributed backend is unavailable"
+  echo "::notice::CUDA functional scope: FlagCX communication is not validated"
 fi
 
 # Install the published FlagGems wheel after FlagTree. --no-deps keeps the

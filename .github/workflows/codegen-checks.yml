@@ -14,11 +14,13 @@
 
 # Codegen staleness and conf/registration consistency gates.
 #
-# Runs every generator's ``--check`` mode that works without a vendor toolkit
+# Runs native-register generators' ``--check`` modes without a vendor toolkit
 # or a built torch_fl, plus the pure-text consistency tests. A stale generated
 # file or a conf route with no registration behind it fails this job with the
 # regen command in the log, so drift surfaces in seconds on ubuntu-latest
 # instead of as a "backend not registered" raise on a hardware runner.
+# Vendor conf generation and its unit tests belong to agnostic-checks.yml:
+# they need no torch, and must not be repeated in this CPU-torch job.
 #
 # Generators that need vendor ATen headers (codegen_ascend, codegen_gcu,
 # codegen_mudnn) or an importable built torch_fl (codegen_ops, codegen_autograd,
@@ -72,8 +74,6 @@ jobs:
       - name: Run generator --check modes
         run: |
           set -euo pipefail
-          echo "=== gen_vendor_confs.py --check ==="
-          python3 scripts/codegen/gen_vendor_confs.py --check
           # Regenerates the per-platform FlagGems register lists that a
           # FlagGems-primary CUDA-ABI build (FLAGOS_BUILD_BOXING=OFF) compiles
           # instead of the full generated/register.inc. Reads only committed
@@ -117,7 +117,6 @@ jobs:
           set -euo pipefail
           python3 -m pytest \
             tests/unit/test_conf_registration_consistency.py \
-            tests/unit/test_gen_vendor_confs.py \
             -v --tb=short -p no:cacheprovider
 
       - name: Run FlagGems conf/codegen consistency tests

@@ -47,6 +47,11 @@ name: Platform integration tests
 on:
   workflow_call:
     inputs:
+      test_profile:
+        description: Functional test selection (pr or nightly; weekly is reserved)
+        type: string
+        required: false
+        default: pr
       platform:
         description: Config basename under .github/configs (without .yml)
         required: true
@@ -85,6 +90,7 @@ jobs:
     uses: ./.github/workflows/load-platform-config.yml
     with:
       platform: ${{ inputs.platform }}
+      test_profile: ${{ inputs.test_profile || 'pr' }}
       checkout_repository: ${{ inputs.checkout_repository }}
       checkout_ref: ${{ inputs.checkout_ref }}
 
@@ -189,7 +195,7 @@ jobs:
 
       - name: Validate wheel compatibility manifest
         id: validate
-        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "${{ needs.configuration.outputs.setup_platform }}" --check-build-env
+        run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
 
       - name: Install wheel
         id: install
@@ -216,6 +222,12 @@ jobs:
           printf 'INTEGRATION_WORKDIR=%s\n' "$TEST_ROOT" >> "$GITHUB_ENV"
           REPORT_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-pytest.XXXXXX")
           printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
+
+      - name: Record hardware identity
+        run: >-
+          python .github/scripts/record_hardware_identity.py
+          --platform "${{ inputs.platform }}"
+          --output "$FLAGCICD_REPORT_DIR/hardware-${{ inputs.platform }}.json"
 
       - name: Install pytest JSON reporting
         run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
@@ -260,10 +272,26 @@ jobs:
           SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
         run: >-
           python .github/scripts/merge_pytest_reports.py
-          --report-dir "$FLAGCICD_REPORT_DIR"
+          --report-dir "$FLAGCICD_REPORT_DIR" --require-execution
           --output "$GITHUB_WORKSPACE/pytest-${REPORT_PLATFORM}.json"
           --platform "$REPORT_PLATFORM" --outcome "$TEST_OUTCOME"
           --source-repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF"
+
+      - name: Check functional test evidence
+        env:
+          REPORT_PLATFORM: ${{ inputs.platform }}
+        run: |
+          python - <<'PYCODE'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, ".github/scripts")
+          from merge_pytest_reports import validate_pytest_result
+          report = json.loads(Path(os.environ["GITHUB_WORKSPACE"], f"pytest-{os.environ['REPORT_PLATFORM']}.json").read_text())
+          assert report["flagcicd"]["complete"] is True, "test evidence is incomplete"
+          validate_pytest_result(report, require_success=True, require_passed=True)
+          PYCODE
 
       # Resolve report paths inside the job container; github.workspace may
       # contain the runner host's checkout path instead of its container mount.

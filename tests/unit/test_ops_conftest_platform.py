@@ -28,6 +28,7 @@ Run: pytest tests/unit/test_ops_conftest_platform.py -v
 import importlib.util
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -47,6 +48,36 @@ def _load_ops_conftest():
 
 
 ops_conftest = _load_ops_conftest()
+
+
+@pytest.mark.parametrize(
+    "platform",
+    ["ascend", "dcu", "gcu", "iluvatar", "kunlunxin", "metax", "mps", "musa", "ppu"],
+)
+@pytest.mark.parametrize(
+    "filename,reason",
+    [
+        ("test_flaggems_mul_route.py", "CUDA FlagGems route regression"),
+        ("test_dtype_cast_performance.py", "CUDA dtype-cast performance regression"),
+    ],
+)
+def test_cuda_profiling_skips_other_platforms_before_runtime_access(
+    monkeypatch, platform, filename, reason
+):
+    package = ModuleType("torch_fl")
+    package.__path__ = []
+    detector = ModuleType("torch_fl._platform")
+    detector.detect_platform = lambda: platform
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setitem(sys.modules, "torch_fl._platform", detector)
+    monkeypatch.setitem(sys.modules, "torch", ModuleType("torch"))
+    # Importing this optional vendor package would produce a different skip.
+    monkeypatch.setitem(sys.modules, "flag_gems", None)
+    path = _OPS_CONFTEST_PATH.parent / filename
+    spec = importlib.util.spec_from_file_location("cuda_mul_route_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    with pytest.raises(pytest.skip.Exception, match=reason):
+        spec.loader.exec_module(module)
 
 
 @pytest.fixture(autouse=True)

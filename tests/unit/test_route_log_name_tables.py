@@ -106,11 +106,12 @@ def test_every_conf_value_resolves_to_a_logged_name():
     assert set(_conf_values()) <= set(LOGGED_AS), sorted(
         _conf_values() - set(LOGGED_AS)
     )
-    table = _table(TABLES[0])
     problems = {}
-    for value in sorted(_conf_values()):
-        if _resolve(table, value) not in logged:
-            problems[value] = _resolve(table, value)
+    for path in TABLES:
+        table = _table(path)
+        for value in sorted(_conf_values()):
+            if _resolve(table, value) not in logged:
+                problems[(str(path.relative_to(ROOT)), value)] = _resolve(table, value)
     assert not problems, problems
 
 
