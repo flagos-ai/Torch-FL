@@ -105,11 +105,18 @@ INC_HEADER = """\
 // `div_.Tensor` joined the gap set for issue #570 -- FlagGems' complex `add`
 // returns zeros for complex128 and its complex `div` raises for complex64 --
 // and the three in-place spellings are answered by `csrc/aten/register.cc`.
-// The gap set is now 59. This file registers 585, which is the 640-op FlagGems
-// ceiling minus the 59 gaps minus the 11 native slots plus the 8 ops that are
-// both gapped and natively claimed (the exclusion is a union, not a sum). The
-// "603" above is the opening paragraph's snapshot at the first survey and is
-// kept for provenance; the registrations are this file's `m.impl` lines.
+// The gap set is now 64, and the conf routes 13 operators to the native slot
+// (8 of them this platform's own kernels, 5 served from csrc/aten/register.cc);
+// 10 operators are in both sets, since the exclusion is a union, not a sum.
+// This file registers 583, counted from its own `m.impl` lines rather than
+// derived -- the generator's exclusion is what fixes the number, and no
+// arithmetic on the FlagGems ceiling reproduces it. The "603" above is the
+// opening paragraph's snapshot at the first survey and is kept for provenance.
+//
+// 2026-11-01: the five `baddbmm` spellings joined the gap set -- FlagGems'
+// batched GEMM is 61-84% wrong and nondeterministic on this chip whenever the
+// output's row count leaves a partial tile -- and `baddbmm`/`baddbmm_` are
+// answered by the native ixblas kernels, the same remedy `bmm` already took.
 //
 // Re-measure and move entries in or out of that set only from BI-V150 results,
 // never by assumption -- and note the DCU precedent: most of the 37 are the
