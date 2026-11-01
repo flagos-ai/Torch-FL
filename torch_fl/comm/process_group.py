@@ -1266,6 +1266,12 @@ _FLAGOS_BACKEND = "flagos"
 # a reload) cannot stack a second layer of interposition.
 _REDIRECT_MARKER = "_flagos_redirects_gloo"
 
+# `torch.distributed.new_group` as it was before the redirect wrapped it, kept so
+# `new_host_group` can reach the real one without reading the wrapper's
+# `__wrapped__` attribute. None until `redirect_gloo_requests` has run, which is
+# also the case where `dist.new_group` is itself already the original.
+_ORIGINAL_NEW_GROUP = None
+
 
 def _gloo_requests_are_redirected() -> bool:
     """True when a gloo request on this host has nothing left to fall back on.
@@ -1339,6 +1345,11 @@ def redirect_gloo_requests() -> None:
     "flagos" after a redirected init), but a caller that spells "gloo" out again
     would otherwise get a second, flagos-hostile group on the same tensors.
 
+    A caller that genuinely wants a host group -- DCP's metadata collectives are
+    the real one -- uses ``new_host_group``, which steps around this. The
+    process-wide ``FLAGOS_DIST_REDIRECT_GLOO=0`` switch is the blunter form of
+    the same thing.
+
     Called once at ``import torch_fl``; subsequent calls are no-ops.
     """
     if getattr(dist.init_process_group, _REDIRECT_MARKER, False):
@@ -1346,6 +1357,9 @@ def redirect_gloo_requests() -> None:
 
     original_init_process_group = dist.init_process_group
     original_new_group = dist.new_group
+
+    global _ORIGINAL_NEW_GROUP
+    _ORIGINAL_NEW_GROUP = original_new_group
 
     @functools.wraps(original_init_process_group)
     def init_process_group(*args, **kwargs):
@@ -1370,6 +1384,47 @@ def redirect_gloo_requests() -> None:
     if c10d_module is not None:
         c10d_module.init_process_group = init_process_group
         c10d_module.new_group = new_group
+
+
+def new_host_group(*args, **kwargs):
+    """Build a group on the host backend, bypassing the gloo redirect.
+
+    ``redirect_gloo_requests`` answers an explicit ``backend="gloo"`` with the
+    flagos backend, because a gloo group over flagos tensors fails in gloo's C++
+    collectives. That is right for the collectives the model runs, and wrong for
+    the one caller that wants a host group *on purpose*: ``torch.distributed
+    .checkpoint``'s metadata collectives carry only CPU tensors, and on a
+    redirected group DCP's save never writes ``.metadata``, leaving every shard
+    on disk and the checkpoint permanently unfinalized (issue #562).
+
+    ``FLAGOS_DIST_REDIRECT_GLOO=0`` already turns the redirect off, but it does
+    so for the whole process: a job that wants one host group *and* flagos
+    groups for its model cannot express that with a switch. This is the
+    per-group form of the same escape hatch.
+
+    Takes ``torch.distributed.new_group``'s signature, except that ``backend``
+    may only be gloo or left out -- spelling it is a restatement of the intent
+    and is accepted, while any other backend is refused rather than silently
+    served as a host group. Use ``torch.distributed.new_group`` for those.
+
+    The group this returns rejects flagos tensors, by design and loudly
+    ("unsupported device type flagos"). Pass it only CPU tensors.
+    """
+    backend = kwargs.pop("backend", None)
+    if len(args) > 2:
+        backend = args[2]
+        args = args[:2]
+    if backend is not None and str(backend).lower() != dist.Backend.GLOO:
+        raise TypeError(
+            f"new_host_group() builds the host group and cannot serve "
+            f"backend={backend!r}. Use torch.distributed.new_group for that."
+        )
+    # The undecorated function, not `dist.new_group`: the wrapper installed above
+    # is what this exists to step around. `__wrapped__` is functools.wraps's and
+    # the issue is right that depending on it is incidental -- so the module
+    # keeps its own reference and this reads that instead.
+    original = _ORIGINAL_NEW_GROUP or dist.new_group
+    return original(*args, backend=dist.Backend.GLOO, **kwargs)
 
 
 # ---------------------------------------------------------------------------
