@@ -133,6 +133,13 @@ publishing fails, which is what [Recovering a single lane](#recovering-a-single-
 is built on. A failed artifact step still fails the job, so a slow or refused
 artifact upload stays visible rather than being swallowed.
 
+The publishing step copies the built wheel into the vendor upload directory and
+keeps the original in `dist/` for artifact upload, including after a publication
+failure. Installed-wheel validation runs outside the checkout in isolated Python
+mode, reads the installed distribution's manifest and `torch.backends` entry
+point, and rejects checkout metadata. Source-tree `torch_fl.egg-info` cannot
+substitute for the installed wheel's build configuration.
+
 ## Credentials
 
 The organization secret **`NEXUS_TOKEN`** in `user:token` form — the same one

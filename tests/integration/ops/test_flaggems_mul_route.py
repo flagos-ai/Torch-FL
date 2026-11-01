@@ -89,7 +89,7 @@ def test_flaggems_mul_guard_matches_the_device_name():
     assert name == actual
 
 
-def test_mul_does_not_cross_the_host_boundary():
+def test_mul_does_not_cross_the_host_boundary(device_copy_profiler):
     """The routed op must compute on device.
 
     A cpu_fallback moves both operands and the result across the bus; the
@@ -100,19 +100,7 @@ def test_mul_does_not_cross_the_host_boundary():
     """
     a = torch.randn(640, 1024, dtype=torch.bfloat16, device=DEVICE)
     b = torch.randn(640, 1024, dtype=torch.bfloat16, device=DEVICE)
-    for _ in range(3):  # warm any lazy init out of the measured window
-        torch.mul(a, b)
-    torch.cuda.synchronize()
-
-    crossings = 0
-    from torch.profiler import ProfilerActivity, profile
-
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-        torch.mul(a, b)
-        torch.cuda.synchronize()
-    for evt in prof.events():
-        if "Memcpy" in evt.name and ("DtoH" in evt.name or "HtoD" in evt.name):
-            crossings += 1
+    crossings = device_copy_profiler(lambda: torch.mul(a, b))
     assert crossings == 0, (
         f"torch.mul crossed the host boundary {crossings} times; "
         "aten::mul.Tensor is on the cpu_fallback rather than the FlagGems route"

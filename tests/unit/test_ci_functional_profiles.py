@@ -180,8 +180,17 @@ def test_nightly_keeps_all_existing_groups_and_isolates_cuda_profiling():
             )
             assert {g["name"] for g in pr} <= {g["name"] for g in nightly}
             extras = {g["name"] for g in nightly} - {g["name"] for g in pr}
-            expected = platform == "nvidia" and not boxing_lane
-            assert len(extras) == (2 if expected else 0)
+            expected = set()
+            if platform == "nvidia":
+                expected = {
+                    "CUDA dtype cast transfer regression"
+                    if boxing_lane
+                    else "CUDA FlagGems multiplication route regression"
+                }
+            assert extras == expected
+            for group in nightly:
+                if group["name"] in extras:
+                    assert group["min_passed"] == (9 if boxing_lane else 5)
     with pytest.raises(ManifestError, match="weekly is reserved"):
         compose(manifest, config, platform, known, boxing=boxing, profile="weekly")
 
@@ -282,6 +291,27 @@ def test_incomplete_or_empty_evidence_cannot_pass(tmp_path, missing):
     actual = merge_reports(tmp_path, "mthreads", "success", "repo", "sha", True)
     assert actual["flagcicd"]["complete"] is False
     assert actual["exitcode"] != 0
+
+
+def test_direct_pytest_without_selected_inventory_cannot_pass(tmp_path):
+    (tmp_path / "session.pending").write_text(json.dumps({"group": "direct-pytest"}))
+    (tmp_path / "session.json").write_text(
+        json.dumps(
+            {
+                "summary": {"passed": 1},
+                "tests": [{"nodeid": "test_sample.py::test_ok"}],
+                "duration": 0.1,
+                "exitcode": 0,
+            }
+        )
+    )
+    report = merge_reports(tmp_path, "nvidia", "success", "repo", "sha")
+    assert report["exitcode"] == 1
+    assert not report["flagcicd"]["complete"]
+    assert (
+        report["flagcicd"]["sessions"][0]["collection_error"]
+        == "selected test inventory is missing"
+    )
 
 
 @pytest.mark.parametrize(

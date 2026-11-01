@@ -17,7 +17,7 @@
 This is a performance contract, separate from cross-platform cast correctness.
 The profiler owns the device through an exclusive CUDA-only nightly manifest group.
 Other CUDA-ABI vendors need their own measurements before joining this contract.
-CPU-only PyTorch intentionally casts through the host and has no CUDA profiler.
+The nightly boxing lane supplies native CUDA copy kernels with CPU-only PyTorch.
 """
 
 from pathlib import Path
@@ -30,36 +30,35 @@ from torch_fl._platform import detect_platform
 if detect_platform() != "cuda":
     pytest.skip("CUDA dtype-cast performance regression", allow_module_level=True)
 
-pytestmark = pytest.mark.profiler
+pytestmark = [pytest.mark.profiler, pytest.mark.usefixtures("native_cuda_copy")]
 
 
 def _device():
     return torch.device("flagos:0")
 
 
-def _memcpy_count(fn):
-    """How many device/host transfers the call under `fn` performs."""
-    fn()  # warm up any lazy init
-    torch.cuda.synchronize()
-    from torch.profiler import ProfilerActivity, profile
+@pytest.fixture(scope="module")
+def native_cuda_copy():
+    """The scheduled lane must supply native copies, not the CPU fallback."""
+    from torch_fl import _env
 
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-        fn()
-    torch.cuda.synchronize()
-    return sum(e.count for e in prof.key_averages() if "Memcpy" in e.key)
+    torch_lib = Path(torch.__file__).resolve().parent / "lib"
+    assert (
+        "boxing" in _env.build_kernels() or (torch_lib / "libtorch_cuda.so").is_file()
+    ), (
+        "Transfer-free casts require a boxing wheel or CUDA-linked PyTorch; "
+        "the default CPU-only vendor lane does not cover this path"
+    )
 
 
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
     [(torch.bfloat16, torch.float32), (torch.float32, torch.bfloat16)],
 )
-def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype):
+def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype, device_copy_profiler):
     """End to end: the bf16<->fp32 cast must not move data between host and device."""
-    torch_lib = Path(torch.__file__).resolve().parent / "lib"
-    if not (torch_lib / "libtorch_cuda.so").is_file():
-        pytest.skip("torch has no libtorch_cuda.so; the cast arm is the host one")
     src = torch.randn(512, 1024, dtype=src_dtype, device=_device())
-    n = _memcpy_count(lambda: src.to(dst_dtype))
+    n = device_copy_profiler(lambda: src.to(dst_dtype))
     assert n == 0, (
         f"{src_dtype} -> {dst_dtype} performed {n} host/device transfers; the cast "
         "is routing through host memory instead of the native copy kernel"
@@ -76,7 +75,9 @@ def test_bf16_fp32_cast_is_transfer_free(src_dtype, dst_dtype):
         (torch.int32, torch.int64),
     ],
 )
-def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
+def test_copy_into_strided_destination_is_transfer_free(
+    src_dtype, dst_dtype, device_copy_profiler
+):
     """`copy_` into a non-contiguous destination must stay on device.
 
     The same-device fast path in `_copy_from` only covers a contiguous source
@@ -96,7 +97,7 @@ def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
     def run():
         dst.copy_(src)
 
-    n = _memcpy_count(run)
+    n = device_copy_profiler(run)
     assert n == 0, (
         f"copy_({src_dtype} -> {dst_dtype}) into a strided destination performed "
         f"{n} host/device transfers; the copy is going through host memory"
@@ -104,7 +105,9 @@ def test_copy_into_strided_destination_is_transfer_free(src_dtype, dst_dtype):
 
 
 @pytest.mark.parametrize("src_dtype", [torch.bfloat16, torch.float32])
-def test_contiguous_of_transposed_source_is_transfer_free(src_dtype):
+def test_contiguous_of_transposed_source_is_transfer_free(
+    src_dtype, device_copy_profiler
+):
     """`contiguous()` on a strided source must gather on device.
 
     `_to_copy` calls it before its cast, so a host gather here costs the round
@@ -117,7 +120,7 @@ def test_contiguous_of_transposed_source_is_transfer_free(src_dtype):
 
     assert out.is_contiguous()
     assert out.device.type == "flagos"
-    n = _memcpy_count(lambda: src.contiguous())
+    n = device_copy_profiler(lambda: src.contiguous())
     assert n == 0, (
         f"contiguous() of a transposed {src_dtype} source performed {n} "
         "host/device transfers; the gather is going through host memory"

@@ -185,33 +185,45 @@ jobs:
         env:
           EXPECTED_BOXING_LANE: ${{ inputs.boxing_lane }}
         run: |
+          set -euo pipefail
           python -m pip install --force-reinstall --no-deps dist/*.whl
-          python - <<'PY'
+          export WHEEL_SOURCE_ROOT="$PWD"
+          wheel_verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$wheel_verify_dir"' EXIT
+          cd "$wheel_verify_dir"
+          python -I - <<'PY'
           import json
           import os
-          from importlib.metadata import distribution, files, metadata
+          from importlib.metadata import distribution
           from pathlib import Path
 
-          package_metadata = metadata("torch_fl")
-          package_files = [str(path) for path in files("torch_fl")]
-          manifest = json.loads(distribution("torch_fl").locate_file("torch_fl/compatibility.json").read_text())
+          installed = distribution("torch_fl")
+          source_root = Path(os.environ["WHEEL_SOURCE_ROOT"]).resolve()
+          installed_root = Path(installed.locate_file("")).resolve()
+          assert installed_root != source_root and installed.read_text("WHEEL"), (
+              f"Expected an installed wheel, resolved metadata from {installed_root}"
+          )
+          package_metadata = installed.metadata
+          package_files = [str(path) for path in installed.files or ()]
+          manifest_path = Path(installed.locate_file("torch_fl/compatibility.json")).resolve()
+          assert manifest_path == installed_root / "torch_fl/compatibility.json", (
+              f"Wheel manifest resolves outside the installed distribution: {manifest_path}"
+          )
+          manifest = json.loads(manifest_path.read_text())
           assert ("boxing" in manifest["build"]["kernels"]) == (os.environ["EXPECTED_BOXING_LANE"] == "1"), (
               "Wheel kernel sets do not match the requested boxing lane"
           )
           assert any("torch_fl" in path for path in package_files), (
               "torch_fl module not found in wheel"
           )
-          # The preflight console script is named for the platform built; the
-          # `torch-fl-<id>` name lives in the packaged table, which is the only
-          # place it can (pyproject.toml's entry points are static).
-          table = Path("torch_fl/entry_points.txt").read_text()
-          accelerator = os.environ["FLAGOS_ACCELERATOR"]
-          assert f"torch-fl-{accelerator} = " in table, (
-              f"packaged entry points have no torch-fl-{accelerator} script: {table}"
-          )
+          assert "torch_fl/compatibility.json" in package_files, "Wheel RECORD omits its manifest"
           assert any(
-              path.endswith(f"torch-fl-{accelerator}") for path in package_files
-          ), "Installed wheel is missing the preflight console script"
+              entry.group == "torch.backends" and entry.name == "torch_fl"
+              and entry.value == "torch_fl._autoload:init"
+              for entry in installed.entry_points
+          ), "Installed wheel is missing the torch.backends autoload hook"
+          print(f"Installed distribution: {installed_root}")
+          print(f"Compatibility manifest: {manifest_path}")
           print(f"Package: {package_metadata['Name']} {package_metadata['Version']}")
           print(f"Installed files: {len(package_files)}")
           PY
@@ -259,7 +271,7 @@ jobs:
           fi
           platform="${ARTIFACT_NAME#wheel-}"
           mkdir -p "wheels/wheel-$platform"
-          mv "${wheels[0]}" "wheels/wheel-$platform/"
+          cp "${wheels[0]}" "wheels/wheel-$platform/"
 
           python .github/scripts/publish_wheels.py \
             --wheels wheels \

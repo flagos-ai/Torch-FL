@@ -16,10 +16,19 @@ Only the hardware matrix is narrowed by the diff router.
 
 `profiles: [nightly]` on a manifest group keeps optional CUDA profiling out of
 ordinary PR checks. Groups without that field run in both profiles. The CUDA
-FlagGems route regression requires at least one passing test. The dtype-cast
-performance regression reports a skip when PyTorch has no `libtorch_cuda.so`:
-that build intentionally casts through the host, and portable cast correctness
-is still checked in the functional groups. Runtime platform
+FlagGems route regression runs on the NVIDIA vendor lane and requires five
+passing cases, including the measured route and correctness cases; its optional
+FlagGems device-name probe may skip on versions without that constant.
+The nine dtype-cast, strided-copy and gather performance cases
+run on the NVIDIA boxing lane, which supplies native CUDA copy kernels even
+though the installed PyTorch is CPU-only. All nine must pass; missing native
+copy support is a configuration failure, not a successful skipped group.
+The default vendor wheel intentionally takes the host path for these copies;
+its portable correctness checks do not establish transfer-free casts. The
+non-boxing, CUDA-linked PyTorch copy path remains outside the scheduled coverage.
+Both transfer suites use `PrivateUse1` activity, count the `gpu_memcpy` category
+independently of display names, and require a known host-transfer positive
+control. An empty device trace cannot establish zero transfers. Runtime platform
 guards retain build-table ids such as `cuda`; CI config names use vendor names
 such as `nvidia`. Source-only contracts run in the agnostic/codegen checks.
 
