@@ -197,23 +197,56 @@ def dispatched_to_mps(source: str) -> int:
 #: this translates the same value into what the build record (``KERNELS`` in
 #: ``torch_fl/_build_config.py``) calls the code that backs it, which is the
 #: other half of "can this wheel reach the route it was handed".
+#: Both spellings of the boxing route are here for the reason
+#: ``ParseBackendName`` (csrc/aten/common.cc) accepts both: the generator emits
+#: ``nvidia`` for the NVIDIA kernel set and ``boxing`` for every other
+#: CUDA-ABI platform's ``_boxing`` conf, while ``cuda`` is the retired spelling
+#: an out-of-tree conf may still carry. All three reach ``Backend::kBoxing``.
 _BACKEND_KERNEL_SET = {
     "flaggems": "flaggems",
     "flaggems_python": "flaggems",
     "flagos_python": "flaggems",
     "flaggems_cpp": "flaggems_cpp",
+    "boxing": "boxing",
+    "nvidia": "boxing",
     "cuda": "boxing",
     "tileops": "tileops",
 }
 
-#: The keys a native-kernel vendor routes to. Each platform's conf names its own
-#: (``ascend`` on Ascend, ``musa`` on MUSA, ``gcu`` on GCU, ``kunlunxin`` on
-#: Kunlunxin, ``iluvatar`` on Iluvatar, ``tsingmicro`` on TsingMicro), and
-#: setup.py compiles every one of them from the single ``vendor`` kernel set
-#: rather than a per-vendor switch -- so one membership test answers "did this
-#: build compile the native kernels" for all of them.
+#: The keys a native-kernel vendor routes to -- every vendor that ships a
+#: conf naming its own kernels, in the vendor spelling the conf uses, plus the
+#: SDK-era spellings ``ParseBackendName`` still accepts (``musa`` for
+#: mthreads, ``gcu`` for enflame, ``mps`` for apple). setup.py compiles all of
+#: them from the single ``vendor`` kernel set rather than a per-vendor switch,
+#: so one membership test answers "did this build compile the native kernels"
+#: for all of them.
+#:
+#: A value missing here (or from ``_BACKEND_KERNEL_SET``) does not fail --
+#: ``route_is_served`` just answers False, and the caller skips. That is how
+#: the vendor rename in #648/#649 silenced the dispatch assertions on nine
+#: confs: the conf said ``mthreads``/``apple``/``enflame``/``boxing``/``nvidia``
+#: while these tables still said ``musa``/``mps``/``gcu``/``cuda``. Keep both
+#: tables in step with ``ParseBackendName``;
+#: tests/unit/test_route_log_name_tables.py pins that.
+#:
+#: ``metax`` is deliberately absent. ``ParseBackendName`` has an arm for it and
+#: the dispatcher carries a ``metax_fn_`` slot, but the tree holds no
+#: ``csrc/aten/backends/metax/`` kernels and no shipped conf routes an op there,
+#: so answering True would claim a kernel set this build cannot have.
 _VENDOR_BACKENDS = frozenset(
-    {"ascend", "musa", "gcu", "kunlunxin", "iluvatar", "tsingmicro"}
+    {
+        "apple",
+        "mps",
+        "ascend",
+        "drobotics",
+        "enflame",
+        "gcu",
+        "iluvatar",
+        "kunlunxin",
+        "mthreads",
+        "musa",
+        "tsingmicro",
+    }
 )
 
 

@@ -85,15 +85,23 @@ def _logged_names():
     return set(re.findall(r'name = "(\w+)"', log))
 
 
-def _table(path):
+def _named(path, name):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     node = next(
         item
         for item in tree.body
         if isinstance(item, ast.Assign)
-        and any(getattr(target, "id", "") == "_LOG_NAME" for target in item.targets)
+        and any(getattr(target, "id", "") == name for target in item.targets)
     )
-    return ast.literal_eval(node.value)
+    value = node.value
+    # `frozenset({...})` is a call, not a literal; read the set it wraps.
+    if isinstance(value, ast.Call) and getattr(value.func, "id", "") == "frozenset":
+        value = value.args[0]
+    return ast.literal_eval(value)
+
+
+def _table(path):
+    return _named(path, "_LOG_NAME")
 
 
 def _resolve(table, value):
@@ -135,3 +143,48 @@ def test_every_table_entry_names_a_logged_backend():
         for value, name in _table(path).items():
             assert name in logged, (path.relative_to(ROOT), value, name)
             assert LOGGED_AS.get(value) == name, (path.relative_to(ROOT), value, name)
+
+
+def test_every_conf_value_resolves_to_a_kernel_set():
+    """``route_is_served`` must recognise every value a shipped conf routes to.
+
+    It answers "did this wheel compile the backend the conf names" by looking
+    the raw conf value up in two tables: ``_BACKEND_KERNEL_SET`` for the
+    build-switch-backed routes and ``_VENDOR_BACKENDS`` for the native ones. A
+    value in neither does not raise -- it answers False, and the caller skips.
+    So drift here does not turn a lane red; it silently stops asserting.
+
+    That is what the vendor rename did. #648 moved the confs to the vendor
+    spelling and #649 moved NVIDIA's boxing key from ``cuda`` to ``nvidia``,
+    while these two tables kept the SDK-era words. Six live values
+    (``apple``, ``boxing``, ``drobotics``, ``enflame``, ``mthreads``,
+    ``nvidia``) fell through, and the dispatch assertions on nine confs --
+    every op on all four boxing lanes among them -- skipped instead of running.
+    """
+    conf = ROOT / "tests" / "integration" / "ops" / "backend_conf.py"
+    kernel_set = _named(conf, "_BACKEND_KERNEL_SET")
+    vendor = _named(conf, "_VENDOR_BACKENDS")
+    known = set(kernel_set) | set(vendor) | {"none"}
+    missing = sorted(_conf_values() - known)
+    assert not missing, (
+        f"{missing} appear in a shipped conf but in neither table, so "
+        "route_is_served() answers False and every test guarded by it skips"
+    )
+
+
+def test_kernel_sets_are_the_ones_setup_py_records():
+    """The second half of ``route_is_served``: the name it tests ``KERNELS`` for.
+
+    ``_BACKEND_KERNEL_SET``'s values are compared against
+    ``torch_fl._env.build_kernels()``, which returns what setup.py wrote from
+    ``kernel_set_names`` in cmake/flagos_platforms.json. A value outside that
+    vocabulary can never match, so it reads as "not compiled" on every wheel.
+    """
+    import json
+
+    conf = ROOT / "tests" / "integration" / "ops" / "backend_conf.py"
+    table = json.loads((ROOT / "cmake" / "flagos_platforms.json").read_text())
+    names = set(table["kernel_set_names"].values())
+    for value, kernels in _named(conf, "_BACKEND_KERNEL_SET").items():
+        assert kernels in names, (value, kernels, sorted(names))
+    assert "vendor" in names, sorted(names)
