@@ -157,7 +157,7 @@ def compile_platform(source, lane, profile, manifest, platform_configs, boxing):
 
 
 def plan_hash(plan):
-    """Hash deterministic identity and final content, excluding run/task IDs."""
+    """Hash identity, diff audit and execution content, excluding run/task IDs."""
     fields = (
         "schema_version",
         "entry",
@@ -170,6 +170,8 @@ def plan_hash(plan):
         "test_level",
         "scope",
         "config_hash",
+        "changed_files",
+        "matched_rules",
         "expected_platforms",
         "expected_shared_checks",
         "selection_reasons",

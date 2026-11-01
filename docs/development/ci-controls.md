@@ -9,16 +9,23 @@ test groups come from the shared integration manifest.
 | Event | Hardware selection |
 | --- | --- |
 | PR with `platform:all` | Every configured platform |
-| PR with one or more `platform:<name>` labels | The union of those platforms |
+| PR with one or more `platform:<name>` labels | File-required platforms plus the platforms named by labels |
 | PR with an unknown routing label | Every platform, conservatively |
 | PR without routing labels | Platforms affected by the changed files |
 | Documentation-only PR without routing labels | No hardware jobs; shared checks still run |
 | Push or daily schedule | Every platform |
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
-Routing labels take precedence over file filtering. Adding or removing labels
-reruns PR CI. Supported platform names are `apple`, `ascend`, `enflame`, `hygon`,
-`iluvatar`, `kunlunxin`, `metax`, `mthreads`, `nvidia` and `thead`.
+Routing labels can expand the file-based matrix; they cannot remove a required
+platform. Shared CI changes and unavailable diffs therefore still select every
+lane even with a single-platform label. For example, a shared workflow change
+with `platform:nvidia` keeps the full matrix, while an MUSA-only change with that
+label runs both MUSA and NVIDIA (including NVIDIA boxing). The plan records the
+file selection and the label's `expand_only` policy. Use the manual dispatch
+route below for targeted diagnostics; it does not replace the PR merge gate.
+Adding or removing labels reruns PR CI. Supported platform names are `apple`,
+`ascend`, `enflame`, `hygon`, `iluvatar`, `kunlunxin`, `metax`, `mthreads`,
+`nvidia` and `thead`.
 
 Each `.github/configs/<platform>.yml` declares `paths_watch`: exact file names,
 directory prefixes ending in `/`, or shell-style globs. Its own configuration
@@ -187,8 +194,11 @@ L0/L1/L2 policy and explicit L2 empty-selection fallback. Regression tests run
 conditionally when present in the tested source checkout.
 
 `plan_hash` binds source repository/commit, comparison base and diff head,
-control-code commit, profile, configuration identity, selection reasons and final
-execution content. `source_sha` is the checked-out commit; `diff_head_sha` may be
+control-code commit, profile, configuration identity, `changed_files`,
+`matched_rules`, selection reasons and final execution content. Modifying either
+audit field invalidates the artifact's hash. The potentially large audit arrays
+stay in the artifact; compact contexts carry the hash instead of duplicating
+them. `source_sha` is the checked-out commit; `diff_head_sha` may be
 the PR head when testing a merge commit. Run, attempt, task and parent IDs are
 excluded from the deterministic hash and run identity is checked separately.
 Large commands and explanations stay in the artifact, outside compact contexts.

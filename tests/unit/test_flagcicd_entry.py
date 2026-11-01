@@ -86,6 +86,8 @@ def plan(level="L2", platforms=None):
         "run_id": "42",
         "run_attempt": "1",
         "selection_reasons": [],
+        "changed_files": [],
+        "matched_rules": [],
         "platforms": expected,
         "expected_platforms": expected,
         "expected_shared_checks": ["plan", "lint"]

@@ -297,7 +297,7 @@ def select_platforms(
     *,
     platform_configs=None,
 ):
-    """Use the existing routing rules, retaining their selection explanation."""
+    """Preserve file-required PR coverage while allowing labels to expand it."""
     known = (
         sorted(platform_configs)
         if platform_configs is not None
@@ -314,20 +314,28 @@ def select_platforms(
         selected = _schedule(known, boxing)
         reasons.append({"kind": "full_event", "event_name": event_name})
     else:
+        selected = _platforms_from_files(
+            changed, known, configs_dir, boxing, reasons, platform_configs
+        )
         label_platforms = _platforms_from_labels(labels, known)
         if label_platforms is not None:
-            selected = _schedule(label_platforms, boxing)
+            label_lanes = _schedule(label_platforms, boxing)
+            required = set(selected) | set(label_lanes)
+            selected = [lane for lane in _schedule(known, boxing) if lane in required]
             routing = sorted(label for label in labels if label.startswith("platform:"))
-            reasons.append({"kind": "labels", "labels": routing})
+            reasons.append(
+                {
+                    "kind": "labels",
+                    "labels": routing,
+                    "policy": "expand_only",
+                    "requested_lanes": label_lanes,
+                }
+            )
             if any(
                 label.split(":", 1)[1].strip() not in (*known, "all")
                 for label in routing
             ):
                 reasons[-1]["fallback"] = "unknown_platform_label"
-        else:
-            selected = _platforms_from_files(
-                changed, known, configs_dir, boxing, reasons, platform_configs
-            )
     return selected, reasons
 
 
@@ -376,9 +384,7 @@ def main() -> None:
 
     labels = [lb.strip() for lb in args.pr_labels.split(",") if lb.strip()]
     changed = None
-    if args.event_name == "pull_request" and not any(
-        label.startswith("platform:") for label in labels
-    ):
+    if args.event_name == "pull_request":
         changed = (
             [f for f in args.changed_files.splitlines() if f.strip()]
             if args.changed_files is not None

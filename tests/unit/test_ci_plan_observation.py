@@ -194,6 +194,41 @@ def test_plan_hash_is_deterministic_and_ignores_run_and_task_identity():
     assert PLANNER.plan_hash(second) == PLANNER.plan_hash(first)
 
 
+@pytest.mark.parametrize("entry", ["ci", "flagcicd"])
+@pytest.mark.parametrize("field", ["changed_files", "matched_rules"])
+def test_modified_audit_fields_are_rejected_by_plan_verification(
+    monkeypatch, entry, field
+):
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    req = request(run_id="42", run_attempt="1")
+    if entry == "ci":
+        plan = PLANNER.build_ci_plan(req, CONTRACT, ROOT, ["setup.py"], "pull_request")
+    else:
+        plan = PLANNER.build_plan(req, CONTRACT, ROOT, ["setup.py"])
+    context = json.loads(PLANNER.report_context(plan))
+    CONSUMER.verify_plan(plan, context)
+    altered = copy.deepcopy(plan)
+    altered[field] = ["altered-audit-evidence"]
+    with pytest.raises(ValueError, match="plan_hash"):
+        CONSUMER.verify_plan(altered, context)
+    assert PLANNER.plan_hash(altered) != plan["plan_hash"]
+    assert field not in context
+
+
+def test_routing_labels_cannot_remove_shared_changes_from_the_execution_plan():
+    changed = [".github/workflows/ci.yml"]
+    baseline = PLANNER.build_ci_plan(request(), CONTRACT, ROOT, changed, "pull_request")
+    labeled = PLANNER.build_ci_plan(
+        request(), CONTRACT, ROOT, changed, "pull_request", ["platform:nvidia"]
+    )
+    assert labeled["expected_platforms"] == baseline["expected_platforms"]
+    assert [lane["name"] for lane in labeled["execution_plan"]] == baseline[
+        "expected_platforms"
+    ]
+    assert labeled["expected_shared_checks"] == baseline["expected_shared_checks"]
+
+
 @pytest.mark.parametrize(
     "field",
     ["source_sha", "control_sha", "base_sha", "diff_head_sha", "source_repository"],

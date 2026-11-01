@@ -5,7 +5,7 @@ It reuses the existing diff router, platform configs and integration manifest.
 
 | Profile | Hardware selection | Tests |
 | --- | --- | --- |
-| PR | Changed-file routing, with existing label overrides | Existing applicable functional groups |
+| PR | Changed-file routing; labels may add platforms | Existing applicable functional groups |
 | Nightly | Every configured platform, regardless of the diff | All existing applicable groups plus CUDA transfer regressions |
 | Weekly | Reserved | Rejected before hardware dispatch until a workload is defined |
 
