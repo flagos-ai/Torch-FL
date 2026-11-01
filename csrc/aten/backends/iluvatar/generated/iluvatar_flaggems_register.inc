@@ -65,6 +65,11 @@
 //   - addmm.dtype_out
 //   - addmm.out
 //   - addmm_
+//   - baddbmm
+//   - baddbmm.dtype
+//   - baddbmm.dtype_out
+//   - baddbmm.out
+//   - baddbmm_
 //   - bmm
 //   - bmm.dtype
 //   - bmm.dtype_out
@@ -113,7 +118,7 @@
 //   - view_as_real
 //   - where.self_out
 //
-// Total: 585 ops registered here, 7 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 583 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -222,8 +227,6 @@
   m.impl("avg_pool2d_backward", WrapperAvgPool2dBackward);
   m.impl("avg_pool3d", WrapperAvgPool3d);
   m.impl("avg_pool3d_backward", WrapperAvgPool3dBackward);
-  m.impl("baddbmm", WrapperBaddbmm);
-  m.impl("baddbmm_", WrapperBaddbmmInplace);
   m.impl("bernoulli_.float", WrapperBernoulliInplaceFloat);
   m.impl("binary_cross_entropy_backward", WrapperBinaryCrossEntropyBackward);
   m.impl("bincount", WrapperBincount);

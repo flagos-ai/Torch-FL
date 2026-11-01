@@ -2476,6 +2476,38 @@ NATIVE_TRITON_GAPS = {
         "bmm.out",
         "bmm.dtype",
         "bmm.dtype_out",
+        # wrong values, nondeterministic: a FlagGems batched GEMM whose leading
+        # dimension leaves a partial tile is wrong on this device. Measured on
+        # u180 (BI-V150, FlagGems 5.4.0, FlagTree/Triton 3.6.0), bf16, error
+        # normalised by |reference|max, 4 trials: at B=4 `baddbmm` reads 70.3%
+        # wrong at M=132, 61.6% at M=136, 73.5% at M=140 and 83.7% at M=556,
+        # against 0.245% at M=128; repeated identical calls disagree. Every
+        # dtype is affected (at M=132 the sibling `bmm` is 81.4% in fp32, 72.1%
+        # in fp16, 52.4% in bf16), so it is not a low-precision tolerance
+        # question, and `B=1` is always clean.
+        #
+        # The fault is below FlagGems, in FlagTree's Iluvatar backend, not in
+        # what FlagGems emits: its DIVISIBLE_M/N/K heuristics resolve on this
+        # device and return the CORRECT value at every shape, and a kernel
+        # written here by hand with ordinary masking is clean at every
+        # (TILE_M, num_warps) in {32,64,128} x {2,4,8}. Isolated to one
+        # construct -- a 3-D grid whose batch offset is taken in-kernel from
+        # `tl.program_id(2)` is 93.2% wrong at M=132, while the same compiled
+        # kernel launched with a (gx, gy, 1) grid and host-folded pointers is
+        # 0.256%. 11 of FlagGems' 12 tuned `bmm` configs are wrong; only
+        # TILE_M=32 survives. Reported for issue #617, whose Qwen3.5-VL vision
+        # tower has 556 tokens and hits the worst case.
+        #
+        # `baddbmm`/`baddbmm_` take the native ixblas kernel, which measures
+        # 0.228-0.256% and deterministic at all of these shapes; the out=/
+        # dtype=/dtype_out= spellings have no native kernel and reach
+        # cpu_fallback. `addbmm` is NOT gapped: it reduces over the batch dim
+        # and measured clean (0.235-0.261%, deterministic) at the same shapes.
+        "baddbmm",
+        "baddbmm.out",
+        "baddbmm.dtype",
+        "baddbmm.dtype_out",
+        "baddbmm_",
         # wrong values: assumes a contiguous grad_output
         "slice_backward",
         # the out= contract (see the MUSA entry for where.self_out)
