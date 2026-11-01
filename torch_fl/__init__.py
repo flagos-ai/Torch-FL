@@ -1882,6 +1882,59 @@ def is_flaggems_enabled():
     return len(_registered_ops) > 0
 
 
+def fused_kernels_available(device=None) -> bool:
+    """Whether a fused Triton kernel can be compiled for this device.
+
+    The predicate dispatch code should gate on instead of ``tensor.is_cuda``.
+    ``is_cuda`` is False on flagos, so a caller choosing between
+    ``torch.compile(flex_attention)`` and eager ``flex_attention`` by hand takes
+    the eager branch and silently materializes the full scores matrix -- correct,
+    and several times slower (issue #515).
+
+    This asks the question the caller means: can inductor generate a Triton
+    kernel for a tensor on this device, here, now. It is deliberately *not*
+    ``optional_integration_status()["compile"] == "active"``: that state records
+    only that the backend-registration imports succeeded, and nothing on that
+    path probes Triton, so it reports ``active`` on a build whose vendor Triton
+    backend is missing. ``raise_if_triton_unavailable`` is the honest check --
+    it applies the CUDA compute-capability floor where one applies and otherwise
+    lets the vendor backend decide -- so that is what runs here, with its
+    exception turned into the boolean a branch needs.
+
+    A False answer is a statement about this build and device, not about the
+    operator: the eager path still computes the right result.
+    """
+    if _optional_integration_state.get("compile") != "active":
+        return False
+    try:
+        from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+        if not FlagOSDeviceInterface.is_available():
+            return False
+        FlagOSDeviceInterface.raise_if_triton_unavailable(device)
+    except Exception:  # noqa: BLE001 - any failure to prove it means "no"
+        return False
+    return True
+
+
+def device_capabilities(device=None) -> dict:
+    """Capability flags for this build, for code that cannot import torch_fl APIs.
+
+    One dict so a downstream framework can read every gate it needs in a single
+    call, rather than discovering one predicate at a time. Keys are stable; new
+    ones may be added, so read by key and do not unpack.
+    """
+    return {
+        "compile": _optional_integration_state.get("compile") == "active",
+        "fused_kernels": fused_kernels_available(device),
+        "fused_attention": (
+            fused_kernels_available(device)
+            and _optional_integration_state.get("flex_attention") == "active"
+        ),
+        "flaggems": is_flaggems_enabled(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Distributed: register "flagos" ProcessGroup backend for privateuseone
 # ---------------------------------------------------------------------------
@@ -2669,6 +2722,8 @@ __all__ = [
     "distributed",
     "get_registered_ops",
     "is_flaggems_enabled",
+    "fused_kernels_available",
+    "device_capabilities",
     "activate_optional_integrations",
     "optional_integration_status",
     "quantization",
