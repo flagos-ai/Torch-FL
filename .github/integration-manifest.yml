@@ -390,6 +390,34 @@ steps:
       python -m pytest tests/integration/ops/ -m "flaggems and main_ops"
       -v -s --tb=short
 
+  # The sibling of the group above, and the one marker in this suite that no
+  # group selected: every `vendor_ops` variant spells `not flaggems_python`, so
+  # the 27 `@pytest.mark.flaggems_python` cases were collected by nothing on any
+  # platform. They are the per-op override contract -- `FLAGOS_OP_<op>=
+  # flaggems_python` must move that one op to the FlagGems Python path and say so
+  # in the dispatch log -- which is the only coverage of the override reaching a
+  # specific op rather than the route the conf already chose.
+  #
+  # Byte-identical on every platform for the same reason `flaggems_ops` is: each
+  # case asks override_is_logged() whether this wheel compiled the FlagGems
+  # kernels *and* its conf routes that op to a FlagGems slot, and skips itself
+  # when either half is missing. So the group measures each platform against its
+  # own conf, and the count differs per lane rather than per command: of the 27,
+  # the vendor builds run 25 on TsingMicro, 24 on MUSA, 23 on Ascend/NVIDIA/PPU,
+  # 21 on MetaX, 20 on Hygon/Iluvatar, 3 on GCU, and 0 on Kunlunxin and MPS,
+  # which route nothing through FlagGems. The boxing builds run 23 on PPU, 20 on
+  # Hygon, 18 on MetaX and 0 on NVIDIA, whose boxing conf keeps every one of
+  # these ops on the boxing kernel -- the group then reports 27 skips there,
+  # which is the honest reading of a conf that routes none of them to FlagGems.
+  #
+  # Each case spawns a subprocess that imports torch_fl, so the group is sized
+  # like `flaggems_ops` rather than like a kernel sweep.
+  - id: flaggems_python_override
+    name: Run operator tests (FlagGems per-op override)
+    command: >-
+      python -m pytest tests/integration/ops/ -m "flaggems_python"
+      -v -s --tb=short
+
   # The MUSA hybrid group is a file, not a marker: the MUSA vendor sweep above
   # deselects `-m flaggems`, and ops/test_musa_flaggems.py is the MUSA hardware
   # behaviour of that route rather than one more generically-selected case. It

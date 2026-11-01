@@ -32,6 +32,11 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
+from backend_conf import (
+    _OVERRIDE_UNSERVED,
+    override_is_logged,
+)
+
 
 DEVICE = "flagos:0"
 
@@ -97,6 +102,8 @@ class TestCosDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        if not override_is_logged("cos", "flaggems_python"):
+            pytest.skip(_OVERRIDE_UNSERVED)
         result = _run_cos_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",

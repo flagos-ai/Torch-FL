@@ -32,7 +32,12 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none, route_is_served
+from backend_conf import (
+    _OVERRIDE_UNSERVED,
+    override_is_logged,
+    route_is_served,
+    routed_backend_or_none,
+)
 
 
 DEVICE = "flagos:0"
@@ -112,6 +117,8 @@ class TestMeanDimDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        if not override_is_logged("mean.dim", "flaggems_python"):
+            pytest.skip(_OVERRIDE_UNSERVED)
         result = _run_mean_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",

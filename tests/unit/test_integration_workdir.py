@@ -948,44 +948,6 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_zeros_dispatch.py::TestZerosDispatch::test_dispatch_log_cuda",
         ),
     ),
-    "flaggems_python_override": (
-        (
-            "asserts `FLAGOS_OP_<op>=flaggems_python` emits a dispatch line, "
-            "which needs the op claimed on PrivateUse1; no lane's `-m` names "
-            "the marker, and on a default wheel an op the conf routes elsewhere "
-            "has no slot for the override to reach. This is issue #555's class "
-            "exactly"
-        ),
-        (
-            "tests/integration/ops/test_abs_dispatch.py::TestAbsDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_add_dispatch.py::TestAddTensorDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_all_dispatch.py::TestAllDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_cat_dispatch.py::TestCatDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_constant_pad_nd_dispatch.py::TestConstantPadNdDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_cos_dispatch.py::TestCosDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_embedding_dense_backward_dispatch.py::TestEmbeddingDenseBackwardDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_embedding_dispatch.py::TestEmbeddingDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_le_dispatch.py::TestLeDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mean_dispatch.py::TestMeanDimDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_neg_dispatch.py::TestNegDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_backward_flaggems_python",
-            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_forward_flaggems_python",
-            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_silu_backward_dispatch.py::TestSiluBackwardDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_silu_dispatch.py::TestSiluDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_sin_dispatch.py::TestSinDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_slice_backward_dispatch.py::TestSliceBackwardDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_softmax_dispatch.py::TestSoftmaxDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_sum_dispatch.py::TestSumDimDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_where_dispatch.py::TestWhereDispatch::test_dispatch_log_flaggems_python",
-        ),
-    ),
     "multi_device_boxing_gaps": (
         (
             "deselected by name from `multi_device_contracts`, the one group "
