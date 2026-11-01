@@ -667,7 +667,16 @@ def test_conf_route_counts_are_stable():
         # kernel but were never listed -- mul.Tensor above all, 1522 host round
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. Both effects apply: 549/1485.
-        "nvidia": {"flaggems": 549, "nvidia": 1485},
+        #
+        # The 1485 are `none`, not `nvidia`. That key parses to
+        # Backend::kBoxing (csrc/aten/common.cc), so the default NVIDIA conf was
+        # routing them to the boxing kernel -- the one thing a default conf may
+        # not do (AGENTS.md, "Default confs never route boxing"), and the same
+        # ops the other three CUDA-ABI platforms below already leave at `none`.
+        # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
+        # only registration a boxing-off build includes, claims the 549 FlagGems
+        # routes and none of these, so they already reached cpu_fallback.
+        "nvidia": {"flaggems": 549, "none": 1485},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each

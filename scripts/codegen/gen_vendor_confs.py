@@ -3622,22 +3622,56 @@ def build_all(conf_dir: Path) -> dict:
     # and hide the missing route behind the vendor's borrowed CUDA kernel. A
     # boxing route here also reaches an empty PrivateUse1 slot on a default
     # (boxing-off) wheel and raises "backend not registered" mid-model.
+    checked = set()
     for platform, (_, routes, _) in out.items():
-        boxed = sorted(
-            op
-            for op, v in routes.items()
-            if v.split("#")[0].strip() in (BOXING_FALLBACK, "cuda")
-        )
-        if boxed:
-            raise SystemExit(
-                f"error: backends_{platform}.conf would route {len(boxed)} op(s) "
-                f"to boxing (e.g. {', '.join(boxed[:5])}). A default conf may "
-                "only use flaggems/flaggems_cpp/tileops/<vendor>/none; an op "
-                "FlagGems does not cover and no vendor kernel implements is "
-                "`none` (cpu_fallback). Boxing belongs in the day-0 "
-                "backends_<platform>_boxing.conf only."
-            )
+        name = f"backends_{platform}.conf"
+        _reject_boxing_routes(name, routes)
+        checked.add(name)
+    # Every other shipped default conf, including the ones this script does not
+    # write. Iterating only `out` is what let backends_nvidia.conf route 1485 ops
+    # to boxing unnoticed: codegen_ops.py writes that file (see _write_files),
+    # so it was never in `out` and never checked, while the rule it breaks is
+    # the one this guard exists for. The check belongs to the contract, not to
+    # the writer.
+    for path in sorted(CONF_DIR.glob("backends_*.conf")):
+        if path.name.endswith("_boxing.conf") or path.name in checked:
+            continue
+        _reject_boxing_routes(path.name, _read_conf_routes(path))
     return out
+
+
+def _read_conf_routes(path: Path) -> dict:
+    """``{op: route value}`` for a shipped conf, comments stripped."""
+    routes = {}
+    for line in path.read_text().splitlines():
+        name, sep, value = line.split("#", 1)[0].partition("=")
+        if sep:
+            routes[name.strip()] = value.strip()
+    return routes
+
+
+def _reject_boxing_routes(name: str, routes: dict) -> None:
+    """Refuse a default conf that names the boxing kernel for any op.
+
+    Both spellings that reach ``Backend::kBoxing`` in ``csrc/aten/common.cc``:
+    ``boxing`` and the legacy ``cuda``, plus ``nvidia`` -- which that parser
+    also maps to the boxing kernel, so a conf naming it is routing boxing
+    whatever the key looks like.
+    """
+    boxed = sorted(
+        op
+        for op, v in routes.items()
+        if v.split("#")[0].strip() in (BOXING_FALLBACK, "cuda", "nvidia")
+    )
+    if boxed:
+        raise SystemExit(
+            f"error: {name} would route {len(boxed)} op(s) "
+            f"to boxing (e.g. {', '.join(boxed[:5])}). A default conf may "
+            "only use flaggems/flaggems_cpp/tileops/<vendor>/none; an op "
+            "FlagGems does not cover and no vendor kernel implements is "
+            "`none` (cpu_fallback). Boxing belongs in the day-0 "
+            "backends_<platform>_boxing.conf only."
+        )
 
 
 def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
