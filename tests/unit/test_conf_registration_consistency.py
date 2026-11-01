@@ -659,7 +659,9 @@ def test_conf_route_counts_are_stable():
         "drobotics": {"drobotics": 34, "none": 2003},
         # Measured on H100 after rebasing onto the main that carries #340.
         # #340 added three exception groups (cuda_route_exceptions for
-        # contract/compile defects, measured_flaggems_rollback for ops that
+        # contract/compile defects -- since renamed flaggems_route_exceptions,
+        # because what the set decides is that FlagGems does not take the op,
+        # not where it goes instead; measured_flaggems_rollback for ops that
         # failed a surveyed case, metadata_route_overrides for ops that buy no
         # kernel on either route) and moved cuda to 390/1644. This branch adds
         # the other half: the FlagGems ceiling is now derived from the generated
@@ -667,7 +669,16 @@ def test_conf_route_counts_are_stable():
         # kernel but were never listed -- mul.Tensor above all, 1522 host round
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. Both effects apply: 549/1485.
-        "nvidia": {"flaggems": 549, "nvidia": 1485},
+        #
+        # The 1485 are `none`, not `nvidia`. That key parses to
+        # Backend::kBoxing (csrc/aten/common.cc), so the default NVIDIA conf was
+        # routing them to the boxing kernel -- the one thing a default conf may
+        # not do (AGENTS.md, "Default confs never route boxing"), and the same
+        # ops the other three CUDA-ABI platforms below already leave at `none`.
+        # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
+        # only registration a boxing-off build includes, claims the 549 FlagGems
+        # routes and none of these, so they already reached cpu_fallback.
+        "nvidia": {"flaggems": 549, "none": 1485},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each

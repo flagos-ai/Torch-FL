@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import route_is_served, routed_backend
+from backend_conf import route_is_served, routed_backend, routed_backend_or_none
 
 
 DEVICE = "flagos:0"
@@ -142,33 +142,35 @@ class TestSumDimDispatch:
         """sum.dim_IntList dispatches to the backend this platform's conf routes it to.
 
         FlagGems-first is the generated default, but it is not unconditional.
-        The CUDA conf returns ``sum.dim_IntList`` to CUDA boxing because the
-        FlagGems route exceeds the survey's per-op time budget on the ``2d-bool``
-        profile while the boxing route returns immediately (see
-        measured_flaggems_rollback in scripts/codegen/codegen_ops.py and
-        docs/reference/operator-support.md), GCU routes it to its native
-        ``gcu`` kernel because the FlagGems kernel carries a 64-bit type the
-        GCU300 front end rejects for an int64 operand (see
-        NATIVE_TRITON_GAPS["gcu"]), and MetaX keeps this overload on the cuda
-        boxing kernel while its activity handling in the profiler workload is
-        being stabilized (see BOXING_GAP_NOTES["metax"] in
-        scripts/codegen/gen_vendor_confs.py). Platforms whose conf keeps the
-        FlagGems route still log flagos_python, so asserting the conf's own value
-        keeps this test meaningful on every platform rather than pinning it to
-        the one it was written on.
+        The FlagGems route for this overload returns no result inside the
+        survey's per-op time budget on the ``2d-bool`` profile, so the NVIDIA
+        conf holds it off FlagGems (measured_flaggems_rollback in
+        scripts/codegen/codegen_ops.py); with no NVIDIA-native kernel to take it
+        instead, a default conf's only remaining route is ``none`` and the op
+        reaches cpu_fallback. GCU routes it to its native ``gcu`` kernel because
+        the FlagGems kernel carries a 64-bit type the GCU300 front end rejects
+        for an int64 operand (see NATIVE_TRITON_GAPS["gcu"]), and MetaX takes the
+        C++ FlagGems slot. Platforms whose conf keeps a FlagGems route still log
+        flagos_python, so asserting the conf's own value keeps this test
+        meaningful on every platform rather than pinning it to the one it was
+        written on.
 
-        Skipped where this wheel did not compile the backend the conf names: the
-        default FlagGems-primary wheel links no CUDA boxing kernels, so on the
-        platforms whose conf returns this overload to ``cuda`` the op is never
-        claimed on PrivateUse1, reaches cpu_fallback and logs nothing. That gap
-        is what this lane's follow-up re-wires to a vendor or FlagGems route.
+        Skipped on two distinct unservable routes, and the skip message is built
+        from ``routed_backend_or_none`` to cover both. A conf naming a backend
+        this wheel did not compile leaves the op unclaimed on PrivateUse1, and a
+        conf naming ``none`` leaves it deliberately unaccelerated; either way the
+        call reaches cpu_fallback and logs nothing, so there is no line to
+        assert. ``routed_backend`` refuses a ``none`` route by design, so
+        reporting the route with it would turn this skip into a failure -- the
+        same containment ``mul.Tensor`` in this directory spells out.
         """
         if not route_is_served("sum.dim_IntList"):
+            route = routed_backend_or_none("sum.dim_IntList") or "none"
             pytest.skip(
-                f"the conf routes sum.dim_IntList to "
-                f"{routed_backend('sum.dim_IntList')}, a backend this wheel did "
-                "not compile (see KERNELS in torch_fl/_build_config.py): the call "
-                "reaches cpu_fallback and logs no dispatch"
+                f"the conf routes sum.dim_IntList to {route}, a backend this "
+                "wheel did not compile or a route deliberately left "
+                "unaccelerated (see KERNELS in torch_fl/_build_config.py): the "
+                "call reaches cpu_fallback and logs no dispatch"
             )
         result = _run_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"

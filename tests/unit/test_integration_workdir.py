@@ -620,15 +620,19 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "exclusion until one job opts into that build"
     ),
     "tests/integration/ops/test_full_cuda_coverage.py": (
-        "exercises the CUDA boxing path: every case asserts that an op "
-        "backends_nvidia.conf routes to `cuda` dispatches to the boxing kernel "
-        "rather than reaching cpu_fallback, and the file's own docstring says "
-        "its ops need the external libtorch_cuda.so. The CUDA lane was the only "
-        "manifest that selected the `cuda` marker, and it now builds the "
-        "default (FlagGems-primary) wheel, which has no boxing kernels for "
-        "these cases to assert on. Accepted exclusion until the vendor-SDK "
-        "native kernels that replace the boxing path land, or a boxing-on CUDA "
-        "job is added"
+        "written against the CUDA boxing path, and the default conf no longer "
+        "names it: its routing cases read a route out of backends_nvidia.conf "
+        "and assert the op logs that backend rather than reaching cpu_fallback, "
+        "which only holds for a route a wheel has a kernel for. `addmm` is one "
+        "of the four, and the default conf routes it `none` -- cpu_fallback is "
+        "now the correct outcome, so the case would assert against the route it "
+        "is reading. The file's own docstring also says its ops need the "
+        "external libtorch_cuda.so. Both CUDA lanes carry the `cuda` marker "
+        "unselected (composed vendor and boxing step lists: no step selects it "
+        "and none names this file), so no job runs it either way. Accepted "
+        "exclusion until the vendor-SDK native kernels that replace the boxing "
+        "path land; re-pointing it at the day-0 `_boxing` conf would make it "
+        "runnable on the nvidia-boxing lane, which is the smaller follow-up"
     ),
     "tests/integration/ops/test_tileops_generated.py": (
         "carries `cuda` for the same reason -- its routes are bound on the CUDA "
