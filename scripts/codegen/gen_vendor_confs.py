@@ -124,11 +124,13 @@ from backend_coverage import (  # noqa: E402
 #   gcu       gcu_register.inc + gcu_flaggems_register.inc     401
 #   ascend    ascend_register.inc                              372
 #
-# metax, tsingmicro and dcu fall through to the `#else` branch and register the
-# full generated list (~2034), so a `none` entry there would be a guaranteed
-# raise rather than a fallback. metax and dcu are handled as CUDA-boxing
-# platforms below (see BOXING_PLATFORMS); backends_tsingmicro.conf stays
-# hand-written.
+# metax and dcu fall through to the `#else` branch and register the full
+# generated list (~2034), so a `none` entry there would be a guaranteed raise
+# rather than a fallback; both are handled as CUDA-boxing platforms below (see
+# BOXING_PLATFORMS). tsingmicro no longer falls through -- register.cc gives it
+# register_boxing_tsingmicro.inc, the 81 ops derived from its own conf -- but
+# backends_tsingmicro.conf stays hand-written, because that conf is the source of
+# the claim and generating it full-coverage would restore the raise.
 #
 #   vendor -> (conf naming its native kernels, other .inc files it registers)
 #
