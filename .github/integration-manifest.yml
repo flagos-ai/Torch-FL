@@ -249,10 +249,17 @@ steps:
 
   # DCU: issue #409. `dcu` is in the accepting half because the sweep required
   # `main_ops`, so a test whose only selecting mark is `dcu` -- the six
-  # ops/test_index_dispatch.py cases and the whole of
-  # ops/test_dcu_flaggems_sdpa.py -- was collected by this job and then
-  # deselected. `-m "(dcu or main_ops) ..." --collect-only -q` selects 62 tests
-  # the old expression did not.
+  # ops/test_index_dispatch.py cases among them -- was collected by this job and
+  # then deselected. `-m "(dcu or main_ops) ..." --collect-only -q` selects 62
+  # tests the old expression did not.
+  #
+  # ops/test_dcu_flaggems_sdpa.py is no longer one of them, and this entry is
+  # why. It asserts `backends_hygon.conf`'s FlagGems SDPA route and skips unless
+  # the loaded conf IS that file, so only the DCU *vendor* lane can execute it --
+  # but `boxing_variant: [hygon]` composes this entry into the boxing lane, and
+  # it was the only step a `dcu`-only file matched. Nine cases ran nowhere. The
+  # file now also carries `flaggems` and `main_ops`, which the vendor lane's own
+  # operator step selects; `not flaggems` here keeps it from running twice.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [hygon]
