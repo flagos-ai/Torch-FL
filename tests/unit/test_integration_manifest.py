@@ -403,16 +403,22 @@ def test_a_boxing_platform_runs_the_same_groups_on_both_builds(platform):
     """
     vendor = composed_steps(platform)
     boxing = composed_steps(platform, boxing_lane=True)
-    # `vendor_ops` is the step whose entry names its build (`boxing_variant`):
-    # the vendor build's own selection cannot answer the boxing conf, so that
-    # entry runs on the boxing build and only there. Every other group is the
-    # same entry run on both builds, in the same order.
+    # Explicit boxing variants cover paths unavailable on the vendor build.
+    # All remaining shared groups retain the same order on both builds.
     vendor_ids = [group["manifest_id"] for group in vendor]
     boxing_ids = [group["manifest_id"] for group in boxing]
     assert vendor_ids.count("vendor_ops") == 0
     assert boxing_ids.count("vendor_ops") == 1
     vendor_only = {entry["id"] for entry in _entries() if entry.get("vendor_only")}
-    assert [i for i in boxing_ids if i != "vendor_ops"] == [
+    boxing_only = {
+        entry["id"]
+        for entry in _entries()
+        if platform in entry.get("boxing_variant", [])
+    }
+    for group_id in boxing_only:
+        assert vendor_ids.count(group_id) == 0
+        assert boxing_ids.count(group_id) == 1
+    assert [i for i in boxing_ids if i not in boxing_only] == [
         i for i in vendor_ids if i not in vendor_only
     ]
 

@@ -29,8 +29,10 @@ Nothing here touches the network.
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
+import sys
 import time
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -221,11 +223,10 @@ def test_wheel_builder_receives_the_loaders_boxing_mode():
     "requested,compiled,accepted",
     [("", False, True), ("1", True, True), ("", True, False), ("1", False, False)],
 )
+@pytest.mark.parametrize("source_boxing", [False, True])
 def test_installed_wheel_must_match_requested_boxing_mode(
-    tmp_path, monkeypatch, requested, compiled, accepted
+    tmp_path, requested, compiled, accepted, source_boxing
 ):
-    import importlib.metadata
-
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github/workflows/build-wheel-common.yml").read_text()
     )
@@ -235,38 +236,105 @@ def test_installed_wheel_must_match_requested_boxing_mode(
     assert "--force-reinstall" in step["run"]
     assert step["env"]["EXPECTED_BOXING_LANE"] == "${{ inputs.boxing_lane }}"
     script = textwrap.dedent(
-        step["run"].split("python - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        step["run"].split("python -I - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     )
-    package = tmp_path / "torch_fl"
-    package.mkdir()
-    (package / "entry_points.txt").write_text("torch-fl-nvidia = stub:main\n")
-    manifest = package / "compatibility.json"
-    manifest.write_text(
-        json.dumps({"build": {"kernels": ["boxing"] if compiled else ["flaggems"]}})
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
-    monkeypatch.setenv("EXPECTED_BOXING_LANE", requested)
-    monkeypatch.setattr(
-        importlib.metadata,
-        "metadata",
-        lambda _: {"Name": "torch_fl", "Version": "2.10.0"},
-    )
-    monkeypatch.setattr(
-        importlib.metadata,
-        "files",
-        lambda _: ["torch_fl/__init__.py", "bin/torch-fl-nvidia"],
-    )
-    monkeypatch.setattr(
-        importlib.metadata,
-        "distribution",
-        lambda _: SimpleNamespace(locate_file=lambda _: manifest),
+    checkout = tmp_path / "checkout"
+    installed = tmp_path / "site-packages"
+    for root, boxing in [(checkout, source_boxing), (installed, compiled)]:
+        package = root / "torch_fl"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("raise RuntimeError('must not import')\n")
+        (package / "compatibility.json").write_text(
+            json.dumps({"build": {"kernels": ["boxing"] if boxing else ["flaggems"]}})
+        )
+        info = root / (
+            "torch_fl.egg-info" if root == checkout else "torch_fl-2.10.0.dist-info"
+        )
+        info.mkdir()
+        (info / ("PKG-INFO" if root == checkout else "METADATA")).write_text(
+            "Metadata-Version: 2.1\nName: torch_fl\nVersion: 2.10.0\n"
+        )
+        (info / "entry_points.txt").write_text(
+            "[torch.backends]\ntorch_fl = torch_fl._autoload:init\n"
+        )
+        if root == installed:
+            (info / "WHEEL").write_text("Wheel-Version: 1.0\n")
+            (info / "RECORD").write_text(
+                "torch_fl/__init__.py,,\ntorch_fl/compatibility.json,,\n"
+            )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"import sys\nsys.path.insert(0, {str(installed)!r})\n" + script,
+        ],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(checkout),
+            "WHEEL_SOURCE_ROOT": str(checkout),
+            "EXPECTED_BOXING_LANE": requested,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if accepted:
-        exec(compile(script, "Verify wheel", "exec"), {})
+        assert result.returncode == 0, result.stderr
+        assert str(installed / "torch_fl/compatibility.json") in result.stdout
     else:
-        with pytest.raises(AssertionError, match="kernel sets"):
-            exec(compile(script, "Verify wheel", "exec"), {})
+        assert result.returncode != 0
+        assert "kernel sets" in result.stderr
+
+
+@pytest.mark.parametrize("publish_succeeds", [True, False])
+def test_publish_staging_preserves_the_wheel_for_artifact_recovery(
+    tmp_path, publish_succeeds
+):
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/build-wheel-common.yml").read_text()
+    )
+    step = next(
+        s
+        for s in workflow["jobs"]["build"]["steps"]
+        if s.get("name") == "Publish the wheel to its vendor lane"
+    )
+    pins = tmp_path / ".github/version-pins.env"
+    pins.parent.mkdir()
+    pins.write_text("TWINE_VERSION_DEFAULT=stub\nFLAGOS_WHEEL_ROOT_DEFAULT=unused\n")
+    proxy = tmp_path / ".github/scripts/lib/proxy_route.sh"
+    proxy.parent.mkdir(parents=True)
+    proxy.write_text("prefer_direct_route() { :; }\n")
+    python = tmp_path / "bin/python"
+    python.parent.mkdir()
+    python.write_text(
+        "#!/bin/bash\nif [[ $1 == -m ]]; then exit 0; fi\nexit "
+        + ("0\n" if publish_succeeds else "1\n")
+    )
+    python.chmod(0o755)
+    wheel = tmp_path / "dist/torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl"
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"the exact built wheel")
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{python.parent}:{os.environ['PATH']}",
+            "GITHUB_REF_TYPE": "tag",
+            "GITHUB_REF_NAME": "v2.10.0",
+            "ARTIFACT_NAME": "wheel-nvidia",
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) == publish_succeeds, result.stderr
+    assert wheel.read_bytes() == b"the exact built wheel"
+    staged = tmp_path / "wheels/wheel-nvidia" / wheel.name
+    assert staged.read_bytes() == wheel.read_bytes()
 
 
 def test_an_unexpected_artifact_directory_is_refused(tmp_path):

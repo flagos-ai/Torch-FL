@@ -365,6 +365,47 @@ def events_in(trace, category, *, completed_only=True):
     return events
 
 
+def device_memcpy_count(fn):
+    """Count device copies by activity category, including unnamed directions.
+
+    CUPTI calls its records simply ``Memcpy``. Count all device copy records
+    conservatively: no direction inferred from a display name can hide a copy.
+    A missing device trace cannot establish that an operation is transfer-free.
+    """
+    torch = _torch_module()
+    fn()
+    torch.flagos.synchronize()
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.PrivateUse1,
+        ]
+    ) as prof:
+        fn()
+        torch.flagos.synchronize()
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "trace.json"
+        prof.export_chrome_trace(str(path))
+        trace = json.loads(path.read_text())
+    copies = events_in(trace, "gpu_memcpy")
+    assert copies or events_in(trace, "kernel"), (
+        "Profiler captured no device activities; zero copies is not evidence"
+    )
+    return len(copies)
+
+
+@pytest.fixture(scope="module")
+def device_copy_profiler():
+    """Prove host transfers are observable before measuring a zero-copy op."""
+    torch = _torch_module()
+    host = torch.randn(64, 64)
+    copies = device_memcpy_count(lambda: host.to("flagos:0").cpu())
+    assert copies >= 2, (
+        "Profiler missed the known H2D/D2H round trip; cannot validate zero copies"
+    )
+    return device_memcpy_count
+
+
 def event_categories(trace):
     """Return categories for completed trace events."""
     return {
