@@ -659,7 +659,9 @@ def test_conf_route_counts_are_stable():
         "drobotics": {"drobotics": 34, "none": 2003},
         # Measured on H100 after rebasing onto the main that carries #340.
         # #340 added three exception groups (cuda_route_exceptions for
-        # contract/compile defects, measured_flaggems_rollback for ops that
+        # contract/compile defects -- since renamed flaggems_route_exceptions,
+        # because what the set decides is that FlagGems does not take the op,
+        # not where it goes instead; measured_flaggems_rollback for ops that
         # failed a surveyed case, metadata_route_overrides for ops that buy no
         # kernel on either route) and moved cuda to 390/1644. This branch adds
         # the other half: the FlagGems ceiling is now derived from the generated
