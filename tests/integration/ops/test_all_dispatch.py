@@ -80,12 +80,40 @@ class TestAllCorrectness:
         assert out.item() is False
 
     @pytest.mark.anyplatform
-    @pytest.mark.skip(reason="FlagGems all() kernel cannot handle empty tensors")
     def test_all_empty_tensor(self):
-        """Empty tensor: all() is vacuously true."""
+        """Empty tensor: all() is vacuously true.
+
+        The historical skip ("FlagGems all() kernel cannot handle empty
+        tensors") is not what breaks. Full reduction is fine on every empty
+        shape measured (1-D `[]`, `(0,0)`, `(3,0)`, `(0,3)`, bool and float);
+        it is the dimension reduction that fails, and it is covered separately
+        below. Issue #710 tracked the missing evidence for this case.
+        """
         a = torch.tensor([], device=DEVICE, dtype=torch.bool)
         out = torch.all(a)
         assert out.item() is True
+
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("shape", [(0, 0), (3, 0), (0, 3)])
+    def test_all_empty_full_reduction(self, shape):
+        """Full reduction over an empty N-D tensor is vacuously true."""
+        for dtype in (torch.bool, torch.float32):
+            a = torch.empty(shape, device=DEVICE, dtype=dtype)
+            assert torch.all(a).item() is True
+
+    @pytest.mark.anyplatform
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "FlagGems all.dim divides numel by the reduced size and raises "
+            "ZeroDivisionError when that size is 0 (issue #710)"
+        ),
+    )
+    def test_all_empty_dim_reduction(self):
+        """``all(dim=0)`` over a zero-length axis returns an empty tensor."""
+        a = torch.empty((0, 3), device=DEVICE, dtype=torch.bool)
+        out = torch.all(a, dim=0)
+        assert out.shape == (3,)
 
     @pytest.mark.anyplatform
     def test_all_numeric_types(self):
