@@ -943,6 +943,142 @@ at::Tensor BmmKernelIluvatar(const at::Tensor& self, const at::Tensor& mat2) {
 
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kIluvatar, BmmKernelIluvatar)
 
+at::Tensor BaddbmmKernelIluvatar(
+    const at::Tensor& self,
+    const at::Tensor& batch1,
+    const at::Tensor& batch2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {
+  if (!iluvatar::IluvatarSupportsGemmDtype(batch1.scalar_type()) ||
+      batch1.scalar_type() != batch2.scalar_type() ||
+      self.scalar_type() != batch1.scalar_type() || batch1.dim() != 3 ||
+      batch2.dim() != 3 || batch2.size(0) != batch1.size(0) ||
+      batch2.size(1) != batch1.size(2) ||
+      batch2.device() != batch1.device() ||
+      self.device() != batch1.device()) {
+    return at::baddbmm(self.cpu(), batch1.cpu(), batch2.cpu(), beta, alpha)
+        .to(batch1.device());
+  }
+  iluvatar::IluvatarDeviceGuard guard(batch1);
+  at::Tensor a = batch1.contiguous();
+  at::Tensor b = batch2.contiguous();
+  const int64_t batch = a.size(0);
+  const int64_t m = a.size(1);
+  const int64_t k = a.size(2);
+  const int64_t n = b.size(2);
+  const int device = iluvatar::IluvatarDeviceIndex(a);
+  cublasHandle_t handle = iluvatar::GetCublasHandle(device);
+  const ixblasDataType_t ab_type = iluvatar::ToBlasDataType(a.scalar_type());
+  const ixblasDataType_t compute_type =
+      iluvatar::IluvatarGemmComputeType(a.scalar_type());
+  // beta*self is folded in first, by broadcasting self into the output and
+  // then calling the GEMM with beta = 1 so it accumulates onto that. `self`
+  // broadcasts over the batch dim in this schema, so expand before copying.
+  at::Tensor out = at::empty({batch, m, n}, a.options());
+  out.copy_(self.expand({batch, m, n}));
+  const ixblasDataType_t c_type = iluvatar::ToBlasDataType(out.scalar_type());
+  const double beta_v = beta.to<double>();
+  if (beta_v != 1.0) {
+    out.mul_(beta);
+  }
+  const float alpha_v = alpha.to<float>();
+  const float beta_gemm = 1.0f;
+  const int64_t a_stride = m * k;
+  const int64_t b_stride = k * n;
+  const int64_t c_stride = m * n;
+  const char* a_base = static_cast<const char*>(a.const_data_ptr());
+  const char* b_base = static_cast<const char*>(b.const_data_ptr());
+  char* c_base = static_cast<char*>(out.data_ptr());
+  // One GemmEx per batch slice, as in the bmm kernel: the batched strided
+  // entry point is not in the symbol set this cohort was measured against.
+  if (alpha_v != 0.0f) {
+    for (int64_t i = 0; i < batch; ++i) {
+      const void* a_ptr = a_base + i * a_stride * a.element_size();
+      const void* b_ptr = b_base + i * b_stride * b.element_size();
+      void* c_ptr = c_base + i * c_stride * out.element_size();
+      ILUVATAR_EXEC(
+          cublasGemmEx(
+              handle, CUBLAS_OP_N, CUBLAS_OP_N, static_cast<int>(n),
+              static_cast<int>(m), static_cast<int>(k), &alpha_v, b_ptr,
+              ab_type, static_cast<int>(n), a_ptr, ab_type,
+              static_cast<int>(k), &beta_gemm, c_ptr, c_type,
+              static_cast<int>(n), compute_type, CUBLAS_GEMM_DEFAULT),
+          "cublasGemmEx");
+    }
+  }
+  iluvatar::IluvatarSynchronizeStream(device);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BaddbmmFn, baddbmm_dispatcher, Backend::kIluvatar, BaddbmmKernelIluvatar)
+
+at::Tensor& BaddbmmInplaceKernelIluvatar(
+    at::Tensor& self,
+    const at::Tensor& batch1,
+    const at::Tensor& batch2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {
+  if (!iluvatar::IluvatarSupportsGemmDtype(batch1.scalar_type()) ||
+      batch1.scalar_type() != batch2.scalar_type() ||
+      self.scalar_type() != batch1.scalar_type() || batch1.dim() != 3 ||
+      batch2.dim() != 3 || batch2.size(0) != batch1.size(0) ||
+      batch2.size(1) != batch1.size(2) || self.dim() != 3 ||
+      self.size(0) != batch1.size(0) || self.size(1) != batch1.size(1) ||
+      self.size(2) != batch2.size(2) || !self.is_contiguous() ||
+      batch2.device() != batch1.device() ||
+      self.device() != batch1.device()) {
+    at::Tensor host = self.cpu();
+    // The in-place spelling is a Tensor method, not an at:: free function.
+    host.baddbmm_(batch1.cpu(), batch2.cpu(), beta, alpha);
+    self.copy_(host);
+    return self;
+  }
+  iluvatar::IluvatarDeviceGuard guard(batch1);
+  at::Tensor a = batch1.contiguous();
+  at::Tensor b = batch2.contiguous();
+  const int64_t batch = a.size(0);
+  const int64_t m = a.size(1);
+  const int64_t k = a.size(2);
+  const int64_t n = b.size(2);
+  const int device = iluvatar::IluvatarDeviceIndex(a);
+  cublasHandle_t handle = iluvatar::GetCublasHandle(device);
+  const ixblasDataType_t ab_type = iluvatar::ToBlasDataType(a.scalar_type());
+  const ixblasDataType_t c_type = iluvatar::ToBlasDataType(self.scalar_type());
+  const ixblasDataType_t compute_type =
+      iluvatar::IluvatarGemmComputeType(a.scalar_type());
+  const double beta_v = beta.to<double>();
+  if (beta_v != 1.0) {
+    self.mul_(beta);
+  }
+  const float alpha_v = alpha.to<float>();
+  const float beta_gemm = 1.0f;
+  const int64_t a_stride = m * k;
+  const int64_t b_stride = k * n;
+  const int64_t c_stride = m * n;
+  const char* a_base = static_cast<const char*>(a.const_data_ptr());
+  const char* b_base = static_cast<const char*>(b.const_data_ptr());
+  char* c_base = static_cast<char*>(self.data_ptr());
+  if (alpha_v != 0.0f) {
+    for (int64_t i = 0; i < batch; ++i) {
+      const void* a_ptr = a_base + i * a_stride * a.element_size();
+      const void* b_ptr = b_base + i * b_stride * b.element_size();
+      void* c_ptr = c_base + i * c_stride * self.element_size();
+      ILUVATAR_EXEC(
+          cublasGemmEx(
+              handle, CUBLAS_OP_N, CUBLAS_OP_N, static_cast<int>(n),
+              static_cast<int>(m), static_cast<int>(k), &alpha_v, b_ptr,
+              ab_type, static_cast<int>(n), a_ptr, ab_type,
+              static_cast<int>(k), &beta_gemm, c_ptr, c_type,
+              static_cast<int>(n), compute_type, CUBLAS_GEMM_DEFAULT),
+          "cublasGemmEx");
+    }
+  }
+  iluvatar::IluvatarSynchronizeStream(device);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(BaddbmmInplaceFn, baddbmm_inplace_dispatcher, Backend::kIluvatar, BaddbmmInplaceKernelIluvatar)
+
 at::Tensor AddmmKernelIluvatar(
     const at::Tensor& self,
     const at::Tensor& mat1,

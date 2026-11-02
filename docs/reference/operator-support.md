@@ -21,7 +21,7 @@ full-coverage conf.
 | Ascend | `ascend` | 221 | 157 | 378 / 2037 | 18.6% |
 | Enflame GCU | `gcu` | 251 | 183 | 434 / 2037 | 21.3% |
 | Moore Threads MUSA | `musa` | 466 | 53 | 519 / 2037 | 25.5% |
-| Iluvatar | `iluvatar` | 585 | 11 | 596 / 2037 | 29.3% |
+| Iluvatar | `iluvatar` | 583 | 13 | 596 / 2037 | 29.3% |
 | Apple MPS | `mps` | 0 | 66 | 66 / 2037 | 3.2% |
 | TsingMicro | `tsingmicro` | 67 | 14 | 81 / 81 | 100.0% |
 | D-Robotics BPU | `bpu` | 0 | 0 | 0 | no per-op kernels |

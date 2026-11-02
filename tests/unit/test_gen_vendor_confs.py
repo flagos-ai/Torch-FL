@@ -532,11 +532,15 @@ def test_vendor_routing_never_exceeds_registration(vendor):
 def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     """`none` boxes to cpu_fallback only where registration skips the op.
 
-    metax, tsingmicro and dcu fall through to the `#else` branch in
-    csrc/aten/register.cc and claim the full generated list, so a `none` entry
-    there would reach the dispatcher and raise on an empty slot instead of
-    falling back. They must not be generated as native-kernel vendors: metax and
-    dcu are covered by their boxing confs, tsingmicro stays hand-written.
+    metax and dcu fall through to the `#else` branch in csrc/aten/register.cc
+    and claim the full generated list, so a `none` entry there would reach the
+    dispatcher and raise on an empty slot instead of falling back. They must not
+    be generated as native-kernel vendors: both are covered by their boxing
+    confs. tsingmicro no longer falls through -- register.cc gives it
+    generated/register_boxing_tsingmicro.inc, the list derived from its own conf
+    -- but it stays hand-written for a different reason: the conf is the source
+    of that claim, so generating it full-coverage would claim every generated op
+    and put the `none` raise back.
     kunlunxin *is* a native-kernel vendor (its own generated registration claims
     only the ops it routes to the vendor XPU SDK), so it belongs in VENDORS.
     mps is likewise a native-kernel vendor: its generated registration
