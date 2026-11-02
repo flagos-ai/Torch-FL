@@ -325,6 +325,103 @@ def test_install_cpu_torch_skips_the_probe_when_the_mirror_is_disabled():
     assert done.stdout == "PIP --index-url https://pin.example/whl/cpu torch==2.10.0\n"
 
 
+def _pip_calls(done: subprocess.CompletedProcess) -> list[str]:
+    """The stub pip_retry's lines, without the ::warning:: the fallback prints."""
+    return [ln for ln in done.stdout.splitlines() if ln.startswith("PIP ")]
+
+
+# The mirror serves a cache of the pin, and it can answer an HTTP error for a
+# wheel the pin lists -- measured as a 403 on the redirect target behind
+# mirror.sjtu.edu.cn, which failed 6 of 14 consecutive runs on the two thead
+# lanes. pip_retry sends one argv every round, so without these the whole
+# install gives up on a file the pinned index has.
+def test_install_cpu_torch_falls_back_to_the_pin_when_the_mirror_fails():
+    probe = 'index_download_bps() { case "$1" in *mirror*) echo 9000000;; *) echo 400000;; esac; }\n'
+    done = _run_bash(
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        + probe
+        # Fail only the mirror, the way a 403 on one blob does.
+        + 'pip_retry() { printf "PIP %s\\n" "$*"; [[ "$*" != *mirror* ]]; }\n'
+        "install_cpu_torch\n"
+    )
+    assert done.returncode == 0, done.stderr
+    assert _pip_calls(done) == [
+        "PIP --index-url https://mirror.example/cpu torch==2.10.0",
+        "PIP --index-url https://pin.example/whl/cpu torch==2.10.0",
+    ]
+    assert "retrying from the pinned index" in done.stdout + done.stderr
+
+
+def test_install_cpu_torch_passes_the_callers_arguments_to_the_fallback():
+    """The fallback must install the same thing, not a bare torch."""
+    probe = 'index_download_bps() { case "$1" in *mirror*) echo 9000000;; *) echo 400000;; esac; }\n'
+    done = _run_bash(
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        + probe
+        + 'pip_retry() { printf "PIP %s\\n" "$*"; [[ "$*" != *mirror* ]]; }\n'
+        "install_cpu_torch --no-cache-dir torchvision==0.25.0\n"
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines()[-1] == (
+        "PIP --index-url https://pin.example/whl/cpu "
+        "--no-cache-dir torchvision==0.25.0 torch==2.10.0"
+    )
+
+
+def test_install_cpu_torch_does_not_retry_when_the_pin_is_what_failed():
+    """A pin failure has nothing to fall back to, so it must not install twice."""
+    probe = 'index_download_bps() { case "$1" in *mirror*) echo 400000;; *) echo 9000000;; esac; }\n'
+    done = _run_bash(
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        + probe
+        + 'pip_retry() { printf "PIP %s\\n" "$*"; return 1; }\n'
+        "install_cpu_torch || echo EXIT-NONZERO\n"
+    )
+    assert done.stdout == (
+        "PIP --index-url https://pin.example/whl/cpu torch==2.10.0\nEXIT-NONZERO\n"
+    )
+    assert "retrying from the pinned index" not in done.stdout + done.stderr
+
+
+def test_install_cpu_torch_reports_failure_when_both_indexes_fail():
+    probe = 'index_download_bps() { case "$1" in *mirror*) echo 9000000;; *) echo 400000;; esac; }\n'
+    done = _run_bash(
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        + probe
+        + 'pip_retry() { printf "PIP %s\\n" "$*"; return 1; }\n'
+        "install_cpu_torch || echo EXIT-NONZERO\n"
+    )
+    assert _pip_calls(done) == [
+        "PIP --index-url https://mirror.example/cpu torch==2.10.0",
+        "PIP --index-url https://pin.example/whl/cpu torch==2.10.0",
+    ]
+    assert "EXIT-NONZERO" in done.stdout
+
+
+def test_install_cpu_torch_does_not_retry_when_the_mirror_equals_the_pin():
+    """Same URL twice is the same failure twice; the probe is skipped too."""
+    done = _run_bash(
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://pin.example/whl/cpu\n"
+        "index_download_bps() { echo PROBE-CALLED; }\n"
+        'pip_retry() { printf "PIP %s\\n" "$*"; return 1; }\n'
+        "install_cpu_torch || echo EXIT-NONZERO\n"
+    )
+    assert done.stdout == (
+        "PIP --index-url https://pin.example/whl/cpu torch==2.10.0\nEXIT-NONZERO\n"
+    )
+    assert "PROBE-CALLED" not in done.stdout
+
+
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
         """Silence the per-request line the probe would otherwise print."""
