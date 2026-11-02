@@ -30,6 +30,8 @@ Run: pytest tests/unit/test_conf_registration_consistency.py -v
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -657,6 +659,28 @@ def _derived_iluvatar_counts() -> dict[str, int]:
         "iluvatar": len(iluvatar),
         "none": len(routes) - len(flaggems) - len(iluvatar),
     }
+
+
+@pytest.mark.anyplatform
+def test_flaggems_conformance_counts_match_committed_confs(monkeypatch):
+    """Catch stale conformance records before building a hardware wheel."""
+    path = REPO_ROOT / "tests/integration/flaggems/flaggems_caps.py"
+    spec = importlib.util.spec_from_file_location("flaggems_count_contract", path)
+    assert spec is not None and spec.loader is not None
+    caps = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(caps)
+    platforms = json.loads((REPO_ROOT / "cmake/flagos_platforms.json").read_text())[
+        "accelerators"
+    ]
+    measured = {}
+    for label in caps.EXPECTED_FLAGGEMS_ROUTES:
+        base = label.removesuffix("_boxing")
+        vendor = platforms.get(base, {}).get("vendor", base)
+        suffix = "_boxing" if label.endswith("_boxing") else ""
+        conf = CONF_DIR / f"backends_{vendor}{suffix}.conf"
+        monkeypatch.setattr(caps, "conf_path", lambda conf=conf: conf)
+        measured[label] = caps.flaggems_coverage_count()
+    assert measured == caps.EXPECTED_FLAGGEMS_ROUTES
 
 
 @pytest.mark.anyplatform
