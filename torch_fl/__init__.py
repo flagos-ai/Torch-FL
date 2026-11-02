@@ -1717,7 +1717,15 @@ def _alias_cuda_to_flagos():
                     return f"{_flagos_type}:{dev[len(alias) + 1 :]}"
             return dev
         if isinstance(dev, _orig_device) and dev.type == "cuda":
-            return _orig_device(_flagos_type, dev.index if dev.index is not None else 0)
+            # `dev.index` is passed through even when it is None, which is the
+            # whole point: an index-less target means "the current device", and
+            # torch resolves that through the privateuse1 device guard, honouring
+            # `set_device`. Forcing 0 here instead sent every rank of a
+            # multi-rank job to flagos:0 -- and only through the `torch.device`
+            # object, because the str branch above already leaves the index to
+            # torch. `nn.Module.to("cuda")` reaches this branch, since
+            # `_parse_to` turns its argument into a device object first.
+            return _orig_device(_flagos_type, dev.index)
         return dev
 
     # A TorchFunctionMode, not a wrapper around torch.device.
@@ -1785,11 +1793,17 @@ def _alias_cuda_to_flagos():
 
     # Tensor.cuda() / Module.cuda() -> the flagos device.
     def _tensor_cuda(self, device=None, non_blocking=False, **kwargs):
-        idx = 0
+        # `Tensor.cuda()` with no argument means the current device on CUDA, so
+        # it has to mean the current device here too: an index-less target is
+        # left index-less and resolved by torch, the same way the `_remap` str
+        # branch does it. Pinning 0 instead put every rank of a multi-rank job
+        # on flagos:0 and NCCL rejected the duplicate device.
+        target = _flagos_type
         if device is not None:
-            d = _orig_device(_remap(device))
-            idx = d.index if d.index is not None else 0
-        return self.to(f"{_flagos_type}:{idx}", non_blocking=non_blocking)
+            index = _orig_device(_remap(device)).index
+            if index is not None:
+                target = f"{_flagos_type}:{index}"
+        return self.to(target, non_blocking=non_blocking)
 
     torch.Tensor.cuda = _tensor_cuda
 
