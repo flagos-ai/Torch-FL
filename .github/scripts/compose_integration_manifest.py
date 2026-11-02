@@ -41,6 +41,7 @@ from pathlib import Path
 # The one substitution the composer performs. Anything else that looks like a
 # variable belongs to the shell on the hardware runner.
 DISPLAY_NAME_TOKEN = "{{display_name}}"
+SUPPORTED_PROFILES = ("pr", "nightly")
 
 _ENTRY_KEYS = {
     "id",
@@ -58,6 +59,15 @@ _ENTRY_KEYS = {
 
 class ManifestError(Exception):
     """A manifest or platform config that cannot be composed."""
+
+
+def validate_profile(profile):
+    """Apply the shared functional-profile policy before selecting work."""
+    if profile not in SUPPORTED_PROFILES:
+        raise ValueError(
+            "weekly is reserved; supported profiles are "
+            + " and ".join(SUPPORTED_PROFILES)
+        )
 
 
 def known_platforms(config_dir) -> list[str]:
@@ -299,13 +309,16 @@ def validate_manifest(manifest, known, boxing=()):
             raise ManifestError(
                 f"step {step_id!r}: min_passed must be a nonnegative integer"
             )
-        profiles = entry.get("profiles", ["pr", "nightly"])
+        profiles = entry.get("profiles", list(SUPPORTED_PROFILES))
         if (
             not isinstance(profiles, list)
             or not profiles
-            or any(profile not in ("pr", "nightly") for profile in profiles)
+            or any(profile not in SUPPORTED_PROFILES for profile in profiles)
         ):
-            raise ManifestError(f"step {step_id!r}: profiles must name pr or nightly")
+            raise ManifestError(
+                f"step {step_id!r}: profiles must name "
+                + " or ".join(SUPPORTED_PROFILES)
+            )
         owner = _step_owner(entry, known)
         if owner is not None and owner not in boxing:
             raise ManifestError(
@@ -457,12 +470,13 @@ def compose(
     boxing_lane=False,
     environment_check=None,
     boxing=(),
-    profile="nightly",
+    profile="pr",
 ):
     """The `integration_tests` list for one platform.
 
     Order is the manifest's, never the config's, so two platforms that run the
     same steps run them in the same sequence.
+    An omitted profile selects ``pr``; nightly groups require an explicit request.
 
     ``boxing_lane`` composes the platform's CUDA-boxing build instead of its
     vendor build: a boxing platform runs every shared step on both, the
@@ -473,8 +487,10 @@ def compose(
     loader hands the boxing lane's ``boxing_environment_check`` here, because the
     two builds are held to different expectations from one config file.
     """
-    if profile not in ("pr", "nightly"):
-        raise ManifestError("weekly is reserved; supported profiles are pr and nightly")
+    try:
+        validate_profile(profile)
+    except ValueError as error:
+        raise ManifestError(str(error)) from error
     steps, _ids, _assigned, _named = validate_manifest(manifest, known, boxing)
     if platform not in known:
         raise ManifestError(
@@ -523,7 +539,7 @@ def compose(
 
     composed = []
     for entry in steps:
-        if profile not in entry.get("profiles", ["pr", "nightly"]):
+        if profile not in entry.get("profiles", SUPPORTED_PROFILES):
             continue
         if not applies(entry):
             continue

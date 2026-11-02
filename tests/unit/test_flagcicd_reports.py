@@ -79,6 +79,77 @@ def _merge(reports, outcome="success"):
     )
 
 
+def _minimum_session(directory, *, group="current", group_id="current"):
+    marker = directory / "b-current.pending"
+    marker.write_text(
+        json.dumps(
+            {"group": group, "group_id": group_id, "selected_nodeids": ["test_ok"]}
+        )
+    )
+    marker.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "summary": {"passed": 1, "total": 1},
+                "tests": [{"nodeid": "test_ok", "outcome": "passed"}],
+                "exitcode": 0,
+                "duration": 0.1,
+            }
+        )
+    )
+
+
+def test_partial_minimum_reports_actual_and_required_counts():
+    with pytest.raises(ValueError, match="dtype: 8 passed, 9 required"):
+        MERGER.validate_group_minimum({"name": "dtype", "min_passed": 9}, {"passed": 8})
+
+
+@pytest.mark.parametrize("broken_json", [None, "invalid json"])
+def test_minimum_ignores_other_group_but_final_merge_rejects_it(tmp_path, broken_json):
+    marker = tmp_path / "a-earlier.pending"
+    marker.write_text(json.dumps({"group": "earlier", "group_id": "earlier"}))
+    if broken_json is not None:
+        marker.with_suffix(".json").write_text(broken_json)
+    _minimum_session(tmp_path)
+    MERGER.check_group_minimum(
+        tmp_path, {"name": "current", "group_id": "current", "min_passed": 1}
+    )
+    merged = _merge(tmp_path)
+    assert merged["exitcode"] == 1
+    assert merged["flagcicd"]["complete"] is False
+    assert marker.with_suffix(".json").name in merged["flagcicd"]["incomplete_sessions"]
+
+
+@pytest.mark.parametrize("group_id,complete", [("current", True), ("other", False)])
+def test_final_minimum_matches_stable_id_instead_of_display_name(
+    tmp_path, group_id, complete
+):
+    _minimum_session(tmp_path, group_id=group_id)
+    group = {
+        "name": "current",
+        "group_id": "current",
+        "command": "python -m pytest test_ok.py",
+        "min_passed": 1,
+        "requires_pytest": True,
+        "status": "passed",
+        "returncode": 0,
+    }
+    (tmp_path / "groups.json").write_text(
+        json.dumps({"expected": ["current"], "groups": [group]})
+    )
+    merged = _merge(tmp_path)
+    assert merged["flagcicd"]["complete"] is complete
+    assert merged["exitcode"] == (0 if complete else 1)
+
+
+def test_minimum_rejects_its_own_missing_report(tmp_path):
+    _minimum_session(tmp_path)
+    (tmp_path / "b-current.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        MERGER.check_group_minimum(
+            tmp_path, {"name": "current", "group_id": "current", "min_passed": 1}
+        )
+
+
 def test_multiple_sessions_preserve_outcomes_and_group_identity(tmp_path):
     workdir = tmp_path / "wheel-only"
     workdir.mkdir()
