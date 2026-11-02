@@ -19,7 +19,6 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import dispatched_to_mps
-from case_gap_issues import case_gap_reason
 
 
 DEVICE = "flagos:0"
@@ -49,7 +48,6 @@ def test_dim_stays_on_the_unvalidated_reference():
 
 
 @pytest.mark.anyplatform
-@pytest.mark.skip(reason=case_gap_reason("#711"))
 def test_each_float_width_dispatches_to_mps():
     source = """
 import torch, torch_fl

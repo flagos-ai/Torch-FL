@@ -925,6 +925,50 @@ def test_every_registered_case_and_route_has_its_own_gap_evidence():
     )
 
 
+def test_fixed_registered_cases_remove_their_source_skip():
+    """A passing case must not leave a stale issue gate behind."""
+    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
+    evidence, _ = _registered_gap_evidence(
+        source, "tests/integration/ops/test_all_dispatch.py", _case_gap_issues()
+    )
+    for name in ("test_all_empty_tensor", "test_all_matches_cpu_reference"):
+        assert (
+            f"tests/integration/ops/test_all_dispatch.py::TestAllCorrectness::{name}"
+        ) not in evidence
+
+
+def test_plain_all_reference_uses_cpu_on_every_platform():
+    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
+    function = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_all_matches_cpu_reference"
+    )
+    markers = {
+        _function_name(mark)
+        for decorator in function.decorator_list
+        if (mark := decorator if isinstance(decorator, ast.Call) else decorator)
+    }
+    assert markers == {"anyplatform"}
+    assert "cuda" not in ast.unparse(function)
+
+
+def test_flag_override_case_uses_the_build_capability_gate():
+    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_dispatch_log_flaggems_python"
+    )
+    text = ast.unparse(function)
+    assert "override_is_logged('all', 'flaggems_python')" in text
+    assert "case_gap_reason('all:flaggems_python')" in text
+    assert "pytest.skip(" in text
+
+
 def test_gap_registry_skips_are_enforced_by_the_cpu_lane():
     workflow = AGNOSTIC_WORKFLOW.read_text(encoding="utf-8")
     assert "tests/unit/test_integration_source_contract.py" in workflow

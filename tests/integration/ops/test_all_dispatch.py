@@ -17,7 +17,7 @@ all dispatch tests
 
 Verifies that torch.all:
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems_python backend (default)
+  - configured routes are reported by the dispatch log
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import override_is_logged
 from case_gap_issues import case_gap_reason
 
 
@@ -81,7 +81,6 @@ class TestAllCorrectness:
         assert out.item() is False
 
     @pytest.mark.anyplatform
-    @pytest.mark.skip(reason=case_gap_reason("#710"))
     def test_all_empty_tensor(self):
         """Empty tensor: all() is vacuously true.
 
@@ -123,14 +122,13 @@ class TestAllCorrectness:
         ref = torch.all(a.cpu())
         assert out.item() == ref.item()
 
-    @pytest.mark.cuda
-    def test_all_matches_cuda(self):
+    @pytest.mark.anyplatform
+    def test_all_matches_cpu_reference(self):
         torch.manual_seed(1)
-        a_cuda = torch.randint(0, 2, (64, 64), device="cuda:0", dtype=torch.bool)
-        ref = torch.all(a_cuda)
-        a = a_cuda.to(DEVICE)
+        host = torch.randint(0, 2, (64, 64), dtype=torch.bool)
+        a = host.to(DEVICE)
         out = torch.all(a)
-        assert out.item() == ref.item()
+        assert out.item() == torch.all(host).item()
 
     @pytest.mark.parametrize("dtype", [torch.bool, torch.float32, torch.int32])
     @pytest.mark.anyplatform
@@ -150,13 +148,9 @@ class TestAllDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
-        """The per-op override selects the FlagGems Python path for ``all``.
-
-        Skipped where the conf routes ``all`` to ``none``: the op is then not
-        claimed on PrivateUse1 at all, so no override can show up in the log.
-        """
-        if routed_backend_or_none("all") is None:
-            pytest.skip(case_gap_reason("all:none"))
+        """The override test applies only where the wheel serves FlagGems."""
+        if not override_is_logged("all", "flaggems_python"):
+            pytest.skip(case_gap_reason("all:flaggems_python"))
         result = _run_all_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",

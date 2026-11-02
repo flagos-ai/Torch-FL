@@ -76,8 +76,12 @@ def test_configure_reports_setup_failure_as_usage_error(monkeypatch):
     monkeypatch.setattr(integration_conftest, "_initialize_flagos_device", unavailable)
     config = types.SimpleNamespace(addinivalue_line=lambda *_: None)
 
-    with pytest.raises(pytest.UsageError, match="expected case gap #711") as error:
+    with pytest.raises(
+        pytest.UsageError, match="device initialization failed"
+    ) as error:
         integration_conftest.pytest_configure(config)
 
     assert "RuntimeError: device initialization failed" in str(error.value)
+    for issue in ("#710", "#711"):
+        assert issue not in str(error.value)
     assert not isinstance(error.value, pytest.skip.Exception)

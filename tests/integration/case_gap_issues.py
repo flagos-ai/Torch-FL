@@ -41,24 +41,9 @@ _ISSUES = (
         "open",
         (
             "tests/integration/ops/test_all_dispatch.py"
-            "::TestAllCorrectness::test_all_empty_tensor",
-            "tests/integration/ops/test_all_dispatch.py"
             "::TestAllDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mps_all.py"
-            "::test_each_spelling_uses_mps_and_empty_results_keep_their_shape",
         ),
-        ("all:none",),
-    ),
-    CaseGapIssue(
-        "#711",
-        "open",
-        (
-            "tests/integration/ops/test_all_dispatch.py"
-            "::TestAllCorrectness::test_all_matches_cuda",
-            "tests/integration/ops/test_mps_argmax.py"
-            "::test_each_float_width_dispatches_to_mps",
-        ),
-        ("@cuda",),
+        ("all:flaggems_python",),
     ),
 )
 
