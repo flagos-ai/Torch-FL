@@ -420,13 +420,38 @@ faster_cpu_torch_index() {
 # minutes on the GCU and Kunlunxin build jobs. A domestic mirror of the same
 # index was 10-100x faster. Either way the install is retried and either way an
 # unreachable index now fails in seconds rather than in five retry rounds.
+#
+# "Authoritative" is why a mirror failure falls back here rather than failing
+# the job. pip_retry deliberately re-sends one argv, so the index it is handed
+# is the only one it will ever ask: every attempt lands on the same host, and a
+# mirror that answers an HTTP error is not a name-resolution failure, so the
+# fast-fail classifier does not stop the rounds either. The mirror is a cache of
+# the pin, so when it does not serve the wheel the pin still can -- and the
+# alternative is a red lane for a file the pinned index has.
+#
+# Measured on the thead lane: mirror.sjtu.edu.cn does not hold the blobs it
+# indexes, it 302s to mirrors.tuna.tsinghua.edu.cn, and that redirect target
+# answers 403 for filelock-4.2.4 from the runner pods often enough to fail 6 of
+# 14 consecutive runs -- alternating between the thead and thead-boxing lanes,
+# because each pod probes independently. That is what makes one install print
+# two mirror hostnames with no --extra-index-url anywhere in the path. The same
+# wheel is listed at the pin, so the retry below is the whole fix.
 install_cpu_torch() {
   local mirror="${TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL:-${CPU_TORCH_MIRROR_INDEX_URL_DEFAULT:-}}"
   local index="$CPU_TORCH_INDEX_URL"
   if [[ -n "$mirror" && "$mirror" != "$CPU_TORCH_INDEX_URL" ]]; then
     index="$(faster_cpu_torch_index "$CPU_TORCH_INDEX_URL" "$mirror")"
   fi
-  pip_retry --index-url "$index" "$@" "torch==${CPU_TORCH_VERSION}"
+  if pip_retry --index-url "$index" "$@" "torch==${CPU_TORCH_VERSION}"; then
+    return 0
+  fi
+  # Nothing to fall back to when the pin is what just failed: the probe picked
+  # it, or there is no mirror configured. Report the original failure.
+  if [[ "$index" == "$CPU_TORCH_INDEX_URL" ]]; then
+    return 1
+  fi
+  echo "::warning::CPU torch install failed from the mirror '${index}'; retrying from the pinned index '${CPU_TORCH_INDEX_URL}'. The mirror is a cache of the pin, so this is a slower install rather than a different wheel."
+  pip_retry --index-url "$CPU_TORCH_INDEX_URL" "$@" "torch==${CPU_TORCH_VERSION}"
 }
 
 # Install the published FlagTree wheel for this platform (its Triton build).

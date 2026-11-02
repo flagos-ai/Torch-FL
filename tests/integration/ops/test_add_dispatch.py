@@ -33,7 +33,13 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend, routed_backend_or_none, route_is_served
+from backend_conf import (
+    _OVERRIDE_UNSERVED,
+    override_is_logged,
+    route_is_served,
+    routed_backend,
+    routed_backend_or_none,
+)
 
 
 DEVICE = "flagos:0"
@@ -113,6 +119,8 @@ class TestAddTensorDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        if not override_is_logged("add.Tensor", "flaggems_python"):
+            pytest.skip(_OVERRIDE_UNSERVED)
         result = _run_add_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",

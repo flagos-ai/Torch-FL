@@ -532,11 +532,15 @@ def test_vendor_routing_never_exceeds_registration(vendor):
 def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     """`none` boxes to cpu_fallback only where registration skips the op.
 
-    metax, tsingmicro and dcu fall through to the `#else` branch in
-    csrc/aten/register.cc and claim the full generated list, so a `none` entry
-    there would reach the dispatcher and raise on an empty slot instead of
-    falling back. They must not be generated as native-kernel vendors: metax and
-    dcu are covered by their boxing confs, tsingmicro stays hand-written.
+    metax and dcu fall through to the `#else` branch in csrc/aten/register.cc
+    and claim the full generated list, so a `none` entry there would reach the
+    dispatcher and raise on an empty slot instead of falling back. They must not
+    be generated as native-kernel vendors: both are covered by their boxing
+    confs. tsingmicro no longer falls through -- register.cc gives it
+    generated/register_boxing_tsingmicro.inc, the list derived from its own conf
+    -- but it stays hand-written for a different reason: the conf is the source
+    of that claim, so generating it full-coverage would claim every generated op
+    and put the `none` raise back.
     kunlunxin *is* a native-kernel vendor (its own generated registration claims
     only the ops it routes to the vendor XPU SDK), so it belongs in VENDORS.
     mps is likewise a native-kernel vendor: its generated registration
@@ -597,21 +601,43 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
             assert route != "flaggems", f"{platform} took a route it never measured"
 
 
-def test_metax_conf_keeps_mm_boxed():
-    """A measured exception, not a derivable one: mm is in the shared fg_cpp set
-    but was not measured servable on MetaX hardware, so it never entered
-    METAX_CPP_MEASURED and must stay off FlagGems.
+def test_metax_routes_mm_to_flaggems_only_in_the_default_conf():
+    """The two metax confs deliberately disagree about `mm`.
 
-    In the default conf that is `none` (cpu_fallback) -- MetaX has no vendor
-    kernel of its own on this tree -- and in the day-0 variant it is `boxing`.
+    Default conf: `flaggems`. The soft-lowp matrix claim needs the key
+    registered -- at `none` codegen emits no `m.impl("mm", ...)`, so an fp8/fp4
+    `mm` reaches cpu_fallback and multiplies the undecoded bytes -- and a default
+    conf may not route `boxing` (AGENTS.md), with no MetaX vendor matmul to take
+    instead. METAX_FLAGGEMS_MEASURED is the lever; see its note for the C550
+    measurements that retired the gap entry's stated SPLIT_K reason.
+
+    Day-0 variant: `boxing`, unchanged. That file's premise is that FlagGems is
+    not what a day-0 model is trusted to, and the lane passes all 30 soft_lowp
+    cases with `mm = boxing` already. BOXING_VARIANT_KEEP_GAPPED is what holds
+    it, and holding it in `gaps` specifically matters: `mm` is in the shared
+    FlagGems C++ set, which route_boxing() ranks above both the Python slot and
+    the boxing fallback, so merely dropping it from the measured set would land
+    it on `flaggems_cpp` rather than back on `boxing`.
+
+    `mm.out` is a real gap on both: FlagGems ships no out= matmul on this build.
     """
     routes = g.build_all(CONF_DIR)["metax"][1]
-    assert routes["mm"].split("#", 1)[0].strip() == "none"
+    assert routes["mm"].split("#", 1)[0].strip() == "flaggems"
+    assert routes["mm.out"].split("#", 1)[0].strip() == "none"
+
     variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["metax"][1]
     assert variant["mm"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
-    # Must exist in METAX_CPP_MEASURED (test_metax_conf_keeps_mm_boxed ensures it
-    # stays pinned to "mm not in the measured set")
+    assert variant["mm.out"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
+
+    # The route comes from the measured set, not from the C++ slot: `mm` was
+    # never verified servable through MetaX's FlagGems C++ path, and a
+    # flaggems_cpp route raises on the fp32 operands aten::bmm must serve.
     assert "mm" not in g.METAX_CPP_MEASURED
+    assert "mm" in g.METAX_FLAGGEMS_MEASURED
+    assert "mm" in g.BOXING_VARIANT_KEEP_GAPPED["metax"]
+    # Still a gap entry, which is what the variant reads.
+    assert "mm" in g.BOXING_TRITON_GAPS["metax"]
+    assert "mm.out" in g.BOXING_TRITON_GAPS["metax"]
 
 
 def test_iluvatar_570_gaps_leave_the_flaggems_path():
@@ -895,15 +921,23 @@ def test_boxing_variant_does_not_apply_measured_composite_routes():
     ops goes through one PrivateUse1 entry and none of them can be left to
     cpu_fallback. Boxing the key would send an ordinary pair and an FP8/FP4
     pair down two different paths under one name.
+
+    That exception is why the two halves are asserted separately below. #672
+    added the mm/bmm override by taking the whole of
+    boxing_measured_python_ops(), which also carries the composite, and this
+    assertion was relaxed to `flaggems` to match rather than the override being
+    narrowed -- so the composite rode into the day-0 conf and the boxing lane
+    reported it as test_sdpa_route_matches_the_recorded_one. The override now
+    reads SOFT_LOWP_FLAGGEMS_MEASURED, which is the set its own note defends.
     """
     assert "scaled_dot_product_attention" in g.DCU_COMPOSITE_FLAGGEMS
     routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["hygon"][1]
-    # Not boxing: hygon is now FlagGems-first on this composite too, so the
-    # variant routes what the default conf routes and boxes nothing back.
-    assert routes["scaled_dot_product_attention"] == "flaggems"
+    assert routes["scaled_dot_product_attention"] == "boxing"
     assert set(g.BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS) == {"hygon"}
     for op in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]:
         assert routes[op] == "flaggems", op
+    # The composite is not in that set, which is what keeps the two apart.
+    assert "scaled_dot_product_attention" not in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
 
 
 @pytest.mark.parametrize("platform", ["metax", "hygon", "thead"])

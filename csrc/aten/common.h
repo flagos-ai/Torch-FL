@@ -220,6 +220,104 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype);
 // only for the calls dispatched under one -- not the ATen schema name.
 bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype);
 
+// The smallest contracted extent (the K of an M x K by K x N matmul) this
+// platform's triton `tl.dot` will compile, or 0 where it has no such floor.
+//
+// Third shape of the same escape as the two predicates above, and the one
+// neither of them can state: this is not a dtype question and not an op
+// question, it is a *shape* floor, and it is the platform's triton backend
+// that imposes it rather than any kernel's own guard.
+//
+// A caller below the floor must widen K itself; zero-filling the contracted
+// axis is exact for a matmul, because the added lanes contribute 0 * 0 to
+// every sum. Only K: `min_dot_size` bounds M and N at 1 everywhere, and
+// padding those would change the output shape, which the `.out` forms cannot
+// have.
+//
+// This belongs to the build, not to a chip: a wheel is built against exactly
+// one FlagTree (.github/version-pins.env), so the floor its triton imposes is
+// fixed for the life of the wheel. It also fails safe -- a FlagTree that
+// lowers the floor turns the padding into a small wasted copy, never a wrong
+// answer.
+int64_t TritonMinDotContractExtent();
+
+// The contracted axis of a matmul operand: the columns of the left side, the
+// rows of the right one, at either rank.
+int64_t MatmulContractDim(const at::Tensor& operand, bool is_rhs);
+
+// Widen the contracted axis to `target` with zeros.
+//
+// Exact for a matmul: the added lanes are 0 on both sides and contribute
+// 0 * 0 = 0 to every element of the sum, so the product is unchanged. Only the
+// contracted axis is touched, so M and N -- and therefore the output shape --
+// are the same, which is what lets the `.out` forms take this unchanged.
+//
+// Built with empty + zero_ + narrow().copy_() rather than at::constant_pad_nd:
+// that op is itself routed to FlagGems on the platforms that have a floor, and
+// FlagGems' triton is the thing being worked around here. empty and copy_
+// carry no conf key, so this cannot bounce off a route.
+at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
+                                int64_t target);
+
+// Widen both operands together when the platform's dot intrinsic will not
+// compile their shared contracted extent. Returns whether it padded, so a
+// caller that has to narrow the result back knows to do it.
+//
+// Lives here rather than in the soft-lowp decode that first needed it because
+// the floor is a property of the platform's triton, not of low-precision
+// arithmetic: an ordinary fp32 `mm` routed to FlagGems hits the same assertion
+// with the same small K. See TritonMinDotContractExtent above.
+bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
+
+// Whether this platform's FlagGems matmul must not be handed `dtype`, with the
+// host round-trip as the only alternative.
+//
+// Fourth shape of the escape the three predicates above describe, and the one
+// none of them can state. It is a (platform, op-family, dtype) gap where the
+// platform has no vendor kernel to divert to:
+//
+//   * FlagGemsRejectsOpDtype states exactly this intersection, but it works by
+//     *substituting* VendorSlot()'s kernel (see ResolveFn in dispatcher.h), and
+//     returns the FlagGems pointer unchanged when that slot is empty. MetaX
+//     registers no vendor matmul, so an entry there compiles and does nothing.
+//   * FlagGemsRejectsDtype is dtype-wide. float64 is not a dtype MetaX's
+//     FlagGems fails for in general -- the pointwise family serves it -- so a
+//     dtype-wide rule would move ops that work today.
+//   * A conf entry routes a whole op. `mm` over fp16/bf16/fp32 is correct and
+//     more accurate than boxing on this route (see METAX_FLAGGEMS_MEASURED),
+//     so moving the op would give up the float case to fix the float64 one.
+//
+// Measured on a MetaX C550 (torch 2.10.0+metax3.8.1.0, flag_gems 5.4.0):
+// FlagGems' tiled `mm` accumulator is declared from `dot_out_dtype` but the
+// `tl.dot` inside the K loop re-assigns it at the operand's own width, which
+// this triton refuses to compile:
+//
+//   triton.compiler.errors.CompilationError: at 75:4:
+//     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=dot_out_dtype)
+//     for k in range(0, tl.cdiv(K, BLOCK_K)):
+//   AssertionError("Loop-carried variable acc has initial type
+//   <['16', '16'], fp32> but is re-assigned to <['16', '16'], fp64> in loop!")
+//
+// On the development host the same call does not raise -- one autotune config
+// reports `PassManager::run failed`, the tuner silently picks another, and the
+// product comes back wrong by rel 0.97 to 1.77. A wrong answer with no
+// exception is the worse of the two outcomes, so this is not a CI workaround.
+//
+// Answers false everywhere else, so a platform without the gap pays one enum
+// compare. This is the same remedy Ascend applies for a dtype aclnn will not
+// take (`MatmulKernelAscend` runs `at::matmul` on a CPU copy, see
+// csrc/aten/backends/ascend/matmul.cc); the difference is only that MetaX has
+// no vendor kernel to host it in, so the generated FlagGems kernel carries it.
+bool FlagGemsMatmulNeedsHost(at::ScalarType dtype);
+
+// Run `mm` on the host and bring the answer back to `reference`'s device, for
+// the dtype FlagGemsMatmulNeedsHost names.
+//
+// Exact rather than a degradation: the host computes the matmul at the full
+// requested width, which is what the dtype asked for and what the device route
+// fails to deliver. Same shape as ascend::MoveCpuResultToDevice.
+at::Tensor MatmulOnHost(const at::Tensor& lhs, const at::Tensor& rhs);
+
 // Memory guard to ensure proper synchronization when accessing device memory
 class MemoryGuard {
  public:

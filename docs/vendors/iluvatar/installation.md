@@ -24,9 +24,11 @@ This CI adaptation changes no operator routes or expected numeric results.
 
 The isolated `/opt/torch-fl-iluvatar-venv` disables system and user site packages.
 The image preinstalls FlagTree `0.6.2a3+iluvatar3.6` (with Triton 3.6), FlagGems
-`5.4.0` and build/test dependencies. The hook clears inherited PYTHONPATH,
-checks requested versions against checkout pins/overrides, and replaces only
-mismatched components in the job container. A FlagTree change replaces its
+`5.4.0` and build/test dependencies. The checkout pins FlagTree
+`0.7.0+iluvatar3.6`, so the hook replaces the image's copy on every run until a
+later image bakes it in. The hook clears inherited PYTHONPATH, checks requested
+versions against checkout pins/overrides, and replaces only mismatched
+components in the job container. A FlagTree change replaces its
 Triton provider as a pair. `pip check` validates the resulting dependencies;
 the checkout's constraints protect CPU torch. Stable dependency updates can be
 baked into a later image. SDK, Python or CPU torch changes require a rebuild.

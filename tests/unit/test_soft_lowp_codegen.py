@@ -390,3 +390,356 @@ def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
         assert "routed" in line, (
             f"{name} is taken unconditionally in the factory arm:\n{arm}"
         )
+
+
+def _decoder_body() -> str:
+    """The FP4 nibble decoder, which is where the operand overloads are chosen."""
+    return _function_body(
+        _OPS_CC.read_text(encoding="utf-8"), "at::Tensor DecodeFp4Nibbles("
+    )
+
+
+def _default_confs() -> list[Path]:
+    return sorted(
+        p
+        for p in (REPO_ROOT / "torch_fl/configs").glob("backends_*.conf")
+        if not p.name.endswith("_boxing.conf")
+    )
+
+
+def _route(conf: Path, key: str) -> str | None:
+    """The conf's route for one key, or None when the key is absent."""
+    pattern = re.compile(rf"^{re.escape(key)} = (\S+)$", re.MULTILINE)
+    found = pattern.search(conf.read_text(encoding="utf-8"))
+    return found.group(1) if found else None
+
+
+# The platforms whose build defines FLAGOS_SOFT_LOWP, i.e. the ones that compile
+# the decoder at all. Spelled as the conf vendor names (csrc/CMakeLists.txt
+# names the platforms: _flagos_is_metax, _flagos_is_dcu).
+_SOFT_LOWP_CONFS = ("backends_metax.conf", "backends_hygon.conf")
+
+
+def test_the_fp4_decoder_shifts_by_a_tensor_not_a_scalar():
+    """``bitwise_right_shift`` is called in the spelling the confs route.
+
+    ``bitwise_right_shift.Tensor_Scalar`` is ``none`` in every default conf
+    that compiles this decoder, so a Scalar shift amount reached the FlagGems
+    bridge, which converts a non-tensor IValue to a Python int and hands it to
+    ``pointwise_dynamic``'s tensor slot:
+
+        ValueError: Element at index 1 is incorrect. Expected True, but got False
+
+    That took out every FP4 case of ``bmm``, ``addmm`` and ``addmm_`` on the
+    MetaX lane (run 40817979024). ``bitwise_right_shift.Tensor`` is the
+    overload FlagGems ships and the confs route, and the two are bitwise
+    identical over all 256 byte values.
+    """
+    body = _decoder_body()
+    shifts = re.findall(r"at::bitwise_right_shift\(([^;]*?)\);", body, re.DOTALL)
+    assert shifts, "the decoder no longer calls bitwise_right_shift:\n" + body
+    for call in shifts:
+        assert "at::Scalar(" not in call, (
+            "a Scalar shift amount binds bitwise_right_shift.Tensor_Scalar, "
+            "which no conf that compiles this decoder routes:\n" + call
+        )
+    assert "scalar_to_tensor(" in body, (
+        "the shift amount must be built as a tensor so the call binds "
+        "bitwise_right_shift.Tensor:\n" + body
+    )
+
+
+@pytest.mark.parametrize("conf_name", _SOFT_LOWP_CONFS)
+def test_the_overload_the_fp4_decoder_uses_is_routed_or_falls_back(conf_name):
+    """The premise of the fix above, read from the confs rather than assumed.
+
+    This is the assertion that would have caught the defect: the overload the
+    decoder binds must be one the platform either routes to a kernel or can
+    serve through ``cpu_fallback``. ``Tensor_Scalar`` cannot be served that way
+    once FlagGems answers for it, which is why its ``none`` was not harmless.
+    """
+    conf = REPO_ROOT / "torch_fl/configs" / conf_name
+    assert conf.is_file(), conf
+    scalar_form = _route(conf, "bitwise_right_shift.Tensor_Scalar")
+    tensor_form = _route(conf, "bitwise_right_shift.Tensor")
+    assert scalar_form == "none", (
+        f"{conf_name} now routes bitwise_right_shift.Tensor_Scalar to "
+        f"{scalar_form!r}; if that is a real kernel the decoder may use the "
+        "Scalar overload again, and this test and its sibling should be "
+        "retired together"
+    )
+    assert tensor_form is not None, (
+        f"{conf_name} has no bitwise_right_shift.Tensor key at all, so the "
+        "decoder's call cannot be routed; regenerate the vendor confs"
+    )
+
+
+def test_bitwise_and_keeps_its_scalar_overload():
+    """The other operand op is left alone, and this records why.
+
+    ``bitwise_and.Scalar`` is routed where the decoder runs, so changing it
+    would be churn. Pinning it keeps a future "make them consistent" edit from
+    moving a call that has a kernel onto one that may not.
+    """
+    body = _decoder_body()
+    assert "at::bitwise_and(" in body, body
+    for conf_name in _SOFT_LOWP_CONFS:
+        conf = REPO_ROOT / "torch_fl/configs" / conf_name
+        assert _route(conf, "bitwise_and.Scalar") == "flaggems", (
+            f"{conf_name} no longer routes bitwise_and.Scalar to flaggems; the "
+            "decoder's Scalar bitwise_and calls need the same treatment as the "
+            "shift did"
+        )
+
+
+_COMMON_CC = REPO_ROOT / "csrc/aten/common.cc"
+_COMMON_H = REPO_ROOT / "csrc/aten/common.h"
+
+
+def test_the_dot_floor_is_declared_platform_neutrally():
+    """The contracted-extent floor is a build fact, not a chip or conf fact.
+
+    The project's naming rule keeps chip names in source only and never in a
+    conf or an accelerator id, and this constraint is imposed by the platform's
+    triton backend rather than by any chip -- so it belongs next to the other
+    FlagGems escapes in common.cc, keyed on the FLAGOS_ACCEL_* build define.
+    """
+    header = _COMMON_H.read_text(encoding="utf-8")
+    assert "int64_t TritonMinDotContractExtent();" in header, (
+        "the floor must be declared in common.h beside the other FlagGems escapes"
+    )
+    body = _function_body(
+        _COMMON_CC.read_text(encoding="utf-8"), "int64_t TritonMinDotContractExtent("
+    )
+    assert "FLAGOS_ACCEL_METAX" in body, (
+        "the floor must be keyed on the build define:\n" + body
+    )
+    assert "return 16;" in body, "MetaX's measured floor is 16:\n" + body
+    assert "return 0;" in body, (
+        "every other platform must answer 0 so the padding is a no-op there:\n" + body
+    )
+    # The expiry has to be written down: this is a shim for a vendor-wheel gap.
+    assert "5.6" in body, (
+        "the comment must record that FlagGems pads K itself from 5.6, so the "
+        "shim can be retired when the pinned cohort moves:\n" + body
+    )
+
+
+def test_the_pad_touches_only_the_contracted_axis():
+    """M and N are never padded, because the `.out` forms cannot take it.
+
+    Padding M or N changes the output shape, and the routed `.out` spellings
+    write the caller's tensor -- CheckOutShape would reject the result. The dot
+    intrinsic bounds M and N at 1 everywhere anyway, so only K ever needs it.
+    This is the invariant most at risk from a later "pad to the min dot size"
+    edit, which reads as all three dimensions.
+
+    Read from common.cc: the pad lives beside the floor now, because an ordinary
+    fp32 `mm` routed to FlagGems hits the same assertion as a decoded FP8 one.
+    """
+    source = _COMMON_CC.read_text(encoding="utf-8")
+    pad = _function_body(source, "bool PadMatmulPairForDot(")
+    assert "MatmulContractDim(" in pad, (
+        "the pad must read the contracted extent, not a shape element:\n" + pad
+    )
+    assert "size(0)" not in pad and "size(1)" not in pad, (
+        "absolute dimension indices in the pad risk touching M or N:\n" + pad
+    )
+    contract = _function_body(source, "int64_t MatmulContractDim(")
+    assert "size(-2)" in contract and "size(-1)" in contract, (
+        "the contracted axis is the last of the left operand and the "
+        "second-to-last of the right one, at either rank:\n" + contract
+    )
+
+
+def test_the_pad_has_an_early_out_and_avoids_a_routed_pad_op():
+    """Zero cost on the common path, and no dependence on a conf route.
+
+    A real GEMM has a large contracted extent and must pay only an integer
+    compare. The fill also must not use ``at::constant_pad_nd``: the platforms
+    with a floor route that op to FlagGems, whose triton is the thing being
+    worked around, so the pad would bounce off the same defect.
+    ``at::empty``/``copy_`` carry no conf key.
+    """
+    source = _COMMON_CC.read_text(encoding="utf-8")
+    pad = _function_body(source, "bool PadMatmulPairForDot(")
+    assert "return false;" in pad, "the pad must early-out:\n" + pad
+    assert "floor" in pad, "the early-out must compare against the floor:\n" + pad
+    build = _function_body(source, "at::Tensor PadMatmulContractDim(")
+    assert "constant_pad_nd" not in build, (
+        "constant_pad_nd is routed to FlagGems on the platforms with a floor:\n" + build
+    )
+    assert "at::empty(" in build and "copy_(" in build, (
+        "the fill must be built from empty + copy_, which carry no conf key:\n" + build
+    )
+
+
+def test_the_floor_reaches_the_ordinary_flaggems_matmul_too():
+    """The pad is not only on the soft-lowp decode path.
+
+    The floor belongs to FlagGems' triton, not to low-precision arithmetic: an
+    ordinary fp32 4x4 `mm` routed to `flaggems` on MetaX raises the same
+    "M >= 1, N >= 1 and K >= 16" CompilationError. PR #688's first shape routed
+    `mm` without this and turned five green dtype_coverage cases red
+    (test_matmul_preserves_float_dtype[dtype0..3] and
+    test_float64_matmul_matches_cpu_reference, run 40980989423).
+
+    It is emitted into the *FlagGems* kernel rather than the shared PrivateUse1
+    wrapper because only that route has the limit -- the same cases pass on
+    MetaX both when `mm` is `boxing` and when it is `none`.
+    """
+    gen = (REPO_ROOT / "scripts/codegen/codegen_ops.py").read_text(encoding="utf-8")
+    assert "_DOT_CONTRACT_PADDED_OPS" in gen, (
+        "the generator must carry the per-op table that widens K"
+    )
+    assert '"mm": ("self", "mat2")' in gen, (
+        "`mm` is the op the MetaX lane measured; its operands are self/mat2"
+    )
+    kernels = (REPO_ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text(
+        encoding="utf-8"
+    )
+    body = _function_body(kernels, "at::Tensor MmKernelPython(")
+    assert "PadMatmulPairForDot(" in body, (
+        "the generated FlagGems mm kernel must widen K before calling gems:\n" + body
+    )
+    # The padded locals, not the raw arguments, are what gems receives.
+    assert "{self_dotpad, mat2_dotpad}" in body, (
+        "the padded operands must be the ones passed to gems:\n" + body
+    )
+
+
+def test_a_dtype_this_route_cannot_serve_leaves_the_device():
+    """float64 `mm` on MetaX must not reach FlagGems at all.
+
+    Widening K is not enough for every dtype: FlagGems' tiled `mm` declares its
+    accumulator from `dot_out_dtype` and re-assigns it at the operand width in
+    the K loop, which triton-metax refuses for float64 ("Loop-carried variable
+    acc has initial type fp32 but is re-assigned to fp64 in loop", metax lane
+    of run 41009417366). On a development host the same call does not raise --
+    it silently answers wrong by rel 0.97 to 1.77 -- so the escape is about
+    correctness, not about a red lane.
+
+    Neither dtype predicate can state this. FlagGemsRejectsOpDtype substitutes
+    VendorSlot()'s kernel and MetaX has none, so an entry there is inert;
+    FlagGemsRejectsDtype is dtype-wide and float64 works across MetaX's
+    pointwise family. And a conf entry routes the whole op, which would give up
+    the float32 case that measured *more* accurate than boxing.
+
+    In the FlagGems kernel, like the pad: float64 `mm` is correct on MetaX
+    through both boxing and cpu_fallback, so only this route needs to leave.
+    """
+    gen = (REPO_ROOT / "scripts/codegen/codegen_ops.py").read_text(encoding="utf-8")
+    assert "_HOST_MATMUL_DTYPE_OPS" in gen, (
+        "the generator must carry the per-op table that escapes to the host"
+    )
+    kernels = (REPO_ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text(
+        encoding="utf-8"
+    )
+    body = _function_body(kernels, "at::Tensor MmKernelPython(")
+    assert "FlagGemsMatmulNeedsHost(" in body, (
+        "the generated FlagGems mm kernel must ask whether the dtype can be "
+        "served at all:\n" + body
+    )
+    assert "MatmulOnHost(" in body, (
+        "the escape must compute on the host, not degrade the dtype:\n" + body
+    )
+    # Before the pad: a dtype that is leaving should not pay for a widening it
+    # will never use.
+    host_at = body.find("FlagGemsMatmulNeedsHost(")
+    pad_at = body.find("PadMatmulPairForDot(")
+    assert host_at < pad_at, "the host escape must return before the pad runs:\n" + body
+
+    common = (REPO_ROOT / "csrc/aten/common.cc").read_text(encoding="utf-8")
+    needs_host = _function_body(common, "bool FlagGemsMatmulNeedsHost(")
+    assert "FLAGOS_ACCEL_METAX" in needs_host, (
+        "the gap is MetaX's; it must be guarded to that build:\n" + needs_host
+    )
+    assert "at::kDouble" in needs_host, "float64 is the measured dtype:\n" + needs_host
+    # Every other platform answers false, so the compare is all they pay.
+    assert "return false;" in needs_host, needs_host
+
+
+def test_the_pad_is_applied_at_the_one_chokepoint():
+    """Every matrix form, including the packed-FP4 path that cannot route.
+
+    DecodeForRoute builds the TensorPair that RunMatrix, RunMatrixOut and
+    ComputeDecoded all consume, so padding there covers mm, bmm, addmm, every
+    .out/.dtype spelling and the FP4 case that is computed rather than routed.
+    Padding inside the dispatch helpers instead would leave FP4 broken.
+    """
+    body = _function_body(
+        _OPS_CC.read_text(encoding="utf-8"), "TensorPair DecodeForRoute("
+    )
+    assert "PadPairForDot(" in body, (
+        "DecodeForRoute is the chokepoint the pad belongs at:\n" + body
+    )
+    pad_at = body.find("PadPairForDot(")
+    pair_at = body.find("TensorPair{")
+    assert pad_at < pair_at, (
+        "the pad must run before the pair is built, or the pair holds the "
+        "unpadded operands:\n" + body
+    )
+    assert "pair.bias" in body, body
+    assert body.find("pair.bias") > pad_at, (
+        "the bias is (M, N) and must not be handed to the pad"
+    )
+
+
+# The padding identity itself, run rather than parsed. The C++ helper cannot be
+# called from here, so this mirrors it exactly -- if the two ever disagree, the
+# source-level tests above are what catch it.
+def _pad_contract(tensor, is_rhs, target):
+    import torch
+
+    shape = list(tensor.shape)
+    axis = len(shape) - 2 if is_rhs else len(shape) - 1
+    extent = shape[axis]
+    shape[axis] = target
+    out = torch.empty(shape, dtype=tensor.dtype)
+    out.zero_()
+    out.narrow(axis, 0, extent).copy_(tensor)
+    return out
+
+
+@pytest.mark.parametrize(
+    "lhs_shape,rhs_shape",
+    [
+        ((4, 4), (4, 4)),  # the failing MetaX case
+        ((3, 5), (5, 7)),  # non-square, M != N != K
+        ((2, 4, 4), (2, 4, 4)),  # batched
+        ((1, 2), (2, 1)),  # K = 2, the fp4 numerics shape
+    ],
+)
+def test_zero_padding_the_contracted_axis_is_exact(lhs_shape, rhs_shape):
+    """Widening K with zeros leaves the product bit-for-bit unchanged.
+
+    This is the premise the shim rests on: the added lanes are 0 on both sides
+    and contribute 0 * 0 to every sum. The output shape is unchanged too, which
+    is what lets the routed ``.out`` forms take it.
+    """
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    lhs = torch.randn(*lhs_shape, dtype=torch.bfloat16)
+    rhs = torch.randn(*rhs_shape, dtype=torch.bfloat16)
+    matmul = torch.bmm if len(lhs_shape) == 3 else torch.mm
+
+    want = matmul(lhs, rhs)
+    got = matmul(_pad_contract(lhs, False, 16), _pad_contract(rhs, True, 16))
+
+    assert got.shape == want.shape, "padding K must not change the output shape"
+    assert torch.equal(got, want), f"max abs diff {(got - want).abs().max().item():.3e}"
+
+
+def test_zero_padding_leaves_an_addmm_bias_alone():
+    """The bias has no contracted axis, so beta * bias is untouched."""
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    lhs = torch.randn(4, 4, dtype=torch.bfloat16)
+    rhs = torch.randn(4, 4, dtype=torch.bfloat16)
+    bias = torch.randn(4, 4, dtype=torch.bfloat16)
+    padded = (_pad_contract(lhs, False, 16), _pad_contract(rhs, True, 16))
+
+    for beta, alpha in ((1.0, 1.0), (0.5, 2.0), (0.0, 1.0), (1.0, 0.0)):
+        want = torch.addmm(bias, lhs, rhs, beta=beta, alpha=alpha)
+        got = torch.addmm(bias, *padded, beta=beta, alpha=alpha)
+        assert torch.equal(got, want), f"beta={beta} alpha={alpha}"

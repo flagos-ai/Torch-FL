@@ -25,6 +25,8 @@
 
   m.impl("_convolution", WrapperPrivConvolution);
   m.impl("addmm", WrapperAddmm);
+  m.impl("baddbmm", WrapperBaddbmm);
+  m.impl("baddbmm_", WrapperBaddbmmInplace);
   m.impl("bmm", WrapperBmm);
   m.impl("convolution", WrapperConvolution);
   m.impl("mm", WrapperMm);

@@ -146,6 +146,33 @@ BOXING_PLATFORMS = {"nvidia", "hygon", "metax", "thead"}
 
 PLATFORMS = sorted(PLATFORM_REGISTRATION)
 
+# The platforms whose conf and registration set are held to agree in both
+# directions by the three checks below.
+#
+# It is every platform that claims exactly what its conf routes, which is what
+# those checks assert. tsingmicro belongs here and was missing (issue #575): it
+# used to fall through to `register.inc` and claim all 2034 generated ops, where
+# the checks would have been meaningless -- 1953 claims its conf never mentions.
+# csrc/aten/register.cc:842 now gives it `register_boxing_tsingmicro.inc`, the
+# 81 ops derived from its own conf, so the invariant applies to it exactly as it
+# does to the native-vendor platforms.
+#
+# The four CUDA-boxing platforms are deliberately absent. Their registration set
+# is read as the union of both build arms, and the soft_lowp matrix wrappers
+# claim `mm`/`bmm`/`addmm` on the boxing arm while the default conf still spells
+# them `none` (csrc/aten/register.cc:826-839), so the union disagrees with either
+# conf by construction. `test_a_boxing_claim_and_the_conf_route_agree_in_both_directions`
+# is their form of this check, asked per arm.
+CONF_MATCHES_REGISTRATION_PLATFORMS = [
+    "apple",
+    "ascend",
+    "enflame",
+    "iluvatar",
+    "kunlunxin",
+    "mthreads",
+    "tsingmicro",
+]
+
 
 def _parse_conf(path: Path) -> dict[str, str]:
     """Read ``<op> = <key>`` routes from a conf, stripping comments."""
@@ -421,9 +448,7 @@ def test_every_route_uses_an_allowed_backend_key(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize(
-    "platform", ["mthreads", "enflame", "ascend", "kunlunxin", "iluvatar", "apple"]
-)
+@pytest.mark.parametrize("platform", CONF_MATCHES_REGISTRATION_PLATFORMS)
 def test_vendor_routes_are_registered(platform):
     """Every op routed to ``<vendor>`` must be in the platform's registration set.
 
@@ -444,9 +469,7 @@ def test_vendor_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize(
-    "platform", ["mthreads", "enflame", "ascend", "kunlunxin", "iluvatar", "apple"]
-)
+@pytest.mark.parametrize("platform", CONF_MATCHES_REGISTRATION_PLATFORMS)
 def test_accelerated_routes_are_registered(platform):
     """Every non-``none`` route must be an op the platform registers.
 
@@ -467,9 +490,7 @@ def test_accelerated_routes_are_registered(platform):
 
 
 @pytest.mark.anyplatform
-@pytest.mark.parametrize(
-    "platform", ["mthreads", "enflame", "ascend", "kunlunxin", "iluvatar", "apple"]
-)
+@pytest.mark.parametrize("platform", CONF_MATCHES_REGISTRATION_PLATFORMS)
 def test_registered_ops_are_never_left_at_none(platform):
     """A registered op left at ``none`` sends a real kernel to ``cpu_fallback``.
 
@@ -659,7 +680,9 @@ def test_conf_route_counts_are_stable():
         "drobotics": {"drobotics": 34, "none": 2003},
         # Measured on H100 after rebasing onto the main that carries #340.
         # #340 added three exception groups (cuda_route_exceptions for
-        # contract/compile defects, measured_flaggems_rollback for ops that
+        # contract/compile defects -- since renamed flaggems_route_exceptions,
+        # because what the set decides is that FlagGems does not take the op,
+        # not where it goes instead; measured_flaggems_rollback for ops that
         # failed a surveyed case, metadata_route_overrides for ops that buy no
         # kernel on either route) and moved cuda to 390/1644. This branch adds
         # the other half: the FlagGems ceiling is now derived from the generated
@@ -667,7 +690,16 @@ def test_conf_route_counts_are_stable():
         # kernel but were never listed -- mul.Tensor above all, 1522 host round
         # trips per forward on the OCR-RM value head -- reach the FlagGems route
         # instead of cpu_fallback. Both effects apply: 549/1485.
-        "nvidia": {"flaggems": 549, "nvidia": 1485},
+        #
+        # The 1485 are `none`, not `nvidia`. That key parses to
+        # Backend::kBoxing (csrc/aten/common.cc), so the default NVIDIA conf was
+        # routing them to the boxing kernel -- the one thing a default conf may
+        # not do (AGENTS.md, "Default confs never route boxing"), and the same
+        # ops the other three CUDA-ABI platforms below already leave at `none`.
+        # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
+        # only registration a boxing-off build includes, claims the 549 FlagGems
+        # routes and none of these, so they already reached cpu_fallback.
+        "nvidia": {"flaggems": 549, "none": 1485},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
@@ -714,7 +746,12 @@ def test_conf_route_counts_are_stable():
         # these 8 ops to `cuda` costs nothing there. If it does cost something,
         # the per-platform answer is NATIVE_TRITON_GAPS["metax"], not a
         # deletion from the shared holds.
-        "metax": {"flaggems": 586, "none": 1436, "flaggems_cpp": 15},
+        #
+        # `mm` moved none -> flaggems (586 -> 587 / 1436 -> 1435): the soft-lowp
+        # matrix claim needs the key registered, and a default conf may not route
+        # boxing. The day-0 variant keeps `boxing`. Measured on a C550; see
+        # METAX_FLAGGEMS_MEASURED in gen_vendor_confs.py.
+        "metax": {"flaggems": 587, "none": 1435, "flaggems_cpp": 15},
         # cat moved to flaggems via the tensorlist_dim codegen category (#498).
         "mthreads": {"flaggems": 466, "none": 1518, "mthreads": 53},
         "thead": {"flaggems": 592, "none": 1445},

@@ -183,19 +183,31 @@ SEEDED_DRAWOPS = frozenset({"native_dropout", "native_dropout_backward"})
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     "ascend": 221,
-    "dcu": 452,
+    # 454: #672 routed DCU's `mm` and `bmm` to FlagGems (the soft-lowp matrix
+    # claim carries every dtype through the prelude, so the key cannot box), and
+    # left this count at the pre-reroute 452. The hygon lane reported the two it
+    # had gained as `assert 454 == 452`.
+    "dcu": 454,
     "gcu": 251,
-    # The iluvatar lane's landing: the conf routes 585 ops to FlagGems, eleven
-    # to the native slot (six ixdnn/ixblas kernels -- `_convolution`, `addmm`,
-    # `bmm`, `convolution`, `mm`, `native_batch_norm` -- plus `_conj`,
-    # `view_as_real`, `add_.Scalar`, `add_.Tensor` and `div_.Tensor` served
-    # from register.cc) and the rest to `none`. Recorded because the lane runs
-    # this suite on the platform and the count is what the conf states -- it is
-    # not an on-device measurement yet. 583 is that tally less the two
-    # ``SEEDED_DRAWOPS`` routes, which CI run 40341912173 measured on the lane.
-    "iluvatar": 583,
+    # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen
+    # to the native slot (eight ixdnn/ixblas kernels -- `_convolution`, `addmm`,
+    # `baddbmm`, `baddbmm_`, `bmm`, `convolution`, `mm`, `native_batch_norm` --
+    # plus `_conj`, `view_as_real`, `add_.Scalar`, `add_.Tensor` and
+    # `div_.Tensor` served from register.cc) and the rest to `none`. Recorded
+    # because the lane runs this suite on the platform and the count is what the
+    # conf states -- it is not an on-device measurement yet. 581 is that tally
+    # less the two ``SEEDED_DRAWOPS`` routes.
+    #
+    # 581 since `baddbmm`/`baddbmm_` left FlagGems: its batched GEMM is 61-84%
+    # wrong and nondeterministic on this chip whenever the output's row count
+    # leaves a partial tile, so both spellings now take the vendor route that
+    # `bmm` already took for the same reason.
+    "iluvatar": 581,
     "kunlunxin": 0,
-    "metax": 584,
+    # 585 since `mm` joined: the default conf routes it to FlagGems so the
+    # soft-lowp matrix claim has a registered key to follow. The day-0 variant
+    # below is unchanged -- it keeps `mm` on the boxing kernel.
+    "metax": 585,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,
@@ -233,7 +245,13 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # ``SEEDED_DRAWOPS`` routes (583 - 2 on metax, and the same - 2 on DCU's 453:
     # the seeded ops reach FlagGems in the day-0 tables of every platform).
     "metax_boxing": 581,
-    "dcu_boxing": 451,
+    # 453: the same two soft-lowp matrix routes as `dcu` above, which the day-0
+    # variant keeps for the same claim reason, less the
+    # `scaled_dot_product_attention` route that variant never meant to carry
+    # (see BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS in
+    # scripts/codegen/gen_vendor_confs.py). The boxing lane reported the gap as
+    # `assert 454 == 451` while that composite was still routed.
+    "dcu_boxing": 453,
     # TsingMicro's conf is the other hand-maintained one: 81 routes, of which 65
     # are the plain `flaggems` key, 2 spell it `flagos_python` (a log name this
     # conf uses as a route value) and 14 are metadata-view routes on the vendor.

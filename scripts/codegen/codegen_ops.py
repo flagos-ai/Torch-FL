@@ -17,8 +17,14 @@
 Codegen for torch_fl CUDA operators.
 
 Reads:
-  - torch_fl/configs/backends_nvidia.conf (op list + backend mapping)
+  - torch_fl/configs/backends_nvidia.conf (the op list, in the legacy
+    non-FLAGOS_CODEGEN_ALL mode only)
   - PyTorch native_functions.yaml (via torchgen)
+
+Writes torch_fl/configs/backends_nvidia.conf (FLAGOS_CODEGEN_ALL=1 only): the
+default NVIDIA conf, which routes `flaggems` or `none` and never `boxing`. The
+day-0 boxing variant is a different file with a different writer
+(scripts/codegen/gen_vendor_confs.py); this script neither reads nor writes it.
 
 Generates (into csrc/aten/generated/):
   - ops.h            shared dispatcher declarations (typedef + DECLARE_DISPATCHER)
@@ -123,6 +129,112 @@ MANUAL_REGISTERED_OPS = {
 _CONTIGUOUS_TENSOR_ARGS_BY_OP = {
     "native_group_norm": ("input",),
 }
+
+
+# Matmul ops whose FlagGems Python kernel must widen its contracted axis before
+# calling gems, mapped to (left operand, right operand).
+#
+# Some platforms' triton refuses to compile a `tl.dot` whose K is below a floor
+# (16 on triton-metax), and FlagTree's adaptive block size can shrink BLOCK_K to
+# K for a small K and then not restore it. The result is a CompilationError, not
+# a wrong answer -- but it is raised for an ordinary fp32 4x4 matmul, which is a
+# shape a test suite and a model both produce.
+#
+# This is emitted into the *FlagGems* kernel rather than the shared PrivateUse1
+# wrapper on purpose. The floor belongs to FlagGems' triton: the same op reaching
+# a boxing kernel or cpu_fallback has no such limit (measured -- the five
+# dtype_coverage matmul cases pass on MetaX both when `mm` is `boxing` and when
+# it is `none`), so padding in the wrapper would tax every route for one route's
+# constraint. TritonMinDotContractExtent() returns 0 where there is no floor, so
+# every other platform pays one integer compare.
+#
+# Only the plain forms are listed. `mm.out` and the `.dtype` forms carry no
+# FlagGems kernel on the platforms with a floor, and `bmm` reaches the C++ slot
+# there; when that changes, the entry is a line each and the padding is already
+# rank-agnostic (it indexes the contracted axis from the end).
+_DOT_CONTRACT_PADDED_OPS = {
+    "mm": ("self", "mat2"),
+}
+
+
+def _dot_contract_prelude(op, args):
+    """Return (prelude_lines, rename_map) widening K for _DOT_CONTRACT_PADDED_OPS.
+
+    The locals shadow nothing: they are fresh names the generated body uses in
+    place of the operands. A platform with no floor leaves the pair untouched,
+    so the two locals alias the arguments and no copy happens.
+    """
+    operands = _DOT_CONTRACT_PADDED_OPS.get(op)
+    if not operands:
+        return "", {}
+    arg_names = {n for _, n in args}
+    for name in operands:
+        if name not in arg_names:
+            raise SystemExit(
+                f"{op}: dot-contract padding needs a `{name}` argument; "
+                f"the schema has {sorted(arg_names)}"
+            )
+    lhs, rhs = operands
+    lines = (
+        f"  at::Tensor {lhs}_dotpad = {lhs};\n"
+        f"  at::Tensor {rhs}_dotpad = {rhs};\n"
+        f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
+    )
+    return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
+
+
+# Matmul ops whose FlagGems Python kernel must leave the device entirely for the
+# dtypes FlagGemsMatmulNeedsHost() names, mapped to (left operand, right
+# operand). Emitted as an early return before any other prelude runs.
+#
+# Same table shape and the same reason as _DOT_CONTRACT_PADDED_OPS above, one
+# step further: there the kernel can be made to work by widening K, here it
+# cannot be made to work at all for the dtype, and the host is the only place
+# the requested precision exists. On MetaX the FlagGems `mm` accumulator is
+# declared from `dot_out_dtype` and re-assigned at the operand width inside the
+# K loop, which triton refuses for float64 -- and on a development host the same
+# call silently returns a wrong product instead of raising. See
+# FlagGemsMatmulNeedsHost in csrc/aten/common.h for both measurements and for
+# why neither dtype predicate nor a conf entry can express this.
+#
+# In the FlagGems kernel rather than the shared wrapper for the same reason the
+# padding is: the gap is this route's. `mm` on MetaX reaches float64 correctly
+# through both boxing and cpu_fallback (measured), so a wrapper-level escape
+# would send every route to the host for a dtype only one of them fails.
+_HOST_MATMUL_DTYPE_OPS = {
+    "mm": ("self", "mat2"),
+}
+
+
+def _host_matmul_prelude(op, args, ret_type):
+    """Return the early-return lines sending _HOST_MATMUL_DTYPE_OPS to the host.
+
+    Only the value-returning forms are emitted: a form that writes into `out`
+    would need the result copied into it rather than returned, and no `.out`
+    matmul carries a FlagGems kernel on the platforms with the gap. Raises if
+    one ever does, rather than emitting a kernel that drops the write.
+    """
+    operands = _HOST_MATMUL_DTYPE_OPS.get(op)
+    if not operands:
+        return ""
+    if ret_type.strip() != "at::Tensor":
+        raise SystemExit(
+            f"{op}: the host-matmul escape returns a value, but the schema "
+            f"returns `{ret_type}`; an out= form needs its own emission"
+        )
+    arg_names = {n for _, n in args}
+    for name in operands:
+        if name not in arg_names:
+            raise SystemExit(
+                f"{op}: the host-matmul escape needs a `{name}` argument; "
+                f"the schema has {sorted(arg_names)}"
+            )
+    lhs, rhs = operands
+    return (
+        f"  if (at::native::flagos::FlagGemsMatmulNeedsHost({lhs}.scalar_type())) {{\n"
+        f"    return at::native::flagos::MatmulOnHost({lhs}, {rhs});\n"
+        f"  }}\n"
+    )
 
 
 # Ops whose index argument holds *positions* into `self`, mapped to the name of
@@ -1298,6 +1410,10 @@ def gen_flaggems_python_kernel(
         ] + [a.name for a in out_args]
     else:
         passed_names = [a.name for a in aten_args if a.name not in kw_names]
+    # Widen a contracted axis the platform's triton will not compile, before the
+    # operands are packed for the call. See _DOT_CONTRACT_PADDED_OPS.
+    dotpad_lines, dotpad_rename = _dot_contract_prelude(op, args)
+    passed_names = [dotpad_rename.get(n, n) for n in passed_names]
     ivalues = "{" + ", ".join(passed_names) + "}"
 
     # kwarg call selects the *Kw caller variant; positional-only uses the plain one.
@@ -1391,7 +1507,12 @@ def gen_flaggems_python_kernel(
     else:
         raise ValueError(f"unsupported flaggems-python category {category} for {op}")
 
-    return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+    # Ordered: the host escape returns before the padding runs, because a dtype
+    # this route cannot serve at all should not pay for a pad it will not use.
+    host_lines = _host_matmul_prelude(op, args, ret_type)
+    return (
+        f"{ret_type} {kn}({args_decl(args)}) {{\n{host_lines}{dotpad_lines}{body}\n}}"
+    )
 
 
 # ============================================================================
@@ -2549,17 +2670,35 @@ def main():
             print(f"   skipped[{reason}]: {len(skipped[reason])}")
         print(f"   skipped[template_skip_list]: {n_manual_skip}")
     else:
+        # Every op the conf lists, whatever its route. This list decides what to
+        # generate, not how to route it: it drives ops.h/ops.cc, both kernel
+        # files and register.inc, and register.inc has to define a wrapper for
+        # each of them -- register_flaggems_nvidia.inc names those symbols, so
+        # generating a subset leaves that list referring to wrappers that do not
+        # exist. The conf is exactly the generated base list
+        # (tests/unit/test_conf_registration_consistency.py::
+        # test_cuda_conf_is_the_generated_base_list), which makes "every entry"
+        # the same set the FLAGOS_CODEGEN_ALL branch enumerates.
+        #
+        # It used to read only the entries routed `nvidia`/`cuda` -- the boxed
+        # subset. That selected 1485 of 2034 even then, and it selects 0 now that
+        # the conf spells those ops `none`, because a default conf may not route
+        # boxing at all (AGENTS.md, "Default confs never route boxing"). The
+        # route a generated op takes is the conf writer's decision further down;
+        # reading it back here only coupled the kernel set to it.
+        #
+        # This path is legacy: every documented invocation sets
+        # FLAGOS_CODEGEN_ALL=1 and takes the enumeration branch above
+        # (.claude/skills/pre-pr-checks/SKILL.md, scripts/README.md). It is kept
+        # because it is the only mode that needs no FlagGems install.
         ops = []
         for line in conf_path.read_text().splitlines():
             line = line.split("#")[0].strip()
             if not line or "=" not in line:
                 continue
-            op, backend = line.split("=", 1)
-            # Both spellings: a conf written before the vendor rename says
-            # `cuda` for this route.
-            if backend.strip() in ("nvidia", "cuda"):
-                ops.append(op.strip())
-        print(f"Found {len(ops)} ops in backends_nvidia.conf")
+            op, _backend = line.split("=", 1)
+            ops.append(op.strip())
+        print(f"Found {len(ops)} ops in {conf_path.name}")
 
     op_info = {}
     categories = defaultdict(list)
@@ -2893,11 +3032,11 @@ def main():
         flaggems_recursive_fallback = FLAGGEMS_RECURSIVE_FALLBACK
         flaggems_runtime_broken = FLAGGEMS_RUNTIME_BROKEN
 
-        # Both sets force a route back to cuda, for different reasons; the conf
-        # writers and the coverage ceiling only need the union. Defined here,
-        # above the backends_nvidia.conf writer, because that writer's exclusion
-        # test reads it -- see the comment at the writer for what went wrong
-        # when the two sets lived below it.
+        # Both sets hold an op off the FlagGems route, for different reasons; the
+        # conf writers and the coverage ceiling only need the union. Defined
+        # here, above the backends_nvidia.conf writer, because that writer's
+        # exclusion test reads it -- see the comment at the writer for what went
+        # wrong when the two sets lived below it.
         #
         # There is no longer a generic backends_flaggems.conf to write here. It
         # was one file per *mode* rather than per platform, and it doubled as the
@@ -2905,7 +3044,7 @@ def main():
         # each other. The coverage set now lives in scripts/codegen/backend_coverage.py
         # as FLAGGEMS_PYTHON_OPS, and the per-op FlagGems routing is stated
         # directly in each platform's own conf by scripts/codegen/gen_vendor_confs.py.
-        flaggems_forced_cuda = flaggems_recursive_fallback | flaggems_runtime_broken
+        flaggems_forced_off = flaggems_recursive_fallback | flaggems_runtime_broken
         # Every generated conf carries the repo's Apache header; without it each
         # regeneration would strip the header off the checked-in files.
         conf_license = [
@@ -2974,9 +3113,26 @@ def main():
         # fix belongs in flag_gems' addmm.
         #
         # The kernel stays generated (reachable via FLAGOS_OP_addmm=flaggems for
-        # debugging) and only the default route goes to the cuda boxing kernel,
-        # which has no minimum-K constraint.
-        cuda_route_exceptions = {
+        # debugging) and only the default route comes off FlagGems. On a boxing
+        # build that route is the CUDA boxing kernel, which has no minimum-K
+        # constraint; on the default wheel it is cpu_fallback (see below).
+        #
+        # What "off the FlagGems route" resolves to is the day-0 split, not this
+        # file's choice. A default conf may only name the vendor's own kernels,
+        # FlagGems or `none` (AGENTS.md, "Default confs never route boxing"), and
+        # NVIDIA has no native CUDA operator library on this tree yet -- the
+        # boxing kernel borrows the vendor's libtorch -- so an op held back here
+        # is `none`, i.e. cpu_fallback. The boxed answer for the same op lives in
+        # `backends_nvidia_boxing.conf`, which is what the boxing lane and a
+        # boxing user select by FLAGOS_BACKEND_CONFIG.
+        #
+        # So each reason recorded below ("the boxing route answers this
+        # correctly, FlagGems does not") still explains why the op must stay off
+        # FlagGems, but on the default wheel it is CPU that answers it, not
+        # boxing. These ops are the list to revisit when NVIDIA gains native
+        # kernels like every other vendor: a native route would be nameable in
+        # the default conf where `boxing` is not.
+        flaggems_route_exceptions = {
             # contract: keep torch.conj lazy (see above)
             "_conj",
             # contract: flag_gems implements `_unsafe_view` as `self.reshape(size)`,
@@ -3175,25 +3331,36 @@ def main():
             "# flagos op backend config -- AUTO-GENERATED (full CUDA mode)",
             "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
             "# FlagGems-first: discovered compatible ops use the flaggems Python",
-            "# backend; all remaining generated ops use CUDA boxing. Ops not listed",
-            "# here are not registered and fall through to cpu_fallback.",
+            "# backend; every remaining generated op is `none` and reaches",
+            "# cpu_fallback, as do the ops not listed here at all.",
+            "#",
+            "# This conf never routes `boxing` -- no default conf may (AGENTS.md,",
+            '# "Default confs never route boxing"). NVIDIA has no native CUDA',
+            "# operator library on this tree yet, so what FlagGems does not cover",
+            "# is `none`, exactly as on the other CUDA-ABI platforms (MetaX, Hygon",
+            "# DCU, T-Head PPU). The boxed routing lives in the opt-in day-0 file",
+            "# backends_nvidia_boxing.conf, selected with FLAGOS_BACKEND_CONFIG on",
+            "# a FLAGOS_BUILD_BOXING=1 wheel.",
             "#",
             "# Exceptions: ops that pass the static discovery gates but cannot use",
-            "# the FlagGems route here go back to CUDA boxing",
-            "# (scripts/codegen/codegen_ops.py:cuda_route_exceptions). `_conj` is",
-            "# there because flag_gems materializes the value and torch.conj has to",
-            "# stay lazy; `_unsafe_view` because flag_gems implements it as",
+            "# the FlagGems route here are held off it",
+            "# (scripts/codegen/codegen_ops.py:flaggems_route_exceptions). `_conj`",
+            "# is there because flag_gems materializes the value and torch.conj has",
+            "# to stay lazy; `_unsafe_view` because flag_gems implements it as",
             "# `reshape`, which returns a copy where ATen returns a view or raises;",
             "# the addmm family because FlagTree AABS shrinks its tl.dot K tile",
             "# below Triton's K >= 16 minimum for small matmuls.",
             "#",
             "# Each exception is a measured result, not a guess: the ops in",
-            "# cuda_route_exceptions are contract/compile exceptions, and the",
+            "# flaggems_route_exceptions are contract/compile exceptions, and the",
             "# additional ops in measured_flaggems_rollback failed a case on the",
             "# FlagGems route that the CUDA boxing route answers correctly (or",
             "# crashed, hung, or recursed) when both were measured with",
             "# tests/manual/flaggems_overload_survey.py on 8x A100. See",
             "# docs/reference/operator-support.md for the per-op failure signatures.",
+            "# Those measurements are why the op must stay off FlagGems; on this",
+            "# conf the answer is CPU, and the boxed answer they name is in the",
+            "# day-0 variant above.",
             "#",
             "# metadata_route_overrides holds a third, cost-only group: ops that do",
             "# no computation on either route, where flag_gems' implementation is a",
@@ -3212,55 +3379,62 @@ def main():
             "# The annotation replaces the former backends_tileops.conf, which was a",
             "# 2060-line copy of this file differing only in those 60 lines.",
             "#",
-            "# Format: op_name = backend   (backend: flaggems | flagos_python | nvidia)",
+            "# Format: op_name = backend   (backend: flaggems | flagos_python | none)",
             "",
         ]
         # Every op held off the FlagGems route by codegen_ops' own exclusion
-        # sets routes to cuda here. The union used to be computed 300 lines
+        # sets routes to `none` here. The union used to be computed 300 lines
         # below this writer, so the writer could not see it and emitted
         # `flaggems` for 24 ops the same file marks "must stay off FlagGems" --
         # including native_layer_norm_backward ("keep on the CUDA boxing path")
         # and index_select (KV-cache corruption in HF beam search). The two sets
         # now sit above this block; see their definitions for the per-op cause.
         #
-        # On a wheel built with FLAGOS_BUILD_BOXING=OFF the boxing kernel set is
-        # not compiled. GetFn(kBoxing) in csrc/aten/dispatcher.h degrades to the
-        # FlagGems Python path there, the same way kFlagGems / kFlagGemsCpp /
-        # kTileOps already do, so one conf stays correct for both builds. The
-        # route is what this file is responsible for; whether the wheel can serve
-        # it is the wheel's, and the degrade makes the two agree instead of
-        # raising "backend not registered".
+        # `none` is the only key a default conf may give them. This conf used to
+        # spell `nvidia`, which csrc/aten/common.cc parses to Backend::kBoxing --
+        # so the default NVIDIA conf routed 1485 ops to the boxing kernel, the
+        # one thing AGENTS.md ("Default confs never route boxing") forbids it.
+        # MetaX, Hygon DCU and the T-Head PPU are the same kind of platform --
+        # CUDA-ABI, no native operator library on this tree -- and all three
+        # already spell these ops `none`; NVIDIA was the one conf that did not.
         #
-        # The degrade resolves the route but cannot make it *correct* for an op
-        # whose flag_gems kernel is itself the defect -- index_select is in
-        # flaggems_runtime_broken for exactly that reason, so on a boxing-off
-        # wheel it lands back on the buggy kernel and HF beam search still fails
-        # (issue #120). That residue has no correct route on this build today;
-        # the enumerated per-op list and the wheel-level decision are tracked in
-        # the follow-up issue.
-        # The fallback key this conf spells is the vendor's name for the boxing
-        # kernel. `cuda` was that spelling when the route was named for the
-        # runtime; it is now `nvidia` like every other vendor key, and the C++
-        # parser still accepts `cuda` for a conf written before the rename.
-        boxing_key = "nvidia"
+        # The runtime behaviour of the default wheel does not change, which is
+        # how a violation this size went unseen. On FLAGOS_BUILD_BOXING=OFF
+        # register.cc includes only register_flaggems_nvidia.inc, which claims
+        # the 549 FlagGems-routed ops and none of these 1485: unclaimed on
+        # PrivateUse1, they already reached cpu_fallback. The conf said `boxing`
+        # about ops that were taking CPU either way -- a misrecorded route, not a
+        # live one -- so writing `none` makes the file state what the wheel does.
+        #
+        # GetFn(kBoxing) in csrc/aten/dispatcher.h does degrade to the FlagGems
+        # Python path when no boxing kernel is linked, which is what made the old
+        # key survivable; it is not what served these ops, because the dispatcher
+        # is never reached for an op that was never claimed.
+        #
+        # The boxed answer is not lost: `backends_nvidia_boxing.conf` routes 2033
+        # ops to `boxing`, and the boxing lane selects it through
+        # FLAGOS_BACKEND_CONFIG (.github/scripts/hooks/set_env_nvidia.sh). That
+        # file is generated by scripts/codegen/gen_vendor_confs.py and reads
+        # nothing from this one.
+        fallback_key = "none"
         n_flaggems_routes = 0
-        n_cuda_fallback = 0
+        n_held_off_flaggems = 0
         n_metadata_override = 0
         for op in sorted(op_info):
             if op in metadata_route_overrides:
-                backend = boxing_key
+                backend = fallback_key
                 if op in flaggems_py:
                     n_metadata_override += 1
             elif (
-                op in cuda_route_exceptions
+                op in flaggems_route_exceptions
                 or op in measured_flaggems_rollback
-                or op in flaggems_forced_cuda
+                or op in flaggems_forced_off
             ):
-                backend = boxing_key
+                backend = fallback_key
                 if op in flaggems_py:
-                    n_cuda_fallback += 1
+                    n_held_off_flaggems += 1
             else:
-                backend = "flaggems" if op in flaggems_py else boxing_key
+                backend = "flaggems" if op in flaggems_py else fallback_key
             if backend == "flaggems":
                 n_flaggems_routes += 1
             suffix = "  # tileops" if op in TILEOPS_OPS else ""
@@ -3269,9 +3443,9 @@ def main():
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "
-            f"and {len(op_info) - n_flaggems_routes} boxing routes "
+            f"and {len(op_info) - n_flaggems_routes} {fallback_key} routes "
             f"({tileops_annotated} annotated # tileops, "
-            f"{n_cuda_fallback} flaggems ops forced back to {boxing_key})"
+            f"{n_held_off_flaggems} flaggems ops held off the FlagGems route)"
         )
         if n_metadata_override:
             print(
@@ -3283,11 +3457,11 @@ def main():
         # ops above. scripts/gen_vendor_confs.py intersects every platform conf
         # with this set, so it is the one place the FlagGems Python surface is
         # declared for all platforms at once.
-        coverage_path = render_flaggems_coverage(flaggems_py, flaggems_forced_cuda)
+        coverage_path = render_flaggems_coverage(flaggems_py, flaggems_forced_off)
         print(
             f"   updated {coverage_path.name}: FLAGGEMS_PYTHON_OPS = "
-            f"{len(flaggems_py) - len(flaggems_forced_cuda & set(flaggems_py))} ops "
-            f"({len(flaggems_forced_cuda & set(flaggems_py))} override-only excluded)"
+            f"{len(flaggems_py) - len(flaggems_forced_off & set(flaggems_py))} ops "
+            f"({len(flaggems_forced_off & set(flaggems_py))} override-only excluded)"
         )
 
         # The vendor confs are not written here. Every

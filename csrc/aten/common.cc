@@ -714,4 +714,104 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
 #endif
 }
 
+int64_t TritonMinDotContractExtent() {
+#if defined(FLAGOS_ACCEL_METAX)
+  // 16, measured. FlagTree's adaptive block size (AABS) shrinks a block that
+  // is wider than the tensor -- `if bs > ts: updated_bs = next_power_of_2(ts)`
+  // in triton/runtime/adjust_kernel_param.py -- so FlagGems' BLOCK_K of 32
+  // becomes next_power_of_2(K) for a small K. Its `metax` arm then restores M
+  // and N to >= 16 and leaves K where the shrink put it, while the `iluvatar`
+  // and `sunrise` arms next to it restore all three. The dot intrinsic then
+  // refuses the tile:
+  //
+  //   triton/spec/metax/triton/language/semantic.py: in dot
+  //     assert lhs.shape[-2].value >= min_dot_size[0] and ...
+  //   AssertionError: Input shapes should have M >= 1, N >= 1 and K >= 16
+  //
+  // Measured on a MetaX C550 (torch 2.10.0+metax3.8.1.0, flag_gems 5.4.0),
+  // calling FlagGems' mm directly with a cold FLAGGEMS_CACHE_DIR:
+  //
+  //   (4, 4) x (4, 4)    CompilationError, the assertion above
+  //   (4, 8) x (8, 4)    CompilationError, the assertion above
+  //   (4, 16) x (16, 4)  OK, max_abs 4.4e-07 against a CPU fp64 reference
+  //   (4, 32) x (32, 4)  OK, max_abs 1.8e-06
+  //
+  // The floor is 16 and not `next_power_of_2(K) < 16`: AABS only shrinks when
+  // the block exceeds the extent, so a config that already carries a small
+  // BLOCK_K trips the same assertion at a K the power-of-two rule would pass
+  // (the thead measurement in scripts/codegen/gen_vendor_confs.py records
+  // K = 4/8/8 failing while 8/8/15 passes -- which config the tuner draws
+  // decides it). Padding every K below 16 costs a copy of a tensor with fewer
+  // than 16 columns and removes the dependence on that draw.
+  //
+  // This is a shim for a vendor-wheel gap, and it has an expiry: FlagGems pads
+  // K itself from 5.6, and FlagTree's metax arm should restore K the way its
+  // iluvatar arm does. When either lands in the pinned cohort, delete this
+  // value and the padding that reads it.
+  return 16;
+#else
+  // No other platform that compiles a soft-lowp decode is known to impose a
+  // contracted-extent floor. Hygon DCU's FlagTree arm also restores only M and
+  // N, but its HIP dot intrinsic has not been measured to refuse a small K --
+  // if its lane ever raises the assertion above, that is this same shim with
+  // its own measurement, not a reason to widen this one on a guess.
+  return 0;
+#endif
+}
+
+int64_t MatmulContractDim(const at::Tensor& operand, bool is_rhs) {
+  return is_rhs ? operand.size(-2) : operand.size(-1);
+}
+
+at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
+                                int64_t target) {
+  auto shape = operand.sizes().vec();
+  const auto axis = is_rhs ? shape.size() - 2 : shape.size() - 1;
+  const auto extent = shape[axis];
+  shape[axis] = target;
+  auto padded = at::empty(shape, operand.options());
+  padded.zero_();
+  padded.narrow(static_cast<int64_t>(axis), 0, extent).copy_(operand);
+  return padded;
+}
+
+bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
+  const auto floor = TritonMinDotContractExtent();
+  if (floor <= 0) {
+    return false;
+  }
+  // Early out on the path that matters: a real GEMM has a contracted extent in
+  // the hundreds or thousands and pays one integer compare here.
+  const auto extent = MatmulContractDim(lhs, false);
+  if (extent >= floor || extent == 0) {
+    return false;
+  }
+  if (MatmulContractDim(rhs, true) != extent) {
+    // Mismatched operands are the caller's error, and the kernel below reports
+    // it with the shapes in the message. Padding them to a common target here
+    // would turn that into a wrong answer.
+    return false;
+  }
+  lhs = PadMatmulContractDim(lhs, false, floor);
+  rhs = PadMatmulContractDim(rhs, true, floor);
+  return true;
+}
+
+bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {
+#if defined(FLAGOS_ACCEL_METAX)
+  // See the declaration in common.h for the compiler assertion, the silent
+  // wrong answer the same call produces on a development host, and why neither
+  // FlagGemsRejectsOpDtype nor FlagGemsRejectsDtype nor a conf entry can state
+  // this gap. float32 and below are correct on this route and stay on it.
+  return dtype == at::kDouble;
+#else
+  (void)dtype;
+  return false;
+#endif
+}
+
+at::Tensor MatmulOnHost(const at::Tensor& lhs, const at::Tensor& rhs) {
+  return at::mm(lhs.cpu(), rhs.cpu()).to(lhs.device());
+}
+
 } // namespace at::native::flagos
