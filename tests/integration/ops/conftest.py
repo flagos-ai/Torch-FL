@@ -59,6 +59,7 @@ def _load_platform():
 
 _platform = _load_platform()
 
+
 # Markers to skip per platform (tests for other backends are not compiled/available).
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     "metax": ("cuda", "ascend", "musa", "dcu"),
@@ -197,8 +198,10 @@ def pytest_collection_modifyitems(
             if item.get_closest_marker(marker_name):
                 item.add_marker(
                     pytest.mark.skip(
-                        reason=f"Skipped on {platform} runtime: requires "
-                        f"@{marker_name} backend"
+                        reason=(
+                            f"Skipped on {platform} runtime: "
+                            f"requires @{marker_name} backend"
+                        )
                     )
                 )
                 break
