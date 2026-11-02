@@ -53,13 +53,31 @@ DEVICE = "flagos:0"
 pytestmark = [
     pytest.mark.flaggems,
     pytest.mark.main_ops,
+    # MetaX SDPA has no vendor kernel yet, and the FlagGems arm does not compile
+    # its _attn_fwd on this stack: Triton rejects the tl.dot in
+    # flag_gems/ops/attention.py with "Input shapes should have M >= 1, N >= 1
+    # and K >= 16" (run 40256656989).
+    #
+    # That compile failure reaches only the five cases the envelope admits --
+    # `eligible`, `masked`, `head_dim64`, `seq512`, `float16`, every one of them
+    # bf16 or fp16. It is *not* the fp32 case: FlagGemsEligible in
+    # csrc/aten/sdp_choice_stub.cc rejects fp32 before any kernel is reached
+    # (`dtype != kBFloat16 && dtype != kHalf`), and it is the last && operand of
+    # the route test, so `float32` never calls flag_gems at all. Its expected
+    # row is `routed=0` for exactly that reason.
+    #
+    # What skips the whole file is the probe's shape, not the dtype: `run_case`
+    # in _SDPA_ORACLE has no per-case error capture, so the first admitted case
+    # that raises stops the child interpreter, no further RESULT lines are
+    # printed, and _sdpa_report asserts the table is complete. The nine cases
+    # the compile failure does not touch are buried with the five that it does.
+    #
+    # Re-enable when the vendor op lands or the FlagGems kernel compiles here.
+    # Recovering the nine sooner means giving `run_case` per-case capture, which
+    # is a deliberate change to a probe and not a side effect of a route fix.
     pytest.mark.skip(
-        reason="MetaX SDPA has no vendor kernel yet, and the FlagGems arm does "
-        "not compile its _attn_fwd on this stack: Triton rejects the fp32 "
-        "tl.dot in flag_gems/ops/attention.py with 'Input shapes should have "
-        "M >= 1, N >= 1 and K >= 16', which fails the probe for every case "
-        "rather than the one (run 40256656989). Re-enable when either the "
-        "vendor op lands or the FlagGems kernel compiles here."
+        reason="the FlagGems _attn_fwd does not compile on this MetaX stack, "
+        "and the probe reports all 14 cases or none (see the comment above)"
     ),
 ]
 
@@ -149,8 +167,8 @@ _SDPA_ORACLE = (
 # is in the probe because `FlagGemsEligible` admits it, and each bound the
 # widening touched is pinned from both sides -- `head_dim8` and `head_dim256`
 # are the first values outside the head-dim bounds, `float32` is the dtype the
-# kernel raises on, and `masked_seq512` is the sequence below the one floor the
-# widening kept.
+# route's own clause refuses before a kernel is reached, and `masked_seq512` is
+# the sequence below the one floor the widening kept.
 #
 # The `mask*` cases below it are the other side of the same clause: each supplies
 # a mask a *caller* may legitimately pass and that the route must refuse. The
@@ -220,7 +238,7 @@ _SDPA_CASES_EXPECTED = {
     "head_dim64": (1, "head_dim 64, inside the route's head_dim bounds"),
     "seq512": (1, "seq 512, which the route no longer floors"),
     "float16": (1, "fp16, the second dtype the route was measured on"),
-    "float32": (0, "float32, whose tile the kernel reports OutOfResources on"),
+    "float32": (0, "float32, which the route's dtype clause rejects in C++"),
     "rank2": (0, "2-D input, and the route requires the 4-D call form"),
     "head_dim8": (0, "head_dim 8, under the 16 a tile's BLOCK_N bottoms out at"),
     "head_dim256": (0, "head_dim 256, over the 128 whose tile still fits"),
