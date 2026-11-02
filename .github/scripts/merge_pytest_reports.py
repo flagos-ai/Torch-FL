@@ -174,7 +174,12 @@ def validate_execution(
             code != 0
             and not (
                 group.get("teardown_tolerated") is True
-                and teardown_crash_allowed(expected.get("environment", {}))
+                and teardown_crash_allowed(
+                    {
+                        **execution.get("environment", {}),
+                        **expected.get("environment", {}),
+                    }
+                )
                 and signal_number(code) in _FATAL_SIGNALS
             )
         ):

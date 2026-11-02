@@ -32,7 +32,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / ".github/scripts"
 sys.path.insert(0, str(SCRIPTS))
-from flagcicd_plan import build_plan  # noqa: E402
+from flagcicd_plan import build_ci_plan, build_plan  # noqa: E402
 from merge_pytest_reports import merge_reports  # noqa: E402
 from ci.generate_matrix import (  # noqa: E402
     _load_platforms,
@@ -192,6 +192,8 @@ def test_profile_policy_is_shared_by_composer_plan_and_resolver(monkeypatch):
         compose({}, {}, "nvidia", [], profile="nightly")
     with pytest.raises(ValueError, match="supported profiles are pr"):
         build_plan(request("nightly"), CONTRACT, ROOT, ["setup.py"])
+    with pytest.raises(ValueError, match="supported profiles are pr"):
+        build_ci_plan(request("nightly"), CONTRACT, ROOT, ["setup.py"], "schedule")
     with pytest.raises(ValueError, match="supported profiles are pr"):
         resolver.resolve(
             {"inputs": {"profile": "nightly"}},

@@ -39,6 +39,7 @@ try:
 finally:
     sys.path.pop(0)
 CONSUMER = sys.modules["platform_config"]
+MATRIX = sys.modules["ci.generate_matrix"]
 CONTRACT = yaml.safe_load((ROOT / ".flagcicd/project.yaml").read_text())
 
 
@@ -438,7 +439,7 @@ def test_ci_nightly_is_full_and_weekly_stays_reserved():
         request(profile="nightly"), CONTRACT, ROOT, [], "schedule"
     )
     configs = ROOT / ".github/configs"
-    known = PLANNER._load_platforms(configs)
+    known = MATRIX._load_platforms(configs)
     assert len(plan["execution_plan"]) == len(known) + len(
         PLANNER.boxing_platforms(configs, known)
     )
@@ -839,7 +840,7 @@ def test_each_platform_file_is_read_once_per_plan(monkeypatch, entry, event, cha
     else:
         PLANNER.build_plan(request(), CONTRACT, ROOT, changed)
     assert counts == {
-        name + ".yml": 1 for name in PLANNER._load_platforms(ROOT / ".github/configs")
+        name + ".yml": 1 for name in MATRIX._load_platforms(ROOT / ".github/configs")
     }
 
 

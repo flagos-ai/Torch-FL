@@ -47,6 +47,7 @@ PLANNER = load("flagcicd_plan")
 RESOLVER = load("flagcicd_resolve")
 REPORTER = load("flagcicd_report")
 MERGER = load("merge_pytest_reports")
+MATRIX = sys.modules["ci.generate_matrix"]
 CONTRACT = yaml.safe_load((ROOT / ".flagcicd/project.yaml").read_text())
 SHA = "a" * 40
 
@@ -830,7 +831,7 @@ def test_l0_validates_all_configurations_during_planning():
     assert "plan" in jobs["complete"]["needs"]
     result = PLANNER.build_plan(request(), CONTRACT, ROOT, ["README.md"])
     assert result["test_level"] == "L0"
-    assert result["validated_platforms"] == PLANNER._load_platforms(
+    assert result["validated_platforms"] == MATRIX._load_platforms(
         ROOT / ".github/configs"
     )
     assert result["expected_shared_checks"] == ["lint", "plan"]
@@ -1293,6 +1294,55 @@ def test_group_evidence_preserves_only_explicit_teardown_tolerance(
     path.write_text(json.dumps(payload))
     report = REPORTER.platform_report(current, "nvidia", jobs(), tmp_path, 1)
     assert report["status"] == expected, report
+
+
+@pytest.mark.parametrize(
+    "shared,group_value,expected",
+    [
+        ("1", None, "passed"),
+        ("1", "0", "report_error"),
+        ("1", "false", "report_error"),
+        ("0", "1", "passed"),
+        ("0", None, "report_error"),
+    ],
+)
+def test_teardown_policy_merges_platform_then_group_environment(
+    tmp_path, shared, group_value, expected
+):
+    current = plan()
+    lane = current["execution_plan"][0]
+    lane["environment"] = {"INTEGRATION_ALLOW_TEARDOWN_CRASH": shared}
+    if group_value is not None:
+        lane["groups"][0]["environment"] = {
+            "INTEGRATION_ALLOW_TEARDOWN_CRASH": group_value
+        }
+    current["plan_hash"] = PLANNER.plan_hash(current)
+    raw_reports(tmp_path, current=current)
+    path = tmp_path / "pytest/pytest-nvidia.json"
+    payload = json.loads(path.read_text())
+    execution = payload["flagcicd"]["execution"]
+    execution["environment"] = lane["environment"]
+    execution["groups"][0].update(returncode=139, teardown_tolerated=True)
+    path.write_text(json.dumps(payload))
+    report = REPORTER.platform_report(current, "nvidia", jobs(), tmp_path, 1)
+    assert report["status"] == expected, report
+
+
+def test_report_cannot_enable_unplanned_platform_teardown_tolerance(tmp_path):
+    current = plan()
+    raw_reports(tmp_path, current=current)
+    path = tmp_path / "pytest/pytest-nvidia.json"
+    payload = json.loads(path.read_text())
+    execution = payload["flagcicd"]["execution"]
+    execution["environment"] = {"INTEGRATION_ALLOW_TEARDOWN_CRASH": "1"}
+    execution["groups"][0].update(returncode=139, teardown_tolerated=True)
+    path.write_text(json.dumps(payload))
+    report = REPORTER.platform_report(current, "nvidia", jobs(), tmp_path, 1)
+    assert report["status"] == "report_error"
+    assert any(
+        "shared execution environment differs from the plan" in e
+        for e in report["errors"]
+    )
 
 
 def test_boxing_cannot_borrow_the_default_lanes_evidence(tmp_path):

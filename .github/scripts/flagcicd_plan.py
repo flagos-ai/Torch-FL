@@ -26,7 +26,6 @@ import yaml
 
 from ci.generate_matrix import (
     _changed_files,
-    _load_platforms as _load_platforms,
     _platforms_from_dispatch,
     _platforms_from_files,
     boxing_platforms,
@@ -141,8 +140,7 @@ def build_ci_plan(
 ):
     """Plan automatic CI without applying the external entry's level policy."""
     profile = request.get("profile", "pr")
-    if profile not in ("pr", "nightly"):
-        raise ValueError("weekly is reserved; supported profiles are pr and nightly")
+    validate_profile(profile)
     if profile == "nightly" and dispatch not in ("", "all"):
         raise ValueError("nightly requires platforms=all")
     platform_configs, raw_configs = load_platform_data(source)
