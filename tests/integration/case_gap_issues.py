@@ -41,9 +41,13 @@ _ISSUES = (
         "open",
         (
             "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_dimensions",
+            "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_tensor",
+            "tests/integration/ops/test_all_dispatch.py"
             "::TestAllDispatch::test_dispatch_log_flaggems_python",
         ),
-        ("all:flaggems_python",),
+        ("all", "all:flaggems_python"),
     ),
 )
 

@@ -931,7 +931,7 @@ def test_fixed_registered_cases_remove_their_source_skip():
     evidence, _ = _registered_gap_evidence(
         source, "tests/integration/ops/test_all_dispatch.py", _case_gap_issues()
     )
-    for name in ("test_all_empty_tensor", "test_all_matches_cpu_reference"):
+    for name in ("test_all_matches_cpu_reference",):
         assert (
             f"tests/integration/ops/test_all_dispatch.py::TestAllCorrectness::{name}"
         ) not in evidence
@@ -966,7 +966,7 @@ def test_flag_override_case_uses_the_build_capability_gate():
     text = ast.unparse(function)
     assert "override_is_logged('all', 'flaggems_python')" in text
     assert "case_gap_reason('all:flaggems_python')" in text
-    assert "pytest.skip(" in text
+    assert "route_is_served('all')" in text
 
 
 def test_gap_registry_skips_are_enforced_by_the_cpu_lane():

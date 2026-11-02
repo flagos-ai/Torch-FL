@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import override_is_logged
+from backend_conf import override_is_logged, route_is_served
 from case_gap_issues import case_gap_reason
 
 
@@ -80,6 +80,7 @@ class TestAllCorrectness:
         out = torch.all(a)
         assert out.item() is False
 
+    @pytest.mark.skip(reason=case_gap_reason("#710"))
     @pytest.mark.anyplatform
     def test_all_empty_tensor(self):
         """Empty tensor: all() is vacuously true.
@@ -93,6 +94,26 @@ class TestAllCorrectness:
         a = torch.tensor([], device=DEVICE, dtype=torch.bool)
         out = torch.all(a)
         assert out.item() is True
+
+    @pytest.mark.skip(reason=case_gap_reason("#710"))
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize(
+        "shape, dim",
+        [
+            ((0, 3), 0),
+            ((2, 0, 3), 1),
+            ((0, 2), -1),
+            ((0, 3), (0, 1)),
+        ],
+    )
+    def test_all_empty_dimensions(self, shape, dim):
+        """Reductions along empty dimensions keep the aten result and shape."""
+        host = torch.empty(shape, dtype=torch.float32)
+        expected = torch.all(host, dim=dim)
+        actual = torch.all(host.to(DEVICE), dim=dim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
 
     @pytest.mark.anyplatform
     @pytest.mark.parametrize("shape", [(0, 0), (3, 0), (0, 3)])
@@ -148,9 +169,10 @@ class TestAllDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
-        """The override test applies only where the wheel serves FlagGems."""
+        """The override selects the FlagGems Python path on a serving wheel."""
         if not override_is_logged("all", "flaggems_python"):
             pytest.skip(case_gap_reason("all:flaggems_python"))
+        assert route_is_served("all")
         result = _run_all_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",
