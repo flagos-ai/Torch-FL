@@ -74,6 +74,49 @@ def _module_cache_key(kind, weight, bias, *params):
     return "|".join(parts)
 
 
+class _FunctionalOp(nn.Module):
+    """A parameterised op expressed through the functional API.
+
+    aten's counterpart of this operator is a function, so its BPU form should
+    call the functional API too rather than build an nn.Module -- initialise,
+    copy weights in, and throw the scaffolding away on every call. This holds
+    only the tensors the function needs; symbolic_trace sees one conv2d call.
+    """
+
+    def __init__(self, weight, stride: int, groups: int):
+        super().__init__()
+        self.weight = nn.Parameter(weight, requires_grad=False)
+        self.stride = stride
+        self.groups = groups
+
+    def forward(self, x):
+        return torch.nn.functional.conv2d(
+            x, self.weight, None, self.stride, 0, 1, self.groups
+        )
+
+
+def _avg_pool_as_conv(channels: int, kernel: int, stride: int) -> nn.Module:
+    """Average pooling as the depthwise conv that computes the same mean.
+
+    Cached by shape: every avg_pool with the same channel count, window and
+    stride is the same operator, and its only weight is a constant. Building
+    the weight once also keeps the artifact cache warm, since the compiled
+    kernel is keyed on the module instance.
+    """
+    key = f"avgpool|{channels}|{kernel}|{stride}"
+    with _holder_lock:
+        cached = _holders.get(key)
+    if cached is not None:
+        return cached
+    weight = torch.full(
+        (channels, 1, kernel, kernel), 1.0 / (kernel * kernel), dtype=torch.float32
+    )
+    module = _FunctionalOp(weight, stride, channels)
+    with _holder_lock:
+        _holders[key] = module
+    return module
+
+
 def _cached_module(key, build):
     with _holder_lock:
         module = _holders.get(key)
@@ -186,11 +229,39 @@ def build_impls(lib: torch.library.Library, dispatcher) -> None:
             raise NotImplementedError
         return out
 
+    def avg_pool_override(inp, kernel_size, stride):
+        # Served as a depthwise conv, not as nn.AvgPool2d.
+        #
+        # Both lower to the same operation, but only one of them survives the
+        # quantizer. Compiled through hbir's average pool the artifact is wrong
+        # by a relative L2 of 0.63 on inputs in [0, 1] -- not a scale that is
+        # merely coarse, since 0.529 quantises to 0.55 on a 0.05 grid and the
+        # kernel returns 0.85. With FLAGOS_BPU_QUANTIZE off the same graph is
+        # bit-exact, so the fault is in how Q/DQ is applied to that op, and
+        # there is no knob on this side to fix it.
+        #
+        # A conv whose weights are all 1/k^2 computes the same average, and its
+        # quantisation is the one the toolchain actually tunes: measured 0.0133
+        # at k=2 on 16x16, 0.0138 on 7x7 where the pool drops the tail, and
+        # 0.0094 at k=3 on 32x32 -- conv-grade error instead of 46x worse.
+        if inp.dim() != 4:
+            raise NotImplementedError
+        k = _pair(kernel_size)
+        s = _pair(stride) if stride else k
+        if k[0] != k[1] or s[0] != s[1]:
+            raise NotImplementedError
+        op = _avg_pool_as_conv(int(inp.shape[1]), k[0], s[0])
+        out = dispatcher.run_module(op, inp)
+        if out is None:
+            raise NotImplementedError
+        return out
+
     installed = []
     for name, fn in (
         ("convolution_overrideable", conv_override),
         ("batch_norm", batch_norm_override),
         ("max_pool2d", max_pool_override),
+        ("avg_pool2d", avg_pool_override),
     ):
         try:
             lib.impl(name, fn, "PrivateUse1")

@@ -34,6 +34,7 @@ import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
 from backend_conf import routed_backend, routed_backend_or_none
+from platform_support import detect_platform
 
 
 DEVICE = "flagos:0"
@@ -165,9 +166,32 @@ class TestEmbeddingDispatchLog:
         Skipped where the conf routes embedding to ``none``: the op is then not
         claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
         the dispatcher and no override can show up in the log.
+
+        Also skipped where a dtype gate outranks the override. The override only
+        rewrites the conf's routing table; what the dispatcher then serves can
+        still be the vendor kernel, because ``FlagGemsRejectsOpDtype``
+        (csrc/aten/common.cc) is consulted per call on the operand dtype. This
+        op is the only one of the per-op override cases whose operand is int64 --
+        ``torch.randint`` builds the indices -- and that is exactly GCU's
+        rejected dtype, so on Enflame the log reads
+
+            [flagos] env override: embedding -> flaggems
+            [flagos dispatch] embedding -> gcu
+
+        and the assertion below cannot hold however the conf is written. The
+        gate is deliberate (int64 fails inside the compiler for every
+        flag_gems pointwise kernel that takes one) and is not exposed to Python,
+        so there is no predicate to ask: the platform is named instead, which
+        keeps the skip readable as the gap it is.
         """
         if routed_backend_or_none("embedding") is None:
             pytest.skip("embedding is routed to 'none' on this platform")
+        if detect_platform() == "gcu":
+            pytest.skip(
+                "GCU's FlagGems dtype gate rejects int64, and this op's indices "
+                "are int64: the override is applied to the table but the "
+                "dispatcher still serves the vendor kernel"
+            )
         result = _run_embedding_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",

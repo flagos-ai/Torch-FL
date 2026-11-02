@@ -33,7 +33,11 @@ import torch
 import torch.nn.functional as F
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import (
+    _OVERRIDE_UNSERVED,
+    override_is_logged,
+    routed_backend_or_none,
+)
 
 
 DEVICE = "flagos:0"
@@ -94,6 +98,8 @@ class TestSiluDispatch:
 
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
+        if not override_is_logged("silu", "flaggems_python"):
+            pytest.skip(_OVERRIDE_UNSERVED)
         result = _run_silu_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",
