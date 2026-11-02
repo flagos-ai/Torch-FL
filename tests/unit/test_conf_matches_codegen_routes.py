@@ -15,7 +15,7 @@
 """The CUDA conf agrees with the route sets the generator writes it from.
 
 `scripts/codegen/codegen_ops.py` decides each op's backend from three sets --
-`cuda_route_exceptions`, `measured_flaggems_rollback` and
+`flaggems_route_exceptions`, `measured_flaggems_rollback` and
 `metadata_route_overrides` -- and `torch_fl/configs/backends_nvidia.conf` is its
 output. The two can only be checked against each other by re-running the
 generator, and that is not always possible: the generator discovers the FlagGems
@@ -26,7 +26,7 @@ A100 development host: the local FlagGems turns 186 more ops into FlagGems
 routes, plus every route in the DCU and MetaX confs.)
 
 So this pins the part that is deterministic regardless of which FlagGems is
-installed: for every op the sets name, the conf must route it to `cuda`. The
+installed: for every op the sets name, the conf must route it to `none`. The
 sets are read with `ast`, not imported -- `codegen_ops.py` imports torchgen at
 module scope and this file is a fast unit test.
 
@@ -43,7 +43,7 @@ _CODEGEN = _REPO / "scripts/codegen/codegen_ops.py"
 _CONF = _REPO / "torch_fl/configs/backends_nvidia.conf"
 
 _ROUTE_SETS = (
-    "cuda_route_exceptions",
+    "flaggems_route_exceptions",
     "measured_flaggems_rollback",
     "metadata_route_overrides",
 )
@@ -89,21 +89,28 @@ def codegen_sets():
     return sets
 
 
-def test_every_exception_set_member_is_routed_to_cuda(codegen_sets):
-    """The whole point of the sets is that the conf sends those ops to boxing.
+def test_every_exception_set_member_is_held_off_flaggems(codegen_sets):
+    """The whole point of the sets is that the conf keeps those ops off FlagGems.
 
     An entry that is absent from the conf, or present with any other backend,
     means the conf and the generator disagree -- and the next `FLAGOS_CODEGEN_ALL=1`
     run would silently change routing.
+
+    The key is `none`, not `nvidia`. `nvidia` parses to Backend::kBoxing
+    (csrc/aten/common.cc) and a default conf may not route boxing (AGENTS.md,
+    "Default confs never route boxing"); the boxed answer for these ops is in
+    backends_nvidia_boxing.conf. What each set records is the measurement that
+    the FlagGems route is wrong for the op -- on this conf the fallback that
+    leaves is cpu_fallback.
     """
     routes = _conf_routes()
     for name, ops in codegen_sets.items():
         for op in sorted(ops):
             assert op in routes, f"{op} ({name}) is not listed in {_CONF.name}"
-            # The boxing route's conf key is the vendor whose kernel serves it.
-            assert routes[op] == "nvidia", (
+            assert routes[op] == "none", (
                 f"{op} ({name}) is routed to {routes[op]!r} in {_CONF.name}, "
-                f"but {name} forces it to nvidia (the boxing kernel)"
+                f"but {name} holds it off the FlagGems route, which on a "
+                "default conf means `none` (cpu_fallback)"
             )
 
 

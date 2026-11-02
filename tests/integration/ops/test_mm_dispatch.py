@@ -33,10 +33,10 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import (
+    _OVERRIDE_UNSERVED,
     override_is_logged,
     routed_backend,
     routed_backend_or_none,
-    _OVERRIDE_UNSERVED,
 )
 
 
@@ -193,6 +193,8 @@ class TestMmDispatchLog:
     @pytest.mark.flaggems_python
     def test_dispatch_log_flaggems_python(self):
         """FLAGOS_OP_mm=flaggems_python routes mm to flagos_python backend."""
+        if not override_is_logged("mm", "flaggems_python"):
+            pytest.skip(_OVERRIDE_UNSERVED)
         result = _run_mm_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "flaggems_python"},
             check=False,

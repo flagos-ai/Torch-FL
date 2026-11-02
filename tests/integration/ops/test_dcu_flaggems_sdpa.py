@@ -79,7 +79,24 @@ import torch_fl
 
 DEVICE = "flagos:0"
 
-pytestmark = pytest.mark.dcu
+# `dcu` alone made this file unreachable. It asserts the route
+# `backends_hygon.conf` states (`scaled_dot_product_attention = flaggems`), and
+# `_require_dcu_flaggems` below skips the module unless the loaded conf IS that
+# file -- so the run that can execute it is the DCU **vendor** lane. But the only
+# manifest step whose selection `dcu` satisfies is `vendor_ops`, which carries
+# `boxing_variant: [hygon]` and therefore composes into the **boxing** lane
+# (.github/integration-manifest.yml); the vendor lane's operator step selects
+# `flaggems and main_ops`, which a `dcu`-only file does not match. Both halves
+# measured with compose_integration_manifest.py: the vendor lane's 16 steps
+# contain no `(dcu or main_ops)`, the boxing lane's 17 do. The result was nine
+# cases that never ran anywhere -- on a platform that ships the route.
+#
+# `flaggems` and `main_ops` are what the vendor lane's operator step selects, and
+# they describe what this file is: a FlagGems-route assertion over a main
+# operator. `dcu` stays so the boxing lane still collects the module and skips it
+# on the conf check, which is the honest outcome there -- that lane loads
+# backends_hygon_boxing.conf, where the route this file asserts is not stated.
+pytestmark = [pytest.mark.dcu, pytest.mark.flaggems, pytest.mark.main_ops]
 
 # The FlagGems SDPA route is the one conf entry the dispatcher does not select
 # for itself. `csrc/aten/sdp_choice_stub.cc` registers one PrivateUse1 kernel for

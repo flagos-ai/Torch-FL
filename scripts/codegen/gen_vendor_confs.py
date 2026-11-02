@@ -124,11 +124,13 @@ from backend_coverage import (  # noqa: E402
 #   gcu       gcu_register.inc + gcu_flaggems_register.inc     401
 #   ascend    ascend_register.inc                              372
 #
-# metax, tsingmicro and dcu fall through to the `#else` branch and register the
-# full generated list (~2034), so a `none` entry there would be a guaranteed
-# raise rather than a fallback. metax and dcu are handled as CUDA-boxing
-# platforms below (see BOXING_PLATFORMS); backends_tsingmicro.conf stays
-# hand-written.
+# metax and dcu fall through to the `#else` branch and register the full
+# generated list (~2034), so a `none` entry there would be a guaranteed raise
+# rather than a fallback; both are handled as CUDA-boxing platforms below (see
+# BOXING_PLATFORMS). tsingmicro no longer falls through -- register.cc gives it
+# register_boxing_tsingmicro.inc, the 81 ops derived from its own conf -- but
+# backends_tsingmicro.conf stays hand-written, because that conf is the source of
+# the claim and generating it full-coverage would restore the raise.
 #
 #   vendor -> (conf naming its native kernels, other .inc files it registers)
 #
@@ -2519,6 +2521,38 @@ NATIVE_TRITON_GAPS = {
         "bmm.out",
         "bmm.dtype",
         "bmm.dtype_out",
+        # wrong values, nondeterministic: a FlagGems batched GEMM whose leading
+        # dimension leaves a partial tile is wrong on this device. Measured on
+        # u180 (BI-V150, FlagGems 5.4.0, FlagTree/Triton 3.6.0), bf16, error
+        # normalised by |reference|max, 4 trials: at B=4 `baddbmm` reads 70.3%
+        # wrong at M=132, 61.6% at M=136, 73.5% at M=140 and 83.7% at M=556,
+        # against 0.245% at M=128; repeated identical calls disagree. Every
+        # dtype is affected (at M=132 the sibling `bmm` is 81.4% in fp32, 72.1%
+        # in fp16, 52.4% in bf16), so it is not a low-precision tolerance
+        # question, and `B=1` is always clean.
+        #
+        # The fault is below FlagGems, in FlagTree's Iluvatar backend, not in
+        # what FlagGems emits: its DIVISIBLE_M/N/K heuristics resolve on this
+        # device and return the CORRECT value at every shape, and a kernel
+        # written here by hand with ordinary masking is clean at every
+        # (TILE_M, num_warps) in {32,64,128} x {2,4,8}. Isolated to one
+        # construct -- a 3-D grid whose batch offset is taken in-kernel from
+        # `tl.program_id(2)` is 93.2% wrong at M=132, while the same compiled
+        # kernel launched with a (gx, gy, 1) grid and host-folded pointers is
+        # 0.256%. 11 of FlagGems' 12 tuned `bmm` configs are wrong; only
+        # TILE_M=32 survives. Reported for issue #617, whose Qwen3.5-VL vision
+        # tower has 556 tokens and hits the worst case.
+        #
+        # `baddbmm`/`baddbmm_` take the native ixblas kernel, which measures
+        # 0.228-0.256% and deterministic at all of these shapes; the out=/
+        # dtype=/dtype_out= spellings have no native kernel and reach
+        # cpu_fallback. `addbmm` is NOT gapped: it reduces over the batch dim
+        # and measured clean (0.235-0.261%, deterministic) at the same shapes.
+        "baddbmm",
+        "baddbmm.out",
+        "baddbmm.dtype",
+        "baddbmm.dtype_out",
+        "baddbmm_",
         # wrong values: assumes a contiguous grad_output
         "slice_backward",
         # the out= contract (see the MUSA entry for where.self_out)
@@ -3633,22 +3667,56 @@ def build_all(conf_dir: Path) -> dict:
     # and hide the missing route behind the vendor's borrowed CUDA kernel. A
     # boxing route here also reaches an empty PrivateUse1 slot on a default
     # (boxing-off) wheel and raises "backend not registered" mid-model.
+    checked = set()
     for platform, (_, routes, _) in out.items():
-        boxed = sorted(
-            op
-            for op, v in routes.items()
-            if v.split("#")[0].strip() in (BOXING_FALLBACK, "cuda")
-        )
-        if boxed:
-            raise SystemExit(
-                f"error: backends_{platform}.conf would route {len(boxed)} op(s) "
-                f"to boxing (e.g. {', '.join(boxed[:5])}). A default conf may "
-                "only use flaggems/flaggems_cpp/tileops/<vendor>/none; an op "
-                "FlagGems does not cover and no vendor kernel implements is "
-                "`none` (cpu_fallback). Boxing belongs in the day-0 "
-                "backends_<platform>_boxing.conf only."
-            )
+        name = f"backends_{platform}.conf"
+        _reject_boxing_routes(name, routes)
+        checked.add(name)
+    # Every other shipped default conf, including the ones this script does not
+    # write. Iterating only `out` is what let backends_nvidia.conf route 1485 ops
+    # to boxing unnoticed: codegen_ops.py writes that file (see _write_files),
+    # so it was never in `out` and never checked, while the rule it breaks is
+    # the one this guard exists for. The check belongs to the contract, not to
+    # the writer.
+    for path in sorted(CONF_DIR.glob("backends_*.conf")):
+        if path.name.endswith("_boxing.conf") or path.name in checked:
+            continue
+        _reject_boxing_routes(path.name, _read_conf_routes(path))
     return out
+
+
+def _read_conf_routes(path: Path) -> dict:
+    """``{op: route value}`` for a shipped conf, comments stripped."""
+    routes = {}
+    for line in path.read_text().splitlines():
+        name, sep, value = line.split("#", 1)[0].partition("=")
+        if sep:
+            routes[name.strip()] = value.strip()
+    return routes
+
+
+def _reject_boxing_routes(name: str, routes: dict) -> None:
+    """Refuse a default conf that names the boxing kernel for any op.
+
+    Both spellings that reach ``Backend::kBoxing`` in ``csrc/aten/common.cc``:
+    ``boxing`` and the legacy ``cuda``, plus ``nvidia`` -- which that parser
+    also maps to the boxing kernel, so a conf naming it is routing boxing
+    whatever the key looks like.
+    """
+    boxed = sorted(
+        op
+        for op, v in routes.items()
+        if v.split("#")[0].strip() in (BOXING_FALLBACK, "cuda", "nvidia")
+    )
+    if boxed:
+        raise SystemExit(
+            f"error: {name} would route {len(boxed)} op(s) "
+            f"to boxing (e.g. {', '.join(boxed[:5])}). A default conf may "
+            "only use flaggems/flaggems_cpp/tileops/<vendor>/none; an op "
+            "FlagGems does not cover and no vendor kernel implements is "
+            "`none` (cpu_fallback). Boxing belongs in the day-0 "
+            "backends_<platform>_boxing.conf only."
+        )
 
 
 def build_boxing_variants(conf_dir: Path, built: dict) -> dict:

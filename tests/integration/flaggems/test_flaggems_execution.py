@@ -108,6 +108,26 @@ def test_operator_result_matches_the_cpu_reference(tag: str):
     actual = run(*on_device)
     assert actual.device.type == "flagos", f"{tag} returned a {actual.device} tensor"
     tol = 1e-3 if tag in _LOOSE_TOLERANCE else 1e-4
+    got = actual.float().cpu()
+    want = expected.float()
+    # A plain `atol=tol` is an absolute bound, and an absolute bound measures
+    # the size of the answer as much as the error in it: `exp` of a standard
+    # normal answers up to ~150 where the draw is lucky, so the same 1e-4 reads
+    # as a much tighter statement on a draw whose maximum is 3 than on one
+    # whose maximum is 5. Scaling by the reference's largest magnitude makes it
+    # a relative one every case is held to on the same terms.
+    scale = float(want.abs().max())
+    bound = tol * scale
+    diff = (got - want).abs()
+    mismatched = int((diff > bound).sum())
     torch.testing.assert_close(
-        actual.cpu(), expected, rtol=tol, atol=tol, msg=f"{tag} on {DEVICE}"
+        got,
+        want,
+        rtol=tol,
+        atol=bound,
+        msg=(
+            f"{tag} on {DEVICE}: {mismatched} of {want.numel()} elements differ "
+            f"by more than {bound:.3e}, the {tol:.1e} of max|ref| {scale:.3e} "
+            f"this case allows; max|d| {float(diff.max()):.3e}"
+        ),
     )

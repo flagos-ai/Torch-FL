@@ -249,10 +249,17 @@ steps:
 
   # DCU: issue #409. `dcu` is in the accepting half because the sweep required
   # `main_ops`, so a test whose only selecting mark is `dcu` -- the six
-  # ops/test_index_dispatch.py cases and the whole of
-  # ops/test_dcu_flaggems_sdpa.py -- was collected by this job and then
-  # deselected. `-m "(dcu or main_ops) ..." --collect-only -q` selects 62 tests
-  # the old expression did not.
+  # ops/test_index_dispatch.py cases among them -- was collected by this job and
+  # then deselected. `-m "(dcu or main_ops) ..." --collect-only -q` selects 62
+  # tests the old expression did not.
+  #
+  # ops/test_dcu_flaggems_sdpa.py is no longer one of them, and this entry is
+  # why. It asserts `backends_hygon.conf`'s FlagGems SDPA route and skips unless
+  # the loaded conf IS that file, so only the DCU *vendor* lane can execute it --
+  # but `boxing_variant: [hygon]` composes this entry into the boxing lane, and
+  # it was the only step a `dcu`-only file matched. Nine cases ran nowhere. The
+  # file now also carries `flaggems` and `main_ops`, which the vendor lane's own
+  # operator step selects; `not flaggems` here keeps it from running twice.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [hygon]
@@ -381,6 +388,34 @@ steps:
     name: Run operator tests (FlagGems runtime path, main ops)
     command: >-
       python -m pytest tests/integration/ops/ -m "flaggems and main_ops"
+      -v -s --tb=short
+
+  # The sibling of the group above, and the one marker in this suite that no
+  # group selected: every `vendor_ops` variant spells `not flaggems_python`, so
+  # the 27 `@pytest.mark.flaggems_python` cases were collected by nothing on any
+  # platform. They are the per-op override contract -- `FLAGOS_OP_<op>=
+  # flaggems_python` must move that one op to the FlagGems Python path and say so
+  # in the dispatch log -- which is the only coverage of the override reaching a
+  # specific op rather than the route the conf already chose.
+  #
+  # Byte-identical on every platform for the same reason `flaggems_ops` is: each
+  # case asks override_is_logged() whether this wheel compiled the FlagGems
+  # kernels *and* its conf routes that op to a FlagGems slot, and skips itself
+  # when either half is missing. So the group measures each platform against its
+  # own conf, and the count differs per lane rather than per command: of the 27,
+  # the vendor builds run 25 on TsingMicro, 24 on MUSA, 23 on Ascend/NVIDIA/PPU,
+  # 21 on MetaX, 20 on Hygon/Iluvatar, 3 on GCU, and 0 on Kunlunxin and MPS,
+  # which route nothing through FlagGems. The boxing builds run 23 on PPU, 20 on
+  # Hygon, 18 on MetaX and 0 on NVIDIA, whose boxing conf keeps every one of
+  # these ops on the boxing kernel -- the group then reports 27 skips there,
+  # which is the honest reading of a conf that routes none of them to FlagGems.
+  #
+  # Each case spawns a subprocess that imports torch_fl, so the group is sized
+  # like `flaggems_ops` rather than like a kernel sweep.
+  - id: flaggems_python_override
+    name: Run operator tests (FlagGems per-op override)
+    command: >-
+      python -m pytest tests/integration/ops/ -m "flaggems_python"
       -v -s --tb=short
 
   # The MUSA hybrid group is a file, not a marker: the MUSA vendor sweep above
