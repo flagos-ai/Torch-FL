@@ -64,8 +64,9 @@ def validate_pytest_session(session):
 
 
 def validate_group_minimum(group, counts):
-    if counts.get("passed", 0) < group.get("min_passed", 0):
-        raise ValueError("required group has no passing tests: " + group["name"])
+    passed, minimum = counts.get("passed", 0), group.get("min_passed", 0)
+    if passed < minimum:
+        raise ValueError(f"{group['name']}: {passed} passed, {minimum} required")
 
 
 def read_pytest_session(marker, session):
@@ -85,11 +86,8 @@ def read_pytest_session(marker, session):
     ):
         raise ValueError("missing pytest summary or test details")
     selected = session.get("selected_nodeids")
-    # A group name is the marker that this session came from a FlagCICD
-    # invocation.  The integration runner writes groups.json, but the
-    # acceptance and wheel-only entry points can run pytest directly and
-    # still use the reporting plugin.  Requiring groups.json here would
-    # make their missing collection inventory silently pass.
+    # A session with a group name must carry its selected inventory,
+    # independently of whether an execution record accompanies the report.
     if session.get("group") and selected is None:
         session["collection_error"] = "selected test inventory is missing"
     if selected is not None:
@@ -115,10 +113,11 @@ def check_group_minimum(directory, group):
     counts, matched = Counter(), False
     group_id = group.get("group_id", group.get("manifest_id", group["name"]))
     for marker in sorted(Path(directory).glob("*.pending")):
-        session = {"report": marker.with_suffix(".json").name}
-        read_pytest_session(marker, session)
+        session = json.loads(marker.read_text(encoding="utf-8"))
         if session.get("group_id", session.get("group")) != group_id:
             continue
+        session["report"] = marker.with_suffix(".json").name
+        read_pytest_session(marker, session)
         validate_pytest_session(session)
         counts.update(session["summary"])
         matched = True
@@ -173,8 +172,11 @@ def merge_reports(
                 "integration groups did not all complete successfully"
             )
         for group in groups:
+            group_id = group.get("group_id", group.get("manifest_id", group["name"]))
             matched = [
-                session for session in sessions if session.get("group") == group["name"]
+                session
+                for session in sessions
+                if session.get("group_id", session.get("group")) == group_id
             ]
             if group.get("requires_pytest") and not matched:
                 execution_errors.append("missing pytest session: " + group["name"])

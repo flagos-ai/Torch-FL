@@ -15,6 +15,7 @@
 """Protect diff routing, full nightly selection and honest functional results."""
 
 import importlib.util
+import builtins
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import signal
 import time
 import subprocess
 import sys
+import types
 
 import pytest
 import yaml
@@ -164,6 +166,99 @@ def test_profile_identity_and_reserved_weekly():
         build_plan(request("weekly"), CONTRACT, ROOT, changed)
     with pytest.raises(ValueError, match="nightly requires platforms=all"):
         build_plan(request("nightly", "mthreads"), CONTRACT, ROOT, changed)
+
+
+@pytest.mark.parametrize("boxing_lane", [False, True])
+def test_omitted_compose_profile_selects_pr(boxing_lane):
+    manifest = yaml.safe_load((ROOT / ".github/integration-manifest.yml").read_text())
+    config = yaml.safe_load((CONFIGS / "nvidia.yml").read_text())
+    known = _load_platforms(CONFIGS)
+    kwargs = {"boxing_lane": boxing_lane, "boxing": boxing_platforms(CONFIGS, known)}
+    assert compose(manifest, config, "nvidia", known, **kwargs) == compose(
+        manifest, config, "nvidia", known, profile="pr", **kwargs
+    )
+
+
+def test_profile_policy_is_shared_by_composer_plan_and_resolver(monkeypatch):
+    module = sys.modules[compose.__module__]
+    monkeypatch.setattr(module, "SUPPORTED_PROFILES", ("pr",))
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    spec = importlib.util.spec_from_file_location(
+        "profile_resolver", SCRIPTS / "flagcicd_resolve.py"
+    )
+    resolver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(resolver)
+    with pytest.raises(ManifestError, match="supported profiles are pr"):
+        compose({}, {}, "nvidia", [], profile="nightly")
+    with pytest.raises(ValueError, match="supported profiles are pr"):
+        build_plan(request("nightly"), CONTRACT, ROOT, ["setup.py"])
+    with pytest.raises(ValueError, match="supported profiles are pr"):
+        resolver.resolve(
+            {"inputs": {"profile": "nightly"}},
+            "workflow_dispatch",
+            "flagos-ai/Torch-FL",
+            "a" * 40,
+        )
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError])
+def test_identity_native_import_failure_keeps_diagnostic_json(
+    tmp_path, monkeypatch, error
+):
+    spec = importlib.util.spec_from_file_location(
+        "identity_probe", SCRIPTS / "record_hardware_identity.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name.startswith("torch_fl"):
+            raise error("native runtime unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    output = tmp_path / "hardware.json"
+    monkeypatch.setattr(
+        sys, "argv", ["identity", "--platform", "nvidia", "--output", str(output)]
+    )
+    module.main()
+    identity = json.loads(output.read_text())
+    assert identity["sdk_version"] == "unknown"
+    assert identity["accelerator_count"] == 0
+    assert identity["current_device"] is None
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, TypeError, ValueError])
+def test_identity_device_count_failure_keeps_diagnostic_json(
+    tmp_path, monkeypatch, error
+):
+    spec = importlib.util.spec_from_file_location(
+        "identity_probe", SCRIPTS / "record_hardware_identity.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def broken_count():
+        raise error("driver unavailable")
+
+    flagos = types.ModuleType("torch_fl.flagos")
+    flagos.device_count = broken_count
+    flagos.current_device = lambda: 0
+    package = types.ModuleType("torch_fl")
+    package.__file__ = str(tmp_path / "__init__.py")
+    package.flagos = flagos
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setitem(sys.modules, "torch_fl.flagos", flagos)
+    output = tmp_path / "hardware.json"
+    monkeypatch.setattr(
+        sys, "argv", ["identity", "--platform", "nvidia", "--output", str(output)]
+    )
+    module.main()
+    identity = json.loads(output.read_text())
+    assert identity["sdk_version"] == "unknown"
+    assert identity["accelerator_count"] == 0
+    assert identity["current_device"] == 0
 
 
 def test_nightly_keeps_all_existing_groups_and_isolates_cuda_profiling():
@@ -379,9 +474,18 @@ def test_cancellation_kills_the_active_command_group(tmp_path, escape, launcher_
             process.communicate()
 
 
-@pytest.mark.parametrize("profile,expected_code", [("nightly", 0), ("weekly", 2)])
+@pytest.mark.parametrize(
+    "profile,dispatch,expected_code",
+    [
+        ("pr", "", 0),
+        ("nightly", "", 0),
+        ("weekly", "", 2),
+        ("unknown", "", 2),
+        ("nightly", "nvidia", 2),
+    ],
+)
 def test_automatic_workflow_profile_selection_before_hardware(
-    tmp_path, profile, expected_code
+    tmp_path, profile, dispatch, expected_code
 ):
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     step = next(
@@ -395,7 +499,7 @@ def test_automatic_workflow_profile_selection_before_hardware(
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         "TEST_PROFILE": profile,
         "EVENT_NAME": "schedule",
-        "DISPATCH_PLATFORMS": "",
+        "DISPATCH_PLATFORMS": dispatch,
         "PR_LABELS_JSON": "[]",
         "BASE_REF": "main",
         "BASE_SHA": "",
@@ -416,7 +520,9 @@ def test_automatic_workflow_profile_selection_before_hardware(
             known, boxing_platforms(CONFIGS, known)
         )
     else:
-        assert "weekly is reserved" in done.stdout
+        assert (
+            "nightly requires platforms=all" if dispatch else "weekly is reserved"
+        ) in done.stdout
         assert not output.exists()
 
 

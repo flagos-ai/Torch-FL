@@ -31,7 +31,7 @@ from ci.generate_matrix import (
     _platforms_from_files,
     boxing_platforms,
 )
-from compose_integration_manifest import compose
+from compose_integration_manifest import compose, validate_profile
 
 
 LEVELS = {"L0": 0, "L1": 1, "L2": 2}
@@ -84,8 +84,7 @@ def build_plan(request, contract, source, changed):
             "platforms must be all, a comma-separated list, or a JSON array"
         )
     profile = request.get("profile", "pr")
-    if profile not in ("pr", "nightly"):
-        raise ValueError("weekly is reserved; supported profiles are pr and nightly")
+    validate_profile(profile)
     if profile == "nightly" and selection.strip() != "all":
         raise ValueError("nightly requires platforms=all")
     boxing = boxing_platforms(configs, known)

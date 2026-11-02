@@ -52,7 +52,15 @@ def get_sdk_version():
         if compat_path.exists():
             compat = json.loads(compat_path.read_text())
             return compat.get("build", {}).get("sdk_version", "unknown")
-    except (ImportError, json.JSONDecodeError, KeyError):
+    except (
+        ImportError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ):
         pass
     return "unknown"
 
@@ -63,7 +71,7 @@ def get_accelerator_count():
         import torch_fl.flagos
 
         return torch_fl.flagos.device_count()
-    except (ImportError, AttributeError):
+    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return 0
 
 

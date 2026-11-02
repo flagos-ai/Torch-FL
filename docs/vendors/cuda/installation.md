@@ -135,10 +135,8 @@ pytest tests/integration/test_factory_ops.py -v --tb=short
 
 The CUDA wheel's base installation and functional CI do not require FlagCX.
 Operators, compilation, single-device models, and multi-device placement tests
-do not establish collective-communication support. The installation acceptance
-report records `flagcx_communication=not_validated`. The installed-wheel
-preflight remains mandatory for the base requirements; the global `pip check`
-audit runs only for release acceptance.
+do not establish collective-communication support. The installed-wheel
+preflight remains mandatory for the base requirements.
 
 For FlagCX communication, explicitly select the CUDA wheel's `cuda-comm` extra
 using the configured FlagOS NVIDIA package index. Its exact version follows

@@ -159,16 +159,20 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          case "$TEST_PROFILE" in
-            pr) ;;
-            nightly)
-              if [[ -n "$DISPATCH_PLATFORMS" && "$DISPATCH_PLATFORMS" != all ]]; then
-                echo "::error::nightly requires platforms=all"
-                exit 2
-              fi
-              ;;
-            *) echo "::error::weekly is reserved; choose pr or nightly"; exit 2 ;;
-          esac
+          python - "$TEST_PROFILE" <<'PY'
+          import sys
+          sys.path.insert(0, ".github/scripts")
+          from compose_integration_manifest import validate_profile
+          try:
+              validate_profile(sys.argv[1])
+          except ValueError as error:
+              print(f"::error::{error}")
+              raise SystemExit(2)
+          PY
+          if [[ "$TEST_PROFILE" == nightly && -n "$DISPATCH_PLATFORMS" && "$DISPATCH_PLATFORMS" != all ]]; then
+            echo "::error::nightly requires platforms=all"
+            exit 2
+          fi
           PR_LABELS=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             PR_LABELS=$(jq -r 'join(",")' <<<"$PR_LABELS_JSON")
