@@ -948,44 +948,6 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_zeros_dispatch.py::TestZerosDispatch::test_dispatch_log_cuda",
         ),
     ),
-    "flaggems_python_override": (
-        (
-            "asserts `FLAGOS_OP_<op>=flaggems_python` emits a dispatch line, "
-            "which needs the op claimed on PrivateUse1; no lane's `-m` names "
-            "the marker, and on a default wheel an op the conf routes elsewhere "
-            "has no slot for the override to reach. This is issue #555's class "
-            "exactly"
-        ),
-        (
-            "tests/integration/ops/test_abs_dispatch.py::TestAbsDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_add_dispatch.py::TestAddTensorDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_all_dispatch.py::TestAllDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_cat_dispatch.py::TestCatDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_constant_pad_nd_dispatch.py::TestConstantPadNdDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_cos_dispatch.py::TestCosDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_embedding_dense_backward_dispatch.py::TestEmbeddingDenseBackwardDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_embedding_dispatch.py::TestEmbeddingDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_le_dispatch.py::TestLeDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mean_dispatch.py::TestMeanDimDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_neg_dispatch.py::TestNegDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_backward_flaggems_python",
-            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_forward_flaggems_python",
-            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_silu_backward_dispatch.py::TestSiluBackwardDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_silu_dispatch.py::TestSiluDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_sin_dispatch.py::TestSinDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_slice_backward_dispatch.py::TestSliceBackwardDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_softmax_dispatch.py::TestSoftmaxDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_sum_dispatch.py::TestSumDimDispatch::test_dispatch_log_flaggems_python",
-            "tests/integration/ops/test_where_dispatch.py::TestWhereDispatch::test_dispatch_log_flaggems_python",
-        ),
-    ),
     "multi_device_boxing_gaps": (
         (
             "deselected by name from `multi_device_contracts`, the one group "
@@ -1067,6 +1029,17 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_mm_out_flaggems_runtime",
             "tests/integration/ops/test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible_on_flaggems_path",
         ),
+    ),
+    "flaggems_python_override": (
+        (
+            "asserts that `FLAGOS_OP_<op>=flaggems_python` moves that op to the "
+            "FlagGems Python path. Every `vendor_ops` variant spells "
+            "`not flaggems_python`, and no other group selects the marker, so on "
+            "a tree without the `flaggems_python_override` group of "
+            "`.github/integration-manifest.yml` (upstream before #703) no command "
+            "collects these 27 cases; the group is what makes them run"
+        ),
+        (),
     ),
 }
 
@@ -1193,6 +1166,63 @@ def test_the_known_unselected_list_has_not_gone_stale():
         )
 
 
+_RAT_HOOK_START = "    import torch_fl\n"
+_HOOK_END = "from exc\n"
+
+# The hook this change replaced: a bare ``pytest.exit`` for an unavailable
+# device and no wrapper around the init call.
+_ORIGINAL_READINESS_HOOK = """
+
+
+def pytest_configure(config):
+    import torch_fl
+
+    if not torch_fl.flagos.is_available():
+        pytest.exit("flagos device is not available.")
+    torch_fl.flagos.init()
+"""
+
+# Imports the hook file of a temporary root the way pytest does -- from the
+# root's conftest, at collection, with ``pytest`` already imported -- runs its
+# ``pytest_configure`` against the stand-in ``torch_fl`` in ``torch_fl_stub``
+# (also written to the same root), and prints what came out of the call.
+_RUNNER = """
+import importlib.util
+import sys
+import traceback
+
+sys.path.insert(0, sys.argv[2])
+import torch_fl_stub  # noqa: E402,F401
+
+spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+
+from _pytest.outcomes import Exit  # noqa: E402
+
+try:
+    hook.pytest_configure(None)
+except Exit as exc:
+    print("Exit", exc.msg)
+except Exception as exc:
+    print(type(exc).__name__, exc)
+else:
+    print("returned")
+"""
+
+_STUB = """
+import sys
+import types
+
+torch_fl = types.ModuleType("torch_fl")
+torch_fl.flagos = types.SimpleNamespace(
+    is_available=lambda: {available},
+    init=_init,
+)
+sys.modules["torch_fl"] = torch_fl
+"""
+
+
 def test_integration_readiness_failure_is_a_hard_error():
     """A missing device or a failed init must fail the run, not skip it.
 
@@ -1201,57 +1231,93 @@ def test_integration_readiness_failure_is_a_hard_error():
     not come up" was lost, and a CI reader had to be told the exit was not a
     pass. Both cases now raise ``pytest.UsageError``, which pytest reports as
     an internal error and exits non-zero for.
+
+    The block sits in the ``pytest_configure`` the integration conftest
+    registers -- the one conftest the whole tree shares -- so it is exercised
+    on its own: a temporary root holds the hook as its conftest, the runner
+    imports it the way pytest does (``pytest`` already in ``sys.modules``),
+    and the call runs against a stand-in ``torch_fl``. The tree's real one is
+    only read, for the hook text, so no accelerator or built extension is
+    needed.
     """
     import os
+    import shutil
     import subprocess
     import sys
+    import tempfile
     import textwrap
 
     repo = Path(__file__).resolve().parents[2]
-    script = textwrap.dedent(
-        """
-        import sys, types
-        import torch_fl
+    current = (repo / "tests/integration/conftest.py").read_text()
+    head, keyword, tail = current.partition(_RAT_HOOK_START)
+    assert keyword, "the readiness block moved; update this test"
+    assert _HOOK_END in tail, "the readiness block moved; update this test"
+    cut = len(tail) - len(tail[tail.index(_HOOK_END) + len(_HOOK_END) :])
+    # The current block, on its own, as a function body the runner can call.
+    body = head[head.rindex("\n") + 1 :] + tail[: cut + len(_HOOK_END)]
+    block = (
+        "import pytest\n\n\ndef pytest_configure(config):\n    import torch_fl\n" + body
+    )
+    stripped = "import pytest\n" + _ORIGINAL_READINESS_HOOK
 
-        class _Flagos:
-            def __init__(self):
-                self.init_calls = 0
-            def is_available(self):
-                return {available}
-            def init(self):
-                self.init_calls += 1
-                {init_body}
+    if not _pytest_available(repo):
+        pytest.skip("pytest is not importable in the interpreter under test")
 
-        torch_fl.flagos = _Flagos()
-        sys.argv = ["pytest", "tests/integration/ops/test_all_dispatch.py", "-q"]
-        import pytest
-        sys.exit(pytest.main(sys.argv[1:]))
-        """
+    def outcome(hook_text, init_body, available):
+        root = Path(tempfile.mkdtemp())
+        try:
+            (root / "hook_source.py").write_text(hook_text)
+            (root / "torch_fl_stub.py").write_text(
+                "import types, sys\n"
+                f"def _init():\n{textwrap.indent(init_body, '    ')}\n"
+                + _STUB.replace("{available}", available)
+            )
+            (root / "run.py").write_text(_RUNNER)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(root / "run.py"),
+                    str(root / "hook_source.py"),
+                    str(root),
+                ],
+                env={**os.environ, "PYTHONPATH": str(repo)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return result
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    result = outcome(stripped, "pass", "False")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("Exit flagos device is not available"), (
+        result.stdout + result.stderr
     )
 
-    def run(available: bool, init_body: str) -> subprocess.CompletedProcess:
-        code = script.format(available=available, init_body=init_body)
-        # The child imports the real torch_fl, so it needs the same vendor
-        # selection the rest of the local sweep uses; CI lanes set it already.
-        env = {**os.environ, "PYTHONPATH": str(repo)}
-        env.setdefault("GEMS_VENDOR", env.get("FLAGOS_VENDOR") or "cuda")
-        return subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=repo,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+    result = outcome(block, "pass", "False")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("UsageError flagos device is not available"), (
+        result.stdout + result.stderr
+    )
 
-    unavailable = run(False, "pass")
-    if "No module named 'torch_fl._C'" in unavailable.stdout + unavailable.stderr:
-        pytest.skip("this checkout has no built torch_fl._C; the hook imports it")
-    assert unavailable.returncode != 0, unavailable.stdout + unavailable.stderr
-    assert "flagos device is not available" in unavailable.stdout + unavailable.stderr
+    result = outcome(block, "raise RuntimeError('ACL runtime broken')", "True")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("UsageError flagos device initialization failed"), (
+        result.stdout + result.stderr
+    )
+    assert "RuntimeError: ACL runtime broken" in result.stdout
 
-    init_failed = run(True, "raise RuntimeError('ACL runtime broken')")
-    output = init_failed.stdout + init_failed.stderr
-    assert init_failed.returncode != 0, output
-    assert "flagos device initialization failed" in output
-    assert "ACL runtime broken" in output
+
+def _pytest_available(repo: Path) -> bool:
+    """Whether the interpreter running this test can import pytest."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import pytest"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result.returncode == 0

@@ -132,7 +132,8 @@ def pytest_configure(config):
             "environment/setup failure, not a test result."
         )
 
-    # Initialize flagos device to ensure ACL runtime is properly set up
+    # Initialize the flagos device; a runtime that cannot come up is the same
+    # kind of environment failure as a missing device.
     try:
         torch_fl.flagos.init()
     except Exception as exc:
