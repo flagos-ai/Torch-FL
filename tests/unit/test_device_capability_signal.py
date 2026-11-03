@@ -166,10 +166,17 @@ def test_no_device_short_circuits_before_the_triton_probe(capability):
     assert interface.asked_for == []
 
 
-def test_false_when_the_interface_cannot_be_imported(capability):
-    """A build with no compile subpackage answers False rather than raising."""
+def test_false_when_the_interface_cannot_be_imported(capability, monkeypatch):
+    """A build with no compile subpackage answers False rather than raising.
+
+    "Nothing installed" is not the same as "not importable": when the real
+    ``torch_fl.compile.device_interface`` can be imported, the in-body import
+    finds it instead of failing. A module set to ``None`` in ``sys.modules`` is
+    the one state an import cannot get past, whatever the host has on disk.
+    """
     capability._optional_integration_state["compile"] = "active"
-    # No stub installed, so the in-body import fails.
+    monkeypatch.setitem(sys.modules, "torch_fl.compile", None)
+    monkeypatch.setitem(sys.modules, "torch_fl.compile.device_interface", None)
     assert capability.fused_kernels_available() is False
 
 
