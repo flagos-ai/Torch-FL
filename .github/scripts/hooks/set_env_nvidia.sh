@@ -33,10 +33,19 @@ FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_cuda}"
 
 # Where the accelerator-side PyTorch comes from. A FlagOS-built image already
 # carries one (`image`); the stock NVIDIA CUDA image does not, so `bootstrap`
-# installs the matching CUDA build into a job-local interpreter. The job stages
-# CUDA assets from it; the incompatible published native FlagGems wheel is not
-# installed on this bootstrap path. `auto` picks
-# whichever applies.
+# installs the matching CUDA build into a job-local interpreter. The boxing lane
+# stages CUDA assets from it; the incompatible published native FlagGems wheel is
+# not installed on this bootstrap path. `auto` picks whichever applies.
+#
+# Only the boxing lane reads that interpreter. The vendor lane builds the wheel
+# whose whole premise is that it carries no libtorch_cuda.so, and its tests run
+# on the +cpu torch like every other platform's, so nothing downstream of the
+# bootstrap names VENDOR_PYTHON. Bootstrapping it there downloaded the
+# multi-GB `torch+cu130` wheel for a path that was never read, and that download
+# is what failed the lane while download.pytorch.org answered 503 through the
+# runner proxy (PR #712, #705). Resolve an image-provided accelerator torch when
+# the image has one -- its site-packages still supplies the flagcx package and
+# the FlagGems C++ route below -- but never install one on the vendor lane.
 VENDOR_MODE="${TORCH_FL_CUDA_VENDOR_MODE:-auto}"
 VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-$VENDOR_TORCH_INDEX_URL_cuda}"
 
@@ -172,36 +181,17 @@ bootstrap_vendor_python() {
   VENDOR_PYTHON="$vendor_python"
 }
 
-VENDOR_PYTHON="$(find_image_vendor_python)"
-case "$VENDOR_MODE" in
-  image)
-    if [[ -z "$VENDOR_PYTHON" ]]; then
-      echo "::error::This image provides no accelerator PyTorch and TORCH_FL_CUDA_VENDOR_MODE=image"
-      exit 1
-    fi
-    ;;
-  bootstrap)
-    VENDOR_PYTHON=""
-    ;;
-  auto) ;;
-  *)
-    echo "::error::TORCH_FL_CUDA_VENDOR_MODE must be auto, image or bootstrap (got '$VENDOR_MODE')"
+# Reads the accelerator torch's version, CUDA runtime and site-packages out of
+# $VENDOR_PYTHON, so the boxing gate stages a version-matched libtorch_cuda.so
+# and the flagcx copy below finds the image's package. Only called when a
+# VENDOR_SOURCE actually resolved one; the vendor lane installs no accelerator
+# torch and reads none of these.
+resolve_vendor_torch() {
+  if [[ ! -x "$VENDOR_PYTHON" ]]; then
+    echo "::error::The accelerator interpreter resolved to '$VENDOR_PYTHON', which is not an executable file"
     exit 1
-    ;;
-esac
-if [[ -n "$VENDOR_PYTHON" ]]; then
-  VENDOR_SOURCE="image"
-else
-  VENDOR_SOURCE="bootstrap"
-  ensure_system_prerequisites
-  bootstrap_vendor_python
-fi
-echo "Accelerator PyTorch source: $VENDOR_SOURCE ($VENDOR_PYTHON)"
-if [[ ! -x "$VENDOR_PYTHON" ]]; then
-  echo "::error::The accelerator interpreter resolved to '$VENDOR_PYTHON', which is not an executable file"
-  exit 1
-fi
-VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
+  fi
+  VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
 import json
 from pathlib import Path
 import site
@@ -220,8 +210,8 @@ print(json.dumps({
 PY
 )"
 
-readarray -t VENDOR_FIELDS < <(
-  VENDOR_INFO="$VENDOR_INFO" "$VENDOR_PYTHON" - <<'PY'
+  readarray -t VENDOR_FIELDS < <(
+    VENDOR_INFO="$VENDOR_INFO" "$VENDOR_PYTHON" - <<'PY'
 import json
 import os
 
@@ -229,33 +219,83 @@ info = json.loads(os.environ["VENDOR_INFO"])
 for key in ("version", "base_version", "cuda", "root", "site", "python"):
     print(info.get(key) or "")
 PY
-)
-VENDOR_TORCH_VERSION="${VENDOR_FIELDS[0]}"
-VENDOR_TORCH_BASE_VERSION="${VENDOR_FIELDS[1]}"
-VENDOR_CUDA_VERSION="${VENDOR_FIELDS[2]}"
-VENDOR_TORCH_ROOT="${VENDOR_FIELDS[3]}"
-VENDOR_SITE="${VENDOR_FIELDS[4]}"
-VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[5]}"
-VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
+  )
+  VENDOR_TORCH_VERSION="${VENDOR_FIELDS[0]}"
+  VENDOR_TORCH_BASE_VERSION="${VENDOR_FIELDS[1]}"
+  VENDOR_CUDA_VERSION="${VENDOR_FIELDS[2]}"
+  VENDOR_TORCH_ROOT="${VENDOR_FIELDS[3]}"
+  VENDOR_SITE="${VENDOR_FIELDS[4]}"
+  VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[5]}"
+  VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
 
+  for nvidia_lib in "$VENDOR_SITE"/nvidia/*/lib; do
+    [[ -d "$nvidia_lib" ]] || continue
+    VENDOR_NVIDIA_LIBS="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}$nvidia_lib"
+  done
+
+  if [[ "$VENDOR_TORCH_BASE_VERSION" != "$CPU_TORCH_VERSION" ]]; then
+    echo "::error::Vendor torch is $VENDOR_TORCH_VERSION; expected $CPU_TORCH_VERSION"
+    exit 1
+  fi
+  if [[ "$VENDOR_CUDA_VERSION" != "13.0" ]]; then
+    echo "::error::Vendor torch CUDA runtime is $VENDOR_CUDA_VERSION; expected 13.0"
+    exit 1
+  fi
+
+  echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
+  echo "Vendor PyTorch: $VENDOR_TORCH_VERSION"
+  echo "Vendor torch root: $VENDOR_TORCH_ROOT"
+}
+
+VENDOR_PYTHON="$(find_image_vendor_python)"
+case "$VENDOR_MODE" in
+  image)
+    if [[ -z "$VENDOR_PYTHON" ]]; then
+      echo "::error::This image provides no accelerator PyTorch and TORCH_FL_CUDA_VENDOR_MODE=image"
+      exit 1
+    fi
+    ;;
+  bootstrap)
+    if [[ "${BOXING_LANE:-}" != "1" ]]; then
+      echo "::error::TORCH_FL_CUDA_VENDOR_MODE=bootstrap asks for an accelerator PyTorch to stage into a boxing wheel, but BOXING_LANE is not 1. The vendor lane runs on the +cpu torch and installs nothing from the vendor index; drop the setting or run the boxing lane."
+      exit 1
+    fi
+    VENDOR_PYTHON=""
+    ;;
+  auto) ;;
+  *)
+    echo "::error::TORCH_FL_CUDA_VENDOR_MODE must be auto, image or bootstrap (got '$VENDOR_MODE')"
+    exit 1
+    ;;
+esac
+if [[ -n "$VENDOR_PYTHON" ]]; then
+  VENDOR_SOURCE="image"
+elif [[ "${BOXING_LANE:-}" == "1" ]]; then
+  VENDOR_SOURCE="bootstrap"
+  ensure_system_prerequisites
+  bootstrap_vendor_python
+else
+  # The vendor lane: no accelerator torch is installed, and none is read below.
+  VENDOR_SOURCE="none"
+fi
+echo "Accelerator PyTorch source: $VENDOR_SOURCE ($VENDOR_PYTHON)"
+# The vendor lane resolves no accelerator torch, so the probe below is skipped
+# there rather than pointed at an empty path. Everything it fills in is read
+# only by the boxing gate and by the flagcx copy, which has nothing to copy when
+# the image carries no accelerator torch.
+VENDOR_TORCH_VERSION=""
+VENDOR_TORCH_BASE_VERSION=""
+VENDOR_CUDA_VERSION=""
+VENDOR_TORCH_ROOT=""
+VENDOR_SITE=""
+VENDOR_PYTHON_VERSION=""
+VENDOR_TORCH_LIB=""
 VENDOR_NVIDIA_LIBS=""
-for nvidia_lib in "$VENDOR_SITE"/nvidia/*/lib; do
-  [[ -d "$nvidia_lib" ]] || continue
-  VENDOR_NVIDIA_LIBS="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}$nvidia_lib"
-done
-
-if [[ "$VENDOR_TORCH_BASE_VERSION" != "$CPU_TORCH_VERSION" ]]; then
-  echo "::error::Vendor torch is $VENDOR_TORCH_VERSION; expected $CPU_TORCH_VERSION"
-  exit 1
+if [[ "$VENDOR_SOURCE" != "none" ]]; then
+  resolve_vendor_torch
+else
+  echo "Vendor lane: no accelerator PyTorch is resolved or installed; tests run on the +cpu torch"
 fi
-if [[ "$VENDOR_CUDA_VERSION" != "13.0" ]]; then
-  echo "::error::Vendor torch CUDA runtime is $VENDOR_CUDA_VERSION; expected 13.0"
-  exit 1
-fi
-
-echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
-echo "Vendor PyTorch: $VENDOR_TORCH_VERSION"
-echo "Vendor torch root: $VENDOR_TORCH_ROOT"
 
 # A matching prebuilt image may carry the FlagGems C++ operators. The only
 # published CUDA native wheel has a libtriton_jit.so built against a different
