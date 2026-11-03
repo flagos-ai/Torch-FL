@@ -227,7 +227,17 @@ jobs:
           printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
 
       - name: Install pytest JSON reporting
-        run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+        run: |
+          # These are reporting tools: a 403 from the image's pip mirror must not
+          # fail a lane whose tests have not run yet. install_with_pypi_fallback
+          # retries on the runner's index and then on the pinned one, which is
+          # what PR #714's MUSA lane needed (TUNA listed pytest-json-report and
+          # then answered 403 for its wheel).
+          source .github/version-pins.env
+          source .github/scripts/lib/set_env_common.sh
+          VENV_PYTHON="$(command -v python)" PIP_RETRY_NO_CACHE=0 \
+            PIP_RETRY_TIMEOUT=60 \
+            install_with_pypi_fallback pytest-json-report==1.5.0 coverage==7.10.7
 
       - name: Prepare Python line coverage
         id: coverage-setup

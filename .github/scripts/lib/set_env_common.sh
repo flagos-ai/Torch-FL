@@ -482,6 +482,38 @@ install_cpu_torch() {
   pip_retry --index-url "$CPU_TORCH_INDEX_URL" "$@" "torch==${CPU_TORCH_VERSION}"
 }
 
+# Install ordinary PyPI packages, retrying on the runner's configured index and
+# then on the pinned one.
+#
+# The runner pods inherit a pip index from the image (the MUSA image sets
+# pypi.tuna.tsinghua.edu.cn) and those images are VCS mirrors: TUNA serves its
+# simple index but answers 403 for individual files -- the same 403 that
+# install_cpu_torch's comment records for filelock-4.2.4 on the thead lane.
+# Measured on PR #714, run 41579196601: `pip install pytest-json-report==1.5.0`
+# from TUNA died on a 403 for the wheel's own file after the index had listed
+# it. A caller that passes no --index-url still lands on that index, so the
+# fallback has to name the pinned one explicitly.
+#
+# This is the shape install_cpu_torch uses; the difference is that the packages
+# are arbitrary and the caller may already be pinning its own index.
+install_with_pypi_fallback() {
+  local pinned="${PIP_INDEX_URL_DEFAULT:-https://pypi.org/simple}"
+  pip_retry "$@" && return 0
+  # A caller that pinned its own index gets that failure reported as-is: the
+  # pinned PyPI is not the same catalogue, and silently swapping it would
+  # install something the caller did not ask for.
+  local arg prev=""
+  for arg in "$@"; do
+    if [[ "$prev" == "--index-url" || "$prev" == "-i" ]] ||
+      [[ "$arg" == --index-url=* || "$arg" == -i=* ]]; then
+      return 1
+    fi
+    prev="$arg"
+  done
+  echo "::warning::Install failed on the runner's configured index; retrying from the pinned index '${pinned}'. The image's mirror answers 403 for some files it indexes (see PR #714)."
+  pip_retry --index-url "$pinned" "$@"
+}
+
 # Install the published FlagTree wheel for this platform (its Triton build).
 install_flagtree() {
   # resource.flagos.net is not on every vendor pod's proxy allowlist, and the

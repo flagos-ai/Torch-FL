@@ -426,3 +426,31 @@ def test_cuda_bootstraps_the_vendor_torch_only_on_the_boxing_lane():
         'tests run on the +cpu torch"\n'
         "fi" in hook
     )
+
+
+def test_reporting_tools_install_through_the_pypi_fallback():
+    """A reporting tool must not fail a lane whose tests can still pass.
+
+    The vendor images inherit a pip index of their own (MUSA's is TUNA) and
+    those are VCS mirrors: TUNA listed pytest-json-report and then answered 403
+    for the wheel's own file, so PR #714's MUSA lane died before running any
+    test. The step installs through install_with_pypi_fallback, which retries on
+    the pinned index, rather than a bare `pip install` that lands on whatever
+    index the image configured.
+    """
+    steps = _steps(WORKFLOW_DIR / "integration-tests.yml")
+    step = next(
+        step for step in steps if step.get("name") == "Install pytest JSON reporting"
+    )
+    run = step["run"]
+    assert "install_with_pypi_fallback" in run
+    assert ".github/version-pins.env" in run
+    assert re.search(r"^\s*python -m pip install\b", run, re.M) is None
+
+    # The helper falls back only when the caller did not pin an index itself.
+    common = (ROOT / ".github/scripts/lib/set_env_common.sh").read_text()
+    helper = re.search(
+        r"^install_with_pypi_fallback\(\) \{\n(.*?)^\}", common, re.M | re.S
+    )
+    assert helper
+    assert '--index-url "$pinned"' in helper.group(1)
