@@ -56,6 +56,9 @@ class FLAGOS_EXPORT CachingDeviceAllocator final : public at::Allocator {
   // Get statistics for a device.
   AllocatorStats get_stats(int device);
 
+  // Physical free/total bytes, independently of the allocator's cached pool.
+  std::pair<size_t, size_t> get_memory_info(int device);
+
   // Reset the peak watermarks for a device, keeping the live totals: the next
   // peak read is a maximum over what is live from here on, not an empty-struct
   // count. Matches the platform allocator's resetPeakStats, which is what the

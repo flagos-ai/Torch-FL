@@ -15,6 +15,24 @@
 #include <flagos.h>
 #include <acl/acl_rt.h>
 
+#include "acl_stream.h"
+
+Stream_t GetDefaultStreamForDevice(int device) {
+  return reinterpret_cast<Stream_t>(
+      at::native::flagos::ascend::GetDefaultAclStreamForDevice(device));
+}
+
+Stream_t GetCurrentStreamForDevice(int device) {
+  return reinterpret_cast<Stream_t>(
+      at::native::flagos::ascend::GetCurrentAclStreamForDevice(device));
+}
+
+Error_t SetCurrentStreamForDevice(int device, Stream_t stream) {
+  at::native::flagos::ascend::SetCurrentAclStreamForDevice(
+      device, reinterpret_cast<aclrtStream>(stream));
+  return Success;
+}
+
 Error_t StreamCreateWithPriority(Stream_t* stream, unsigned int flags, int priority) {
   aclError err = aclrtCreateStream((aclrtStream*)stream);
   return (err == ACL_SUCCESS) ? Success : ErrorUnknown;

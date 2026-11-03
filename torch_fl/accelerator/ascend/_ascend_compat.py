@@ -54,6 +54,8 @@ exponential, and CANN has no complex compute at all, so the Qwen-Image
 transformer cannot build its rotation operands on this backend without it.
 """
 
+import struct
+
 import torch
 
 from torch_fl import flagos
@@ -185,6 +187,54 @@ def install_ascend_rng_generators():
 
     flagos.manual_seed = manual_seed
     flagos.manual_seed_all = manual_seed_all
+
+    native_get_state = flagos.get_rng_state
+    native_set_state = flagos.set_rng_state
+    magic = b"TFLASRNG"
+
+    def device_index(device):
+        if isinstance(device, int):
+            return device
+        index = torch.device(device).index
+        return flagos.current_device() if index is None else index
+
+    def get_rng_state(device="flagos"):
+        # Native CANN draws reserve seeds from the CPU-backed generator;
+        # FlagGems consumes a separate Philox seed/offset. Checkpoint both in
+        # one opaque CPU ByteTensor without changing either generator's layout.
+        native = native_get_state(device)
+        philox = _get_ascend_generator(device_index(device)).get_state()
+        header = torch.tensor(
+            list(struct.pack("<8sII", magic, 1, native.numel())), dtype=torch.uint8
+        )
+        return torch.cat((header, native, philox))
+
+    def set_rng_state(new_state, device="flagos"):
+        if new_state.dtype != torch.uint8 or new_state.device.type != "cpu":
+            return native_set_state(new_state, device)
+        values = new_state.reshape(-1)
+        if values.numel() < 16 or bytes(values[:8].tolist()) != magic:
+            # Previously saved native-generator states keep their old meaning.
+            return native_set_state(new_state, device)
+        _, version, native_size = struct.unpack("<8sII", bytes(values[:16].tolist()))
+        if version != 1 or values.numel() != 16 + native_size + 16:
+            raise ValueError("Invalid combined Ascend RNG state")
+        native = values[16 : 16 + native_size].clone()
+        philox = values[16 + native_size :].clone()
+        checked = _AscendPhiloxGenerator(0)
+        checked.set_state(philox)
+        native_set_state(native, device)
+        _get_ascend_generator(device_index(device)).set_state(philox)
+
+    flagos.get_rng_state = get_rng_state
+    flagos.set_rng_state = set_rng_state
+    # An existing CUDA compatibility alias may hold the original function
+    # objects. Keep that alias on the same public state contract.
+    cuda = getattr(torch, "cuda", None)
+    if cuda is not None and getattr(cuda, "get_rng_state", None) is native_get_state:
+        cuda.get_rng_state = get_rng_state
+    if cuda is not None and getattr(cuda, "set_rng_state", None) is native_set_state:
+        cuda.set_rng_state = set_rng_state
 
 
 # --- diffusers: the Qwen-Image rotary embedding ------------------------------

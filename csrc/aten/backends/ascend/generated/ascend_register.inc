@@ -11,6 +11,10 @@
 // reaches the cpu_fallback. So this file is exactly the Ascend coverage
 // set, and `none` in backends_ascend.conf is honest.
 
+  m.impl("__lshift__.Scalar", WrapperBitwiseLeftShiftTensorScalar);
+  m.impl("__lshift__.Tensor", WrapperBitwiseLeftShiftTensor);
+  m.impl("__rshift__.Scalar", WrapperBitwiseRightShiftTensorScalar);
+  m.impl("__rshift__.Tensor", WrapperBitwiseRightShiftTensor);
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
   m.impl("_amp_foreach_non_finite_check_and_unscale.out", WrapperPrivAmpForeachNonFiniteCheckAndUnscaleOut);
@@ -18,6 +22,9 @@
   m.impl("_chunk_cat", WrapperPrivChunkCat);
   m.impl("_chunk_cat.out", WrapperPrivChunkCatOut);
   m.impl("_conj", WrapperPrivConj);
+  m.impl("_conj_copy.out", WrapperPrivConjCopyOut);
+  m.impl("_conj_physical", WrapperPrivConjPhysical);
+  m.impl("_conj_physical.out", WrapperPrivConjPhysicalOut);
   m.impl("_foreach_add_.List", WrapperForeachAddInplaceList);
   m.impl("_foreach_add_.Scalar", WrapperForeachAddInplaceScalar);
   m.impl("_foreach_addcdiv_.ScalarList", WrapperForeachAddcdivInplaceScalarlist);
@@ -33,6 +40,8 @@
   m.impl("_foreach_sqrt", WrapperForeachSqrt);
   m.impl("_fused_rms_norm", WrapperPrivFusedRmsNorm);
   m.impl("_fused_rms_norm_backward", WrapperPrivFusedRmsNormBackward);
+  m.impl("_linalg_eigh", WrapperPrivLinalgEigh);
+  m.impl("_linalg_svd", WrapperPrivLinalgSvd);
   m.impl("_log_softmax", WrapperPrivLogSoftmax);
   m.impl("_log_softmax_backward_data", WrapperPrivLogSoftmaxBackwardData);
   m.impl("_neg_view", WrapperPrivNegView);
@@ -97,11 +106,17 @@
   m.impl("bitwise_and.Tensor", WrapperBitwiseAndTensor);
   m.impl("bitwise_and_.Scalar", WrapperBitwiseAndInplaceScalar);
   m.impl("bitwise_and_.Tensor", WrapperBitwiseAndInplaceTensor);
+  m.impl("bitwise_left_shift.Scalar_Tensor", WrapperBitwiseLeftShiftScalarTensor);
+  m.impl("bitwise_left_shift.Tensor", WrapperBitwiseLeftShiftTensor);
+  m.impl("bitwise_left_shift.Tensor_Scalar", WrapperBitwiseLeftShiftTensorScalar);
   m.impl("bitwise_not", WrapperBitwiseNot);
   m.impl("bitwise_or.Scalar", WrapperBitwiseOrScalar);
   m.impl("bitwise_or.Tensor", WrapperBitwiseOrTensor);
   m.impl("bitwise_or_.Scalar", WrapperBitwiseOrInplaceScalar);
   m.impl("bitwise_or_.Tensor", WrapperBitwiseOrInplaceTensor);
+  m.impl("bitwise_right_shift.Scalar_Tensor", WrapperBitwiseRightShiftScalarTensor);
+  m.impl("bitwise_right_shift.Tensor", WrapperBitwiseRightShiftTensor);
+  m.impl("bitwise_right_shift.Tensor_Scalar", WrapperBitwiseRightShiftTensorScalar);
   m.impl("bitwise_xor.Scalar", WrapperBitwiseXorScalar);
   m.impl("bitwise_xor.Tensor", WrapperBitwiseXorTensor);
   m.impl("bitwise_xor_.Scalar", WrapperBitwiseXorInplaceScalar);
@@ -127,6 +142,9 @@
   m.impl("clamp_min.Tensor", WrapperClampMinTensor);
   m.impl("clamp_min_", WrapperClampMinInplace);
   m.impl("clamp_min_.Tensor", WrapperClampMinInplaceTensor);
+  m.impl("complex", WrapperComplex);
+  m.impl("conj_physical", WrapperPrivConjPhysical);
+  m.impl("conj_physical.out", WrapperConjPhysicalOut);
   m.impl("constant_pad_nd", WrapperConstantPadNd);
   m.impl("convolution", WrapperConvolution);
   m.impl("convolution_backward", WrapperConvolutionBackward);
@@ -139,6 +157,7 @@
   m.impl("cumprod", WrapperCumprod);
   m.impl("cumsum", WrapperCumsum);
   m.impl("detach", WrapperDetach);
+  m.impl("diagonal", WrapperDiagonal);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
   m.impl("div_.Scalar", WrapperDivInplaceScalar);
@@ -165,6 +184,10 @@
   m.impl("expm1", WrapperExpm1);
   m.impl("expm1_", WrapperExpm1Inplace);
   m.impl("exponential_", WrapperExponentialInplace);
+  m.impl("eye", WrapperEye);
+  m.impl("eye.m", WrapperEyeM);
+  m.impl("eye.m_out", WrapperEyeMOut);
+  m.impl("eye.out", WrapperEyeOut);
   m.impl("fill_.Scalar", WrapperFillInplaceScalar);
   m.impl("fill_.Tensor", WrapperFillInplaceTensor);
   m.impl("flip", WrapperFlip);
@@ -213,6 +236,11 @@
   m.impl("leaky_relu_backward", WrapperLeakyReluBackward);
   m.impl("lerp_.Scalar", WrapperLerpInplaceScalar);
   m.impl("lift_fresh", WrapperLiftFresh);
+  m.impl("linalg_matrix_exp", WrapperLinalgMatrixExp);
+  m.impl("linalg_matrix_exp.out", WrapperLinalgMatrixExpOut);
+  m.impl("linalg_qr", WrapperLinalgQr);
+  m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
+  m.impl("linalg_solve_triangular.out", WrapperLinalgSolveTriangularOut);
   m.impl("linalg_vector_norm", WrapperLinalgVectorNorm);
   m.impl("linspace", WrapperLinspace);
   m.impl("log", WrapperLog);
@@ -231,6 +259,11 @@
   m.impl("logical_or", WrapperLogicalOr);
   m.impl("logical_or_", WrapperLogicalOrInplace);
   m.impl("logical_xor", WrapperLogicalXor);
+  m.impl("logit", WrapperLogit);
+  m.impl("logit.out", WrapperLogitOut);
+  m.impl("logit_", WrapperLogitInplace);
+  m.impl("logit_backward", WrapperLogitBackward);
+  m.impl("logit_backward.grad_input", WrapperLogitBackwardGradInput);
   m.impl("lt.Scalar", WrapperLtScalar);
   m.impl("lt.Tensor", WrapperLtTensor);
   m.impl("lt_.Scalar", WrapperLtInplaceScalar);
@@ -260,6 +293,7 @@
   m.impl("mul_.Scalar", WrapperMulInplaceScalar);
   m.impl("mul_.Tensor", WrapperMulInplaceTensor);
   m.impl("multinomial", WrapperMultinomial);
+  m.impl("multinomial.out", WrapperMultinomialOut);
   m.impl("mv", WrapperMv);
   m.impl("native_batch_norm", WrapperNativeBatchNorm);
   m.impl("native_batch_norm_backward", WrapperNativeBatchNormBackward);
@@ -322,6 +356,8 @@
   m.impl("reciprocal_", WrapperReciprocalInplace);
   m.impl("relu", WrapperRelu);
   m.impl("relu_", WrapperReluInplace);
+  m.impl("remainder.Scalar", WrapperRemainderScalar);
+  m.impl("remainder.Tensor", WrapperRemainderTensor);
   m.impl("round", WrapperRound);
   m.impl("round_", WrapperRoundInplace);
   m.impl("round_.decimals", WrapperRoundInplaceDecimals);
@@ -374,6 +410,8 @@
   m.impl("threshold_", WrapperThresholdInplace);
   m.impl("threshold_backward", WrapperThresholdBackward);
   m.impl("topk", WrapperTopk);
+  m.impl("trace", WrapperTrace);
+  m.impl("trace.out", WrapperTraceOut);
   m.impl("transpose.int", WrapperTransposeInt);
   m.impl("tril", WrapperTril);
   m.impl("tril_", WrapperTrilInplace);
@@ -384,6 +422,10 @@
   m.impl("unbind.int", WrapperUnbindInt);
   m.impl("uniform_", WrapperUniformInplace);
   m.impl("unsqueeze", WrapperUnsqueeze);
+  m.impl("vdot", WrapperVdot);
+  m.impl("vdot.out", WrapperVdotOut);
+  m.impl("view_as_complex", WrapperViewAsComplex);
+  m.impl("view_as_real", WrapperViewAsReal);
   m.impl("where.self", WrapperWhereSelf);
   m.impl("zero_", WrapperZeroInplace);
   m.impl("zeros", WrapperZeros);

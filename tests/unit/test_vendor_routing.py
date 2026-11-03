@@ -144,6 +144,8 @@ def test_base_collectives_delegate_with_converted_views(monkeypatch):
     """Both new virtuals must pass the flagos->cuda view through, not the raw
     privateuseone tensor."""
 
+    monkeypatch.setenv("GEMS_VENDOR", "nvidia")
+
     class _FakeInner:
         def __init__(self):
             self.seen = {}
@@ -488,4 +490,4 @@ def test_device_scoped_guard_covers_exactly_the_device_scoped_vendors():
     whose backend binds the device itself would set a device it does not own,
     and omitting it for one that needs it fails silently (zeros, not an error).
     """
-    assert pg._DEVICE_SCOPED_VENDORS == ("enflame", "tsingmicro")
+    assert pg._DEVICE_SCOPED_VENDORS == ("ascend", "enflame", "tsingmicro")
