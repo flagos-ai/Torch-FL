@@ -133,14 +133,20 @@ jobs:
             ${{ inputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      #
+      # continue-on-error makes a failed transfer a cold miss, so the deadline
+      # below has to be long enough that a slow-but-working transfer is never
+      # turned into one. 3 minutes and a 2-minute stall detector timed out on
+      # the largest caches (see integration-tests.yml); this mirrors that job's
+      # 10-minute deadline so both halves of a platform's cache warm equally.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
         uses: actions/cache/restore@v4
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 10
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}

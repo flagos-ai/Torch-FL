@@ -148,14 +148,23 @@ jobs:
             ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      #
+      # continue-on-error makes a failed transfer a cold miss, so the deadline
+      # below has to be long enough that a slow-but-working transfer is never
+      # turned into one. At 3 minutes the Ascend cache (which holds the FlagTree
+      # wheel) timed out on every run of PRs #707/#712 and was then re-fetched
+      # from the index -- paying the download twice and, on those pods, failing
+      # the index fetch instead. The cache warms up, not down, so the deadline
+      # scales with it: 10 minutes and a 5-minute stall detector let a large
+      # cache land while still bounding a genuinely wedged transfer.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
         uses: actions/cache/restore@v4
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 10
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
