@@ -314,6 +314,15 @@ def test_the_saved_original_is_what_it_calls(
     even when `dist.new_group` has been replaced since.
     """
     _fake_accelerator(monkeypatch, "flagos")
+    # `import torch_fl` installs the redirect, but not everywhere it is expected
+    # to: `register_flagos_backend` returns early when "flagos" is already in
+    # `Backend.backend_list`, and a host that set `FLAGOS_DIST_REDIRECT_GLOO=0`
+    # keeps the wrappers off. Neither is this test's subject, so clear both
+    # pieces of process state and install the redirect here rather than read
+    # what import happened to leave behind.
+    monkeypatch.delenv("FLAGOS_DIST_REDIRECT_GLOO", raising=False)
+    init_process_group = dist.init_process_group
+    monkeypatch.delattr(init_process_group, pg._REDIRECT_MARKER, raising=False)
     pg.redirect_gloo_requests()
     assert pg._ORIGINAL_NEW_GROUP is not None
 
