@@ -18,6 +18,7 @@ import importlib
 import os
 import sys
 import time
+import types
 
 import torch
 
@@ -3139,6 +3140,54 @@ def get_device_properties(device=None):
     return _DeviceProperties(_device_index(device))
 
 
+def _utils_get_device_index(device, optional=False, allow_cpu=False):
+    """`torch.cuda._utils._get_device_index`, for the privateuse1 device module.
+
+    This exists for one caller that is not ours.
+    `torch.serialization._validate_device` resolves a `map_location` by asking
+    the device module for `_utils._get_device_index`, and its docstring names
+    that attribute as the contract a privateuse1 backend has to implement. With
+    no `_utils` it takes an `else` branch that calls `torch.device(location)`
+    directly, so `map_location="cuda:3"` deserializes onto a **cuda** device
+    rather than onto flagos -- which on a CPU-only torch is not a device at all,
+    and on a boxing build is the wrong one. Most of the ecosystem checkpoints
+    with `map_location="cuda"`, so the CUDA spellings are the ones that matter
+    (issue #531).
+
+    `_device_index` already accepts every form the CUDA function documents,
+    including the `"cuda:1"` string, and returns only the index -- which is the
+    whole answer here, because flagos has a single device type. The two flags
+    are the CUDA signature's, honoured rather than ignored: `allow_cpu` lets a
+    caller pass `"cpu"` and get -1, and `optional` is what `None` means. A
+    non-optional `None` is an error in the CUDA function and stays one here.
+    """
+    if allow_cpu:
+        if isinstance(device, str):
+            device = torch.device(device)
+        if isinstance(device, torch.device) and device.type == "cpu":
+            return -1
+    if device is None and not optional:
+        raise ValueError(
+            "_get_device_index: `device` is None and `optional` is False; pass a "
+            "device index, a torch.device, a '<type>[:<index>]' string, or set "
+            "optional=True to mean the current device"
+        )
+    return _device_index(device)
+
+
+#: The submodule `torch.serialization._validate_device` looks for. Built here
+#: rather than shipped as a `torch_fl/flagos/_utils.py` file because it is one
+#: function and it has to be an attribute of the registered device module --
+#: a real submodule would also be importable as `torch_fl.flagos._utils`, which
+#: would advertise a second, unowned entry point to the same shim.
+_utils = types.ModuleType(f"{__name__}._utils")
+_utils.__doc__ = (
+    "The privateuse1 device-module hook torch.serialization._validate_device "
+    "reads. See _utils_get_device_index."
+)
+_utils._get_device_index = _utils_get_device_index
+
+
 __all__ = [
     "device",
     "device_count",
@@ -3167,6 +3216,7 @@ __all__ = [
     "mem_get_info",
     "reset_peak_memory_stats",
     "get_device_properties",
+    "_utils",
 ]
 
 
