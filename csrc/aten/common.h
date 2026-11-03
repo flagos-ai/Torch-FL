@@ -128,6 +128,9 @@ bool LogEnabled(const char* item);
 // and the comparison ops -- which lower through a different path -- do work.
 // The same calls reach aclnn kernels through the vendor slot and return the
 // right float64 answer, so the fallback is a gain rather than a loss.
+// Ascend complex dtypes also bypass FlagGems: its pointwise compiler cannot
+// represent complex pointers. Generated vendor kernels use CANN complex
+// factorizations or device-resident real components, retaining their precision.
 //
 // On MetaX the broad gap is complex64/complex128. Its Triton backend has no
 // complex pointer type, so a FlagGems kernel instantiated from either dtype
@@ -202,9 +205,9 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype);
 // decides on its own: a FlagGems kernel that is unguarded about the element
 // type it code-generates, called with a dtype the reference implementation of
 // that op rejects outright, or with one the platform's triton dot intrinsic
-// will not accept. Two shapes are in the table today: `neg` over bool, and
-// `mm` / `mm.out` over int64/int32/int16/uint8 -- integral matmul, where the
-// op must stay on FlagGems for float (see common.cc for both measurements).
+// will not accept. Examples include `neg` over bool, integral matmul, and
+// int64 `where` with scalar conditions. The floating matmul route depends on
+// its precision policy; see common.cc for the measured cases.
 //
 // Both of the other mechanisms were measured against this gap and neither can
 // state it. A conf entry routes a whole op: `neg` over

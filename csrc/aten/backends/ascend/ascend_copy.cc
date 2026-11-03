@@ -3,6 +3,10 @@
 #include "ascend_copy.h"
 
 #include <ATen/core/Tensor.h>
+#include <algorithm>
+#include <vector>
+#include <ATen/ATen.h>
+#include <ATen/ops/view_as_real_native.h>
 #include "op_api_common.h"
 
 namespace at::native::flagos::ascend {
@@ -16,6 +20,17 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   }
   if (dst.numel() == 0) {
     return true;  // nothing to copy
+  }
+  // A complex element is two adjacent real scalars. Reinterpret the storage
+  // before ACLNN sees it so strided copies stay on device without requiring
+  // a complex ACL dtype. Lazy math bits are resolved by the caller.
+  if (dst.scalar_type() != src.scalar_type() &&
+      (dst.is_complex() || src.is_complex())) {
+    return StridedCopy(dst, DtypeCast(src, dst.scalar_type()));
+  }
+  if (dst.is_complex() && src.scalar_type() == dst.scalar_type()) {
+    return StridedCopy(at::native::view_as_real(dst),
+                       at::native::view_as_real(src));
   }
 
   // Issue #326: `contiguous()` / `copy_` reach this from platform-shared code
@@ -34,8 +49,39 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   // strides/offset recorded on each aclTensor. AclTensorWrapper preserves the
   // tensor's sizes/strides/offset, so a non-contiguous src is copied correctly
   // into the (contiguous) dst without a host round-trip.
-  AclTensorWrapper dst_wrap(dst);
-  AclTensorWrapper src_wrap(src);
+  // CANN copy accepts at most eight logical dimensions. Gate application
+  // permutes a high-rank qubit view before flattening it; merge dimensions
+  // that are contiguous in both operands without changing storage or order.
+  auto source = src.sizes() == dst.sizes() ? src : src.expand(dst.sizes());
+  std::vector<int64_t> sizes, dst_strides, src_strides;
+  for (int64_t axis = 0; axis < dst.dim(); ++axis) {
+    const auto size = dst.size(axis);
+    if (size == 1) continue;
+    if (!sizes.empty() && dst_strides.back() == dst.stride(axis) * size &&
+        src_strides.back() == source.stride(axis) * size) {
+      sizes.back() *= size;
+      dst_strides.back() = dst.stride(axis);
+      src_strides.back() = source.stride(axis);
+    } else {
+      sizes.push_back(size);
+      dst_strides.push_back(dst.stride(axis));
+      src_strides.push_back(source.stride(axis));
+    }
+  }
+  auto destination_view = dst.as_strided(sizes, dst_strides);
+  auto source_view = source.as_strided(sizes, src_strides);
+  if (sizes.size() > 8) {
+    // Fully interleaved permutations need more than eight independent strides.
+    // Tile the smallest axis and reuse this device copy, bounding each CANN
+    // descriptor without gathering any tensor data on the host.
+    auto axis = std::min_element(sizes.begin(), sizes.end()) - sizes.begin();
+    for (int64_t index = 0; index < sizes[axis]; ++index) {
+      StridedCopy(destination_view.select(axis, index), source_view.select(axis, index));
+    }
+    return true;
+  }
+  AclTensorWrapper dst_wrap(destination_view);
+  AclTensorWrapper src_wrap(source_view);
   EXEC_ASCEND_CMD(aclnnInplaceCopy,
                   const_cast<aclTensor*>(dst_wrap.get()),
                   src_wrap.get());
@@ -58,6 +104,24 @@ at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype) {
   // like garbage. That is the failure
   // `test_dtype_cast_matches_same_device_result` reproduces.
   OpDeviceGuard device_guard_(DeviceOf(src));
+  if (c10::isComplexType(dtype)) {
+    auto out = at::empty(src.sizes(), src.options().dtype(dtype));
+    auto parts = at::native::view_as_real(out);
+    parts.select(-1, 0).copy_(src.is_complex() ? at::real(src) : src);
+    if (src.is_complex()) {
+      parts.select(-1, 1).copy_(at::imag(src));
+    } else {
+      // Fill a dense temporary, then use the stride-aware native copy. Some
+      // pointwise routes treat this interleaved destination as dense storage.
+      auto imaginary = parts.select(-1, 1);
+      imaginary.copy_(at::zeros(imaginary.sizes(), imaginary.options()));
+    }
+    return out;
+  }
+  if (src.is_complex()) {
+    TORCH_WARN_ONCE("Casting complex values to real discards the imaginary part");
+    return at::real(src).to(dtype).contiguous();
+  }
   // aclnnCast expects a dense input; make src contiguous first (cheap, and the
   // callers in _to_copy already pass a contiguous tensor).
   at::Tensor src_c = src.is_contiguous() ? src : src.contiguous();
