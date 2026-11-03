@@ -351,11 +351,10 @@ done
 # the checked-in csrc/aten/generated/flaggems_python_kernels.cc. Add it to the
 # build stage if PPU is ever wired into build-wheel-common.yml.
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # Both wheels live on resource.flagos.net, which this pod reaches directly
-  # rather than through its rejecting HTTP proxy.
-  prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
+  # Both wheels live on resource.flagos.net. install_flagtree/install_flag_gems
+  # probe that host for an unproxied route on every platform, so this pod -- the
+  # one whose proxy is known to refuse it -- needs no route call of its own.
   install_flagtree
-  prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
   install_flag_gems
 fi
 

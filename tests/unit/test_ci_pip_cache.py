@@ -245,7 +245,14 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
     # Every transfer is bounded so a stalled cache service cannot turn into an
     # unbounded wait before the install and the tests. Keep these caps explicit
     # so tuning stays visible.
-    restore_maximum, segment_maximum = 3, 2
+    #
+    # The restore cap is 10 minutes because a failed transfer is a cold miss, not
+    # a failure: at 3 minutes the largest cache (Ascend's, which holds the
+    # FlagTree wheel) timed out on every run of PRs #707/#712 and was then
+    # re-downloaded from the index, so the cap cost a second transfer instead of
+    # saving one. The wait is still bounded, and the segment stall detector is
+    # what catches a wedged transfer inside that budget.
+    restore_maximum, segment_maximum = 10, 5
     save_maximum = 3
     for step in _steps(workflow):
         if step.get("uses", "").startswith("actions/cache/"):
@@ -381,3 +388,69 @@ def test_cuda_caches_cpu_torch_without_the_vendor_wheel_set():
     assert re.search(
         r"pip_retry --no-cache-dir --index-url \"\$VENDOR_TORCH_INDEX_URL\"", hook
     )
+
+
+def test_cuda_bootstraps_the_vendor_torch_only_on_the_boxing_lane():
+    """The vendor lane runs on the +cpu torch; only boxing stages a libtorch_cuda.
+
+    The vendor lane builds the wheel whose premise is that it carries no
+    libtorch_cuda.so, and nothing downstream of the bootstrap reads
+    VENDOR_PYTHON there. Bootstrapping it anyway downloaded the multi-GB
+    torch+cu130 wheel for an unread path, and that download is what failed the
+    lane while the PyTorch index answered 503 through the runner proxy.
+    """
+    hook = (ROOT / ".github/scripts/hooks/set_env_nvidia.sh").read_text()
+
+    # The bootstrap is guarded by BOXING_LANE: the vendor lane resolves the
+    # source as "none" instead of installing one.
+    assert (
+        'elif [[ "${BOXING_LANE:-}" == "1" ]]; then\n'
+        '  VENDOR_SOURCE="bootstrap"\n'
+        "  ensure_system_prerequisites\n"
+        "  bootstrap_vendor_python\n"
+        "else\n"
+        "  # The vendor lane: no accelerator torch is installed, and none is read below.\n"
+        '  VENDOR_SOURCE="none"\n'
+        "fi" in hook
+    )
+
+    # The explicit mode override cannot smuggle a bootstrap onto the vendor lane.
+    assert "TORCH_FL_CUDA_VENDOR_MODE=bootstrap asks for an accelerator PyTorch" in hook
+
+    # The probe reads the accelerator torch, so it must not run without one.
+    assert (
+        'if [[ "$VENDOR_SOURCE" != "none" ]]; then\n'
+        "  resolve_vendor_torch\n"
+        "else\n"
+        '  echo "Vendor lane: no accelerator PyTorch is resolved or installed; '
+        'tests run on the +cpu torch"\n'
+        "fi" in hook
+    )
+
+
+def test_reporting_tools_install_through_the_pypi_fallback():
+    """A reporting tool must not fail a lane whose tests can still pass.
+
+    The vendor images inherit a pip index of their own (MUSA's is TUNA) and
+    those are VCS mirrors: TUNA listed pytest-json-report and then answered 403
+    for the wheel's own file, so PR #714's MUSA lane died before running any
+    test. The step installs through install_with_pypi_fallback, which retries on
+    the pinned index, rather than a bare `pip install` that lands on whatever
+    index the image configured.
+    """
+    steps = _steps(WORKFLOW_DIR / "integration-tests.yml")
+    step = next(
+        step for step in steps if step.get("name") == "Install pytest JSON reporting"
+    )
+    run = step["run"]
+    assert "install_with_pypi_fallback" in run
+    assert ".github/version-pins.env" in run
+    assert re.search(r"^\s*python -m pip install\b", run, re.M) is None
+
+    # The helper falls back only when the caller did not pin an index itself.
+    common = (ROOT / ".github/scripts/lib/set_env_common.sh").read_text()
+    helper = re.search(
+        r"^install_with_pypi_fallback\(\) \{\n(.*?)^\}", common, re.M | re.S
+    )
+    assert helper
+    assert '--index-url "$pinned"' in helper.group(1)

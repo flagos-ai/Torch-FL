@@ -148,14 +148,23 @@ jobs:
             ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      #
+      # continue-on-error makes a failed transfer a cold miss, so the deadline
+      # below has to be long enough that a slow-but-working transfer is never
+      # turned into one. At 3 minutes the Ascend cache (which holds the FlagTree
+      # wheel) timed out on every run of PRs #707/#712 and was then re-fetched
+      # from the index -- paying the download twice and, on those pods, failing
+      # the index fetch instead. The cache warms up, not down, so the deadline
+      # scales with it: 10 minutes and a 5-minute stall detector let a large
+      # cache land while still bounding a genuinely wedged transfer.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
         uses: actions/cache/restore@v4
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 10
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
@@ -218,7 +227,17 @@ jobs:
           printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
 
       - name: Install pytest JSON reporting
-        run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+        run: |
+          # These are reporting tools: a 403 from the image's pip mirror must not
+          # fail a lane whose tests have not run yet. install_with_pypi_fallback
+          # retries on the runner's index and then on the pinned one, which is
+          # what PR #714's MUSA lane needed (TUNA listed pytest-json-report and
+          # then answered 403 for its wheel).
+          source .github/version-pins.env
+          source .github/scripts/lib/set_env_common.sh
+          VENV_PYTHON="$(command -v python)" PIP_RETRY_NO_CACHE=0 \
+            PIP_RETRY_TIMEOUT=60 \
+            install_with_pypi_fallback pytest-json-report==1.5.0 coverage==7.10.7
 
       - name: Prepare Python line coverage
         id: coverage-setup

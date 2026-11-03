@@ -19,13 +19,9 @@ PY
     # FlagTree owns triton's modules. Remove both metadata owners before
     # replacing the provider; installing stock Triton separately is invalid.
     "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
-    prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
     install_flagtree
   fi
 
-  if ! flag_gems_installed; then
-    prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
-  fi
   install_flag_gems
   # New releases may require a different dependency cohort. Fail explicitly
   # instead of letting an incompatible install reach the build or hardware.
