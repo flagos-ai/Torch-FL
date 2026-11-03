@@ -47,6 +47,45 @@ x = torch.randn(64, 512, device="flagos:0")
 y = model(x)  # Automatically fused kernels
 ```
 
+### Gating on capability, not on `is_cuda`
+
+Code that picks between a compiled and an eager path must not gate on
+`tensor.is_cuda`. On flagos that attribute is `False`, so the gate selects the
+eager path even though the fused kernel is available -- the result is correct and
+several times slower, and the only signal is a `UserWarning`:
+
+```python
+# Wrong on flagos: is_cuda is False, so this always takes the eager branch.
+fn = torch.compile(flex_attention) if q.is_cuda else flex_attention
+
+# Correct: ask whether a fused kernel can be built for this device.
+fn = torch.compile(flex_attention) if torch_fl.fused_kernels_available() else flex_attention
+```
+
+`fused_kernels_available(device=None)` returns whether inductor can generate a
+Triton kernel for a tensor on that device in this process. It applies the CUDA
+compute-capability floor where one applies, and otherwise lets the vendor Triton
+backend decide. A `False` answer is a statement about the build and device, not
+about the operator: the eager path still computes the right result.
+
+For code that needs several gates at once:
+
+```python
+>>> torch_fl.device_capabilities()
+{'compile': True, 'fused_kernels': True, 'fused_attention': True, 'flaggems': True}
+```
+
+Keys are stable and new ones may be added, so read by key rather than unpacking.
+Note that `compile` and `fused_kernels` are deliberately separate: `compile` says
+the backend registered, which succeeds whenever the registration imports
+resolve, while `fused_kernels` says a kernel can actually be built. On a build
+whose vendor Triton backend is missing the first is `True` and the second is
+`False`. Gate execution on `fused_kernels`.
+
+This is also why `optional_integration_status()["compile"]` is not the right
+signal for a dispatch decision: it reports registration state, not capability.
+Use it to diagnose which hooks installed, not to choose a code path.
+
 ### Compilation Modes
 
 ```python
