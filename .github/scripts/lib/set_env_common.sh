@@ -196,8 +196,8 @@ PY
 }
 
 # True when pip's own output shows an error that a retry cannot fix: the pod
-# cannot resolve the index host, and that condition does not clear while the job
-# runs. Only name-resolution failures qualify.
+# cannot resolve the index host, or the runner's HTTP proxy refuses the CONNECT
+# to it, and neither condition clears while the job runs.
 #
 # pip's "Could not find a version that satisfies" / "No matching distribution
 # found" are deliberately *not* matched, even though a DNS failure prints them
@@ -205,12 +205,36 @@ PY
 # 502 can clear, so treating them as permanent would turn a recoverable outage
 # into a failed job. The host pre-check in pip_retry covers the static case; the
 # match below covers a failure that starts after the pre-check passed.
+#
+# "Tunnel connection failed" *is* matched, and is not the same thing as the 502
+# above. It is urllib3 reporting that the proxy answered the CONNECT and
+# declined: the request never reached the index, so the index's own health says
+# nothing about it, and the pod's proxy allowlist does not change inside a job.
+# Measured across PRs #712/#705/#708, every affected lane burned pip's ten
+# inner retries plus five outer rounds -- 35 minutes -- on the same 503 before
+# reporting it. The 5xx varies (500, 503), so only the tunnel line is matched;
+# the status is named in what this returns.
 pip_error_is_permanent() {
   grep -qE \
     -e 'Failed to resolve' \
     -e 'Temporary failure in name resolution' \
     -e 'NameResolutionError' \
+    -e 'Tunnel connection failed' \
     "$1"
+}
+
+# A one-line reason for pip_error_is_permanent's answer, for the error message.
+# Names the tunnel case explicitly, because "cannot reach the index" reads like
+# an outage while a refused CONNECT is a pod allowlist problem the index owner
+# cannot fix.
+pip_permanent_error_reason() {
+  local tunnel=""
+  tunnel="$(grep -aoE 'Tunnel connection failed: [0-9]+ [A-Za-z ]+' "$1" | head -n 1)"
+  if [[ -n "$tunnel" ]]; then
+    printf '%s (the runner proxy refused the CONNECT; add this index host to the proxy allowlist or the pod NO_PROXY, see .github/scripts/lib/proxy_route.sh)' "${tunnel% }"
+    return 0
+  fi
+  printf 'the pod cannot resolve the index host'
 }
 
 # pip install with retries for large wheels on unstable networks.
@@ -251,7 +275,7 @@ pip_retry() {
       break
     fi
     if pip_error_is_permanent "$log_file"; then
-      echo "::error::pip install hit an error that retrying cannot fix, and gave up after ${attempt} attempt(s): $*"
+      echo "::error::pip install hit an error that retrying cannot fix ($(pip_permanent_error_reason "$log_file")), and gave up after ${attempt} attempt(s): $*"
       rm -f "$log_file"
       return 1
     fi
@@ -291,6 +315,10 @@ install_flag_gems() {
     echo "Using preinstalled FlagGems $FLAGGEMS_VERSION"
     return 0
   fi
+  # Same index, same proxy trap as install_flagtree; the probe is repeated
+  # because FLAGGEMS_INDEX_URL is often a per-vendor lane that FlagTree's
+  # hosted index does not cover.
+  prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
   pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
     "flag-gems===$FLAGGEMS_VERSION"
   if ! flag_gems_installed; then
@@ -456,6 +484,13 @@ install_cpu_torch() {
 
 # Install the published FlagTree wheel for this platform (its Triton build).
 install_flagtree() {
+  # resource.flagos.net is not on every vendor pod's proxy allowlist, and the
+  # proxy answers a refused CONNECT with a tunnel 503 that pip retries for
+  # 35 minutes before reporting it as a missing wheel. Probing the unproxied
+  # route first is what keeps that from failing the lane; see proxy_route.sh.
+  # The probe lives here rather than at each call site because every platform
+  # installs FlagTree from this index.
+  prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
   pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" \
     "flagtree===${FLAGTREE_VERSION}"
 }

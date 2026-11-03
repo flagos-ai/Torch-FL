@@ -280,6 +280,9 @@ def test_flaggems_reuse_requires_published_version(
         (site / "flag_gems.py").touch()
 
     result = run_shell(
+        # install_flag_gems probes the unproxied route before it installs; the
+        # sandbox has no proxy_route.sh, so record it and carry on.
+        "prefer_direct_route() { printf 'ROUTE_PROBED %s\\n' \"$1\"; }\n"
         "pip_retry() {\n"
         '  printf "INSTALL_REQUESTED %s\\n" "$*"\n'
         '  printf "Name: flag_gems\\nVersion: 5.4.0\\n" > "$STUB_METADATA"\n'
@@ -306,6 +309,9 @@ def test_flaggems_reuse_requires_published_version(
 
 def test_flaggems_rejects_an_unusable_installed_wheel(tmp_path):
     result = run_shell(
+        # install_flag_gems probes the unproxied route first; the sandbox has no
+        # proxy_route.sh, so record it and carry on.
+        "prefer_direct_route() { printf 'ROUTE_PROBED %s\\n' \"$1\"; }\n"
         "pip_retry() { return 0; }\n"
         + shell_function("flag_gems_installed", COMMON)
         + "\n"

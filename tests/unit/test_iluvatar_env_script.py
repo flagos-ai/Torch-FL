@@ -127,11 +127,13 @@ def test_matching_baseline_needs_no_download_or_install(tmp_path):
 
 
 def test_changed_flagtree_replaces_the_complete_triton_provider(tmp_path):
+    # The unproxied-route probe is no longer this helper's job: it lives in the
+    # shared install_flagtree, which every platform calls, so the helper drops
+    # its own call. This stub records installs, not routes.
     done, calls = provision(tmp_path, tree_matches=False)
     assert done.returncode == 0, done.stderr
     assert calls == [
         "-m pip uninstall -y flagtree triton triton_kernels",
-        "route https://example.invalid/tree",
         "tree new+iluvatar",
         "-m pip check",
     ]
@@ -141,7 +143,6 @@ def test_changed_gems_preserves_the_compiler_and_cpu_torch(tmp_path):
     done, calls = provision(tmp_path, gems_matches=False)
     assert done.returncode == 0, done.stderr
     assert calls == [
-        "route https://example.invalid/gems",
         "gems new-gems",
         "-m pip check",
     ]
