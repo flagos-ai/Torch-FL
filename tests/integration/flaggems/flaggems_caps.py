@@ -182,7 +182,10 @@ SEEDED_DRAWOPS = frozenset({"native_dropout", "native_dropout_backward"})
 #: narrow ones while every operator still reaches some backend -- the failure
 #: mode a per-operator route assertion cannot see.
 EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
-    "ascend": 221,
+    # 221 - 8 + 2: _conj, abs, fill_.Scalar, multinomial, neg,
+    # pow.Tensor_Scalar, uniform_ and where.self use the native Ascend paths;
+    # eye and eye.m now have FlagGems routes. Counted from the shipped conf.
+    "ascend": 215,
     # 454: #672 routed DCU's `mm` and `bmm` to FlagGems (the soft-lowp matrix
     # claim carries every dtype through the prelude, so the key cannot box), and
     # left this count at the pre-reroute 452. The hygon lane reported the two it

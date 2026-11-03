@@ -80,6 +80,11 @@ from pathlib import Path
 # DECLARE_DISPATCHER in generated/ops.h exactly (else the build won't link).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from codegen_ops import schema_to_cpp_name  # noqa: E402
+from ascend_complex import HELPERS as COMPLEX_HELPERS, branch as complex_branch  # noqa: E402
+from ascend_linalg import HELPERS as LINALG_HELPERS, TEMPLATES as LINALG_TEMPLATES  # noqa: E402
+
+from ascend_random import TEMPLATES as RANDOM_TEMPLATES  # noqa: E402
+from ascend_foreach import branch as foreach_branch  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 OUT_CC = REPO / "csrc/aten/backends/ascend/generated/ascend_kernels.cc"
@@ -104,6 +109,39 @@ HANDWRITTEN_DIRS = (
 # here (they already own the kAscend slot; double-register crashes at import).
 # --------------------------------------------------------------------------
 OPS = {
+    # Complex storage views only change metadata; no ACLNN dtype is involved.
+    "view_as_real": ("complex_view", None),
+    "view_as_complex": ("complex_view", None),
+    "complex": ("complex_construct", None),
+    "_conj_physical": ("complex_conjugate", None),
+    "_conj_physical.out": ("complex_conjugate_out", None),
+    "conj_physical.out": ("complex_conjugate_out", None),
+    "_conj_copy.out": ("complex_conjugate_out", None),
+    "diagonal": ("metadata_diagonal", None),
+    "bitwise_right_shift.Tensor": ("binary", "RightShift"),
+    "bitwise_left_shift.Tensor": ("binary", "LeftShift"),
+    "bitwise_right_shift.Tensor_Scalar": ("shift_scalar", None),
+    "bitwise_left_shift.Tensor_Scalar": ("shift_scalar", None),
+    "bitwise_right_shift.Scalar_Tensor": ("shift_scalar_tensor", None),
+    "bitwise_left_shift.Scalar_Tensor": ("shift_scalar_tensor", None),
+    "linalg_qr": ("linalg_qr", "LinalgQr"),
+    "logit": ("logit_device", None),
+    "logit.out": ("logit_device_out", None),
+    "logit_": ("logit_device_inplace", None),
+    "logit_backward": ("logit_device_backward", None),
+    "logit_backward.grad_input": ("logit_device_backward_out", None),
+    "vdot": ("device_vdot", None),
+    "vdot.out": ("device_vdot_out", None),
+    "trace": ("device_trace", None),
+    "trace.out": ("device_trace_out", None),
+    "linalg_matrix_exp": ("matrix_exp", None),
+    "linalg_matrix_exp.out": ("matrix_exp_out", None),
+    "_linalg_eigh": ("linalg_eigh", None),
+    "multinomial": ("multinomial", "Multinomial"),
+    "multinomial.out": ("multinomial_out", "Multinomial"),
+    "linalg_solve_triangular": ("solve_triangular", "TriangularSolve"),
+    "linalg_solve_triangular.out": ("solve_triangular_out", "TriangularSolve"),
+    "_linalg_svd": ("linalg_svd", "Svd"),
     # ---- unary: aclnn<Name>(self, out), out = self.shape/dtype ----
     "sqrt": ("unary", None),
     "exp": ("unary", None),
@@ -210,6 +248,8 @@ OPS = {
     "clamp_min": ("unary_scalar", None),
     "clamp_max": ("unary_scalar", None),
     "fmod.Scalar": ("unary_scalar", "FmodScalar"),
+    "remainder.Scalar": ("remainder_scalar", "RemainderTensorScalar"),
+    "remainder.Tensor": ("remainder_tensor", "RemainderTensorTensor"),
     "pow.Tensor_Scalar": ("unary_scalar", "PowTensorScalar"),  # migrated seed
     # ---- unary_two_scalar: (Tensor, Scalar, Scalar) -> same shape ----
     "softplus": ("unary_two_scalar", None),
@@ -291,6 +331,10 @@ OPS = {
     "stack": ("stack", "Stack"),
     # factory ops: at::empty + device-side zero_/fill_ (no direct aclnn call).
     "zeros": ("zeros", None),
+    "eye": ("eye", None),
+    "eye.m": ("eye_m", None),
+    "eye.out": ("eye_out", None),
+    "eye.m_out": ("eye_m_out", None),
     "ones": ("ones", None),
     "scalar_tensor": ("scalar_tensor", None),
     "ones_like": ("ones_like", None),
@@ -564,6 +608,16 @@ SKIP = {
     # le.Tensor stays handwritten: aclnnLe symbol is absent, needs runtime
     # multi-version probing (aclnnLe / aclnnLeTensor / aclnnLessEqual).
     "le.Tensor",
+}
+
+# ATen's Python operator aliases have no generated dispatcher of their own.
+# Their schemas match the canonical operators, so reuse those wrappers.
+REGISTRATION_ALIASES = {
+    "__rshift__.Tensor": "bitwise_right_shift.Tensor",
+    "__rshift__.Scalar": "bitwise_right_shift.Tensor_Scalar",
+    "__lshift__.Tensor": "bitwise_left_shift.Tensor",
+    "__lshift__.Scalar": "bitwise_left_shift.Tensor_Scalar",
+    "conj_physical": "_conj_physical",
 }
 
 # --------------------------------------------------------------------------
@@ -4523,7 +4577,74 @@ SCALAR_VARIANT = {
     "sub.Tensor": ("Subs", "alpha"),
 }
 
+T_COMPLEX_VIEW = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  return at::native::{cpu_op}(self);
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
+T_COMPLEX_CONSTRUCT = """\
+at::Tensor {kernel}(const at::Tensor& real, const at::Tensor& imag) {{
+  return ascend::PackComplex(real, imag);
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
+T_COMPLEX_CONJUGATE = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!self.is_complex()) return self.clone();
+  auto [real, imag] = ascend::ComplexParts(self);
+  return ascend::PackComplex(real, -imag);
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
+T_COMPLEX_CONJUGATE_OUT = """\
+at::Tensor& {kernel}(const at::Tensor& self, at::Tensor& out) {{
+  if (!self.is_complex()) {{ out.copy_(self); return out; }}
+  auto [real, imag] = ascend::ComplexParts(self);
+  out.copy_(ascend::PackComplex(real, -imag));
+  return out;
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
+T_METADATA_DIAGONAL = """\
+at::Tensor {kernel}(const at::Tensor& self, int64_t offset, int64_t dim1, int64_t dim2) {{
+  return at::native::diagonal(self, offset, dim1, dim2);
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
+T_SHIFT_SCALAR = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
+  auto dtype = at::result_type(self, other);
+  auto amount = at::scalar_tensor(other, self.options().dtype(dtype));
+  return at::{cpu_op}(self.to(dtype), amount);
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
+T_SHIFT_SCALAR_TENSOR = """\
+at::Tensor {kernel}(const at::Scalar& self, const at::Tensor& other) {{
+  auto dtype = at::result_type(other, self);
+  auto value = at::scalar_tensor(self, other.options().dtype(dtype));
+  return at::{cpu_op}(value, other.to(dtype));
+}}
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kAscend, {kernel})
+"""
+
 CATEGORIES = {
+    **LINALG_TEMPLATES,
+    **RANDOM_TEMPLATES,
+    "complex_view": T_COMPLEX_VIEW,
+    "complex_construct": T_COMPLEX_CONSTRUCT,
+    "complex_conjugate": T_COMPLEX_CONJUGATE,
+    "complex_conjugate_out": T_COMPLEX_CONJUGATE_OUT,
+    "metadata_diagonal": T_METADATA_DIAGONAL,
+    "shift_scalar": T_SHIFT_SCALAR,
+    "shift_scalar_tensor": T_SHIFT_SCALAR_TENSOR,
     "unary": T_UNARY,
     "binary": T_BINARY,
     "binary_alpha": T_BINARY_ALPHA,
@@ -4663,7 +4784,30 @@ CATEGORIES = {
 # on-host and fill via zero_/fill_, which are themselves device-side aclnn ops).
 # The symbol-validation guard is skipped for these; their OPS override is unused.
 NO_ACLNN_CATEGORIES = {
+    "logit_device",
+    "logit_device_out",
+    "logit_device_inplace",
+    "logit_device_backward",
+    "logit_device_backward_out",
+    "device_vdot",
+    "device_vdot_out",
+    "device_trace",
+    "device_trace_out",
+    "matrix_exp",
+    "matrix_exp_out",
+    "linalg_eigh",
+    "complex_view",
+    "complex_construct",
+    "complex_conjugate",
+    "complex_conjugate_out",
+    "metadata_diagonal",
+    "shift_scalar",
+    "shift_scalar_tensor",
     "dropout_backward",
+    "eye",
+    "eye_m",
+    "eye_out",
+    "eye_m_out",
     "zeros",
     "ones",
     "scalar_tensor",
@@ -4705,6 +4849,13 @@ FILE_HEADER = """\
 
 #include "../../../generated/ops.h"
 #include <ATen/core/Tensor.h>
+#include <ATen/ATen.h>
+#include <ATen/WrapDimUtils.h>
+#include <ATen/ops/_conj_native.h>
+#include <ATen/ops/_neg_view_native.h>
+#include <ATen/ops/diagonal_native.h>
+#include <ATen/ops/view_as_real_native.h>
+#include <ATen/ops/view_as_complex_native.h>
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/empty.h>
@@ -4745,11 +4896,15 @@ FILE_HEADER = """\
 #include <ATen/ops/tanh.h>
 #include <ATen/ops/trunc.h>
 #include <c10/core/Scalar.h>
+#include <c10/core/DefaultDtype.h>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <vector>
 #include "../op_preparation.h"
 #include "../op_api_common.h"
 #include "../dtype_support.h"
+#include "runtime/generator.h"
 
 namespace at::native::flagos {
 
@@ -4869,6 +5024,33 @@ def inject_device_guard(body: str, kernel: str) -> str:
     return body[:brace] + decl + body[brace:]
 
 
+def inject_shift_bounds(body: str, op: str) -> str:
+    """Preserve ATen's saturation semantics instead of CANN's modulo shifts."""
+    if op not in {"bitwise_left_shift.Tensor", "bitwise_right_shift.Tensor"}:
+        return body
+    marker = "  auto out = ascend::OpPreparation::apply_tensor_without_format("
+    preparation = """\
+  TORCH_CHECK(c10::isIntegralType(result_dtype, false),
+              "bitwise shift: expected integral inputs");
+  if (self_c.numel() == 0 || other_c.numel() == 0) {
+    return at::empty(out_shape, result_options);
+  }
+  const int64_t width = c10::elementSize(result_dtype) * 8;
+  auto invalid_shift = at::logical_or(other_c < 0, other_c >= width);
+  other_c = at::clamp(other_c, 0, width - 1);
+"""
+    body = body.replace(marker, preparation + marker, 1)
+    result = "  auto saturated = at::zeros_like(out);\n"
+    if op == "bitwise_right_shift.Tensor":
+        result += """\
+  if (c10::isSignedType(result_dtype)) {
+    saturated = at::where(self_b < 0, at::full_like(out, -1), saturated);
+  }
+"""
+    result += "  return at::where(invalid_shift, saturated, out);"
+    return body.replace("  return out;", result, 1)
+
+
 def aclnn_name(op_base: str, override) -> str:
     if override:
         return "aclnn" + override
@@ -4967,6 +5149,11 @@ def emit_register_inc(covered: list) -> int:
             file=sys.stderr,
         )
 
+    for alias, canonical in REGISTRATION_ALIASES.items():
+        if canonical in ops:
+            wrappers[alias] = wrappers[canonical]
+            ops.add(alias)
+
     lines = [
         "// Copyright (c) 2026, BAAI. All rights reserved.",
         "//",
@@ -5055,11 +5242,19 @@ def main():
                         sf = tmpl.format(aclnn_s=acl_s)
                         scalar_fastpath_ops.append(op)
                 fmt["scalar_fastpath"] = sf
-        bodies.append(inject_device_guard(template.format(**fmt), kernel))
+        body = inject_shift_bounds(template.format(**fmt), op)
+        lowering = foreach_branch(op) + complex_branch(op)
+        if lowering:
+            signature = _kernel_def(kernel).search(body)
+            brace = body.index("{", signature.end()) + 1
+            body = body[:brace] + "\n" + lowering + body[brace:]
+        bodies.append(inject_device_guard(body, kernel))
         covered.append((op, acl, cat))
 
     OUT_CC.parent.mkdir(parents=True, exist_ok=True)
-    OUT_CC.write_text(FILE_HEADER + "\n".join(bodies) + FILE_FOOTER)
+    OUT_CC.write_text(
+        FILE_HEADER + COMPLEX_HELPERS + LINALG_HELPERS + "\n".join(bodies) + FILE_FOOTER
+    )
 
     # Report grouped by category.
     print(f"[gen] {OUT_CC.relative_to(REPO)}  ({len(covered)} kernels)")

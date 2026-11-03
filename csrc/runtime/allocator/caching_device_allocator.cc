@@ -553,6 +553,20 @@ void CachingDeviceAllocator::record_stream(
   state.outstanding_events.push_back({event, block});
 }
 
+std::pair<size_t, size_t> CachingDeviceAllocator::get_memory_info(int device) {
+  int previous = -1;
+  TORCH_CHECK(backend_->get_device_index(&previous) == Success,
+              "Failed to read the current device for memory info");
+  TORCH_CHECK(backend_->set_device(device) == Success,
+              "Failed to select device for memory info");
+  size_t free = 0, total = 0;
+  const auto status = backend_->get_memory_info(&free, &total);
+  const auto restore_status = backend_->set_device(previous);
+  TORCH_CHECK(status == Success, "Failed to query physical device memory");
+  TORCH_CHECK(restore_status == Success, "Failed to restore device after memory query");
+  return {free, total};
+}
+
 AllocatorStats CachingDeviceAllocator::get_stats(int device) {
   if (backend_->provides_caching()) {
     AllocatorStats stats;
