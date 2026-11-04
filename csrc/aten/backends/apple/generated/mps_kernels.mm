@@ -1503,6 +1503,45 @@ at::Tensor CumsumKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kApple, CumsumKernelMps)
 
 
+at::Tensor CumprodKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    std::optional<at::ScalarType> dtype) {
+  if (!mps::MpsSupportsCumsumDtype(self.scalar_type(), dtype)) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  const at::ScalarType result_dtype = dtype.value_or(self.scalar_type());
+  int64_t axis = 0;
+  if (!mps::MpsCumsumAxis(self, dim, &axis)) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  if (result_dtype != self_c.scalar_type()) {
+    self_c = self_c.to(result_dtype);
+  }
+  at::Tensor out = at::empty(
+      self_c.sizes(), self_c.options().dtype(result_dtype));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("cumprod", axis),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph cumulativeProductWithTensor:args[0]
+                                               axis:axis
+                                               name:nil];
+      });
+  if (!ran) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CumprodFn, cumprod_dispatcher, Backend::kApple, CumprodKernelMps)
+
+
 at::Tensor SoftplusKernelMps(
     const at::Tensor& self,
     const at::Scalar& beta,
