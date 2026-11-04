@@ -109,6 +109,8 @@ def test_a_vendor_kernel_tree_selects_its_own_lane():
         "docs/development/testing.md",
         "docs/assets/ci.png",
         "README.md\ndocs/guide.rst",
+        "docs/assets/diagram.PNG",
+        "docs/guide/appendix.MD",
     ],
 )
 def test_documentation_needs_no_hardware(files):

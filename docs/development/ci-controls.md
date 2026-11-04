@@ -34,6 +34,22 @@ also affects MetaX. Keep these relationships aligned with
 `cmake/flagos_platforms.json` and the runtime build configuration when adding or
 changing a platform.
 
+## Superseded runs
+
+After source resolution, `ci-lifecycle` cancels active `ci.yml` runs for an
+older head of the same pull request, or for an older push to the same branch.
+PR cleanup matches the source repository and branch, so another fork and another
+PR keep their runs. Push cleanup remains within the base repository. Completed
+runs and other workflows are left alone; the latest run is never cancelled.
+
+Shared checks and each platform use separate concurrency groups. A new revision
+therefore replaces the old copy of a given lane without cancelling the current
+revision's other lanes. Platforms remain independent. Lifecycle cleanup runs in
+its own per-run group before shared checks and platforms start, so cancelling an
+older run cannot remove the newer run's cleanup. Scheduled runs are not
+cancelled. `/ci` dispatch remains available for manual reruns; its previous
+grouping behavior is outside this automatic cleanup.
+
 ## One required check
 
 The top-level job named **CI complete** runs after the shared checks and every
@@ -73,7 +89,8 @@ from authorized users receive a usage response. Closed PRs and deleted fork
 heads cannot dispatch. Separate concurrency groups keep a requested PR run from
 cancelling main, nightly CI or another PR's requested run.
 
-Requested runs provide diagnostics for the PR head. Their check run belongs to
+Requested runs provide diagnostics for the PR head and are outside automatic
+superseded-run cleanup. Their check run belongs to
 the dispatch ref; they do not replace the ordinary PR's required **CI complete**
 check or publish a synthetic passing check on the PR commit.
 
