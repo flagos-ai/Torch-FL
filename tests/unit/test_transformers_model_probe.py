@@ -107,6 +107,73 @@ def test_unknown_model_is_distinct_from_a_failure():
     assert probe.verdict(result, ALL_LAYERS) == "UNKNOWN_MODEL"
 
 
+# --- model classes ------------------------------------------------------------
+
+
+def test_a_causal_lm_is_tried_first():
+    """Generation is a layer, and only a causal-LM head has it."""
+    assert probe.MODEL_CLASSES[0] == "AutoModelForCausalLM"
+
+
+def test_an_encoder_is_reachable_without_a_causal_lm_mapping():
+    """Issue #254: a causal-LM-only list reported every encoder UNSUPPORTED_TASK.
+
+    The model has to be reachable through a task head or the bare body, or the
+    probe never gets past the config layer for mpnet, bert and roberta.
+    """
+    assert {"AutoModelForMaskedLM", "AutoModel"} <= set(probe.MODEL_CLASSES)
+
+
+def test_the_body_is_the_last_fallback():
+    """A head should produce the measured model; the body only rescues it."""
+    assert probe.MODEL_CLASSES[-1] == "AutoModel"
+
+
+def test_every_class_the_child_names_exists_in_transformers():
+    """The child resolves each name with getattr and silently skips a missing one.
+
+    A typo would therefore remove a fallback without failing anything, which is
+    how the causal-LM-only list stayed invisible. Checked against the installed
+    transformers when there is one, and skipped where transformers is absent.
+    """
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        pytest.skip("transformers is not installed on this host")
+    for name in probe.MODEL_CLASSES:
+        assert hasattr(transformers, name), name
+
+
+def test_the_child_receives_the_class_list():
+    """The order is the parent's; the child must not carry a second copy."""
+    assert '"model_classes": list(MODEL_CLASSES)' in _source()
+    assert 'MODEL_CLASSES = request["model_classes"]' in probe.CHILD
+
+
+def test_the_built_class_is_reported_with_the_config():
+    """Which head measured the model changes what a PASS means, so it is recorded."""
+    assert (
+        'emit("config", "PASS", params=params, model_class=MODEL_CLASS)' in probe.CHILD
+    )
+
+
+def test_summary_names_the_class_that_was_measured():
+    result = _result(
+        config={
+            "status": "PASS",
+            "params": 24_672,
+            "model_class": "AutoModelForMaskedLM",
+        }
+    )
+    result.update(model="mpnet", device="flagos:0", dtype="float32")
+    result.update(verdict="PASS", duration_s=1.0)
+    assert "class      AutoModelForMaskedLM" in probe.summarize(result, [])
+
+
+def _source() -> str:
+    return SCRIPT.read_text()
+
+
 def test_verdict_only_considers_selected_layers():
     """A layer that was not requested cannot decide the verdict."""
     result = _result(
