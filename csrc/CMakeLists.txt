@@ -547,21 +547,24 @@ endif()
 # (copy_ops.cc::_to_copy, run 40285867035 test_compile_dtypes[float16]). When
 # the found torch does ship libtorch_cuda.so the same cast is served on-device,
 # which is worth a lot of cudaMemcpy (see the comment at the call site). The
-# probe reads the directory of the torch this link actually uses, so it answers
-# for the torch in the build environment rather than for a directory the
+# probe reads the prefix of the torch `find_package(Torch)` resolved, so it
+# answers for the torch in the build environment rather than for a directory the
 # conditions below might fall back to.
+#
+# It must not read `torch_cpu_library`/`torch_python_library`: both are
+# `INTERFACE IMPORTED` targets -- declared that way by cmake/TorchPythonTargets.cmake
+# and, when torch's own export wins the `if(NOT TARGET ...)` race, by caffe2's
+# hand-written Caffe2Targets.cmake -- and an INTERFACE IMPORTED target can never
+# carry IMPORTED_LOCATION. Asking for it yields `-NOTFOUND`, so a probe written
+# that way answers OFF on every host, including one whose torch does ship
+# libtorch_cuda.so. `torch_cpu` does carry a path, but under
+# IMPORTED_LOCATION_RELEASE rather than IMPORTED_LOCATION, so naming the right
+# target is not enough either. TorchConfig.cmake sets TORCH_INSTALL_PREFIX from
+# its own directory, which is exactly the torch that was found.
 set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA OFF)
-get_target_property(_flagos_torch_cpu_location torch_cpu_library IMPORTED_LOCATION)
-get_target_property(_flagos_torch_python_location torch_python_library IMPORTED_LOCATION)
-foreach(_flagos_torch_location IN ITEMS
-    "${_flagos_torch_cpu_location}" "${_flagos_torch_python_location}")
-  if(_flagos_torch_location)
-    get_filename_component(_flagos_torch_dir "${_flagos_torch_location}" DIRECTORY)
-    if(EXISTS "${_flagos_torch_dir}/libtorch_cuda.so")
-      set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
-    endif()
-  endif()
-endforeach()
+if(TORCH_INSTALL_PREFIX AND EXISTS "${TORCH_INSTALL_PREFIX}/lib/libtorch_cuda.so")
+  set(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA ON)
+endif()
 message(STATUS "torch_fl: torch links libtorch_cuda.so: ${FLAGOS_TORCH_LINKS_LIBTORCH_CUDA}")
 if(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TORCH_LINKS_LIBTORCH_CUDA=1)
