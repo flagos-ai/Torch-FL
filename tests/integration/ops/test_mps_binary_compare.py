@@ -272,6 +272,45 @@ class TestBinaryPicks:
 
     @pytest.mark.parametrize("name", sorted(BINARY_PICKS))
     @pytest.mark.anyplatform
+    def test_nan_through_a_broadcast(self, name):
+        """A NaN that has to be broadcast still comes out a NaN.
+
+        This is the case the two tests beside this one each missed: NaN
+        propagation was covered at matching shapes and broadcasting was covered
+        with finite values, so `maximum([nan, 1, 2, 3], arange(12).view(3, 4))`
+        answered `0.0` where the reference answers `nan` -- a wrong number that
+        never raises. The body now declines a broadcast pair that holds a NaN
+        rather than selecting over mismatched shapes, so the reference answers.
+        """
+        fn = BINARY_PICKS[name]
+        for shape_a, shape_b, side in (
+            ((4, 5), (5,), "lhs"),
+            ((4, 5), (5,), "rhs"),
+            ((4, 5), (5,), "both"),
+            ((4, 5), (4, 1), "rhs"),
+            ((5,), (4, 5), "lhs"),
+            ((4, 5), (), "rhs"),
+        ):
+            a = _randn(shape_a)
+            b = _randn(shape_b) if shape_b else torch.tensor(1.5)
+            if side in ("lhs", "both"):
+                a.reshape(-1)[0] = float("nan")
+            if side in ("rhs", "both"):
+                b.reshape(-1)[0] = float("nan")
+            out = fn(_to_device(a), _to_device(b)).cpu()
+            expected = fn(a, b)
+            assert torch.isnan(out).equal(torch.isnan(expected)), (
+                name,
+                shape_a,
+                shape_b,
+                side,
+                out,
+                expected,
+            )
+            assert torch.equal(torch.isnan(out), torch.isnan(expected))
+
+    @pytest.mark.parametrize("name", sorted(BINARY_PICKS))
+    @pytest.mark.anyplatform
     def test_broadcast_and_row_pitch(self, name):
         fn = BINARY_PICKS[name]
         for shape_a, shape_b in (((4, 5), (5,)), ((4, 5), (4, 1)), ((4, 5), ())):

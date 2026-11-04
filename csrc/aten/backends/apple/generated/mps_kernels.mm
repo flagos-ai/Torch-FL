@@ -355,8 +355,6 @@ REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kApple,
 
 
 at::Tensor MaximumKernelMps(const at::Tensor& self, const at::Tensor& other) {
-  // Evaluate the reference's broadcast and alpha checks before the graph. They
-  // are also needed when the call takes the CPU round-trip below.
   std::vector<int64_t> out_shape;
   try {
     out_shape = at::infer_size(self.sizes(), other.sizes());
@@ -366,68 +364,100 @@ at::Tensor MaximumKernelMps(const at::Tensor& self, const at::Tensor& other) {
   if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
     return at::maximum(self.cpu(), other.cpu()).to(self.device());
   }
-  if (!mps::MpsSupportsScalarAlpha(self.scalar_type(), 1)) {
-    return at::maximum(self.cpu(), other.cpu()).to(self.device());
-  }
   at::Tensor self_c = self.contiguous();
   at::Tensor other_c = other.contiguous();
   at::Tensor out = at::empty(out_shape, self_c.options());
   if (out.numel() == 0) {
     return out;
   }
-  const bool scalar_rhs = other_c.numel() == 1;
-  const std::vector<std::vector<int64_t>> argument_shapes = {
-      self_c.sizes().vec(),
-      scalar_rhs ? out_shape : other_c.sizes().vec()};
-  if (self_c.sizes().equals(at::IntArrayRef(out_shape)) || scalar_rhs) {
-    const std::vector<at::Tensor> inputs =
-        self_c.sizes().equals(at::IntArrayRef(out_shape))
-        ? std::vector<at::Tensor>{self_c}
-        : std::vector<at::Tensor>{self_c, other_c};
-    const bool ran = mps::MpsRunGraph(
-        mps::MpsGraphKey("maximum"),
-        inputs,
-        out,
-        argument_shapes,
-        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-          MPSGraphTensor* primary = args[0];
-          MPSGraphTensor* secondary = args.count == 2
-              ? args[1]
-              : mps::MpsConstant(graph, 1, self_c.scalar_type());
-          MPSGraphTensor* other_t = mps::MpsScaledByScalar(
-              graph, secondary, 1, self_c.scalar_type());
-          secondary = nil;
-          if (other_t != nil && !scalar_rhs) {
-            secondary = [graph broadcastTensor:other_t
-                                       toShape:mps::MpsFlatShape(out.numel())
-                                          name:nil];
-          } else if (other_t != nil) {
-            secondary = other_t;
-          }
-          if (secondary == nil) {
-            return nil;
-          }
-          return [graph maximumWithPrimaryTensor:primary secondaryTensor:secondary name:nil];
-        });
-    if (!ran) {
+  const bool broadcast =
+      !self_c.sizes().equals(at::IntArrayRef(out_shape)) ||
+      !other_c.sizes().equals(at::IntArrayRef(out_shape));
+  // A NaN that would have to be broadcast selects against the wrong shape in a
+  // graph built the way every other body here is built, so it round-trips.
+  // Only a floating operand can hold a NaN, and asking an integral one is not
+  // free of surprises in this tree -- the check runs on the host copy with the
+  // floating-width test in front of it.
+  if (broadcast && self_c.is_floating_point()) {
+    const at::Tensor self_host = self_c.to(at::kCPU);
+    const at::Tensor other_host = other_c.to(at::kCPU);
+    if (at::isnan(self_host).any().item<bool>() ||
+        at::isnan(other_host).any().item<bool>()) {
       return at::maximum(self.cpu(), other.cpu()).to(self.device());
     }
-    return out;
   }
+  // A one-element secondary is expanded on the host before the graph. Asking
+  // MpsRunGraph to place a numel-1 operand at a larger `argument_shapes` entry
+  // fails module verification on this SDK (measured), and the expansion is a
+  // copy of one element.
+  const bool scalar_rhs = other_c.numel() == 1;
+  std::vector<at::Tensor> operands{self_c};
+  if (scalar_rhs && !other_c.sizes().equals(at::IntArrayRef(out_shape))) {
+    operands.push_back(other_c.expand(out_shape).contiguous());
+  } else {
+    operands.push_back(other_c);
+  }
+  const std::vector<std::vector<int64_t>> argument_shapes = {
+      self_c.sizes().vec(), operands[1].sizes().vec()};
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("maximum"),
-      {self_c, other_c},
+      operands,
       out,
       argument_shapes,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        // An alpha MpsConstant cannot express exactly in this width takes the
-        // round-trip. Passing a nil operand to the selector aborts MPSGraph.
-        MPSGraphTensor* other_t = mps::MpsScaledByScalar(
-            graph, args[1], 1, self_c.scalar_type());
-        if (other_t == nil) {
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args.count == 2 ? args[1] : primary;
+        // The secondary is broadcast explicitly whenever it is not already the
+        // output's shape. That covers a one-element operand too: MPSGraph will
+        // not widen a rank-0 tensor into a rank-N result (measured, the module
+        // fails verification without this).
+        // `MpsRunGraph` already placed every operand at the shape in
+        // `argument_shapes`, so a one-element secondary arrives as the output's
+        // shape and needs nothing here. Only a genuinely broadcast operand --
+        // one whose own shape differs from the output's -- is widened.
+        if (!scalar_rhs && broadcast) {
+          secondary = [graph broadcastTensor:secondary
+                                     toShape:mps::MpsAxesArray(out_shape)
+                                        name:nil];
+          if (secondary == nil) {
+            return nil;
+          }
+        }
+        MPSGraphTensor* answer =
+            [graph maximumWithPrimaryTensor:primary secondaryTensor:secondary name:nil];
+        if (answer == nil) {
           return nil;
         }
-        return [graph maximumWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+        // A NaN back over the node's answer wherever either operand was one.
+        // `x - x` is a NaN exactly where `x` was and neutral everywhere else, so
+        // it produces the replacement without a NaN constant, which MpsConstant
+        // cannot express.
+        MPSGraphTensor* primary_nan =
+            [graph subtractionWithPrimaryTensor:primary secondaryTensor:primary name:nil];
+        MPSGraphTensor* self_nan = [graph isNaNWithTensor:primary name:nil];
+        if (primary_nan == nil || self_nan == nil) {
+          return nil;
+        }
+        MPSGraphTensor* either_nan = self_nan;
+        if (!scalar_rhs && secondary != primary) {
+          MPSGraphTensor* secondary_nan =
+              [graph subtractionWithPrimaryTensor:secondary secondaryTensor:secondary name:nil];
+          MPSGraphTensor* other_nan = [graph isNaNWithTensor:secondary name:nil];
+          if (secondary_nan == nil || other_nan == nil) {
+            return nil;
+          }
+          primary_nan =
+              [graph additionWithPrimaryTensor:primary_nan secondaryTensor:secondary_nan name:nil];
+          either_nan =
+              [graph logicalORWithPrimaryTensor:self_nan secondaryTensor:other_nan name:nil];
+          if (primary_nan == nil || either_nan == nil) {
+            return nil;
+          }
+        }
+        return [graph selectWithPredicateTensor:either_nan
+                           truePredicateTensor:primary_nan
+                          falsePredicateTensor:answer
+                                          name:nil];
       });
   if (!ran) {
     return at::maximum(self.cpu(), other.cpu()).to(self.device());
@@ -439,8 +469,6 @@ REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kApple, Maxi
 
 
 at::Tensor MinimumKernelMps(const at::Tensor& self, const at::Tensor& other) {
-  // Evaluate the reference's broadcast and alpha checks before the graph. They
-  // are also needed when the call takes the CPU round-trip below.
   std::vector<int64_t> out_shape;
   try {
     out_shape = at::infer_size(self.sizes(), other.sizes());
@@ -450,68 +478,100 @@ at::Tensor MinimumKernelMps(const at::Tensor& self, const at::Tensor& other) {
   if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
     return at::minimum(self.cpu(), other.cpu()).to(self.device());
   }
-  if (!mps::MpsSupportsScalarAlpha(self.scalar_type(), 1)) {
-    return at::minimum(self.cpu(), other.cpu()).to(self.device());
-  }
   at::Tensor self_c = self.contiguous();
   at::Tensor other_c = other.contiguous();
   at::Tensor out = at::empty(out_shape, self_c.options());
   if (out.numel() == 0) {
     return out;
   }
-  const bool scalar_rhs = other_c.numel() == 1;
-  const std::vector<std::vector<int64_t>> argument_shapes = {
-      self_c.sizes().vec(),
-      scalar_rhs ? out_shape : other_c.sizes().vec()};
-  if (self_c.sizes().equals(at::IntArrayRef(out_shape)) || scalar_rhs) {
-    const std::vector<at::Tensor> inputs =
-        self_c.sizes().equals(at::IntArrayRef(out_shape))
-        ? std::vector<at::Tensor>{self_c}
-        : std::vector<at::Tensor>{self_c, other_c};
-    const bool ran = mps::MpsRunGraph(
-        mps::MpsGraphKey("minimum"),
-        inputs,
-        out,
-        argument_shapes,
-        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-          MPSGraphTensor* primary = args[0];
-          MPSGraphTensor* secondary = args.count == 2
-              ? args[1]
-              : mps::MpsConstant(graph, 1, self_c.scalar_type());
-          MPSGraphTensor* other_t = mps::MpsScaledByScalar(
-              graph, secondary, 1, self_c.scalar_type());
-          secondary = nil;
-          if (other_t != nil && !scalar_rhs) {
-            secondary = [graph broadcastTensor:other_t
-                                       toShape:mps::MpsFlatShape(out.numel())
-                                          name:nil];
-          } else if (other_t != nil) {
-            secondary = other_t;
-          }
-          if (secondary == nil) {
-            return nil;
-          }
-          return [graph minimumWithPrimaryTensor:primary secondaryTensor:secondary name:nil];
-        });
-    if (!ran) {
+  const bool broadcast =
+      !self_c.sizes().equals(at::IntArrayRef(out_shape)) ||
+      !other_c.sizes().equals(at::IntArrayRef(out_shape));
+  // A NaN that would have to be broadcast selects against the wrong shape in a
+  // graph built the way every other body here is built, so it round-trips.
+  // Only a floating operand can hold a NaN, and asking an integral one is not
+  // free of surprises in this tree -- the check runs on the host copy with the
+  // floating-width test in front of it.
+  if (broadcast && self_c.is_floating_point()) {
+    const at::Tensor self_host = self_c.to(at::kCPU);
+    const at::Tensor other_host = other_c.to(at::kCPU);
+    if (at::isnan(self_host).any().item<bool>() ||
+        at::isnan(other_host).any().item<bool>()) {
       return at::minimum(self.cpu(), other.cpu()).to(self.device());
     }
-    return out;
   }
+  // A one-element secondary is expanded on the host before the graph. Asking
+  // MpsRunGraph to place a numel-1 operand at a larger `argument_shapes` entry
+  // fails module verification on this SDK (measured), and the expansion is a
+  // copy of one element.
+  const bool scalar_rhs = other_c.numel() == 1;
+  std::vector<at::Tensor> operands{self_c};
+  if (scalar_rhs && !other_c.sizes().equals(at::IntArrayRef(out_shape))) {
+    operands.push_back(other_c.expand(out_shape).contiguous());
+  } else {
+    operands.push_back(other_c);
+  }
+  const std::vector<std::vector<int64_t>> argument_shapes = {
+      self_c.sizes().vec(), operands[1].sizes().vec()};
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("minimum"),
-      {self_c, other_c},
+      operands,
       out,
       argument_shapes,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        // An alpha MpsConstant cannot express exactly in this width takes the
-        // round-trip. Passing a nil operand to the selector aborts MPSGraph.
-        MPSGraphTensor* other_t = mps::MpsScaledByScalar(
-            graph, args[1], 1, self_c.scalar_type());
-        if (other_t == nil) {
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args.count == 2 ? args[1] : primary;
+        // The secondary is broadcast explicitly whenever it is not already the
+        // output's shape. That covers a one-element operand too: MPSGraph will
+        // not widen a rank-0 tensor into a rank-N result (measured, the module
+        // fails verification without this).
+        // `MpsRunGraph` already placed every operand at the shape in
+        // `argument_shapes`, so a one-element secondary arrives as the output's
+        // shape and needs nothing here. Only a genuinely broadcast operand --
+        // one whose own shape differs from the output's -- is widened.
+        if (!scalar_rhs && broadcast) {
+          secondary = [graph broadcastTensor:secondary
+                                     toShape:mps::MpsAxesArray(out_shape)
+                                        name:nil];
+          if (secondary == nil) {
+            return nil;
+          }
+        }
+        MPSGraphTensor* answer =
+            [graph minimumWithPrimaryTensor:primary secondaryTensor:secondary name:nil];
+        if (answer == nil) {
           return nil;
         }
-        return [graph minimumWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+        // A NaN back over the node's answer wherever either operand was one.
+        // `x - x` is a NaN exactly where `x` was and neutral everywhere else, so
+        // it produces the replacement without a NaN constant, which MpsConstant
+        // cannot express.
+        MPSGraphTensor* primary_nan =
+            [graph subtractionWithPrimaryTensor:primary secondaryTensor:primary name:nil];
+        MPSGraphTensor* self_nan = [graph isNaNWithTensor:primary name:nil];
+        if (primary_nan == nil || self_nan == nil) {
+          return nil;
+        }
+        MPSGraphTensor* either_nan = self_nan;
+        if (!scalar_rhs && secondary != primary) {
+          MPSGraphTensor* secondary_nan =
+              [graph subtractionWithPrimaryTensor:secondary secondaryTensor:secondary name:nil];
+          MPSGraphTensor* other_nan = [graph isNaNWithTensor:secondary name:nil];
+          if (secondary_nan == nil || other_nan == nil) {
+            return nil;
+          }
+          primary_nan =
+              [graph additionWithPrimaryTensor:primary_nan secondaryTensor:secondary_nan name:nil];
+          either_nan =
+              [graph logicalORWithPrimaryTensor:self_nan secondaryTensor:other_nan name:nil];
+          if (primary_nan == nil || either_nan == nil) {
+            return nil;
+          }
+        }
+        return [graph selectWithPredicateTensor:either_nan
+                           truePredicateTensor:primary_nan
+                          falsePredicateTensor:answer
+                                          name:nil];
       });
   if (!ran) {
     return at::minimum(self.cpu(), other.cpu()).to(self.device());

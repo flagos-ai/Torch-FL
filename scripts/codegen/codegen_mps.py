@@ -79,8 +79,8 @@ OPS = {
     "mul.Tensor": "binary",
     # maximum/minimum pick between two operands elementwise: the same binary
     # body, one selector each.
-    "maximum": "binary",
-    "minimum": "binary",
+    "maximum": "nan_propagating",
+    "minimum": "nan_propagating",
     "rsub.Scalar": "rsub_scalar",
     "add.Scalar": "binary_scalar",
     "sub.Scalar": "binary_scalar",
@@ -1098,6 +1098,7 @@ SUPPORTS = {
     "arange_stop": "MpsSupportsFactoryDtype",
     "clamp": "MpsSupportsClampDtype",
     "gelu": "MpsSupportsGeluDtype",
+    "nan_propagating": "MpsSupportsBinaryDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -1817,7 +1818,142 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
-# The elementwise body over a tensor and a host scalar. The scalar becomes a
+# `maximum` and `minimum` need one thing `T_BINARY` does not do: their nodes
+# **swallow a NaN** where the reference propagates it. Measured,
+# `maximum([nan, 1, 2, 3], arange(12).view(3, 4))` answers `0.0` in the first
+# column where the reference answers `nan` -- so a finite broadcast is exact and
+# only the NaN is lost, which is the kind of wrong answer that never raises.
+#
+# The guard is `isNaNWithTensor:` over each operand and a `select` back to a NaN,
+# built over the **broadcast** shapes so a `(4,)` predicate selects against a
+# `(3, 4)` result.
+#
+# A NaN that needs broadcasting declines instead of being selected. Getting the
+# broadcast right costs a second graph shape and a fifth node for a case that is
+# rare in practice, and the round-trip is correct where a half-built guard is
+# silent about being wrong -- the failure mode this body exists to remove. So the
+# rule is: same-shape operands are served with the guard, a broadcast pair whose
+# broadcast has no NaN in it is served unguarded (a finite broadcast is exact),
+# and a broadcast pair that actually contains a NaN takes the round-trip.
+#
+# Only this pair uses the body. The other `binary` ops -- add, sub, mul, div --
+# propagate NaN through the node by themselves and keep `T_BINARY`.
+T_NAN_PROPAGATING = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self.sizes(), other.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  if (!mps::{supports}(self.scalar_type(), other.scalar_type())) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool broadcast =
+      !self_c.sizes().equals(at::IntArrayRef(out_shape)) ||
+      !other_c.sizes().equals(at::IntArrayRef(out_shape));
+  // A NaN that would have to be broadcast selects against the wrong shape in a
+  // graph built the way every other body here is built, so it round-trips.
+  // Only a floating operand can hold a NaN, and asking an integral one is not
+  // free of surprises in this tree -- the check runs on the host copy with the
+  // floating-width test in front of it.
+  if (broadcast && self_c.is_floating_point()) {{
+    const at::Tensor self_host = self_c.to(at::kCPU);
+    const at::Tensor other_host = other_c.to(at::kCPU);
+    if (at::isnan(self_host).any().item<bool>() ||
+        at::isnan(other_host).any().item<bool>()) {{
+      return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+    }}
+  }}
+  // A one-element secondary is expanded on the host before the graph. Asking
+  // MpsRunGraph to place a numel-1 operand at a larger `argument_shapes` entry
+  // fails module verification on this SDK (measured), and the expansion is a
+  // copy of one element.
+  const bool scalar_rhs = other_c.numel() == 1;
+  std::vector<at::Tensor> operands{{self_c}};
+  if (scalar_rhs && !other_c.sizes().equals(at::IntArrayRef(out_shape))) {{
+    operands.push_back(other_c.expand(out_shape).contiguous());
+  }} else {{
+    operands.push_back(other_c);
+  }}
+  const std::vector<std::vector<int64_t>> argument_shapes = {{
+      self_c.sizes().vec(), operands[1].sizes().vec()}};
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      out,
+      argument_shapes,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args.count == 2 ? args[1] : primary;
+        // The secondary is broadcast explicitly whenever it is not already the
+        // output's shape. That covers a one-element operand too: MPSGraph will
+        // not widen a rank-0 tensor into a rank-N result (measured, the module
+        // fails verification without this).
+        // `MpsRunGraph` already placed every operand at the shape in
+        // `argument_shapes`, so a one-element secondary arrives as the output's
+        // shape and needs nothing here. Only a genuinely broadcast operand --
+        // one whose own shape differs from the output's -- is widened.
+        if (!scalar_rhs && broadcast) {{
+          secondary = [graph broadcastTensor:secondary
+                                     toShape:mps::MpsAxesArray(out_shape)
+                                        name:nil];
+          if (secondary == nil) {{
+            return nil;
+          }}
+        }}
+        MPSGraphTensor* answer =
+            [graph {call}primary secondaryTensor:secondary name:nil];
+        if (answer == nil) {{
+          return nil;
+        }}
+        // A NaN back over the node's answer wherever either operand was one.
+        // `x - x` is a NaN exactly where `x` was and neutral everywhere else, so
+        // it produces the replacement without a NaN constant, which MpsConstant
+        // cannot express.
+        MPSGraphTensor* primary_nan =
+            [graph subtractionWithPrimaryTensor:primary secondaryTensor:primary name:nil];
+        MPSGraphTensor* self_nan = [graph isNaNWithTensor:primary name:nil];
+        if (primary_nan == nil || self_nan == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* either_nan = self_nan;
+        if (!scalar_rhs && secondary != primary) {{
+          MPSGraphTensor* secondary_nan =
+              [graph subtractionWithPrimaryTensor:secondary secondaryTensor:secondary name:nil];
+          MPSGraphTensor* other_nan = [graph isNaNWithTensor:secondary name:nil];
+          if (secondary_nan == nil || other_nan == nil) {{
+            return nil;
+          }}
+          primary_nan =
+              [graph additionWithPrimaryTensor:primary_nan secondaryTensor:secondary_nan name:nil];
+          either_nan =
+              [graph logicalORWithPrimaryTensor:self_nan secondaryTensor:other_nan name:nil];
+          if (primary_nan == nil || either_nan == nil) {{
+            return nil;
+          }}
+        }}
+        return [graph selectWithPredicateTensor:either_nan
+                           truePredicateTensor:primary_nan
+                          falsePredicateTensor:answer
+                                          name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+# The elementwise body over a tensor and a host scalar.# The elementwise body over a tensor and a host scalar. The scalar becomes a
 # one-element constant in the operand's own element type and the graph broadcasts
 # it; the dtype gate accepted only the scalars that element type can carry, so an
 # `int32` tensor takes an integer scalar and a float tensor anything real. A
@@ -6158,6 +6294,7 @@ CATEGORIES = {
     "unary": T_UNARY,
     "trig": T_UNARY,
     "binary": T_BINARY,
+    "nan_propagating": T_NAN_PROPAGATING,
     "rsub_scalar": T_RSUB_SCALAR,
     "binary_scalar": T_SCALAR,
     "reduce": T_REDUCE,
