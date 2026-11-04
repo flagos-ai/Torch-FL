@@ -714,6 +714,24 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
     m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
     m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
+  #elif defined(USE_CAMBRICON)
+    // Cambricon MLU is FlagGems-primary with no vendor-native half yet: the CNNL
+    // kernels under aten/backends/cambricon/ do not exist, so there is no
+    // cambricon_register.inc to include and the FlagGems .inc is the platform's
+    // entire PrivateUse1 surface. An op it does not claim stays unregistered,
+    // which is what lets a `none` route in backends_cambricon.conf reach
+    // cpu_fallback rather than raising "backend not registered" -- the same
+    // contract the Iluvatar and BPU arms document above. Add
+    // `#include "backends/cambricon/generated/cambricon_register.inc"` here once
+    // CNNL kernels land.
+    //
+    // Registered whenever the FlagGems Python path is compiled in, not behind a
+    // *_KERNEL switch: backends_cambricon.conf routes ops to FlagGems by
+    // default, so these kFlagGems dispatcher slots must exist or those routes
+    // have nowhere to land.
+    #if defined(FLAGOS_FLAGGEMS_PYTHON)
+    #include "backends/cambricon/generated/cambricon_flaggems_register.inc"
+    #endif
   #elif defined(USE_BPU)
     // The BPU's unit of execution is a whole compiled artifact (a .hbm from
     // hbdk4), not an individual operator, so a kernel here submits an artifact

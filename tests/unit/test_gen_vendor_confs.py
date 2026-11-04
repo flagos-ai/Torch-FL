@@ -548,7 +548,11 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     it ships, so it is a generated full-coverage conf too.
     drobotics joins them for the same reason: backends/bpu/generated/
     bpu_register.inc claims only the ops with a kernel behind them, so a `none`
-    route there falls back instead of raising.
+    route there falls back instead of raising. cambricon joins them for the
+    iluvatar reason rather than the mps one: it has no native .inc at all yet
+    (its VENDORS row names the empty slot), and register.cc includes only its
+    FlagGems .inc, so registration skips every op FlagGems does not cover and
+    `none` does fall back to cpu_fallback.
     """
     assert set(g.VENDORS) == {
         "mthreads",
@@ -558,6 +562,7 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
         "iluvatar",
         "apple",
         "drobotics",
+        "cambricon",
     }
     assert "metax" not in g.VENDORS
     assert "tsingmicro" not in g.VENDORS

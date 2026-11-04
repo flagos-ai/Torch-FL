@@ -13,7 +13,8 @@
 #endif
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_DCU) && \
     !defined(USE_GCU) && !defined(USE_MUSA) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR) && \
+    !defined(USE_CAMBRICON)
 #include "backends/nvidia_memory.h"
 #endif
 #if defined(USE_TSINGMICRO)
@@ -33,6 +34,9 @@
 #endif
 #if defined(USE_MPS)
 #include "backends/apple_memory.h"
+#endif
+#if defined(USE_CAMBRICON)
+#include "backends/cambricon_memory.h"
 #endif
 
 #include <c10/util/Exception.h>
@@ -669,6 +673,14 @@ CachingDeviceAllocator* GetCachingAllocator() {
     // with flagos's own caching on top. The XPU SDK ships no caching allocator
     // to delegate to (see backends/kunlunxin_memory.h).
     auto backend = std::make_unique<KunlunxinDeviceMemory>();
+    alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
+#elif defined(USE_CAMBRICON)
+    // Cambricon MLU: cnrtMalloc via the accelerator/cambricon contract
+    // functions, with flagos's own block pool on top. The Neuware toolkit ships
+    // no caching allocator of its own to delegate to -- torch_mlu brings
+    // MLUCachingAllocator, but torch_mlu is not installed by design -- so
+    // provides_caching() stays at its false default.
+    auto backend = std::make_unique<CambriconDeviceMemory>();
     alloc = std::make_unique<CachingDeviceAllocator>(std::move(backend));
 #elif defined(USE_MPS)
     // Apple Metal: MTLBuffers from the accelerator/apple contract functions, with

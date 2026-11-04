@@ -538,6 +538,21 @@ class Stream(torch.cuda.Stream):
         return self.cuda_stream
 
     @property
+    def mlu_stream(self):
+        """Raw cnrt queue handle, the name Triton's mlu driver reads.
+
+        ``triton/backends/mlu/driver.py`` does
+        ``torch.mlu.current_stream(idx).mlu_stream``. On this platform torch.mlu
+        is torch_fl's own shim over this module (see
+        torch_fl/accelerator/cambricon/_cambricon_compat.py), so the attribute
+        belongs here next to the musa/gcu spellings rather than being arranged
+        around in the shim.
+        """
+        if hasattr(self, "_stream"):
+            return self._stream.handle
+        return self.cuda_stream
+
+    @property
     def device_index(self):
         if hasattr(self, "_stream"):
             return self._stream.device_index
@@ -572,6 +587,7 @@ class _DefaultStreamHandle:
         "cuda_stream",
         "gcu_stream",
         "musa_stream",
+        "mlu_stream",
         "txda_stream",
         "device_index",
     )
@@ -581,6 +597,11 @@ class _DefaultStreamHandle:
         self.gcu_stream = 0
         get_musa_stream = getattr(_C, "_get_musa_current_raw_stream", None)
         self.musa_stream = get_musa_stream(device_index) if get_musa_stream else 0
+        # Cambricon's Triton driver reads `.mlu_stream`. A cnrt queue is a real
+        # per-device handle rather than a fixed 0, so it is asked for when the
+        # runtime layer that owns it is compiled in.
+        get_mlu_stream = getattr(_C, "_get_cambricon_current_raw_stream", None)
+        self.mlu_stream = get_mlu_stream(device_index) if get_mlu_stream else 0
         # TsingMicro's triton launcher (triton.backends.tsingmicro.driver) reads
         # `.txda_stream`; the TX runtime only has the default stream, handle 0.
         self.txda_stream = 0
@@ -765,6 +786,20 @@ class _HostTimedEvent:
         if self._t is None or end_event._t is None:
             raise RuntimeError("elapsed_time called on an unrecorded event")
         return (end_event._t - self._t) * 1000.0  # ms, matching torch.cuda.Event
+
+    def hardware_time(self, end_event):
+        """Device-side duration in nanoseconds, the name Triton's mlu bench uses.
+
+        ``triton/testing.py``'s Cambricon ``do_bench`` estimates a kernel from
+        ``start_event.hardware_time(end_event) / 1000 / 5`` and expects
+        nanoseconds, which on real torch_mlu comes from
+        ``cnrtNotifierElapsedTime``. This event has no device timestamp to read --
+        ``record`` drains the queue and reads the host clock -- so the host-clock
+        duration is reported in the unit the caller expects. That is a wall-time
+        estimate of a drained launch, which is what an autotuner compares
+        candidates by; it is not device-only occupancy time.
+        """
+        return self.elapsed_time(end_event) * 1e6
 
 
 class Event(torch.cuda.Event):
@@ -2137,6 +2172,34 @@ def _align_flagtree_autotuning_knobs():
         pass
 
 
+def _flaggems_autotune_knob(triton_knobs):
+    """Whether the user turned ``TRITON_CACHE_AUTOTUNING`` off, parsed as Triton does.
+
+    Returns True when the knob may be enabled (unset, or set to anything Triton
+    reads as on) and False when the user explicitly declined -- that "no" is what
+    the caller must respect. A build whose knobs module cannot answer at all
+    returns True so the caller proceeds: this function exists to avoid
+    overwriting a deliberate setting, not to veto enabling the cache.
+
+    Parsed through ``env_bool.from_env`` -- the same parser ``env_bool.get``
+    uses -- rather than a hand-rolled truthiness test, so "on"/"yes"/"1" mean
+    here exactly what they mean to Triton. Reached from the descriptor because
+    the module-level ``getenv_bool`` helper it wraps is not part of every Triton
+    build (the Cambricon 3.4 line has no such name), and a missing name here
+    would otherwise be swallowed by the caller's ``except Exception`` and turn
+    into a silent no-op instead of a slow run.
+    """
+    knob = triton_knobs.autotuning
+    descriptor = type(knob).__dict__.get("cache")
+    try:
+        raw = descriptor.env_val if descriptor is not None else None
+        if raw is None:
+            return True
+        return bool(descriptor.from_env(raw))
+    except Exception:  # noqa: BLE001 - an unreadable knob is "not set"
+        return True
+
+
 def _enable_flaggems_autotune_cache():
     """Stop Triton from re-benchmarking the same autotune configs every process.
 
@@ -2213,7 +2276,13 @@ def _enable_flaggems_autotune_cache():
 
         # Default True on purpose: unset is the state this exists to change, and
         # anything a user did set that does not parse as truthy is a "no".
-        if not triton_knobs.getenv_bool("TRITON_CACHE_AUTOTUNING", True):
+        #
+        # Reached through the knob object rather than ``triton_knobs.getenv_bool``
+        # directly: that helper is not part of every Triton build (the Cambricon
+        # 3.4 line has no such name), and the whole function is wrapped in
+        # ``except Exception: pass`` -- so calling it unconditionally turned the
+        # per-platform mismatch into a silent no-op instead of a slow run.
+        if not _flaggems_autotune_knob(triton_knobs):
             return
 
         os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
@@ -2910,7 +2979,6 @@ def _stand_down_foreign_triton_drivers():
         import triton.backends
     except ImportError:
         return
-
     backend = triton.backends.backends.get("nvidia")
     if backend is None:
         return

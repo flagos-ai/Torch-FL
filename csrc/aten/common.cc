@@ -56,6 +56,8 @@ std::string DefaultConfigPath() {
       platform = "iluvatar";
 #elif defined(USE_MPS)
       platform = "apple";
+#elif defined(USE_CAMBRICON)
+      platform = "cambricon";
 #endif
       if (platform) {
         // dir is <prefix>/torch_fl/lib, configs are at <prefix>/torch_fl/configs/

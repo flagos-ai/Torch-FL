@@ -98,7 +98,7 @@
 
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
 
 namespace at::flagos {
 namespace {

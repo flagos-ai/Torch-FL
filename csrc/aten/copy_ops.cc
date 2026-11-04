@@ -72,7 +72,8 @@
 // symbol there. The de-boxed arm below covers both cases.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
-    !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR)
+    !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR) && \
+    !defined(USE_CAMBRICON)
 #define FLAGOS_COPY_CUDA_ABI 1
 #else
 #define FLAGOS_COPY_CUDA_ABI 0
@@ -495,7 +496,7 @@ at::Tensor _copy_from(
       musa_ops::MudnnCopy(self, const_cast<at::Tensor&>(dst));
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
 #if defined(FLAGOS_BOXING_BUILD)
       // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
       // strided copy kernel (handles strides, dtype casts on-device). The
@@ -547,6 +548,13 @@ at::Tensor _copy_from(
       const bool copied_on_device = gcu::StridedCopy(dst, self);
 #elif defined(USE_KUNLUNXIN)
       const bool copied_on_device = kunlunxin::StridedCopy(dst, self);
+#elif defined(USE_CAMBRICON)
+      // Cambricon has no CNNL strided-copy kernel yet (there is no native .inc --
+      // see the USE_CAMBRICON arm in register.cc), so there is nothing to call
+      // on device: report false and let the CPU round-trip below serve the copy.
+      // Correct but slow; it is the same starting point every native backend
+      // used before its copy kernel landed.
+      const bool copied_on_device = false;
 #else
       const bool copied_on_device = ascend::StridedCopy(dst, self);
 #endif
@@ -654,7 +662,7 @@ at::Tensor _copy_from(
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyHostToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
-    defined(USE_ILUVATAR) || defined(USE_MPS)
+    defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
       at::native::flagos::_copy_from(tmp, dst, false);
 #elif defined(FLAGOS_BOXING_BUILD)
       DeviceBoxingGuard guard(tmp, dst);
@@ -715,7 +723,7 @@ at::Tensor _copy_from(
       Memcpy(tmp.data_ptr(), self_contig.data_ptr(), nbytes, MemcpyDeviceToDevice);
 #if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
-    defined(USE_ILUVATAR) || defined(USE_MPS)
+    defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
       at::native::flagos::_copy_from(tmp, dst, false);
 #elif defined(FLAGOS_BOXING_BUILD)
       DeviceBoxingGuard guard(tmp, dst);
@@ -883,9 +891,11 @@ at::Tensor _to_copy(
       musa_ops::MudnnCopy(self_contig, result);
 #elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
-    defined(USE_ILUVATAR) || defined(USE_MPS)
+    defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
       // No CUDA runtime on these backends, so the CUDA TensorIterator cast
-      // below is unavailable.
+      // below is unavailable. Cambricon takes the CPU round-trip arm below: it
+      // has no CNNL cast kernel yet, which is the same starting point TsingMicro
+      // and BPU are on.
 #ifdef USE_ASCEND
       // Ascend casts on-device via aclnnCast, avoiding the D2H->CPU->H2D
       // round-trip that dominated HF RMSNorm (two fp16<->fp32 casts per layer).

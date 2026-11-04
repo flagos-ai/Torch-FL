@@ -64,6 +64,11 @@ EXPECTED_TRACER = {
     "tsingmicro": "tsingmicro_device_tracer",
     "bpu": "unavailable_device_tracer",
     "mps": "unavailable_device_tracer",
+    # Cambricon has no profiler tracer yet: no cnrt activity API is wrapped, and
+    # FLAGOS_DISABLE_CUDA_ASSETS keeps the CUPTI path from being built. Same
+    # state kunlunxin/tsingmicro/bpu/mps are in, and the ladder's else() arm
+    # already selects the unavailable tracer for it.
+    "cambricon": "unavailable_device_tracer",
 }
 
 

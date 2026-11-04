@@ -75,6 +75,7 @@ PLATFORM_VENDOR = {
     "cuda": "nvidia",
     "ppu": "thead",
     "tsingmicro": "tsingmicro",
+    "cambricon": "cambricon",
 }
 
 #: Vendor layer -> platform name. A FLAGOS_ACCELERATOR may name either half.
@@ -112,6 +113,7 @@ _CONF_VENDOR_FRAGMENTS = (
     "iluvatar",
     "apple",
     "tsingmicro",
+    "cambricon",
     "nvidia",
 )
 

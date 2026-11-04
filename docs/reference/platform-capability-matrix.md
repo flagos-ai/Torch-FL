@@ -26,6 +26,7 @@ when a platform gains or loses one.
 | `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2042 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
 | `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2042 | yes |
+| `cambricon` | vendor-native (cnrt runtime; FlagGems-primary, CNNL kernels pending) | `cambricon` | `cambricon` (FlagGems register only; CNNL kernels pending) | `cambricon` | 2042 | yes |
 
 Column notes:
 
@@ -169,12 +170,29 @@ build opts into boxing.
   vendor image: its config leaves `ci_image` empty and the two consuming
   workflows omit the `container:` key for that value, because a macOS runner
   cannot start a container and the accelerator is the runner's own Metal GPU.
+- **Cambricon** (MLU590, neuware 4.6.7) is a native backend over libcnrt, run on
+  a stock `torch 2.10.0+cpu` wheel: the vendor plugin torch_mlu is deliberately
+  not installed, and the `torch.mlu` / `torch.backends.mlu` / `torch_mlu` surface
+  FlagGems and Triton's mlu driver read is synthesized at import time by
+  `torch_fl/accelerator/cambricon/_cambricon_compat.py`. Its Triton backend comes
+  from the lane's `triton` wheel, not from a `flagtree` package -- there is no
+  cambricon flagtree build. The conf routes the full shared FlagGems ceiling
+  (**640** `flaggems`) and **1397** `none`, because no CNNL operator kernels exist
+  yet: `csrc/aten/backends/cambricon/` holds only the generated FlagGems register,
+  and `FLAGOS_CAMBRICON_KERNEL` is deliberately undefined until they land. No
+  MLU overload survey has been run, so those 640 routes are "unmeasured", not
+  "known good". `torch.compile` has no profile entry, and strided copy and dtype
+  cast take the CPU round-trip arms the other native backends use before their
+  copy kernels land. There is no profiler tracer (the ladder's `else()` arm
+  selects the unavailable one) and no FlagCX pin: the lane publishes FlagCX only
+  for neuware 4.4.3 and 4.7.2 while this platform's wheel segment is
+  `neuware4.6.7`, and one SDK spelling per platform is the rule.
 
 ## Directory inventory
 
 Authoritative membership of the three per-platform trees. Machine-checked
 against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
-- `csrc/runtime/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
-- `csrc/aten/backends/`: apple, ascend, bpu, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: apple, ascend, bpu, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro
+- `csrc/runtime/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
+- `csrc/aten/backends/`: apple, ascend, bpu, cambricon, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
+- `torch_fl/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro

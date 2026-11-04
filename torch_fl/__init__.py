@@ -805,7 +805,7 @@ _registered_ops = []
 
 
 def _patch_flaggems_philox():
-    """Route MUSA FlagGems RNG reservations through the flagos generator.
+    """Route MUSA/Cambricon FlagGems RNG reservations through the flagos generator.
 
     Native muRAND/mudnn kernels and this bridge both consume one 64-bit seed per
     stochastic operation from the selected PrivateUse1 generator. FlagGems then
@@ -814,7 +814,7 @@ def _patch_flaggems_philox():
     deterministic without maintaining a second CUDA-style generator state.
     """
     if (
-        _build_accelerator() not in ("mthreads", "tsingmicro")
+        _build_accelerator() not in ("mthreads", "tsingmicro", "cambricon")
         or not _conf_routes_to_flaggems()
     ):
         return
@@ -1234,6 +1234,26 @@ def _patch_flaggems_codegen_config():
         patch_diffusers_qwenimage_rope()
         return
 
+    # --- Cambricon MLU branch (vendor-native, FlagGems through a shim) ---
+    # Keyed on the build accelerator like MUSA/Kunlunxin. The wheel runs on the
+    # stock torch+cpu; torch_mlu is deliberately not installed, so nothing in the
+    # process publishes torch.mlu for FlagGems' cambricon backend or for the
+    # Triton mlu driver underneath it. install_cambricon_compat() synthesizes
+    # that surface from torch_fl.flagos -- the TsingMicro shim's pattern applied
+    # to a vendor whose plugin cannot be loaded at all.
+    #
+    # Returning here also keeps the generic NVIDIA branch below from claiming the
+    # platform: flagos tensors live in cnrt memory, so the CUDA shim would
+    # install CUDA-backed generators for them.
+    if _build_accelerator() == "cambricon":
+        from torch_fl.accelerator.cambricon._cambricon_compat import (
+            install_cambricon_compat,
+        )
+
+        install_cambricon_compat()
+        _env.set_foreign("GEMS_VENDOR", "cambricon")
+        return
+
     # --- Iluvatar branch ---
     # Keyed on the build accelerator for the same reason as DCU: the vendor torch
     # is a real CUDA build over corex's CUDA-shaped runtime, so
@@ -1556,9 +1576,21 @@ _cuda_alias_active = False
 #              hint manager, so leaving "txda" out does not merely mistype a
 #              tensor: `import flag_gems` raises and every flaggems-routed op
 #              on TsingMicro is unreachable.
+#   cambricon  Triton's mlu driver builds its autotune scratch as
+#              torch.empty(..., device='mlu') and reports the device interface
+#              as torch.device("mlu", torch.mlu.current_device())
+#              (triton/backends/mlu/driver.py). torch_mlu would have registered
+#              the name; this build does not install torch_mlu, so the alias is
+#              what keeps the benchmark step of every autotuned FlagGems kernel
+#              from dying with "Expected one of cpu, cuda, ... device type at
+#              start of device string: mlu". Deliberately NOT "cuda": MLU has no
+#              CUDA runtime, and a flagos tensor here is cnrt memory, so
+#              reinterpreting a device string as CUDA would be wrong rather than
+#              merely unhelpful.
 _VENDOR_DEVICE_ALIASES = {
     "mthreads": ("cuda", "musa"),
     "tsingmicro": ("cuda", "txda"),
+    "cambricon": ("mlu",),
 }
 
 # The CUDA probe as it stands when the alias decision is made: torch's own

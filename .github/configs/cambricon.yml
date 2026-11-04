@@ -1,0 +1,78 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+display_name: Cambricon
+
+# Cambricon-specific environment preparation stays outside the common workflow.
+setup_script: .github/scripts/set_env.sh
+setup_platform: cambricon
+
+# The FlagOS runtime image for this lane: stock torch+cpu with neuware and the
+# FlagGems release the other lanes carry. Its own torch_mlu is never imported --
+# set_env_cambricon.sh builds in an isolated venv and asserts its absence.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-cambricon-neuware4.4.3:2.1.2
+
+runner_labels:
+  - cambricon-mlu
+
+# Platform-specific code selects this hardware lane on PRs.
+# Shared or unrecognized code selects every lane conservatively.
+paths_watch:
+  - torch_fl/accelerator/cambricon/
+  - torch_fl/configs/backends_cambricon.conf
+  - csrc/aten/backends/cambricon/
+  - csrc/runtime/accelerator/cambricon/
+  - csrc/runtime/allocator/backends/cambricon_memory.h
+  - .github/scripts/hooks/set_env_cambricon.sh
+  - .github/scripts/set_env_cambricon.sh
+  - scripts/codegen/codegen_cambricon_flaggems.py
+
+container_volumes: []
+
+integration_environment: {}
+
+# Cambricon is non-NVIDIA: expose the /dev/cambricon_dev* device nodes through
+# --privileged (the same layout the MetaX and MUSA lanes use).
+container_options: >-
+  --privileged
+  --ipc=host
+  --shm-size=512g
+  --ulimit memlock=-1
+  --cap-add=SYS_PTRACE
+
+timeout_minutes: 60
+# Release/manual wheel-build artifact; CI tests the wheel in the build job.
+wheel_artifact_name: wheel-cambricon
+
+# What this platform's environment has to look like before any test runs.
+#
+# The isolated venv must hold CPU torch 2.10 with no libtorch_cuda.so. torch_mlu
+# must NOT be installed: torch_fl publishes a torch_mlu shim of its own (see
+# torch_fl/accelerator/cambricon/_cambricon_compat.py), so a real vendor package
+# in the same interpreter is a conflict worth failing on here rather than as a
+# device error later.
+environment_check:
+  torch_version_base: "2.10.0"
+  cuda_version: null
+  torch_path_forbidden:
+    - /opt/conda/
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+  flagos_devices:
+    more_than: 0
+  # Triton must be the mlu build (the lane's `triton` wheel) and FlagGems must
+  # resolve the cambricon backend; without both, every `flaggems` route in
+  # backends_cambricon.conf has nothing to dispatch to.
+  triton_backend: mlu
+  flaggems_vendor: cambricon
