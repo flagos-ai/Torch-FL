@@ -3384,24 +3384,27 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # the one node.
 #
 # **The subnormal the graph does not keep.** This is the one measured difference
-# from the reference, and it is not a division property. Measured on an M5
-# through this backend: a subnormal *result* comes back as zero -- `1e-38 / 2`
-# is `5.0e-39` on the reference and `0` from the graph, while `2.35e-38 / 2` is
-# the normal `1.175494e-38` from both -- and the same through every spelling
-# (`div.Tensor` with a tensor or a folded constant, `div.Scalar`, and the
-# reciprocal, which returns `inf` for `1 / 1.17e-38` where the reference reaches
-# `8.5e37`). `mul.Tensor` flushes identically and has been routed to `mps` since
-# stage 2 (`1e-38 * 0.5` -> `0`), as does `add.Tensor` (`1e-39 + 1e-39` -> `0`).
-# So the choice here is "div behaves like the mul and add the branch already
-# serves" or "div is the only arithmetic op on the device with a different
-# subnormal policy from its siblings", and the first is both the smaller surprise
-# and the one already shipped. The gate does not pretend otherwise --
-# MpsSupportsDivDtype's note records the measurement and test_mps_div.py pins it
-# as intentional beside the `mul` case it shares -- so a future reader meets it
-# as a known property rather than by bisecting a model. Nothing in a
-# transformer's attention or normalization path evaluates a division whose result
-# is subnormal -- the values there are O(1) -- so this is a boundary the branch
-# documents rather than one it meets.
+# from the reference, and it is not a division property either way. Measured on
+# an M5 through this backend: a subnormal *result* comes back as zero --
+# `1e-38 / 2` is `5.0e-39` on the reference and `0` from the graph, while
+# `2.35e-38 / 2` is the normal `1.175494e-38` from both -- and the same through
+# every division spelling (`div.Tensor` with a tensor or a folded constant,
+# `div.Scalar`, and the reciprocal, which returns `inf` for `1 / 1.17e-38` where
+# the reference reaches `8.5e37`). An earlier version of this note recorded that
+# `mul.Tensor` and `add.Tensor` flushed identically; re-measured on the same
+# class of host, they do **not** -- the multiplicative and additive nodes keep
+# the subnormal (`1e-38 * 0.5` -> `5.0e-39`, `1e-39 + 1e-39` -> `2.0e-39`) --
+# and `aten::mul.Scalar`, which folds its constant through `constantWithScalar:`,
+# flushes where `mul.Tensor` over the same values does not. So the policy is a
+# property of the node body rather than of the platform, the two bodies of one
+# selector can disagree, and a test that pins one body's answer onto another's
+# is wrong rather than merely stale: test_mps_div.py now probes each body it
+# asserts. The gate does not pretend otherwise -- MpsSupportsDivDtype's note
+# records the measurement -- so a future reader meets it as a known property
+# rather than by bisecting a model. Nothing in a transformer's attention or
+# normalization path evaluates a division whose result is subnormal -- the
+# values there are O(1) -- so this is a boundary the branch documents rather
+# than one it meets.
 #
 # **The `mode` overloads are a different body, not a keyword.** `div.Tensor_mode`
 # and `div.Scalar_mode` carry a `rounding_mode` whose three values are `floor`,
