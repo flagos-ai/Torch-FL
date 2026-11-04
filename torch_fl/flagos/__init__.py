@@ -168,6 +168,9 @@ def _lazy_init():
         # reaches the tune-space repair only here; see the function.
         _musa_tune_space_ready()
         return
+    # A bring-up runs the repair before the first one, in case a device call
+    # failed early and left the tuner uncovered.
+    _musa_tune_space_ready()
     _C._init()
     _initialized = True
 
@@ -2916,9 +2919,8 @@ def _musa_tune_space_ready() -> None:
     ``flag_gems.ops`` are both imported. See ``_patch_flaggems_tune_space``.
     """
     from .. import _build_accelerator
-    from .._platform import platform_for
 
-    if platform_for(_build_accelerator()) != "musa":
+    if _build_accelerator() != "mthreads":
         return
     if "flag_gems.utils.libentry" not in sys.modules:
         return

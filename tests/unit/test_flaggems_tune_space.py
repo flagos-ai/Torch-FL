@@ -395,6 +395,84 @@ def test_the_patch_is_installed_once(fitted_tuner):
     assert fitted_tuner.LibTuner.run is first
 
 
+def test_a_policy_subclass_created_later_is_repaired(as_musa, stub_libentry):
+    """``LibTuner.register`` builds a policy subclass per ``libtuner`` call.
+
+    FlagGems imports op modules lazily, so most of those subclasses are created
+    after the patch ran. Each carries a copy of ``LibTuner.run`` taken at class
+    creation, and that copy is what a launch calls, so the subclass has to
+    inherit the repair rather than only the base class.
+    """
+    flagos._patch_flaggems_tune_space()
+
+    class Policy(stub_libentry.LibTuner):
+        pass
+
+    assert getattr(Policy.__dict__["run"], flagos._TUNE_SPACE_PATCHED, False)
+    tuner = Policy(refusals=1)
+    assert tuner.run() == "ran"
+    assert len(tuner.attempts) == 2
+
+
+def test_a_policy_subclass_made_before_the_patch_is_repointed(monkeypatch):
+    """The classes created before the patch hold their own unpatched ``run``.
+
+    ``_rewrap_flaggems_tuners`` rebinds each one's method, and the instances
+    already built that pinned the old function keep working on the repaired one.
+    """
+    module = types.SimpleNamespace(
+        LibTuner=type(
+            "LibTuner",
+            (),
+            {"__init__": _StubTuner.__init__, "run": _StubTuner.run},
+        )
+    )
+
+    class Early(module.LibTuner):
+        pass
+
+    built = Early(refusals=1)
+    real_import = importlib.import_module
+
+    def fake(name, *args, **kwargs):
+        if name == "flag_gems.utils.libentry":
+            return module
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(flagos.importlib, "import_module", fake)
+    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "mthreads")
+
+    flagos._patch_flaggems_tune_space()
+
+    assert getattr(Early.__dict__["run"], flagos._TUNE_SPACE_PATCHED, False)
+    assert getattr(built.run, flagos._TUNE_SPACE_PATCHED, False)
+
+
+def test_the_same_runtime_is_repaired_once(monkeypatch, stub_libentry):
+    """A FlagGems reload builds a new ``LibTuner`` and needs the repair again;
+    the same instance does not, so later bring-ups cost a dictionary check."""
+    runtime = types.ModuleType("flag_gems.runtime")
+    real_import = importlib.import_module
+
+    def fake(name, *args, **kwargs):
+        if name == "flag_gems.utils.libentry":
+            return stub_libentry
+        if name == "flag_gems.runtime":
+            return runtime
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(flagos.importlib, "import_module", fake)
+    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "mthreads")
+
+    flagos._patch_flaggems_tune_space()
+    first = stub_libentry.LibTuner.__dict__[flagos._TUNING_MODULE_PATCHED]
+
+    flagos._patch_flaggems_tune_space()
+
+    assert first is runtime
+    assert stub_libentry.LibTuner.__dict__[flagos._TUNING_MODULE_PATCHED] is runtime
+
+
 def test_failure_is_not_fatal(monkeypatch, as_musa):
     """Best-effort, like the patches around it: this runs inside device init."""
 
