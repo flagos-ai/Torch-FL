@@ -1859,6 +1859,61 @@ at::Tensor AtanhKernelMps(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(AtanhFn, atanh_dispatcher, Backend::kApple, AtanhKernelMps)
 
 
+at::Tensor TanKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::tan(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("tan"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph tanWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::tan(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TanFn, tan_dispatcher, Backend::kApple, TanKernelMps)
+
+
+at::Tensor LogicalNotKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::logical_not(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("logical_not"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* zero =
+            [graph constantWithScalar:0.0 dataType:args[0].dataType];
+        if (zero == nil) {
+          return nil;
+        }
+        return [graph equalWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];
+      });
+  if (!ran) {
+    return at::logical_not(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LogicalNotFn, logical_not_dispatcher, Backend::kApple, LogicalNotKernelMps)
+
+
 at::Tensor SinhKernelMps(const at::Tensor& self) {
   if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
     return at::sinh(self.cpu()).to(self.device());

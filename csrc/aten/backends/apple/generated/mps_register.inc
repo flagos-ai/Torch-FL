@@ -69,6 +69,7 @@
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("linspace", WrapperLinspace);
   m.impl("log", WrapperLog);
+  m.impl("logical_not", WrapperLogicalNot);
   m.impl("lt.Scalar", WrapperLtScalar);
   m.impl("lt.Tensor", WrapperLtTensor);
   m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
@@ -106,6 +107,7 @@
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);
   m.impl("t", WrapperT);
   m.impl("take", WrapperTake);
+  m.impl("tan", WrapperTan);
   m.impl("tanh", WrapperTanh);
   m.impl("transpose.int", WrapperTransposeInt);
   m.impl("triu", WrapperTriu);
