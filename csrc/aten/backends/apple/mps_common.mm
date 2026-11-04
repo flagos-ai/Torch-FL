@@ -330,6 +330,12 @@ bool MpsSupportsReduceDtype(
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsReduceDtype(at::ScalarType dtype) {
+  // The reductions that do not take a dtype: the answer is the operand's own
+  // width, which is exactly the two-argument form with no override.
+  return MpsSupportsReduceDtype(dtype, std::nullopt);
+}
+
 bool MpsSupportsDivDtype(at::ScalarType self_dtype, at::ScalarType other_dtype) {
   // The float widths only, *not* the mul predicate, even though the two would
   // look interchangeable: `mul` is dtype-preserving on the reference and

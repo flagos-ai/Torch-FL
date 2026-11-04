@@ -87,6 +87,9 @@ OPS = {
     "mul.Scalar": "binary_scalar",
     "sum.dim_IntList": "reduce",
     "mean.dim": "reduce",
+    "amax": "reduce_intlist",
+    "amin": "reduce_intlist",
+    "prod.dim_int": "reduce_dim",
     "all": "all",
     "all.dim": "all_dim",
     "all.dims": "all_dims",
@@ -631,6 +634,9 @@ AT_OP = {
     "mul.Scalar": "mul",
     "sum.dim_IntList": "sum",
     "mean.dim": "mean",
+    "amax": "amax",
+    "amin": "amin",
+    "prod.dim_int": "prod",
     "all": "all",
     "all.dim": "all",
     "all.dims": "all",
@@ -818,6 +824,8 @@ SUPPORTS = {
     "binary": "MpsSupportsBinaryDtype",
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
+    "reduce_intlist": "MpsSupportsReduceDtype",
+    "reduce_dim": "MpsSupportsReduceDtype",
     "all": "MpsSupportsAllDtype",
     "all_dim": "MpsSupportsAllDtype",
     "all_dims": "MpsSupportsAllDtype",
@@ -982,6 +990,10 @@ CALLS = {
     "mul.Scalar": "multiplicationWithPrimaryTensor:",
     "sum.dim_IntList": "reductionSumWithTensor:",
     "mean.dim": "reductionSumWithTensor:",
+    # amax/amin propagate NaN, so they take the PropagateNaN selectors.
+    "amax": "reductionMaximumPropagateNaNWithTensor:",
+    "amin": "reductionMinimumPropagateNaNWithTensor:",
+    "prod.dim_int": "reductionProductWithTensor:",
     # `all` and `triu` build their comparison and select in the body.
     "all": "",
     "all.dim": "",
@@ -1240,6 +1252,11 @@ KEY_PARTS = {
     "mul.Scalar": ", other",
     "sum.dim_IntList": ", axes",
     "mean.dim": ", axes",
+    "amax": ", axes, keepdim",
+    "amin": ", axes, keepdim",
+    "prod.dim_int": (
+        ", dim, keepdim, dtype.has_value() ? static_cast<int64_t>(*dtype) : int64_t{-1}"
+    ),
     "all": "",
     "all.dim": ", dimension, keepdim",
     "all.dims": ", axis_key, axes, keepdim",
@@ -1693,6 +1710,87 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # The named `axes:` selectors keep the rank and leave each reduced axis at size 1,
 # which is the keepdim shape; the aten shape is applied by the reshape MpsRunGraph
 # reads the result through, so keepdim and its absence are the same graph.
+# `amax`, `amin` and `prod` reduce over an `int[1]` dimension list and take no
+# `dtype` argument, so they cannot share `T_REDUCE`'s signature. The body is the
+# same otherwise: the axes go through `MpsReduceAxes`, an empty operand takes the
+# reference (a reduction over nothing is not nothing), and the graph receives the
+# axes as an `NSArray<NSNumber*>`.
+#
+# `amax`/`amin` take the `PropagateNaN` selectors rather than the plain
+# `reductionMaximum`/`reductionMinimum` ones: the reference propagates a NaN
+# through these two ops and the plain nodes drop it.
+# `prod.dim_int` reduces over a single dimension and takes an optional `dtype`,
+# so it shares neither `T_REDUCE`'s axis list nor `T_REDUCE_INTLIST`'s missing
+# dtype. The body is otherwise the reduce body with the one dimension wrapped.
+T_REDUCE_DIM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    bool keepdim,
+    std::optional<at::ScalarType> dtype) {{
+  if (!mps::{supports}(self.scalar_type(), dtype)) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+T_REDUCE_INTLIST = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    at::IntArrayRef dim,
+    bool keepdim) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_REDUCE = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -5599,6 +5697,8 @@ CATEGORIES = {
     "rsub_scalar": T_RSUB_SCALAR,
     "binary_scalar": T_SCALAR,
     "reduce": T_REDUCE,
+    "reduce_intlist": T_REDUCE_INTLIST,
+    "reduce_dim": T_REDUCE_DIM,
     "all": T_ALL,
     "all_dim": T_ALL_DIM,
     "all_dims": T_ALL_DIMS,
