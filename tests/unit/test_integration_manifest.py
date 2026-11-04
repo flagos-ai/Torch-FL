@@ -57,6 +57,7 @@ from manifest_composer import (
 _PLATFORMS = (
     "apple",
     "ascend",
+    "cambricon",
     "enflame",
     "hygon",
     "iluvatar",
@@ -80,9 +81,11 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    "factory_ops": ("cambricon",),
     "iluvatar_runtime": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "kunlunxin",
@@ -94,6 +97,7 @@ _KNOWN_GAPS = {
     "musa_runtime": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",
@@ -102,10 +106,11 @@ _KNOWN_GAPS = {
         "nvidia",
         "thead",
     ),
-    "vendor_ops": ("apple",),
+    "vendor_ops": ("apple", "cambricon"),
     "multi_device_contracts": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "iluvatar",
         "kunlunxin",
@@ -114,6 +119,7 @@ _KNOWN_GAPS = {
     "musa_flaggems_hybrid": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",
@@ -122,13 +128,11 @@ _KNOWN_GAPS = {
         "nvidia",
         "thead",
     ),
-    "rng": (
-        "apple",
-        "thead",
-    ),
+    "rng": ("apple", "cambricon", "thead"),
     "soft_lowp_matrix": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "iluvatar",
         "kunlunxin",
@@ -136,35 +140,23 @@ _KNOWN_GAPS = {
         "nvidia",
         "thead",
     ),
-    "amp_contract": (
-        "apple",
-        "kunlunxin",
-        "thead",
-    ),
-    "profiler_contract": (
-        "apple",
-        "enflame",
-        "kunlunxin",
-    ),
+    "amp_contract": ("apple", "cambricon", "kunlunxin", "thead"),
+    "profiler_contract": ("apple", "cambricon", "enflame", "kunlunxin"),
     "profiler_parity": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "kunlunxin",
         "metax",
         "mthreads",
         "thead",
     ),
-    "torch_compile": (
-        "apple",
-        "ascend",
-        "hygon",
-        "mthreads",
-        "thead",
-    ),
+    "torch_compile": ("apple", "ascend", "cambricon", "hygon", "mthreads", "thead"),
     "inference": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",
@@ -176,6 +168,7 @@ _KNOWN_GAPS = {
     "training": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",
@@ -187,6 +180,7 @@ _KNOWN_GAPS = {
     "native_comm_bridge": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "iluvatar",
         "kunlunxin",
@@ -198,6 +192,7 @@ _KNOWN_GAPS = {
     "musa_dispatch": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",
@@ -209,6 +204,7 @@ _KNOWN_GAPS = {
     "unit_tests_per_file": (
         "apple",
         "ascend",
+        "cambricon",
         "enflame",
         "iluvatar",
         "kunlunxin",
@@ -219,6 +215,7 @@ _KNOWN_GAPS = {
     ),
     "backend_ops": (
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",
@@ -230,6 +227,7 @@ _KNOWN_GAPS = {
     ),
     "mps_runtime": (
         "ascend",
+        "cambricon",
         "enflame",
         "hygon",
         "iluvatar",

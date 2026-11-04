@@ -503,6 +503,63 @@
         "bpu"
       ]
     },
+
+    "cambricon": {
+
+      "vendor": "cambricon",
+      "_comment": [
+        "Cambricon MLU (BANG). A native backend like kunlunxin/mps, not a",
+        "boxing one: the runtime sources under csrc/runtime/accelerator/",
+        "cambricon/ call libcnrt directly (cnrtMalloc, cnrtQueue_t,",
+        "cnrtNotifier_t) and the op kernels go through CNNL, so no tensor is",
+        "re-issued onto the CUDA key and boxing is off.",
+        "",
+        "The wheel runs on the stock torch+cpu. torch_mlu is intentionally NOT",
+        "a dependency -- it hard-links its own libtorch and is ABI-bound to one",
+        "vendor torch minor -- so vendor_torch_libraries is false. The",
+        "torch.mlu/torch_mlu surface FlagGems and Triton's mlu driver read is",
+        "synthesized at import time by torch_fl/accelerator/cambricon/",
+        "_cambricon_compat.py, backed by the runtime this row builds.",
+        "",
+        "FlagGems Python is ON and is the primary operator route. Its Triton",
+        "backend comes from the lane's `triton` wheel (3.4.0+mlu2.1.1), not from",
+        "a `flagtree` package: flagtree is deliberately not installed here. The",
+        "CNNL kernels under aten/backends/cambricon/ cover the ops FlagGems does",
+        "not and are still being added -- until then those ops reach",
+        "cpu_fallback, which is what backends_cambricon.conf records.",
+        "",
+        "wheel_local names the Neuware build variant (neuware4.6.7), matching",
+        "how the other lanes carry their SDK segment, and the wheel publishes",
+        "to the flagos-pypi-cambricon lane that already exists.",
+        "The chip layer (MLU370/MLU590) is source-only and never appears here."
+      ],
+      "project_languages": ["CXX", "C"],
+      "runtime_dir": "cambricon",
+      "bundle_libdir": "lib",
+      "vendor_torch_libraries": false,
+      "wheel_local": "neuware4.6.7",
+      "pypi_lane": "cambricon",
+      "use_macro": "USE_CAMBRICON",
+      "writes_platform_marker": true,
+      "c10_cuda_no_cmake_configure": true,
+      "kernel_defaults": {
+        "FLAGOS_BUILD_VENDOR": true,
+        "FLAGOS_BUILD_FLAGGEMS": true,
+        "FLAGOS_BUILD_BOXING": false,
+        "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+        "FLAGOS_BUILD_TILEOPS": false
+      },
+      "pins": {
+        "FLAGOS_BUILD_BOXING": {
+          "value": false,
+          "reason": "native MLU backend: ops route to the CNNL kernels, never to the CUDA boxing kernels"
+        },
+        "FLAGOS_BUILD_FLAGGEMS_CPP": {
+          "value": false,
+          "reason": "no FlagGems liboperators.so exists for the Neuware SDK"
+        }
+      }
+    },
     "mps": {
       "vendor": "apple",
       "_comment": [

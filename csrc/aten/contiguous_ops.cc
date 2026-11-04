@@ -229,7 +229,7 @@ at::Tensor contiguous(
       musa_ops::MudnnCopy(self, result);
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
       // The CUDA gather: hand it to the native TensorIterator strided copy
       // kernel. `DeviceBoxingGuard` only rewrites device metadata to CUDA --
       // the kernel behind it is a CUDA DispatchStub, so the arm is chosen by
@@ -260,6 +260,10 @@ at::Tensor contiguous(
       const bool copied_on_device = gcu::StridedCopy(result, self);
 #elif defined(USE_KUNLUNXIN)
       const bool copied_on_device = kunlunxin::StridedCopy(result, self);
+#elif defined(USE_CAMBRICON)
+      // No CNNL strided-copy kernel yet: report false and take the CPU
+      // round-trip below, the same arm copy_ops.cc uses.
+      const bool copied_on_device = false;
 #else
       const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif
@@ -327,7 +331,7 @@ at::Tensor clone(
 #else
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
     // Use DeviceBoxingGuard to leverage CUDA's native strided copy kernel
     // instead of an expensive CPU round-trip -- but only in a wheel whose torch
     // actually ships that kernel. See the note above
@@ -353,6 +357,9 @@ at::Tensor clone(
     const bool copied_on_device = gcu::StridedCopy(result, self);
 #elif defined(USE_KUNLUNXIN)
     const bool copied_on_device = kunlunxin::StridedCopy(result, self);
+#elif defined(USE_CAMBRICON)
+    // No CNNL strided-copy kernel yet; the `copy_` fallback just below serves it.
+    const bool copied_on_device = false;
 #else
     const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif

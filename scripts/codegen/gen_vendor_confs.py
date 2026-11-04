@@ -186,6 +186,19 @@ VENDORS = {
         "backends/iluvatar/generated/iluvatar_register.inc",
         ("backends/iluvatar/generated/iluvatar_flaggems_register.inc",),
     ),
+    # Cambricon MLU is FlagGems-primary with no native half yet: the CNNL
+    # kernels under aten/backends/cambricon/ do not exist, so the native slot is
+    # the empty string -- the explicit "no native kernels" declaration, not a
+    # file that should exist. Every op FlagGems does not cover therefore routes
+    # to `none` (cpu_fallback) rather than to a vendor kernel. The FlagGems .inc
+    # comes from codegen_cambricon_flaggems.py; when a cnnl_register.inc lands,
+    # name it in this slot and that generator subtracts its ops automatically,
+    # keeping the two disjoint inside the one PrivateUse1 TORCH_LIBRARY_IMPL
+    # body.
+    "cambricon": (
+        "",
+        ("backends/cambricon/generated/cambricon_flaggems_register.inc",),
+    ),
 }
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
@@ -1135,6 +1148,7 @@ FLAGGEMS_PYTHON_PLATFORMS = {
     "mthreads",
     "thead",
     "iluvatar",
+    "cambricon",
 }
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's
