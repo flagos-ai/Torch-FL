@@ -2883,6 +2883,81 @@ at::Tensor ExpKernelMps(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kApple, ExpKernelMps)
 
 
+at::Tensor Exp2KernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::exp2(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("exp2"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph exponentBase2WithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::exp2(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(Exp2Fn, exp2_dispatcher, Backend::kApple, Exp2KernelMps)
+
+
+at::Tensor Log2KernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::log2(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("log2"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph logarithmBase2WithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::log2(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kApple, Log2KernelMps)
+
+
+at::Tensor Log10KernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::log10(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("log10"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph logarithmBase10WithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::log10(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kApple, Log10KernelMps)
+
+
 at::Tensor LogKernelMps(const at::Tensor& self) {
   if (!mps::MpsSupportsLogDtype(self.scalar_type())) {
     return at::log(self.cpu()).to(self.device());
