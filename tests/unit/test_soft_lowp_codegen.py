@@ -611,13 +611,17 @@ def test_the_floor_reaches_the_ordinary_flaggems_matmul_too():
 def test_a_dtype_this_route_cannot_serve_leaves_the_device():
     """float64 `mm` on MetaX must not reach FlagGems at all.
 
-    Widening K is not enough for every dtype: FlagGems' tiled `mm` declares its
-    accumulator from `dot_out_dtype` and re-assigns it at the operand width in
-    the K loop, which triton-metax refuses for float64 ("Loop-carried variable
-    acc has initial type fp32 but is re-assigned to fp64 in loop", metax lane
-    of run 41009417366). On a development host the same call does not raise --
-    it silently answers wrong by rel 0.97 to 1.77 -- so the escape is about
-    correctness, not about a red lane.
+    Widening K is not enough for every dtype. In CI the FlagGems tiled `mm`
+    fails to compile for float64 ("Loop-carried variable acc has initial type
+    fp32 but is re-assigned to fp64 in loop", metax lane of run 41009417366).
+    On a development host the same call does not raise and answers wrong by
+    rel 0.97 to 1.77, so the escape is about correctness, not a red lane.
+
+    The underlying defect is a row permutation, not the accumulator the compile
+    assertion points at: a pure-triton fp64 `tl.dot` returns `A @ I` as the rows
+    of `A`, bit-exact but reordered by `(i % 4) * 4 + (i // 4)` per 16-row
+    block, where fp32 is correct. Upstream as flagos-ai/FlagTree#1489; this
+    escape is deleted when that is fixed.
 
     Neither dtype predicate can state this. FlagGemsRejectsOpDtype substitutes
     VendorSlot()'s kernel and MetaX has none, so an entry there is inert;
