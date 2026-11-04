@@ -115,6 +115,7 @@
   m.impl("tan", WrapperTan);
   m.impl("tanh", WrapperTanh);
   m.impl("transpose.int", WrapperTransposeInt);
+  m.impl("tril", WrapperTril);
   m.impl("triu", WrapperTriu);
   m.impl("trunc", WrapperTrunc);
   m.impl("unsqueeze", WrapperUnsqueeze);

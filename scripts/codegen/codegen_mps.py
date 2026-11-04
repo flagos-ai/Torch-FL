@@ -96,6 +96,7 @@ OPS = {
     # The fixed causal mask the model reads selects one triangle of the operand.
     # The graph uses MPSGraph's row and column coordinates. See T_TRIU.
     "triu": "triu",
+    "tril": "tril",
     "argmax": "argmax",
     # Qwen3.5's GatedDeltaNet solves a batched triangular system. MPSGraph has
     # no triangular-solve selector on the hosted SDK, so the body builds a
@@ -760,6 +761,7 @@ AT_OP = {
     "all.dim": "all",
     "all.dims": "all",
     "triu": "triu",
+    "tril": "tril",
     "argmax": "argmax",
     "linalg_solve_triangular": "linalg_solve_triangular",
     "index.Tensor": "index",
@@ -958,6 +960,7 @@ SUPPORTS = {
     "all_dim": "MpsSupportsAllDtype",
     "all_dims": "MpsSupportsAllDtype",
     "triu": "MpsSupportsTriuDtype",
+    "tril": "MpsSupportsTriuDtype",
     "argmax": "MpsSupportsArgmaxDtype",
     "SOLVE_TRIANGULAR": "MpsSupportsTriangularSolveDtype",
     "index": "",
@@ -1130,6 +1133,7 @@ CALLS = {
     "all.dim": "",
     "all.dims": "",
     "triu": "",
+    "tril": "",
     "argmax": "",
     # T_CUMSUM writes the full selector because its axis binds to the first
     # argument, as MpsGatherIndex does for the gather family.
@@ -1406,6 +1410,7 @@ KEY_PARTS = {
     "all.dim": ", dimension, keepdim",
     "all.dims": ", axis_key, axes, keepdim",
     "triu": ", diagonal",
+    "tril": ", diagonal",
     "argmax": ", axis, keepdim",
     # The three host flags choose the substitution direction and which side of
     # the system B covers. They cannot be inferred from tensor signatures.
@@ -2191,6 +2196,71 @@ T_TRIU = r"""at::Tensor {kernel}(const at::Tensor& self, int64_t diagonal) {{
           return nil;
         }}
         return [graph selectWithPredicateTensor:upper
+                            truePredicateTensor:args[0]
+                           falsePredicateTensor:zero
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), diagonal).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+# `tril` is `triu` with the comparison reversed: the same coordinate difference
+# against the same offset, `<=` instead of `>=`. The two bodies are otherwise
+# identical, including the int32 cast on the offset -- a scalar constant in int64
+# is not broadcastable against an int32 tensor on this SDK, and the graph compiler
+# aborts on that mismatch.
+#
+# Serving it matters more than the arithmetic suggests: `triu` is already on the
+# graph and `tril` was not, so a single tensor masked on one side cost a
+# round-trip while the other did not. Measured, `tril` on (1024, 1024) took
+# 0.58 ms through the fallback where `triu`'s graph answers in 0.29 ms.
+T_TRIL = r"""at::Tensor {kernel}(const at::Tensor& self, int64_t diagonal) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu(), diagonal).to(self.device());
+  }}
+  if (self.dim() < 2 || self.size(-1) == 0 || self.size(-2) == 0) {{
+    return at::{at_op}(self.cpu(), diagonal).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}", diagonal),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSShape* shape = mps::MpsShapeOf(self_c.sizes());
+        MPSGraphTensor* column =
+            [graph coordinateAlongAxis:-1 withShape:shape name:nil];
+        MPSGraphTensor* row =
+            [graph coordinateAlongAxis:-2 withShape:shape name:nil];
+        MPSGraphTensor* difference =
+            [graph subtractionWithPrimaryTensor:column
+                                secondaryTensor:row
+                                           name:nil];
+        // Coordinates are int32. Cast the offset before comparing: a scalar
+        // constant in int64 is not broadcastable against an int32 tensor on
+        // this SDK, and the graph compiler aborts on that mismatch.
+        MPSGraphTensor* diagonal_t =
+            mps::MpsConstant(graph, diagonal, at::kInt);
+        MPSGraphTensor* offset = diagonal_t == nil ? nil :
+            [graph broadcastTensor:diagonal_t
+                           toShape:shape
+                              name:nil];
+        MPSGraphTensor* lower =
+            [graph lessThanOrEqualToWithPrimaryTensor:difference
+                                      secondaryTensor:offset
+                                                 name:nil];
+        MPSGraphTensor* zero =
+            mps::MpsConstant(graph, 0, self_c.scalar_type());
+        if (lower == nil || zero == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:lower
                             truePredicateTensor:args[0]
                            falsePredicateTensor:zero
                                            name:nil];
@@ -6217,6 +6287,7 @@ CATEGORIES = {
     "all_dim": T_ALL_DIM,
     "all_dims": T_ALL_DIMS,
     "triu": T_TRIU,
+    "tril": T_TRIL,
     "argmax": T_ARGMAX,
     "SOLVE_TRIANGULAR": T_SOLVE_TRIANGULAR,
     "index": T_INDEX,

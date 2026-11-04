@@ -1061,6 +1061,61 @@ at::Tensor TriuKernelMps(const at::Tensor& self, int64_t diagonal) {
 REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kApple, TriuKernelMps)
 
 
+at::Tensor TrilKernelMps(const at::Tensor& self, int64_t diagonal) {
+  if (!mps::MpsSupportsTriuDtype(self.scalar_type())) {
+    return at::tril(self.cpu(), diagonal).to(self.device());
+  }
+  if (self.dim() < 2 || self.size(-1) == 0 || self.size(-2) == 0) {
+    return at::tril(self.cpu(), diagonal).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("tril", diagonal),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSShape* shape = mps::MpsShapeOf(self_c.sizes());
+        MPSGraphTensor* column =
+            [graph coordinateAlongAxis:-1 withShape:shape name:nil];
+        MPSGraphTensor* row =
+            [graph coordinateAlongAxis:-2 withShape:shape name:nil];
+        MPSGraphTensor* difference =
+            [graph subtractionWithPrimaryTensor:column
+                                secondaryTensor:row
+                                           name:nil];
+        // Coordinates are int32. Cast the offset before comparing: a scalar
+        // constant in int64 is not broadcastable against an int32 tensor on
+        // this SDK, and the graph compiler aborts on that mismatch.
+        MPSGraphTensor* diagonal_t =
+            mps::MpsConstant(graph, diagonal, at::kInt);
+        MPSGraphTensor* offset = diagonal_t == nil ? nil :
+            [graph broadcastTensor:diagonal_t
+                           toShape:shape
+                              name:nil];
+        MPSGraphTensor* lower =
+            [graph lessThanOrEqualToWithPrimaryTensor:difference
+                                      secondaryTensor:offset
+                                                 name:nil];
+        MPSGraphTensor* zero =
+            mps::MpsConstant(graph, 0, self_c.scalar_type());
+        if (lower == nil || zero == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:lower
+                            truePredicateTensor:args[0]
+                           falsePredicateTensor:zero
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::tril(self.cpu(), diagonal).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TrilFn, tril_dispatcher, Backend::kApple, TrilKernelMps)
+
+
 at::Tensor ArgmaxKernelMps(
     const at::Tensor& self,
     std::optional<int64_t> dim,
