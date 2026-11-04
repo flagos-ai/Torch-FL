@@ -146,10 +146,14 @@ OPS = {
     # layer's device dispatch time, and at seq 1 -- where the whole layer's
     # arithmetic is 0.09 GFLOP -- the eight `mm` calls were still 84% of it, so
     # the cost is the host round trip around the weights rather than the flops.
-    # `addmm`, `mv`, `linear` and the `.out` spellings follow the same rule as
-    # the categories above: unregistered until a kernel exists.
+    # `addmm` is the spelling `nn.Linear` reaches on this build, so it is the
+    # gemm-family op a model actually waits on; it shares T_GEMM's layout work
+    # and adds the bias. `mv`, `matmul`, `addbmm`/`baddbmm` and the `.out`
+    # spellings follow the same rule as the categories above: unregistered until
+    # a kernel exists.
     "mm": "gemm",
     "bmm": "gemm",
+    "addmm": "addmm",
     # Convolution, the last lane of stage 3 and the op the two matmuls above are
     # not enough for: a vision model (and a Qwen3.5-class mixer's depthwise
     # conv1d) reaches `conv2d`/`conv1d` through `nn.Conv2d` and
@@ -562,6 +566,7 @@ AT_OP = {
     "pow.Tensor_Scalar": "pow",
     "mm": "mm",
     "bmm": "bmm",
+    "addmm": "addmm",
     # The CPU reference the `conv` category round-trips to. `convolution` is the
     # composite that lowers to `convolution_overrideable`, and the reference
     # implementation behind it is the slow 2d/3d path, so this is what the
@@ -706,6 +711,11 @@ SUPPORTS = {
     "cumsum": "MpsSupportsCumsumDtype",
     "softplus": "MpsSupportsSoftplusDtype",
     "gemm": "MpsSupportsGemmDtype",
+    # The two `mat` operands are gated exactly as `mm`'s, and the bias is held
+    # to their width by the body rather than by this predicate: aten's `addmm`
+    # promotes nothing, so a bias of another width is a reference concern and a
+    # decline, not a wider graph.
+    "addmm": "MpsSupportsGemmDtype",
     "softmax": "MpsSupportsSoftmaxDtype",
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
@@ -872,6 +882,9 @@ CALLS = {
     # takes is the same node as the rank-2 pair mm takes.
     "mm": "matrixMultiplicationWithPrimaryTensor:",
     "bmm": "matrixMultiplicationWithPrimaryTensor:",
+    # T_ADDMM writes the whole body: the product, the optional alpha, and the
+    # bias with its own beta.
+    "addmm": "",
     "neg": "negativeWithTensor:",
     "sin": "sinWithTensor:",
     "cos": "cosWithTensor:",
@@ -1068,6 +1081,13 @@ KEY_PARTS = {
     # Which of the two operands the graph has to transpose: see T_GEMM.
     "mm": ", self_transposed, mat2_transposed",
     "bmm": ", self_transposed, mat2_transposed",
+    # T_ADDMM reads the same two layout flags, the result shape the bias was
+    # broadcast to, and both scalings. The *values* go in, not the flags the
+    # body derives from them: `alpha=2` and `alpha=0.25` both set
+    # `scales_product`, so a key carrying the flag would make them one plan and
+    # the first product would answer both -- measured, that returned values up
+    # to 15.98 from the reference.
+    "addmm": (", mat1_transposed, mat2_transposed, out_shape, alpha, beta"),
     # The axis the body resolved against the operand's rank. The result dtype
     # `half_to_float` decides does not need naming here: the body widens the
     # operand to it first, and MpsRunGraph folds the operand's own dtype into the
@@ -2127,6 +2147,149 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # in float, hand back float -- and it is what the graph path does by widening
 # to `out_dtype`. The dtype gate above decides the widened result, so the two
 # paths agree on the answer for every width that reaches them.
+
+# `addmm` is the op `nn.Linear` actually reaches on this PyTorch build -- not
+# `mm`, which the stage-3 increment took first -- so it is the largest host
+# round-trip left in the gemm family. Measured on an M5 with a (2048, 2048)
+# float32 product, `torch.addmm(a, a, a)` cost 15.1 ms against 7.9 ms for
+# `torch.mm(a, a)` over the same operands, and the difference is the round-trip:
+# `mm` is served and `addmm` was not.
+#
+# The body is T_GEMM's with the bias folded in as two more nodes, so what is
+# worth recording is where it differs from that sibling rather than the product:
+#
+#   * **`alpha` and `beta` are host values the graph bakes in.** They scale the
+#     product and the bias respectively (`beta * input + alpha * (mat1 @ mat2)`),
+#     and neither is visible in any operand's dtype or shape, so both are in the
+#     plan key. A call that differed only in `alpha` would otherwise be answered
+#     by the graph the first call compiled -- a wrong answer, not a slow path.
+#   * **The bias broadcasts, and the product is rank-2.** aten's `addmm` takes
+#     only the 2-D `mat1`/`mat2` pair, so the product is `(M, N)` and the bias is
+#     broadcast onto it by the reference's own `infer_size`. The body asks
+#     `at::infer_size` for the result shape rather than restating the rule, and a
+#     bias that does not reach the product takes the round-trip and gets the
+#     reference's own message.
+#   * **`beta == 0` skips the bias entirely.** That is what the reference means
+#     by it -- the bias is not read -- so building the node anyway would read
+#     memory the reference does not and could turn a valid call into a decline on
+#     the bias's dtype.
+#
+# `alpha == 1` and `beta == 1` build no node at all, so the ordinary
+# `nn.Linear` path is the bare product plus the bias. The operands keep T_GEMM's
+# layout handling: `MpsGemmOperand` resolves each `mat` and carries the transpose
+# into the graph as a view rather than a copy.
+T_ADDMM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Tensor& mat1,
+    const at::Tensor& mat2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {{
+  if (!mps::{supports}(mat1.scalar_type(), mat2.scalar_type())) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  // The bias takes the result's width and device. A bias of another float width
+  // or device is the reference's to promote rather than the graph's to coerce.
+  if (self.scalar_type() != mat1.scalar_type() ||
+      self.device() != mat1.device()) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  if (mat1.dim() != 2 || mat2.dim() != 2 ||
+      mat1.size(-1) != mat2.size(-2)) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  // The reference's own broadcast rule, asked rather than restated: a bias that
+  // does not reach (M, N) is an error, and `at::infer_size` is what says so.
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self.sizes(), {{mat1.size(0), mat2.size(1)}});
+  }} catch (const std::exception&) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, mat1.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  if (mat1.numel() == 0 || mat2.numel() == 0) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  const mps::MpsGemmOperand mat1_operand = mps::MpsGemmOperandOf(mat1);
+  const mps::MpsGemmOperand mat2_operand = mps::MpsGemmOperandOf(mat2);
+  const bool mat1_transposed = mat1_operand.transposed;
+  const bool mat2_transposed = mat2_operand.transposed;
+  const bool folds_bias = !beta.equal(0);
+  const bool scales_product = !alpha.equal(1);
+  const bool scales_bias = folds_bias && !beta.equal(1);
+  const at::ScalarType dtype = mat1.scalar_type();
+  // Each operand reaches the graph at the shape its own buffer holds -- the
+  // operand itself, or its transpose view when `transposed` -- which is what
+  // MpsRunGraph describes. There is no shared "product shape": a transposed
+  // weight's buffer is (N, K) and the dense one's is (K, N), and describing
+  // both as (M, N) reads the wrong bytes.
+  std::vector<at::Tensor> inputs{{mat1_operand.buffer, mat2_operand.buffer}};
+  if (folds_bias) {{
+    inputs.push_back(self.contiguous());
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      inputs,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        if (args.count != (folds_bias ? 3u : 2u)) {{
+          return nil;
+        }}
+        // MpsRunGraph describes every operand densely at the shape its buffer
+        // holds, so a transposed one carries its transpose as a node -- the
+        // layout T_GEMM resolves the same way.
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args[1];
+        if (mat1_transposed) {{
+          primary =
+              [graph transposeTensor:primary dimension:0 withDimension:1 name:nil];
+        }}
+        if (mat2_transposed) {{
+          secondary =
+              [graph transposeTensor:secondary dimension:0 withDimension:1 name:nil];
+        }}
+        MPSGraphTensor* product =
+            [graph matrixMultiplicationWithPrimaryTensor:primary
+                                         secondaryTensor:secondary
+                                                    name:nil];
+        if (scales_product) {{
+          product = mps::MpsScaledByScalar(graph, product, alpha, dtype);
+          if (product == nil) {{
+            return nil;
+          }}
+        }}
+        if (!folds_bias) {{
+          return product;
+        }}
+        MPSGraphTensor* bias = args[2];
+        if (scales_bias) {{
+          bias = mps::MpsScaledByScalar(graph, bias, beta, dtype);
+          if (bias == nil) {{
+            return nil;
+          }}
+        }}
+        // The product is (M, N) and the bias is whatever aten broadcast to it;
+        // the node broadcasts the pair the way the reference did.
+        return [graph additionWithPrimaryTensor:product secondaryTensor:bias name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_SOFTMAX_BODY = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -5117,6 +5280,7 @@ CATEGORIES = {
     "cumsum": T_CUMSUM,
     "softplus": T_SOFTPLUS,
     "gemm": T_GEMM,
+    "addmm": T_ADDMM,
     "softmax": T_SOFTMAX_BODY,
     "pow_scalar": T_POW,
     "conv": T_CONV,
