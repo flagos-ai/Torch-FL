@@ -1032,3 +1032,169 @@ def cpp_oplib():
 
 
 _CPP_OPLIB = None
+
+
+class DeviceChain:
+    """Runs a sequence of artifacts without bringing activations back to the host.
+
+    Every op the eager path dispatches today returns a host array, which the
+    next op copies onto the device again. Measured on the S600, that is the
+    difference between 0.09 ms and 1.8 ms per operator: a bare driver loop over
+    in-place device pointers costs 0.094 ms, while the same op through the
+    runtime, the buffered kernel and the aten wrapper costs an order of
+    magnitude more.
+
+    This keeps a small ring of device buffers and hands each op the buffer the
+    previous one wrote, so an activation never leaves the device. The host only
+    sees the input of the first op and the result of the last.
+
+    Buffers are keyed by byte size and reused round-robin. Two consecutive ops
+    can share a bucket size without aliasing because the ring is at least two
+    deep: op N writes buffer (N+1) % ring while reading (N) % ring.
+
+    The chain is not reentrant and not thread safe; one instance serves one
+    sequence of ops at a time.
+    """
+
+    def __init__(self, ring: int = 4, flush: bool = True):
+        if _dnn is None or _ucp is None:
+            raise RuntimeError("BPU runtime libraries are unavailable")
+        self.ring = max(2, int(ring))
+        self.flush = bool(flush)
+        self._kernels: dict[str, _ChainKernel] = {}
+        self._buffers: list[UCPSysMem] = []
+        self._in_use = 0
+
+    def _kernel(self, hbm_path: str, model_name: str) -> "_ChainKernel":
+        k = self._kernels.get(hbm_path)
+        if k is None:
+            k = _ChainKernel(hbm_path, model_name, self)
+            self._kernels[hbm_path] = k
+        return k
+
+    def _alloc(self, nbytes: int) -> UCPSysMem:
+        mem = UCPSysMem()
+        if _ucp.hbUCPMallocCached(ctypes.byref(mem), nbytes, 0):
+            raise RuntimeError(f"hbUCPMallocCached({nbytes}) failed")
+        self._buffers.append(mem)
+        return mem
+
+    def take(self, nbytes: int) -> UCPSysMem:
+        """A device buffer of at least `nbytes`, reused round-robin.
+
+        Round-robin rather than first-fit: two consecutive ops often want the
+        same size, and handing back the buffer the previous op just wrote would
+        alias read and write. Bumping the cursor every call keeps the read and
+        write buffers distinct as long as the ring is at least two deep.
+        """
+        n = len(self._buffers)
+        for k in range(n):
+            mem = self._buffers[(self._in_use + k) % n]
+            if mem.memSize >= nbytes:
+                self._in_use = (self._in_use + k + 1) % n
+                return mem
+        mem = self._alloc(nbytes)
+        self._in_use = 0
+        return mem
+
+    def run_chain(self, steps, x: np.ndarray) -> np.ndarray:
+        """Run `steps` back to back on device and return the last result.
+
+        `steps` is a list of (hbm_path, model_name) pairs whose widths match
+        `x`. Each step reads the previous step's output in place.
+        """
+        if not steps:
+            return x
+        first = self._kernel(*steps[0])
+        flat = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
+        if flat.size != first.width:
+            raise ValueError(
+                f"chain input has {flat.size} lanes, artifacts want {first.width}"
+            )
+        src = self.take(first.out_bytes)
+        ctypes.memmove(
+            ctypes.c_void_p(src.virAddr),
+            ctypes.c_void_p(flat.ctypes.data),
+            first.nbytes,
+        )
+        if self.flush:
+            _ucp.hbUCPMemFlush(ctypes.byref(src), CACHE_CLEAN)
+        for path, name in steps:
+            k = self._kernel(path, name)
+            dst = self.take(k.out_bytes)
+            if dst.virAddr == src.virAddr:
+                # The ring handed back the buffer we are reading from.
+                dst = self._alloc(k.out_bytes)
+            k.execute(src, dst)
+            src = dst
+        if self.flush:
+            _ucp.hbUCPMemFlush(ctypes.byref(src), CACHE_INVALIDATE)
+        return np.frombuffer(
+            (ctypes.c_float * (src.memSize // 4)).from_address(src.virAddr),
+            dtype=np.float32,
+        ).copy()
+
+    def close(self) -> None:
+        for mem in self._buffers:
+            try:
+                _ucp.hbUCPFree(ctypes.byref(mem))
+            except Exception:  # noqa: BLE001 - closing is best effort
+                pass
+        self._buffers.clear()
+        self._kernels.clear()
+
+
+class _ChainKernel:
+    """One artifact prepared for device-to-device execution."""
+
+    def __init__(self, hbm_path: str, model_name: str, chain: DeviceChain):
+        self.packed = ctypes.c_void_p()
+        paths = (ctypes.c_char_p * 1)(ctypes.c_char_p(hbm_path.encode()))
+        if _dnn.hbDNNInitializeFromFiles(ctypes.byref(self.packed), paths, 1):
+            raise RuntimeError(f"hbDNNInitializeFromFiles({hbm_path}) failed")
+        self.model = ctypes.c_void_p()
+        if _dnn.hbDNNGetModelHandle(
+            ctypes.byref(self.model), self.packed, ctypes.c_char_p(model_name.encode())
+        ):
+            raise RuntimeError(f"hbDNNGetModelHandle({model_name}) failed")
+        self.in_props = DNNTensorProperties()
+        self.out_props = DNNTensorProperties()
+        if _dnn.hbDNNGetInputTensorProperties(
+            ctypes.byref(self.in_props), self.model, 0
+        ):
+            raise RuntimeError("hbDNNGetInputTensorProperties failed")
+        _prepare_stride(self.in_props)
+        if _dnn.hbDNNGetOutputTensorProperties(
+            ctypes.byref(self.out_props), self.model, 0
+        ):
+            raise RuntimeError("hbDNNGetOutputTensorProperties failed")
+        self.width = 1
+        for i in range(self.in_props.validShape.numDimensions):
+            self.width *= int(self.in_props.validShape.dimensionSize[i])
+        self.nbytes = self.width * 4
+        self.out_bytes = _buffer_size(self.out_props)
+        self.sched = UCPSchedParam(
+            priority=0, customId=0, backend=BPU_CORE_ANY, deviceId=0
+        )
+        self._in_t = (DNNTensor * 1)()
+        self._out_t = (DNNTensor * 1)()
+        self._in_t[0].properties = self.in_props
+        self._out_t[0].properties = self.out_props
+        self._out_ptr = ctypes.c_void_p()
+
+    def execute(self, src: UCPSysMem, dst: UCPSysMem) -> None:
+        self._in_t[0].sysMem = src
+        self._out_t[0].sysMem = dst
+        handle = ctypes.c_void_p()
+        rc = _dnn.hbDNNInferV2(
+            ctypes.byref(handle), self._out_t, self._in_t, self.model
+        )
+        if rc:
+            raise RuntimeError(f"hbDNNInferV2 rc={rc}")
+        rc = _ucp.hbUCPSubmitTask(handle, ctypes.byref(self.sched))
+        if rc:
+            raise RuntimeError(f"hbUCPSubmitTask rc={rc}")
+        rc = _ucp.hbUCPWaitTaskDone(handle, -1)
+        _ucp.hbUCPReleaseTask(handle)
+        if rc:
+            raise RuntimeError(f"hbUCPWaitTaskDone rc={rc}")
