@@ -67,6 +67,11 @@ debug/
 # Transient agent worktrees
 .claude/worktrees/
 
+# Scratch space for agent exploration scripts. A throwaway under here was picked
+# up by a `git add -A` once and had to be removed from a branch afterwards; the
+# directory is for work in progress that is never meant to be committed.
+.scratch/
+
 # Empty hash-named lock files dropped in the repo root by tooling. Scoped to a
 # 64-hex-character basename rather than *.lock so real dependency lockfiles
 # (poetry.lock, Cargo.lock, uv.lock) stay tracked.
