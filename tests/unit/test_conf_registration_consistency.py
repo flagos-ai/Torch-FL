@@ -812,14 +812,16 @@ def test_conf_route_counts_are_stable():
         # spellings ``ceil``/``floor``/``trunc`` and the predicates ``isnan``,
         # ``isinf``, ``isneginf``, ``isposinf`` and ``signbit`` -- ``round`` is
         # deliberately absent, because MPSGraph's node rounds half away from zero
-        # where the reference rounds half to even (83 ops so far) -- so the conf
+        # where the reference rounds half to even, and the whole comparison family
+        # (``eq``/``ne``/``lt``/``le``/``gt``/``ge`` over tensors and over a
+        # scalar) with ``maximum``/``minimum`` (94 ops so far) -- so the conf
         # routes those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"none": 1959, "apple": 83},
+        "apple": {"none": 1948, "apple": 94},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then
