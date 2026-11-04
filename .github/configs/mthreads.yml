@@ -38,6 +38,12 @@ paths_watch:
   - .github/scripts/set_env_mthreads.sh
   - scripts/codegen/codegen_musa_flaggems.py
   - scripts/codegen/codegen_mudnn.py
+  # The file names no MUSA code, but one of its cases is the one that went red
+  # on main at the module-to-device comparison: its `Linear` draw is summed both
+  # on the device and on the CPU, and an unseeded draw there is a lottery on
+  # any platform whose `linear` adds the 4 terms in a different order. Without
+  # this entry a change to the case never reaches the lane it was written for.
+  - tests/integration/test_factory_ops.py
 
 container_volumes: []
 
