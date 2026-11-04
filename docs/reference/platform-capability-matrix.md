@@ -195,4 +195,4 @@ against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
 - `csrc/runtime/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
 - `csrc/aten/backends/`: apple, ascend, bpu, cambricon, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: apple, ascend, bpu, cambricon, dcu, enflame, hygon, iluvatar, metax, mthreads, nvidia, ppu, thead, tsingmicro
+- `torch_fl/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro
