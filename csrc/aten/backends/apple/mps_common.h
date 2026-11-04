@@ -289,6 +289,11 @@ bool MpsSupportsReduceDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype);
 
+// The `int[1]`-dimension reductions (`amax`, `amin`, `prod`) take no `dtype`
+// argument at all, so there is no out_dtype to check -- the same question with
+// nothing to compare against.
+bool MpsSupportsReduceDtype(at::ScalarType dtype);
+
 // Whether an aten `_softmax` over a tensor of `self_dtype` computes exactly on
 // the MPSGraph path, and the dtype the result comes back in.
 //

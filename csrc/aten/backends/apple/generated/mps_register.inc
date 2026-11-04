@@ -24,6 +24,8 @@
   m.impl("all", WrapperAll);
   m.impl("all.dim", WrapperAllDim);
   m.impl("all.dims", WrapperAllDims);
+  m.impl("amax", WrapperAmax);
+  m.impl("amin", WrapperAmin);
   m.impl("arange", WrapperArange);
   m.impl("arange.start", WrapperArangeStart);
   m.impl("arange.start_step", WrapperArangeStartStep);
@@ -81,6 +83,7 @@
   m.impl("ne.Tensor", WrapperNeTensor);
   m.impl("neg", WrapperNeg);
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
+  m.impl("prod.dim_int", WrapperProdDimInt);
   m.impl("reciprocal", WrapperReciprocal);
   m.impl("rsqrt", WrapperRsqrt);
   m.impl("rsub.Scalar", WrapperRsubScalar);

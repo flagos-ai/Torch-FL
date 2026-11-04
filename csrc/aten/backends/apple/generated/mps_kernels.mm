@@ -762,6 +762,106 @@ at::Tensor MeanDimKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kApple, MeanDimKernelMps)
 
 
+at::Tensor AmaxKernelMps(
+    const at::Tensor& self,
+    at::IntArrayRef dim,
+    bool keepdim) {
+  if (!mps::MpsSupportsReduceDtype(self.scalar_type())) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("amax", axes, keepdim),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionMaximumPropagateNaNWithTensor:args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      });
+  if (!ran) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kApple, AmaxKernelMps)
+
+
+at::Tensor AminKernelMps(
+    const at::Tensor& self,
+    at::IntArrayRef dim,
+    bool keepdim) {
+  if (!mps::MpsSupportsReduceDtype(self.scalar_type())) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("amin", axes, keepdim),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionMinimumPropagateNaNWithTensor:args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      });
+  if (!ran) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kApple, AminKernelMps)
+
+
+at::Tensor ProdDimIntKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    bool keepdim,
+    std::optional<at::ScalarType> dtype) {
+  if (!mps::MpsSupportsReduceDtype(self.scalar_type(), dtype)) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("prod.dim_int", dim, keepdim, dtype.has_value() ? static_cast<int64_t>(*dtype) : int64_t{-1}),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionProductWithTensor:args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      });
+  if (!ran) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ProdDimIntFn, prod_dim_int_dispatcher, Backend::kApple, ProdDimIntKernelMps)
+
+
 at::Tensor AllKernelMps(const at::Tensor& self) {
   if (!mps::MpsSupportsAllDtype(self.scalar_type())) {
     return at::all(self.cpu()).to(self.device());
