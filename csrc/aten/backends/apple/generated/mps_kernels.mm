@@ -2610,6 +2610,116 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kApple, SiluKernelMps)
 
 
+at::Tensor LeakyReluKernelMps(
+    const at::Tensor& self,
+    const at::Scalar& negative_slope) {
+  if (!mps::MpsSupportsUnaryDtype(self.scalar_type())) {
+    return at::leaky_relu(self.cpu(), negative_slope).to(self.device());
+  }
+  at::Tensor input = self.contiguous();
+  at::Tensor out = at::empty(input.sizes(), input.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("leaky_relu", negative_slope.toFloat()),
+      {input},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+return [graph leakyReLUWithTensor:args[0]
+                            alpha:negative_slope.toFloat()
+                             name:nil];
+      });
+  if (!ran) {
+    return at::leaky_relu(self.cpu(), negative_slope).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LeakyReluFn, leaky_relu_dispatcher, Backend::kApple, LeakyReluKernelMps)
+
+
+at::Tensor EluKernelMps(
+    const at::Tensor& self,
+    const at::Scalar& alpha,
+    const at::Scalar& scale,
+    const at::Scalar& input_scale) {
+  if (!mps::MpsSupportsUnaryDtype(self.scalar_type())) {
+    return at::elu(self.cpu(), alpha, scale, input_scale).to(self.device());
+  }
+  at::Tensor input = self.contiguous();
+  at::Tensor out = at::empty(input.sizes(), input.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("elu", alpha.toFloat(), scale.toFloat(), input_scale.toFloat()),
+      {input},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+MPSGraphTensor* scale_t =
+            mps::MpsConstant(graph, scale, self.scalar_type());
+        MPSGraphTensor* shifted =
+            mps::MpsConstant(graph, alpha, self.scalar_type());
+        MPSGraphTensor* input_scale_t =
+            mps::MpsConstant(graph, input_scale, self.scalar_type());
+        MPSGraphTensor* zero =
+            [graph constantWithScalar:0.0 dataType:args[0].dataType];
+        if (scale_t == nil || shifted == nil || input_scale_t == nil ||
+            zero == nil) {
+          return nil;
+        }
+        // exp(input_scale * x) - 1, then * alpha, then * scale.
+        MPSGraphTensor* scaled_in = [graph multiplicationWithPrimaryTensor:args[0]
+                                                          secondaryTensor:input_scale_t
+                                                                     name:nil];
+        MPSGraphTensor* ex = [graph exponentWithTensor:scaled_in name:nil];
+        MPSGraphTensor* negative = [graph subtractionWithPrimaryTensor:ex
+                                                     secondaryTensor:
+                                                         [graph constantWithScalar:1.0
+                                                                          dataType:args[0].dataType]
+                                                                name:nil];
+        negative = [graph multiplicationWithPrimaryTensor:negative
+                                         secondaryTensor:shifted
+                                                    name:nil];
+        MPSGraphTensor* positive = [graph multiplicationWithPrimaryTensor:args[0]
+                                                          secondaryTensor:scale_t
+                                                                     name:nil];
+        MPSGraphTensor* positive_branch =
+            [graph greaterThanWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];
+        if (scaled_in == nil || ex == nil || negative == nil ||
+            positive == nil || positive_branch == nil) {
+          return nil;
+        }
+        MPSGraphTensor* picked = [graph selectWithPredicateTensor:positive_branch
+                                              truePredicateTensor:positive
+                                             falsePredicateTensor:
+                                                 [graph multiplicationWithPrimaryTensor:negative
+                                                                      secondaryTensor:scale_t
+                                                                                 name:nil]
+                                                             name:nil];
+        if (picked == nil) {
+          return nil;
+        }
+        // A NaN operand takes itself, as `relu` and `tanh` do.
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (nan == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:nan
+                            truePredicateTensor:args[0]
+                           falsePredicateTensor:picked
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::elu(self.cpu(), alpha, scale, input_scale).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EluFn, elu_dispatcher, Backend::kApple, EluKernelMps)
+
+
 at::Tensor SiluBackwardKernelMps(const at::Tensor& grad_output, const at::Tensor& self) {
   if (!mps::MpsSupportsSiluBackwardDtype(grad_output.scalar_type(), self.scalar_type()) ||
       grad_output.device() != self.device()) {

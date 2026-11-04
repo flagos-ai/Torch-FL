@@ -44,6 +44,7 @@
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
+  m.impl("elu", WrapperElu);
   m.impl("embedding", WrapperEmbedding);
   m.impl("eq.Scalar", WrapperEqScalar);
   m.impl("eq.Tensor", WrapperEqTensor);
@@ -64,6 +65,7 @@
   m.impl("isposinf", WrapperIsposinf);
   m.impl("le.Scalar", WrapperLeScalar);
   m.impl("le.Tensor", WrapperLeTensor);
+  m.impl("leaky_relu", WrapperLeakyRelu);
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("linspace", WrapperLinspace);
   m.impl("log", WrapperLog);

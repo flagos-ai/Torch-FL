@@ -203,6 +203,8 @@ OPS = {
     # `silu_backward` is a separate body below: it uses the derivative
     # `sigmoid(x) * (1 + x * (1 - sigmoid(x)))` and has its own dtype gate.
     "silu": "silu",
+    "leaky_relu": "activation",
+    "elu": "activation",
     # The first backward body on this backend, and the one a SwiGLU projection
     # needs before it can train: the forward `silu` is already served, so every
     # autograd step that reaches its gradient would otherwise leave the device.
@@ -618,6 +620,99 @@ PREDICATE_BODIES = {
     ),
 }
 
+# The C++ body T_ACTIVATION splices in, per op, together with the parameters the
+# kernel takes beyond `self`. Three nodes, three shapes.
+ACTIVATION_BODIES = {
+    # `relu` is deliberately absent. It measures *slower* than the round-trip at
+    # every shape a model produces -- 0.09x at (64, 64), 0.51x at
+    # (1, 16, 512, 512), and only 1.63x faster from about a million elements up --
+    # and the reason is not the NaN guard this body would need. Measured against
+    # the already-served single-node `clamp_min`, that is 0.47x at the same large
+    # shape too: a ReLU is cheap enough on the host that MPS's per-call submission
+    # cost dominates until the operand is very large. Serving it would trade a
+    # cheap host kernel for a GPU dispatch, so it stays on the reference.
+    "leaky_relu": {
+        "params": ",\n    const at::Scalar& negative_slope",
+        "args": ", negative_slope",
+        "body": (
+            "return [graph leakyReLUWithTensor:args[0]\n"
+            "                            alpha:negative_slope.toFloat()\n"
+            "                             name:nil];"
+        ),
+    },
+    "elu": {
+        "params": ",\n    const at::Scalar& alpha,\n    const at::Scalar& scale,\n    const at::Scalar& input_scale",
+        "args": ", alpha, scale, input_scale",
+        # The node takes only `alpha`. aten's `scale` and `input_scale` reach
+        # different branches, which a naive `scale * elu(input_scale * x)` gets
+        # wrong: measured, that form answers 1.0 where the reference answers 2.0
+        # for the positive branch of `elu(x, 1, scale=2, input_scale=0.5)`.
+        #
+        # The reference is
+        #     x > 0  ->  scale * x
+        #     x <= 0 ->  scale * alpha * (exp(input_scale * x) - 1)
+        # so `input_scale` shapes only the negative branch and `scale` multiplies
+        # the result. With the defaults (scale=1, input_scale=1) this is the node
+        # exactly, so the composition below is built from primitives rather than
+        # around the node.
+        "body": (
+            "MPSGraphTensor* scale_t =\n"
+            "            mps::MpsConstant(graph, scale, self.scalar_type());\n"
+            "        MPSGraphTensor* shifted =\n"
+            "            mps::MpsConstant(graph, alpha, self.scalar_type());\n"
+            "        MPSGraphTensor* input_scale_t =\n"
+            "            mps::MpsConstant(graph, input_scale, self.scalar_type());\n"
+            "        MPSGraphTensor* zero =\n"
+            "            [graph constantWithScalar:0.0 dataType:args[0].dataType];\n"
+            "        if (scale_t == nil || shifted == nil || input_scale_t == nil ||\n"
+            "            zero == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        // exp(input_scale * x) - 1, then * alpha, then * scale.\n"
+            "        MPSGraphTensor* scaled_in = [graph multiplicationWithPrimaryTensor:args[0]\n"
+            "                                                          secondaryTensor:input_scale_t\n"
+            "                                                                     name:nil];\n"
+            "        MPSGraphTensor* ex = [graph exponentWithTensor:scaled_in name:nil];\n"
+            "        MPSGraphTensor* negative = [graph subtractionWithPrimaryTensor:ex\n"
+            "                                                     secondaryTensor:\n"
+            "                                                         [graph constantWithScalar:1.0\n"
+            "                                                                          dataType:args[0].dataType]\n"
+            "                                                                name:nil];\n"
+            "        negative = [graph multiplicationWithPrimaryTensor:negative\n"
+            "                                         secondaryTensor:shifted\n"
+            "                                                    name:nil];\n"
+            "        MPSGraphTensor* positive = [graph multiplicationWithPrimaryTensor:args[0]\n"
+            "                                                          secondaryTensor:scale_t\n"
+            "                                                                     name:nil];\n"
+            "        MPSGraphTensor* positive_branch =\n"
+            "            [graph greaterThanWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];\n"
+            "        if (scaled_in == nil || ex == nil || negative == nil ||\n"
+            "            positive == nil || positive_branch == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        MPSGraphTensor* picked = [graph selectWithPredicateTensor:positive_branch\n"
+            "                                              truePredicateTensor:positive\n"
+            "                                             falsePredicateTensor:\n"
+            "                                                 [graph multiplicationWithPrimaryTensor:negative\n"
+            "                                                                      secondaryTensor:scale_t\n"
+            "                                                                                 name:nil]\n"
+            "                                                             name:nil];\n"
+            "        if (picked == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        // A NaN operand takes itself, as `relu` and `tanh` do.\n"
+            "        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];\n"
+            "        if (nan == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        return [graph selectWithPredicateTensor:nan\n"
+            "                            truePredicateTensor:args[0]\n"
+            "                           falsePredicateTensor:picked\n"
+            "                                           name:nil];"
+        ),
+    },
+}
+
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
 # not compute (the SUPPORTS predicate below). The fallback keeps the result
 # correct and stays on the host: it is not a delegation to a CUDA kernel.
@@ -697,6 +792,8 @@ AT_OP = {
     # round-trip lands on the reference's own implementation rather than on a
     # composite that would re-enter the dispatcher.
     "silu": "silu",
+    "leaky_relu": "leaky_relu",
+    "elu": "elu",
     # The CPU reference behind a declined `silu_backward`. The op has its own
     # derivative kernel -- it is not a prompted composition -- so this is where
     # the reference's promotion rule and gradient values live.
@@ -845,6 +942,7 @@ SUPPORTS = {
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
+    "activation": "MpsSupportsUnaryDtype",
     # Two equal float widths, float32 and float16. The reference promotes a
     # mixed pair to a common width, while MpsRunGraph requires every operand and
     # its result to share an element type, so a mixed pair takes the round-trip.
@@ -1062,6 +1160,9 @@ CALLS = {
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
     "silu": "sigmoidWithTensor:",
+    # The activation bodies build their node inline; see ACTIVATION_BODIES.
+    "leaky_relu": "",
+    "elu": "",
     # Unused: T_SILU_BACKWARD writes the sigmoid, the residual `1 - sigmoid`
     # and both multiplies in full, because the second operand appears only in
     # the final multiply. The entry exists because `render` reads `CALLS[op]`
@@ -1307,6 +1408,10 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    "relu": "",
+    # Two slopes describe two graphs, so the value is in the key.
+    "leaky_relu": ", negative_slope.toFloat()",
+    "elu": ", alpha.toFloat(), scale.toFloat(), input_scale.toFloat()",
     # Empty for the same reason: the graph is a function of both operands'
     # dtypes and shapes, which MpsRunGraph folds into the key itself, and the
     # body bakes no host value into it.
@@ -5531,6 +5636,46 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
+# The activation family takes no host value for `relu` and one `float` for the
+# other two. Each body is one node:
+#
+# * `relu` has no selector of its own. It is the clamp node at a zero lower bound
+#   with no upper bound -- the same node `T_CLAMP` builds -- so it reuses that
+#   shape rather than inventing one.
+# * `leaky_relu` and `elu` take their `negative_slope` / `alpha` as a plain
+#   `float`, not a tensor, so the value is a C++ parameter of the body and has to
+#   be folded into the plan key: two slopes describe two graphs.
+#
+# The signed zero is the edge this family shares with `clamp`. `relu(-0.0)` is
+# `-0.0` on the reference, and a body that answered `+0.0` would pass an equality
+# check; the cases pin the sign bit instead.
+T_ACTIVATION = """\
+at::Tensor {kernel}(
+    const at::Tensor& self{params}) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu(){args}).to(self.device());
+  }}
+  at::Tensor input = self.contiguous();
+  at::Tensor out = at::empty(input.sizes(), input.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{input}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+{body}
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(){args}).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_CLAMP = """\\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -5714,6 +5859,7 @@ CATEGORIES = {
     "pow_scalar": T_POW,
     "conv": T_CONV,
     "silu": T_SILU,
+    "activation": T_ACTIVATION,
     "silu_backward": T_SILU_BACKWARD,
     "sigmoid": T_SIGMOID,
     "exp": T_EXP,
@@ -5917,7 +6063,12 @@ def render():
                 supports=SUPPORTS[category],
                 call=CALLS[op],
                 rank=RANK.get(op, 0),
-                body=PREDICATE_BODIES.get(op, ""),
+                body=(
+                    PREDICATE_BODIES.get(op)
+                    or ACTIVATION_BODIES.get(op, {}).get("body", "")
+                ),
+                params=ACTIVATION_BODIES.get(op, {}).get("params", ""),
+                args=ACTIVATION_BODIES.get(op, {}).get("args", ""),
                 alpha_param=alpha_param,
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,
