@@ -137,6 +137,18 @@ Error_t Memcpy(void* dst, const void* src, size_t count, MemcpyKind kind) {
     return ErrorUnknown;
   }
 
+  // A copy onto the same buffer is a no-op, and cnrt does not accept it: it
+  // returns CN_MEMORY_ERROR_INVALID_ADDRESS (632015) for `cnrtMemcpy` with
+  // dst == src, where cudaMemcpy and the other vendor APIs treat it as a
+  // successful copy of zero effect. PyTorch issues these -- `copy_data` in the
+  // device allocator is handed identical pointers when a tensor is constructed
+  // from storage it already owns -- and on a Qwen3 backward that was thousands of
+  // rejected copies per step, each one logged and each one leaving the buffer
+  // alone. Nothing inspected the return value, so the run looked healthy.
+  if (dst == src) {
+    return Success;
+  }
+
   // cnrtMemcpy is the blocking form; it synchronises internally, so it needs no
   // queue argument once the default queue exists on the target device.
   return toError(
@@ -166,6 +178,12 @@ Error_t MemcpyAsync(
   cnrtMemTransDir_t dir;
   if (!toCnrtDir(kind, &dir)) {
     return ErrorUnknown;
+  }
+
+  // Same reasoning as `Memcpy`: cnrt rejects a copy onto the same buffer, and a
+  // no-op is what the caller asked for.
+  if (dst == src) {
+    return Success;
   }
 
   // A null queue means "the default queue of the current device", which is also
