@@ -17,6 +17,7 @@ import functools
 import os
 import re
 import sys
+import types
 
 # Single access point for every FLAGOS_* variable (see torch_fl/_env.py). Imported
 # for its side effect as well: it scans the environment once and warns about a
@@ -804,6 +805,25 @@ def _install_tsingmicro_flaggems_compat() -> None:
 _registered_ops = []
 
 
+def _is_philox_binding(func) -> bool:
+    """Is ``func`` the bridge's patched seed function, from any torch_fl copy?"""
+    handle = getattr(func, "__self__", None)
+    return isinstance(handle, types.SimpleNamespace) and hasattr(handle, "philox")
+
+
+def _philox_rebind(mod, patched, orig) -> None:
+    """Point one module's import-time copy at `patched`; never raise."""
+    try:
+        namespace = vars(mod)
+        if namespace.get("philox_backend_seed_offset") is orig:
+            namespace["philox_backend_seed_offset"] = patched
+    except Exception:
+        pass
+
+
+_PHILOX_REBIND = None
+
+
 def _patch_flaggems_philox():
     """Route MUSA/Cambricon FlagGems RNG reservations through the flagos generator.
 
@@ -818,6 +838,14 @@ def _patch_flaggems_philox():
         or not _conf_routes_to_flaggems()
     ):
         return
+
+    # The bridge as installed in this interpreter, whichever `torch_fl` copy
+    # installed it: the handle below, which carries the patched seed function
+    # and the sweep that binds it. Reset here so a previous call cannot be
+    # adopted by this one.
+    global _PHILOX_BINDING, _PHILOX_REBIND
+    _PHILOX_BINDING = None
+    _PHILOX_REBIND = None
 
     try:
         # Import the *package* first, then the submodule. ``flag_gems.utils.
@@ -842,6 +870,8 @@ def _patch_flaggems_philox():
         from flag_gems.utils import random_utils
 
         _orig = random_utils.philox_backend_seed_offset
+
+        _rebind = _philox_rebind
 
         def _patched(increment, generator=None):
             if generator is None:
@@ -870,7 +900,24 @@ def _patch_flaggems_philox():
         # module it fails to reach still falls back to this one through
         # `random_utils`, so the bridge must never be skipped because the sweep
         # was interrupted.
-        random_utils.philox_backend_seed_offset = _patched
+        #
+        # Another copy of torch_fl in this interpreter (the installed package
+        # beside a tree on PYTHONPATH — `tests/unit/conftest.py` restores the
+        # backend config path for the same split) has already bound the bridge
+        # here. Adopt its function rather than bind this copy's: it closes over
+        # that copy's `_reserve_rng_seed`, and binding it costs the first copy
+        # its sweep targets. Either way the module must end up bound to the
+        # bridge, since a previous test may have put its fake back.
+        handle = None
+        current = random_utils.philox_backend_seed_offset
+        if current is not _orig:
+            if not _is_philox_binding(current):
+                return
+            handle = current.__self__
+        elif handle is None:
+            handle = types.SimpleNamespace(philox=_patched, rebind=_rebind)
+            _PHILOX_BINDING = handle
+        random_utils.philox_backend_seed_offset = handle.philox
 
         # RNG modules bind this function with ``from ... import`` at import time,
         # so update every already-loaded copy as well as the canonical module.
@@ -896,14 +943,18 @@ def _patch_flaggems_philox():
         # completes, while a pytest process that imported transformers first does
         # and the sweep used to die at the first of them, leaving every
         # ``randn``/``rand``/``randperm`` on the failure path above.
+        #
+        #
+        # FlagGems re-imports op modules under the dispatcher's name during
+        # `_register_flaggems_operators()`, after this runs: `_mthreads.ops.
+        # randn` and `flag_gems.runtime.backend._mthreads.ops.randn` are two
+        # module objects with their own `from ... import`. Those are swept by
+        # `_sweep_philox_after_imports()` at the end of that phase.
         for mod in list(sys.modules.values()):
-            try:
-                namespace = vars(mod)
-                if namespace.get("philox_backend_seed_offset") is not _orig:
-                    continue
-                namespace["philox_backend_seed_offset"] = _patched
-            except Exception:
-                continue
+            _rebind(mod, handle.philox, _orig)
+        # Read back by `_sweep_philox_after_imports`, once registration has
+        # imported the dispatcher's copies of the op modules.
+        _PHILOX_REBIND = (handle.philox, _orig)
     except Exception:
         # FlagGems remains optional; native MUSA kernels stay available.
         pass
@@ -1972,6 +2023,26 @@ def device_capabilities(device=None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _sweep_philox_after_imports() -> None:
+    """Re-bind the RNG seed function in modules registration imported late.
+
+    `_patch_flaggems_philox` replaces `philox_backend_seed_offset` in every
+    module loaded at that point. `_register_flaggems_operators` then imports
+    each vendor op module under the dispatcher's dotted name, which creates
+    modules that bind the original function through their own `from ...
+    import` -- on MUSA, `flag_gems.runtime.backend._mthreads.ops.randn` beside
+    the `_mthreads.ops.randn` FlagGems had loaded. An unpatched binding dies
+    unpacking the flagos generator's MT19937 state (`ValueError: too many
+    values to unpack`), so every such module is swept once more here.
+    """
+    if _PHILOX_REBIND is None:
+        return
+    patched, orig = _PHILOX_REBIND
+    rebind = _PHILOX_BINDING.rebind if _PHILOX_BINDING else _philox_rebind
+    for mod in list(sys.modules.values()):
+        rebind(mod, patched, orig)
+
+
 def _register_distributed_backend():
     """Register ProcessGroupFlagOS as the 'flagos' torch.distributed backend.
 
@@ -2698,6 +2769,9 @@ def _phase_ecosystem() -> None:
 
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()
+    # Registration imported each vendor op module again, under the dispatcher's
+    # name, with its own copy of the seed function the bridge replaced above.
+    _sweep_philox_after_imports()
 
     from . import quantization  # noqa: E402, F401
 
