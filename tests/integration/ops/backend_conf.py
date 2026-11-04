@@ -35,6 +35,7 @@ the test files do not each restate it.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -229,6 +230,41 @@ _OVERRIDE_UNSERVED = (
 )
 
 
+def _flaggems_claim_list() -> frozenset[str] | None:
+    """Ops ``csrc/aten/generated/register_flaggems_<platform>.inc`` claims.
+
+    The list the generator emits for the CUDA-ABI platforms is in the source
+    tree, so it is read from there rather than from an install the wheel does
+    not ship it in. ``None`` when this checkout has no list for the platform:
+    a vendor-named platform's FlagGems arm claims from its own file, and a
+    source tree without the generated directory answers nothing.
+    """
+    platform = torch_fl._platform.build_accelerator()
+    if not platform:
+        return None
+    list_dir = _claim_list_dir()
+    if list_dir is None:
+        return None
+    path = list_dir / f"register_flaggems_{platform}.inc"
+    if not path.is_file():
+        return None
+    return frozenset(re.findall(r'm\.impl\("([^"]+)"', path.read_text()))
+
+
+def _claim_list_dir() -> Path | None:
+    """``csrc/aten/generated`` for the checkout this file is running from.
+
+    Walked up from this file, because the suite runs both out of a checkout (the
+    sibling ``csrc/``) and from a copy under ``.github/scripts`` that CI places
+    in the container (one level further out).
+    """
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "csrc" / "aten" / "generated"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def override_is_logged(op: str, backend: str) -> bool:
     """True when ``FLAGOS_OP_<op>=<backend>`` can produce a dispatch line.
 
@@ -248,6 +284,15 @@ def override_is_logged(op: str, backend: str) -> bool:
     no-op (PPU, runs 40127851880 and 40135954656: ``FLAGOS_OP_mm=cuda`` on
     ``backends_thead_boxing.conf``). Both halves are asked of the wheel, never
     of a platform name.
+
+    The conf's own route is not enough, which is how issue #555's first sentence
+    ("Five ... tests are unsatisfiable") was measured as wrong: the FlagGems
+    routes codegen holds an op off -- ``measured_flaggems_rollback`` in
+    ``scripts/codegen/codegen_ops.py``, e.g. ``sum.dim_IntList`` on NVIDIA,
+    whose FlagGems kernel returns no result in time -- leave it ``none`` in that
+    platform's conf, and the generated claim list is built from the conf. So the
+    claim list is read too, the way issue #555 asks ``register_flaggems_nvidia.inc``
+    its question, and an op absent from it answers False whatever the conf says.
     """
     kernels = torch_fl._env.build_kernels()
     if backend == "boxing":
@@ -255,7 +300,14 @@ def override_is_logged(op: str, backend: str) -> bool:
     kernel_set = _BACKEND_KERNEL_SET.get(backend)
     if kernel_set is None or kernel_set not in kernels:
         return False
-    return _conf_route(op) in _FLAGGEMS_BACKENDS
+    if _conf_route(op) not in _FLAGGEMS_BACKENDS:
+        return False
+    # `register_flaggems_<platform>.inc` is built only for the CUDA-ABI
+    # platforms (codegen_boxing_flaggems_register.PLATFORMS); a vendor-named
+    # platform's FlagGems arm claims from its own list, so the conf is the
+    # whole answer there.
+    claim_list = _flaggems_claim_list()
+    return claim_list is None or op in claim_list
 
 
 def route_is_served(op: str) -> bool:
