@@ -700,6 +700,20 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // takes the CPU crossing. Unconditional: the wrapper needs no vendor or
     // FlagGems kernel. Only the backward -- the forward keeps its FlagGems /
     // ixdnn routes.
+    m.impl("convolution_backward_overrideable",
+        FlagosWrapperConvolutionBackwardOverrideable);
+    // See FlagosWrapperPrivConj above. Unconditional like the conv pair
+    // above: the metadata kernel needs neither a vendor nor a FlagGems slot, and both
+    // op names carry no CPU fallback to reach instead.
+    m.impl("_conj", FlagosWrapperPrivConj);
+    m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
+    m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
+    // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
+    // wrong for add (complex128) and raises for div (complex64) here, so these
+    // run ATen's kernels instead.
+    m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
+    m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
+    m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_CAMBRICON)
     // Cambricon MLU is FlagGems-primary with no vendor-native half yet: the CNNL
     // kernels under aten/backends/cambricon/ do not exist, so there is no
@@ -718,37 +732,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_FLAGGEMS_PYTHON)
     #include "backends/cambricon/generated/cambricon_flaggems_register.inc"
     #endif
-  #elif defined(USE_BPU)
-    // BPU registers no compute ops. The BPU's unit of execution is a whole
-    // compiled graph (a .hbm produced by hbdk4), so there is no per-operator
-    // kernel to claim -- and claiming an op on PrivateUse1 without a kernel
-    // behind it raises "backend not registered" instead of falling back.
-    // Leaving the list out routes every op to cpu_fallback below; acceleration
-    // comes from the torch.compile backend in torch_fl/backends/bpu/.
-    //
-    // The *_overrideable ops are the exception, and the generic fallback cannot
-    // serve them. aten::convolution routes PrivateUse1 to
-    // convolution_overrideable, whose only other kernel is a
-    // CompositeExplicitAutograd stub that raises NotImplementedError -- so
-    // cpu_fallback, which moves the arguments to CPU and redispatches the *same*
-    // op, lands right back on that stub. These wrappers instead call
-    // at::convolution on the CPU tensors, which is the op that actually has a
-    // CPU kernel.
-    m.impl("convolution_overrideable", BPUWrapperConvolutionOverrideable);
-    m.impl("convolution_backward_overrideable",
-        FlagosWrapperConvolutionBackwardOverrideable);
-    // See FlagosWrapperPrivConj above. Unconditional like the conv pair
-    // above: the metadata kernel needs neither a vendor nor a FlagGems slot, and both
-    // op names carry no CPU fallback to reach instead.
-    m.impl("_conj", FlagosWrapperPrivConj);
-    m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
-    m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
-    // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
-    // wrong for add (complex128) and raises for div (complex64) here, so these
-    // run ATen's kernels instead.
-    m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
-    m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
-    m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_BPU)
     // The BPU's unit of execution is a whole compiled artifact (a .hbm from
     // hbdk4), not an individual operator, so a kernel here submits an artifact
