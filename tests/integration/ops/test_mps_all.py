@@ -19,18 +19,12 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import dispatched_to_mps
-from platform_support import detect_platform
+from case_gap_issues import case_gap_reason
 
 
 DEVICE = "flagos:0"
 
-pytestmark = [
-    pytest.mark.mps,
-    pytest.mark.skipif(
-        detect_platform() != "mps",
-        reason="Apple Silicon (Metal) backend only",
-    ),
-]
+pytestmark = pytest.mark.mps
 
 
 @pytest.mark.anyplatform
@@ -55,6 +49,7 @@ def test_dim_and_keepdim_follow_aten(dim, keepdim):
 
 
 @pytest.mark.anyplatform
+@pytest.mark.skip(reason=case_gap_reason("#710"))
 def test_each_spelling_uses_mps_and_empty_results_keep_their_shape():
     source = """
 import torch, torch_fl

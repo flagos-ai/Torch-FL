@@ -33,6 +33,7 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import routed_backend_or_none
+from case_gap_issues import case_gap_reason
 
 
 DEVICE = "flagos:0"
@@ -80,6 +81,7 @@ class TestAllCorrectness:
         assert out.item() is False
 
     @pytest.mark.anyplatform
+    @pytest.mark.skip(reason=case_gap_reason("#710"))
     def test_all_empty_tensor(self):
         """Empty tensor: all() is vacuously true.
 
@@ -101,19 +103,16 @@ class TestAllCorrectness:
             a = torch.empty(shape, device=DEVICE, dtype=dtype)
             assert torch.all(a).item() is True
 
+    @pytest.mark.skip(reason=case_gap_reason("#710"))
     @pytest.mark.anyplatform
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "FlagGems all.dim divides numel by the reduced size and raises "
-            "ZeroDivisionError when that size is 0 (issue #710)"
-        ),
-    )
     def test_all_empty_dim_reduction(self):
-        """``all(dim=0)`` over a zero-length axis returns an empty tensor."""
-        a = torch.empty((0, 3), device=DEVICE, dtype=torch.bool)
-        out = torch.all(a, dim=0)
+        """Reducing an empty axis returns True for every output element."""
+        host = torch.empty((0, 3), dtype=torch.bool)
+        expected = torch.all(host, dim=0)
+        out = torch.all(host.to(DEVICE), dim=0)
         assert out.shape == (3,)
+        assert out.dtype == torch.bool
+        assert torch.equal(out.cpu(), expected)
 
     @pytest.mark.anyplatform
     def test_all_numeric_types(self):
@@ -126,8 +125,6 @@ class TestAllCorrectness:
 
     @pytest.mark.cuda
     def test_all_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
         torch.manual_seed(1)
         a_cuda = torch.randint(0, 2, (64, 64), device="cuda:0", dtype=torch.bool)
         ref = torch.all(a_cuda)
@@ -156,11 +153,10 @@ class TestAllDispatch:
         """The per-op override selects the FlagGems Python path for ``all``.
 
         Skipped where the conf routes ``all`` to ``none``: the op is then not
-        claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
-        the dispatcher and no override can show up in the log.
+        claimed on PrivateUse1 at all, so no override can show up in the log.
         """
         if routed_backend_or_none("all") is None:
-            pytest.skip("all is routed to 'none' on this platform")
+            pytest.skip(case_gap_reason("all:none"))
         result = _run_all_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",

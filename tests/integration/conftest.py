@@ -17,6 +17,20 @@ import pytest
 pytest_plugins = ("profiler_support", "amp_support")
 
 
+def _require_flagos_device(is_available, init):
+    """Check and initialize the runtime behind the device these cases use."""
+    if not is_available():
+        raise RuntimeError("torch_fl.flagos.is_available() returned False")
+    init()
+
+
+def _initialize_flagos_device():
+    """Prepare flagos:0 without letting its default device pick the outcome."""
+    import torch_fl
+
+    _require_flagos_device(torch_fl.flagos.is_available, torch_fl.flagos.init)
+
+
 # Backend config selection moved fully into torch_fl._select_backend_config(),
 # which reads the build record (the recorded accelerator + the lib/flagos_platform
 # marker) and picks backends_<platform>.conf. conftest no longer pre-empts it: a MetaX
@@ -116,29 +130,11 @@ def pytest_configure(config):
         "markers", "amp_grad_scaler: requires the GradScaler unscale/update routes"
     )
 
-    import torch_fl
-
-    # A missing device or a failed init is a broken environment, not a test
-    # result. `pytest.exit` was the old outcome: it stops pytest through its
-    # own exit code, which a CI reader has to be told is not a pass, and it
-    # could not say whether the device was absent or the runtime failed to
-    # come up. Exiting through the standard path here makes either case a
-    # hard error -- pytest's internal-error status, non-zero in every CI
-    # wrapper -- with the cause in the message.
-    if not torch_fl.flagos.is_available():
-        raise pytest.UsageError(
-            "flagos device is not available: torch_fl imported, but "
-            "torch_fl.flagos.is_available() is False. This is an "
-            "environment/setup failure, not a test result."
-        )
-
-    # Initialize the flagos device; a runtime that cannot come up is the same
-    # kind of environment failure as a missing device.
+    # Collection runs before this hook, so this check cannot change the node-id
+    # set. A failed setup is an explicit collection error; it is never a skip.
     try:
-        torch_fl.flagos.init()
-    except Exception as exc:
+        _initialize_flagos_device()
+    except Exception as exc:  # noqa: BLE001 -- pytest reports setup failure
         raise pytest.UsageError(
-            "flagos device initialization failed: "
-            f"{type(exc).__name__}: {exc}. This is an "
-            "environment/setup failure, not a test result."
+            f"flagos integration setup failed for flagos:0: {type(exc).__name__}: {exc}"
         ) from exc

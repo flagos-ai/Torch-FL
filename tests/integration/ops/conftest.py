@@ -14,9 +14,16 @@
 
 import importlib.machinery
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
+
+_INTEGRATION_DIR = str(Path(__file__).resolve().parents[1])
+if _INTEGRATION_DIR not in sys.path:
+    sys.path.insert(0, _INTEGRATION_DIR)
+
+from case_gap_issues import case_gap_reason  # noqa: E402
 
 
 def _platform_path() -> Path:
@@ -198,12 +205,7 @@ def pytest_collection_modifyitems(
         for marker_name in markers_to_skip:
             if item.get_closest_marker(marker_name):
                 item.add_marker(
-                    pytest.mark.skip(
-                        reason=(
-                            f"Skipped on {platform} runtime: "
-                            f"requires @{marker_name} backend"
-                        )
-                    )
+                    pytest.mark.skip(reason=case_gap_reason(f"@{marker_name}"))
                 )
                 break
 
