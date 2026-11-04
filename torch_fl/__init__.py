@@ -435,14 +435,19 @@ def _validate_dcu_decoupled_runtime() -> None:
     if _env.flag("FLAGOS_DCU_SKIP_RUNTIME_CHECK"):
         return
 
-    from torch_fl.accelerator.hygon._dcu_libtorch_link import vendor_core_mode
+    from torch_fl.accelerator.hygon._dcu_libtorch_link import (
+        _bundle_dirname,
+        vendor_core_mode,
+    )
 
     if vendor_core_mode():
         return  # legacy mode replaces the core wholesale; nothing to reconcile.
 
     from torch_fl.accelerator.hygon._dcu_runtime_check import validate_decoupled_runtime
 
-    validate_decoupled_runtime(os.path.join(os.path.dirname(__file__), "lib_hygon"))
+    validate_decoupled_runtime(
+        os.path.join(os.path.dirname(__file__), _bundle_dirname())
+    )
 
 
 def _check_privateuse1_unclaimed() -> None:
@@ -1028,8 +1033,12 @@ def _restore_dcu_hip_version() -> None:
     hip_ver = _env.value("FLAGOS_DCU_HIP_VERSION", "")
     rocm_ver = ""
     if not hip_ver:
+        # The bundle is lib_hygon in this tree and lib_dcu in a wheel that named
+        # it for the vendor; take whichever is there.
+        from torch_fl.accelerator.hygon._dcu_libtorch_link import _bundle_dirname
+
         ver_py = os.path.join(
-            os.path.dirname(__file__), "lib_hygon", "vendor_version.py"
+            os.path.dirname(__file__), _bundle_dirname(), "vendor_version.py"
         )
         try:
             with open(ver_py, encoding="utf-8") as f:
@@ -1072,9 +1081,11 @@ def _patch_flaggems_codegen_config():
       card is present.
 
     - Hygon DCU (DTK): set GEMS_VENDOR=hygon so FlagGems uses its _hygon
-      codegen config (triton hcu backend, triton_extra_name="hip"). No
-      torch.cuda shim is needed -- DTK ships a hipified torch with a real,
-      working torch.cuda. This branch must precede the generic-NVIDIA one:
+      codegen config (triton hcu backend, triton_extra_name="hip"). A decoupled
+      wheel puts a stock torch+cpu in front of DTK's device libraries, so
+      torch.version.hip is restored from the bundle and torch.cuda is shimmed
+      onto the driver; with a real DTK torch in front both are no-ops. This
+      branch must precede the generic-NVIDIA one:
       is_nvidia_cuda_available() is False on DTK (there is no libcuda.so, only
       libgalaxyhip), so without it DCU would reach the ascend fallback and get
       GEMS_VENDOR=ascend -- which also breaks the comm layer, since that vendor
