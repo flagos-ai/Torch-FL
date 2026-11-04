@@ -34,6 +34,7 @@
   m.impl("atanh", WrapperAtanh);
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
+  m.impl("ceil", WrapperCeil);
   m.impl("clamp", WrapperClamp);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
@@ -45,10 +46,15 @@
   m.impl("eq.Scalar", WrapperEqScalar);
   m.impl("erf", WrapperErf);
   m.impl("exp", WrapperExp);
+  m.impl("floor", WrapperFloor);
   m.impl("gather", WrapperGather);
   m.impl("gelu", WrapperGelu);
   m.impl("index.Tensor", WrapperIndexTensor);
   m.impl("index_select", WrapperIndexSelect);
+  m.impl("isinf", WrapperIsinf);
+  m.impl("isnan", WrapperIsnan);
+  m.impl("isneginf", WrapperIsneginf);
+  m.impl("isposinf", WrapperIsposinf);
   m.impl("le.Tensor", WrapperLeTensor);
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("linspace", WrapperLinspace);
@@ -69,6 +75,7 @@
   m.impl("rsub.Scalar", WrapperRsubScalar);
   m.impl("select.int", WrapperSelectInt);
   m.impl("sigmoid", WrapperSigmoid);
+  m.impl("signbit", WrapperSignbit);
   m.impl("silu", WrapperSilu);
   m.impl("silu_backward", WrapperSiluBackward);
   m.impl("sin", WrapperSin);
@@ -86,5 +93,6 @@
   m.impl("tanh", WrapperTanh);
   m.impl("transpose.int", WrapperTransposeInt);
   m.impl("triu", WrapperTriu);
+  m.impl("trunc", WrapperTrunc);
   m.impl("unsqueeze", WrapperUnsqueeze);
   m.impl("where.self", WrapperWhereSelf);
