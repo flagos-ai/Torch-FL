@@ -262,6 +262,9 @@ OPS = {
     # `exp2`'s and `expm1`'s selectors are separate nodes with their own width
     # questions that this increment does not answer.
     "exp": "exp",
+    "exp2": "exp",
+    "log2": "exp",
+    "log10": "exp",
     # The inverse of the node above and the second-largest elementwise unary left
     # on a small model's fallback profile: measured on an M5 on a (3, 512, 3072)
     # float32 operand, the `cpu_fallback` round-trip cost 4.51 ms. A model reaches
@@ -831,6 +834,9 @@ AT_OP = {
     # why the gate sends those widths here rather than evaluating them in the
     # graph.
     "exp": "exp",
+    "exp2": "exp2",
+    "log2": "log2",
+    "log10": "log10",
     # The CPU reference the `log` body round-trips to on the widths it declines.
     # `log` is its own aten kernel rather than a composition, so the round-trip
     # lands on the reference's own implementation -- which is where its domain
@@ -1200,6 +1206,11 @@ CALLS = {
     # exponential directly. The node is the whole body, so the width list is the
     # only thing the increment decides.
     "exp": "exponentWithTensor:",
+    # Each has a base-specific node; the generic logarithm/exponent would need a
+    # constant multiply around it and lose the point of serving them.
+    "exp2": "exponentBase2WithTensor:",
+    "log2": "logarithmBase2WithTensor:",
+    "log10": "logarithmBase10WithTensor:",
     # Its own selector, named directly like the exponential's, and the reason `log`
     # is one node rather than the `log2`/`loge` composition a hand-written body
     # would need.
@@ -1451,6 +1462,9 @@ KEY_PARTS = {
     # reads no other host value. A body that bakes nothing into the graph has no
     # way to be handed a plan it did not build.
     "exp": "",
+    "exp2": "",
+    "log2": "",
+    "log10": "",
     # Empty, for the same reason `exp`'s is: one selector over one operand, so the
     # graph is a function of the operand's dtype and shape alone -- which
     # MpsRunGraph folds into the cache key itself -- and the body bakes no host

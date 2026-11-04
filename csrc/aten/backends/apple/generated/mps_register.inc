@@ -50,6 +50,7 @@
   m.impl("eq.Tensor", WrapperEqTensor);
   m.impl("erf", WrapperErf);
   m.impl("exp", WrapperExp);
+  m.impl("exp2", WrapperExp2);
   m.impl("floor", WrapperFloor);
   m.impl("gather", WrapperGather);
   m.impl("ge.Scalar", WrapperGeScalar);
@@ -69,6 +70,8 @@
   m.impl("linalg_solve_triangular", WrapperLinalgSolveTriangular);
   m.impl("linspace", WrapperLinspace);
   m.impl("log", WrapperLog);
+  m.impl("log10", WrapperLog10);
+  m.impl("log2", WrapperLog2);
   m.impl("logical_not", WrapperLogicalNot);
   m.impl("lt.Scalar", WrapperLtScalar);
   m.impl("lt.Tensor", WrapperLtTensor);
