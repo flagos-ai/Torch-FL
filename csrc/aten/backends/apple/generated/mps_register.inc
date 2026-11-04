@@ -42,6 +42,7 @@
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
   m.impl("cosh", WrapperCosh);
+  m.impl("cumprod", WrapperCumprod);
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);

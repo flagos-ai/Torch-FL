@@ -111,6 +111,7 @@ OPS = {
     # GatedDeltaNet accumulates its decay along the chunk axis. The graph uses
     # MPSGraph's cumulative-sum node with the operand's own dtype. See T_CUMSUM.
     "cumsum": "cumsum",
+    "cumprod": "cumprod",
     # Qwen3.5's linear-attention gate uses the linear branch of ATen's softplus.
     "softplus": "softplus",
     # `softmax` is the third stage-3 lane and the op a small model calls between
@@ -763,6 +764,7 @@ AT_OP = {
     "linalg_solve_triangular": "linalg_solve_triangular",
     "index.Tensor": "index",
     "cumsum": "cumsum",
+    "cumprod": "cumprod",
     "softplus": "softplus",
     "_softmax": "_softmax",
     "neg": "neg",
@@ -960,6 +962,7 @@ SUPPORTS = {
     "SOLVE_TRIANGULAR": "MpsSupportsTriangularSolveDtype",
     "index": "",
     "cumsum": "MpsSupportsCumsumDtype",
+    "cumprod": "MpsSupportsCumsumDtype",
     "softplus": "MpsSupportsSoftplusDtype",
     "gemm": "MpsSupportsGemmDtype",
     # The two `mat` operands are gated exactly as `mm`'s, and the bias is held
@@ -1131,6 +1134,7 @@ CALLS = {
     # T_CUMSUM writes the full selector because its axis binds to the first
     # argument, as MpsGatherIndex does for the gather family.
     "cumsum": "",
+    "cumprod": "",
     # T_SOFTPLUS builds the threshold comparison and both branches in the
     # operand's dtype. See the template.
     "softplus": "",
@@ -1411,6 +1415,7 @@ KEY_PARTS = {
     # shapes. The accumulator dtype is folded into the operand's dtype by the
     # body.
     "cumsum": ", axis",
+    "cumprod": ", axis",
     "softplus": ", beta, threshold",
     # Which of the two operands the graph has to transpose: see T_GEMM.
     "mm": ", self_transposed, mat2_transposed",
@@ -5718,6 +5723,51 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
+# The product counterpart of T_CUMSUM, and nearly the same body. Two things
+# differ: the selector is `cumulativeProductWithTensor:axis:name:`, which takes no
+# `exclusive:`/`reverse:` pair where the sum node has one (measured), and the
+# round-trip calls `at::cumprod`. Those two are why this is a separate template
+# rather than T_CUMSUM with a parameter.
+T_CUMPROD = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    std::optional<at::ScalarType> dtype) {{
+  if (!mps::{supports}(self.scalar_type(), dtype)) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  const at::ScalarType result_dtype = dtype.value_or(self.scalar_type());
+  int64_t axis = 0;
+  if (!mps::MpsCumsumAxis(self, dim, &axis)) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  if (result_dtype != self_c.scalar_type()) {{
+    self_c = self_c.to(result_dtype);
+  }}
+  at::Tensor out = at::empty(
+      self_c.sizes(), self_c.options().dtype(result_dtype));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph cumulativeProductWithTensor:args[0]
+                                               axis:axis
+                                               name:nil];
+      }});
+  if (!ran) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 # Softplus is `x / beta` when `beta * x > threshold`, and
 # `log1p(exp(beta * x)) / beta` otherwise. MPSGraph's `softPlusWithTensor:` uses
 # its own fixed parameters, so the body represents ATen's two scalar arguments
@@ -6171,6 +6221,7 @@ CATEGORIES = {
     "SOLVE_TRIANGULAR": T_SOLVE_TRIANGULAR,
     "index": T_INDEX,
     "cumsum": T_CUMSUM,
+    "cumprod": T_CUMPROD,
     "softplus": T_SOFTPLUS,
     "gemm": T_GEMM,
     "addmm": T_ADDMM,
