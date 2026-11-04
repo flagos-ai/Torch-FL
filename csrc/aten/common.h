@@ -39,6 +39,7 @@ enum class Backend {
   kEnflame,        // conf key: enflame
   kKunlunxin,
   kIluvatar,
+  kCambricon,      // conf key: cambricon
   kTileOps,
   kApple,          // Apple Metal / MPSGraph (conf key: apple)
   // D-Robotics RDK BPU. The kernels submit compiled operator artifacts from

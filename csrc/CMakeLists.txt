@@ -687,14 +687,16 @@ elseif(_flagos_is_cambricon)
   # ${_torch_fl_link_libs}).
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
   if(FLAGOS_BUILD_VENDOR)
-    # CNNL is linked from the start so the operator kernels under
-    # aten/backends/cambricon/ need no extra link line as they land. It is the
-    # library the platform's `vendor` slot will call.
+    # FLAGOS_CAMBRICON_KERNEL gates the native m.impl subset in register.cc,
+    # mirroring FLAGOS_KUNLUNXIN_KERNEL and FLAGOS_ILUVATAR_KERNEL. It is what
+    # makes csrc/aten/backends/cambricon/generated/cambricon_register.inc
+    # compiled in; without it the FlagGems half is still registered and the ops
+    # in that file fall through to the conf's `none` route.
     #
-    # FLAGOS_CAMBRICON_KERNEL is deliberately NOT defined yet: register.cc gates
-    # its native `.inc` include on it, and there is no cnnl_register.inc until
-    # those kernels exist. Defining it now would be a claim with nothing behind
-    # it.
+    # The op list behind it is short (codegen_cambricon.py) because this backend
+    # is FlagGems-primary: a vendor kernel appears there only where FlagGems
+    # cannot serve the op.
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_CAMBRICON_KERNEL=1)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${CNNL_LIB})
   endif()
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
