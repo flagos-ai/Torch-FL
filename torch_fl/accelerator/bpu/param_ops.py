@@ -74,6 +74,9 @@ class ParamKernel:
         self._model = None
         self._in_name = None
         self._out_name = None
+        # Where the compiler cached this artifact. The C++ submit loads it by
+        # path, so it has to survive build().
+        self.path: str | None = None
         self._lock = threading.Lock()
         self._failed = False
 
@@ -98,6 +101,7 @@ class ParamKernel:
                 )
                 from hbm_runtime import HB_HBMRuntime
 
+                self.path = str(path)
                 self._rt = HB_HBMRuntime(str(path))
                 self._model = self._rt.model_names[0]
                 self._in_name = in_names[0]
@@ -123,6 +127,27 @@ class ParamKernel:
         feed = {self._model: {self._in_name: np.ascontiguousarray(x, dtype=np.float32)}}
         out = self._rt.run(feed)[self._model]
         return out[self._out_name]
+
+    def run_tensor(self, tensor):
+        """Run on the device from C++, or None to take the numpy path.
+
+        Compilation stays in Python -- a partition goes through ONNX,
+        quantisation and hbdk4, which is seconds per layer and needs the
+        toolchain's whole Python surface. Running does not, and running is what
+        repeats: an eager forward submits the same artifact thousands of times.
+        Handing the submit to C++ keeps those calls out of the interpreter --
+        no module object, no numpy view, no per-call dictionary lookup.
+        """
+        if self.path is None or tensor.device.type != "flagos":
+            return None
+        if tensor.dtype is not torch.float32 or tuple(tensor.shape) != self.in_shape:
+            return None
+        try:
+            from torch_fl import _C
+
+            return _C._flagos_run_artifact(self.path, [tensor])
+        except (AttributeError, RuntimeError):
+            return None
 
 
 class ParamKernelCache:
