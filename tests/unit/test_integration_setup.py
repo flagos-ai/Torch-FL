@@ -41,9 +41,7 @@ integration_conftest = _load_integration_conftest()
 def test_device_setup_rejects_unavailable_runtime_before_init():
     initialized = []
 
-    with pytest.raises(
-        RuntimeError, match=r"torch_fl\.flagos\.is_available\(\) returned False"
-    ):
+    with pytest.raises(pytest.UsageError, match="flagos device is not available"):
         integration_conftest._require_flagos_device(
             lambda: False, lambda: initialized.append(True)
         )

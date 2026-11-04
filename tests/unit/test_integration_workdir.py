@@ -1165,8 +1165,7 @@ def test_the_known_unselected_list_has_not_gone_stale():
         )
 
 
-_RAT_HOOK_START = "    import torch_fl\n"
-_HOOK_END = "from exc\n"
+_RAT_HOOK_START = "import torch_fl"
 
 # The hook this change replaced: a bare ``pytest.exit`` for an unavailable
 # device and no wrapper around the init call.
@@ -1233,11 +1232,10 @@ def test_integration_readiness_failure_is_a_hard_error():
 
     The block sits in the ``pytest_configure`` the integration conftest
     registers -- the one conftest the whole tree shares -- so it is exercised
-    on its own: a temporary root holds the hook as its conftest, the runner
-    imports it the way pytest does (``pytest`` already in ``sys.modules``),
-    and the call runs against a stand-in ``torch_fl``. The tree's real one is
-    only read, for the hook text, so no accelerator or built extension is
-    needed.
+    on its own: the runner imports it the way pytest does (``pytest`` already
+    in ``sys.modules``), executes only the readiness block, and runs that
+    against a stand-in ``torch_fl``. The tree's real one is only read, for the
+    hook text, so no accelerator or built extension is needed.
     """
     import os
     import shutil
@@ -1247,15 +1245,49 @@ def test_integration_readiness_failure_is_a_hard_error():
     import textwrap
 
     repo = Path(__file__).resolve().parents[2]
-    current = (repo / "tests/integration/conftest.py").read_text()
-    head, keyword, tail = current.partition(_RAT_HOOK_START)
-    assert keyword, "the readiness block moved; update this test"
-    assert _HOOK_END in tail, "the readiness block moved; update this test"
-    cut = len(tail) - len(tail[tail.index(_HOOK_END) + len(_HOOK_END) :])
-    # The current block, on its own, as a function body the runner can call.
-    body = head[head.rindex("\n") + 1 :] + tail[: cut + len(_HOOK_END)]
-    block = (
-        "import pytest\n\n\ndef pytest_configure(config):\n    import torch_fl\n" + body
+    tree = ast.parse((repo / "tests/integration/conftest.py").read_text())
+    hook_source = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "pytest_configure"
+    )
+    setup = next(
+        statement
+        for statement in hook_source.body
+        if isinstance(statement, ast.Try) and "UsageError" in ast.unparse(statement)
+    )
+    readiness = [setup]
+    assert not any(
+        isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.ImportFrom,
+            ),
+        )
+        for statement in readiness
+        for node in ast.walk(statement)
+    )
+    readiness = [
+        *(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name.startswith("_")
+            and node.name != "__name__"
+        ),
+        *readiness,
+    ]
+    runner_hook = (
+        "import pytest\n\n\n"
+        + "\n\n".join(
+            ast.unparse(statement) for statement in readiness if statement is not setup
+        )
+        + "\n\n\ndef pytest_configure(config):\n"
+        + "    import torch_fl\n"
+        + textwrap.indent(ast.unparse(setup), "    ")
     )
     stripped = "import pytest\n" + _ORIGINAL_READINESS_HOOK
 
@@ -1294,15 +1326,15 @@ def test_integration_readiness_failure_is_a_hard_error():
         result.stdout + result.stderr
     )
 
-    result = outcome(block, "pass", "False")
+    result = outcome(runner_hook, "pass", "False")
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.startswith("UsageError flagos device is not available"), (
         result.stdout + result.stderr
     )
 
-    result = outcome(block, "raise RuntimeError('ACL runtime broken')", "True")
+    result = outcome(runner_hook, "raise RuntimeError('ACL runtime broken')", "True")
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.startswith("UsageError flagos device initialization failed"), (
+    assert result.stdout.startswith("UsageError flagos integration setup failed"), (
         result.stdout + result.stderr
     )
     assert "RuntimeError: ACL runtime broken" in result.stdout

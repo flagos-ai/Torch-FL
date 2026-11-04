@@ -20,7 +20,7 @@ pytest_plugins = ("profiler_support", "amp_support")
 def _require_flagos_device(is_available, init):
     """Check and initialize the runtime behind the device these cases use."""
     if not is_available():
-        raise RuntimeError("torch_fl.flagos.is_available() returned False")
+        raise pytest.UsageError("flagos device is not available for flagos:0.")
     init()
 
 
@@ -138,6 +138,8 @@ def pytest_configure(config):
     # set. A failed setup is an explicit collection error; it is never a skip.
     try:
         _initialize_flagos_device()
+    except pytest.UsageError:
+        raise
     except Exception as exc:  # noqa: BLE001 -- pytest reports setup failure
         raise pytest.UsageError(
             f"flagos integration setup failed for flagos:0: {type(exc).__name__}: {exc}"
