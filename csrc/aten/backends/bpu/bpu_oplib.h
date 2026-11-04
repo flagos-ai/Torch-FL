@@ -37,10 +37,13 @@
 #include <stdint.h>
 
 #include <ATen/core/Tensor.h>
+#include <flagos.h>
 #include <ATen/ops/empty_like.h>
 
 #include <cstdint>
 #include <utility>
+#include <string>
+#include <vector>
 
 namespace flagos {
 namespace bpu {
@@ -59,6 +62,82 @@ int64_t BucketFor(const char* op, int nargs, int64_t width);
 // the artifact fails, which sends the caller to the reference path.
 bool Run(const char* op, int nargs, const float* const* in, int64_t width,
          float* out);
+
+// `Run` with a C ABI, so a caller that is not going through ATen -- the eager
+// path in torch_fl/accelerator/bpu -- can reach it with ctypes and skip the
+// dispatcher. Same semantics and same return value.
+extern "C" FLAGOS_EXPORT bool FlagosBpuOplibRun(const char* op, int nargs,
+                                                const float* const* in,
+                                                int64_t width, float* out);
+
+// Submit the artifact at `hbm_path` with tensor arguments.
+//
+// Elementwise operators need none of this: every operand is the same width, so
+// `Run` can size one bucket and copy. An operator with parameters cannot. Its
+// shape is fixed when it is compiled, so it has no bucket, and the number and
+// extent of its arguments are whatever that particular graph declares.
+//
+// A weight is *not* among those arguments. Compiling one as a runtime input
+// leaves the toolchain no constant to fold, and the artifact it produces is a
+// CPU node: measured at 185 ms for one 64-channel 3x3 layer, against 0.9 ms for
+// the same layer with its weight baked in. So the caller compiles one artifact
+// per weight set -- see ParamKernelCache on the Python side, which keys them by
+// pulse and shape -- and this only has to run it.
+//
+// `hbm_path` is therefore an absolute path, not a name under FLAGOS_BPU_OPLIB:
+// these artifacts live wherever the compiler cached them.
+//
+// The shapes are answered from the file, and every `at::Tensor` is checked
+// against what it declares, which keeps a mismatch a miss rather than a wrong
+// answer. Returns false when the file is absent, when `inputs` does not match
+// its declaration, or when submission fails -- all of which send the caller to
+// the reference path.
+FLAGOS_EXPORT bool RunArtifact(
+    const char* hbm_path, const std::vector<at::Tensor>& inputs, at::Tensor& out);
+
+
+// Register the artifact a parameterised operator compiled to, and look it up
+// again.
+//
+// aten hands a convolution its weight as a tensor, not as the nn.Module the
+// Python compiler traces, so the two sides cannot describe the same operator
+// the same way. The compiler knows which weight set produced which artifact --
+// it is the thing that traced, quantised and compiled it -- so it publishes the
+// mapping and the kernel reads it back. `key` is opaque to this layer.
+FLAGOS_EXPORT void RegisterArtifact(const char* key, const char* hbm_path);
+
+// The path registered for `key`, or nullptr. Returned pointer stays valid for
+// the life of the process.
+FLAGOS_EXPORT const char* LookupArtifact(const char* key);
+
+// The key RunWeightedOp derives. Exposed so the compiler can register under the
+// same string it will look up.
+FLAGOS_EXPORT std::string WeightedKey(const char* op,
+                                      const std::vector<at::Tensor>& operands);
+
+// Submit the artifact the compiler registered for these operands.
+//
+// `op` names the aten operator; the operands are the tensors its artifact was
+// compiled from, in the order the compiler keyed them. The key is derived here
+// from their storage identity and version rather than passed in, so that a
+// kernel never has to know how the compiler names things.
+//
+// Falls to `fallback` when nothing is registered for this operand set, which
+// keeps an uncompiled model correct rather than merely slow.
+template <typename Fallback>
+at::Tensor RunWeightedOp(const char* op, const std::vector<at::Tensor>& operands,
+                         Fallback fallback) {
+  const std::string key = WeightedKey(op, operands);
+  const char* path = LookupArtifact(key.c_str());
+  if (path == nullptr) {
+    return fallback();
+  }
+  at::Tensor out;
+  if (!RunArtifact(path, {operands.front()}, out)) {
+    return fallback();
+  }
+  return out;
+}
 
 // One-line accounting of hits and misses, for the same reason
 // EagerDispatcher.summary() exists on the Python side: a path that silently

@@ -215,6 +215,29 @@ class KernelLibrary:
         self._lock = threading.Lock()
         self._max_cached = 32
         self._direct_cache: dict[str, object] = {}
+        self._pool = None
+        self.hits_cpp = 0
+        # The C++ oplib is the fastest route once it is reachable: it keeps the
+        # buffers and descriptors open per artifact and skips the Python layer
+        # below it. None when the extension does not export the C ABI.
+        self._cpp = None
+        if os.environ.get("FLAGOS_BPU_CPP_OPLIB", "1") != "0":
+            from .submit import cpp_oplib
+
+            self._cpp = cpp_oplib()
+        # Cache maintenance is opt-in: the host-mapped allocation this board
+        # hands out is visible to the device without the two hbUCPMemFlush
+        # calls, and skipping them was measured at 0.408 -> 0.293 ms on a
+        # 262144-lane relu and 0.181 -> 0.073 ms on a 32768-lane one, with
+        # bit-identical results. A platform whose cache behaviour differs can
+        # set FLAGOS_BPU_FLUSH=1.
+        # Off by default: the flush is what makes a device-written output
+        # visible, and without it a graph whose output lands in a CPU node
+        # returns the previous request's values (measured on neg_1x4096).
+        # FLAGOS_BPU_NOFLUSH=1 skips it, which was correct for the conv and
+        # relu artifacts tested but is not safe in general.
+        self._flush = os.environ.get("FLAGOS_BPU_NOFLUSH") != "1"
+        self.hits_direct = 0
 
     @property
     def ops(self) -> list[str]:
@@ -262,6 +285,7 @@ class KernelLibrary:
         whole-op budget of ~0.14 ms, and the C-level equivalent with the
         buffers held open runs the same work in 0.045 ms. This keeps them open.
         """
+        nargs = int(entry.get("nargs", 1))
         key = str(self.root / entry["file"])
         with self._lock:
             cached = self._direct_cache.get(key)
@@ -269,7 +293,7 @@ class KernelLibrary:
             return cached
 
         try:
-            from .submit import DirectKernel
+            from .submit import FlatKernel
 
             # The artifact's filename carries the dtype, the model name inside
             # it does not: relu_1x3072_f32.hbm declares a model called
@@ -277,11 +301,13 @@ class KernelLibrary:
             # the filename stem fails and every call silently takes the slow
             # hbm_runtime path (a malloc/free pair per call, 0.97 ms against
             # 0.15 ms with the buffers held open).
-            kernel = DirectKernel(
+            kernel = FlatKernel(
                 str(self.root / entry["file"]),
                 str(entry["name"]).removesuffix(f"_{self.dtype}"),
                 self.bucket_width(entry),
                 self.numpy_dtype,
+                flush=self._flush,
+                nargs=nargs,
             )
         except Exception as exc:  # noqa: BLE001 - fall back to hbm_runtime
             log.debug(
@@ -324,9 +350,32 @@ class KernelLibrary:
         # submit.py for the C++ side to mirror, but the Python dispatch goes
         # through the runtime.
 
+        # The C++ path is tried before anything below it: it needs neither the
+        # cached runtime nor the feed dict, and the lookup that builds them
+        # measured 0.008 ms against a whole call of 0.13 ms.
+        cpp = self._cpp
+        op_name = entry.get("op")
+        if cpp is not None and op_name:
+            result = np.empty(int(np.prod(arrays[0].shape)), self.numpy_dtype)
+            try:
+                if cpp.run(op_name, arrays, result):
+                    self.hits_cpp += 1
+                    return result.reshape(arrays[0].shape)
+            except Exception as exc:  # noqa: BLE001 - fall through to the next path
+                log.debug("bpu oplib C ABI failed for %s: %s", entry["name"], exc)
+
         rt = self._runtime(entry)
         model = rt.model_names[0]
         names = rt.input_names[model]
+
+        direct = self._direct(entry)
+        if direct is not None:
+            try:
+                result = direct.run(arrays[0] if len(arrays) == 1 else list(arrays))
+                self.hits_direct += 1
+                return result[: int(np.prod(arrays[0].shape))]
+            except Exception as exc:  # noqa: BLE001 - fall back to the runtime
+                log.debug("bpu oplib direct path failed for %s: %s", entry["name"], exc)
 
         feed = {model: {}}
         for name, a in zip(names, arrays):
@@ -345,7 +394,10 @@ class KernelLibrary:
                     f"bucket {width}; lookup() should have ruled this out"
                 )
 
-        out = rt.run(feed)[model]
+        if self._pool is not None:
+            out = self._pool.run((str(self.root / entry["file"]),), feed)[model]
+        else:
+            out = rt.run(feed)[model]
         result = out[rt.output_names[model][0]].reshape(-1)
         return result[: int(np.prod(arrays[0].shape))]
 
@@ -362,6 +414,8 @@ class EagerDispatcher:
     def __init__(self, root: str | Path | None, enabled: bool = True):
         self.enabled = enabled and root is not None
         self.library = KernelLibrary(root) if self.enabled else None
+        if self.library is not None and os.environ.get("FLAGOS_BPU_CORES"):
+            self._enable_core_pool(os.environ["FLAGOS_BPU_CORES"])
         self.params = ParamKernelCache() if self.enabled else None
         self.stats = {
             "hit": 0,
@@ -375,6 +429,25 @@ class EagerDispatcher:
     def _tally(self, key: str) -> None:
         with self._lock:
             self.stats[key] += 1
+
+    def _enable_core_pool(self, spec: str) -> None:
+        """Spread dispatches over several BPU cores.
+
+        `spec` is `cores` or `cores:lanes`, e.g. `0,1` or `0,1:2`. A serial
+        caller leaves the second core idle -- `run()` waits inline, so the
+        driver only ever sees one submission at a time -- while pinned
+        runtimes driven from separate lanes overlap (measured 4.3x at three
+        threads on this board). Opt-in because it costs one extra runtime per
+        lane, and the artifacts are large.
+        """
+        from .submit import CorePool
+
+        core_part, _, lane_part = spec.partition(":")
+        cores = [int(c) for c in core_part.split(",") if c.strip()]
+        if not cores:
+            raise ValueError(f"FLAGOS_BPU_CORES={spec!r} names no cores")
+        lanes = int(lane_part) if lane_part else 1
+        self.library._pool = CorePool(cores=cores, lanes_per_core=lanes)
 
     def run_module(self, module, tensor):
         """Run one parameterised module on the BPU, or None if it cannot.
@@ -394,6 +467,15 @@ class EagerDispatcher:
         kernel = self.params.get(module, tuple(tensor.shape))
         if kernel is None:
             return None
+        # Submit from C++ when the artifact is already compiled and the input
+        # is a device tensor: that is the path an eager forward repeats, and it
+        # skips the interpreter, the numpy view and the runtime's Python
+        # wrapper. Falls through to the numpy path below when it cannot, which
+        # keeps one implementation of the transfer rather than two.
+        direct = kernel.run_tensor(tensor)
+        if direct is not None:
+            self._tally("hit_param")
+            return direct
         try:
             # Read the input where it already lives. The BPU's device memory is
             # host-mapped, so this is a pointer wrap rather than a transfer --
@@ -521,13 +603,30 @@ def register_eager(root: str | Path | None = None) -> EagerDispatcher | None:
 
     def _make(target: str, nargs: int):
         def _impl(*args, **kwargs):
-            arrays = [
-                a.detach().cpu().numpy() if isinstance(a, torch.Tensor) else a
-                for a in args[:nargs]
-            ]
-            out = dispatcher.dispatch(target, arrays)
+            # Read the operands where they already live. `detach().cpu().numpy()`
+            # and `.to(device)` on the way back cost two device copies per op,
+            # and an eager forward issues dozens of ops per layer: profiling a
+            # single conv block counted 45 aten::_to_copy calls, 3.7 ms of the
+            # 23 ms it took. The device memory is host-mapped, so a pointer wrap
+            # replaces both directions.
             tensors = [a for a in args[:nargs] if isinstance(a, torch.Tensor)]
             device = tensors[0].device if tensors else torch.device("cpu")
+            arrays = []
+            for a in args[:nargs]:
+                if not isinstance(a, torch.Tensor):
+                    arrays.append(a)
+                    continue
+                try:
+                    arrays.append(as_array(a))
+                except (TypeError, ValueError):
+                    arrays.append(a.detach().cpu().numpy())
+            out = dispatcher.dispatch(target, arrays)
+            if device.type == "flagos":
+                try:
+                    # Already a flagos tensor: `.to(device)` on it would copy.
+                    return wrap_in_place(out)
+                except (TypeError, RuntimeError):
+                    pass
             return torch.from_numpy(np.ascontiguousarray(out)).to(device)
 
         return _impl
