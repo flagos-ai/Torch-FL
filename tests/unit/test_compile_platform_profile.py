@@ -26,6 +26,7 @@ tests/integration/test_compile.py.
 
 import functools
 
+import types
 import pytest
 
 import torch
@@ -152,6 +153,24 @@ def as_tsingmicro(monkeypatch):
             raising=False,
         )
     monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "tsingmicro")
+    # Triton's driver resolution reaches a real device on whichever accelerator
+    # this suite happens to run on, and on Cambricon that loads the mlu driver --
+    # which recompiles and reloads bang_utils and kills the process, so an
+    # exception cannot be caught. The profile is forced here, so stand in a
+    # driver that matches it: a fake target is what a forced profile implies, and
+    # it keeps the test independent of the hardware it runs on.
+    from triton.runtime import driver as _triton_driver
+
+    monkeypatch.setattr(
+        _triton_driver,
+        "active",
+        types.SimpleNamespace(
+            get_current_target=lambda: types.SimpleNamespace(
+                backend="txda", arch=1, warp_size=16
+            )
+        ),
+        raising=False,
+    )
     return pp._TSINGMICRO_PROFILE
 
 

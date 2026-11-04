@@ -268,3 +268,72 @@ def install_cambricon_compat() -> None:
 
     install_torch_mlu_shim(flagos)
     install_mlu_driver_device_strings()
+
+    # The cnrt context has to exist before the properties are read, and on this
+    # platform nothing else does it: torch_mlu's `import torch_mlu` normally
+    # stands the runtime up, and torch_mlu is not installed here. `_C._init` is
+    # the same call flagos._lazy_init makes first, minus the FlagGems import that
+    # would re-enter what the next line is preparing for.
+    try:
+        flagos._C._init()
+        flagos._initialized = True
+    except Exception:  # noqa: BLE001 - device bring-up is best-effort here
+        return
+    _preload_flaggems_cambricon_utils()
+
+
+def _preload_flaggems_cambricon_utils() -> None:
+    """Break the import cycle FlagGems' ``_cambricon`` backend contains.
+
+    ``_cambricon/__init__.py`` starts with ``from .utils import DEVICE_COUNT``,
+    which runs ``utils`` -- and ``utils`` reads the device at module scope
+    (``BangUtils().get_device_properties(torch.mlu.current_device())``). Its
+    sibling ``ops/sort.py`` imports the same module by *absolute* path
+    (deliberately: "so that this file can also be loaded as a standalone module
+    ... without the surrounding package context"), so loading ``_cambricon.ops``
+    first re-enters the still-executing ``_cambricon`` package and runs ``utils``
+    a second time. ``BangUtils`` is a singleton whose ``__init__`` recompiles and
+    reloads the ``bang_utils`` C module on every call, so that second run tears
+    down the cnrt context the first one created and the process dies inside
+    ``cnrtGetDevice`` instead of raising.
+
+    Which order ``flag_gems`` walks that cycle in depends on what is already in
+    ``sys.modules``. On this platform the device is not up yet when the import
+    starts (there is no vendor package doing it in ``import torch_mlu``), so the
+    re-entrant path is the one it takes.
+
+    Seeding the module with the values ``utils`` would have computed removes the
+    re-entry: the real import then finds it present and keeps the values. The
+    properties come from the same ``BangUtils`` call ``utils`` makes, so this is
+    not a stand-in for the measurement -- it is the measurement, taken once, on
+    a device that is up. Skipped whenever anything is missing; FlagGems is
+    optional everywhere.
+    """
+    import sys
+    import types
+
+    name = "flag_gems.runtime.backend._cambricon.utils"
+    if name in sys.modules:
+        return
+    try:
+        from triton.backends.mlu.driver import BangUtils
+
+        props = BangUtils().get_device_properties(_current_device())
+    except Exception:  # noqa: BLE001 - FlagGems/Triton absent or undetectable
+        return
+
+    int_max = sys.maxsize
+    utils = types.ModuleType(name)
+    utils.__doc__ = "Seeded by torch_fl; see _preload_flaggems_cambricon_utils."
+    cluster_num = props.get("cluster_num", 0)
+    utils.TOTAL_CLUSTER_NUM = cluster_num
+    utils.TOTAL_CORE_NUM = cluster_num * props.get("core_num_per_cluster", 0)
+    utils.MAX_NRAM_SIZE = props.get("max_nram_size", 0)
+    utils.DEVICE_COUNT = _device_count()
+    utils.MAX_GRID_SIZES = [
+        props.get(f"max_block_task_dim_{axis}", int_max) for axis in "xyz"
+    ]
+    utils.MAX_GRID_SIZE_X, utils.MAX_GRID_SIZE_Y, utils.MAX_GRID_SIZE_Z = (
+        utils.MAX_GRID_SIZES
+    )
+    sys.modules[name] = utils
