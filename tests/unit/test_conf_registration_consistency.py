@@ -805,14 +805,17 @@ def test_conf_route_counts_are_stable():
         # trigonometric and predicate spellings, the vision interpolation
         # factories, clamp, GELU, rsub.Scalar, the eight metadata views and
         # ``addmm`` -- the spelling ``nn.Linear`` lowers to, added so a model's
-        # linear layers stop round-tripping the weight through the host
-        # (67 ops so far) -- so the conf routes those to
+        # linear layers stop round-tripping the weight through the host -- and
+        # the eight inverse-hyperbolic and hyperbolic trigonometric spellings
+        # (``asin``, ``acos``, ``atan``, ``asinh``, ``acosh``, ``atanh``,
+        # ``sinh``, ``cosh``), which are one MPSGraph node each
+        # (75 ops so far) -- so the conf routes those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"none": 1975, "apple": 67},
+        "apple": {"none": 1967, "apple": 75},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then

@@ -16,6 +16,8 @@
   m.impl("_softmax", WrapperPrivSoftmax);
   m.impl("_unsafe_view", WrapperPrivUnsafeView);
   m.impl("abs", WrapperAbs);
+  m.impl("acos", WrapperAcos);
+  m.impl("acosh", WrapperAcosh);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
   m.impl("addmm", WrapperAddmm);
@@ -26,11 +28,16 @@
   m.impl("arange.start", WrapperArangeStart);
   m.impl("arange.start_step", WrapperArangeStartStep);
   m.impl("argmax", WrapperArgmax);
+  m.impl("asin", WrapperAsin);
+  m.impl("asinh", WrapperAsinh);
+  m.impl("atan", WrapperAtan);
+  m.impl("atanh", WrapperAtanh);
   m.impl("bmm", WrapperBmm);
   m.impl("cat", WrapperCat);
   m.impl("clamp", WrapperClamp);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
+  m.impl("cosh", WrapperCosh);
   m.impl("cumsum", WrapperCumsum);
   m.impl("div.Scalar", WrapperDivScalar);
   m.impl("div.Tensor", WrapperDivTensor);
@@ -65,6 +72,7 @@
   m.impl("silu", WrapperSilu);
   m.impl("silu_backward", WrapperSiluBackward);
   m.impl("sin", WrapperSin);
+  m.impl("sinh", WrapperSinh);
   m.impl("slice.Tensor", WrapperSliceTensor);
   m.impl("softplus", WrapperSoftplus);
   m.impl("sqrt", WrapperSqrt);
