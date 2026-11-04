@@ -1563,6 +1563,117 @@ at::Tensor BmmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kApple, BmmKernelMps)
 
 
+at::Tensor AddmmKernelMps(
+    const at::Tensor& self,
+    const at::Tensor& mat1,
+    const at::Tensor& mat2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {
+  if (!mps::MpsSupportsGemmDtype(mat1.scalar_type(), mat2.scalar_type())) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  // The bias takes the result's width and device. A bias of another float width
+  // or device is the reference's to promote rather than the graph's to coerce.
+  if (self.scalar_type() != mat1.scalar_type() ||
+      self.device() != mat1.device()) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  if (mat1.dim() != 2 || mat2.dim() != 2 ||
+      mat1.size(-1) != mat2.size(-2)) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  // The reference's own broadcast rule, asked rather than restated: a bias that
+  // does not reach (M, N) is an error, and `at::infer_size` is what says so.
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self.sizes(), {mat1.size(0), mat2.size(1)});
+  } catch (const std::exception&) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, mat1.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (mat1.numel() == 0 || mat2.numel() == 0) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  const mps::MpsGemmOperand mat1_operand = mps::MpsGemmOperandOf(mat1);
+  const mps::MpsGemmOperand mat2_operand = mps::MpsGemmOperandOf(mat2);
+  const bool mat1_transposed = mat1_operand.transposed;
+  const bool mat2_transposed = mat2_operand.transposed;
+  const bool folds_bias = !beta.equal(0);
+  const bool scales_product = !alpha.equal(1);
+  const bool scales_bias = folds_bias && !beta.equal(1);
+  const at::ScalarType dtype = mat1.scalar_type();
+  // Each operand reaches the graph at the shape its own buffer holds -- the
+  // operand itself, or its transpose view when `transposed` -- which is what
+  // MpsRunGraph describes. There is no shared "product shape": a transposed
+  // weight's buffer is (N, K) and the dense one's is (K, N), and describing
+  // both as (M, N) reads the wrong bytes.
+  std::vector<at::Tensor> inputs{mat1_operand.buffer, mat2_operand.buffer};
+  if (folds_bias) {
+    inputs.push_back(self.contiguous());
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("addmm", mat1_transposed, mat2_transposed, out_shape, alpha, beta),
+      inputs,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        if (args.count != (folds_bias ? 3u : 2u)) {
+          return nil;
+        }
+        // MpsRunGraph describes every operand densely at the shape its buffer
+        // holds, so a transposed one carries its transpose as a node -- the
+        // layout T_GEMM resolves the same way.
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args[1];
+        if (mat1_transposed) {
+          primary =
+              [graph transposeTensor:primary dimension:0 withDimension:1 name:nil];
+        }
+        if (mat2_transposed) {
+          secondary =
+              [graph transposeTensor:secondary dimension:0 withDimension:1 name:nil];
+        }
+        MPSGraphTensor* product =
+            [graph matrixMultiplicationWithPrimaryTensor:primary
+                                         secondaryTensor:secondary
+                                                    name:nil];
+        if (scales_product) {
+          product = mps::MpsScaledByScalar(graph, product, alpha, dtype);
+          if (product == nil) {
+            return nil;
+          }
+        }
+        if (!folds_bias) {
+          return product;
+        }
+        MPSGraphTensor* bias = args[2];
+        if (scales_bias) {
+          bias = mps::MpsScaledByScalar(graph, bias, beta, dtype);
+          if (bias == nil) {
+            return nil;
+          }
+        }
+        // The product is (M, N) and the bias is whatever aten broadcast to it;
+        // the node broadcasts the pair the way the reference did.
+        return [graph additionWithPrimaryTensor:product secondaryTensor:bias name:nil];
+      });
+  if (!ran) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kApple, AddmmKernelMps)
+
+
 at::Tensor ConvolutionOverrideableKernelMps(
     const at::Tensor& input,
     const at::Tensor& weight,

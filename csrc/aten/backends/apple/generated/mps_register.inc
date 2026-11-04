@@ -18,6 +18,7 @@
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("addmm", WrapperAddmm);
   m.impl("all", WrapperAll);
   m.impl("all.dim", WrapperAllDim);
   m.impl("all.dims", WrapperAllDims);
