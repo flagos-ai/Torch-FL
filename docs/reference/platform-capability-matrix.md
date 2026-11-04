@@ -3,7 +3,7 @@
 The twelve `FLAGOS_ACCELERATOR` values, what each is, and what it actually
 supports. The tree layout made this "obvious" to maintainers but hid the
 asymmetries — PPU is Python-only, TsingMicro's Python compat is a Qwen-Image-2.1
-rope shim only, `soft_lowp` is aten-only, and CI covers nine of the twelve — so
+rope shim only, `soft_lowp` is aten-only, and CI covers ten of the thirteen — so
 this page is the authoritative answer.
 
 The directory inventory at the end is machine-checked by
@@ -26,7 +26,7 @@ when a platform gains or loses one.
 | `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2042 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
 | `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2042 | yes |
-| `cambricon` | vendor-native (cnrt runtime; FlagGems-primary, CNNL kernels pending) | `cambricon` | `cambricon` (FlagGems register only; CNNL kernels pending) | `cambricon` | 2042 | yes |
+| `cambricon` | vendor-native (cnrt runtime; FlagGems-primary, CNNL kernels pending) | `cambricon` | `cambricon` (FlagGems register only; CNNL kernels pending) | `cambricon` | 2042 | no |
 
 Column notes:
 
@@ -164,8 +164,12 @@ build opts into boxing.
   `corex4.5.0`. The native kernel cohort is **not yet hardware-revalidated**: the
   ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
   BI-V150) but the full cohort has not been re-measured.
-- **CI covers 9 of 12**: TsingMicro, BPU and Iluvatar have no
-  `.github/configs/` entry. MPS gained one with its operator lane, the first
+- **CI covers 10 of 13**: TsingMicro, BPU and Cambricon have no
+  `.github/configs/` entry. Cambricon's platform is complete and builds, but no
+  runner carries its hardware yet, so the lane is retired and `pypi_lane` is
+  empty — a release job reads its runner label and image from that config file,
+  so publishing waits on the runner rather than the code. Iluvatar has a lane of
+  its own. MPS gained one with its operator lane, the first
   platform whose hardware job runs on a GitHub-hosted macOS runner rather than a
   vendor image: its config leaves `ci_image` empty and the two consuming
   workflows omit the `container:` key for that value, because a macOS runner
@@ -177,7 +181,7 @@ build opts into boxing.
   `torch_fl/accelerator/cambricon/_cambricon_compat.py`. Its Triton backend comes
   from the lane's `triton` wheel, not from a `flagtree` package -- there is no
   cambricon flagtree build. The conf routes the full shared FlagGems ceiling
-  (**640** `flaggems`) and **1397** `none`, because no CNNL operator kernels exist
+  (**640** `flaggems`) and **1402** `none`, because no CNNL operator kernels exist
   yet: `csrc/aten/backends/cambricon/` holds only the generated FlagGems register,
   and `FLAGOS_CAMBRICON_KERNEL` is deliberately undefined until they land. No
   MLU overload survey has been run, so those 640 routes are "unmeasured", not
