@@ -45,6 +45,8 @@ _ISSUES = (
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_tensor",
             "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_dim_reduction",
+            "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_dim_empty_reduction_reaches_its_route",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllDispatch::test_dispatch_log_flaggems_python",

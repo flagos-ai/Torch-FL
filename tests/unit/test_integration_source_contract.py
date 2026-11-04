@@ -937,6 +937,20 @@ def test_fixed_registered_cases_remove_their_source_skip():
         ) not in evidence
 
 
+def test_empty_dimension_case_uses_a_cpu_reference_instead_of_xfail():
+    """The case owns an issue-gated skip, so it must not expect a failure too."""
+    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
+    function = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_all_empty_dim_reduction"
+    )
+    text = ast.unparse(function)
+    assert "xfail" not in text
+    assert "torch.equal(out.cpu(), expected)" in text
+
+
 def test_plain_all_reference_uses_cpu_on_every_platform():
     source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
     function = next(
