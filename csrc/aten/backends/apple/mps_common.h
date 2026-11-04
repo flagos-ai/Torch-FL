@@ -840,17 +840,22 @@ bool MpsSupportsTakeDtype(
 // reciprocal overflows from the same boundary: `1 / 1.17e-38` is `8.5e37` on the
 // reference and `inf` from the graph.
 //
-// This is not a division property, and the measurement says so plainly:
-// `mul.Tensor` flushes the identical way and has been routed to this backend
-// since stage 2 (`1e-38 * 0.5` -> `0`), as does `add.Tensor` (`1e-39 + 1e-39`
-// -> `0`). So the choice here is "div behaves like the mul and add this branch
-// already serves" or "div is the only arithmetic op on the device with a
-// different subnormal policy from its three siblings", and the first is both the
-// smaller surprise and the one already shipped. Nothing in an attention or
-// normalization path evaluates a division whose result is subnormal -- those are
-// O(1) by construction -- so this is a boundary the branch documents rather than
-// one it meets. test_mps_div.py pins it as intentional beside the ``mul`` case
-// it shares.
+// This is not a division property either way, and re-measuring it showed the
+// earlier reading was too wide. The first version of this note recorded that
+// `mul.Tensor` flushed identically (`1e-38 * 0.5` -> `0`) and that `add.Tensor`
+// did too (`1e-39 + 1e-39` -> `0`). On the M5 the suite was then re-run on,
+// both keep the subnormal: `multiplicationWithPrimaryTensor:` over two runtime
+// operands returns `5.0e-39` and `additionWithPrimaryTensor:` returns `2.0e-39`,
+// while every division spelling still returns `0`. So the flush belongs to the
+// node body, not to the platform: the division and reciprocal nodes flush and
+// the additive and multiplicative ones do not, on one and the same host. The
+// constant body is a third reading even under one selector -- `aten::mul.Scalar`
+// reaches `MpsConstant`'s folded `constantWithScalar:` and flushes there while
+// `aten::mul.Tensor` over the same values keeps them -- which is why each body
+// is probed rather than inheriting a sibling's answer. Nothing in an attention
+// or normalization path evaluates a division whose result is subnormal -- those
+// are O(1) by construction -- so this is a boundary the branch documents rather
+// than one it meets. test_mps_div.py pins each body against its own probe.
 //
 // The other case that separates the plausible readings -- `a / b` against
 // `a * reciprocal(b)` -- does **not** show up here: measured against `at::div`
