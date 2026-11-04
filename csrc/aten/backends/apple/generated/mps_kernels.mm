@@ -1641,6 +1641,246 @@ at::Tensor CoshKernelMps(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CoshFn, cosh_dispatcher, Backend::kApple, CoshKernelMps)
 
 
+at::Tensor CeilKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRoundingDtype(self.scalar_type())) {
+    return at::ceil(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("ceil"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph ceilWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::ceil(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kApple, CeilKernelMps)
+
+
+at::Tensor FloorKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRoundingDtype(self.scalar_type())) {
+    return at::floor(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("floor"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph floorWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::floor(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kApple, FloorKernelMps)
+
+
+at::Tensor TruncKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRoundingDtype(self.scalar_type())) {
+    return at::trunc(self.cpu()).to(self.device());
+  }
+  if (self.dim() == 0) {
+    // The node aborts on a rank-0 operand rather than declining -- see the note
+    // above -- and a one-element answer is free on the host.
+    return at::trunc(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("trunc"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph truncateWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::trunc(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kApple, TruncKernelMps)
+
+
+at::Tensor IsnanKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isnan(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isnan"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph isNaNWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::isnan(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsnanFn, isnan_dispatcher, Backend::kApple, IsnanKernelMps)
+
+
+at::Tensor IsinfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isinf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isinf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph isInfiniteWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::isinf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsinfFn, isinf_dispatcher, Backend::kApple, IsinfKernelMps)
+
+
+at::Tensor SignbitKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::signbit(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("signbit"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];
+        if (sign == nil) {
+          return nil;
+        }
+        return [graph notEqualWithPrimaryTensor:sign
+                             secondaryTensor:[graph constantWithScalar:0.0
+                                                              dataType:args[0].dataType]
+                                        name:nil];
+      });
+  if (!ran) {
+    return at::signbit(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SignbitFn, signbit_dispatcher, Backend::kApple, SignbitKernelMps)
+
+
+at::Tensor IsneginfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isneginf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isneginf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];
+        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];
+        if (infinite == nil || sign == nil) {
+          return nil;
+        }
+        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign
+                             secondaryTensor:[graph constantWithScalar:0.0
+                                                              dataType:args[0].dataType]
+                                        name:nil];
+        if (negative == nil) {
+          return nil;
+        }
+        return [graph logicalANDWithPrimaryTensor:infinite
+                               secondaryTensor:negative
+                                          name:nil];
+      });
+  if (!ran) {
+    return at::isneginf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsneginfFn, isneginf_dispatcher, Backend::kApple, IsneginfKernelMps)
+
+
+at::Tensor IsposinfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isposinf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isposinf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];
+        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];
+        if (infinite == nil || sign == nil) {
+          return nil;
+        }
+        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign
+                             secondaryTensor:[graph constantWithScalar:0.0
+                                                              dataType:args[0].dataType]
+                                        name:nil];
+        if (negative == nil) {
+          return nil;
+        }
+        return [graph logicalANDWithPrimaryTensor:infinite
+                               secondaryTensor:[graph notWithTensor:negative name:nil]
+                                          name:nil];
+      });
+  if (!ran) {
+    return at::isposinf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsposinfFn, isposinf_dispatcher, Backend::kApple, IsposinfKernelMps)
+
+
 at::Tensor PowTensorScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   if (!mps::MpsSupportsPowDtype(self.scalar_type(), other)) {
     return at::pow(self.cpu(), other).to(self.device());

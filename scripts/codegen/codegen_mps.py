@@ -143,6 +143,14 @@ OPS = {
     "atanh": "trig",
     "sinh": "trig",
     "cosh": "trig",
+    "ceil": "rounding",
+    "floor": "rounding",
+    "trunc": "trunc",
+    "isnan": "predicate",
+    "isinf": "predicate",
+    "signbit": "predicate",
+    "isneginf": "predicate",
+    "isposinf": "predicate",
     # A scalar exponent. MPSGraph's power is a real selector rather than an
     # exp/log composition, which is what keeps the NaN of a negative base to a
     # fractional exponent -- the case the reference produces and a composition
@@ -537,6 +545,63 @@ METADATA_VIEW_OPS = {
     "unsqueeze": "unsqueeze",
 }
 
+# The graph expression each predicate body builds, as the C++ text `render` splices
+# into T_PREDICATE. The single-node spellings name their selector there; the two
+# composed ones build `isinf AND signbit`, which is why they are not rows in
+# CALLS alone.
+PREDICATE_BODIES = {
+    "isnan": "return [graph isNaNWithTensor:args[0] name:nil];",
+    "isinf": "return [graph isInfiniteWithTensor:args[0] name:nil];",
+    # `signbitWithTensor:` answers a float (0.0/1.0), not a bool -- checked,
+    # its dataType is float32 -- so it is compared against zero. Without
+    # that comparison the float is copied into a bool buffer and the result
+    # is garbage: measured, `signbit(-inf)` came back false.
+    "signbit": (
+        "MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
+        "        if (sign == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph notEqualWithPrimaryTensor:sign\n"
+        "                             secondaryTensor:[graph constantWithScalar:0.0\n"
+        "                                                              dataType:args[0].dataType]\n"
+        "                                        name:nil];"
+    ),
+    "isneginf": (
+        "MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];\n"
+        "        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
+        "        if (infinite == nil || sign == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign\n"
+        "                             secondaryTensor:[graph constantWithScalar:0.0\n"
+        "                                                              dataType:args[0].dataType]\n"
+        "                                        name:nil];\n"
+        "        if (negative == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph logicalANDWithPrimaryTensor:infinite\n"
+        "                               secondaryTensor:negative\n"
+        "                                          name:nil];"
+    ),
+    "isposinf": (
+        "MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];\n"
+        "        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
+        "        if (infinite == nil || sign == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign\n"
+        "                             secondaryTensor:[graph constantWithScalar:0.0\n"
+        "                                                              dataType:args[0].dataType]\n"
+        "                                        name:nil];\n"
+        "        if (negative == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph logicalANDWithPrimaryTensor:infinite\n"
+        "                               secondaryTensor:[graph notWithTensor:negative name:nil]\n"
+        "                                          name:nil];"
+    ),
+}
+
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
 # not compute (the SUPPORTS predicate below). The fallback keeps the result
 # correct and stays on the host: it is not a delegation to a CUDA kernel.
@@ -574,6 +639,14 @@ AT_OP = {
     "atanh": "atanh",
     "sinh": "sinh",
     "cosh": "cosh",
+    "ceil": "ceil",
+    "floor": "floor",
+    "trunc": "trunc",
+    "isnan": "isnan",
+    "isinf": "isinf",
+    "signbit": "signbit",
+    "isneginf": "isneginf",
+    "isposinf": "isposinf",
     # Qwen3.5's causal mask and rotary path build the predicates with these
     # three spellings. Each has the reference's own aten error contract.
     "eq.Scalar": "eq",
@@ -715,6 +788,9 @@ SUPPORTS = {
     "unary": "MpsSupportsUnaryDtype",
     "trig": "MpsSupportsTrigDtype",
     "atan": "MpsSupportsTrigDtype",
+    "rounding": "MpsSupportsRoundingDtype",
+    "trunc": "MpsSupportsRoundingDtype",
+    "predicate": "MpsSupportsPredicateDtype",
     "binary": "MpsSupportsBinaryDtype",
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
@@ -913,6 +989,19 @@ CALLS = {
     "atanh": "atanhWithTensor:",
     "sinh": "sinhWithTensor:",
     "cosh": "coshWithTensor:",
+    "ceil": "ceilWithTensor:",
+    "floor": "floorWithTensor:",
+    # The selector is `truncateWithTensor:`, not `truncWithTensor:` -- the
+    # one place in this family where the aten name and the selector part
+    # ways. A wrong name here aborts the process rather than declining:
+    # MPSGraph raises `unrecognized selector` from inside the graph block.
+    "trunc": "truncateWithTensor:",
+    "isnan": "isnanWithTensor:",
+    "isinf": "isinfWithTensor:",
+    "signbit": "signbitWithTensor:",
+    # isneginf/isposinf compose isinf + signbit in the body.
+    "isneginf": "",
+    "isposinf": "",
     "eq.Scalar": "equalWithPrimaryTensor:",
     "le.Tensor": "lessThanOrEqualToWithPrimaryTensor:",
     "ne.Scalar": "notEqualWithPrimaryTensor:",
@@ -1082,6 +1171,14 @@ KEY_PARTS = {
     "atanh": "",
     "sinh": "",
     "cosh": "",
+    "ceil": "",
+    "floor": "",
+    "trunc": "",
+    "isnan": "",
+    "isinf": "",
+    "signbit": "",
+    "isneginf": "",
+    "isposinf": "",
     "cos": "",
     # The scalar predicates bake their stored value into the graph; the tensor
     # form is a function of its operands' signatures alone.
@@ -4731,6 +4828,83 @@ at::Tensor {kernel}(const at::Tensor& self) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
+# The unary predicates answer a bool tensor, so unlike the `unary` template they
+# allocate the result in bool and hand the graph a node whose operand keeps the
+# input's width. `isnan`, `isinf` and `signbit` are one node each.
+#
+# `isneginf` and `isposinf` are not: MPSGraph has `isInfiniteWithTensor:` and
+# `signbitWithTensor:` and nothing that combines them, so those two compose the
+# pair with a logical AND. Measured against the reference over `+-inf`, a finite
+# value and `+-0.0`, the composition is exact -- an infinity has no mantissa to
+# compare and the sign bit is the same bit the reference reads.
+#
+# -0.0 is where a wrong composition would hide: `isneginf(-0.0)` is false on the
+# reference even though the sign bit is set, because the value is not infinite.
+# The AND of the two nodes answers false for exactly that reason, which is why
+# the two-node form is correct rather than merely close.
+T_PREDICATE = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        {body}
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+# `trunc` is the rounding spelling that needs a guard. Measured on an M5,
+# `truncateWithTensor:` over a rank-0 operand does not decline: MPSGraph fails its
+# own MLIR pass (`failed assertion 'Error: MLIR pass manager failed'`) and aborts
+# the process, where `ceilWithTensor:` and `floorWithTensor:` answer the same
+# shape correctly. So a rank-0 operand takes the reference, which is one element
+# on the host, and every other shape uses the node.
+T_TRUNC = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  if (self.dim() == 0) {{
+    // The node aborts on a rank-0 operand rather than declining -- see the note
+    // above -- and a one-element answer is free on the host.
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_TANH = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
@@ -5366,6 +5540,12 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 CATEGORIES = {
+    # The rounding spellings share the unary body: dtype-preserving, one node.
+    "rounding": T_UNARY,
+    # trunc alone needs the rank-0 guard: see T_TRUNC.
+    "trunc": T_TRUNC,
+    # The predicates answer bool and isneginf/isposinf compose two nodes.
+    "predicate": T_PREDICATE,
     "atan": T_ATAN,
     "unary": T_UNARY,
     "trig": T_UNARY,
@@ -5591,6 +5771,7 @@ def render():
                 supports=SUPPORTS[category],
                 call=CALLS[op],
                 rank=RANK.get(op, 0),
+                body=PREDICATE_BODIES.get(op, ""),
                 alpha_param=alpha_param,
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,

@@ -183,6 +183,30 @@ bool MpsSupportsTrigDtype(at::ScalarType dtype) {
   return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
+bool MpsSupportsRoundingDtype(at::ScalarType dtype) {
+  // The three float widths. The rounding nodes are dtype-preserving and an
+  // integral operand would be returned unchanged, but the graph's handling of
+  // those nodes over integral operands is not what this increment measured --
+  // and the sibling predicate gate records what an unverified integral operand
+  // costs: MPSGraph aborts the process rather than declining. So an integral
+  // operand keeps the round-trip, where `ceil(int32)` is the identity anyway and
+  // bool reaches the reference's own `not implemented for 'Bool'`.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
+bool MpsSupportsPredicateDtype(at::ScalarType dtype) {
+  // The three float widths, and nothing else. MPSGraph's predicate nodes are
+  // defined for the floating element types: measured, `isNaNWithTensor:` over an
+  // int8 operand does not decline, it aborts the process inside MPSGraph's own
+  // encode with `object cannot be nil (key: isNaN_i_i8)`. That is the failure
+  // class this gate exists for -- a wrong gate would take the process with it
+  // rather than return a wrong number -- so an integral operand keeps the
+  // round-trip, where `isnan` is false everywhere and `signbit` reads a real sign.
+  // bool is excluded for the same reason and because `isnan(bool)` is false
+  // everywhere on the reference.
+  return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16;
+}
+
 bool MpsSupportsCumsumDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype) {

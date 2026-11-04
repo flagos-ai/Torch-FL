@@ -139,6 +139,29 @@ bool MpsSupportsSoftplusDtype(
 // so both take the CPU reference.
 bool MpsSupportsTrigDtype(at::ScalarType dtype);
 
+// Whether a rounding op (`ceil`, `floor`, `round`, `trunc`) computes on the
+// MPSGraph path. All four are dtype-preserving: the reference returns the
+// operand's own width, and an integral operand comes back unchanged because it
+// is already an integer. So the only question is whether the graph can carry the
+// element type -- bool included would be wrong, since the reference raises for a
+// bool operand, and float64 has no MPSGraph element type. Both decline to the
+// round-trip, where the reference answers or raises in its own words.
+bool MpsSupportsRoundingDtype(at::ScalarType dtype);
+
+// Whether a unary predicate (`isnan`, `isinf`, `isneginf`, `isposinf`,
+// `signbit`) computes on the MPSGraph path.
+//
+// These answer a **bool** tensor whatever the operand's width, and the graph
+// selects that width from the node rather than from the result, so the predicate
+// is about the operand. Integral operands are served: `isnan`/`isinf` are false
+// for them and `signbit` is a real question the graph can answer. float64 has no
+// MPSGraph element type and takes the round-trip.
+//
+// `isinf`/`isneginf`/`isposinf` are not single nodes -- MPSGraph has
+// `isInfiniteWithTensor:` and `signbitWithTensor:` and nothing that combines
+// them -- so those bodies compose the two. See T_ISINF.
+bool MpsSupportsPredicateDtype(at::ScalarType dtype);
+
 // Gather source values at dense row-major int32 addresses and reshape the
 // flat graph result to the aten result. False means MPSGraph declined the
 // graph, so the caller can use its checked reference.
