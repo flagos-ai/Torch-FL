@@ -1438,7 +1438,18 @@ KEY_PARTS = {
     # device allocation, so no mode-dependent endpoint or rounding rule is
     # baked into a graph.
     "arange.start_step": "",
-    "clamp": ", min, max",
+    # Both bounds are `optional<Scalar>` and MpsKeyAppend has no overload for
+    # that; `min.has_value()` plus the scalar is what distinguishes two plans, so
+    # the key folds the presence and the value rather than the optional itself.
+    # This entry was written when the body was added but the body did not splice
+    # it -- the key stayed `"clamp"` alone, so a second call with different
+    # bounds reused the first call's compiled graph and answered with the old
+    # bounds. Measured: clamping [[1,9],[2,3]] to (-2,2) and then to (0,5)
+    # answered [[1,0,2.0],[2,2.0]] for both.
+    "clamp": (
+        ", min.has_value() ? min->toDouble() : NAN, "
+        "max.has_value() ? max->toDouble() : NAN"
+    ),
     "gelu": ", approximate",
 }
 
@@ -5550,7 +5561,7 @@ at::Tensor {kernel}(
     return host.to(self.device());
   }}
   const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("{op}"),
+      mps::MpsGraphKey("{op}"{key_parts}),
       {{input}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
@@ -5561,8 +5572,15 @@ at::Tensor {kernel}(
           if (lower == nil) {{
             return nil;
           }}
+          // Broadcast to the operand's own shape, not to its element count.
+          // Measured: broadcasting a 0-d constant to `numel()` and then asking
+          // `mps.maximum` to combine it with an N-D operand aborts the graph
+          // (`mps.maximum op requires the same element type ... (tensor<2x2xsi64>,
+          // tensor<4xsi64>)`), and on an integral operand it takes the process
+          // with it. The float path hid this because its element type matched
+          // anyway; the shape did not.
           lower = [graph broadcastTensor:lower
-                                 toShape:mps::MpsFlatShape(input.numel())
+                                 toShape:args[0].shape
                                     name:nil];
           value = [graph maximumWithPrimaryTensor:value
                                  secondaryTensor:lower
@@ -5575,11 +5593,31 @@ at::Tensor {kernel}(
             return nil;
           }}
           upper = [graph broadcastTensor:upper
-                                 toShape:mps::MpsFlatShape(input.numel())
+                                 toShape:args[0].shape
                                     name:nil];
           value = [graph minimumWithPrimaryTensor:value
                                  secondaryTensor:upper
                                             name:nil];
+        }}
+        // A NaN operand comes back as a bound, where the reference propagates
+        // it -- measured, `clamp([nan, -3, 3], -1, 1)` answers [-1.0, -1.0, 1.0]
+        // without a guard. The one-sided `clamp_min`/`clamp_max` paths are
+        // separate kernels and already propagate, which is why this only shows
+        // through the two-bound form.
+        //
+        // The guard is floating-point only: `isNaNWithTensor:` over an integral
+        // operand does not decline, it raises `object cannot be nil (key:
+        // isNaN_i8)` from inside MPSGraph and aborts the process. An integral
+        // operand has no NaN to propagate, so there is nothing to guard.
+        if (!c10::isIntegralType(self.scalar_type(), /*includeBool=*/false)) {{
+          MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+          if (nan == nil) {{
+            return nil;
+          }}
+          value = [graph selectWithPredicateTensor:nan
+                               truePredicateTensor:args[0]
+                              falsePredicateTensor:value
+                                              name:nil];
         }}
         return value;
       }});
