@@ -420,7 +420,20 @@ void BlockingMemcpy(
     MemcpyKind kind,
     const at::Tensor& on_device) {
   BlockingCopyGuard barrier(on_device);
-  Memcpy(dst, src, nbytes, kind);
+  // The result used to be dropped. A copy that fails leaves the destination
+  // holding whatever the allocator handed back, and every caller here treats the
+  // buffer as if it had been written -- so the failure surfaced later, as wrong
+  // numbers or a NaN loss, with nothing pointing at the copy. Measured on
+  // Cambricon (`cnrtMemcpy` returning CN_MEMORY_ERROR_INVALID_ADDRESS during a
+  // Qwen3 backward): the step completed, the gradients stayed finite, and the
+  // loss went NaN a few steps later. Report it where it happens instead.
+  TORCH_CHECK(
+      Memcpy(dst, src, nbytes, kind) == Success,
+      "flagos: device memcpy failed (",
+      nbytes,
+      " bytes, kind ",
+      static_cast<int>(kind),
+      "); the destination buffer would have been left unwritten");
 }
 
 ADD_IMPL_TO_DISPATCHER(
