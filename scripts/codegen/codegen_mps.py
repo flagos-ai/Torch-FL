@@ -197,6 +197,7 @@ OPS = {
     # are the CUDA/MPS-specific paths aten picks off the CUDA/MPS key and are not
     # the ones a PrivateUse1 tensor reaches, so they stay unregistered too.
     "convolution_overrideable": "conv",
+    "convolution_backward_overrideable": "conv_backward",
     # The first activation a transformer reaches: `silu` is what a SwiGLU MLP
     # multiplies its gate projection by, so it runs once per layer on the
     # (batch, seq, intermediate) tensor -- a bigger operand than the softmax
@@ -811,6 +812,7 @@ AT_OP = {
     # round-trip is written against -- it carries the same shape, stride, padding,
     # dilation, transposed, output_padding and groups arguments the kernel holds.
     "convolution_overrideable": "convolution",
+    "convolution_backward_overrideable": "convolution_backward",
     # The CPU reference the `silu` body round-trips to on a dtype it declines.
     # `silu` exists as its own aten kernel rather than a decomposition, so the
     # round-trip lands on the reference's own implementation rather than on a
@@ -968,6 +970,7 @@ SUPPORTS = {
     "softmax": "MpsSupportsSoftmaxDtype",
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
+    "conv_backward": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
     "activation": "MpsSupportsUnaryDtype",
     # Two equal float widths, float32 and float16. The reference promotes a
@@ -1185,6 +1188,7 @@ CALLS = {
     # rank, so `{call}` names the shape-independent prefix both share and the
     # template fills the rank in.
     "convolution_overrideable": "convolution{dim}DWithSourceTensor:",
+    "convolution_backward_overrideable": "",
     # The body builds two nodes and the unary call table names one selector, so
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
@@ -1444,6 +1448,9 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    # The dimension is the only host value that changes this body's graph
+    # shape apart from the operands themselves, and it is in the key.
+    "convolution_backward_overrideable": ", dim",
     "relu": "",
     # Two slopes describe two graphs, so the value is in the key.
     "leaky_relu": ", negative_slope.toFloat()",
@@ -2844,7 +2851,242 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # declined. That is what a per-category predicate is for. float64 has no
 # MPSGraph element type and the integral and bool widths are the reference's own
 # NotImplementedError, so those take the round-trip and get it.
-T_CONV = """\
+# The convolution backward. `convolution_overrideable` is served, and a
+# `PrivateUse1` forward has to register its own backward -- otherwise
+# `y.sum().backward()` on any convolution raises
+#   convolution_backward_overrideable: You are likely triggering this with tensor
+#   backend other than CPU
+# which is what a model trained on this backend hits, and it is a missing kernel
+# rather than a wrong gradient.
+#
+# The graph has both halves as nodes:
+#   convolution2DDataGradientWithIncomingGradientTensor:    -> grad_input
+#   convolution2DWeightsGradientWithIncomingGradientTensor: -> grad_weight
+# and the bias gradient is the incoming gradient summed over every axis but the
+# channel one, which a reduction node already expresses.
+#
+# The three results are optional -- `output_mask` says which the caller wants --
+# so a masked-out half is left undefined rather than computed and dropped.
+T_CONV_BACKWARD = """\\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> {kernel}(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups,
+    ::std::array<bool, 3> output_mask) {{
+  // The round-trip cannot re-enter `convolution_backward_overrideable`: that op
+  // is the overrideable contract, not an implementation, and it is unimplemented
+  // on CPU too (measured -- calling it on host tensors raises the same
+  // NotImplementedError). The real implementation is `convolution_backward`,
+  // which takes the forward bias *sizes* the overrideable form does not carry.
+  // A convolution with a bias therefore cannot be reversed exactly here, and the
+  // bias-gradient case is the one that needs its shape; without a bias the sizes
+  // list is empty and the call is exact.
+// `convolution_backward` expects one entry per output channel when a bias
+  // exists. `output_mask[2]` is the only signal this body gets about that, so a
+  // requested bias gradient is spelled with the weight's channel count.
+  std::vector<int64_t> bias_channels;
+  if (output_mask[2]) {{
+    bias_channels.push_back(weight.size(0));
+  }}
+  const auto fallback = [&]() {{
+    auto host = at::convolution_backward(
+        grad_output.cpu(), input.cpu(), weight.cpu(), bias_channels, stride,
+        padding, dilation, transposed, output_padding, groups, output_mask);
+    const auto move = [](const at::Tensor& t, at::Device device) {{
+      return t.defined() ? t.to(device) : t;
+    }};
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        move(std::get<0>(host), grad_output.device()),
+        move(std::get<1>(host), grad_output.device()),
+        move(std::get<2>(host), grad_output.device()));
+  }};
+  const int64_t dim = input.dim() - 2;
+  const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
+  const bool padding_ok =
+      (dim == 1 && (padding.size() == 1 || padding.size() == 2)) ||
+      (dim > 1 && padding.size() == 2 * ndim);
+  // Only the 2-D data/weights gradient selectors exist; a 1-D convolution is
+  // folded into them the way the forward folds it, and a 3-D one takes the
+  // round-trip.
+  if (dim < 1 || dim > 2 || weight.dim() != input.dim() ||
+      stride.size() != ndim || !padding_ok || dilation.size() != ndim ||
+      groups < 1 || transposed || output_padding.size() != ndim) {{
+    return fallback();
+  }}
+  for (const int64_t entry : stride) {{
+    if (entry <= 0) {{
+      return fallback();
+    }}
+  }}
+  for (const int64_t entry : dilation) {{
+    if (entry <= 0) {{
+      return fallback();
+    }}
+  }}
+  for (const int64_t entry : output_padding) {{
+    if (entry != 0) {{
+      return fallback();
+    }}
+  }}
+  if (input.size(1) / groups != weight.size(1) ||
+      weight.size(0) % groups != 0) {{
+    return fallback();
+  }}
+  mps::MpsConvParams params;
+  std::vector<int64_t> out_shape;
+  if (!mps::MpsConvResolve(
+          input, weight, stride, padding, dilation, groups, &params, &out_shape)) {{
+    return fallback();
+  }}
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor input_c = input.contiguous();
+  at::Tensor weight_c = weight.contiguous();
+  if (grad_output_c.numel() == 0 || input_c.numel() == 0 ||
+      weight_c.numel() == 0) {{
+    return fallback();
+  }}
+  at::Tensor grad_input;
+  at::Tensor grad_weight;
+  at::Tensor grad_bias;
+
+  // Both halves are 2-D graph calls, so a 1-D convolution has the same trailing
+  // axis inserted that the forward inserts.
+  std::vector<int64_t> source_shape(input_c.sizes().vec());
+  std::vector<int64_t> weight_shape(weight_c.sizes().vec());
+  std::vector<int64_t> grad_shape(grad_output_c.sizes().vec());
+  if (dim == 1) {{
+    source_shape.insert(source_shape.end() - 1, 1);
+    weight_shape.insert(weight_shape.end() - 1, 1);
+    grad_shape.insert(grad_shape.end() - 1, 1);
+  }}
+
+  if (output_mask[0]) {{
+    at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}.input", dim),
+        {{grad_output_c, weight_c}},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphObject* descriptor =
+              mps::MpsConvDescriptor(input_c.scalar_type(), 2, params);
+          if (descriptor == nil) {{
+            return nil;
+          }}
+          MPSGraphTensor* grad = args[0];
+          MPSGraphTensor* kernel = args[1];
+          if (dim == 1) {{
+            grad = mps::MpsReshape(graph, grad, grad_shape);
+            kernel = mps::MpsReshape(graph, kernel, weight_shape);
+            if (grad == nil || kernel == nil) {{
+              mps::MpsRelease(descriptor);
+              return nil;
+            }}
+          }}
+          MPSGraphTensor* y =
+              [graph convolution2DDataGradientWithIncomingGradientTensor:grad
+                                                    weightsTensor:kernel
+                                                      outputShape:mps::MpsAxesArray(source_shape)
+                                       forwardConvolutionDescriptor:
+                                           (MPSGraphConvolution2DOpDescriptor*)descriptor
+                                                             name:nil];
+          mps::MpsRelease(descriptor);
+          if (y == nil || dim != 1) {{
+            return y;
+          }}
+          return mps::MpsReshape(graph, y, input_c.sizes().vec());
+        }});
+    if (!ran) {{
+      return fallback();
+    }}
+    grad_input = out;
+  }}
+
+  if (output_mask[1]) {{
+    at::Tensor out = at::empty(weight_c.sizes(), weight_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}.weight", dim),
+        {{grad_output_c, input_c}},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphObject* descriptor =
+              mps::MpsConvDescriptor(input_c.scalar_type(), 2, params);
+          if (descriptor == nil) {{
+            return nil;
+          }}
+          MPSGraphTensor* grad = args[0];
+          MPSGraphTensor* source = args[1];
+          if (dim == 1) {{
+            grad = mps::MpsReshape(graph, grad, grad_shape);
+            source = mps::MpsReshape(graph, source, source_shape);
+            if (grad == nil || source == nil) {{
+              mps::MpsRelease(descriptor);
+              return nil;
+            }}
+          }}
+          MPSGraphTensor* y =
+              [graph convolution2DWeightsGradientWithIncomingGradientTensor:grad
+                                                             sourceTensor:source
+                                                              outputShape:mps::MpsAxesArray(weight_shape)
+                                              forwardConvolutionDescriptor:
+                                                  (MPSGraphConvolution2DOpDescriptor*)descriptor
+                                                                    name:nil];
+          mps::MpsRelease(descriptor);
+          if (y == nil || dim != 1) {{
+            return y;
+          }}
+          return mps::MpsReshape(graph, y, weight_c.sizes().vec());
+        }});
+    if (!ran) {{
+      return fallback();
+    }}
+    grad_weight = out;
+  }}
+
+  if (output_mask[2]) {{
+    // The bias gradient is the incoming gradient summed over batch and space.
+    std::vector<int64_t> axes;
+    axes.push_back(0);
+    std::vector<int64_t> reduced_shape(grad_output_c.sizes().vec());
+    reduced_shape[1] = 1;
+    for (int64_t d = 2; d < grad_output_c.dim(); ++d) {{
+      axes.push_back(d);
+      reduced_shape[d] = 1;
+    }}
+    at::Tensor out = at::empty(reduced_shape, grad_output_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}.bias", dim),
+        {{grad_output_c}},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphTensor* y =
+              [graph reductionSumWithTensor:args[0]
+                                     axes:mps::MpsAxesArray(axes)
+                                     name:nil];
+          if (y == nil || dim != 1) {{
+            return y;
+          }}
+          return mps::MpsReshape(graph, y, reduced_shape);
+        }});
+    if (!ran) {{
+      return fallback();
+    }}
+    grad_bias = out.reshape({{weight_c.size(0)}});
+  }}
+
+  return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+      grad_input, grad_weight, grad_bias);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+T_CONV = """\\
 at::Tensor {kernel}(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -5935,6 +6177,7 @@ CATEGORIES = {
     "softmax": T_SOFTMAX_BODY,
     "pow_scalar": T_POW,
     "conv": T_CONV,
+    "conv_backward": T_CONV_BACKWARD,
     "silu": T_SILU,
     "activation": T_ACTIVATION,
     "silu_backward": T_SILU_BACKWARD,

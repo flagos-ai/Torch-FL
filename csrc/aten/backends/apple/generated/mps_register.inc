@@ -38,6 +38,7 @@
   m.impl("cat", WrapperCat);
   m.impl("ceil", WrapperCeil);
   m.impl("clamp", WrapperClamp);
+  m.impl("convolution_backward_overrideable", WrapperConvolutionBackwardOverrideable);
   m.impl("convolution_overrideable", WrapperConvolutionOverrideable);
   m.impl("cos", WrapperCos);
   m.impl("cosh", WrapperCosh);
