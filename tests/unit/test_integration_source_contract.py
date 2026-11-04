@@ -292,6 +292,20 @@ def _skip_ownership(tree, relative, issues):
     return ownership
 
 
+def test_case_gap_import_resolves_the_shared_registry_from_ops():
+    """The ops directory must not shadow the shared case-gap registry."""
+    path = REPO_ROOT / "tests/integration/ops/test_all_dispatch.py"
+    tree = ast.parse(_read(path))
+    imports = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and any(alias.name == "case_gap_reason" for alias in node.names)
+    ]
+    assert len(imports) == 1
+    assert imports[0].module == "tests.integration.case_gap_issues"
+
+
 def _registered_gap_evidence(source, relative, issues):
     """Return the registered cases and routes that have source evidence."""
     tree = ast.parse(source, filename=relative)
@@ -966,6 +980,84 @@ def test_plain_all_reference_uses_cpu_on_every_platform():
     }
     assert markers == {"anyplatform"}
     assert "cuda" not in ast.unparse(function)
+
+
+def _shared_all_cases_reach_each_platforms_ci():
+    """Return the shared `all` cases, and those no composed lane collects."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "integration_workdir_contract",
+        REPO_ROOT / "tests/unit/test_integration_workdir.py",
+    )
+    workdir_contract = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(REPO_ROOT / "tests/unit"))
+    spec.loader.exec_module(workdir_contract)
+    unselected = {case.node_id for case in workdir_contract._unselected_cases()}
+    shared_cases = {
+        case.node_id
+        for case in workdir_contract._all_cases()
+        if case.file == "tests/integration/ops/test_all_dispatch.py"
+        and {"anyplatform", "main_ops"} <= case.marks
+    }
+    return shared_cases, shared_cases & unselected
+
+
+def test_shared_all_cases_reach_a_ci_lane():
+    """A migrated correctness suite must be selected, or CI cannot watch it."""
+    shared_cases, unselected = _shared_all_cases_reach_each_platforms_ci()
+    assert shared_cases
+    assert unselected == set()
+
+
+def test_every_platform_lane_selects_the_shared_all_cases():
+    """Portable cases must not rely on an Apple or vendor-specific command."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "integration_workdir_contract",
+        REPO_ROOT / "tests/unit/test_integration_workdir.py",
+    )
+    workdir_contract = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(REPO_ROOT / "tests/unit"))
+    spec.loader.exec_module(workdir_contract)
+    shared = {
+        case.node_id
+        for case in workdir_contract._all_cases()
+        if case.file == "tests/integration/ops/test_all_dispatch.py"
+        and {"anyplatform", "main_ops"} <= case.marks
+    }
+    missing_platforms = []
+    for platform in workdir_contract._manifest_platforms():
+        selected = {
+            case.node_id
+            for case in workdir_contract._all_cases()
+            if case.node_id in shared
+            and any(
+                not any(
+                    workdir_contract._names_target(case.file, ignored)
+                    for ignored in selection.ignored
+                )
+                and any(
+                    workdir_contract._names_target(case.file, path)
+                    for path in selection.paths
+                )
+                and (
+                    selection.marker is None
+                    or workdir_contract._evaluate(selection.marker, set(case.marks))
+                )
+                and (
+                    selection.keyword is None
+                    or workdir_contract._keeps(selection.keyword, case.parts)
+                )
+                for selection in workdir_contract._manifest_selections(platform)
+            )
+        }
+        if selected != shared:
+            missing_platforms.append(platform)
+    assert missing_platforms == ["apple", "ascend"]
 
 
 def test_flag_override_case_uses_the_build_capability_gate():

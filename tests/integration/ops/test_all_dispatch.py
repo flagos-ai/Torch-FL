@@ -33,10 +33,18 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import override_is_logged, route_is_served
-from case_gap_issues import case_gap_reason
+
+from tests.integration.case_gap_issues import case_gap_reason
 
 
 DEVICE = "flagos:0"
+
+# This file's correctness group is part of the shared case cohort. The standard
+# CI sweep selects `main_ops` on each platform's vendor and FlagGems lanes, so
+# leaving only `anyplatform` here made every one of the eleven cases invisible
+# to CI on the five lanes that accept only standard marks. Keep the backend
+# dispatch cases below outside this sweep: they assert one named route.
+pytestmark = pytest.mark.main_ops
 
 
 def _run_all_subprocess(
