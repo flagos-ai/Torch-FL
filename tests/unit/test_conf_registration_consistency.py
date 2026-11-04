@@ -817,14 +817,15 @@ def test_conf_route_counts_are_stable():
         # scalar) with ``maximum``/``minimum``, and the extrema and product
         # reductions ``amax``/``amin``/``prod.dim_int``, and the activations
         # ``leaky_relu``/``elu`` (99 ops so far; ``relu`` is deliberately left on
-        # the reference because it measures slower there than the round-trip) --
-        # so the conf routes those to
+        # the reference because it measures slower there than the round-trip),
+        # and ``tan`` and ``logical_not`` (101 ops so far) -- so the conf routes
+        # those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"none": 1943, "apple": 99},
+        "apple": {"none": 1941, "apple": 101},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then

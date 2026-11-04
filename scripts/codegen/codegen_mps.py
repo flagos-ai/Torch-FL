@@ -148,6 +148,12 @@ OPS = {
     "asinh": "trig",
     "acosh": "trig",
     "atanh": "trig",
+    "tan": "trig",
+    # `logical_not` answers bool whatever its operand is, so it is a predicate.
+    # `bitwise_not` is deliberately absent: measured, it is 0.07x at (64, 64) and
+    # only 1.37x from about a million elements up -- the same shape-dependent cost
+    # `relu` showed, where a cheap host kernel loses to MPS's submission cost.
+    "logical_not": "predicate",
     "sinh": "trig",
     "cosh": "trig",
     "ceil": "rounding",
@@ -574,6 +580,19 @@ PREDICATE_BODIES = {
     # its dataType is float32 -- so it is compared against zero. Without
     # that comparison the float is copied into a bool buffer and the result
     # is garbage: measured, `signbit(-inf)` came back false.
+    # `logical_not` is `x == 0`, not `notWithTensor:`. Measured, the `not` node
+    # is the *bitwise* complement over the operand's own width, so it answers
+    # false for `1.5` where the reference answers false for a nonzero and true
+    # for a zero: `logical_not([0.0, 1.5])` came back [False, False] against the
+    # reference's [True, False]. Comparing to zero is the definition.
+    "logical_not": (
+        "MPSGraphTensor* zero =\n"
+        "            [graph constantWithScalar:0.0 dataType:args[0].dataType];\n"
+        "        if (zero == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph equalWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];"
+    ),
     "signbit": (
         "MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
         "        if (sign == nil) {\n"
@@ -753,6 +772,8 @@ AT_OP = {
     "asinh": "asinh",
     "acosh": "acosh",
     "atanh": "atanh",
+    "tan": "tan",
+    "logical_not": "logical_not",
     "sinh": "sinh",
     "cosh": "cosh",
     "ceil": "ceil",
@@ -1123,6 +1144,8 @@ CALLS = {
     "asinh": "asinhWithTensor:",
     "acosh": "acoshWithTensor:",
     "atanh": "atanhWithTensor:",
+    "tan": "tanWithTensor:",
+    "logical_not": "",
     "sinh": "sinhWithTensor:",
     "cosh": "coshWithTensor:",
     "ceil": "ceilWithTensor:",
@@ -1317,6 +1340,8 @@ KEY_PARTS = {
     "asinh": "",
     "acosh": "",
     "atanh": "",
+    "tan": "",
+    "logical_not": "",
     "sinh": "",
     "cosh": "",
     "ceil": "",
