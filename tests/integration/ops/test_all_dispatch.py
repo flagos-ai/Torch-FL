@@ -115,6 +115,18 @@ class TestAllCorrectness:
         assert actual.dtype == torch.bool
         assert torch.equal(actual.cpu(), expected)
 
+    @pytest.mark.skip(reason=case_gap_reason("#710"))
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("keepdim", [False, True])
+    def test_all_dim_empty_reduction_reaches_its_route(self, keepdim):
+        """The dimension overload is tested when the global reduction has no route."""
+        host = torch.empty((3, 0), dtype=torch.float32)
+        expected = torch.all(host, dim=-1, keepdim=keepdim)
+        actual = torch.all(host.to(DEVICE), dim=-1, keepdim=keepdim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
     @pytest.mark.anyplatform
     @pytest.mark.parametrize("shape", [(0, 0), (3, 0), (0, 3)])
     def test_all_empty_full_reduction(self, shape):
