@@ -142,6 +142,8 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kKunlunxin;
   } else if (val == "iluvatar") {
     *out = Backend::kIluvatar;
+  } else if (val == "cambricon") {
+    *out = Backend::kCambricon;
   } else if (val == "ascend") {
     *out = Backend::kAscend;
   } else if (val == "mthreads" || val == "musa") {  // musa: the SDK-era spelling
@@ -177,6 +179,7 @@ const char* BackendName(Backend b) {
     case Backend::kEnflame:      return "enflame";
     case Backend::kKunlunxin:    return "kunlunxin";
     case Backend::kIluvatar:     return "iluvatar";
+    case Backend::kCambricon:    return "cambricon";
     case Backend::kTileOps:      return "tileops";
     case Backend::kApple:        return "apple";
     case Backend::kDrobotics:    return "drobotics";
