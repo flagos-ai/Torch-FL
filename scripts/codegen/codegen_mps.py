@@ -135,6 +135,14 @@ OPS = {
     # the scalar and tensor predicates around the same embedding.
     "sin": "trig",
     "cos": "trig",
+    "asin": "trig",
+    "acos": "trig",
+    "atan": "atan",
+    "asinh": "trig",
+    "acosh": "trig",
+    "atanh": "trig",
+    "sinh": "trig",
+    "cosh": "trig",
     # A scalar exponent. MPSGraph's power is a real selector rather than an
     # exp/log composition, which is what keeps the NaN of a negative base to a
     # fractional exponent -- the case the reference produces and a composition
@@ -558,6 +566,14 @@ AT_OP = {
     # operands need the reference's promotion to float32.
     "sin": "sin",
     "cos": "cos",
+    "asin": "asin",
+    "acos": "acos",
+    "atan": "atan",
+    "asinh": "asinh",
+    "acosh": "acosh",
+    "atanh": "atanh",
+    "sinh": "sinh",
+    "cosh": "cosh",
     # Qwen3.5's causal mask and rotary path build the predicates with these
     # three spellings. Each has the reference's own aten error contract.
     "eq.Scalar": "eq",
@@ -698,6 +714,7 @@ AT_OP = {
 SUPPORTS = {
     "unary": "MpsSupportsUnaryDtype",
     "trig": "MpsSupportsTrigDtype",
+    "atan": "MpsSupportsTrigDtype",
     "binary": "MpsSupportsBinaryDtype",
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
@@ -888,6 +905,14 @@ CALLS = {
     "neg": "negativeWithTensor:",
     "sin": "sinWithTensor:",
     "cos": "cosWithTensor:",
+    "asin": "asinWithTensor:",
+    "acos": "acosWithTensor:",
+    "atan": "atanWithTensor:",
+    "asinh": "asinhWithTensor:",
+    "acosh": "acoshWithTensor:",
+    "atanh": "atanhWithTensor:",
+    "sinh": "sinhWithTensor:",
+    "cosh": "coshWithTensor:",
     "eq.Scalar": "equalWithPrimaryTensor:",
     "le.Tensor": "lessThanOrEqualToWithPrimaryTensor:",
     "ne.Scalar": "notEqualWithPrimaryTensor:",
@@ -1049,6 +1074,14 @@ KEY_PARTS = {
     "abs": "",
     "neg": "",
     "sin": "",
+    "asin": "",
+    "acos": "",
+    "atan": "",
+    "asinh": "",
+    "acosh": "",
+    "atanh": "",
+    "sinh": "",
+    "cosh": "",
     "cos": "",
     # The scalar predicates bake their stored value into the graph; the tensor
     # form is a function of its operands' signatures alone.
@@ -4629,6 +4662,75 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # selectors and contracts -- `atanh`'s domain is `|x| < 1`, which is not this
 # node's domain at all.
 
+# `atan` is one MPSGraph node and is otherwise the shared unary template, but it
+# needs one guard the rest of the trig family does not: measured on an M5,
+# `atanWithTensor:` answers `atan(-0.0)` with `+0.0` where the reference answers
+# `-0.0`. Every other spelling in the family keeps the sign (`asin`, `asinh`,
+# `atanh`, `sinh`), so this is a property of the node rather than of the width or
+# of the platform.
+#
+# The guard is the `tanh` one read in a different place: rather than selecting a
+# replacement value, it negates the result where the operand's sign bit is set
+# and the node's answer is zero. Negating a zero that should stay `+0.0` is
+# harmless -- `-0.0` and `+0.0` have the same value and the ternary selects only
+# where the reference itself wants the sign -- while leaving the wrong sign in
+# place is a wrong answer a value comparison cannot see.
+T_ATAN = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* atan = [graph {call}args[0] name:nil];
+        if (atan == nil) {{
+          return nil;
+        }}
+        // The node drops the sign of a zero operand: `atan(-0.0)` comes back
+        // `+0.0` where the reference keeps the sign bit, which is the one
+        // deviation of this body from `at::atan`. The node is right about every
+        // other operand, including every negative one, so the guard has to
+        // fire *only* where the operand is a zero carrying the sign -- a
+        // `signbit` alone would negate every negative answer.
+        MPSGraphTensor* negative_sign = [graph signbitWithTensor:args[0] name:nil];
+        MPSGraphTensor* is_zero =
+            [graph equalWithPrimaryTensor:args[0]
+                          secondaryTensor:[graph constantWithScalar:0.0
+                                                           dataType:args[0].dataType]
+                                     name:nil];
+        if (negative_sign == nil || is_zero == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* signed_zero =
+            [graph logicalANDWithPrimaryTensor:negative_sign
+                               secondaryTensor:is_zero
+                                          name:nil];
+        MPSGraphTensor* negated = [graph negativeWithTensor:atan name:nil];
+        if (signed_zero == nil || negated == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:signed_zero
+                            truePredicateTensor:negated
+                           falsePredicateTensor:atan
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_TANH = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
@@ -5264,6 +5366,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 CATEGORIES = {
+    "atan": T_ATAN,
     "unary": T_UNARY,
     "trig": T_UNARY,
     "binary": T_BINARY,
