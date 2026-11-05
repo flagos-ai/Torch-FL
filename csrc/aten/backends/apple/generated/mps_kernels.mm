@@ -1267,12 +1267,12 @@ at::Tensor ArgmaxKernelMps(
             : [graph logicalANDWithPrimaryTensor:no_nan
                                  secondaryTensor:equals
                                             name:nil];
-        // `>=`, not `>`: `has_nan` is the *last* NaN's coordinate, and that
-        // coordinate must itself be a candidate. With `>` a slice whose only NaN
-        // sat at position 0 produced no candidate, so the reduction answered the
-        // `no_match` sentinel -- `argmax([nan, 1, 2])` came back as `3`, the axis
-        // length. The `reductionMinimum` below still takes the first candidate,
-        // which is the index the reference names.
+        // `has_nan` is the *first* NaN's coordinate, and `>=` makes that
+        // coordinate a candidate. Both halves are needed: with a strict `>` against
+        // the last NaN, a slice whose only NaN sat at position 0 produced no
+        // candidate at all and the reduction answered `no_match`. The
+        // `reductionMinimum` below then takes the first candidate, which is the
+        // index the reference names.
         MPSGraphTensor* selected_nan =
             [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
                                         secondaryTensor:has_nan
@@ -1282,6 +1282,10 @@ at::Tensor ArgmaxKernelMps(
                         truePredicateTensor:selected_nan
                        falsePredicateTensor:finite
                                        name:nil];
+        // The value a non-matching position contributes. It is outside the range
+        // of a real index, so the `reductionMinimum` above ignores it while every
+        // position is considered, and the host-side check after the run turns any
+        // slice that is *all* marker into a reference call rather than an answer.
         MPSGraphTensor* no_match = mps::MpsConstant(
             graph, self_c.size(axis), at::ScalarType::Int);
         if (matches == nil || no_match == nil) {
@@ -1306,6 +1310,16 @@ at::Tensor ArgmaxKernelMps(
   if (!ran) {
     return at::argmax(self.cpu(), dim, keepdim).to(self.device());
   }
+  // `size(axis)` is the graph's internal "no position matched" marker, not an
+  // answer the reference ever produces: a real index is in `[0, size(axis))`.
+  // If it reaches the output, the candidate set was wrong -- which is exactly
+  // what `argmax([nan, 1, 2])` used to return, as `3`. That value is a valid
+  // index on a longer slice, so returning it looks like an answer; a CPU round
+  // trip would hide the defect as a slow call. Raising names it instead.
+  TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
+              "argmax: the MPS graph produced no matching position along dim ",
+              axis, " for at least one element. This is a defect in the graph, "
+              "not in the input; please report it.");
   return selected;
 }
 

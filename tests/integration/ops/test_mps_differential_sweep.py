@@ -151,6 +151,20 @@ def _seeded(device, shape=(3, 4), offset=2.0):
     )
 
 
+def _with_nan(device, shape=(2, 5, 4), positions=((0, 0, 0),)):
+    """`_positive` with NaNs written at fixed positions.
+
+    Every case here is about what an operator does *when a NaN is present*, and
+    the family of defects that motivated this helper -- `maximum` in #740 and
+    `argmax` in #750 -- each shipped because the family was tested with finite
+    values and the NaN behaviour was tested elsewhere, but never both at once.
+    """
+    t = _positive(device, shape).clone()
+    for index in positions:
+        t[index] = float("nan")
+    return t
+
+
 def _cases():
     """`(label, builder)` where `builder(device)` returns the op's result."""
     cases = []
@@ -206,6 +220,82 @@ def _cases():
             (f"argmax-d{dim}", lambda dev, dim=dim: torch.argmax(_seeded(dev), dim))
         )
     cases.append(("argmax-flat", lambda dev: torch.argmax(_seeded(dev))))
+
+    # --- NaN in a reduction ------------------------------------------------
+    # Not a shape variant of the cases above: a NaN propagates differently from
+    # any finite value, and two of this backend's silent defects lived exactly
+    # here. `sum`/`prod`/`mean`/`amax`/`amin` all answer NaN; `argmax` names the
+    # position of the first NaN; `max`/`min` return it as the value.
+    nan_positions = (
+        ("head", ((0, 0, 0),)),
+        ("middle", ((0, 2, 1),)),
+        ("tail", ((1, 4, 3),)),
+        ("two", ((0, 0, 0), (1, 4, 3))),
+    )
+    for where, positions in nan_positions:
+        for keepdim in (False, True):
+            cases.append(
+                (
+                    f"amax-nan-{where}-kd{keepdim}",
+                    lambda dev, positions=positions, keepdim=keepdim: torch.amax(
+                        _with_nan(dev, positions=positions), (0, 1, 2), keepdim=keepdim
+                    ),
+                )
+            )
+            cases.append(
+                (
+                    f"mean-nan-{where}-kd{keepdim}",
+                    lambda dev, positions=positions, keepdim=keepdim: torch.mean(
+                        _with_nan(dev, positions=positions), 1, keepdim=keepdim
+                    ),
+                )
+            )
+            cases.append(
+                (
+                    f"sum-nan-{where}-kd{keepdim}",
+                    lambda dev, positions=positions, keepdim=keepdim: torch.sum(
+                        _with_nan(dev, positions=positions), 1, keepdim=keepdim
+                    ),
+                )
+            )
+        # `argmax` over the axis each NaN sits on, so the answer is the position
+        # of that NaN rather than a value it propagates to.
+        cases.append(
+            (
+                f"argmax-nan-{where}",
+                lambda dev, positions=positions: torch.argmax(
+                    _with_nan(dev, positions=positions), 2
+                ),
+            )
+        )
+        cases.append(
+            (
+                f"maxdim-nan-{where}",
+                lambda dev, positions=positions: (
+                    torch.max(_with_nan(dev, positions=positions), 2).values
+                ),
+            )
+        )
+
+    # The same NaN through an activation or a pointwise function, which is where a
+    # mask or a padded position usually enters. `gelu` and `silu` live on
+    # `torch.nn.functional`, the rest on `torch`.
+    nan_unary = (
+        ("gelu", torch.nn.functional.gelu),
+        ("silu", torch.nn.functional.silu),
+        ("sigmoid", torch.sigmoid),
+        ("exp", torch.exp),
+        ("log", torch.log),
+        ("sqrt", torch.sqrt),
+        ("tanh", torch.tanh),
+    )
+    for name, fn in nan_unary:
+        cases.append(
+            (
+                f"{name}-nan",
+                lambda dev, fn=fn: fn(_with_nan(dev, positions=((0, 1, 2),))),
+            )
+        )
     for name, fn in (("all", torch.all), ("any", torch.any)):
         for dim in (0, 1):
             cases.append(
