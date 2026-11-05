@@ -134,18 +134,50 @@ class TestCorrectness:
         assert (out[1:] < 0).all(), out
 
     @pytest.mark.anyplatform
-    def test_saturation_is_the_references_answer(self):
-        """A long scan past one overflows to inf and one below it decays to zero."""
-        # 2.0^128 is past float32's 3.4e38 and 0.5^128 is past its smallest
-        # subnormal, so both ends of the scan land where the reference lands.
+    def test_saturation_past_one(self):
+        """A scan past one overflows to inf, which every backend agrees on.
+
+        This is asserted exactly because `inf` is not a rounding question. The
+        decaying half of the pair is separate -- see
+        `test_decay_into_the_subnormal_range` for why.
+        """
         big = torch.full((128,), 2.0)
-        small = torch.full((128,), 0.5)
         out_big = torch.cumprod(_to_device(big), 0).cpu()
-        out_small = torch.cumprod(_to_device(small), 0).cpu()
         assert torch.isinf(out_big[-1]).item()
-        assert out_small[-1].item() == 0.0
         torch.testing.assert_close(out_big, torch.cumprod(big, 0), equal_nan=True)
-        torch.testing.assert_close(out_small, torch.cumprod(small, 0))
+
+    @pytest.mark.anyplatform
+    def test_decay_into_the_subnormal_range(self):
+        """`0.5 ** 128` is a float32 *subnormal*, and Metal may flush it to zero.
+
+        `0.5 ** 128` is `2.9387e-39`, which is representable as a subnormal but is
+        below the smallest *normal* float32 (`1.1755e-38`). The CPU reference keeps
+        it at full subnormal precision; the Metal path on this backend's own
+        hardware flushes it to `0.0`.
+
+        This test used to assert `== 0.0` exactly, which passed on the machine it
+        was written on and failed on the CI runner -- an assertion about the
+        runner's subnormal handling rather than about `cumprod`. Subnormal
+        behaviour is not something this backend promises either way, so what is
+        asserted here is what both answers share: the scan decays out of the
+        normal range and stays non-negative.
+        """
+        small = torch.full((128,), 0.5)
+        out_small = torch.cumprod(_to_device(small), 0).cpu()
+        reference = torch.cumprod(small, 0)
+
+        # Both agree until the subnormal range begins; `0.5 ** 126` is still
+        # normal (1.1754e-38 is the smallest normal, and 2**-126 is exactly it).
+        torch.testing.assert_close(out_small[:126], reference[:126], rtol=0, atol=0)
+
+        # Past that, the value is either the subnormal the reference computed or
+        # a zero, and it is never negative or NaN.
+        tail = out_small[126:]
+        assert (tail >= 0).all(), tail
+        assert not torch.isnan(tail).any(), tail
+        assert (tail <= reference[126]).all(), (tail, reference[126:])
+        # A zero tail is valid; so is one that matches the reference exactly.
+        assert tail.equal(reference[126:]) or (tail == 0).all(), tail
 
     @pytest.mark.anyplatform
     def test_a_nan_operand_propagates(self):
