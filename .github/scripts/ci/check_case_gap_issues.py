@@ -249,10 +249,17 @@ def _test_functions(
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]:
     return tuple(
         node
-        for node in ast.walk(tree)
+        for node in _walk_complete(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name.startswith("test_")
     )
+
+
+def _walk_complete(tree: ast.AST):
+    """Yield every node, including those in arguments and decorators."""
+    yield tree
+    for child in ast.iter_child_nodes(tree):
+        yield from _walk_complete(child)
 
 
 def _qualname(
@@ -280,7 +287,7 @@ def _source_violations(
         return [f"{relative}:{exc.lineno}: invalid Python: {exc.msg}"], {}
     parents = {
         id(child): parent
-        for parent in ast.walk(tree)
+        for parent in _walk_complete(tree)
         for child in ast.iter_child_nodes(parent)
     }
     functions = _test_functions(tree)
@@ -323,11 +330,10 @@ def _source_violations(
         for function in functions
         for decorator in function.decorator_list
     ) or any(
-        isinstance(node, ast.Call) and _is_tracked_skip(node) for node in ast.walk(tree)
+        isinstance(node, ast.Call) and _is_tracked_skip(node)
+        for node in _walk_complete(tree)
     )
-    if not imports and not uses_tracked_skip and relative not in migrated:
-        return errors, {}
-    if imports != {"tracked_skip"}:
+    if (imports or uses_tracked_skip) and imports != {"tracked_skip"}:
         errors.append(
             f"{relative}: tracked skip must be imported from the shared registry"
         )
@@ -341,9 +347,9 @@ def _source_violations(
         if any(
             isinstance(node, ast.Name) and node.id == "pytestmark"
             for target in targets
-            for node in ast.walk(target)
+            for node in _walk_complete(target)
         ):
-            for node in ast.walk(statement.value):
+            for node in _walk_complete(statement.value):
                 if isinstance(node, ast.Call) and _callee_name(node.func) in {
                     "skip",
                     "skipif",
@@ -352,7 +358,7 @@ def _source_violations(
                     errors.append(
                         f"{relative}:{node.lineno}: module-wide skips are forbidden"
                     )
-    for node in ast.walk(tree):
+    for node in _walk_complete(tree):
         if isinstance(node, ast.Assign):
             assignments = node.targets
         elif isinstance(node, ast.AnnAssign):
@@ -360,7 +366,7 @@ def _source_violations(
         else:
             assignments = []
         for target in assignments:
-            for name in ast.walk(target):
+            for name in _walk_complete(target):
                 if isinstance(name, ast.Name) and name.id == "tracked_skip":
                     errors.append(
                         f"{relative}:{node.lineno}: tracked_skip cannot be rebound"
@@ -371,7 +377,7 @@ def _source_violations(
                     f"{relative}:{node.lineno}: local tracked_skip definitions are forbidden"
                 )
             if node.name.startswith("test_"):
-                for decorator in ast.walk(node):
+                for decorator in _walk_complete(node):
                     if isinstance(decorator, ast.Call) and _callee_name(
                         decorator.func
                     ) in {"skip", "skipif", "xfail"}:

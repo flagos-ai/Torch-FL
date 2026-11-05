@@ -235,10 +235,9 @@ def test_main_checks_skip_forms_in_every_migrated_source(tmp_path):
     submitted = tmp_path / relative
     submitted.parent.mkdir(parents=True)
     submitted.write_text(source, encoding="utf-8")
+    assert module._read_contract_sources(tmp_path, contract) == {relative: source}
     errors = module.source_violations(
-        module._read_contract_sources(tmp_path, contract),
-        (),
-        frozenset(contract.sources),
+        {relative: source}, (), frozenset(contract.sources)
     )
     assert any(
         error.startswith(f"{relative}:") and "test skips must use" in error
@@ -271,6 +270,13 @@ def _source_errors(source):
 
 def test_source_contract_accepts_only_the_registered_decorator():
     assert _source_errors(_VALID_SOURCE) == []
+
+
+def test_migrated_source_without_a_skip_has_nothing_to_import():
+    module = _checker()
+    relative = "tests/integration/ops/test_mps_argmax.py"
+    source = "def test_x():\n    return True\n"
+    assert module.source_violations({relative: source}, (), frozenset({relative})) == []
 
 
 @pytest.mark.parametrize(
