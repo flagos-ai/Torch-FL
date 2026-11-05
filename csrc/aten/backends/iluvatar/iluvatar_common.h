@@ -487,9 +487,14 @@ inline void IluvatarAxpy(
   IluvatarSynchronizeStream(device);
 }
 
-// y += alpha * s on every element of y, for `t + 1.0`. ixblasScal follows the
-// same type rules measured for ixblasAxpyEx (float32 alpha beside both operand
-// types, executionType 0).
+// y += alpha * s on every element of y, for `t + 1.0`. Built on ixblasAxpyEx
+// rather than ixblasScal: corex exports only the typed Sscal/Dscal/Cscal/
+// Zscal entry points, and every one of them is single precision or wider.
+// y += alpha * s is the axpy y += (alpha * s) * ones, and that broadcast is
+// not free: sizing that vector against the tensor route would need a fill
+// kernel first (fused_ops has `fill_`, not `full`), so the scalar call's
+// advantage over routing the 0-dim tensor through add.Tensor is that it skips
+// the contiguous() copy, not the ones buffer.
 inline void IluvatarAxpyScalar(
     at::Tensor& y,
     const at::Scalar& s,
@@ -501,34 +506,45 @@ inline void IluvatarAxpyScalar(
   const int device = IluvatarDeviceIndex(y);
   cublasHandle_t handle = GetCublasHandle(device);
   const float alpha_f = static_cast<float>(alpha.to<double>());
+  // `ones` stands in for the x operand: n elements of 1 in the output's type,
+  // with alpha carrying the value. The value is rounded to the output's type
+  // rather than the multiply being narrowed, which is what ATen does for a
+  // python number.
+  at::Tensor ones;
   if (y.scalar_type() == at::kHalf) {
-    const at::Half s_half = s.to<at::Half>();
+    ones = at::full({n}, 1, y.options());
+    const float scaled = static_cast<float>(s.to<at::Half>());
     ILUVATAR_EXEC(
-        ixblasScal(
+        ixblasAxpyEx(
             handle,
             static_cast<int>(n),
-            &alpha_f,
+            &scaled,
             IX_R_32F,
-            &s_half,
+            ones.const_data_ptr(),
             IX_R_16F,
+            1,
             y.data_ptr(),
             IX_R_16F,
-            1),
-        "ixblasScal");
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
   } else {
-    const float s_float = static_cast<float>(s.to<double>());
+    ones = at::full({n}, 1, y.options());
+    const float scaled = static_cast<float>(s.to<double>());
     ILUVATAR_EXEC(
-        ixblasScal(
+        ixblasAxpyEx(
             handle,
             static_cast<int>(n),
-            &alpha_f,
+            &scaled,
             IX_R_32F,
-            &s_float,
+            ones.const_data_ptr(),
             IX_R_32F,
+            1,
             y.data_ptr(),
             IX_R_32F,
-            1),
-        "ixblasScal");
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
   }
   IluvatarSynchronizeStream(device);
 }
