@@ -202,7 +202,6 @@
   m.impl("addr_", WrapperAddrInplace);
   m.impl("affine_grid_generator", WrapperAffineGridGenerator);
   m.impl("alias", WrapperAlias);
-  m.impl("alias_copy.out", WrapperAliasCopyOut);
   m.impl("all", WrapperAll);
   m.impl("all.dim", WrapperAllDim);
   m.impl("all.dims", WrapperAllDims);
@@ -520,6 +519,7 @@
   m.impl("mish_", WrapperMishInplace);
   m.impl("mode", WrapperMode);
   m.impl("mse_loss", WrapperMseLoss);
+  m.impl("mul.Tensor", WrapperMulTensor);
   m.impl("multinomial", WrapperMultinomial);
   m.impl("mv", WrapperMv);
   m.impl("nan_to_num", WrapperNanToNum);
