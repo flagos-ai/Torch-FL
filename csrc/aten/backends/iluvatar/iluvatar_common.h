@@ -421,25 +421,27 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
         ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
   } while (0)
 
-// `x` laid out one element per index of `target`'s shape, for an add whose
-// operand broadcasts. It must not go through `x.expand(target).contiguous()`:
-// both tensors are ventored on this backend, and `reshape` is deferred to
-// `view`, which reads a broadcast operand back as a contiguous one and
-// refuses the copy with "The expanded size of the tensor (64) must match the
-// existing size (128)" (measured on u180). Materialising the strides here
-// replaces `reshape` with ATen's strided clone, which is the copy this needs.
-inline at::Tensor IluvatarBroadcastOperand(
-    const at::Tensor& x, at::IntArrayRef target) {
+// `x` laid out one element per index of a `rank`-dimensional output, for the
+// add whose operand broadcasts or follows the output's layout. It must not go
+// through `x.expand(out).contiguous()`, and not through a plain `contiguous()`
+// either: both tensors are ventored on this backend, so `contiguous()` on a
+// broadcast operand is a no-op (it already has no element twice) and on an
+// operand that shares the output's transposed layout it reads in memory order.
+// The strides are built for the output's shape and `as_strided` expands them,
+// so `clone` is the strided copy that materialises either case. Leading
+// dimensions are broadcast (stride 0), which is what ATen's right-aligned
+// broadcast does. A 0-dim operand is the scalar branch's case and is not
+// passed here.
+inline at::Tensor IluvatarAxpyOperand(const at::Tensor& x, int64_t rank) {
   const at::Tensor xc = x.contiguous();
-  std::vector<int64_t> strides(target.size(), 0);
-  const int64_t lead = static_cast<int64_t>(target.size()) - xc.dim();
+  std::vector<int64_t> sizes(rank, 1);
+  std::vector<int64_t> strides(rank, 0);
+  const int64_t lead = rank - xc.dim();
   for (const auto d : c10::irange(xc.dim())) {
-    const int64_t i = lead + d;
-    if (xc.size(d) == target[i] && xc.stride(d) != 0) {
-      strides[i] = xc.stride(d);
-    }
+    sizes[d + lead] = xc.size(d);
+    strides[d + lead] = xc.stride(d);
   }
-  return xc.as_strided(target, strides).clone();
+  return xc.as_strided(sizes, strides).clone();
 }
 
 // y += alpha * other on every element, where `other` is a 0-dim tensor whose
@@ -461,11 +463,11 @@ inline void IluvatarAxpy(
     at::Tensor& y,
     const at::Tensor& x,
     const at::Scalar& alpha) {
-  const int64_t n = x.numel();
+  at::Tensor xc = IluvatarAxpyOperand(x, y.dim());
+  const int64_t n = xc.numel();
   if (n == 0 || alpha.to<double>() == 0.0) {
     return;
   }
-  at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
   const int device = IluvatarDeviceIndex(y);
   cublasHandle_t handle = GetCublasHandle(device);
   // alpha is float32 in both arms: the vendor takes alpha in its own type tag

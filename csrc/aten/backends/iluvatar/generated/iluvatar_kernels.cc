@@ -1177,20 +1177,13 @@ at::Tensor AddTensorKernelIluvatar(
       "iluvatar: add.Tensor has no vendor kernel for an addend of ",
       other.scalar_type(), " beside ", self.scalar_type(),
       " (ixblasAxpyEx serves float32/float16)");
-  // The tensor axpy reads one element per output, so a shape that broadcasts
-  // cannot ride it. With both tensors ventored the operand is materialised at
-  // the output's shape instead of the op being refused -- see
-  // IluvatarBroadcastOperand for why that is not `expand().contiguous()`.
-  at::Tensor x_b;
-  if (!is_scalar && !self.sizes().equals(x.sizes())) {
-    x_b = iluvatar::IluvatarBroadcastOperand(x, self.sizes());
-  }
+
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
   if (is_scalar) {
     iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
   } else {
-    iluvatar::IluvatarAxpy(out, x_b.defined() ? x_b : x, alpha);
+    iluvatar::IluvatarAxpy(out, x, alpha);
   }
   return out;
 }
@@ -1245,24 +1238,17 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
       "iluvatar: add_.Tensor has no vendor kernel for an addend of ",
       other.scalar_type(), " beside ", self.scalar_type(),
       " (ixblasAxpyEx serves float32/float16)");
-  // The tensor axpy reads one element per output, so a shape that broadcasts
-  // cannot ride it. With both tensors ventored the operand is materialised at
-  // the output's shape instead of the op being refused -- see
-  // IluvatarBroadcastOperand for why that is not `expand().contiguous()`.
-  at::Tensor x_b;
-  if (!is_scalar && !self.sizes().equals(x.sizes())) {
-    x_b = iluvatar::IluvatarBroadcastOperand(x, self.sizes());
-  }
+
   if (is_scalar) {
     iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
     return self;
   }
   if (self.is_contiguous()) {
-    iluvatar::IluvatarAxpy(self, x_b.defined() ? x_b : x, alpha);
+    iluvatar::IluvatarAxpy(self, x, alpha);
     return self;
   }
   at::Tensor out = self.contiguous();
-  iluvatar::IluvatarAxpy(out, x_b.defined() ? x_b : x, alpha);
+  iluvatar::IluvatarAxpy(out, x, alpha);
   self.copy_(out);
   return self;
 }
