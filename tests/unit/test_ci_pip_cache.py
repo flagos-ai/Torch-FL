@@ -39,8 +39,12 @@ def _steps(workflow):
     return next(job["steps"] for job in document["jobs"].values() if "steps" in job)
 
 
-def _condition(expression, states, cancelled=False, success=True):
-    """Evaluate the workflow's boolean expression against recorded action outputs."""
+def _condition(expression, states, cancelled=False, success=True, event_name="push"):
+    """Evaluate the workflow's boolean expression against recorded action outputs.
+
+    `event_name` stands in for the context's `github.event_name`. It defaults to
+    `push`, the run that is allowed to write the cache.
+    """
 
     def output(match):
         step, field, name = match.groups()
@@ -56,6 +60,7 @@ def _condition(expression, states, cancelled=False, success=True):
     expression = re.sub(
         r"steps\.([a-z-]+)\.(outcome|outputs\.([a-z-]+))", output, expression
     )
+    expression = re.sub(r"github\.event_name", repr(event_name), expression)
     expression = expression.replace("cancelled()", repr(cancelled))
     expression = expression.replace("success()", repr(success))
     expression = expression.replace("failure()", repr(not success and not cancelled))
@@ -237,6 +242,23 @@ def test_cache_transfer_decisions(
     assert (
         upload["with"]["key"]
         == "${{ steps.pip-cache-lookup.outputs.cache-primary-key }}"
+    )
+
+    # A pull request restores exactly as a push does, but never writes: its
+    # cache would land in a refs/pull/<n>/merge scope no branch can read, while
+    # counting against the same 10 GB budget.
+    assert _condition(restore["if"], states, cancelled, success=job_success) is (
+        download and job_success
+    )
+    assert (
+        _condition(
+            upload["if"],
+            states,
+            cancelled,
+            success=job_success,
+            event_name="pull_request",
+        )
+        is False
     )
 
 

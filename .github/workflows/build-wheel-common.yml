@@ -288,8 +288,13 @@ jobs:
       # !cancelled() intentionally permits saving after failure (no success()).
       # Skip exact hits, failed lookups/transfers and cancelled jobs.
       # Cache errors must not change the build/test result.
+      #
+      # Only a push run writes the cache, for the reason integration-tests.yml
+      # gives at its own save step: a pull request's cache lands in a
+      # refs/pull/<n>/merge scope no branch can read, while counting against the
+      # same 10 GB repository budget.
       - name: Save pip downloads
-        if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4
         continue-on-error: true
         timeout-minutes: 3
