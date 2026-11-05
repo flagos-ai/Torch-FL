@@ -726,6 +726,10 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
   // wrapped tensor is the unsupported dtype has nowhere to go, which is what
   // this predicate keeps it from claiming.
   //
+  // It is asked once per tensor argument, so a served result beside an
+  // unserved addend is refused here and served by the kernel -- the kernel's
+  // own gate does the same widening and refusal for the pairs this misses.
+  //
   // BEGIN GENERATED: iluvatar Axpy dtype escape.
   if ((dtype == at::kDouble || dtype == at::kBFloat16 ||
        c10::isComplexType(dtype) || c10::isIntegralType(dtype, true)) &&
@@ -735,6 +739,7 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
       std::strcmp(op_name, "add_.Tensor") == 0)) {
     return true;
   }
+  return false;
   // END GENERATED: iluvatar Axpy dtype escape.
 #else
   // No vendor route is known to have a gap that is specific to one op and

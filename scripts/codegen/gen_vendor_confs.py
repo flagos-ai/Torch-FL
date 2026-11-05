@@ -3991,6 +3991,17 @@ def iluvatar_axpy_escape_ops() -> list:
 
 
 def render_iluvatar_axpy_escape() -> str:
+    """The escape answers for every argument of the call, not just the routed one.
+
+    `FlagGemsRejectsArgs` calls the predicate once per argument, so the routed
+    tensor reaching it first says nothing about the addend: `x + 1.0` on a
+    float16 tensor arrives with a float32 result -- the routed dtype -- and a
+    float16 addend, which the vendor call serves; refusing on the result alone
+    would send a served call back to the native kernel. `y += x` with a
+    float64 `x` is the reverse, a served result with an addend the vendor call
+    returns NOT_SUPPORTED for. A scalar argument cannot answer the question
+    (see FlagGemsRejectsArg), so it only ever compares as "no".
+    """
     ops = iluvatar_axpy_escape_ops()
     if not ops:
         return f"{ESCAPE_BEGIN}\n{ESCAPE_END}\n"
@@ -4003,6 +4014,7 @@ def render_iluvatar_axpy_escape() -> str:
         "      (" + checks + ")) {\n"
         "    return true;\n"
         "  }\n"
+        "  return false;\n"
         f"{ESCAPE_END}\n"
     )
 
