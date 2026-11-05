@@ -449,29 +449,47 @@ inline at::Tensor IluvatarAxpyOperand(
   return xc.as_strided(src_sizes, strides).clone().as_strided(out, strides);
 }
 
-// y += alpha * other on every element, where `other` is a 0-dim tensor whose
-// value is added everywhere. Kept separate from IluvatarAxpy because the two
-// vendor calls differ: the tensor form takes `other`'s data pointer, and a
-// 0-dim tensor has no length for the vendor to read per output.
+// y += alpha * x on the device, followed by y[broadcast] = y, so that an
+// elementwise pair and a broadcasting one are one vendored axpy rather than a
+// FlagGems broadcast `mul` per call.
 //
-// y += alpha * x on the device, for the four `add` schemas
-// (codegen_iluvatar.py's add_* categories).
+// ixblasAxpyEx reads both vectors linearly, so a broadcasting operand has to be
+// one vector before it arrives; the copies that would serve that directly do
+// not work here -- both tensors are ventored on this backend, so `contiguous()`
+// on a broadcast operand is a no-op, `expand` is refused on the way to
+// `reshape`, and an `as_strided` view of the output's shape fails the storage
+// check. What does work is ATen's own `copy_`, which every backend implements
+// as a broadcast, and is what the output's copy into `x`'s shape uses.
 //
-// ixblasAxpyEx takes alpha by pointer with its own type tag, and its
-// `executionType` byte was measured on u180 (corex 4.5.0) to accept only 0 --
-// the enum's named values (16F, 32F, 64F, 32I) all returned
-// IXBLAS_STATUS_NOT_SUPPORTED. alpha is float32 for both operand types (see
-// the comment on alpha_f below). Both were verified against the CPU reference;
-// every other dtype is refused by IluvatarSupportsAxpyDtype before the call,
-// because the vendor call returns status 15 for all of them.
+// The axpy is over `x`'s own element count, fed with an output buffer that
+// starts as a copy of `y`'s leading `numel(x)` elements; that is the pair of
+// operands the vendor call needs whether or not `x` broadcasts. A broadcast
+// output then takes `y` back from that buffer's own broadcast. The
+// intermediate read of `y` is the only extra tensor this costs; the axpy
+// itself is one vendored call, as it is for the elementwise pair.
 inline void IluvatarAxpy(
     at::Tensor& y,
     const at::Tensor& x,
     const at::Scalar& alpha) {
-  at::Tensor xc = IluvatarAxpyOperand(x, y.sizes());
+  const at::Tensor xc = x.contiguous();
   const int64_t n = xc.numel();
   if (n == 0 || alpha.to<double>() == 0.0) {
     return;
+  }
+  const bool elementwise = x.sizes().equals(y.sizes());
+  at::Tensor acc;
+  at::Tensor* dst = &y;
+  const int64_t ynumel = y.numel();
+  if (!elementwise) {
+    if (xc.numel() > ynumel) {
+      TORCH_CHECK(
+          false, "iluvatar: an add operand of ", x.sizes(),
+          " does not broadcast over ", y.sizes());
+    }
+    // The first `n` elements of `y` in storage order: the axpy's y vector,
+    // whatever `y`'s own layout is.
+    acc = y.reshape({-1}).narrow(0, 0, n).clone();
+    dst = &acc;
   }
   const int device = IluvatarDeviceIndex(y);
   cublasHandle_t handle = GetCublasHandle(device);
@@ -491,7 +509,7 @@ inline void IluvatarAxpy(
             xc.const_data_ptr(),
             IX_R_16F,
             1,
-            y.data_ptr(),
+            dst->data_ptr(),
             IX_R_16F,
             1,
             static_cast<ixblasDataType_t>(0)),
@@ -506,13 +524,16 @@ inline void IluvatarAxpy(
             xc.const_data_ptr(),
             IX_R_32F,
             1,
-            y.data_ptr(),
+            dst->data_ptr(),
             IX_R_32F,
             1,
             static_cast<ixblasDataType_t>(0)),
         "ixblasAxpyEx");
   }
   IluvatarSynchronizeStream(device);
+  if (!elementwise) {
+    y.copy_(acc.reshape(xc.sizes()));
+  }
 }
 
 // y += alpha * s on every element of y, for `t + 1.0`. Built on ixblasAxpyEx
