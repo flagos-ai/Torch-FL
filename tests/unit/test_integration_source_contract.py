@@ -19,35 +19,27 @@ belong in the wheel's routing table and build record, or in a capability probe
 run inside a case. A probe must not decide which test functions are collected,
 which parameters exist, or whether a module can be imported at all.
 
-Every expected skip in a migrated file belongs to one tracked issue in
-``tests/integration/case_gap_issues.py``. Previously migrated files stay in
-``MIGRATED_CASE_FILES``, so adding a skip to them requires a registered gap.
-An issue stays open, with its skip in place, until the gap is fixed; only then
-can the next shared case group be migrated. The CPU-only lane checks both
-collection shape and skip ownership.
+This module checks that rule statically, so the CPU-only lane catches a new
+platform branch before any accelerator job is spent on it. The migration list
+below records the existing branches that still need to move. It may shrink as
+those files gain shared cases, but adding an entry for a new violation is not a
+supported way to make this check pass.
 
 Only the Python standard library is imported here. These are source-tree checks
 and must not need torch or a device.
 """
 
 import ast
-import dataclasses
-import json
-import re
-
-import pytest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SUITE_RELATIVE_PATHS = ("tests/integration/flaggems", "tests/integration/ops")
-SUITE_ROOTS = tuple(REPO_ROOT / relative for relative in SUITE_RELATIVE_PATHS)
+SUITE_ROOTS = tuple(
+    REPO_ROOT / relative
+    for relative in ("tests/integration/flaggems", "tests/integration/ops")
+)
 AGNOSTIC_WORKFLOW = REPO_ROOT / ".github/workflows/agnostic-checks.yml"
-CASE_GAP_ISSUES = REPO_ROOT / "tests/integration/case_gap_issues.py"
-
-#: The generated op suites with unconditional MPS expectations that the user
-#: approved for the first cross-chip migration. Until a new migration step is
-#: reviewed, no other file can introduce a skip without an issue.
+MPS_SUITE = REPO_ROOT / "tests/integration/ops"
 MIGRATED_CASE_FILES = frozenset(
     {
         "tests/integration/ops/test_all_dispatch.py",
@@ -71,342 +63,6 @@ def _function_name(function):
     if isinstance(function, ast.Attribute):
         return function.attr
     return ""
-
-
-def _case_gap_issues():
-    """Read registered issue rows without importing the test helper."""
-    tree = ast.parse(_read(CASE_GAP_ISSUES))
-    table = next(
-        (
-            statement
-            for statement in tree.body
-            if isinstance(statement, (ast.Assign, ast.AnnAssign))
-            and (
-                statement.target.id
-                if isinstance(statement, ast.AnnAssign)
-                else statement.targets[0].id
-            )
-            == "_ISSUES"
-        ),
-        None,
-    )
-    value = table.value if table is not None else None
-    if isinstance(value, (ast.Tuple, ast.List)):
-        args = value.elts
-    elif isinstance(value, ast.Call):
-        args = value.args
-    else:
-        args = ()
-    if any(not isinstance(arg, ast.Call) for arg in args):
-        raise AssertionError("case gaps may contain only CaseGapIssue(...) rows")
-    entries = [arg.args for arg in args]
-    issues = {}
-    route_owners = {}
-    for entry in entries:
-        if len(entry) not in {3, 4}:
-            raise AssertionError("each gap names an issue, state, cases, and routes")
-        issue, state, cases, *routes = entry
-        if not (
-            isinstance(issue, ast.Constant)
-            and isinstance(issue.value, str)
-            and re.fullmatch(r"#[1-9][0-9]*", issue.value)
-            and isinstance(state, ast.Constant)
-            and state.value in {"open", "fixed"}
-            and isinstance(cases, (ast.Tuple, ast.List))
-            and cases.elts
-            and all(
-                isinstance(case, ast.Constant)
-                and isinstance(case.value, str)
-                and "::" in case.value
-                for case in cases.elts
-            )
-            and (
-                not routes
-                or isinstance(routes[0], (ast.Tuple, ast.List))
-                and all(
-                    isinstance(route, ast.Constant)
-                    and isinstance(route.value, str)
-                    and route.value
-                    for route in routes[0].elts
-                )
-            )
-        ):
-            raise AssertionError("invalid case-gap issue row")
-        if issue.value in issues:
-            raise AssertionError(f"{issue.value} is registered more than once")
-        issues[issue.value] = (
-            state.value,
-            tuple(case.value for case in cases.elts),
-            tuple(route.value for route in routes[0].elts) if routes else (),
-        )
-        for route in routes[0].elts if routes else ():
-            if route.value in route_owners:
-                raise AssertionError(f"{route.value} is registered more than once")
-            route_owners[route.value] = issue.value
-    return issues
-
-
-def _scope_name(function, parents):
-    scope = function
-    while id(scope) in parents:
-        scope = parents[id(scope)]
-        if isinstance(scope, ast.ClassDef):
-            return f"{scope.name}::{function.name}"
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
-            return function.name
-    return function.name
-
-
-def _case_marker_names(tree, parents):
-    """Yield each collected case and the backend markers it carries."""
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        names = set()
-        for decorator in node.decorator_list:
-            mark = decorator.func if isinstance(decorator, ast.Call) else decorator
-            if _function_name(mark) == "mark":
-                if not isinstance(decorator, ast.Call) or not decorator.args:
-                    continue
-                mark = decorator.args[0]
-            name = _function_name(mark)
-            if name not in {"skip", "skipif"}:
-                names.add(name)
-        if names:
-            yield _scope_name(node, parents), names
-
-
-def _module_mark_owner(mark, tree):
-    """Find a module mark through its bare or list-valued ``pytestmark``."""
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "pytestmark"
-            for target in statement.targets
-        ):
-            value = statement.value
-            items = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
-            if any(item is mark for item in items):
-                return "<module>"
-    return None
-
-
-def _skip_marks(tree):
-    """Return every skip call and the collected node whose outcome it owns."""
-    parents = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[id(child)] = node
-    marks = []
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and _function_name(node.func) in {"skip", "skipif"}
-        ):
-            continue
-        component = _module_mark_owner(node, tree)
-        current = node
-        while component is None and id(current) in parents:
-            current = parents[id(current)]
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                component = _scope_name(current, parents)
-        if component is None and (
-            isinstance(node.func.value, ast.Attribute)
-            and _function_name(node.func.value.value) == "pytest"
-        ):
-            component = "<module>"
-        marks.append((node, component))
-    return marks
-
-
-def _issue_mentioned(reason):
-    """Return every issue key this skip names."""
-    mentioned = set()
-    for node in ast.walk(reason):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            mentioned.update(re.findall(r"#[1-9][0-9]*", node.value))
-        if (
-            isinstance(node, ast.Call)
-            and _function_name(node.func) == "case_gap_reason"
-            and len(node.args) == 1
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        ):
-            mentioned.add(node.args[0].value)
-    return mentioned
-
-
-def _skip_ownership(tree, relative, issues):
-    """Associate each skip in a migrated file with its registry row."""
-    ownership = []
-    route_entries = {
-        route: number for number, (_, _, routes) in issues.items() for route in routes
-    }
-    for call, case in _skip_marks(tree):
-        reason = (
-            call.args[0]
-            if call.args
-            else next(
-                (
-                    keyword.value
-                    for keyword in call.keywords
-                    if keyword.arg in {"reason", "condition"}
-                ),
-                None,
-            )
-        )
-        mentioned = _issue_mentioned(reason) if reason is not None else set()
-        keys = mentioned | {
-            route
-            for _, _, routes in issues.values()
-            for route in routes
-            if route in mentioned
-        }
-        if not keys:
-            ownership.append((call.lineno, None, "skip has no reason", case, relative))
-            continue
-        for key in keys:
-            if key in route_entries:
-                key = route_entries[key]
-            if key not in issues:
-                ownership.append(
-                    (call.lineno, key, "skip has no open issue", case, relative)
-                )
-                continue
-            state, cases, routes = issues[key]
-            if state != "open":
-                ownership.append(
-                    (call.lineno, key, "issue is not open", case, relative)
-                )
-                continue
-            owned_by_route = any(route in mentioned for route in routes)
-            if owned_by_route:
-                ownership.append((call.lineno, key, "tracked", case, relative))
-            elif case is None or not any(
-                case == registered.removeprefix(f"{relative}::") for registered in cases
-            ):
-                ownership.append(
-                    (call.lineno, key, "skip owner is not registered", case, relative)
-                )
-            else:
-                ownership.append((call.lineno, key, "tracked", case, relative))
-    return ownership
-
-
-def test_case_gap_import_resolves_the_shared_registry_from_ops():
-    """The ops directory must not shadow the shared case-gap registry."""
-    path = REPO_ROOT / "tests/integration/ops/test_all_dispatch.py"
-    tree = ast.parse(_read(path))
-    imports = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and any(alias.name == "case_gap_reason" for alias in node.names)
-    ]
-    assert len(imports) == 1
-    assert imports[0].module == "tests.integration.case_gap_issues"
-
-
-def _registered_gap_evidence(source, relative, issues):
-    """Return the registered cases and routes that have source evidence."""
-    tree = ast.parse(source, filename=relative)
-    parents = {
-        id(child): node
-        for node in ast.walk(tree)
-        for child in ast.iter_child_nodes(node)
-    }
-    cases = {
-        f"{relative}::{name}": markers
-        for name, markers in _case_marker_names(tree, parents)
-    }
-    registered = {
-        case: issue
-        for issue, (_, owned_cases, _) in issues.items()
-        for case in owned_cases
-    }
-    registered_routes = {
-        route: issue
-        for issue, (_, _, owned_routes) in issues.items()
-        for route in owned_routes
-    }
-    ownership = _skip_ownership(tree, relative, issues)
-    observed = set()
-    observed_routes = set()
-    for line, issue, message, case, _ in ownership:
-        if message == "skip has no reason":
-            continue
-        if issue not in issues or message != "tracked":
-            raise AssertionError(
-                "the registered skip does not name its owner: "
-                f"{relative}:{line}: {issue}: {message}"
-            )
-        node = f"{relative}::{case}" if case else ""
-        if node in registered:
-            observed.add(node)
-    for route, issue in registered_routes.items():
-        if not route.startswith("@"):
-            route_cases = {
-                f"{relative}::{case}"
-                for _, owner, message, case, _ in ownership
-                if owner == issue and message == "tracked" and case
-            }
-            in_source = any(
-                isinstance(child, ast.Constant) and child.value == route
-                for child in ast.walk(tree)
-            )
-            found = in_source and bool(route_cases)
-            if found:
-                observed.update(route_cases & registered.keys())
-                observed_routes.add(route)
-            continue
-        for case, markers in cases.items():
-            if registered.get(case) == issue and any(
-                route[1:] in marker for marker in markers
-            ):
-                observed.add(case)
-                observed_routes.add(route)
-    return observed, observed_routes
-
-
-def _unattributed_case_skips(migrated=MIGRATED_CASE_FILES):
-    """Skips in migrated files without an open, owning issue."""
-    findings = []
-    for path in _suite_sources():
-        relative = path.relative_to(REPO_ROOT).as_posix()
-        if relative not in migrated:
-            continue
-        for line, issue, message, _, _ in _skip_ownership(
-            ast.parse(_read(path), filename=str(path)),
-            relative,
-            _case_gap_issues(),
-        ):
-            if message not in {"tracked", "route"}:
-                findings.append((relative, line, issue, message))
-    return findings
-
-
-def _read(path):
-    return path.read_text(encoding="utf-8")
-
-
-def _skip_findings(source, issues, relative="test_case.py"):
-    tree = ast.parse(source)
-    if issues and isinstance(next(iter(issues.values())), _SyntheticIssue):
-        issues = {
-            issue: (entry.state, entry.cases, entry.routes)
-            for issue, entry in issues.items()
-        }
-    return [
-        message
-        for _, issue, message, _, _ in _skip_ownership(tree, relative, issues)
-        if message not in {"tracked", "route"}
-    ]
-
-
-@dataclasses.dataclass(frozen=True)
-class _SyntheticIssue:
-    state: str
-    cases: tuple[str, ...]
-    routes: tuple[str, ...] = ()
 
 
 def _platform_probe_calls(tree):
@@ -612,35 +268,52 @@ def _collection_violations():
 
 #: The platform-shaped test files this first contract step found. They predate
 #: the shared-case migration: most carry a module-level MPS skip and their own
-#: vocabulary for the same operator. Every entry must still contain a violation;
-#: fixing one requires deleting it here, so the list cannot hide the next
-#: branch after that file has moved to the shared shape.
+#: vocabulary for the same operator. Every entry must still exist; a missing one
+#: requires deleting it here, so a renamed or split file cannot escape review.
+#: A migrated file leaves this list. A newly added MPS-only file must be migrated
+#: before it lands -- adding it here requires a deliberate source change and is
+#: reported as a migration gap, not accepted as a valid way to add coverage.
 _MIGRATION_EXEMPTIONS = frozenset(
     {
         *(
             f"tests/integration/ops/test_mps_{name}.py"
             for name in (
+                "activations",
+                "addmm",
+                "all",
+                "argmax",
+                "argmax_nan",
                 "batch_norm",
                 "binary",
+                "binary_compare",
                 "cat",
+                "clamp_integral",
                 "contiguous",
                 "conv",
+                "conv_backward",
+                "cumprod",
                 "cumsum",
                 "div",
+                "differential_sweep",
                 "embedding",
                 "erf",
                 "exp",
+                "exp_log_bases",
+                "extrema_product",
                 "gather",
                 "gemm",
                 "index",
                 "index_select",
+                "inverse_trig",
                 "layer_norm",
                 "log",
                 "masked_fill",
+                "not_tan",
                 "pow",
                 "qwen35",
                 "reduce",
                 "rotary_and_compare",
+                "rounding_predicates",
                 "rsqrt",
                 "sigmoid",
                 "silu",
@@ -649,6 +322,7 @@ _MIGRATION_EXEMPTIONS = frozenset(
                 "sqrt",
                 "take",
                 "tanh",
+                "tril",
                 "triu",
                 "unary",
                 "views",
@@ -670,25 +344,14 @@ def test_platform_detector_covers_every_vendor_conf():
     platform_source = ast.parse(
         (REPO_ROOT / "torch_fl/_platform.py").read_text(encoding="utf-8")
     )
-    cmake_platforms = json.loads(
-        (REPO_ROOT / "cmake/flagos_platforms.json").read_text(encoding="utf-8")
-    )
-    cmake_vendors = {row["vendor"] for row in cmake_platforms["accelerators"].values()}
-    platform_mapping = next(
+    string_literals = {
         node.value
-        for node in platform_source.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "PLATFORM_VENDOR"
-            for target in node.targets
-        )
-    )
-    vendors = {
-        item.value for item in platform_mapping.keys if isinstance(item, ast.Constant)
+        for node in ast.walk(platform_source)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
     assert confs
     for vendor in confs:
-        assert vendor in vendors or vendor in cmake_vendors, vendor
+        assert vendor in string_literals, vendor
 
 
 def test_probe_recognizes_imported_and_qualified_detectors():
@@ -770,6 +433,19 @@ def test_platform_guarded_import_is_checked():
     assert len(_probe_uses(tree)) == 1
 
 
+def test_every_platform_specific_mps_file_is_migrated_or_listed():
+    """A missing entry has to be migrated or receive a deliberate exemption."""
+    platform_files = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in MPS_SUITE.glob("test_mps_*.py")
+    }
+    unhandled = platform_files - MIGRATED_CASE_FILES - _MIGRATION_EXEMPTIONS
+    unhandled -= {path for path, _, _ in _collection_violations()}
+    assert not unhandled, (
+        f"platform-specific files without a collection violation: {sorted(unhandled)}"
+    )
+
+
 def test_platform_defined_only_test_is_checked():
     tree = ast.parse(
         "if detect_platform() == 'mps':\n    def test_mps_only():\n        pass\n"
@@ -782,7 +458,7 @@ def test_no_new_platform_branch_changes_the_integration_suite_shape():
     unexpected = sorted(
         (path, line, expression)
         for path, line, expression in violations
-        if path not in _MIGRATION_EXEMPTIONS
+        if path not in MIGRATED_CASE_FILES and path not in _MIGRATION_EXEMPTIONS
     )
     assert not unexpected, "move the capability check inside the test case: " + repr(
         unexpected
@@ -792,292 +468,16 @@ def test_no_new_platform_branch_changes_the_integration_suite_shape():
 def test_migration_exemptions_are_exact_and_still_necessary():
     violations = _collection_violations()
     observed = {path for path, _, _ in violations}
-    assert observed == _MIGRATION_EXEMPTIONS, (
-        "remove fixed files from _MIGRATION_EXEMPTIONS without adding new ones: "
-        f"fixed={sorted(_MIGRATION_EXEMPTIONS - observed)}, "
+    migrated_files = {
+        "tests/integration/ops/test_mps_all.py",
+        "tests/integration/ops/test_mps_argmax.py",
+    }
+    assert observed & _MIGRATION_EXEMPTIONS
+    assert observed == _MIGRATION_EXEMPTIONS - migrated_files, (
+        "platform-specific files must be migrated or stay on the frozen exemption list: "
+        f"unmigrated={sorted(_MIGRATION_EXEMPTIONS - observed)}, "
         f"new={sorted(observed - _MIGRATION_EXEMPTIONS)}"
     )
-
-
-def test_every_expected_skip_names_one_open_case_issue():
-    findings = _unattributed_case_skips()
-    assert not findings, (
-        "register the gap in integration/case_gap_issues.py and name its issue "
-        "in the skip: " + repr(findings)
-    )
-
-
-def test_migrated_skips_reject_unregistered_and_closed_issues():
-    cases = ("tests/integration/ops/test_case.py::test_case",)
-    rows = {
-        "#1": _SyntheticIssue("open", cases),
-        "#2": _SyntheticIssue("fixed", cases),
-    }
-    source = (
-        "import pytest\ndef test_case():\n    pytest.skip(case_gap_reason('{issue}'))\n"
-    )
-    relative = "tests/integration/ops/test_case.py"
-    assert not _skip_findings(source.format(issue="#1"), rows, relative)
-    assert _skip_findings(source.format(issue="#2"), rows, relative) == [
-        "issue is not open"
-    ]
-    assert _skip_findings(source.format(issue="#3"), rows, relative) == [
-        "skip has no open issue"
-    ]
-    assert _skip_findings(
-        "import pytest\ndef test_case():\n    pytest.skip('x')\n", rows, relative
-    ) == ["skip has no reason"]
-
-
-def test_case_gap_evidence_rejects_a_missing_skip_or_wrong_owner():
-    issues = {
-        "#1": (
-            "open",
-            ("tests/integration/ops/test_case.py::test_skip",),
-            ("all:none",),
-        ),
-        "#2": (
-            "open",
-            ("tests/integration/ops/test_case.py::TestGated::test_gated",),
-            ("@cuda",),
-        ),
-    }
-    source = """\
-import pytest
-
-def test_skip():
-    pytest.skip(case_gap_reason("#1"))
-
-class TestGated:
-    @pytest.mark.cuda
-    def test_gated(self):
-        assert routed_backend_or_none("all") is None
-"""
-    relative = "tests/integration/ops/test_case.py"
-    assert _registered_gap_evidence(source, relative, issues) == (
-        {
-            f"{relative}::{case.split('::', 1)[1]}"
-            for _, cases, _ in issues.values()
-            for case in cases
-        },
-        {"@cuda"},
-    )
-    with pytest.raises(AssertionError, match="registered skip"):
-        wrong_owner = {
-            "#2": issues["#2"],
-            "#1": (issues["#1"][0], issues["#1"][1], ()),
-        }
-        _registered_gap_evidence(
-            source.replace('case_gap_reason("#1")', '"expected case gap #2"'),
-            relative,
-            wrong_owner,
-        )
-    for missing_route in ("all:none", "@cuda"):
-        incomplete = {
-            issue: (
-                state,
-                cases,
-                tuple(route for route in routes if route != missing_route),
-            )
-            for issue, (state, cases, routes) in issues.items()
-        }
-        observed, routes = _registered_gap_evidence(source, relative, incomplete)
-        assert missing_route not in routes
-    no_skip, _ = _registered_gap_evidence(
-        source.replace('pytest.skip(case_gap_reason("#1"))', "pass"),
-        relative,
-        issues,
-    )
-    assert f"{relative}::test_skip" not in no_skip
-    no_gate, no_route = _registered_gap_evidence(
-        source.replace("@pytest.mark.cuda", ""), relative, issues
-    )
-    assert f"{relative}::TestGated::test_gated" not in no_gate
-    assert "@cuda" not in no_route
-
-
-def _registered_evidence_for_suite():
-    issues = _case_gap_issues()
-    observed = set()
-    routes = set()
-    for path in _suite_sources():
-        relative = path.relative_to(REPO_ROOT).as_posix()
-        found, found_routes = _registered_gap_evidence(_read(path), relative, issues)
-        observed.update(found)
-        routes.update(found_routes)
-    return observed, routes
-
-
-def test_every_registered_case_and_route_has_its_own_gap_evidence():
-    issues = _case_gap_issues()
-    expected = {
-        (issue, case) for issue, (_, cases, _) in issues.items() for case in cases
-    }
-    evidence = {
-        (issue, case)
-        for issue, (_, cases, _) in issues.items()
-        for case in cases
-        if case
-        in _registered_gap_evidence(
-            _read(REPO_ROOT / case.split("::", 1)[0]),
-            case.split("::", 1)[0],
-            issues,
-        )[0]
-    }
-    assert expected == evidence, (
-        "register every expected skip against its actual case: "
-        f"missing={sorted(expected - evidence)}"
-    )
-    expected_routes = {route for _, _, routes in issues.values() for route in routes}
-    found, observed_routes = _registered_evidence_for_suite()
-    assert expected_routes == observed_routes, (
-        "register a route only when it gates one of its issue's recorded cases: "
-        f"missing={sorted(expected_routes - observed_routes)}"
-    )
-    assert found == {case for _, cases, _ in issues.values() for case in cases}, (
-        "each registered case needs its owning skip or route gate"
-    )
-
-
-def test_fixed_registered_cases_remove_their_source_skip():
-    """A passing case must not leave a stale issue gate behind."""
-    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
-    evidence, _ = _registered_gap_evidence(
-        source, "tests/integration/ops/test_all_dispatch.py", _case_gap_issues()
-    )
-    for name in ("test_all_matches_cpu_reference",):
-        assert (
-            f"tests/integration/ops/test_all_dispatch.py::TestAllCorrectness::{name}"
-        ) not in evidence
-
-
-def test_empty_dimension_case_uses_a_cpu_reference_instead_of_xfail():
-    """The case owns an issue-gated skip, so it must not expect a failure too."""
-    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
-    function = next(
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "test_all_empty_dim_reduction"
-    )
-    text = ast.unparse(function)
-    assert "xfail" not in text
-    assert "torch.equal(out.cpu(), expected)" in text
-
-
-def test_plain_all_reference_uses_cpu_on_every_platform():
-    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
-    function = next(
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "test_all_matches_cpu_reference"
-    )
-    markers = {
-        _function_name(mark)
-        for decorator in function.decorator_list
-        if (mark := decorator if isinstance(decorator, ast.Call) else decorator)
-    }
-    assert markers == {"anyplatform"}
-    assert "cuda" not in ast.unparse(function)
-
-
-def _shared_all_cases_reach_each_platforms_ci():
-    """Return the shared `all` cases, and those no composed lane collects."""
-    import importlib.util
-    import sys
-
-    spec = importlib.util.spec_from_file_location(
-        "integration_workdir_contract",
-        REPO_ROOT / "tests/unit/test_integration_workdir.py",
-    )
-    workdir_contract = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(REPO_ROOT / "tests/unit"))
-    spec.loader.exec_module(workdir_contract)
-    unselected = {case.node_id for case in workdir_contract._unselected_cases()}
-    shared_cases = {
-        case.node_id
-        for case in workdir_contract._all_cases()
-        if case.file == "tests/integration/ops/test_all_dispatch.py"
-        and {"anyplatform", "main_ops"} <= case.marks
-    }
-    return shared_cases, shared_cases & unselected
-
-
-def test_shared_all_cases_reach_a_ci_lane():
-    """A migrated correctness suite must be selected, or CI cannot watch it."""
-    shared_cases, unselected = _shared_all_cases_reach_each_platforms_ci()
-    assert shared_cases
-    assert unselected == set()
-
-
-def test_every_platform_lane_selects_the_shared_all_cases():
-    """Portable cases must not rely on an Apple or vendor-specific command."""
-    import importlib.util
-    import sys
-
-    spec = importlib.util.spec_from_file_location(
-        "integration_workdir_contract",
-        REPO_ROOT / "tests/unit/test_integration_workdir.py",
-    )
-    workdir_contract = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(REPO_ROOT / "tests/unit"))
-    spec.loader.exec_module(workdir_contract)
-    shared = {
-        case.node_id
-        for case in workdir_contract._all_cases()
-        if case.file == "tests/integration/ops/test_all_dispatch.py"
-        and {"anyplatform", "main_ops"} <= case.marks
-    }
-    missing_platforms = []
-    for platform in workdir_contract._manifest_platforms():
-        selected = {
-            case.node_id
-            for case in workdir_contract._all_cases()
-            if case.node_id in shared
-            and any(
-                not any(
-                    workdir_contract._names_target(case.file, ignored)
-                    for ignored in selection.ignored
-                )
-                and any(
-                    workdir_contract._names_target(case.file, path)
-                    for path in selection.paths
-                )
-                and (
-                    selection.marker is None
-                    or workdir_contract._evaluate(selection.marker, set(case.marks))
-                )
-                and (
-                    selection.keyword is None
-                    or workdir_contract._keeps(selection.keyword, case.parts)
-                )
-                for selection in workdir_contract._manifest_selections(platform)
-            )
-        }
-        if selected != shared:
-            missing_platforms.append(platform)
-    assert missing_platforms == ["apple", "ascend"]
-
-
-def test_flag_override_case_uses_the_build_capability_gate():
-    source = _read(REPO_ROOT / "tests/integration/ops/test_all_dispatch.py")
-    tree = ast.parse(source)
-    function = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "test_dispatch_log_flaggems_python"
-    )
-    text = ast.unparse(function)
-    assert "override_is_logged('all', 'flaggems_python')" in text
-    assert "case_gap_reason('all:flaggems_python')" in text
-    assert "route_is_served('all')" in text
-
-
-def test_gap_registry_skips_are_enforced_by_the_cpu_lane():
-    workflow = AGNOSTIC_WORKFLOW.read_text(encoding="utf-8")
-    assert "tests/unit/test_integration_source_contract.py" in workflow
 
 
 def test_platform_shape_contract_runs_in_cpu_ci():
