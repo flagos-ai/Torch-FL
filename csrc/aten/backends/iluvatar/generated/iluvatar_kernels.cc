@@ -1149,6 +1149,8 @@ at::Tensor AddTensorKernelIluvatar(
     const at::Tensor& self,
     const at::Tensor& other,
     const at::Scalar& alpha) {
+  // python's number arrives as a 0-dim tensor (`t + 1.0`), which the
+  // broadcast scalar call below serves; it has no operand dtype of its own.
   const bool is_scalar = other.dim() == 0;
   if (!is_scalar && !self.sizes().equals(other.sizes())) {
     TORCH_CHECK_NOT_IMPLEMENTED(
@@ -1157,18 +1159,24 @@ at::Tensor AddTensorKernelIluvatar(
         self.sizes(), " + ", other.sizes(),
         "); ixblasAxpyEx serves an elementwise add");
   }
-  if (self.device() != other.device() ||
-      !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
-    TORCH_CHECK_NOT_IMPLEMENTED(
-        false,
-        "iluvatar: add.Tensor has no vendor kernel for ", self.scalar_type(),
-        " (ixblasAxpyEx serves float32/float16)");
-  }
-  // add promotes a mixed-type pair and ATen hands the kernel the promoted
-  // result type, so a same-type float32/float16 pair needs no cast; the pair
-  // that arrives mixed is a float16 addend with a float32 alpha, which ATen
-  // promotes to float32. Widen the addend with the result or ixblasAxpyEx
-  // reads float16 memory into a float32 output.
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add.Tensor has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  // add promotes a mixed-type pair, so a float16 addend beside a float32
+  // result (a python float with a float16 tensor) arrives in its own type and
+  // has to be widened with the result; ixblasAxpyEx reads the addend at the
+  // output's width. A same-type pair needs no cast.
+  const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(self.scalar_type());
+  const bool x_served =
+      is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
+  TORCH_CHECK(
+      x_served,
+      "iluvatar: add.Tensor has no vendor kernel for an addend of ",
+      other.scalar_type(), " beside ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
   iluvatar::IluvatarDeviceGuard guard(self);
   if (is_scalar) {
     at::Tensor out = at::empty(self.sizes(), self.options());
@@ -1176,9 +1184,6 @@ at::Tensor AddTensorKernelIluvatar(
     iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
     return out;
   }
-  const at::Tensor x = other.scalar_type() == self.scalar_type()
-      ? other
-      : other.to(self.scalar_type());
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
   iluvatar::IluvatarAxpy(out, x, alpha);
@@ -1208,6 +1213,8 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
     at::Tensor& self,
     const at::Tensor& other,
     const at::Scalar& alpha) {
+  // python's number arrives as a 0-dim tensor (`t + 1.0`), which the
+  // broadcast scalar call below serves; it has no operand dtype of its own.
   const bool is_scalar = other.dim() == 0;
   if (!is_scalar && !self.sizes().equals(other.sizes())) {
     TORCH_CHECK_NOT_IMPLEMENTED(
@@ -1216,26 +1223,29 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
         self.sizes(), " + ", other.sizes(),
         "); ixblasAxpyEx serves an elementwise add");
   }
-  if (self.device() != other.device() ||
-      !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
-    TORCH_CHECK_NOT_IMPLEMENTED(
-        false,
-        "iluvatar: add_.Tensor has no vendor kernel for ", self.scalar_type(),
-        " (ixblasAxpyEx serves float32/float16)");
-  }
-  // add promotes a mixed-type pair and ATen hands the kernel the promoted
-  // result type, so a same-type float32/float16 pair needs no cast; the pair
-  // that arrives mixed is a float16 addend with a float32 alpha, which ATen
-  // promotes to float32. Widen the addend with the result or ixblasAxpyEx
-  // reads float16 memory into a float32 output.
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add_.Tensor has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  // add promotes a mixed-type pair, so a float16 addend beside a float32
+  // result (a python float with a float16 tensor) arrives in its own type and
+  // has to be widened with the result; ixblasAxpyEx reads the addend at the
+  // output's width. A same-type pair needs no cast.
+  const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(self.scalar_type());
+  const bool x_served =
+      is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
+  TORCH_CHECK(
+      x_served,
+      "iluvatar: add_.Tensor has no vendor kernel for an addend of ",
+      other.scalar_type(), " beside ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
   iluvatar::IluvatarDeviceGuard guard(self);
   if (is_scalar) {
     iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
     return self;
   }
-  const at::Tensor x = other.scalar_type() == self.scalar_type()
-      ? other
-      : other.to(self.scalar_type());
   iluvatar::IluvatarAxpy(self, x, alpha);
   return self;
 }
