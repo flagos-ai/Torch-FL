@@ -159,17 +159,17 @@ def as_tsingmicro(monkeypatch):
     # exception cannot be caught. The profile is forced here, so stand in a
     # driver that matches it: a fake target is what a forced profile implies, and
     # it keeps the test independent of the hardware it runs on.
-    from triton.runtime import driver as _triton_driver
+    import triton.runtime as triton_runtime
 
+    fake_driver = types.SimpleNamespace(
+        get_current_target=lambda: types.SimpleNamespace(
+            backend="txda", arch=1, warp_size=16
+        )
+    )
+    # Replace the exported driver object instead of accessing lazy properties
+    # or depending on a vendor build's private DriverConfig fields.
     monkeypatch.setattr(
-        _triton_driver,
-        "active",
-        types.SimpleNamespace(
-            get_current_target=lambda: types.SimpleNamespace(
-                backend="txda", arch=1, warp_size=16
-            )
-        ),
-        raising=False,
+        triton_runtime, "driver", types.SimpleNamespace(active=fake_driver)
     )
     return pp._TSINGMICRO_PROFILE
 
@@ -668,6 +668,7 @@ def _capture_registrations(di, monkeypatch):
         "_repair_stock_cuda_interface",
         "_patch_joint_graph_pattern_init",
         "_patch_benchmarker",
+        "_patch_triton_warp_size",
         "_prime_has_triton",
     ):
         monkeypatch.setattr(di, name, lambda: None, raising=False)
@@ -1234,23 +1235,13 @@ def test_triton_warp_size_patch_uses_the_driver_on_tsingmicro(
     ``warp_size=32`` while ``driver.active.get_current_target()`` reported 16 --
     wrong-but-running, so it mis-shapes the kernel instead of failing.
     """
-    import types
-
     from torch._inductor.runtime import triton_heuristics
-    from triton.runtime import driver as triton_driver
     from torch_fl.compile import device_interface as di
 
-    # `driver.active` is a read-only property over `_active`, so seed the slot it
-    # reads; monkeypatch restores whatever was there.
-    monkeypatch.setattr(
-        triton_driver,
-        "_active",
-        types.SimpleNamespace(
-            get_current_target=lambda: types.SimpleNamespace(
-                backend="txda", arch=1, warp_size=16
-            )
-        ),
-    )
+    # as_tsingmicro already supplies a fake public driver.active. Do not patch
+    # a private _active slot: vendor Triton builds need not expose that slot.
+    # Register restoration of the heuristic that production code replaces.
+    monkeypatch.setattr(triton_heuristics, "cc_warp_size", lambda cc: 32)
 
     di._patch_triton_warp_size()
 
@@ -1525,10 +1516,13 @@ def _run_threads_pin(monkeypatch, *, backend, env=None, threads=32):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: backend
     )
-    monkeypatch.setattr(inductor_config, "compile_threads", threads)
-
-    applied = inductor_backend.pin_compile_threads()
-    return applied, inductor_config.compile_threads
+    # ConfigModule values are dynamic, not module __dict__ entries. pytest 9.2
+    # snapshots non-descriptor attributes from __dict__, so teardown would
+    # delete this setting and poison subsequent tests. Use config.patch, which
+    # restores the config's actual prior state even if the pin mutates it.
+    with inductor_config.patch(compile_threads=threads):
+        applied = inductor_backend.pin_compile_threads()
+        return applied, inductor_config.compile_threads
 
 
 @pytest.mark.anyplatform
