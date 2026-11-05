@@ -486,9 +486,14 @@ inline void IluvatarAxpy(
           false, "iluvatar: an add operand of ", x.sizes(),
           " does not broadcast over ", y.sizes());
     }
-    // The first `n` elements of `y` in storage order: the axpy's y vector,
-    // whatever `y`'s own layout is.
-    acc = y.reshape({-1}).narrow(0, 0, n).clone();
+    // The streaming variant is refused on this backend for a ventored tensor
+    // (`contiguous` on such a view reads in memory order and keeps the same
+    // size), so the leading elements are taken through a full dense copy and
+    // narrowed there.
+    acc = y.reshape({-1})
+              .contiguous()
+              .narrow(0, 0, n)
+              .clone(at::MemoryFormat::Contiguous);
     dst = &acc;
   }
   const int device = IluvatarDeviceIndex(y);
