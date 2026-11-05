@@ -144,16 +144,21 @@ _KUNLUNXIN_PROFILE = PlatformProfile(
 )
 
 # Iluvatar (corex): the runtime is CUDA-shaped -- a real cuda_runtime.h and a
-# real libcudart -- so the target name is "cuda" and FlagTree's NVIDIA backend
-# compiles for it. It is nevertheless not *CUDA-like* in this table's sense:
-# that flag means "torch.cuda can answer hardware and stream queries", and this
-# build links the CPU torch wheel with its own stream registry instead (see
-# csrc/runtime/accelerator/iluvatar/stream.cc). Leaving it off the table would
-# fall back to _CUDA_PROFILE and emit torch._C._cuda_getCurrentRawStream, which
-# the CPU wheel does not have.
+# real libcudart -- and this build links the CPU torch wheel with its own stream
+# registry instead of torch.cuda (see csrc/runtime/accelerator/iluvatar/
+# stream.cc). Its FlagTree does *not* name the target the CUDA way, though:
+# measured on a BI-V150 with flagtree 0.6.2a3+iluvatar3.6,
+#
+#     >>> from triton.runtime.driver import driver
+#     >>> driver.active.get_current_target()
+#     GPUTarget(backend='corex', arch=71, warp_size=64)
+#
+# and the backend package is registered under that same key. Naming the target
+# "cuda" here sent every kernel through Triton's NVIDIA backend lookup, which
+# does not know "corex"; the profile therefore reports the driver's own names.
 _ILUVATAR_PROFILE = PlatformProfile(
-    triton_device_type="cuda",
-    triton_backend_key="nvidia",
+    triton_device_type="corex",
+    triton_backend_key="corex",
     is_cuda_like=False,
     vendor="iluvatar",
 )
