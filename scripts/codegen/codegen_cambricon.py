@@ -60,8 +60,17 @@ HEADER = """\
 
 # The ops this backend claims on PrivateUse1, and the C++ function that answers
 # each. Ordered by op name so a regeneration cannot reorder the file.
+#
+# `mul.out` is the out= spelling of the same multiply. It is here because a
+# training step reaches it directly (188 calls in one Qwen3 causal-LM step, the
+# largest remaining fallback) and it is the same arithmetic, so serving it costs
+# one forwarder. `embedding_dense_backward` is the other measured gap on that
+# step, and FlagGems' dense function rejects a flagos device by name the same way
+# its `mul` did; CNNL has a dedicated backward entry point for it.
 NATIVE_OPS = {
+    "embedding_dense_backward": "EmbeddingDenseBackward",
     "mul.Tensor": "MulTensor",
+    "mul.out": "MulOut",
 }
 
 
