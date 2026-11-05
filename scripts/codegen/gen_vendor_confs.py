@@ -3038,7 +3038,7 @@ def flaggems_python_ops(conf_dir: Path = None) -> set:
 # rather than only the pre-2026-10-22 subset. Each name here stands for a survey
 # that was actually run on that hardware; add one when you have the result, not
 # when you want the ops.
-_CEILING_GRADUATED = frozenset({"nvidia", "cambricon"})
+_CEILING_GRADUATED = frozenset({"nvidia", "cambricon", "iluvatar"})
 
 
 def flaggems_python_ops_for(platform: str) -> set:
@@ -3060,7 +3060,12 @@ def flaggems_python_ops_for(platform: str) -> set:
 
     cambricon graduates here because ``mul.Tensor`` was measured on it: see
     ``docs/vendors/cambricon/operator-survey.md`` for the run and its result.
-    Every other platform stays frozen until it does the same.
+    iluvatar graduates on the same single name: measured on u180 (BI-V150,
+    FlagGems 5.4.0), ``mul.Tensor`` served by FlagGems matches the CPU
+    reference on fp32, bf16, fp16, int64 and bool, contiguous and transposed
+    operands, at 0.12-0.15 ms against 0.43 ms for the cpu_fallback route it
+    replaces (issue #667). Every other platform stays frozen until it does the
+    same.
     """
     if platform in _CEILING_GRADUATED:
         return set(FLAGGEMS_PYTHON_OPS)
