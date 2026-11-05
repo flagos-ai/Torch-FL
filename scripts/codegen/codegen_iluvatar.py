@@ -1083,7 +1083,6 @@ _ADD_DELEGATE = {
 
 _ADD_GATE = """\
   if (!self.sizes().equals(other.sizes()) ||
-      self.scalar_type() != other.scalar_type() ||
       self.device() != other.device() ||
       !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {{
     TORCH_CHECK_NOT_IMPLEMENTED(
@@ -1092,18 +1091,26 @@ _ADD_GATE = """\
         " at these shapes (ixblasAxpyEx serves float32/float16 on an "
         "elementwise add)");
   }}
+  // add promotes a mixed-type pair and ATen hands the kernel the promoted
+  // result type, so a same-type float32/float16 pair needs no cast; the pair
+  // that arrives mixed is a float16 addend with a float32 alpha, which ATen
+  // promotes to float32. Widen the addend with the result or ixblasAxpyEx
+  // reads float16 memory into a float32 output.
+  const at::Tensor x = other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(self.scalar_type());
   iluvatar::IluvatarDeviceGuard guard(self);
 """
 
 _ADD_OUT = """\
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
-  iluvatar::IluvatarAxpy(out, other, alpha);
+  iluvatar::IluvatarAxpy(out, x, alpha);
   return out;
 }}
 """
 _ADD_IN_PLACE = """\
-  iluvatar::IluvatarAxpy(self, other, alpha);
+  iluvatar::IluvatarAxpy(self, x, alpha);
   return self;
 }}
 """
