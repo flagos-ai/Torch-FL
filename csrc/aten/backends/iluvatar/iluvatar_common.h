@@ -507,13 +507,14 @@ inline void IluvatarAxpyScalar(
   cublasHandle_t handle = GetCublasHandle(device);
   const float alpha_f = static_cast<float>(alpha.to<double>());
   // `ones` stands in for the x operand: n elements of 1 in the output's type,
-  // with alpha carrying the value. The value is rounded to the output's type
+  // with alpha carrying `alpha * s`. The value is rounded to the output's type
   // rather than the multiply being narrowed, which is what ATen does for a
   // python number.
   at::Tensor ones;
   if (y.scalar_type() == at::kHalf) {
     ones = at::full({n}, 1, y.options());
-    const float scaled = static_cast<float>(s.to<at::Half>());
+    const float scaled =
+        alpha_f * static_cast<float>(s.to<at::Half>());
     ILUVATAR_EXEC(
         ixblasAxpyEx(
             handle,
@@ -530,7 +531,7 @@ inline void IluvatarAxpyScalar(
         "ixblasAxpyEx");
   } else {
     ones = at::full({n}, 1, y.options());
-    const float scaled = static_cast<float>(s.to<double>());
+    const float scaled = alpha_f * static_cast<float>(s.to<double>());
     ILUVATAR_EXEC(
         ixblasAxpyEx(
             handle,
@@ -546,7 +547,7 @@ inline void IluvatarAxpyScalar(
             static_cast<ixblasDataType_t>(0)),
         "ixblasAxpyEx");
   }
-  IluvatarSynchronizeStream(device);
+  IluvatarSynchronizeStream(y.get_device());
 }
 
 

@@ -1087,16 +1087,10 @@ _ADD_DELEGATE = {
 # can decide this -- the conf routes the op to `iluvatar`, so ResolveFn never
 # reaches its FlagGems substitution and the kernel is what has to answer.
 _ADD_GATE = """\
-  // python's number arrives as a 0-dim tensor (`t + 1.0`), which the
-  // broadcast scalar call below serves; it has no operand dtype of its own.
+  iluvatar::IluvatarDeviceGuard guard(self);
+  // a python number arrives as a 0-dim tensor (`t + 1.0`); the broadcast
+  // scalar call below serves it, and it has no operand dtype of its own.
   const bool is_scalar = other.dim() == 0;
-  if (!is_scalar && !self.sizes().equals(other.sizes())) {{
-    TORCH_CHECK_NOT_IMPLEMENTED(
-        false,
-        "iluvatar: {op_name} has no vendor kernel for this pair of shapes (",
-        self.sizes(), " + ", other.sizes(),
-        "); ixblasAxpyEx serves an elementwise add");
-  }}
   TORCH_CHECK(
       iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
       "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
@@ -1115,32 +1109,40 @@ _ADD_GATE = """\
       "iluvatar: {op_name} has no vendor kernel for an addend of ",
       other.scalar_type(), " beside ", self.scalar_type(),
       " (ixblasAxpyEx serves float32/float16)");
+  // The tensor axpy reads one element per output, so a shape that broadcasts
+  // cannot ride it. With both tensors ventored the operand is materialised at
+  // the output's shape instead of the op being refused: expand is a metadata
+  // view and one contiguous copy.
+  at::Tensor x_b;
+  if (!is_scalar && !self.sizes().equals(x.sizes())) {{
+    x_b = x.expand(self.sizes()).contiguous();
+  }}
 """
 
-# python's number arrives here as a 0-dim tensor (`t + 1.0`), and the vendor's
-# tensor axpy reads one element per output, so that case takes the broadcast
-# scalar call the same op has as add.Scalar.
+# The tensor-operand spellings: add.Tensor (allocating) and add_.Tensor.
 _ADD_OUT = """\
-  iluvatar::IluvatarDeviceGuard guard(self);
-  if (is_scalar) {{
-    at::Tensor out = at::empty(self.sizes(), self.options());
-    out.copy_(self.is_contiguous() ? self : self.contiguous());
-    iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
-    return out;
-  }}
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
-  iluvatar::IluvatarAxpy(out, x, alpha);
+  if (is_scalar) {{
+    iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
+  }} else {{
+    iluvatar::IluvatarAxpy(out, x_b.defined() ? x_b : x, alpha);
+  }}
   return out;
 }}
 """
 _ADD_IN_PLACE = """\
-  iluvatar::IluvatarDeviceGuard guard(self);
   if (is_scalar) {{
     iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
     return self;
   }}
-  iluvatar::IluvatarAxpy(self, x, alpha);
+  if (self.is_contiguous()) {{
+    iluvatar::IluvatarAxpy(self, x_b.defined() ? x_b : x, alpha);
+    return self;
+  }}
+  at::Tensor out = self.contiguous();
+  iluvatar::IluvatarAxpy(out, x_b.defined() ? x_b : x, alpha);
+  self.copy_(out);
   return self;
 }}
 """
@@ -1170,11 +1172,11 @@ at::Tensor {kernel}(
     const at::Tensor& self,
     const at::Scalar& other,
     const at::Scalar& alpha) {{
+  iluvatar::IluvatarDeviceGuard guard(self);
   TORCH_CHECK(
       iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
       "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
       " (ixblasAxpyEx serves float32/float16)");
-  iluvatar::IluvatarDeviceGuard guard(self);
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
   iluvatar::IluvatarAxpyScalar(out, other, alpha);
@@ -1371,6 +1373,7 @@ FILE_HEADER = """\
 #include <ATen/ops/_convolution.h>
 #include <ATen/ops/_native_batch_norm_legit.h>
 #include <ATen/ops/_native_batch_norm_legit_no_training.h>
+#include <ATen/ops/add.h>
 #include <ATen/ops/addmm.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
