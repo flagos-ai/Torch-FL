@@ -454,3 +454,27 @@ def test_reporting_tools_install_through_the_pypi_fallback():
     )
     assert helper
     assert '--index-url "$pinned"' in helper.group(1)
+
+
+def test_kunlunxin_keeps_its_oversized_flagtree_wheel_out_of_the_cache():
+    """The 3.2 GB XPU wheel is bigger than the cache can hold and slower from it.
+
+    Restoring that wheel took 418 s to transfer at 8 MB/s (run 41972928483); the
+    same kind of wheel downloads from resource.flagos.net at 86 MB/s, so about
+    39 s. Holding it in the cache also evicted the other platforms' caches, so
+    the CUDA lane's restore fell through every restore-key and re-downloaded its
+    own wheels. Only this one install opts out; the hook's others still cache.
+    """
+    hook = (ROOT / ".github/scripts/hooks/set_env_kunlunxin.sh").read_text()
+    assert re.search(
+        r"^PIP_RETRY_NO_CACHE=1\ninstall_flagtree\nPIP_RETRY_NO_CACHE=0$", hook, re.M
+    )
+
+    # The override is scoped to that one install, so the rest of the hook caches.
+    assert re.search(r"^install_flag_gems$", hook, re.M)
+    assert not re.search(r"^export PIP_RETRY_NO_CACHE=1", hook, re.M)
+
+    # Every other platform still installs FlagTree through the cached path.
+    for name in ("nvidia", "ascend", "mthreads", "hygon", "metax", "enflame"):
+        other = (ROOT / f".github/scripts/hooks/set_env_{name}.sh").read_text()
+        assert not re.search(r"PIP_RETRY_NO_CACHE=1", other), name
