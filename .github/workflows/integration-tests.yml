@@ -405,8 +405,22 @@ jobs:
       # !cancelled() intentionally permits saving after failure (no success()).
       # Skip exact hits, failed lookups/transfers and cancelled jobs.
       # Cache errors must not change the build/test result.
+      #
+      # Only a push run writes the cache. GitHub scopes a cache to the ref that
+      # saved it, so a pull request's run saves into its own
+      # refs/pull/<n>/merge scope and can never be read by the branch -- while
+      # still counting against the repository's single 10 GB budget. With five
+      # to seven pull requests open, the same per-platform entries existed once
+      # per ref: measured at 19 entries / 9.7 GB for 9 distinct keys, of which
+      # main's own share was 3.65 GB. That pressure is what evicted entries
+      # mid-flight and made the other lanes miss their own restore-key prefix.
+      #
+      # A pull request still restores -- its lookup and restore steps are
+      # unchanged -- and the key is built from the dependency files, not from
+      # the code under test, so the entry main saved is the one a pull request
+      # wants. Only the write is dropped, and main saves it on merge.
       - name: Save pip downloads
-        if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4
         continue-on-error: true
         timeout-minutes: 3
