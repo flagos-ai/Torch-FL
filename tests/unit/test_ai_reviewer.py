@@ -195,6 +195,7 @@ def test_self_authored_pull_request_is_not_approved():
     "path",
     [
         ".github/workflows/ai-review.yml",
+        ".github/workflows/case-gap-issues.yml",
         ".github/scripts/ci/ai_reviewer.py",
         ".github/configs/cuda.yml",
         "CODEOWNERS",

@@ -18,11 +18,18 @@ An expected gap receives a stable ID from a migration group. The same ID may be
 used by every chip affected by one defect, so a fix closes one issue for all of
 them. Every issue still blocks the next migration group until its skipped cases
 pass. Closing it removes the skip and its row in the same change.
+
+This registry is the offline source of truth for the source contract. The
+separate case-gap workflow verifies that its issues are still open on GitHub.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import re
+from typing import Any
+
+import pytest
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,16 +37,32 @@ class CaseGapIssue:
     """One tracked capability gap and the cases it currently owns."""
 
     number: str
-    state: str
-    cases: tuple[str, ...]
+    cases: tuple[str, ...] = ()
     routes: tuple[str, ...] = ()
+    upstream: str = ""
+
+    def __post_init__(self):
+        if re.fullmatch(r"#[1-9][0-9]*", self.number) is None:
+            raise ValueError(f"case gap needs a numbered issue, got {self.number!r}")
+        if not self.cases and not self.routes:
+            raise ValueError(f"case gap {self.number} must own cases or routes")
+        if any(value.startswith("#") for value in self.routes):
+            raise ValueError("case IDs must be listed in cases, not routes")
+
+        if self.upstream and (
+            re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*",
+                self.upstream,
+            )
+            is None
+        ):
+            raise ValueError("upstream must be owner/repository/issues/number")
 
 
 _ISSUES = (
     CaseGapIssue(
-        "#710",
-        "open",
-        (
+        number="#710",
+        cases=(
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_dimensions",
             "tests/integration/ops/test_all_dispatch.py"
@@ -47,28 +70,35 @@ _ISSUES = (
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_dim_reduction",
             "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_full_reduction",
+            "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_dim_empty_reduction_reaches_its_route",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllDispatch::test_dispatch_log_flaggems_python",
         ),
-        ("all", "all:flaggems_python"),
+        upstream="flagos-ai/FlagGems/issues/8411",
+    ),
+    CaseGapIssue(
+        number="#710",
+        routes=("all", "all:flaggems_python"),
+        upstream="flagos-ai/FlagGems/issues/8411",
     ),
 )
 
 
-def case_gap_reason(key: str) -> str:
-    """Return a skip reason whose route or case is owned by an open issue."""
-    entry = open_case_gap(key)
-    if key.startswith("#"):
-        route = "<case>"
-    else:
-        route = key
-    return f"expected case gap {entry.number} ({route})"
-
-
 def open_case_gap(key: str) -> CaseGapIssue:
     """Return the open issue that owns a case ID or route key."""
-    matches = [entry for entry in _ISSUES if key == entry.number or key in entry.routes]
-    if len(matches) != 1 or matches[0].state != "open":
+    case_key = key.startswith("#")
+    owned = any(key in (entry.cases if case_key else entry.routes) for entry in _ISSUES)
+    matches = [
+        entry for entry in _ISSUES if (entry.cases if case_key else entry.routes)
+    ]
+    if not owned or len(matches) != 1:
         raise LookupError(f"{key} is not owned by one open registered case gap")
     return matches[0]
+
+
+def tracked_skip(condition: bool, *, issue: str) -> Any:
+    """Attach a skip condition to a registered open issue."""
+    entry = open_case_gap(issue)
+    return pytest.mark.skipif(condition, reason=f"expected case gap {entry.number}")

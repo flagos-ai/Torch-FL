@@ -34,7 +34,7 @@ import torch_fl  # noqa: F401
 
 from backend_conf import override_is_logged, route_is_served
 
-from tests.integration.case_gap_issues import case_gap_reason
+from tests.integration.case_gap_issues import tracked_skip
 
 
 DEVICE = "flagos:0"
@@ -88,7 +88,10 @@ class TestAllCorrectness:
         out = torch.all(a)
         assert out.item() is False
 
-    @pytest.mark.skip(reason=case_gap_reason("#710"))
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
     @pytest.mark.anyplatform
     def test_all_empty_tensor(self):
         """Empty tensor: all() is vacuously true.
@@ -103,7 +106,10 @@ class TestAllCorrectness:
         out = torch.all(a)
         assert out.item() is True
 
-    @pytest.mark.skip(reason=case_gap_reason("#710"))
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
     @pytest.mark.anyplatform
     @pytest.mark.parametrize(
         "shape, dim",
@@ -123,7 +129,10 @@ class TestAllCorrectness:
         assert actual.dtype == torch.bool
         assert torch.equal(actual.cpu(), expected)
 
-    @pytest.mark.skip(reason=case_gap_reason("#710"))
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
     @pytest.mark.anyplatform
     @pytest.mark.parametrize("keepdim", [False, True])
     def test_all_dim_empty_reduction_reaches_its_route(self, keepdim):
@@ -135,15 +144,29 @@ class TestAllCorrectness:
         assert actual.dtype == torch.bool
         assert torch.equal(actual.cpu(), expected)
 
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
     @pytest.mark.anyplatform
     @pytest.mark.parametrize("shape", [(0, 0), (3, 0), (0, 3)])
     def test_all_empty_full_reduction(self, shape):
-        """Full reduction over an empty N-D tensor is vacuously true."""
+        """Full reduction over an empty N-D tensor is vacuously true.
+
+        The MUSA FlagGems route raises ``ZeroDivisionError: integer division or
+        modulo by zero`` here: its ``all`` kernel computes
+        ``triton.cdiv(n_elements, block_size)`` and derives ``block_size`` from
+        the element count, which is 0. Owned by the same issue as the other
+        empty-input cases above.
+        """
         for dtype in (torch.bool, torch.float32):
             a = torch.empty(shape, device=DEVICE, dtype=dtype)
             assert torch.all(a).item() is True
 
-    @pytest.mark.skip(reason=case_gap_reason("#710"))
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
     @pytest.mark.anyplatform
     def test_all_empty_dim_reduction(self):
         """Reducing an empty axis returns True for every output element."""
@@ -187,11 +210,14 @@ class TestAllCorrectness:
 class TestAllDispatch:
     """Verify dispatch routing for all op."""
 
+    @pytest.mark.main_ops
     @pytest.mark.flaggems_python
+    @tracked_skip(
+        condition=not override_is_logged("all", "flaggems_python"),
+        issue="#710",
+    )
     def test_dispatch_log_flaggems_python(self):
         """The override selects the FlagGems Python path on a serving wheel."""
-        if not override_is_logged("all", "flaggems_python"):
-            pytest.skip(case_gap_reason("all:flaggems_python"))
         assert route_is_served("all")
         result = _run_all_subprocess(
             {
@@ -203,6 +229,7 @@ class TestAllDispatch:
         assert "[flagos dispatch] all -> flagos_python" in result.stderr
 
     @pytest.mark.cuda
+    @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_all_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_all": "cuda"}

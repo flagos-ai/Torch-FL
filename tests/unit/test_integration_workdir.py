@@ -911,7 +911,6 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_acos_dispatch.py::TestAcosCorrectness::test_acos_matches_cuda",
             "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_cuda_override",
             "tests/integration/ops/test_add_dispatch.py::TestAddTensorCorrectness::test_add_matches_cuda",
-            "tests/integration/ops/test_all_dispatch.py::TestAllDispatch::test_dispatch_log_cuda_override",
             "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_cuda_override",
             "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatch::test_bmm_matches_cuda_ref",
             "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_bmm_out_cuda_override",

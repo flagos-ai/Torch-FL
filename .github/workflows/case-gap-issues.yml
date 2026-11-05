@@ -1,0 +1,90 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A skipped shared case is allowed only while its tracking issue is open. Run
+# the query script from the trusted base revision with pull_request_target.
+# Only the registry is read from the submitted revision, through AST parsing;
+# no pull request source is imported or executed.
+
+name: Case gap issues
+
+on:
+  workflow_call:
+    inputs:
+      checkout_repository:
+        required: true
+        type: string
+      checkout_ref:
+        required: true
+        type: string
+      registry_repository:
+        required: true
+        type: string
+      registry_ref:
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  verify-gate:
+    name: Verify case gap issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted issue query
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/ci/check_case_gap_issues.py
+          sparse-checkout-cone-mode: false
+
+      - name: Check out submitted case-gap registry
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.registry_repository || inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}
+          path: registry
+          persist-credentials: false
+          sparse-checkout: |
+            tests/integration/case_gap_issues.py
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Require every registered case gap to have an open issue
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python .github/scripts/ci/check_case_gap_issues.py \
+            --script-root "$GITHUB_WORKSPACE/trusted/.github/scripts/ci" \
+            --registry "$GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py"

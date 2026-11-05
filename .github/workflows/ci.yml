@@ -55,6 +55,8 @@ jobs:
     outputs:
       repository: ${{ steps.resolve.outputs.repository }}
       ref: ${{ steps.resolve.outputs.ref }}
+      base_repository: ${{ steps.resolve.outputs.base_repository }}
+      base_ref: ${{ steps.resolve.outputs.base_ref }}
     steps:
       - name: Resolve trusted source
         id: resolve
@@ -63,6 +65,7 @@ jobs:
           EVENT_REPOSITORY: ${{ github.repository }}
           EVENT_REF: ${{ github.sha }}
           PR_NUMBER: ${{ inputs.pr_number || '' }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           set -euo pipefail
 
@@ -92,8 +95,22 @@ jobs:
             echo "Testing PR #${PR_NUMBER} from ${repository}@${ref}"
           fi
 
+          # The issue gate reads the trusted base. Keep it separate from the
+          # submitted ref, which still runs the PR's source contract.
+          base_repository="$EVENT_REPOSITORY"
+          base_ref="$PR_BASE_SHA"
+          if [[ -z "$base_ref" ]]; then
+            base_ref=$(gh api "repos/${EVENT_REPOSITORY}/commits/main" --jq .sha)
+          fi
+          if [[ ! "$base_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the trusted main revision"
+            exit 1
+          fi
+
           printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+          printf 'base_repository=%s\n' "$base_repository" >> "$GITHUB_OUTPUT"
+          printf 'base_ref=%s\n' "$base_ref" >> "$GITHUB_OUTPUT"
 
   lint:
     needs: resolve-checkout
@@ -121,9 +138,24 @@ jobs:
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
 
+  case-gap-issues:
+    name: Case gap issues
+    needs: resolve-checkout
+    permissions:
+      contents: read
+      issues: read
+    uses: ./.github/workflows/case-gap-issues.yml
+    with:
+      checkout_repository: ${{ needs.resolve-checkout.outputs.base_repository }}
+      checkout_ref: ${{ needs.resolve-checkout.outputs.base_ref }}
+      registry_repository: ${{ needs.resolve-checkout.outputs.repository }}
+      registry_ref: ${{ needs.resolve-checkout.outputs.ref }}
+    secrets:
+      GH_TOKEN: ${{ github.token }}
+
   discover-platforms:
     name: Discover platforms
-    needs: [resolve-checkout, lint, agnostic-checks, codegen-checks]
+    needs: [resolve-checkout, lint, agnostic-checks, codegen-checks, case-gap-issues]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -204,6 +236,7 @@ jobs:
       - lint
       - agnostic-checks
       - codegen-checks
+      - case-gap-issues
       - discover-platforms
       - platform-pipeline
     runs-on: ubuntu-latest
@@ -221,7 +254,7 @@ jobs:
 
           jobs = json.loads(os.environ["RESULTS"])
           errors = []
-          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks", "discover-platforms"):
+          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks", "case-gap-issues", "discover-platforms"):
               if jobs[name]["result"] != "success":
                   errors.append(f"{name}: {jobs[name]['result']}")
 

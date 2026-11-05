@@ -1,0 +1,225 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The issue gate reads live state and fails closed when verification is lost."""
+
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / ".github" / "scripts" / "ci" / "check_case_gap_issues.py"
+REGISTRY = ROOT / "tests/integration" / "case_gap_issues.py"
+
+
+def _checker():
+    spec = importlib.util.spec_from_file_location("case_gap_checker", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _script_arguments(module):
+    return [
+        str(module.DEFAULT_SCRIPT_ROOT / SCRIPT.name),
+        "--script-root",
+        str(module.DEFAULT_SCRIPT_ROOT),
+        "--registry",
+        str(REGISTRY),
+    ]
+
+
+def test_registry_reads_the_shared_issue_and_its_component_fix():
+    gap = _checker().registered_gaps(REGISTRY)[0]
+    assert (gap.number, gap.repository, gap.upstream) == (
+        "#710",
+        "flagos-ai/Torch-FL",
+        "flagos-ai/FlagGems/issues/8411",
+    )
+
+
+def test_closed_and_unavailable_issues_fail_the_gate():
+    module = _checker()
+    gap = module.registered_gaps(REGISTRY)[0]
+    calls = []
+
+    def lookup(repository, number):
+        calls.append((repository, number))
+        return "closed"
+
+    errors = module.validate_gaps((gap,), lookup)
+    assert len(errors) == 2
+    assert "issue flagos-ai/Torch-FL/issues/710 is closed" in errors[0]
+    assert "upstream flagos-ai/FlagGems/issues/8411 is closed" in errors[1]
+    assert calls == [
+        ("flagos-ai/Torch-FL", "710"),
+        ("flagos-ai/FlagGems", "8411"),
+    ]
+
+    def upstream_closed(repository, number):
+        return "closed" if repository == "flagos-ai/FlagGems" else "open"
+
+    errors = module.validate_gaps((gap,), upstream_closed)
+    assert len(errors) == 1
+    assert "upstream flagos-ai/FlagGems/issues/8411 is closed" in errors[0]
+
+    def unavailable(*_):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    errors = module.validate_gaps((gap,), unavailable)
+    assert len(errors) == 2
+    assert all("could not verify" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        'CaseGapIssue("#710", cases=("x::test_x",), routes=("x",), upstream="a/b/issues/1")',
+        'CaseGapIssue("#710", cases=("x::test_x",), routes=(), upstream="a/b/issues/1")',
+        'CaseGapIssue(number="#710", cases=(), routes=(), upstream="a/b/issues/1")',
+        'CaseGapIssue(number="710", cases=("x::test_x",), routes=(), upstream="a/b/issues/1")',
+        'CaseGapIssue(number="#710", cases=("x::test_x",), routes=(), upstream="a/b/pulls/1")',
+        'CaseGapIssue(number="#710", cases=("x::test_x",), routes=(), upstream="a/b/issues/1", state="open")',
+        'CaseGapIssue(number="#710", cases=(), routes=("#710",), upstream="")',
+    ],
+)
+def test_registry_rejects_untracked_or_incomplete_rows(row, tmp_path):
+    path = tmp_path / "case_gap_issues.py"
+    path.write_text(f"_ISSUES = ({row},)\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        _checker().registered_gaps(path)
+
+
+def test_registry_rejects_duplicate_case_owners(tmp_path):
+    row = (
+        "CaseGapIssue(number='#{0}', cases=('x::test_x',), routes=(), "
+        "upstream='a/b/issues/{0}')"
+    )
+    path = tmp_path / "case_gap_issues.py"
+    path.write_text(f"_ISSUES = ({row.format(1)}, {row.format(2)})\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly one issue owner"):
+        _checker().registered_gaps(path)
+
+
+def test_registry_groups_rows_with_the_same_issue(tmp_path):
+    path = tmp_path / "case_gap_issues.py"
+    path.write_text(
+        "_ISSUES = ("
+        "CaseGapIssue(number='#710', cases=('x::test_x',), routes=(), "
+        "upstream='a/b/issues/1'), "
+        "CaseGapIssue(number='#710', cases=(), routes=('x',), "
+        "upstream='a/b/issues/1'),"
+        ")\n",
+        encoding="utf-8",
+    )
+    gaps = _checker().registered_gaps(path)
+    assert [(gap.number, gap.repository, gap.upstream) for gap in gaps] == [
+        ("#710", "flagos-ai/Torch-FL", "a/b/issues/1")
+    ]
+
+
+def test_registry_rejects_different_upstreams_for_one_issue(tmp_path):
+    path = tmp_path / "case_gap_issues.py"
+    path.write_text(
+        "_ISSUES = ("
+        "CaseGapIssue(number='#710', cases=('x::test_x',), routes=(), "
+        "upstream=''), "
+        "CaseGapIssue(number='#710', cases=(), routes=('x',), "
+        "upstream='a/b/issues/1'),"
+        ")\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="one upstream"):
+        _checker().registered_gaps(path)
+
+
+def test_api_issue_rejects_a_pull_request(monkeypatch):
+    module = _checker()
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, '{"pull_request": {}}', ""
+        ),
+    )
+    with pytest.raises(ValueError, match="must name an issue"):
+        module._api_issue("flagos-ai/Torch-FL", "723")
+
+
+def test_api_issue_does_not_accept_user_supplied_gh_environment(monkeypatch):
+    module = _checker()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, '{"state": "OPEN"}', "")
+
+    monkeypatch.setenv("GH_TOKEN", "workflow-token")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module._api_issue("flagos-ai/Torch-FL", "710") == "open"
+    assert "env" not in calls[0][1]
+
+
+def test_main_fails_when_an_issue_is_closed(monkeypatch, capsys):
+    module = _checker()
+    gap = module.registered_gaps(REGISTRY)[0]
+    monkeypatch.setattr(module, "registered_gaps", lambda _: (gap,))
+    monkeypatch.setattr(
+        module,
+        "_api_issue",
+        lambda repository, _: (
+            "closed" if repository == "flagos-ai/Torch-FL" else "open"
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", _script_arguments(module))
+    assert module.main() == 1
+    assert "issue flagos-ai/Torch-FL/issues/710 is closed" in capsys.readouterr().out
+
+
+def test_main_fails_when_github_cannot_be_queried(monkeypatch):
+    module = _checker()
+    gap = module.registered_gaps(REGISTRY)[0]
+    monkeypatch.setattr(module, "registered_gaps", lambda _: (gap,))
+
+    def unavailable(*_):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(module, "_api_issue", unavailable)
+    monkeypatch.setattr(sys, "argv", _script_arguments(module))
+    assert module.main() == 1
+
+
+def test_main_rejects_the_script_outside_its_trusted_root(tmp_path):
+    module = _checker()
+    script = tmp_path / "check_case_gap_issues.py"
+    script.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    process = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--script-root",
+            str(module.DEFAULT_SCRIPT_ROOT),
+            "--registry",
+            str(REGISTRY),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode == 1
+    assert "must run from the trusted base script" in process.stdout
