@@ -2431,7 +2431,6 @@ NATIVE_TRITON_GAPS = {
         # ZeroDivisionError where ATen returns NaN (the same defect MetaX's note
         # records as FlagGems issue #6333). The conf is per-op and cannot gate
         # on shape, so both spellings stay gapped until that is fixed upstream.
-        "mean",
         "mean.dim",
         # `_conj`, for the contract test_math_bits_contract.py pins: ATen's conj
         # is a lazy view (Conjugate bit set, storage untouched) and FlagGems'
