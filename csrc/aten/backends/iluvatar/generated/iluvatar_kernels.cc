@@ -1174,11 +1174,11 @@ at::Tensor AddTensorKernelIluvatar(
       " (ixblasAxpyEx serves float32/float16)");
   // The tensor axpy reads one element per output, so a shape that broadcasts
   // cannot ride it. With both tensors ventored the operand is materialised at
-  // the output's shape instead of the op being refused: expand is a metadata
-  // view and one contiguous copy.
+  // the output's shape instead of the op being refused -- see
+  // IluvatarBroadcastOperand for why that is not `expand().contiguous()`.
   at::Tensor x_b;
   if (!is_scalar && !self.sizes().equals(x.sizes())) {
-    x_b = x.expand(self.sizes()).contiguous();
+    x_b = iluvatar::IluvatarBroadcastOperand(x, self.sizes());
   }
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
@@ -1237,11 +1237,11 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
       " (ixblasAxpyEx serves float32/float16)");
   // The tensor axpy reads one element per output, so a shape that broadcasts
   // cannot ride it. With both tensors ventored the operand is materialised at
-  // the output's shape instead of the op being refused: expand is a metadata
-  // view and one contiguous copy.
+  // the output's shape instead of the op being refused -- see
+  // IluvatarBroadcastOperand for why that is not `expand().contiguous()`.
   at::Tensor x_b;
   if (!is_scalar && !self.sizes().equals(x.sizes())) {
-    x_b = x.expand(self.sizes()).contiguous();
+    x_b = iluvatar::IluvatarBroadcastOperand(x, self.sizes());
   }
   if (is_scalar) {
     iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);

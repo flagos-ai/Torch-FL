@@ -421,6 +421,27 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
         ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
   } while (0)
 
+// `x` laid out one element per index of `target`'s shape, for an add whose
+// operand broadcasts. It must not go through `x.expand(target).contiguous()`:
+// both tensors are ventored on this backend, and `reshape` is deferred to
+// `view`, which reads a broadcast operand back as a contiguous one and
+// refuses the copy with "The expanded size of the tensor (64) must match the
+// existing size (128)" (measured on u180). Materialising the strides here
+// replaces `reshape` with ATen's strided clone, which is the copy this needs.
+inline at::Tensor IluvatarBroadcastOperand(
+    const at::Tensor& x, at::IntArrayRef target) {
+  const at::Tensor xc = x.contiguous();
+  std::vector<int64_t> strides(target.size(), 0);
+  const int64_t lead = static_cast<int64_t>(target.size()) - xc.dim();
+  for (const auto d : c10::irange(xc.dim())) {
+    const int64_t i = lead + d;
+    if (xc.size(d) == target[i] && xc.stride(d) != 0) {
+      strides[i] = xc.stride(d);
+    }
+  }
+  return xc.as_strided(target, strides).clone();
+}
+
 // y += alpha * other on every element, where `other` is a 0-dim tensor whose
 // value is added everywhere. Kept separate from IluvatarAxpy because the two
 // vendor calls differ: the tensor form takes `other`'s data pointer, and a
