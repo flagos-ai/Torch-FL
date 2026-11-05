@@ -825,6 +825,15 @@ elseif(_flagos_is_cambricon)
           "for compute ops.")
     endif()
     message(STATUS "cnnl op library: ${CNNL_LIB}")
+    # The fused transformer ops (flash attention) live in libcnnl_extra, which
+    # ships in the same directory but is a separate library. Optional: a
+    # toolkit without it still builds, and the attention kernel is left out.
+    find_library(CNNL_EXTRA_LIB cnnl_extra PATHS "${NEUWARE_LIB_DIR}" NO_DEFAULT_PATH)
+    if(CNNL_EXTRA_LIB)
+      message(STATUS "cnnl extra op library: ${CNNL_EXTRA_LIB}")
+    else()
+      message(STATUS "cnnl extra op library: not found (fused attention disabled)")
+    endif()
     set(CNNL_INCLUDE_DIRS "${NEUWARE_HOME}/include")
   endif()
 

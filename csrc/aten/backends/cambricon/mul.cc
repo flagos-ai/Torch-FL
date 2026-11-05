@@ -18,7 +18,7 @@
 // shape used here is alpha1=1, alpha2=1, beta=0.
 
 #include "aten/backends/cambricon/cambricon_common.h"
-#include "aten/backends/cambricon/mul.h"
+#include "aten/backends/cambricon/attention.h"
 
 #ifdef USE_CAMBRICON
 

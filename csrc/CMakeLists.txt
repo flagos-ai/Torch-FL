@@ -698,6 +698,13 @@ elseif(_flagos_is_cambricon)
     # cannot serve the op.
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_CAMBRICON_KERNEL=1)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${CNNL_LIB})
+    # libcnnl_extra carries the fused transformer ops. It is optional, and the
+    # attention kernel is gated on having it: without the macro the kernel is
+    # not compiled, so nothing references a symbol the toolkit lacks.
+    if(CNNL_EXTRA_LIB)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_CAMBRICON_CNNL_EXTRA=1)
+      target_link_libraries(${LIBRARY_NAME} PRIVATE ${CNNL_EXTRA_LIB})
+    endif()
   endif()
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
       PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)

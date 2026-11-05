@@ -93,7 +93,7 @@ namespace at::native::flagos {
 #endif
 
 #if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_KERNEL)
-#include "aten/backends/cambricon/mul.h"
+#include "aten/backends/cambricon/attention.h"
 #endif
 
 namespace at::flagos {
