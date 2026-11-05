@@ -1243,15 +1243,7 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
     iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
     return self;
   }
-  // The axpy writes the output in storage order, so a `self` that is not
-  // contiguous is served through a dense copy and written back.
-  if (self.is_contiguous()) {
-    iluvatar::IluvatarAxpy(self, x, alpha);
-    return self;
-  }
-  at::Tensor out = self.reshape({-1}).clone().reshape(self.sizes());
-  iluvatar::IluvatarAxpy(out, x, alpha);
-  self.copy_(out);
+  iluvatar::IluvatarAxpy(self, x, alpha);
   return self;
 }
 

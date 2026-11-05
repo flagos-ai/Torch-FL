@@ -449,9 +449,7 @@ inline at::Tensor IluvatarAxpyOperand(
   return xc.as_strided(src_sizes, strides).clone().as_strided(out, strides);
 }
 
-// y += alpha * x on the device, followed by y[broadcast] = y, so that an
-// elementwise pair and a broadcasting one are one vendored axpy rather than a
-// FlagGems broadcast `mul` per call.
+// y += alpha * x on the device, where `x` may broadcast over `y`.
 //
 // ixblasAxpyEx reads both vectors linearly, so a broadcasting operand has to be
 // one vector before it arrives; the copies that would serve that directly do
@@ -459,42 +457,42 @@ inline at::Tensor IluvatarAxpyOperand(
 // on a broadcast operand is a no-op, `expand` is refused on the way to
 // `reshape`, and an `as_strided` view of the output's shape fails the storage
 // check. What does work is ATen's own `copy_`, which every backend implements
-// as a broadcast, and is what the output's copy into `x`'s shape uses.
+// as a broadcast.
 //
-// The axpy is over `x`'s own element count, fed with an output buffer that
-// starts as a copy of `y`'s leading `numel(x)` elements; that is the pair of
-// operands the vendor call needs whether or not `x` broadcasts. A broadcast
-// output then takes `y` back from that buffer's own broadcast. The
-// intermediate read of `y` is the only extra tensor this costs; the axpy
-// itself is one vendored call, as it is for the elementwise pair.
+// The axpy runs over the output's own element count, with `x` staged into a
+// dense buffer of that shape by a broadcast `copy_`. That buffer is one extra
+// tensor beside the output for the broadcast case; the axpy is still one
+// vendored call, and nothing on the way goes through a FlagGems elementwise
+// kernel.
 inline void IluvatarAxpy(
     at::Tensor& y,
     const at::Tensor& x,
     const at::Scalar& alpha) {
-  const at::Tensor xc = x.contiguous();
-  const int64_t n = xc.numel();
+  const int64_t n = y.numel();
   if (n == 0 || alpha.to<double>() == 0.0) {
     return;
   }
   const bool elementwise = x.sizes().equals(y.sizes());
-  at::Tensor acc;
+  // The axpy writes the output in storage order, so a `y` that is not
+  // contiguous is served through a dense copy and written back. This comes
+  // before the operand staging, which sizes that buffer off `y`.
+  at::Tensor dense;
   at::Tensor* dst = &y;
-  const int64_t ynumel = y.numel();
+  if (!y.is_contiguous()) {
+    dense = y.reshape({-1}).clone(at::MemoryFormat::Contiguous);
+    dst = &dense;
+  }
+  at::Tensor staged;
+  const at::Tensor* src = &x;
   if (!elementwise) {
-    if (xc.numel() > ynumel) {
+    if (x.numel() > n) {
       TORCH_CHECK(
           false, "iluvatar: an add operand of ", x.sizes(),
           " does not broadcast over ", y.sizes());
     }
-    // The streaming variant is refused on this backend for a ventored tensor
-    // (`contiguous` on such a view reads in memory order and keeps the same
-    // size), so the leading elements are taken through a full dense copy and
-    // narrowed there.
-    acc = y.reshape({-1})
-              .contiguous()
-              .narrow(0, 0, n)
-              .clone(at::MemoryFormat::Contiguous);
-    dst = &acc;
+    staged = at::zeros(dst->sizes(), dst->options());
+    staged.copy_(x);
+    src = &staged;
   }
   const int device = IluvatarDeviceIndex(y);
   cublasHandle_t handle = GetCublasHandle(device);
@@ -511,7 +509,7 @@ inline void IluvatarAxpy(
             static_cast<int>(n),
             &alpha_f,
             IX_R_32F,
-            xc.const_data_ptr(),
+            src->const_data_ptr(),
             IX_R_16F,
             1,
             dst->data_ptr(),
@@ -526,7 +524,7 @@ inline void IluvatarAxpy(
             static_cast<int>(n),
             &alpha_f,
             IX_R_32F,
-            xc.const_data_ptr(),
+            src->const_data_ptr(),
             IX_R_32F,
             1,
             dst->data_ptr(),
@@ -536,8 +534,8 @@ inline void IluvatarAxpy(
         "ixblasAxpyEx");
   }
   IluvatarSynchronizeStream(device);
-  if (!elementwise) {
-    y.copy_(acc.reshape(xc.sizes()));
+  if (!y.is_contiguous()) {
+    y.copy_(dense.reshape(y.sizes()));
   }
 }
 
