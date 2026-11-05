@@ -1098,10 +1098,13 @@ _ADD_GATE = """\
   // add promotes a mixed-type pair, so a float16 addend beside a float32
   // result (a python float with a float16 tensor) arrives in its own type and
   // has to be widened with the result; ixblasAxpyEx reads the addend at the
-  // output's width. A same-type pair needs no cast.
+  // output's width. A same-type pair needs no cast. The widen is a no-op when
+  // `self` keeps the addend's layout: `add_` on a transposed `self` arrives
+  // with the addend sharing that layout, and only a dtype change (or a
+  // non-contiguous `self`) materialises it.
   const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
       ? other
-      : other.to(self.scalar_type());
+      : other.to(self.scalar_type(), self.is_contiguous(), self.suggest_memory_format());
   const bool x_served =
       is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
   TORCH_CHECK(
