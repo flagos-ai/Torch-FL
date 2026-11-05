@@ -205,7 +205,11 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # wrong and nondeterministic on this chip whenever the output's row count
     # leaves a partial tile, so both spellings now take the vendor route that
     # `bmm` already took for the same reason.
-    "iluvatar": 581,
+    #
+    # 582 since `mean` joined: the whole-tensor reduction re-measures clean on
+    # u180 after the #570 gap. `mean.dim` stays on `none` -- its FlagGems
+    # kernel returns NaN for a non-inner dimension ((8, 12), dim=0).
+    "iluvatar": 582,
     "kunlunxin": 0,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow. The day-0 variant

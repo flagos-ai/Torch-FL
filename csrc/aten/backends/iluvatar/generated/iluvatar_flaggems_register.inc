@@ -88,7 +88,6 @@
 //   - i0.out
 //   - linalg_matrix_exp.out
 //   - masked_scatter_backward
-//   - mean
 //   - mean.dim
 //   - mm
 //   - mm.out
@@ -125,7 +124,7 @@
 //   - view_as_real
 //   - where.self_out
 //
-// Total: 583 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 584 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -509,6 +508,7 @@
   m.impl("max_pool3d_with_indices", WrapperMaxPool3dWithIndices);
   m.impl("max_pool3d_with_indices_backward", WrapperMaxPool3dWithIndicesBackward);
   m.impl("max_unpool2d", WrapperMaxUnpool2d);
+  m.impl("mean", WrapperMean);
   m.impl("median", WrapperMedian);
   m.impl("median.dim", WrapperMedianDim);
   m.impl("min", WrapperMin);
