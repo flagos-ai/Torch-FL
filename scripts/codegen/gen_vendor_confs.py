@@ -255,6 +255,20 @@ EXTRA_NATIVE = {
     },
 }
 
+# Ops a vendor's generator compiles a kernel for but registers itself from
+# register.cc instead of from the vendor `.inc`, so they appear in no `.inc` at
+# all. Unlike ESCAPE_NATIVE these are not escape-only: the op is theirs, so the
+# FlagGems `.inc` must not claim it and the conf routes it to the vendor.
+#
+# iluvatar's in-place add: the kernels are IluvatarAddInplace /
+# IluvatarAddScalarInplace in csrc/aten/backends/iluvatar/iluvatar_common.h and
+# register.cc names them in its TORCH_LIBRARY_IMPL body (see the comment there).
+# Before this set existed the .inc scan could not see them, so
+# vendor_native_ops() dropped them from codegen_iluvatar_flaggems.py's
+# subtraction too, add_.Tensor stayed in the FlagGems `.inc`, and the duplicate
+# m.impl would have failed at library load.
+SELF_REGISTERED_NATIVE = {"iluvatar": {"add_.Tensor", "add_.Scalar"}}
+
 # Ops a hand-written wrapper claims for every platform, so they appear in no
 # .inc at all. Same cause as EXTRA_NATIVE, different owner:
 # csrc/aten/sdp_choice_stub.cc registers aten::scaled_dot_product_attention on
@@ -277,13 +291,13 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 # They are NOT reachable through the dispatcher's runtime dtype escape, despite
 # the shape of that mechanism: ResolveFn (dispatcher.h) substitutes the vendor
 # slot only when FlagGemsRejectsArgs() says yes, and that predicate is compiled
-# per vendor -- its `#else` arm (common.cc) returns false, and iluvatar has no
-# arm. So for an iluvatar build the escape never fires and the force/override
-# routes above are the only ones. (The escape's other prerequisite is present:
-# WrapperMm & co. register into the vendor slot, so VendorSlot() resolves.)
-# Adding a USE_ILUVATAR arm is a per-dtype decision that needs a BI-V150
-# measurement of a FlagGems gap, which does not exist yet; until then this
-# comment must not describe the kernels as escape-reachable.
+# per vendor -- its `#else` arm (common.cc) returns false. Only iluvatar has an
+# arm, and it is written for the one op the vendor kernel now owns instead: it
+# refuses `add_` on a dtype the ixblas axpy has no arm for (anything but
+# fp32/fp16) and leaves those calls on FlagGems. It never fires for the ops
+# listed here, which keep the force/override routes above as their only way to
+# the vendor kernel. (The escape's other prerequisite is present: WrapperMm & co.
+# register into the vendor slot, so VendorSlot() resolves.)
 #
 # Listing them here is what keeps the annotation truthful. Without it an op like
 # `mm` reads "= flaggems" with no marker -- the same line a platform with no GEMM
@@ -291,7 +305,8 @@ EXTRA_ROUTED = {"scaled_dot_product_attention"}
 # would be indistinguishable from one that is unreachable. The generator's own
 # header warns against exactly that documentation failure.
 #
-# Deliberately folded into NEITHER vendoring function. `vendor_native_ops()` is
+# Deliberately folded into NEITHER vendoring function -- the opposite of
+# SELF_REGISTERED_NATIVE above, whose ops *are* in both. `vendor_native_ops()` is
 # what the per-vendor generators subtract from their own registration set, so
 # adding these there would make codegen_iluvatar_flaggems.py drop the two
 # _native_batch_norm_legit* variants from the FlagGems `.inc` -- and because
@@ -2483,8 +2498,9 @@ NATIVE_TRITON_GAPS = {
         # complex64 -- measured on the CI lane 2026-10-21 as the one remaining
         # failure of test_math_bits_contract.py once `_conj` and
         # `view_as_real` were answered, and in-process against flag_gems 5.4.0.
-        # The conf routes these three to the native slot instead, where
-        # register.cc publishes ATen's own add_/div_ (see EXTRA_NATIVE).
+        # The conf routes these three to the native slot instead. add_/div_
+        # are in EXTRA_NATIVE, where register.cc publishes ATen's own div_ and
+        # IluvatarAddInplace/IluvatarAddScalarInplace answer add_ (see above).
         #
         # Only the in-place spellings are routed. `add.Tensor` and
         # `add.Scalar` ride the out-of-place -> in-place lowering: with the
@@ -2613,7 +2629,7 @@ NATIVE_TRITON_GAPS = {
 # regressions. Failures for specific ops go in NATIVE_TRITON_GAPS above with their
 # diagnosis; this set is for blanket "prefer native until measured" policies.
 #
-# Iluvatar joins for one op, `_conj`: register.cc's USE_ILUVATAR arm republishes
+# Iluvatar joins for `_conj` and the two in-place add spellings. For `_conj`: register.cc's USE_ILUVATAR arm republishes
 # ATen's metadata implementation there (see EXTRA_NATIVE), and that registration
 # has to be named in exactly one place. Preferring native removes `_conj` from
 # py_here, which both stops the FlagGems slot from being subtracted as a rival
@@ -2621,6 +2637,15 @@ NATIVE_TRITON_GAPS = {
 # from -- and drops the gap entry from NATIVE_TRITON_GAPS["iluvatar"] as
 # redundant. FlagGems coverage is unaffected (the .inc is generated from the
 # FlagGems set, and only `none`/`iluvatar` ops are in it).
+#
+# And for the in-place add family: it is among the hottest ops in the #667
+# forward pass and FlagGems' Python kernel for it is what the BI-V150
+# measurement showed in the 31x gap -- it materialises its own output and then
+# `copy_`s back, so every `add_` costs a kernel, a temporary and a device copy.
+# The native kernel (IluvatarAddInplace in iluvatar_common.h) is one ixblas axpy
+# per call, measured correct on fp32/fp16 for the elementwise, broadcast-lane
+# and scalar spellings; every other dtype is answered inside the same kernel by
+# at::add_out, the registration register.cc used before this change.
 #
 # Cambricon joins for the same kind of reason, one step stronger: its native
 # set is a list of ops FlagGems actively cannot serve, so preferring FlagGems
@@ -3128,10 +3153,15 @@ def vendor_native_ops(vendor: str) -> set:
     currently wins. ESCAPE_NATIVE ops (a kernel with no `m.impl` of its own) are
     annotated by render(), not added here: this function is what each vendor's
     own generator subtracts from its registration set, so it must stay equal to
-    the ops that generator actually emits an `m.impl` for.
+    the ops that generator actually emits an `m.impl` for, available in the
+    vendored files or registered straight from register.cc (SELF_REGISTERED_NATIVE).
     """
     native_inc, _ = VENDORS[vendor]
-    return registered_impls(CSRC_DIR / native_inc) | EXTRA_NATIVE.get(vendor, set())
+    return (
+        registered_impls(CSRC_DIR / native_inc)
+        | EXTRA_NATIVE.get(vendor, set())
+        | SELF_REGISTERED_NATIVE.get(vendor, set())
+    )
 
 
 def vendor_registered_ops(vendor: str) -> set:
@@ -3146,7 +3176,11 @@ def vendor_registered_ops(vendor: str) -> set:
     ops = registered_impls(CSRC_DIR / native_inc)
     for inc in extra_incs:
         ops |= registered_impls(CSRC_DIR / inc)
-    return ops | EXTRA_NATIVE.get(vendor, set())
+    return (
+        ops
+        | EXTRA_NATIVE.get(vendor, set())
+        | SELF_REGISTERED_NATIVE.get(vendor, set())
+    )
 
 
 def _platform_from_conf(filename: str) -> str:

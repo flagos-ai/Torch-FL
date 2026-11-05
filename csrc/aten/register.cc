@@ -39,6 +39,13 @@
 #include "runtime/allocator/caching_device_allocator.h"
 #include "dispatcher.h"
 
+#if defined(USE_ILUVATAR)
+// For the in-place add kernels the arm below registers by name. Included here,
+// at file scope, and not inside the TORCH_LIBRARY_IMPL body: the header pulls
+// in torch and corex headers, which cannot be included from inside a function.
+#include "backends/iluvatar/iluvatar_common.h"
+#endif
+
 #include <c10/core/impl/LocalDispatchKeySet.h>
 
 #include <algorithm>
@@ -513,22 +520,13 @@ at::Tensor FlagosWrapperPrivViewAsReal(const at::Tensor& self) {
 // `add` lowers the out-of-place spelling to add_.Tensor, so `z + t`, `z + 1`
 // and the conjugated `z + 0` reach these kernels through that lowering.
 //
-// They return Tensor& because ATen's add_.Tensor family (CPU, meta) does, and
-// the registrar matches signatures exactly. add_ calls the operator
-// (at::add_out), not a lower-level kernel: ATen registers the complex out=
-// kernel through its structured meta/decomposition path, which only a call
-// through at:: picks up. `at::native::add_out` does not exist in this build
-// (measured: "not a member of at::native").
-at::Tensor& FlagosWrapperPrivAddTensorInplace(
-    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
-  return at::add_out(self, self, other, alpha);
-}
-
-at::Tensor& FlagosWrapperPrivAddScalarInplace(
-    at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
-  return at::add_out(self, self, other, alpha);
-}
-
+// Only div_ is registered here. The two add_ spellings had a wrapper of their
+// own (at::add_out, since `at::native::add_out` does not exist in this build),
+// and it served the complex dtypes the FlagGems route could not; the
+// ILUVATAR_EXEC-block arm of TORCH_LIBRARY_IMPL below now answers them from
+// IluvatarAddInplace / IluvatarAddScalarInplace instead (one ixblas axpy on
+// float32/float16, the same at::add_out for anything else), so the two m.impl
+// lines there are the only ones and this file must not repeat them.
 at::Tensor& FlagosWrapperPrivDivInplace(
     at::Tensor& self, const at::Tensor& other) {
   // ATen's complex div kernel writes its destination before it reads its
@@ -691,6 +689,16 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // cpu_fallback. That is the same defect the Ascend comment above records.
     #if defined(FLAGOS_ILUVATAR_KERNEL)
     #include "backends/iluvatar/generated/iluvatar_register.inc"
+    // The two in-place add spellings are registered here rather than through
+    // either .inc: their kernels live in iluvatar_common.h (included above).
+    // The conf routes them to `iluvatar` (NATIVE_KERNEL_PREFERRED), where the
+    // kernel is one ixblas axpy for float32/float16 instead of FlagGems'
+    // flag_gems.add + copy_ (an extra kernel and a device copy per call, on
+    // one of the hottest ops of the #667 forward pass); ATen's at::add_out
+    // still answers every other dtype, as FlagosWrapperPrivDivInplace's former
+    // add sibling did.
+    m.impl("add_.Tensor", at::native::flagos::iluvatar::IluvatarAddInplace);
+    m.impl("add_.Scalar", at::native::flagos::iluvatar::IluvatarAddScalarInplace);
     #endif
     // Registered whenever the FlagGems Python path is compiled in, not only
     // under FLAGOS_ILUVATAR_KERNEL: backends_iluvatar.conf routes ops to
@@ -712,11 +720,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_conj", FlagosWrapperPrivConj);
     m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
     m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
-    // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
-    // wrong for add (complex128) and raises for div (complex64) here, so these
-    // run ATen's kernels instead.
-    m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
-    m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
+    // See FlagosWrapperPrivDivInplace above: FlagGems' complex kernel raises
+    // for div (complex64) here, so it runs ATen's kernel instead. The two add_
+    // spellings are registered in the FLAGOS_ILUVATAR_KERNEL block instead.
     m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_CAMBRICON)
     // Cambricon MLU is FlagGems-primary with a short CNNL vendor half. An op in
