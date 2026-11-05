@@ -436,26 +436,17 @@ inline at::Tensor IluvatarAxpyOperand(
     const at::Tensor& x, at::IntArrayRef out) {
   const at::Tensor xc = x.contiguous();
   const int64_t lead = static_cast<int64_t>(out.size()) - xc.dim();
-  // ATen's right-aligned broadcast: every leading dimension of the output has
-  // no counterpart in the operand (stride 0), and a dimension of the operand
-  // that is 1 where the output is wider is broadcast too (its stride is 0).
-  // The view is sized against the output for the storage check and a
-  // broadcast dimension is sized 1 (it contributes no extent); the clone
-  // below brings it back to the output's shape.
-  std::vector<int64_t> sizes(out.begin(), out.end());
   std::vector<int64_t> strides(static_cast<size_t>(lead), 0);
   for (const auto d : c10::irange(xc.dim())) {
-    const bool broadcast = xc.size(d) == 1 && out[d + lead] != 1;
-    strides.push_back(broadcast ? 0 : xc.stride(d));
-    if (broadcast) {
-      sizes[d + lead] = 1;
-    }
+    strides.push_back(xc.size(d) == 1 && out[d + lead] != 1 ? 0
+                                                            : xc.stride(d));
   }
-  return xc.as_strided(sizes, strides)
-      .clone(at::MemoryFormat::Contiguous)
-      .as_strided(
-          out, strides,
-          static_cast<int64_t>(xc.storage_offset()));
+  // Sized by the operand's own dims, so as_strided checks the storage the copy
+  // reads; the output's shape and the broadcast strides are applied to the
+  // dense buffer the copy leaves behind.
+  std::vector<int64_t> src_sizes(static_cast<size_t>(lead), 1);
+  src_sizes.insert(src_sizes.end(), xc.sizes().begin(), xc.sizes().end());
+  return xc.as_strided(src_sizes, strides).clone().as_strided(out, strides);
 }
 
 // y += alpha * other on every element, where `other` is a 0-dim tensor whose
