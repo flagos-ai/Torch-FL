@@ -439,12 +439,23 @@ inline at::Tensor IluvatarAxpyOperand(
   // ATen's right-aligned broadcast: every leading dimension of the output has
   // no counterpart in the operand (stride 0), and a dimension of the operand
   // that is 1 where the output is wider is broadcast too (its stride is 0).
+  // The view is sized against the output for the storage check and a
+  // broadcast dimension is sized 1 (it contributes no extent); the clone
+  // below brings it back to the output's shape.
+  std::vector<int64_t> sizes(out.begin(), out.end());
   std::vector<int64_t> strides(static_cast<size_t>(lead), 0);
   for (const auto d : c10::irange(xc.dim())) {
-    strides.push_back(xc.size(d) == 1 && out[d + lead] != 1 ? 0
-                                                            : xc.stride(d));
+    const bool broadcast = xc.size(d) == 1 && out[d + lead] != 1;
+    strides.push_back(broadcast ? 0 : xc.stride(d));
+    if (broadcast) {
+      sizes[d + lead] = 1;
+    }
   }
-  return xc.as_strided(out, strides).clone();
+  return xc.as_strided(sizes, strides)
+      .clone(at::MemoryFormat::Contiguous)
+      .as_strided(
+          out, strides,
+          static_cast<int64_t>(xc.storage_offset()));
 }
 
 // y += alpha * other on every element, where `other` is a 0-dim tensor whose
