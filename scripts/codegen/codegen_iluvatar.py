@@ -1104,7 +1104,9 @@ _ADD_GATE = """\
   // non-contiguous `self`) materialises it.
   const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
       ? other
-      : other.to(self.scalar_type(), self.is_contiguous(), self.suggest_memory_format());
+      : other.to(
+            self.options(), self.is_contiguous(), false,
+            self.suggest_memory_format());
   const bool x_served =
       is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
   TORCH_CHECK(
