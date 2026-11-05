@@ -467,6 +467,27 @@ at::Tensor WrapperScaledDotProductAttention(
     bool is_causal,
     std::optional<double> scale,
     bool enable_gqa) {
+#if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
+  // Cambricon's fused kernel, ahead of the training-path check below.
+  //
+  // That check exists because the CUDA-boxing route records its autograd node
+  // on boxed tensors the guard then unboxes. This route has no such problem: the
+  // Function in attention.cc saves the flagos tensors it was given and returns
+  // flagos gradients, so it serves both inference and training, and putting it
+  // first is what makes a training step get the fused forward and backward.
+  //
+  // The bounds are what the kernel was measured on: half/bfloat16, no mask, no
+  // dropout, no GQA group expansion, and q/k/v already dense in the 4-D form the
+  // CNNL API describes.
+  if (FusedAttentionEligible(query, key, value, attn_mask, dropout_p,
+                             enable_gqa)) {
+    const double resolved_scale =
+        scale.has_value() ? *scale
+                          : 1.0 / std::sqrt(static_cast<double>(query.size(3)));
+    return at::native::flagos::cambricon::ScaledDotProductAttention(
+        query, key, value, resolved_scale, is_causal);
+  }
+#endif
   // Training path: when a grad-requiring input is present the composite's flash
   // forward records its autograd node on the CUDA-boxed tensors, but the guard
   // below unboxes them on scope exit -- so backward would later see PrivateUse1
@@ -482,23 +503,6 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
-#if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
-  // Cambricon's fused kernel. Forward only for now: the backward through
-  // cnnlFlashAttentionBackward_v2 is not wired up, so a training call keeps the
-  // decomposition above (which is correct, just slower) until it is.
-  //
-  // The bounds are what the kernel was measured on: half/bfloat16, no mask, no
-  // dropout, no GQA group expansion, and q/k/v already dense in the 4-D form
-  // the CNNL API describes.
-  if (FusedAttentionEligible(query, key, value, attn_mask, dropout_p,
-                             enable_gqa)) {
-    const double resolved_scale =
-        scale.has_value() ? *scale
-                          : 1.0 / std::sqrt(static_cast<double>(query.size(3)));
-    return at::native::flagos::cambricon::ScaledDotProductAttention(
-        query, key, value, resolved_scale, is_causal);
-  }
-#endif
 #ifdef FLAGOS_FLAGGEMS_PYTHON
   // FlagGems route, when the conf asks for it (see the file header). Both halves
   // are load-bearing: HasBackendForOp() keeps a conf that never names this op on
