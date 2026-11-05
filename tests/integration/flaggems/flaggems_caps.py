@@ -192,14 +192,14 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # had gained as `assert 454 == 452`.
     "dcu": 454,
     "gcu": 251,
-    # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen
-    # to the native slot (eight ixdnn/ixblas kernels -- `_convolution`, `addmm`,
+    # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, sixteen
+    # to the native slot (twelve ixdnn/ixblas kernels -- `_convolution`,
+    # `add.Scalar`, `add.Tensor`, `add_.Scalar`, `add_.Tensor`, `addmm`,
     # `baddbmm`, `baddbmm_`, `bmm`, `convolution`, `mm`, `native_batch_norm` --
-    # plus `_conj`, `view_as_real`, `add_.Scalar`, `add_.Tensor` and
-    # `div_.Tensor` served from register.cc) and the rest to `none`. Recorded
-    # because the lane runs this suite on the platform and the count is what the
-    # conf states -- it is not an on-device measurement yet. 581 is that tally
-    # less the two ``SEEDED_DRAWOPS`` routes.
+    # plus `_conj`, `view_as_real` and `div_.Tensor` served from register.cc) and
+    # the rest to `none`. Recorded because the lane runs this suite on the platform and the
+    # count is what the conf states -- it is not an on-device measurement yet.
+    # 581 is that tally less the two ``SEEDED_DRAWOPS`` routes.
     #
     # 581 since `baddbmm`/`baddbmm_` left FlagGems: its batched GEMM is 61-84%
     # wrong and nondeterministic on this chip whenever the output's row count

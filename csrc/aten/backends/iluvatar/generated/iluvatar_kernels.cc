@@ -1145,5 +1145,71 @@ at::Tensor AddmmKernelIluvatar(
 
 REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kIluvatar, AddmmKernelIluvatar)
 
+at::Tensor AddTensorKernelIluvatar(
+    const at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar& alpha) {
+  if (!self.sizes().equals(other.sizes()) ||
+      self.scalar_type() != other.scalar_type() ||
+      self.device() != other.device() ||
+      !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
+    TORCH_CHECK_NOT_IMPLEMENTED(
+        false,
+        "iluvatar: add.Tensor has no vendor kernel for ", self.scalar_type(),
+        " at these shapes (ixblasAxpyEx serves float32/float16 on an "
+        "elementwise add)");
+  }
+  iluvatar::IluvatarDeviceGuard guard(self);
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self.is_contiguous() ? self : self.contiguous());
+  iluvatar::IluvatarAxpy(out, other, alpha);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kIluvatar, AddTensorKernelIluvatar)
+
+at::Tensor AddScalarKernelIluvatar(
+    const at::Tensor& self,
+    const at::Scalar& other,
+    const at::Scalar& alpha) {
+  at::Tensor scalar =
+      at::empty({}, self.options()).fill_(other.to<double>());
+  return AddTensorKernelIluvatar(self, scalar, alpha);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kIluvatar, AddScalarKernelIluvatar)
+
+at::Tensor& AddInplaceTensorKernelIluvatar(
+    at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar& alpha) {
+  if (!self.sizes().equals(other.sizes()) ||
+      self.scalar_type() != other.scalar_type() ||
+      self.device() != other.device() ||
+      !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
+    TORCH_CHECK_NOT_IMPLEMENTED(
+        false,
+        "iluvatar: add_.Tensor has no vendor kernel for ", self.scalar_type(),
+        " at these shapes (ixblasAxpyEx serves float32/float16 on an "
+        "elementwise add)");
+  }
+  iluvatar::IluvatarDeviceGuard guard(self);
+  iluvatar::IluvatarAxpy(self, other, alpha);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kIluvatar, AddInplaceTensorKernelIluvatar)
+
+at::Tensor& AddInplaceScalarKernelIluvatar(
+    at::Tensor& self,
+    const at::Scalar& other,
+    const at::Scalar& alpha) {
+  at::Tensor scalar =
+      at::empty({}, self.options()).fill_(other.to<double>());
+  return AddInplaceTensorKernelIluvatar(self, scalar, alpha);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceScalarFn, add_inplace_scalar_dispatcher, Backend::kIluvatar, AddInplaceScalarKernelIluvatar)
+
 } // namespace iluvatar
 } // namespace at::native::flagos

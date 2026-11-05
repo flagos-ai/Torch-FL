@@ -266,6 +266,21 @@ inline bool IluvatarSupportsGemmDtype(at::ScalarType type) {
   return type == at::kHalf || type == at::kFloat || type == at::kBFloat16;
 }
 
+// Whether `ixblasAxpyEx` serves this scalar type on a BI-V150.
+//
+// Measured on u180 (corex 4.5.0), `add.Tensor` shapes: float32 and float16
+// return IXBLAS_STATUS_SUCCESS and match the CPU reference exactly; float64,
+// bfloat16, complex64, complex128, int32 and int64 return status 15
+// (IXBLAS_STATUS_NOT_SUPPORTED) for every alpha and execution type tried, and
+// `executionType` must be 0 -- the enum's named values (16F, 32F, 64F, 32I)
+// all return 15. So this is a deliberately narrow gate, not
+// `IluvatarSupportsDtype`: a wider gate would hand the kernel a call that
+// fails, and a kernel that caught the failure and took the host round trip
+// instead would be the cpu_fallback this backend exists to avoid.
+inline bool IluvatarSupportsAxpyDtype(at::ScalarType type) {
+  return type == at::kFloat || type == at::kHalf;
+}
+
 // Whether a `Tensor?` argument actually carries a tensor.
 //
 // `has_value()` alone is not the test. C++ composite code forwards its own
@@ -381,8 +396,6 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
       std::to_string(static_cast<int>(status)) + ")";
 }
 
-} // namespace at::native::flagos::iluvatar
-
 // Issues one vendor call and raises on failure with the status enum's name.
 //
 // `status` is the expression returning an ixdnnStatus_t or ixblasStatus_t and
@@ -408,4 +421,69 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
         ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
   } while (0)
 
-#endif // USE_ILUVATAR
+// y += alpha * x on the device, for the four `add` schemas
+// (codegen_iluvatar.py's add_* categories).
+//
+// ixblasAxpyEx takes alpha by pointer with its own type tag, and its
+// `executionType` byte was measured on u180 (corex 4.5.0) to accept only 0 --
+// the enum's named values (16F, 32F, 64F, 32I) all returned
+// IXBLAS_STATUS_NOT_SUPPORTED. alpha is float32 for both operand types (see
+// the comment on alpha_f below). Both were verified against the CPU reference;
+// every other dtype is refused by IluvatarSupportsAxpyDtype before the call,
+// because the vendor call returns status 15 for all of them.
+inline void IluvatarAxpy(
+    at::Tensor& y,
+    const at::Tensor& x,
+    const at::Scalar& alpha) {
+  const int64_t n = x.numel();
+  if (n == 0 || alpha.to<double>() == 0.0) {
+    return;
+  }
+  at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
+  const int device = IluvatarDeviceIndex(y);
+  cublasHandle_t handle = GetCublasHandle(device);
+  // alpha is float32 in both arms: the vendor takes alpha in its own type tag
+  // and was measured to accept a float32 alpha beside float16 operands
+  // (IX_R_16F x/y, IX_R_32F alpha -> status 0, exact), while a float16 alpha
+  // returns status 15 for every execution type tried. So one alpha width
+  // serves both dtypes.
+  const float alpha_f = static_cast<float>(alpha.to<double>());
+  if (x.scalar_type() == at::kHalf) {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            xc.const_data_ptr(),
+            IX_R_16F,
+            1,
+            y.data_ptr(),
+            IX_R_16F,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  } else {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            xc.const_data_ptr(),
+            IX_R_32F,
+            1,
+            y.data_ptr(),
+            IX_R_32F,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  }
+  IluvatarSynchronizeStream(device);
+}
+
+
+
+} // namespace at::native::flagos::iluvatar
+
+#endif  // USE_ILUVATAR

@@ -315,6 +315,17 @@ ESCAPE_NATIVE = {
     }
 }
 
+# The iluvatar conf keys whose kernel is IluvatarSupportsAxpyDtype (ixblasAxpyEx
+# serves float32/float16 only). Their uncovered dtypes are sent back to FlagGems
+# by the escape emitted into csrc/aten/common.cc -- see
+# render_iluvatar_axpy_escape() for why that arm is generated from this list.
+ILUVATAR_AXPY_GATED_OPS = (
+    "add.Scalar",
+    "add.Tensor",
+    "add_.Scalar",
+    "add_.Tensor",
+)
+
 # CUDA-ABI platforms (cuda, metax, dcu, ppu) use the same five-key shape as a
 # native vendor, but they have no vendor kernel library of their own: their
 # `<vendor>` slot is empty, and every op FlagGems does not cover reaches
@@ -2486,13 +2497,24 @@ NATIVE_TRITON_GAPS = {
         # The conf routes these three to the native slot instead, where
         # register.cc publishes ATen's own add_/div_ (see EXTRA_NATIVE).
         #
-        # Only the in-place spellings are routed. `add.Tensor` and
-        # `add.Scalar` ride the out-of-place -> in-place lowering: with the
-        # in-place op on a PrivateUse1 kernel, ATen's `add` composite
-        # dispatches `z + t`, `z + 0` and `z + 1` to the in-place slot, so
-        # they leave FlagGems without a second registration (and cannot have
-        # one: an out= kernel does not match add.Tensor's C++ signature, and
-        # the register.cc comment records the abort that measured it).
+        # `add.Scalar` is the spelling a python scalar takes here: a number is
+        # a wrapped scalar, so `z + 0`, `z + 1` and `t + 2.0` arrive as
+        # add.Tensor with the number as a 0-dim tensor, never as add.Scalar,
+        # and add.Scalar itself is reached only by an explicit call. It is
+        # gapped with its sibling because one kernel serves both.
+        #
+        # `add.Tensor` used to ride the out-of-place -> in-place lowering onto
+        # `add_.Tensor` rather than carrying an out= kernel, which an m.impl
+        # under its schema would abort on. It has a vendor kernel of its own
+        # now (ixblasAxpyEx, codegen_iluvatar.py's add_tensor categories,
+        # measured on u180), so it stays gapped and routes to the native slot:
+        # gapping an op FlagGems claims is what removes it from the FlagGems
+        # .inc, and the native .inc's claim is generated from that removal.
+        # The dtypes the vendor call refuses keep the FlagGems kernel through
+        # the escape in csrc/aten/common.cc, which `--check` keeps in step with
+        # this file (see ILUVATAR_AXPY_ESCAPE).
+        "add.Scalar",
+        "add.Tensor",
         # The in-place pair also fixes a defect of its own: a `none` route
         # made `self.add_(other)` a boxed cpu_fallback that wrote to a CPU
         # copy and left `self` unchanged (measured on u180 2026-10-21).
@@ -2501,8 +2523,6 @@ NATIVE_TRITON_GAPS = {
         # before it reads its sources, so `x.div_(y)` -- which hands it the
         # operand itself -- came back as the unchanged operand for complex128
         # and as zeros for complex64 (measured on u180 2026-10-21).
-        "add.Tensor",
-        "add.Scalar",
         "add_.Tensor",
         "add_.Scalar",
         "div_.Tensor",
@@ -3932,6 +3952,67 @@ def print_stats(built: dict) -> None:
 _MAX_GENERATION_PASSES = 4
 
 
+# The dtype escape for an op this file routes to a vendor kernel that does not
+# serve every dtype of that op, emitted into csrc/aten/common.cc's
+# FlagGemsRejectsOpDtype.
+#
+# The escape is what keeps a partly-covered op native without either widening
+# the vendor call past what was measured or leaving the uncovered dtypes to
+# raise: ResolveFn substitutes the vendor slot when the predicate fires, so
+# `add` is native where ixblasAxpyEx was measured and FlagGems where it was
+# not -- the route main had for every dtype before the op became native.
+#
+# The block in common.cc is between the two markers below and is generated
+# rather than hand-written for the same reason the confs are: the op list here
+# and the strcmp chain there are the same decision, and a spelling added here
+# but forgotten there is an op that raises for a dtype the conf promised. The
+# predicate and its rationale live in common.cc; only the op list is derived.
+# `--check` reports common.cc stale while the two disagree.
+COMMON_CC = REPO_ROOT / "csrc/aten/common.cc"
+ESCAPE_BEGIN = "  // BEGIN GENERATED: iluvatar Axpy dtype escape."
+ESCAPE_END = "  // END GENERATED: iluvatar Axpy dtype escape."
+# The dtypes IluvatarSupportsAxpyDtype (iluvatar_common.h) refuses. float32 and
+# float16 are the ones ixblasAxpyEx serves.
+ILUVATAR_AXPY_REFUSED = (
+    "dtype == at::kDouble || dtype == at::kBFloat16 ||",
+    "c10::isComplexType(dtype) || c10::isIntegralType(dtype, true)",
+)
+
+
+def iluvatar_axpy_escape_ops() -> list:
+    """The iluvatar-routed conf keys whose kernel is the Axpy gate.
+
+    Read back from the iluvatar conf's generated routes rather than from the
+    codegen's registry, so this file does not import codegen_iluvatar (the
+    FlagGems codegen avoids the same import for the lean CI job)."""
+    routes = build_all(CONF_DIR)["iluvatar"][1]
+    gated = set(ILUVATAR_AXPY_GATED_OPS)
+    return sorted(op for op, value in routes.items() if op in gated)
+
+
+def render_iluvatar_axpy_escape() -> str:
+    ops = iluvatar_axpy_escape_ops()
+    if not ops:
+        return f"{ESCAPE_BEGIN}\n{ESCAPE_END}\n"
+    pred = "\n       ".join(ILUVATAR_AXPY_REFUSED)
+    checks = " ||\n".join(f'std::strcmp(op_name, "{op}") == 0' for op in ops)
+    checks = checks.replace("\n", "\n      ")
+    return (
+        f"{ESCAPE_BEGIN}\n"
+        f"  if (({pred}) &&\n"
+        "      (" + checks + ")) {\n"
+        "    return true;\n"
+        "  }\n"
+        f"{ESCAPE_END}\n"
+    )
+
+
+def _generated_escape(common_cc: str) -> str:
+    start = common_cc.index(ESCAPE_BEGIN)
+    end = common_cc.index(ESCAPE_END, start) + len(ESCAPE_END) + 1
+    return common_cc[start:end]
+
+
 def _write_files(built: dict, variants: dict, check: bool) -> list:
     """Write (or, with `check`, only list) every stale conf. Returns the names.
 
@@ -3962,6 +4043,20 @@ def _write_files(built: dict, variants: dict, check: bool) -> list:
         if not check:
             path.write_text(text)
             print(f"wrote {path.relative_to(REPO_ROOT)}")
+    # The generated dtype escape in common.cc is a third artifact of the same
+    # routes: an op this file sends to the iluvatar Axpy kernel whose dtype the
+    # vendor call refuses has to name that dtype in the escape, or the native
+    # kernel is asked for a dtype ixblasAxpyEx returns STATUS_NOT_SUPPORTED for.
+    if COMMON_CC.exists():
+        current = COMMON_CC.read_text()
+        wanted = render_iluvatar_axpy_escape()
+        if _generated_escape(current) != wanted:
+            stale.append(COMMON_CC.name)
+            if not check:
+                start = current.index(ESCAPE_BEGIN)
+                end = current.index(ESCAPE_END, start) + len(ESCAPE_END) + 1
+                COMMON_CC.write_text(current[:start] + wanted + current[end:])
+                print(f"wrote {COMMON_CC.relative_to(REPO_ROOT)}")
     return stale
 
 
