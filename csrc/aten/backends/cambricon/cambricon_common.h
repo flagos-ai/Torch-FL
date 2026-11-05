@@ -6,14 +6,12 @@
 // for each operand, an operation descriptor for the entry point, and passes
 // raw device pointers. There is no workspace-query phase for the elementwise
 // ops used here -- `cnnlOpTensor` accepts a null workspace -- so a kernel is:
-// open a device guard, describe the operands, call, drain the stream.
+// open a device guard, describe the operands, and enqueue on the runtime stream.
 //
-// One handle per device. `cnnlCreate` binds the handle to whichever device is
+// One handle per device per host thread. `cnnlCreate` binds the handle to whichever device is
 // current, so a handle is not portable across devices and must not be shared
-// between them; `CnnlHandle` therefore keys its cache by device ordinal. This
-// mirrors what `runtime/accelerator/cambricon/` does for the stream registry,
-// and for the same reason: a process (or a test) may switch devices between
-// calls.
+// between them; `HandleForDevice` therefore keys its cache by device ordinal.
+// A process (or a test) may switch devices between calls.
 //
 // The handle is created lazily and never destroyed. A cnnl handle owns the
 // library's allocator state; tearing it down at unload while tensors allocated
@@ -26,6 +24,7 @@
 
 #include <ATen/ATen.h>
 #include <c10/core/ScalarType.h>
+#include "runtime/guard.h"
 
 #include <cnnl.h>
 #include <cnrt.h>
@@ -97,12 +96,15 @@ class CambriconDeviceGuard {
 // device guard is the caller's (`at::cuda`-style guard is not used here because
 // this backend has its own `DeviceGuard` in runtime/accelerator/cambricon/).
 inline cnnlHandle_t HandleForDevice(int device_index) {
-  static std::mutex mutex;
-  static std::unordered_map<int, cnnlHandle_t> handles;
-
-  std::lock_guard<std::mutex> lock(mutex);
+  // CNNL handles carry mutable queue state. Do not share a handle between
+  // threads that may select different streams on the same device.
+  static thread_local std::unordered_map<int, cnnlHandle_t> handles;
   auto it = handles.find(device_index);
   if (it != handles.end()) {
+    CheckCnnl(
+        cnnlSetQueue(it->second, reinterpret_cast<cnrtQueue_t>(
+            GetCurrentStreamForDevice(device_index))),
+        "cnnlSetQueue");
     return it->second;
   }
 
@@ -116,7 +118,11 @@ inline cnnlHandle_t HandleForDevice(int device_index) {
 
   cnnlHandle_t handle = nullptr;
   CheckCnnl(cnnlCreate(&handle), "cnnlCreate");
-  CheckCnnl(cnnlSetQueue(handle, nullptr), "cnnlSetQueue");
+  // Use the same queue as runtime copies and FlagGems kernels.
+  CheckCnnl(
+      cnnlSetQueue(handle, reinterpret_cast<cnrtQueue_t>(
+          GetCurrentStreamForDevice(device_index))),
+      "cnnlSetQueue");
   handles.emplace(device_index, handle);
   return handle;
 }
