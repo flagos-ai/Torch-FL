@@ -1253,8 +1253,9 @@ at::Tensor ArgmaxKernelMps(
                         truePredicateTensor:positions_float
                        falsePredicateTensor:minus_one
                                        name:nil];
+        // The *first* NaN, because that is the index the reference names.
         MPSGraphTensor* has_nan =
-            [graph reductionMaximumWithTensor:nan_positions
+            [graph reductionMinimumWithTensor:nan_positions
                                          axis:axis
                                          name:nil];
         MPSGraphTensor* equals =
@@ -1266,10 +1267,16 @@ at::Tensor ArgmaxKernelMps(
             : [graph logicalANDWithPrimaryTensor:no_nan
                                  secondaryTensor:equals
                                             name:nil];
+        // `>=`, not `>`: `has_nan` is the *last* NaN's coordinate, and that
+        // coordinate must itself be a candidate. With `>` a slice whose only NaN
+        // sat at position 0 produced no candidate, so the reduction answered the
+        // `no_match` sentinel -- `argmax([nan, 1, 2])` came back as `3`, the axis
+        // length. The `reductionMinimum` below still takes the first candidate,
+        // which is the index the reference names.
         MPSGraphTensor* selected_nan =
-            [graph greaterThanWithPrimaryTensor:positions_float
-                                secondaryTensor:has_nan
-                                           name:nil];
+            [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
+                                        secondaryTensor:has_nan
+                                                   name:nil];
         MPSGraphTensor* matches =
             [graph selectWithPredicateTensor:nan
                         truePredicateTensor:selected_nan
