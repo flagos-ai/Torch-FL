@@ -32,6 +32,15 @@ from typing import Any
 import pytest
 
 
+MIGRATED_CASE_FILES = frozenset(
+    {
+        "tests/integration/ops/test_all_dispatch.py",
+        "tests/integration/ops/test_mps_all.py",
+        "tests/integration/ops/test_mps_argmax.py",
+    }
+)
+
+
 @dataclasses.dataclass(frozen=True)
 class CaseGapIssue:
     """One tracked capability gap and the cases it currently owns."""
@@ -48,8 +57,10 @@ class CaseGapIssue:
             raise ValueError(f"case gap {self.number} must own cases or routes")
         if any(value.startswith("#") for value in self.routes):
             raise ValueError("case IDs must be listed in cases, not routes")
+        if not self.upstream:
+            raise ValueError(f"case gap {self.number} needs an upstream issue")
 
-        if self.upstream and (
+        if (
             re.fullmatch(
                 r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*",
                 self.upstream,
@@ -99,6 +110,15 @@ def open_case_gap(key: str) -> CaseGapIssue:
 
 
 def tracked_skip(condition: bool, *, issue: str) -> Any:
-    """Attach a skip condition to a registered open issue."""
+    """Attach a skip to a registered gap without hiding why it remains."""
+    return pytest.mark.skipif(condition, reason=_skip_reason(issue))
+
+
+def _skip_reason(issue: str) -> str:
+    """Name both issues, but leave their live state to the trusted CI query."""
     entry = open_case_gap(issue)
-    return pytest.mark.skipif(condition, reason=f"expected case gap {entry.number}")
+    number = entry.number.removeprefix("#")
+    return (
+        f"{entry.number} https://github.com/flagos-ai/Torch-FL/issues/{number}; "
+        f"upstream https://github.com/{entry.upstream}"
+    )

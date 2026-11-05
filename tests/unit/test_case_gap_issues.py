@@ -109,10 +109,12 @@ def test_registry_rejects_untracked_or_incomplete_rows(row, tmp_path):
 def test_registry_rejects_duplicate_case_owners(tmp_path):
     row = (
         "CaseGapIssue(number='#{0}', cases=('x::test_x',), routes=(), "
-        "upstream='a/b/issues/{0}')"
+        "upstream='a/b/issues/{1}')"
     )
     path = tmp_path / "case_gap_issues.py"
-    path.write_text(f"_ISSUES = ({row.format(1)}, {row.format(2)})\n", encoding="utf-8")
+    path.write_text(
+        f"_ISSUES = ({row.format(1, 10)}, {row.format(2, 20)})\n", encoding="utf-8"
+    )
     with pytest.raises(ValueError, match="exactly one issue owner"):
         _checker().registered_gaps(path)
 
@@ -139,7 +141,7 @@ def test_registry_rejects_different_upstreams_for_one_issue(tmp_path):
     path.write_text(
         "_ISSUES = ("
         "CaseGapIssue(number='#710', cases=('x::test_x',), routes=(), "
-        "upstream=''), "
+        "upstream='a/b/issues/10'), "
         "CaseGapIssue(number='#710', cases=(), routes=('x',), "
         "upstream='a/b/issues/1'),"
         ")\n",
@@ -223,3 +225,96 @@ def test_main_rejects_the_script_outside_its_trusted_root(tmp_path):
     )
     assert process.returncode == 1
     assert "must run from the trusted base script" in process.stdout
+
+
+_GAP = """CaseGapIssue(number="#710", cases=("tests/integration/ops/test_x.py::test_x",), routes=(), upstream="flagos-ai/FlagGems/issues/8411")
+"""
+_CONTRACT = "MIGRATED_CASE_FILES = frozenset({'tests/integration/ops/test_x.py'})\n"
+_VALID_SOURCE = (
+    "from tests.integration.case_gap_issues import tracked_skip\n"
+    "@tracked_skip(condition=True, issue='#710')\n"
+    "def test_x():\n"
+    "    return True\n"
+)
+
+
+def _source_errors(source):
+    module = _checker()
+    gaps = module.parse_registered_gaps(
+        __import__("ast").parse(f"_ISSUES = ({_GAP},)"), require_upstream=True
+    )
+    return module.source_violations(
+        {"tests/integration/ops/test_x.py": source},
+        gaps,
+        frozenset({"tests/integration/ops/test_x.py"}),
+    )
+
+
+def test_source_contract_accepts_only_the_registered_decorator():
+    assert _source_errors(_VALID_SOURCE) == []
+
+
+@pytest.mark.parametrize(
+    "source, message",
+    [
+        (
+            _VALID_SOURCE.replace(
+                "from tests.integration.case_gap_issues import tracked_skip\n", ""
+            ),
+            "shared registry",
+        ),
+        (
+            _VALID_SOURCE.replace("@tracked_skip", "@pytest.mark.skipif"),
+            "must use the tracked_skip",
+        ),
+        (
+            _VALID_SOURCE.replace(
+                "    return True\n", "    import pytest\n    pytest.skip('gap')\n"
+            ),
+            "must use the tracked_skip",
+        ),
+        (
+            _VALID_SOURCE.replace(
+                "    return True\n", "    pytest.importorskip('x')\n"
+            ),
+            "must use the tracked_skip",
+        ),
+        (
+            _VALID_SOURCE.replace(
+                "from tests.integration.case_gap_issues import tracked_skip\n",
+                "from tests.integration.case_gap_issues import tracked_skip as skip\n",
+            ),
+            "must not be aliased",
+        ),
+        (
+            _VALID_SOURCE
+            + "original = tracked_skip\n"
+            + "tracked_skip = lambda *args, **kwargs: (lambda f: f)\n",
+            "cannot be rebound",
+        ),
+        (
+            "import pytest\n"
+            "from tests.integration.case_gap_issues import tracked_skip\n"
+            "pytestmark = pytest.mark.skipif(True, reason='gap')\n"
+            + _VALID_SOURCE.split("\n", 1)[1],
+            "module-wide",
+        ),
+        (
+            "from tests.integration.case_gap_issues import tracked_skip\n"
+            "@tracked_skip(condition=True, issue='#710', reason='ignored')\n"
+            "def test_x():\n"
+            "    return True\n",
+            "accepts only",
+        ),
+        (
+            _VALID_SOURCE.replace("issue='#710'", "issue='#711'"),
+            "no registry row",
+        ),
+        (
+            _VALID_SOURCE.replace("def test_x", "def test_other"),
+            "no cases owned",
+        ),
+    ],
+)
+def test_source_contract_rejects_unregistered_skip_forms(source, message):
+    assert any(message in error for error in _source_errors(source))

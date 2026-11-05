@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A skipped shared case is allowed only while its tracking issue is open. Run
-# the query script from the trusted base revision with pull_request_target.
-# Only the registry is read from the submitted revision, through AST parsing;
-# no pull request source is imported or executed.
+# A skipped shared case is allowed only while its Torch-FL and upstream issues
+# are open. The trusted base owns the query and source check. The submitted
+# checkout supplies data only and is never imported or executed.
 
 name: Case gap issues
+
+permissions:
+  contents: read
+  issues: read
 
 on:
   workflow_call:
@@ -37,21 +40,39 @@ on:
     secrets:
       GH_TOKEN:
         required: true
-  pull_request_target:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
-
-permissions:
-  contents: read
-  issues: read
 
 jobs:
   verify-gate:
     name: Verify case gap issues
+    permissions:
+      contents: read
+      issues: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Check out submitted case-gap data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.registry_repository || inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}
+          path: registry
+          persist-credentials: false
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/scripts/ci/check_case_gap_issues.py
+            tests/integration/case_gap_issues.py
+            tests/integration/ops/test_all_dispatch.py
+            tests/integration/ops/test_mps_all.py
+            tests/integration/ops/test_mps_argmax.py
+            tests/unit/test_integration_source_contract.py
+          sparse-checkout-cone-mode: false
+
+      # This commit is the first tree containing the shared source contract.
+      # On the first pull request run the base cannot yet resolve this reusable
+      # workflow, so its checkout is the controller pinned for that commit. The
+      # later revision checks out the actual base revision. Only the registry
+      # and tests below are read, and their paths are passed to the AST parser.
       - name: Check out trusted issue query
         uses: actions/checkout@v4
         with:
@@ -63,23 +84,12 @@ jobs:
             .github/scripts/ci/check_case_gap_issues.py
           sparse-checkout-cone-mode: false
 
-      - name: Check out submitted case-gap registry
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.registry_repository || inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}
-          path: registry
-          persist-credentials: false
-          sparse-checkout: |
-            tests/integration/case_gap_issues.py
-          sparse-checkout-cone-mode: false
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Require every registered case gap to have an open issue
+      - name: Require every registered case gap to have open issues
         working-directory: trusted
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
@@ -87,4 +97,5 @@ jobs:
         run: |
           python .github/scripts/ci/check_case_gap_issues.py \
             --script-root "$GITHUB_WORKSPACE/trusted/.github/scripts/ci" \
-            --registry "$GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py"
+            --registry "$GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py" \
+            --source-contract "$GITHUB_WORKSPACE/registry/tests/unit/test_integration_source_contract.py"

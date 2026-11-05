@@ -138,6 +138,9 @@ jobs:
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
 
+  # The controller is pinned to the base revision. Submitted source and its
+  # registry are checked as data. The first commit introducing this gate runs it
+  # in an explicit origin workflow; later revisions use this required job.
   case-gap-issues:
     name: Case gap issues
     needs: resolve-checkout

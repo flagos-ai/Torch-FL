@@ -36,6 +36,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.case_gap_issues import MIGRATED_CASE_FILES
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SUITE_ROOTS = tuple(
@@ -44,13 +46,6 @@ SUITE_ROOTS = tuple(
 )
 AGNOSTIC_WORKFLOW = REPO_ROOT / ".github/workflows/agnostic-checks.yml"
 MPS_SUITE = REPO_ROOT / "tests/integration/ops"
-MIGRATED_CASE_FILES = frozenset(
-    {
-        "tests/integration/ops/test_all_dispatch.py",
-        "tests/integration/ops/test_mps_all.py",
-        "tests/integration/ops/test_mps_argmax.py",
-    }
-)
 CASE_GAP_REGISTRY = REPO_ROOT / "tests/integration/case_gap_issues.py"
 CASE_GAP_CHECKER = REPO_ROOT / ".github/scripts/ci/check_case_gap_issues.py"
 
@@ -739,12 +734,12 @@ def _verify_case_gaps(registry=None):
         case.split("::", 1)[0] for _, cases, _ in rows for case in cases
     }
     source_paths = list(_suite_sources())
+    known_sources = {path.resolve() for path in source_paths}
     source_paths.extend(
         REPO_ROOT / case.split("::", 1)[0]
         for _, cases, _ in rows
         for case in cases
-        if (REPO_ROOT / case.split("::", 1)[0]).resolve()
-        not in {path.resolve() for path in source_paths}
+        if (REPO_ROOT / case.split("::", 1)[0]).resolve() not in known_sources
         and (REPO_ROOT / case.split("::", 1)[0]).is_file()
     )
     sources = {
@@ -901,11 +896,12 @@ def test_case_gap_fixture_passes_the_shared_contract(monkeypatch, tmp_path):
     assert _verify_case_gaps(registry)[0][0] == "#1"
 
 
-def test_optional_upstream_does_not_require_a_second_issue():
+def test_every_registered_gap_requires_an_upstream_issue():
     tree = ast.parse(
         '_ISSUES = (CaseGapIssue(number="#1", cases=("x",), routes=(), upstream=""),)\n'
     )
-    assert _case_gap_checker().parse_registered_gaps(tree)[0].number == "#1"
+    with pytest.raises(ValueError, match="must have an upstream issue"):
+        _case_gap_checker().parse_registered_gaps(tree, require_upstream=True)
 
 
 @pytest.mark.parametrize(
