@@ -1150,23 +1150,25 @@ at::Tensor AddTensorKernelIluvatar(
     const at::Tensor& other,
     const at::Scalar& alpha) {
   const bool is_scalar = other.dim() == 0;
-  if ((!is_scalar && !self.sizes().equals(other.sizes())) ||
-      self.device() != other.device() ||
+  if (!is_scalar && !self.sizes().equals(other.sizes())) {
+    TORCH_CHECK_NOT_IMPLEMENTED(
+        false,
+        "iluvatar: add.Tensor has no vendor kernel for this pair of shapes (",
+        self.sizes(), " + ", other.sizes(),
+        "); ixblasAxpyEx serves an elementwise add");
+  }
+  if (self.device() != other.device() ||
       !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
     TORCH_CHECK_NOT_IMPLEMENTED(
         false,
         "iluvatar: add.Tensor has no vendor kernel for ", self.scalar_type(),
-        " at these shapes (ixblasAxpyEx serves float32/float16 on an "
-        "elementwise add)");
+        " (ixblasAxpyEx serves float32/float16)");
   }
   // add promotes a mixed-type pair and ATen hands the kernel the promoted
   // result type, so a same-type float32/float16 pair needs no cast; the pair
   // that arrives mixed is a float16 addend with a float32 alpha, which ATen
   // promotes to float32. Widen the addend with the result or ixblasAxpyEx
   // reads float16 memory into a float32 output.
-  const at::Tensor x = other.scalar_type() == self.scalar_type()
-      ? other
-      : other.to(self.scalar_type());
   iluvatar::IluvatarDeviceGuard guard(self);
   if (is_scalar) {
     at::Tensor out = at::empty(self.sizes(), self.options());
@@ -1174,6 +1176,9 @@ at::Tensor AddTensorKernelIluvatar(
     iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
     return out;
   }
+  const at::Tensor x = other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(self.scalar_type());
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
   iluvatar::IluvatarAxpy(out, x, alpha);
@@ -1189,7 +1194,7 @@ at::Tensor AddScalarKernelIluvatar(
   TORCH_CHECK(
       iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
       "iluvatar: add.Scalar has no vendor kernel for ", self.scalar_type(),
-      " (ixblasScal serves float32/float16)");
+      " (ixblasAxpyEx serves float32/float16)");
   iluvatar::IluvatarDeviceGuard guard(self);
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
@@ -1204,28 +1209,33 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
     const at::Tensor& other,
     const at::Scalar& alpha) {
   const bool is_scalar = other.dim() == 0;
-  if ((!is_scalar && !self.sizes().equals(other.sizes())) ||
-      self.device() != other.device() ||
+  if (!is_scalar && !self.sizes().equals(other.sizes())) {
+    TORCH_CHECK_NOT_IMPLEMENTED(
+        false,
+        "iluvatar: add_.Tensor has no vendor kernel for this pair of shapes (",
+        self.sizes(), " + ", other.sizes(),
+        "); ixblasAxpyEx serves an elementwise add");
+  }
+  if (self.device() != other.device() ||
       !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
     TORCH_CHECK_NOT_IMPLEMENTED(
         false,
         "iluvatar: add_.Tensor has no vendor kernel for ", self.scalar_type(),
-        " at these shapes (ixblasAxpyEx serves float32/float16 on an "
-        "elementwise add)");
+        " (ixblasAxpyEx serves float32/float16)");
   }
   // add promotes a mixed-type pair and ATen hands the kernel the promoted
   // result type, so a same-type float32/float16 pair needs no cast; the pair
   // that arrives mixed is a float16 addend with a float32 alpha, which ATen
   // promotes to float32. Widen the addend with the result or ixblasAxpyEx
   // reads float16 memory into a float32 output.
-  const at::Tensor x = other.scalar_type() == self.scalar_type()
-      ? other
-      : other.to(self.scalar_type());
   iluvatar::IluvatarDeviceGuard guard(self);
   if (is_scalar) {
     iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
     return self;
   }
+  const at::Tensor x = other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(self.scalar_type());
   iluvatar::IluvatarAxpy(self, x, alpha);
   return self;
 }
@@ -1239,7 +1249,7 @@ at::Tensor& AddInplaceScalarKernelIluvatar(
   TORCH_CHECK(
       iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
       "iluvatar: add_.Scalar has no vendor kernel for ", self.scalar_type(),
-      " (ixblasScal serves float32/float16)");
+      " (ixblasAxpyEx serves float32/float16)");
   iluvatar::IluvatarDeviceGuard guard(self);
   iluvatar::IluvatarAxpyScalar(self, other, alpha);
   return self;

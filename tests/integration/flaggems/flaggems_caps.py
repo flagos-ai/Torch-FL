@@ -206,10 +206,15 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # leaves a partial tile, so both spellings now take the vendor route that
     # `bmm` already took for the same reason.
     #
-    # 582 since `mean` joined: the whole-tensor reduction re-measures clean on
-    # u180 after the #570 gap. `mean.dim` stays on `none` -- its FlagGems
-    # kernel returns NaN for a non-inner dimension ((8, 12), dim=0).
-    "iluvatar": 582,
+    # 580 since `add.Tensor`/`add.Scalar` left FlagGems: they take the native
+    # ixblasAxpyEx kernel for float32/float16 and escape back to FlagGems for
+    # every other dtype (FlagGems' complex128 add returns zeros and its
+    # float64 add is wrong on this chip). The escape keeps the two ops
+    # registered on PrivateUse1, so they still count as FlagGems-covered
+    # routes in the conf tally (582, `mean` included after the #570 gap was
+    # re-measured) even though their conf value is the vendor slot; this
+    # number is the routes that dispatch straight to FlagGems.
+    "iluvatar": 580,
     "kunlunxin": 0,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow. The day-0 variant
