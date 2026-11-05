@@ -2422,7 +2422,15 @@ NATIVE_TRITON_GAPS = {
         "special_chebyshev_polynomial_v",
         "special_hermite_polynomial_h",
         "special_shifted_chebyshev_polynomial_u",
-        "mean",
+        # `mean` and `mean.dim` were gapped on 2026-10-20 for the keepdim mean
+        # returning wrong values (issue #570). Re-measured on u180 (BI-V150,
+        # FlagGems 5.4.0), `flag_gems.mean_dim` matches CPU on fp32, bf16 and
+        # fp16 over dim 0, -1 and [0, -1], keepdim on and off -- 63 cases, 0
+        # failures, rel ~1.5e-07. The #570 note is still real for the one shape
+        # it did describe: an empty reduction -- `empty(0).mean()` -- raises
+        # ZeroDivisionError where ATen returns NaN (the same defect MetaX's note
+        # records as FlagGems issue #6333). The conf is per-op and cannot gate
+        # on shape, so both spellings stay gapped until that is fixed upstream.
         "mean.dim",
         # `_conj`, for the contract test_math_bits_contract.py pins: ATen's conj
         # is a lazy view (Conjugate bit set, storage untouched) and FlagGems'

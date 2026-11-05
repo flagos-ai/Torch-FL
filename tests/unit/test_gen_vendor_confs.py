@@ -649,8 +649,10 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     """The op families the Iluvatar CI lane fails on (issue #570) are not
     routed to FlagGems, and the fix is a gap rather than a route change.
 
-    `mean`/`mean.dim` return wrong values through the generic FlagGems kernel,
-    so neither spelling may stay on `flaggems`. `mm` and `mm.out` both leave:
+    `mean.dim` returns wrong values through the generic FlagGems kernel on a
+    non-inner dimension (NaN), so it may not stay on `flaggems`; `mean` (the
+    whole-tensor reduction) was re-measured clean on u180 and has left the gap.
+    `mm` and `mm.out` both leave:
     the float64 failure is the `_iluvatar` tuning perf model raising "dtype not
     supported" during config pruning, and the first landing of this fix left
     `mm` routed, which only moved the failure from `matmul_prob` to `matmul` on
@@ -716,7 +718,6 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "bmm.dtype_out",
         "bmm.out",
         "div_.Tensor",
-        "mean",
         "mean.dim",
         "mm",
         "mm.out",
