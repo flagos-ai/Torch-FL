@@ -1119,9 +1119,11 @@ _ADD_GATE = """\
 
 # The tensor-operand spellings: add.Tensor (allocating) and add_.Tensor.
 _ADD_OUT = """\
+  // The axpy writes its output in full, so only the scalar path seeds its
+  // output from `self`.
   at::Tensor out = at::empty(self.sizes(), self.options());
-  out.copy_(self.is_contiguous() ? self : self.contiguous());
   if (is_scalar) {{
+    out.copy_(self.is_contiguous() ? self : self.contiguous());
     iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
   }} else {{
     iluvatar::IluvatarAxpy(out, x, alpha);
