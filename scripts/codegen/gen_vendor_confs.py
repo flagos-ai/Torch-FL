@@ -241,9 +241,9 @@ VENDORS = {
 # unchanged. register.cc publishes add_/div_: add_ through ATen's own add_out,
 # div_ through a host round trip (ATen's complex div writes its destination
 # before it reads its sources, so it is wrong when the destination is the
-# operand). `add.Tensor` and `add.Scalar` are in NATIVE_TRITON_GAPS but
-# not here: they take the out-of-place -> in-place lowering to the same kernel,
-# and an out= m.impl cannot be registered under the add.Tensor schema.
+# operand). `add.Tensor`, `add.Scalar` and `add.out` are in NATIVE_TRITON_GAPS
+# but not here: they are registered straight from register.cc against their own
+# schemas (SELF_REGISTERED_NATIVE below), so they need no entry in this set.
 EXTRA_NATIVE = {
     "ascend": {"matmul", "matmul_backward"},
     "iluvatar": {
@@ -260,14 +260,23 @@ EXTRA_NATIVE = {
 # all. Unlike ESCAPE_NATIVE these are not escape-only: the op is theirs, so the
 # FlagGems `.inc` must not claim it and the conf routes it to the vendor.
 #
-# iluvatar's in-place add: the kernels are IluvatarAddInplace /
-# IluvatarAddScalarInplace in csrc/aten/backends/iluvatar/iluvatar_common.h and
-# register.cc names them in its TORCH_LIBRARY_IMPL body (see the comment there).
-# Before this set existed the .inc scan could not see them, so
-# vendor_native_ops() dropped them from codegen_iluvatar_flaggems.py's
-# subtraction too, add_.Tensor stayed in the FlagGems `.inc`, and the duplicate
+# iluvatar's add family: the kernel is IluvatarAdd in
+# csrc/aten/backends/iluvatar/iluvatar_common.h and register.cc names it against
+# each of the six schemas in its TORCH_LIBRARY_IMPL body (see the comment
+# there). Before this set existed the .inc scan could not see it, so
+# vendor_native_ops() dropped those ops from codegen_iluvatar_flaggems.py's
+# subtraction too, the FlagGems `.inc` kept claiming them, and the duplicate
 # m.impl would have failed at library load.
-SELF_REGISTERED_NATIVE = {"iluvatar": {"add_.Tensor", "add_.Scalar"}}
+SELF_REGISTERED_NATIVE = {
+    "iluvatar": {
+        "add.Tensor",
+        "add.Scalar",
+        "add.out",
+        "add.Scalar_out",
+        "add_.Tensor",
+        "add_.Scalar",
+    }
+}
 
 # Ops a hand-written wrapper claims for every platform, so they appear in no
 # .inc at all. Same cause as EXTRA_NATIVE, different owner:
@@ -2498,17 +2507,15 @@ NATIVE_TRITON_GAPS = {
         # complex64 -- measured on the CI lane 2026-10-21 as the one remaining
         # failure of test_math_bits_contract.py once `_conj` and
         # `view_as_real` were answered, and in-process against flag_gems 5.4.0.
-        # The conf routes these three to the native slot instead. add_/div_
-        # are in EXTRA_NATIVE, where register.cc publishes ATen's own div_ and
-        # IluvatarAddInplace/IluvatarAddScalarInplace answer add_ (see above).
+        # The conf routes these three to the native slot instead. div_ is in
+        # EXTRA_NATIVE, where register.cc publishes ATen's own div_; the add
+        # family answers itself (SELF_REGISTERED_NATIVE, see above).
         #
-        # Only the in-place spellings are routed. `add.Tensor` and
-        # `add.Scalar` ride the out-of-place -> in-place lowering: with the
-        # in-place op on a PrivateUse1 kernel, ATen's `add` composite
-        # dispatches `z + t`, `z + 0` and `z + 1` to the in-place slot, so
-        # they leave FlagGems without a second registration (and cannot have
-        # one: an out= kernel does not match add.Tensor's C++ signature, and
-        # the register.cc comment records the abort that measured it).
+        # Every spelling is routed, out-of-place included. With all six add
+        # schemas registered from register.cc against their own
+        # (SELF_REGISTERED_NATIVE), ATen's
+        # `add` composite reaches the kernel directly instead of lowering to
+        # add_.Tensor, and the model's adds stop allocating inside FlagGems.
         # The in-place pair also fixes a defect of its own: a `none` route
         # made `self.add_(other)` a boxed cpu_fallback that wrote to a CPU
         # copy and left `self` unchanged (measured on u180 2026-10-21).
@@ -2638,14 +2645,14 @@ NATIVE_TRITON_GAPS = {
 # redundant. FlagGems coverage is unaffected (the .inc is generated from the
 # FlagGems set, and only `none`/`iluvatar` ops are in it).
 #
-# And for the in-place add family: it is among the hottest ops in the #667
-# forward pass and FlagGems' Python kernel for it is what the BI-V150
-# measurement showed in the 31x gap -- it materialises its own output and then
-# `copy_`s back, so every `add_` costs a kernel, a temporary and a device copy.
-# The native kernel (IluvatarAddInplace in iluvatar_common.h) is one ixblas axpy
-# per call, measured correct on fp32/fp16 for the elementwise, broadcast-lane
-# and scalar spellings; every other dtype is answered inside the same kernel by
-# at::add_out, the registration register.cc used before this change.
+# And for the add family: it is among the hottest ops in the #667 forward pass
+# and FlagGems' Python kernel for it is what the BI-V150 measurement showed in
+# the 31x gap -- it materialises a full-size temporary, measured at ~7 ms on a
+# 48 MB bf16 activation against ~0.5 ms for the native kernel (IluvatarAdd in
+# iluvatar_common.h), which is one ixblas axpy for fp32/fp16. Every other
+# dtype, and every layout the vendor call cannot express, is answered inside
+# the same kernel by at::add_out -- the registration register.cc used before
+# this change -- so no add reaches cpu_fallback.
 #
 # Cambricon joins for the same kind of reason, one step stronger: its native
 # set is a list of ops FlagGems actively cannot serve, so preferring FlagGems

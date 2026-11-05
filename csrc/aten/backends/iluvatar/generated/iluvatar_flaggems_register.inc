@@ -124,7 +124,7 @@
 //   - view_as_real
 //   - where.self_out
 //
-// Total: 584 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 584 ops registered here, 10 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);

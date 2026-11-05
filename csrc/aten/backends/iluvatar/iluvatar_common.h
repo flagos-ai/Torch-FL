@@ -52,6 +52,7 @@
 #include <ATen/ATen.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/ones.h>
+#include <ATen/ops/scalar_tensor.h>
 #include <c10/core/Scalar.h>
 
 #include <cublas_v2.h>
@@ -423,29 +424,44 @@ inline bool IluvatarSupportsAxpyDtype(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf;
 }
 
-// y += alpha * x on the device, both operands the same shape and contiguous,
-// for the in-place elementwise `add` (IluvatarAddInplace below).
+// d += alpha * x on the device, for float32/float16 operands: one
+// ixblasAxpyEx, the in-place term of an elementwise add. The other term is the
+// destination's own value, which IluvatarAdd makes sure already holds what it
+// should before this call -- there is no vendor call for `d = alpha*x + beta*y`
+// itself.
 //
-// ixblasAxpyEx takes alpha by pointer with its own type tag, and its
-// `executionType` byte was measured on u180 (corex 4.5.0) to accept only 0 --
-// the enum's named values (16F, 32F, 64F, 32I) all returned
-// IXBLAS_STATUS_NOT_SUPPORTED. alpha is float32 for both operand types: the
-// vendor takes alpha in its own type tag and was measured to accept a float32
-// alpha beside float16 operands (IX_R_16F x/y, IX_R_32F alpha -> status 0,
-// exact), while a float16 alpha returns status 15 for every execution type
-// tried. Both were verified against the CPU reference.
+// ixblasAxpyEx defers to the handle's stream, which is the flagos current
+// stream (GetCublasHandle rebinds it on every call), so the caller's next op is
+// ordered behind it without a device-wide drain.
+//
+// alpha is float32 for both operand types: measured on u180 (corex 4.5.0), the
+// vendor accepts IX_R_16F x/y with IX_R_32F alpha (status 0, exact) and returns
+// status 15 for a float16 alpha under every execution type, and
+// `executionType` accepts only 0 (its 16F/32F/64F/32I values all return
+// NOT_SUPPORTED). Strides are in elements; 1 is the only stride a multi-element
+// contiguous tensor can have.
+//
+// `d` may alias `x` (the in-place add passes it as both) -- the vendor kernel
+// reads element by element, so the read of x precedes the write to it.
+//
+// `groups` is 1 for the elementwise case and more when the operand is a
+// broadcast vector (see IluvatarAdd): the destination is then the operand
+// repeated `groups` times along its last dimension, and each repetition is one
+// more call over the same operand bytes.
 inline void IluvatarAxpy(
-    at::Tensor& y,
+    at::Tensor& d,
     const at::Tensor& x,
-    const at::Scalar& alpha) {
-  const int64_t n = y.numel();
-  if (n == 0 || alpha.to<double>() == 0.0) {
+    double alpha,
+    int64_t groups = 1) {
+  const int64_t n = d.numel();
+  if (n == 0) {
     return;
   }
-  const int device = IluvatarDeviceIndex(y);
+  const int device = IluvatarDeviceIndex(d);
   cublasHandle_t handle = GetCublasHandle(device);
-  const float alpha_f = static_cast<float>(alpha.to<double>());
-  if (x.scalar_type() == at::kHalf) {
+  const float alpha_f = static_cast<float>(alpha);
+  const auto type = ToBlasDataType(d.scalar_type());
+  if (groups == 1) {
     ILUVATAR_EXEC(
         ixblasAxpyEx(
             handle,
@@ -453,215 +469,133 @@ inline void IluvatarAxpy(
             &alpha_f,
             IX_R_32F,
             x.const_data_ptr(),
-            IX_R_16F,
+            type,
             1,
-            y.data_ptr(),
-            IX_R_16F,
-            1,
-            static_cast<ixblasDataType_t>(0)),
-        "ixblasAxpyEx");
-  } else {
-    ILUVATAR_EXEC(
-        ixblasAxpyEx(
-            handle,
-            static_cast<int>(n),
-            &alpha_f,
-            IX_R_32F,
-            x.const_data_ptr(),
-            IX_R_32F,
-            1,
-            y.data_ptr(),
-            IX_R_32F,
+            d.data_ptr(),
+            type,
             1,
             static_cast<ixblasDataType_t>(0)),
         "ixblasAxpyEx");
-  }
-  IluvatarSynchronizeStream(device);
-}
-
-// y += alpha * s on every element of `y`, for `add_.Scalar` (ATen boxes
-// `x += 1.0` onto it). corex exports only the typed Sscal/Dscal/Cscal/Zscal
-// entry points and `ixblasScal` is not among them, so this is the axpy
-// y += (alpha * s) * ones. The value is rounded to the output's type rather
-// than the multiply being narrowed, which is what ATen does for a python
-// number.
-inline void IluvatarAxpyScalar(
-    at::Tensor& y,
-    const at::Scalar& s,
-    const at::Scalar& alpha) {
-  const int64_t n = y.numel();
-  if (n == 0 || alpha.to<double>() == 0.0) {
     return;
   }
-  const int device = IluvatarDeviceIndex(y);
-  cublasHandle_t handle = GetCublasHandle(device);
-  const float alpha_f = static_cast<float>(alpha.to<double>());
-  const at::Tensor ones = at::ones({n}, y.options());
-  if (y.scalar_type() == at::kHalf) {
-    const float scaled = alpha_f * static_cast<float>(s.to<at::Half>());
-    ILUVATAR_EXEC(
-        ixblasAxpyEx(
-            handle,
-            static_cast<int>(n),
-            &scaled,
-            IX_R_32F,
-            ones.const_data_ptr(),
-            IX_R_16F,
-            1,
-            y.data_ptr(),
-            IX_R_16F,
-            1,
-            static_cast<ixblasDataType_t>(0)),
-        "ixblasAxpyEx");
-  } else {
-    const float scaled = alpha_f * static_cast<float>(s.to<double>());
-    ILUVATAR_EXEC(
-        ixblasAxpyEx(
-            handle,
-            static_cast<int>(n),
-            &scaled,
-            IX_R_32F,
-            ones.const_data_ptr(),
-            IX_R_32F,
-            1,
-            y.data_ptr(),
-            IX_R_32F,
-            1,
-            static_cast<ixblasDataType_t>(0)),
-        "ixblasAxpyEx");
-  }
-  IluvatarSynchronizeStream(device);
-}
-
-// y += alpha * x for a `y` the axpy reads linearly and an `x` that may
-// broadcast over it. A broadcasting operand is the same `m`-element vector
-// every `m` elements of `y`, so it is one axpy per group over the operand's own
-// length -- no intermediate the size of `y`, and every group's read of `x`
-// finishes before its write of `y` (the two never share storage here).
-//
-// The caller passes `y` dense, or contiguous when it intends to write the
-// result back: this reads `y` linearly.
-inline void IluvatarBroadcastAxpy(
-    at::Tensor& y,
-    const at::Tensor& x,
-    const at::Scalar& alpha) {
-  const int64_t n = y.numel();
-  const int64_t m = x.numel();
-  if (n == 0 || m == 0 || alpha.to<double>() == 0.0) {
-    return;
-  }
+  const int64_t m = n / groups;
   TORCH_CHECK(
-      n % m == 0,
-      "iluvatar: an add operand of ", x.sizes(), " does not broadcast over ",
-      y.sizes());
-  const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
-  at::Tensor yflat = y.reshape({-1});
-  const int device = IluvatarDeviceIndex(y);
-  cublasHandle_t handle = GetCublasHandle(device);
-  const float alpha_f = static_cast<float>(alpha.to<double>());
-  for (int64_t g = 0; g < n; g += m) {
-    at::Tensor ys = yflat.narrow(0, g, m);
-    if (xc.scalar_type() == at::kHalf) {
-      ILUVATAR_EXEC(
-          ixblasAxpyEx(
-              handle,
-              static_cast<int>(m),
-              &alpha_f,
-              IX_R_32F,
-              xc.const_data_ptr(),
-              IX_R_16F,
-              1,
-              ys.data_ptr(),
-              IX_R_16F,
-              1,
-              static_cast<ixblasDataType_t>(0)),
-          "ixblasAxpyEx");
-    } else {
-      ILUVATAR_EXEC(
-          ixblasAxpyEx(
-              handle,
-              static_cast<int>(m),
-              &alpha_f,
-              IX_R_32F,
-              xc.const_data_ptr(),
-              IX_R_32F,
-              1,
-              ys.data_ptr(),
-              IX_R_32F,
-              1,
-              static_cast<ixblasDataType_t>(0)),
-          "ixblasAxpyEx");
-    }
+      m * groups == n,
+      "iluvatar: ", n, " elements do not split into ", groups, " groups");
+  char* base = static_cast<char*>(d.data_ptr());
+  const int64_t bytes = m * d.element_size();
+  for (int64_t g = 0; g < groups; ++g) {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(m),
+            &alpha_f,
+            IX_R_32F,
+            x.const_data_ptr(),
+            type,
+            1,
+            base + g * bytes,
+            type,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
   }
-  IluvatarSynchronizeStream(device);
 }
 
-// The in-place elementwise add the conf routes to `iluvatar`. These are the
-// only kernels register.cc names by hand rather than taking from an `.inc`.
-// They live here, not in iluvatar_kernels.cc, because register.cc includes that
-// file inside its TORCH_LIBRARY_IMPL body (a function body), where torch and
-// corex headers cannot be pulled in; this header is included at file scope.
-inline at::Tensor& IluvatarAddInplace(
-    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
-  iluvatar::IluvatarDeviceGuard guard(self);
-  // The conf routes this op to `iluvatar` for every dtype, so this is the one
-  // answer for all of them: float32/float16 are the axpy below, and every
-  // other dtype takes the same at::add_out register.cc used to answer them
-  // with (ATen's complex out= kernel, reached through at:: so the structured
-  // meta/decomposition path picks it up; `at::native::add_out` does not exist
-  // in this build). Neither arm is a CPU fallback.
-  if (!iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()) ||
-      other.scalar_type() != self.scalar_type()) {
-    return at::add_out(self, self, other, alpha);
+// The elementwise add the conf routes to `iluvatar`, in all three spellings
+// (add.Tensor, add_.Tensor, add_.Scalar): one entry point, because they differ
+// only in where the result goes and what the second addend is.
+//
+// These are the only kernels register.cc names by hand rather than taking from
+// an `.inc`. They live here, not in iluvatar_kernels.cc, because register.cc
+// includes that file inside its TORCH_LIBRARY_IMPL body (a function body),
+// where torch and corex headers cannot be pulled in; this header is included at
+// file scope instead.
+//
+// The conf routes this op to `iluvatar` for every dtype, so this is the one
+// answer for all of them: float32/float16 contiguous operands go through the
+// vendor kernel (IluvatarAxpy, one per operand-sized group), and every other
+// dtype -- and the layouts the vendor call cannot express -- fall to
+// at::add_out, the same registration register.cc used before this change.
+// Neither arm is a CPU fallback.
+//
+// Why FlagGems is not the route: its add is a Python kernel that allocates and
+// writes a full-size temporary, and on a 48 MB bf16 activation measured ~7 ms
+// on u180 against ~0.5 ms of bandwidth. The elementwise add is called hundreds
+// of times per training step, so the temporary is the whole cost.
+inline at::Tensor& IluvatarAdd(
+    at::Tensor& out,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Scalar& alpha) {
+  iluvatar::IluvatarDeviceGuard guard(out);
+  const int64_t n = out.numel();
+  const int64_t m = b.numel();
+  // The vendor call is a contiguous linear add: the destination and the a
+  // operand must be contiguous and the same length, and the b operand either
+  // the same length (elementwise) or an evenly repeated vector (broadcast --
+  // a bias or a per-channel scale, the other common shape of an add).
+  const bool vectorised = iluvatar::IluvatarSupportsAxpyDtype(out.scalar_type()) &&
+      a.scalar_type() == out.scalar_type() &&
+      b.scalar_type() == out.scalar_type() && a.numel() == n &&
+      a.is_contiguous() && out.is_contiguous() && m > 0 &&
+      n % m == 0 && b.is_contiguous() &&
+      (b.sizes().equals(out.sizes()) || out.sizes().back() == m);
+  if (!vectorised) {
+    return at::add_out(out, a, b, alpha);
   }
-  if (self.numel() == 0) {
-    return self;
+  const double s = alpha.to<double>();
+  const bool a_aliases_out = out.storage().is_alias_of(a.storage());
+  const bool b_aliases_out = out.storage().is_alias_of(b.storage());
+  // IluvatarAxpy adds into the destination (d += alpha * x), so `out`'s value
+  // at the call has to be one of the result's terms already. The steady
+  // state -- every add in a model -- is b_aliases_out with alpha 1, and that
+  // is the single vendor call with nothing to prepare.
+  const int64_t groups = n / m;
+  if (b_aliases_out && s == 1.0) {
+    IluvatarAxpy(out, a, 1.0, groups);
+    return out;
   }
-  // `add_` accepts an operand that shares `self`'s storage (`x.add_(x)`): the
-  // axpy reads `x` while it writes `y`, so such an operand is cloned first.
-  const at::Tensor x = other.storage().is_alias_of(self.storage())
-      ? other.clone(at::MemoryFormat::Contiguous)
-      : (other.is_contiguous()
-             ? other
-             : other.contiguous(at::MemoryFormat::Contiguous));
-  const bool elementwise = x.sizes().equals(self.sizes());
-  if (self.is_contiguous()) {
-    if (elementwise) {
-      iluvatar::IluvatarAxpy(self, x, alpha);
-    } else {
-      iluvatar::IluvatarBroadcastAxpy(self, x, alpha);
+  if (a_aliases_out) {
+    // Nothing may be written to `out` before `a` (which is `out`) is read.
+    return at::add_out(out, a, b, alpha);
+  }
+  // Make `out` hold b (scaled when alpha is not 1), then add alpha * a. The
+  // copy and the scale are elementwise kernels; at::add_out would be the same
+  // two passes, so this is never slower than the registration it replaces.
+  if (n == m) {
+    out.copy_(b);
+    if (s != 1.0) {
+      out.mul_(s);
     }
-    return self;
-  }
-  // A non-contiguous `self` (`x = t.t(); x.add_(...)`): the axpy writes in
-  // storage order, so the result is built dense and copied back through the
-  // strides. Building it from a clone also keeps the operand of that copy
-  // distinct from its destination.
-  at::Tensor dense = self.reshape({-1}).clone(at::MemoryFormat::Contiguous);
-  if (elementwise) {
-    iluvatar::IluvatarAxpy(dense, x, alpha);
   } else {
-    iluvatar::IluvatarBroadcastAxpy(dense, x, alpha);
+    // A broadcast operand is a view of the same bytes, so one-call copy and
+    // scale are both broadcasts; only the fill itself repeats.
+    if (s == 1.0) {
+      out.view({groups, m}).copy_(b);
+    } else {
+      out.view({groups, m}).copy_(b).mul_(s);
+    }
   }
-  self.copy_(dense.reshape(self.sizes()));
-  return self;
+  IluvatarAxpy(out, a, s, groups);
+  return out;
 }
 
-inline at::Tensor& IluvatarAddScalarInplace(
-    at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
-  iluvatar::IluvatarDeviceGuard guard(self);
-  // Same two arms as IluvatarAddInplace above.
-  if (!iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
-    return at::add_out(self, self, other, alpha);
-  }
-  if (!self.is_contiguous()) {
-    at::Tensor dense = self.reshape({-1}).clone(at::MemoryFormat::Contiguous);
-    iluvatar::IluvatarAxpyScalar(dense, other, alpha);
-    self.copy_(dense.reshape(self.sizes()));
-    return self;
-  }
-  iluvatar::IluvatarAxpyScalar(self, other, alpha);
-  return self;
+// add_.Scalar / add.Scalar / add.Scalar_out: `b` is a host number. ATen's
+// composite for these spellings boxes it into a 0-dim device tensor and calls
+// the tensor form above, so there is one implementation and one result -- a
+// number that does not fit the dtype's precision by more than one rounding step
+// would need a variant that reads b as a float instead.
+inline at::Tensor& IluvatarAddScalar(
+    at::Tensor& out, const at::Scalar& b, const at::Scalar& alpha) {
+  return IluvatarAdd(
+      out, out, at::scalar_tensor(b, out.options()), alpha);
+}
+
+inline at::Tensor& IluvatarAddScalarOut(
+    const at::Tensor& self, const at::Scalar& b, const at::Scalar& alpha,
+    at::Tensor& out) {
+  return IluvatarAdd(out, self, at::scalar_tensor(b, out.options()), alpha);
 }
 
 } // namespace at::native::flagos::iluvatar

@@ -54,8 +54,13 @@ EXTRA_NATIVE = {
         "_conj",
         "view_as_real",
         "div_.Tensor",
-        # The in-place add pair is registered in the FLAGOS_ILUVATAR_KERNEL arm
-        # of register.cc, in no ``.inc`` at all; it answers the same native slot.
+        # The add family is registered against all six of its schemas in the
+        # FLAGOS_ILUVATAR_KERNEL arm of register.cc, in no ``.inc`` at all; it
+        # answers the same native slot.
+        "add.Tensor",
+        "add.Scalar",
+        "add.out",
+        "add.Scalar_out",
         "add_.Tensor",
         "add_.Scalar",
     },
