@@ -690,15 +690,16 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_ILUVATAR_KERNEL)
     #include "backends/iluvatar/generated/iluvatar_register.inc"
     // The add family is registered here rather than through either .inc: its
-    // kernel lives in iluvatar_common.h (included above). The conf routes all
-    // three spellings to `iluvatar`, where float32/float16 contiguous operands
+    // kernel lives in iluvatar_common.h (included above). The conf routes these
+    // four spellings to `iluvatar`, where float32/float16 contiguous operands
     // take one ixblas axpy instead of FlagGems' Python kernel and its
     // full-size temporary -- on one of the hottest ops of the #667 forward
     // pass. at::add_out still answers every other dtype, as it did when
     // FlagosWrapperPrivAddTensorInplace was the registration.
     //
-    // add.Tensor and add.out are the composite `add`'s own call shapes; with
-    // them registered, ATen's add does not lower to add_.Tensor at all.
+    // add_.Tensor is what ATen's composite `add` lowers to on this backend,
+    // so it is the spelling `a + b` and `a.add(b)` actually reach.
+    m.impl("add_.Tensor", at::native::flagos::iluvatar::IluvatarAdd);
     m.impl("add_.Scalar", at::native::flagos::iluvatar::IluvatarAddScalar);
     m.impl("add.Scalar", at::native::flagos::iluvatar::IluvatarAddScalarOut);
     m.impl("add.Scalar_out", at::native::flagos::iluvatar::IluvatarAddScalarOut);
