@@ -421,6 +421,11 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
         ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
   } while (0)
 
+// y += alpha * other on every element, where `other` is a 0-dim tensor whose
+// value is added everywhere. Kept separate from IluvatarAxpy because the two
+// vendor calls differ: the tensor form takes `other`'s data pointer, and a
+// 0-dim tensor has no length for the vendor to read per output.
+//
 // y += alpha * x on the device, for the four `add` schemas
 // (codegen_iluvatar.py's add_* categories).
 //
@@ -478,6 +483,52 @@ inline void IluvatarAxpy(
             1,
             static_cast<ixblasDataType_t>(0)),
         "ixblasAxpyEx");
+  }
+  IluvatarSynchronizeStream(device);
+}
+
+// y += alpha * s on every element of y, for `t + 1.0`. ixblasScal follows the
+// same type rules measured for ixblasAxpyEx (float32 alpha beside both operand
+// types, executionType 0).
+inline void IluvatarAxpyScalar(
+    at::Tensor& y,
+    const at::Scalar& s,
+    const at::Scalar& alpha) {
+  const int64_t n = y.numel();
+  if (n == 0 || alpha.to<double>() == 0.0) {
+    return;
+  }
+  const int device = IluvatarDeviceIndex(y);
+  cublasHandle_t handle = GetCublasHandle(device);
+  const float alpha_f = static_cast<float>(alpha.to<double>());
+  if (y.scalar_type() == at::kHalf) {
+    const at::Half s_half = s.to<at::Half>();
+    ILUVATAR_EXEC(
+        ixblasScal(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            &s_half,
+            IX_R_16F,
+            y.data_ptr(),
+            IX_R_16F,
+            1),
+        "ixblasScal");
+  } else {
+    const float s_float = static_cast<float>(s.to<double>());
+    ILUVATAR_EXEC(
+        ixblasScal(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            &s_float,
+            IX_R_32F,
+            y.data_ptr(),
+            IX_R_32F,
+            1),
+        "ixblasScal");
   }
   IluvatarSynchronizeStream(device);
 }

@@ -1081,8 +1081,10 @@ _ADD_DELEGATE = {
     "add_scalar_inplace": "AddInplaceTensorKernelIluvatar",
 }
 
+
 _ADD_GATE = """\
-  if (!self.sizes().equals(other.sizes()) ||
+  const bool is_scalar = other.dim() == 0;
+  if ((!is_scalar && !self.sizes().equals(other.sizes())) ||
       self.device() != other.device() ||
       !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {{
     TORCH_CHECK_NOT_IMPLEMENTED(
@@ -1102,7 +1104,16 @@ _ADD_GATE = """\
   iluvatar::IluvatarDeviceGuard guard(self);
 """
 
+# python's number arrives here as a 0-dim tensor (`t + 1.0`), and the vendor's
+# tensor axpy reads one element per output, so that case takes the broadcast
+# scalar call the same op has as add.Scalar.
 _ADD_OUT = """\
+  if (is_scalar) {{
+    at::Tensor out = at::empty(self.sizes(), self.options());
+    out.copy_(self.is_contiguous() ? self : self.contiguous());
+    iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
+    return out;
+  }}
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
   iluvatar::IluvatarAxpy(out, x, alpha);
@@ -1110,6 +1121,10 @@ _ADD_OUT = """\
 }}
 """
 _ADD_IN_PLACE = """\
+  if (is_scalar) {{
+    iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
+    return self;
+  }}
   iluvatar::IluvatarAxpy(self, x, alpha);
   return self;
 }}
@@ -1140,9 +1155,15 @@ at::Tensor {kernel}(
     const at::Tensor& self,
     const at::Scalar& other,
     const at::Scalar& alpha) {{
-  at::Tensor scalar =
-      at::empty({{}}, self.options()).fill_(other.to<double>());
-  return {tensor_kernel}(self, scalar, alpha);
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
+      " (ixblasScal serves float32/float16)");
+  iluvatar::IluvatarDeviceGuard guard(self);
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self.is_contiguous() ? self : self.contiguous());
+  iluvatar::IluvatarAxpyScalar(out, other, alpha);
+  return out;
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})
@@ -1170,9 +1191,13 @@ at::Tensor& {kernel}(
     at::Tensor& self,
     const at::Scalar& other,
     const at::Scalar& alpha) {{
-  at::Tensor scalar =
-      at::empty({{}}, self.options()).fill_(other.to<double>());
-  return {tensor_kernel}(self, scalar, alpha);
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
+      " (ixblasScal serves float32/float16)");
+  iluvatar::IluvatarDeviceGuard guard(self);
+  iluvatar::IluvatarAxpyScalar(self, other, alpha);
+  return self;
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})

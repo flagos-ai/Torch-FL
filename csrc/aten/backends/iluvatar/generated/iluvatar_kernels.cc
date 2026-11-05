@@ -1149,7 +1149,8 @@ at::Tensor AddTensorKernelIluvatar(
     const at::Tensor& self,
     const at::Tensor& other,
     const at::Scalar& alpha) {
-  if (!self.sizes().equals(other.sizes()) ||
+  const bool is_scalar = other.dim() == 0;
+  if ((!is_scalar && !self.sizes().equals(other.sizes())) ||
       self.device() != other.device() ||
       !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
     TORCH_CHECK_NOT_IMPLEMENTED(
@@ -1167,6 +1168,12 @@ at::Tensor AddTensorKernelIluvatar(
       ? other
       : other.to(self.scalar_type());
   iluvatar::IluvatarDeviceGuard guard(self);
+  if (is_scalar) {
+    at::Tensor out = at::empty(self.sizes(), self.options());
+    out.copy_(self.is_contiguous() ? self : self.contiguous());
+    iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
+    return out;
+  }
   at::Tensor out = at::empty(self.sizes(), self.options());
   out.copy_(self.is_contiguous() ? self : self.contiguous());
   iluvatar::IluvatarAxpy(out, x, alpha);
@@ -1179,9 +1186,15 @@ at::Tensor AddScalarKernelIluvatar(
     const at::Tensor& self,
     const at::Scalar& other,
     const at::Scalar& alpha) {
-  at::Tensor scalar =
-      at::empty({}, self.options()).fill_(other.to<double>());
-  return AddTensorKernelIluvatar(self, scalar, alpha);
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add.Scalar has no vendor kernel for ", self.scalar_type(),
+      " (ixblasScal serves float32/float16)");
+  iluvatar::IluvatarDeviceGuard guard(self);
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self.is_contiguous() ? self : self.contiguous());
+  iluvatar::IluvatarAxpyScalar(out, other, alpha);
+  return out;
 }
 
 REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kIluvatar, AddScalarKernelIluvatar)
@@ -1190,7 +1203,8 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
     at::Tensor& self,
     const at::Tensor& other,
     const at::Scalar& alpha) {
-  if (!self.sizes().equals(other.sizes()) ||
+  const bool is_scalar = other.dim() == 0;
+  if ((!is_scalar && !self.sizes().equals(other.sizes())) ||
       self.device() != other.device() ||
       !iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type())) {
     TORCH_CHECK_NOT_IMPLEMENTED(
@@ -1208,6 +1222,10 @@ at::Tensor& AddInplaceTensorKernelIluvatar(
       ? other
       : other.to(self.scalar_type());
   iluvatar::IluvatarDeviceGuard guard(self);
+  if (is_scalar) {
+    iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
+    return self;
+  }
   iluvatar::IluvatarAxpy(self, x, alpha);
   return self;
 }
@@ -1218,9 +1236,13 @@ at::Tensor& AddInplaceScalarKernelIluvatar(
     at::Tensor& self,
     const at::Scalar& other,
     const at::Scalar& alpha) {
-  at::Tensor scalar =
-      at::empty({}, self.options()).fill_(other.to<double>());
-  return AddInplaceTensorKernelIluvatar(self, scalar, alpha);
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add_.Scalar has no vendor kernel for ", self.scalar_type(),
+      " (ixblasScal serves float32/float16)");
+  iluvatar::IluvatarDeviceGuard guard(self);
+  iluvatar::IluvatarAxpyScalar(self, other, alpha);
+  return self;
 }
 
 REGISTER_IMPL_TO_DISPATCHER(AddInplaceScalarFn, add_inplace_scalar_dispatcher, Backend::kIluvatar, AddInplaceScalarKernelIluvatar)
