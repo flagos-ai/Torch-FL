@@ -90,6 +90,7 @@ jobs:
           python-version: "3.12"
 
       - name: Require every registered case gap to have open issues
+        id: query
         working-directory: trusted
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}

@@ -120,6 +120,15 @@ def test_main_ci_runs_the_issue_gate_for_pull_requests():
     assert resolve["outputs"]["base_ref"] == ("${{ steps.resolve.outputs.base_ref }}")
 
 
+def test_main_ci_runs_the_issue_checker_from_the_main_after_this_change():
+    """The base is exposed so the first-commit run can be retried after merge."""
+    main = _workflow("ci.yml")
+    gate = main["jobs"]["ci-complete"]
+    assert gate["outputs"]["base_sha"] == (
+        "${{ needs.resolve-checkout.outputs.base_ref }}"
+    )
+
+
 def test_required_gate_covers_matrix_pipeline():
     jobs = _workflow("ci.yml")["jobs"]
     gate = jobs["ci-complete"]

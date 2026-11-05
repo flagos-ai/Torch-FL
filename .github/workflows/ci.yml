@@ -139,8 +139,8 @@ jobs:
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
 
   # The controller is pinned to the base revision. Submitted source and its
-  # registry are checked as data. The first commit introducing this gate runs it
-  # in an explicit origin workflow; later revisions use this required job.
+  # registry are checked as data. The first commit introducing this gate has no
+  # reusable workflow in its base, so every follow-up run verifies that commit.
   case-gap-issues:
     name: Case gap issues
     needs: resolve-checkout
@@ -234,6 +234,8 @@ jobs:
   ci-complete:
     name: CI complete
     if: always()
+    outputs:
+      base_sha: ${{ needs.resolve-checkout.outputs.base_ref }}
     needs:
       - resolve-checkout
       - lint

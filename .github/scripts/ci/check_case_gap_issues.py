@@ -325,13 +325,12 @@ def _source_violations(
     ) or any(
         isinstance(node, ast.Call) and _is_tracked_skip(node) for node in ast.walk(tree)
     )
-    if imports != {"tracked_skip"}:
-        if uses_tracked_skip or relative in migrated:
-            errors.append(
-                f"{relative}: tracked skip must be imported from the shared registry"
-            )
     if not imports and not uses_tracked_skip and relative not in migrated:
         return errors, {}
+    if imports != {"tracked_skip"}:
+        errors.append(
+            f"{relative}: tracked skip must be imported from the shared registry"
+        )
     for statement in tree.body:
         if isinstance(statement, ast.Assign):
             targets = statement.targets

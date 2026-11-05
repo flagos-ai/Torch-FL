@@ -227,6 +227,25 @@ def test_main_rejects_the_script_outside_its_trusted_root(tmp_path):
     assert "must run from the trusted base script" in process.stdout
 
 
+def test_main_checks_skip_forms_in_every_migrated_source(tmp_path):
+    module = _checker()
+    relative = "tests/integration/ops/test_mps_all.py"
+    contract = module.CaseGapContract("", (relative,))
+    source = "import pytest\ndef test_x():\n    pytest.skip('gap')\n"
+    submitted = tmp_path / relative
+    submitted.parent.mkdir(parents=True)
+    submitted.write_text(source, encoding="utf-8")
+    errors = module.source_violations(
+        module._read_contract_sources(tmp_path, contract),
+        (),
+        frozenset(contract.sources),
+    )
+    assert any(
+        error.startswith(f"{relative}:") and "test skips must use" in error
+        for error in errors
+    )
+
+
 _GAP = """CaseGapIssue(number="#710", cases=("tests/integration/ops/test_x.py::test_x",), routes=(), upstream="flagos-ai/FlagGems/issues/8411")
 """
 _CONTRACT = "MIGRATED_CASE_FILES = frozenset({'tests/integration/ops/test_x.py'})\n"
