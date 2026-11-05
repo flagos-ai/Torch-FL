@@ -11,4 +11,6 @@
 // Included from the USE_CAMBRICON arm of csrc/aten/register.cc when
 // FLAGOS_CAMBRICON_KERNEL is defined.
 
+  m.impl("embedding_dense_backward", at::native::flagos::cambricon::EmbeddingDenseBackward);
   m.impl("mul.Tensor", at::native::flagos::cambricon::MulTensor);
+  m.impl("mul.out", at::native::flagos::cambricon::MulOut);

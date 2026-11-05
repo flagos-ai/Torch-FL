@@ -93,10 +93,34 @@ at::Tensor MulTensor(const at::Tensor& self, const at::Tensor& other) {
                            dense_result.mutable_data_ptr()), "cnnlCastDataType (mul output)");
   return result;
 }
+// The out= spelling. It is the same arithmetic into a caller-provided buffer, so
+// it forwards to the functional kernel and copies the result in rather than
+// repeating the descriptor work; `copy_` is a runtime copy on this backend, not
+// a host round trip. Served here because a Qwen3 training step reaches
+// `mul.out` directly and it was the largest remaining cpu_fallback there.
+//
+// An out= buffer that does not yet carry the result shape is resized here. aten
+// resizes a wrong-sized buffer before dispatching, so the shapes that reach this
+// kernel are the right one and the empty one a caller passes to be filled;
+// copying into a non-empty mismatch instead reaches the device with a
+// destination the copy cannot map, and that faults rather than raising.
+at::Tensor& MulOut(const at::Tensor& self, const at::Tensor& other,
+                   at::Tensor& out) {
+  auto result = MulTensor(self, other);
+  if (out.sizes() != result.sizes()) {
+    // The empty buffer aten's out= contract allows, and a wrong-sized one that
+    // reached the kernel before the dispatcher resized it.
+    out.resize_(result.sizes());
+  }
+  out.copy_(result);
+  return out;
+}
 } // namespace at::native::flagos::cambricon
 
 namespace at::native::flagos {
 REGISTER_IMPL_TO_DISPATCHER(
     MulTensorFn, mul_tensor_dispatcher, Backend::kCambricon, cambricon::MulTensor);
+REGISTER_IMPL_TO_DISPATCHER(
+    MulOutFn, mul_out_dispatcher, Backend::kCambricon, cambricon::MulOut);
 } // namespace at::native::flagos
 #endif // USE_CAMBRICON
