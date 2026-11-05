@@ -421,7 +421,7 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
         ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
   } while (0)
 
-// `x` laid out one element per index of a `rank`-dimensional output, for the
+// `x` laid out one element per index of the output's shape, for the
 // add whose operand broadcasts or follows the output's layout. It must not go
 // through `x.expand(out).contiguous()`, and not through a plain `contiguous()`
 // either: both tensors are ventored on this backend, so `contiguous()` on a
@@ -432,16 +432,19 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
 // dimensions are broadcast (stride 0), which is what ATen's right-aligned
 // broadcast does. A 0-dim operand is the scalar branch's case and is not
 // passed here.
-inline at::Tensor IluvatarAxpyOperand(const at::Tensor& x, int64_t rank) {
+inline at::Tensor IluvatarAxpyOperand(
+    const at::Tensor& x, at::IntArrayRef out) {
   const at::Tensor xc = x.contiguous();
-  std::vector<int64_t> sizes(rank, 1);
-  std::vector<int64_t> strides(rank, 0);
-  const int64_t lead = rank - xc.dim();
+  const int64_t lead = static_cast<int64_t>(out.size()) - xc.dim();
+  // ATen's right-aligned broadcast: every leading dimension of the output has
+  // no counterpart in the operand (stride 0), and a dimension of the operand
+  // that is 1 where the output is wider is broadcast too (its stride is 0).
+  std::vector<int64_t> strides(static_cast<size_t>(lead), 0);
   for (const auto d : c10::irange(xc.dim())) {
-    sizes[d + lead] = xc.size(d);
-    strides[d + lead] = xc.stride(d);
+    strides.push_back(xc.size(d) == 1 && out[d + lead] != 1 ? 0
+                                                            : xc.stride(d));
   }
-  return xc.as_strided(sizes, strides).clone();
+  return xc.as_strided(out, strides).clone();
 }
 
 // y += alpha * other on every element, where `other` is a 0-dim tensor whose
@@ -463,7 +466,7 @@ inline void IluvatarAxpy(
     at::Tensor& y,
     const at::Tensor& x,
     const at::Scalar& alpha) {
-  at::Tensor xc = IluvatarAxpyOperand(x, y.dim());
+  at::Tensor xc = IluvatarAxpyOperand(x, y.sizes());
   const int64_t n = xc.numel();
   if (n == 0 || alpha.to<double>() == 0.0) {
     return;
