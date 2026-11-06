@@ -12,17 +12,6 @@
 
 namespace at::native::flagos::cambricon {
 
-// `mul.Tensor` through cnnlOpTensor, and the out= spelling that forwards to it.
-// See mul.cc.
-at::Tensor MulTensor(const at::Tensor& self, const at::Tensor& other);
-at::Tensor& MulOut(
-    const at::Tensor& self, const at::Tensor& other, at::Tensor& out);
-
-// `embedding_dense_backward` through cnnlEmbeddingBackward. See embedding.cc.
-at::Tensor EmbeddingDenseBackward(
-    const at::Tensor& grad_output, const at::Tensor& indices,
-    int64_t num_weights, int64_t padding_idx, bool scale_grad_by_freq);
-
 #ifdef FLAGOS_CAMBRICON_CNNL_EXTRA
 // Fused scaled-dot-product attention through CNNL's flash attention. See
 // attention.cc.

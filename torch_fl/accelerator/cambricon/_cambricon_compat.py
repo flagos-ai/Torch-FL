@@ -56,13 +56,29 @@ import types
 #: Resolved by soname, so the neuware install on the loader path supplies it.
 _CNRT_SONAME = "libcnrt.so"
 
+# The loaded library, resolved once. `ctypes.CDLL` runs dlopen and rebinds every
+# symbol on each call, and `_current_device` is on FlagGems' per-op path (its
+# `torch.mlu.current_device` is the shim below), so constructing the handle per
+# call taxed every kernel launch. Measured on an MLU590: 272 us inside one
+# `add` launch, unchanged from a 64-element tensor to a 4096x4096 one -- the
+# signature of fixed setup cost, not of work proportional to the data. Caching
+# the object removes it; the handle stays valid for the life of the process.
+_CNRT = None
+_CNRT_RESOLVED = False
+
 
 def _cnrt():
     """The process' ``libcnrt.so``, or None when the MLU runtime is absent."""
-    try:
-        return ctypes.CDLL(_CNRT_SONAME)
-    except OSError:
-        return None
+    global _CNRT, _CNRT_RESOLVED
+    if not _CNRT_RESOLVED:
+        try:
+            _CNRT = ctypes.CDLL(_CNRT_SONAME)
+        except OSError:
+            _CNRT = None
+        # Remember a failure too: retrying a load that cannot succeed only puts
+        # the dlopen attempt back on the per-op path it was removed from.
+        _CNRT_RESOLVED = True
+    return _CNRT
 
 
 def _device_count() -> int:

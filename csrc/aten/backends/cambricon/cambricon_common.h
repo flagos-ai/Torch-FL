@@ -179,6 +179,10 @@ class TensorDesc {
   void Set(const at::Tensor& tensor) {
     const auto sizes = tensor.sizes();
     std::vector<int> dims(sizes.begin(), sizes.end());
+    TORCH_CHECK(
+        !dims.empty(),
+        "flagos cambricon: a rank-0 tensor reached a CNNL descriptor (",
+        tensor.scalar_type(), ")");
     CheckCnnl(
         cnnlSetTensorDescriptor(
             desc_,
@@ -187,6 +191,30 @@ class TensorDesc {
             static_cast<int>(dims.size()),
             dims.empty() ? nullptr : dims.data()),
         "cnnlSetTensorDescriptor");
+  }
+
+  // Describes `tensor` with its own strides.
+  //
+  // CNNL requires the lowest-dimension stride to be 1, so this only serves
+  // views that already satisfy it. A transposed matrix does not -- w.t() of a
+  // (K, N) weight carries strides (1, K) -- and is handled by describing the
+  // underlying storage and setting the matmul transpose flag instead, which
+  // keeps the weight from being copied (copying it made the multiply 242 times
+  // slower than the same product on a contiguous operand).
+  void SetStrided(const at::Tensor& tensor) {
+    const auto sizes = tensor.sizes();
+    const auto strides = tensor.strides();
+    std::vector<int> dims(sizes.begin(), sizes.end());
+    std::vector<int> steps(strides.begin(), strides.end());
+    CheckCnnl(
+        cnnlSetTensorDescriptorEx(
+            desc_,
+            CNNL_LAYOUT_ARRAY,
+            ToCnnlDtype(tensor.scalar_type()),
+            static_cast<int>(dims.size()),
+            dims.empty() ? nullptr : dims.data(),
+            dims.empty() ? nullptr : steps.data()),
+        "cnnlSetTensorDescriptorEx");
   }
 
   cnnlTensorDescriptor_t get() const { return desc_; }
