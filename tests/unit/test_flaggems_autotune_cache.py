@@ -133,6 +133,35 @@ def test_unparsable_setting_is_left_alone(as_dcu, monkeypatch):
     assert triton_knobs.autotuning.cache is False
 
 
+def test_a_knob_without_a_value_is_read_from_the_environment(as_dcu, monkeypatch):
+    """The parse must not depend on the knob object carrying the raw value.
+
+    Triton 3.6's ``env_bool`` stores only the *override* in ``obj.__dict__`` and
+    keeps no parsed-value attribute, so any parse that starts from ``__dict__``
+    reads "unset" no matter what the environment says. That is the shape of the
+    regression this pins: the guard then answers "enable" for every value,
+    including a deliberate ``0``.
+    """
+    assert not hasattr(triton_knobs.autotuning, "env_val")
+    monkeypatch.setenv(ENV_VAR, "0")
+
+    assert os.environ[ENV_VAR] == "0"
+    assert flagos._flaggems_autotune_knob(triton_knobs) is False
+
+
+def test_a_build_without_the_parser_still_enables(as_dcu, monkeypatch):
+    """The user's setting is read through ``knobs.getenv_bool``, which the
+    Cambricon 3.4 Triton line does not have. Its absence must read as "not set"
+    and enable the cache -- not as a veto, and not as a crash."""
+    monkeypatch.delattr(triton_knobs, "getenv_bool", raising=False)
+    monkeypatch.setenv(ENV_VAR, "0")
+
+    flagos._enable_flaggems_autotune_cache()
+
+    assert os.environ[ENV_VAR] == "1"
+    assert triton_knobs.autotuning.cache is True
+
+
 def test_failure_is_not_fatal(as_dcu, monkeypatch):
     """Best-effort, like the patches around it: this runs inside device init."""
 
