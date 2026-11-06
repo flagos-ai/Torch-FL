@@ -592,10 +592,157 @@ inline at::Tensor& IluvatarAddScalar(
       out, out, at::scalar_tensor(b, out.options()), alpha);
 }
 
-inline at::Tensor& IluvatarAddScalarOut(
+// add.Scalar_out, the out= spelling. Its schema names an out parameter, and
+// registering a by-reference kernel under it aborts the library at load with
+// "Mismatch in kernel C++ signatures" (measured on u180), so it is registered
+// through the boxed kernel below, the same way add.out is.
+inline at::Tensor& IluvatarAddScalarOutImpl(
     const at::Tensor& self, const at::Scalar& b, const at::Scalar& alpha,
     at::Tensor& out) {
-  return IluvatarAdd(out, self, at::scalar_tensor(b, out.options()), alpha);
+  if (!out.sizes().equals(self.sizes())) {
+    out.resize_(self.sizes());
+  }
+  out.copy_(self);
+  return IluvatarAddScalar(out, b, alpha);
+}
+
+inline void IluvatarAddScalarOut(
+    const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  const auto& schema = op.schema();
+  const size_t base = stack->size() - schema.arguments().size();
+  const at::Tensor self = stack->at(base).toTensor();
+  const at::Scalar& b = stack->at(base + 1).toScalar();
+  const at::Scalar& alpha = stack->at(base + 2).toScalar();
+  at::Tensor& out =
+      stack->at(base + static_cast<size_t>(*schema.argumentIndexWithName("out")))
+          .toTensor();
+  IluvatarAddScalarOutImpl(self, b, alpha, out);
+  stack->resize(base + 1);
+  stack->at(base) = out;
+}
+
+// add.Tensor, the out-of-place tensor add. Nothing in ATen's own path names it
+// -- `a + b` and `a.add(b)` reach add.out -- so this is the kernel for a call
+// that comes straight to the op, and it also answers a plain `a + b`: measured
+// on u180, remove the add.Tensor registration and `a + b` segfaults, because
+// ATen's composite add.Tensor lowers to `add_(empty_like(self) + 0, ..)` and
+// the empty destination it starts from is garbage, which segfaults inside
+// copy_ before the add. IluvatarAdd reads its destination as one of the
+// result's terms, so this entry point writes both of them first.
+inline at::Tensor IluvatarAddTensor(
+    const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  const int64_t m = other.numel();
+  iluvatar::IluvatarDeviceGuard guard(out);
+  const bool vectorised =
+      iluvatar::IluvatarSupportsAxpyDtype(out.scalar_type()) &&
+      self.scalar_type() == out.scalar_type() &&
+      other.scalar_type() == out.scalar_type() &&
+      self.numel() == out.numel() && self.is_contiguous() && m > 0 &&
+      out.numel() % m == 0 && other.is_contiguous() &&
+      (other.sizes().equals(out.sizes()) || out.sizes().back() == m);
+  if (!vectorised) {
+    return IluvatarAdd(out, self, other, alpha);
+  }
+  const double s = alpha.to<double>();
+  const int64_t groups = out.numel() / m;
+  out.view({groups, m}).copy_(other);
+  if (s != 1.0) {
+    out.mul_(s);
+  }
+  IluvatarAxpy(out, self, s, groups);
+  return out;
+}
+
+// add.out, and therefore add_.Tensor. Its schema is
+// `(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)`,
+// and add_.Tensor is a structured delegate to it (`structured_delegate:
+// add.out` in native_functions.yaml), so both spellings reach this kernel and a
+// typed registration must carry the four-argument signature. It is a callable
+// object rather than a plain function because torch::Library::impl takes the
+// out argument by value, which a `Tensor&` parameter does not bind to; the
+// library accepts functors, and calls theirs with the schema's arguments.
+//
+// `out` arrives empty in the `out=` spelling, so it must be written, not read:
+// measured on u180, a kernel that read it answered garbage plus self. The
+// in-place spelling reaches the same kernel with `out` aliasing `self`, which
+// IluvatarAdd serves with one vendor call. Sizes that do not all match are the
+// same split IluvatarAdd makes -- ATen resizes `out` to the broadcast shape,
+// then the kernel runs at that shape.
+//
+// torch::Library::impl wraps the functor for every dispatch key the schema
+// lists, and only the PrivateUse1 one has an out parameter to take by value;
+// add.out's (catch all) registration is dispatched on operands alone. Measured
+// on u180, a functor here aborted the whole library with "Mismatch in kernel
+// C++ signatures" at registerKernel, so add.out goes in through the boxed
+// kernel below, and this struct is the body that kernel calls.
+struct IluvatarAddOut {
+  at::Tensor& operator()(
+      const at::Tensor& self,
+      const at::Tensor& other,
+      const at::Scalar& alpha,
+      at::Tensor& out) const {
+    const bool same_shape =
+        other.sizes().equals(self.sizes()) && out.sizes().equals(self.sizes());
+    if (!same_shape || out.device() != self.device()) {
+      const auto shape = at::infer_size(self.sizes(), other.sizes());
+      out.resize_(shape);
+    }
+    const double s = alpha.to<double>();
+    // Only the same-shape, contiguous case goes to the vendor axpy. Frame plus
+    // bias is (M, 1) plus (1, N), and a stride-0 expanded view of self is what
+    // would make that one call -- measured on u180, running the axpy on a
+    // resize alone segfaulted. Everything else is answered here with the
+    // elementwise kernels instead of through at::add_out: that call
+    // redispatches to whatever add.out resolves to for these operands, which on
+    // this backend is the very registration that is running.
+    if (out.is_contiguous() && self.sizes().equals(out.sizes()) &&
+        other.sizes().equals(out.sizes())) {
+      return IluvatarAdd(out, self, other, alpha);
+    }
+    // The broadcasting side is not one contiguous run of the destination, so
+    // it is two elementwise passes: out = self (scaled), then out += other
+    // (scaled). Both are broadcast copies, which is the only way a stride-0
+    // operand is written down here.
+    const auto scale = [&](const at::Tensor& t) {
+      return s == 1.0 ? t : t.mul(s);
+    };
+    out.copy_(scale(self));
+    out.add_(scale(other));
+    return out;
+  }
+};
+
+// add.out as a boxed kernel. The stack holds the op's own arguments, alpha and
+// out among them, and the return is the Tensor the operator passes in as
+// `out`, so self and other are the first two arguments the schema lists and
+// the destination is the one named `out`.
+inline void IluvatarAddOutBoxed(
+    const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  const auto& schema = op.schema();
+  const size_t base = stack->size() - schema.arguments().size();
+  at::Tensor self = stack->at(base).toTensor();
+  at::Tensor other = stack->at(base + 1).toTensor();
+  at::Tensor& out =
+      stack->at(base + static_cast<size_t>(*schema.argumentIndexWithName("out")))
+          .toTensor();
+  const size_t alpha_at =
+      base + static_cast<size_t>(*schema.argumentIndexWithName("alpha"));
+  const double alpha = stack->at(alpha_at).toScalar().toDouble();
+  IluvatarAddOut{}(self, other, at::Scalar(alpha), out);
+  stack->resize(base + 1);
+  stack->at(base) = out;
+}
+
+// add.Scalar, the out-of-place spelling `a + 1` / `a.add(1)`. Its schema has
+// no out parameter, so it keeps the three-argument shape; the destination is a
+// fresh tensor, and IluvatarAdd reads `out` as a term of the result, so it is
+// written from `self` before the vendor call.
+inline at::Tensor IluvatarAddScalarTensor(
+    const at::Tensor& self, const at::Scalar& b, const at::Scalar& alpha) {
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self);
+  return IluvatarAddScalar(out, b, alpha);
 }
 
 } // namespace at::native::flagos::iluvatar

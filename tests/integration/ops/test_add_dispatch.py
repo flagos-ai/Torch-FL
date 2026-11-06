@@ -100,6 +100,100 @@ class TestAddTensorCorrectness:
         ref = a.cpu() + b.cpu()
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
+    @pytest.mark.anyplatform
+    def test_add_out_empty_destination(self):
+        """`torch.add(a, b, out=empty)` writes its destination, never reads it.
+
+        add.out is a structured op whose destination may arrive empty. A kernel
+        that adds into a destination it assumes already holds one addend answers
+        whatever the allocator left there: measured on u180, garbage plus self.
+        """
+        torch.manual_seed(4)
+        a = torch.randn(16, 32, device=DEVICE)
+        b = torch.randn(32, device=DEVICE)
+        out = torch.empty(16, 32, device=DEVICE)
+        result = torch.add(a, b, out=out)
+        assert result.data_ptr() == out.data_ptr()
+        torch.testing.assert_close(out.cpu(), a.cpu() + b.cpu(), rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.anyplatform
+    def test_add_broadcast_out_winning_size(self):
+        """An out= destination of the broadcast shape is written in place."""
+        torch.manual_seed(5)
+        a = torch.randn(8, 1, device=DEVICE)
+        b = torch.randn(1, 16, device=DEVICE)
+        out = torch.empty(8, 16, device=DEVICE)
+        result = torch.add(a, b, out=out)
+        assert result.data_ptr() == out.data_ptr()
+        torch.testing.assert_close(out.cpu(), a.cpu() + b.cpu(), rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.anyplatform
+    def test_add_inplace_broadcast_to_64x64(self):
+        """`a += b` with a (64, 1) destination and a (1, 64) addend.
+
+        This is the frame-plus-bias in-place add. The destination repeats its
+        addend, which one linear axpy over the destination cannot express: on
+        u180 the vendor path segfaulted on exactly this pair, while the
+        out-of-place `torch.add(a, b)` on the same operands answered.
+        """
+        torch.manual_seed(6)
+        a = torch.randn(64, 1, device=DEVICE)
+        b = torch.randn(1, 64, device=DEVICE)
+        ref = a.cpu() + b.cpu()
+        a += b
+        torch.testing.assert_close(a.cpu(), ref, rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.anyplatform
+    def test_add_inplace_broadcast_to_64x1(self):
+        """`a.add_(b)` on a (64, 1) destination with a (1, 64) addend must not raise.
+
+        The destination keeps its (64, 1) shape, so nothing is broadcast onto
+        its size; the addend is read as a broadcast. A kernel that assumes the
+        destination's last dimension is the whole repeated operand fails here
+        with "output with shape [1, 64] doesn't match the broadcast shape
+        [64, 64]" (measured on u180).
+        """
+        torch.manual_seed(8)
+        a = torch.randn(64, 1, device=DEVICE).round(decimals=2)
+        b = torch.randn(1, 64, device=DEVICE)
+        ref = a.cpu() + b.cpu()
+        a.add_(b)
+        torch.testing.assert_close(a.cpu(), ref, rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.anyplatform
+    def test_add_broadcast_then_out_of_place(self):
+        """The out-of-place `a + b` covers the same shapes as the in-place add.
+
+        ATen's composite lowers `a + b` to add_.Tensor, whose structured
+        delegate is add.out; registering a kernel under add.Tensor instead turns
+        add.out/add_.Tensor/add_.Scalar into backend-fallback calls, and the
+        composite then runs only against the CPU dispatcher's tensors. Measured
+        on u180: an 8x8 pair failed with "The size of tensor a (64) must match
+        the size of tensor b (8)", and (64, 1) plus (1, 64) with "output with
+        shape [1, 64] doesn't match the broadcast shape [64, 64]".
+        """
+        torch.manual_seed(7)
+        for shape_a, shape_b in (
+            ((8, 8), (8, 8)),
+            ((128, 256), (128, 256)),
+            ((64, 1), (64, 1)),
+            ((64, 1), (1, 64)),
+            ((8192,), (8192,)),
+        ):
+            a = torch.randn(shape_a, device=DEVICE)
+            b = torch.randn(shape_b, device=DEVICE)
+            ref = torch.add(a.cpu(), b.cpu())
+            got = a + b
+            assert got.shape == ref.shape
+            torch.testing.assert_close(got.cpu(), ref, rtol=1e-4, atol=1e-4)
+            got = a.add(b, alpha=2.0)
+            torch.testing.assert_close(
+                got.cpu(),
+                torch.add(a.cpu(), b.cpu(), alpha=2.0),
+                rtol=1e-4,
+                atol=1e-4,
+            )
+
     @pytest.mark.cuda
     def test_add_matches_cuda(self):
         if not torch.cuda.is_available():
