@@ -6,6 +6,7 @@
 // file to build backends_cambricon.conf, so the routes and the registrations
 // cannot drift apart. Included from the USE_CAMBRICON arm of
 // csrc/aten/register.cc when FLAGOS_CAMBRICON_KERNEL is defined.
+  m.impl("_safe_softmax", WrapperPrivSafeSoftmax);
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);

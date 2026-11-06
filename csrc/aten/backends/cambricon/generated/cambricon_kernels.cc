@@ -19,7 +19,21 @@
 #include <ATen/ops/zeros.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
+
+// CloneVendorFn, and the weak CloneVendorHook the clone kernel below overrides.
+// register.cc defines both; the alias is repeated here rather than shared
+// through a header because register.cc is the only other place that names them.
+using CloneVendorFn = ::std::optional<at::Tensor> (*)(
+    const at::Tensor&, ::std::optional<at::MemoryFormat>);
+CloneVendorFn CloneVendorHook();
+
+// The shape register.cc's clone table is typed with. Repeated here rather than
+// shared through a header because these two files are its only users.
+using CloneVendorFn = ::std::optional<at::Tensor> (*)(
+    const at::Tensor&, ::std::optional<at::MemoryFormat>);
 
 namespace at::native::flagos::cambricon {
 
@@ -136,6 +150,115 @@ constexpr int64_t kMaxNumWeights = int64_t{1} << 24;
 
 } // namespace
 
+at::Tensor PrivSafeSoftmaxKernelCambricon(const at::Tensor& self, int64_t dim, std::optional<at::ScalarType> dtype) {
+  const at::ScalarType input_dtype = self.scalar_type();
+  TORCH_CHECK(
+      SupportedFloatDtype(input_dtype),
+      "flagos cambricon: _safe_softmax does not serve ", input_dtype);
+  TORCH_CHECK(
+      self.device().type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: _safe_softmax requires a device tensor");
+  TORCH_CHECK(
+      self.dim() > 0,
+      "flagos cambricon: _safe_softmax does not serve a zero-rank tensor");
+  const int64_t resolved = dim < 0 ? dim + self.dim() : dim;
+  TORCH_CHECK(
+      resolved == self.dim() - 1,
+      "flagos cambricon: _safe_softmax serves the last axis only, got ", dim);
+  TORCH_CHECK(
+      !dtype.has_value() || *dtype == at::kFloat || *dtype == input_dtype,
+      "flagos cambricon: _safe_softmax does not serve the requested dtype");
+
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+  const auto wide = Widen(self, handle);
+  const bool strided = wide.data_ptr() == self.data_ptr();
+  auto output = at::empty(self.sizes(), self.options().dtype(at::kFloat));
+  // cnnlSoftmaxForward's LOW_DIMENSION mode reduces the last axis of a
+  // three-dimensional descriptor, and rejects anything else: a 4-D
+  // (2,16,512,512) descriptor came back "Input and output shapes must be
+  // identical and three-dimensional". Folding every leading axis into one keeps
+  // the reduced axis in the same place, so the answer is unchanged -- a softmax
+  // over the last axis does not care how the rows before it are grouped.
+  //
+  // The collapsed view is taken with as_strided, not reshape: reshape would copy
+  // a non-contiguous operand to make the collapse legal, which is the very copy
+  // this kernel avoids.
+  // Exactly three dimensions: a probe against this SDK showed rank 2 and rank 4
+  // both rejected with "Input and output shapes must be identical and
+  // three-dimensional", and rank 3 accepted. So every axis before the last two
+  // is folded into one, which moves nothing -- a softmax over the last axis does
+  // not care how the rows before it are grouped.
+  const int64_t rank = self.dim();
+  std::vector<int64_t> folded;
+  std::vector<int64_t> folded_strides;
+  if (rank <= 3) {
+    folded.assign(self.sizes().begin(), self.sizes().end());
+    folded_strides.assign(wide.strides().begin(), wide.strides().end());
+    while (folded.size() < 3) {
+      folded.insert(folded.begin(), 1);
+      folded_strides.insert(folded_strides.begin(), 0);
+    }
+  } else {
+    int64_t leading = 1;
+    for (int64_t axis = 0; axis + 2 < rank; ++axis) {
+      leading *= self.size(axis);
+    }
+    folded = {leading, self.size(rank - 2), self.size(rank - 1)};
+    // Folding axes 0..rank-3 leaves the step between consecutive blocks, which
+    // is the stride of the last axis being merged.
+    folded_strides = {wide.stride(rank - 3), wide.stride(rank - 2),
+                       wide.stride(rank - 1)};
+  }
+  const auto wide_3d = wide.as_strided(folded, folded_strides);
+  auto output_3d = output.as_strided(folded, folded_strides);
+
+  TensorDesc in_desc, out_desc;
+  if (strided) {
+    in_desc.SetStrided(wide_3d);
+  } else {
+    in_desc.Set(wide_3d);
+  }
+  out_desc.Set(output_3d);
+
+  size_t workspace_size = 0;
+  CheckCnnl(
+      cnnlGetSoftmaxForwardWorkspaceSize(
+          handle, in_desc.get(), out_desc.get(), CNNL_SOFTMAX_ACCURATE,
+          CNNL_SOFTMAX_MODE_LOW_DIMENSION, &workspace_size),
+      "cnnlGetSoftmaxForwardWorkspaceSize");
+  at::Tensor workspace;
+  if (workspace_size > 0) {
+    workspace = at::empty(
+        {static_cast<int64_t>(workspace_size)},
+        self.options().dtype(at::kByte));
+  }
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  CheckCnnl(
+      cnnlSoftmaxForward_v2(
+          handle, CNNL_SOFTMAX_ACCURATE, CNNL_SOFTMAX_MODE_LOW_DIMENSION,
+          &one, in_desc.get(), wide.const_data_ptr(), &zero, out_desc.get(),
+          workspace_size,
+          workspace_size > 0 ? workspace.mutable_data_ptr() : nullptr,
+          output.data_ptr()),
+      "cnnlSoftmaxForward_v2 (_safe_softmax)");
+
+  // What comes back is the requested dtype when there is one, otherwise the
+  // input's: _safe_softmax on a half tensor answers in half, so returning the
+  // float32 the kernel computes in would be a different op. Narrowing is one
+  // pass, and the widening cast of the input was the other.
+  const auto result_dtype = dtype.has_value() ? *dtype : input_dtype;
+  if (output.scalar_type() == result_dtype) {
+    return output;
+  }
+  auto result = at::empty(self.sizes(), self.options().dtype(result_dtype));
+  Narrow(output, result, handle);
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSafeSoftmaxFn, priv_safe_softmax_dispatcher, Backend::kCambricon, PrivSafeSoftmaxKernelCambricon);
+
 at::Tensor AbsKernelCambricon(const at::Tensor& self) {
   const at::ScalarType dtype = self.scalar_type();
   TORCH_CHECK(
@@ -146,11 +269,23 @@ at::Tensor AbsKernelCambricon(const at::Tensor& self) {
       "flagos cambricon: abs requires a device tensor");
   CambriconDeviceGuard guard(self);
   const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
-  const auto input = self.contiguous();
-  const auto wide = Widen(input, handle);
+  // The operand keeps its own strides. In a training step this op is reached
+  // through a [B, heads, S, head_dim] transpose view, and gathering that view
+  // into a dense buffer costs 15762 us against 13 us for the negation itself --
+  // the copy was the whole cost. cnnlNegTensor documents strided descriptors
+  // (cnnlSetTensorDescriptorEx), so the view is described as it is.
+  //
+  // A widening dtype has to be materialised anyway, because the cast produces a
+  // dense tensor and there is nothing left to describe.
+  const auto wide = Widen(self, handle);
+  const bool strided = wide.data_ptr() == self.data_ptr();
   auto output = at::empty(self.sizes(), self.options().dtype(at::kFloat));
   TensorDesc in_desc, out_desc;
-  in_desc.Set(wide);
+  if (strided) {
+    in_desc.SetStrided(self);
+  } else {
+    in_desc.Set(wide);
+  }
   out_desc.Set(output);
   CheckCnnl(
       cnnlAbs(
@@ -432,6 +567,55 @@ at::Tensor BmmKernelCambricon(const at::Tensor& self, const at::Tensor& mat2) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kCambricon, BmmKernelCambricon);
+
+namespace {
+
+::std::optional<at::Tensor> CloneKernelCambricon(
+    const at::Tensor& self, ::std::optional<at::MemoryFormat> memory_format) {
+  if (self.device().type() != c10::DeviceType::PrivateUse1) {
+    return ::std::nullopt;
+  }
+  // FLAGOS_OP_clone=<backend> is the conf's per-op override, and clone has no
+  // dispatcher slot for it to act on, so the hook reads it itself. Anything but
+  // "cambricon" declines, which is how a build can be taken back to the ATen
+  // route without being recompiled.
+  {
+    const char* want = std::getenv("FLAGOS_OP_clone");
+    if (want != nullptr && std::strcmp(want, "cambricon") != 0) {
+      return ::std::nullopt;
+    }
+  }
+  if (!SupportedFloatDtype(self.scalar_type())) {
+    return ::std::nullopt;
+  }
+  if (memory_format.has_value() &&
+      *memory_format != at::MemoryFormat::Contiguous) {
+    return ::std::nullopt;
+  }
+  // An empty tensor has nothing to gather, and describing it as a strided copy
+  // is a call for a result that is already correct.
+  if (self.numel() == 0) {
+    return at::empty(self.sizes(), self.options());
+  }
+
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+  auto result = at::empty(self.sizes(), self.options());
+  TensorDesc in_desc, out_desc;
+  // The source keeps its own strides: that is the whole point, and it is what
+  // cnnlSetTensorDescriptorEx is for. It requires the innermost stride to be 1,
+  // which is what a view of a dense tensor has.
+  in_desc.SetStrided(self);
+  out_desc.Set(result);
+  CheckCnnl(
+      cnnlCopy_v2(
+          handle, in_desc.get(), self.const_data_ptr(), out_desc.get(),
+          result.mutable_data_ptr(), nullptr, 0),
+      "cnnlCopy_v2 (clone)");
+  return result;
+}
+
+} // namespace (anon)
 
 at::Tensor EmbeddingDenseBackwardKernelCambricon(
     const at::Tensor& grad_output, const at::Tensor& indices,
@@ -1000,28 +1184,29 @@ at::Tensor NegKernelCambricon(const at::Tensor& self) {
       "flagos cambricon: neg requires a device tensor");
   CambriconDeviceGuard guard(self);
   const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
-  const auto input = self.contiguous();
-  const auto wide = Widen(input, handle);
+  // The operand keeps its own strides. In a training step this op is reached
+  // through a [B, heads, S, head_dim] transpose view, and gathering that view
+  // into a dense buffer costs 15762 us against 13 us for the negation itself --
+  // the copy was the whole cost. cnnlNegTensor documents strided descriptors
+  // (cnnlSetTensorDescriptorEx), so the view is described as it is.
+  //
+  // A widening dtype has to be materialised anyway, because the cast produces a
+  // dense tensor and there is nothing left to describe.
+  const auto wide = Widen(self, handle);
+  const bool strided = wide.data_ptr() == self.data_ptr();
   auto output = at::empty(self.sizes(), self.options().dtype(at::kFloat));
   TensorDesc in_desc, out_desc;
-  in_desc.Set(wide);
+  if (strided) {
+    in_desc.SetStrided(self);
+  } else {
+    in_desc.Set(wide);
+  }
   out_desc.Set(output);
-  // neg has no unary CNNL entry point, and the op-tensor forms take two
-  // operands: SUB with the tensor passed twice computes x - x, and MUL with a
-  // negative scale computes -x*x. So the operand is subtracted from a zero
-  // buffer, which is the only shape of this call that yields -x.
-  auto zero_buffer = at::zeros(self.sizes(), self.options().dtype(at::kFloat));
-  TensorDesc zero_desc;
-  zero_desc.Set(zero_buffer);
-  OpTensorDesc op(CNNL_OP_TENSOR_SUB, at::kFloat);
-  const float one = 1.0f;
-  const float zero = 0.0f;
   CheckCnnl(
-      cnnlOpTensor(
-          handle, op.get(), &one, zero_desc.get(), zero_buffer.const_data_ptr(),
-          &one, in_desc.get(), wide.const_data_ptr(), nullptr, 0, &zero,
-          out_desc.get(), output.mutable_data_ptr()),
-      "cnnlOpTensor (neg)");
+      cnnlNegTensor(
+          handle, in_desc.get(), wide.const_data_ptr(), out_desc.get(),
+          output.mutable_data_ptr()),
+      "cnnlNegTensor (neg)");
   if (!ComputesInFloat32(dtype)) {
     return output;
   }
@@ -1071,11 +1256,23 @@ at::Tensor RsqrtKernelCambricon(const at::Tensor& self) {
       "flagos cambricon: rsqrt requires a device tensor");
   CambriconDeviceGuard guard(self);
   const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
-  const auto input = self.contiguous();
-  const auto wide = Widen(input, handle);
+  // The operand keeps its own strides. In a training step this op is reached
+  // through a [B, heads, S, head_dim] transpose view, and gathering that view
+  // into a dense buffer costs 15762 us against 13 us for the negation itself --
+  // the copy was the whole cost. cnnlNegTensor documents strided descriptors
+  // (cnnlSetTensorDescriptorEx), so the view is described as it is.
+  //
+  // A widening dtype has to be materialised anyway, because the cast produces a
+  // dense tensor and there is nothing left to describe.
+  const auto wide = Widen(self, handle);
+  const bool strided = wide.data_ptr() == self.data_ptr();
   auto output = at::empty(self.sizes(), self.options().dtype(at::kFloat));
   TensorDesc in_desc, out_desc;
-  in_desc.Set(wide);
+  if (strided) {
+    in_desc.SetStrided(self);
+  } else {
+    in_desc.Set(wide);
+  }
   out_desc.Set(output);
   CheckCnnl(
       cnnlRsqrt(
@@ -1273,5 +1470,29 @@ at::Tensor SumDimIntlistKernelCambricon(
 
 REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kCambricon, SumDimIntlistKernelCambricon);
 } // namespace at::native::flagos::cambricon
+
+
+// Installs this backend's clone kernel into register.cc's vendor table. Emitted
+// after the at::native::flagos::cambricon namespace closes, because it has to
+// name both the kernel and a variable that lives outside it.
+//
+// register.cc owns this table -- weak there, so a build with no backend that
+// fills it still links -- and consults it for a PrivateUse1 tensor. This file
+// only installs into it; the variable is not defined here, because two
+// definitions of one global in different objects is an ODR violation even when
+// one of them is weak.
+extern CloneVendorFn g_clone_vendor;
+
+namespace {
+
+// Runs before main and before any tensor can be cloned, because it is a static
+// initialiser in the same translation unit as the kernels.
+__attribute__((constructor)) void InstallCloneHook() {
+  g_clone_vendor = static_cast<CloneVendorFn>(
+      at::native::flagos::cambricon::CloneKernelCambricon);
+}
+
+} // namespace
+
 
 #endif // USE_CAMBRICON
