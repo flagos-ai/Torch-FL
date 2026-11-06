@@ -3,6 +3,7 @@ repository: Torch-FL
 entry_workflow: .github/workflows/flagcicd-entry.yml
 platform_config_glob: .github/configs/*.yml
 
+# Functional scope only; release acceptance is separate.
 levels:
   L0:
     support: supported

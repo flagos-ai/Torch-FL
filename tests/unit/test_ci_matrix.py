@@ -207,8 +207,46 @@ def test_non_pr_events_default_to_every_lane(event):
         ("platform:ascend,platform:unknown", LANES),
     ],
 )
-def test_routing_labels_override_file_filters_without_duplicates(labels, expected):
+def test_routing_labels_add_platforms_to_documentation_changes_without_duplicates(
+    labels, expected
+):
     assert _run(files="README.md", labels=labels)[1] == expected
+
+
+@pytest.mark.parametrize(
+    "files,labels,expected",
+    [
+        (".github/workflows/ci.yml", "platform:nvidia", LANES),
+        ("unknown/runtime.cc", "platform:nvidia", LANES),
+        (
+            "torch_fl/configs/backends_nvidia.conf",
+            "platform:ascend",
+            lanes("nvidia", "ascend"),
+        ),
+        (
+            ".github/configs/mthreads.yml",
+            "platform:nvidia",
+            lanes("mthreads", "nvidia"),
+        ),
+        (
+            ".github/configs/mthreads.yml",
+            "platform:mthreads,platform:mthreads",
+            lanes("mthreads"),
+        ),
+    ],
+)
+def test_routing_labels_cannot_remove_file_required_platforms(files, labels, expected):
+    result, selected = _run(files=files, labels=labels)
+    assert result.returncode == 0, result.stderr
+    assert selected == expected
+
+
+def test_missing_diff_cannot_be_narrowed_by_a_platform_label():
+    selected, reasons = MATRIX.select_platforms(
+        "pull_request", CONFIGS, None, ["platform:nvidia"]
+    )
+    assert selected == LANES
+    assert any(reason["kind"] == "diff_unavailable" for reason in reasons)
 
 
 @pytest.mark.parametrize(

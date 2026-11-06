@@ -17,6 +17,7 @@ name: CI
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 on:
   schedule:
@@ -28,6 +29,11 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
     inputs:
+      profile:
+        description: pr or full nightly; weekly is reserved
+        type: choice
+        default: pr
+        options: [pr, nightly, weekly]
       platforms:
         description: 'Comma-separated platforms to run, or all'
         required: false
@@ -128,47 +134,49 @@ jobs:
     timeout-minutes: 5
     outputs:
       platforms: ${{ steps.detect.outputs.platforms }}
+      context: ${{ steps.detect.outputs.context }}
+      plan_artifact: ${{ steps.detect.outputs.artifact_name }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout trusted plan code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - name: Checkout source data
+        uses: actions/checkout@v4
         with:
           repository: ${{ needs.resolve-checkout.outputs.repository }}
           ref: ${{ needs.resolve-checkout.outputs.ref }}
+          path: source
           persist-credentials: false
           fetch-depth: 0
-
-      - name: Install matrix parser dependency
-        run: python -m pip install PyYAML
-
-      # Emits `platforms` as a JSON array of config basenames, narrowed to the
-      # platforms a pull request can affect. Labels take precedence over files.
-      - name: Detect configured platforms
+      - name: Install plan parser
+        run: python -m pip install "PyYAML==6.0.2"
+      - name: Plan selected platforms and execution
         id: detect
         env:
+          SOURCE_REPOSITORY: ${{ needs.resolve-checkout.outputs.repository }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms || '' }}
           EVENT_NAME: ${{ github.event_name }}
+          TEST_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || inputs.profile || 'pr' }}
           BASE_REF: ${{ github.base_ref || 'main' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          PR_LABELS=""
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            PR_LABELS=$(jq -r 'join(",")' <<<"$PR_LABELS_JSON")
-          fi
-
-          python .github/scripts/ci/generate_matrix.py \
-            --event-name "$EVENT_NAME" \
-            --base-ref "$BASE_REF" \
-            --base-sha "$BASE_SHA" \
-            --head-sha "$HEAD_SHA" \
-            --configs-dir .github/configs \
-            --pr-labels "$PR_LABELS" \
-            --dispatch-platforms "$DISPATCH_PLATFORMS" \
-            >> "$GITHUB_OUTPUT"
+        run: >-
+          python control/.github/scripts/flagcicd_plan.py
+          --ci --source source --output flagcicd-plan.json
+      - name: Retain execution plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.detect.outputs.artifact_name }}
+          path: flagcicd-plan.json
+          if-no-files-found: error
+          retention-days: 14
 
   # One hardware pipeline per configured platform. The reusable workflow reads
-  # runner, image, timeout, and test manifest values from that platform config.
+  # runner, image, timeout, and test groups from the validated plan snapshot.
   #
   # fail-fast is off on purpose. The PR is red whatever the other lanes do, so
   # cancelling them on the first failure saves accelerator time only when the
@@ -192,8 +200,11 @@ jobs:
       FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ matrix.platform }}
+      test_profile: ${{ github.event_name == 'schedule' && 'nightly' || inputs.profile || 'pr' }}
       checkout_repository: ${{ needs.resolve-checkout.outputs.repository }}
       checkout_ref: ${{ needs.resolve-checkout.outputs.ref }}
+      execution_plan_artifact: ${{ needs.discover-platforms.outputs.plan_artifact || 'missing-required-execution-plan' }}
+      execution_plan_context: ${{ needs.discover-platforms.outputs.context }}
 
   # Single required-check gate for branch protection.
   ci-complete:
@@ -207,79 +218,39 @@ jobs:
       - discover-platforms
       - platform-pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Verify shared checks and selected platforms passed
+      - name: Checkout trusted report code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download execution plan
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ needs.discover-platforms.outputs.plan_artifact || 'missing-required-execution-plan' }}
+          path: execution-plan
+      - name: Download platform outcomes
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: flagcicd-platform-*
+          path: platform-reports
+      - name: Aggregate and check planned execution
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-          import sys
-
-          jobs = json.loads(os.environ["RESULTS"])
-          errors = []
-          for name in ("resolve-checkout", "lint", "agnostic-checks", "codegen-checks", "discover-platforms"):
-              if jobs[name]["result"] != "success":
-                  errors.append(f"{name}: {jobs[name]['result']}")
-
-          try:
-              selected = json.loads(jobs["discover-platforms"]["outputs"]["platforms"])
-              if not isinstance(selected, list) or not all(isinstance(p, str) for p in selected):
-                  raise ValueError("platforms must be an array of strings")
-          except (KeyError, TypeError, ValueError) as exc:
-              errors.append(f"Invalid platform discovery: {exc}")
-              selected = []
-
-          platform_result = jobs["platform-pipeline"]["result"]
-          if selected and platform_result != "success":
-              errors.append(f"platform-pipeline: {platform_result}")
-          elif not selected and platform_result not in ("success", "skipped"):
-              errors.append(f"platform-pipeline: {platform_result}")
-
-          # The matrix result says that some lane failed, not which one -- the
-          # matrix collapses every failure into "failure", and a lane can still
-          # be cancelled out from under it (a timeout, or the run being stopped
-          # by hand). Read the run's jobs back and report each one's conclusion.
-          # This is a nicety: wherever the API cannot answer (no token, no run id), the
-          # gate still decides on the results above.
-          run_id = os.environ.get("GITHUB_RUN_ID", "")
-          repo = os.environ.get("GITHUB_REPOSITORY", "")
-          try:
-              if not (run_id and repo and os.environ.get("GH_TOKEN")):
-                  raise ValueError("not in a GitHub run with a token")
-              listing = subprocess.run(
-                  [
-                      "gh", "api", "--paginate",
-                      f"repos/{repo}/actions/runs/{run_id}/jobs",
-                  ],
-                  check=True,
-                  capture_output=True,
-                  text=True,
-              ).stdout
-              # --paginate joins the pages' objects; normalize either shape.
-              pages = json.loads(listing if listing.lstrip().startswith("[") else f"[{listing}]")
-              listed = [job for page in pages for job in page.get("jobs", [])]
-          except (subprocess.CalledProcessError, ValueError, AttributeError) as exc:
-              print(f"::warning::could not list job conclusions: {exc}")
-              listed = []
-
-          for job in listed:
-              name = job.get("name", "")
-              conclusion = job.get("conclusion")
-              if conclusion in ("failure", "timed_out"):
-                  print(f"::error::{name}: {conclusion}")
-              elif conclusion == "cancelled" and name.startswith("Platform pipeline ("):
-                  print(
-                      f"::notice::{name} was cancelled before it finished, so it "
-                      "measured nothing; re-run that lane to measure it"
-                  )
-
-          for error in errors:
-              print(f"::error::{error}")
-          if errors:
-              sys.exit(1)
-          print("Shared checks and all selected platforms passed.")
-          PY
+          FLAGCICD_PLAN: ${{ needs.discover-platforms.outputs.context }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: >-
+          python .github/scripts/flagcicd_report.py summary --entry ci --diagnostics
+          --plan-file execution-plan/flagcicd-plan.json
+          --directory platform-reports --output flagcicd-run-summary.json
+      - name: Retain run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flagcicd-run-summary-${{ github.run_attempt }}
+          path: flagcicd-run-summary.json
+          if-no-files-found: error
+          retention-days: 14

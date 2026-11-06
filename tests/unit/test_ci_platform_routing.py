@@ -14,8 +14,10 @@
 
 """Keep matrix routing, checkout source and the required gate in agreement."""
 
+import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +33,85 @@ PLATFORMS = sorted(
     for path in CONFIGS.glob("*.yml")
     if path.stem not in {"template", "image_sources", "platforms"}
 )
+
+
+sys.path.insert(0, str(ROOT / ".github/scripts"))
+try:
+    import flagcicd_plan as PLANNER
+
+    spec = importlib.util.spec_from_file_location(
+        "routing_ci_gate", ROOT / ".github/scripts/flagcicd_report.py"
+    )
+    REPORTER = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(REPORTER)
+finally:
+    sys.path.pop(0)
+
+
+def gate_plan(selected=False):
+    request = {
+        "source_repository": "owner/fork",
+        "source_sha": "a" * 40,
+        "control_sha": "c" * 40,
+        "base_sha": "b" * 40,
+        "task_id": "",
+        "parent_run_id": "",
+        "run_id": "42",
+        "run_attempt": "1",
+    }
+    contract = yaml.safe_load((ROOT / ".flagcicd/project.yaml").read_text())
+    return PLANNER.build_ci_plan(
+        request,
+        contract,
+        ROOT,
+        ["README.md"],
+        "workflow_dispatch" if selected else "pull_request",
+        dispatch=PLATFORMS[0] if selected else "",
+    )
+
+
+def _shared_test_files(workflow):
+    return [
+        token
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        for token in shlex.split(step.get("run", ""), comments=True)
+        if token.startswith("tests/") and token.endswith(".py")
+    ]
+
+
+def test_cpu_workflows_do_not_schedule_the_same_explicit_test_file_twice():
+    agnostic = _shared_test_files(_workflow("agnostic-checks.yml"))
+    codegen = _shared_test_files(_workflow("codegen-checks.yml"))
+    assert len(agnostic) == len(set(agnostic))
+    assert len(codegen) == len(set(codegen))
+    assert not set(agnostic) & set(codegen)
+    assert "tests/unit/test_gen_vendor_confs.py" in agnostic
+
+
+def test_stdlib_vendor_conf_check_has_one_lightweight_owner():
+    calls = []
+    for name in ("agnostic-checks.yml", "codegen-checks.yml"):
+        for job in _workflow(name)["jobs"].values():
+            for step in job.get("steps", []):
+                for line in step.get("run", "").replace("\\\n", " ").splitlines():
+                    argv = shlex.split(line, comments=True)
+                    if (
+                        argv
+                        and argv[0] in ("python", "python3")
+                        and argv[1:]
+                        == ["scripts/codegen/gen_vendor_confs.py", "--check"]
+                    ):
+                        calls.append(name)
+    assert calls == ["agnostic-checks.yml"]
+
+
+def test_both_entries_still_require_both_shared_cpu_jobs():
+    ci = _workflow("ci.yml")["jobs"]
+    entry = _workflow("flagcicd-entry.yml")["jobs"]
+    assert {"agnostic-checks", "codegen-checks"} <= set(ci["ci-complete"]["needs"])
+    assert {"agnostic", "codegen"} <= set(entry["complete"]["needs"])
+    assert {"agnostic", "codegen"} <= set(entry["platforms"]["needs"])
 
 
 def _workflow(name):
@@ -91,7 +172,7 @@ def test_platform_tests_and_manifest_use_the_resolved_source():
     config_checkout = next(
         step
         for step in config_workflow["jobs"]["configuration"]["steps"]
-        if step.get("uses", "").startswith("actions/checkout@")
+        if step.get("name") == "Checkout source data"
     )["with"]
     assert config_checkout["repository"] == (
         "${{ inputs.checkout_repository || github.repository }}"
@@ -127,24 +208,18 @@ def test_dispatch_can_select_each_platform(platform):
 
 @pytest.mark.parametrize("selected", [True, False])
 @pytest.mark.parametrize("result", ["success", "skipped", "failure", "cancelled"])
-def test_required_gate_checks_platform_result(selected, result):
+def test_required_gate_checks_platform_result(tmp_path, selected, result):
     gate = _workflow("ci.yml")["jobs"]["ci-complete"]
     results = {name: {"result": "success"} for name in gate["needs"]}
-    results["discover-platforms"]["outputs"] = {
-        "platforms": json.dumps(PLATFORMS[:1] if selected else [])
-    }
     results["platform-pipeline"]["result"] = result
-    process = subprocess.run(
-        ["bash", "-e", "-c", gate["steps"][0]["run"]],
-        env={**os.environ, "RESULTS": json.dumps(results)},
-        capture_output=True,
-        text=True,
+    report = REPORTER.aggregate(gate_plan(selected), results, tmp_path, 1)
+    assert (report["status"] == "passed") == (
+        not selected and result in ("success", "skipped")
     )
-    assert (process.returncode == 0) == (
-        result == "success" or (not selected and result == "skipped")
-    )
-    if process.returncode:
-        assert f"platform-pipeline: {result}" in process.stdout
+    if selected and result == "success":
+        assert any("missing platform report" in e for e in report["errors"])
+    elif result not in ("success", "skipped") or (selected and result == "skipped"):
+        assert any("platform-pipeline:" in e for e in report["errors"])
 
 
 @pytest.mark.parametrize(
@@ -157,19 +232,13 @@ def test_required_gate_checks_platform_result(selected, result):
         "discover-platforms",
     ],
 )
-def test_required_gate_rejects_skipped_shared_checks(name):
+def test_required_gate_rejects_skipped_shared_checks(tmp_path, name):
     gate = _workflow("ci.yml")["jobs"]["ci-complete"]
     results = {job: {"result": "success"} for job in gate["needs"]}
-    results["discover-platforms"]["outputs"] = {"platforms": "[]"}
     results[name]["result"] = "skipped"
-    process = subprocess.run(
-        ["bash", "-e", "-c", gate["steps"][0]["run"]],
-        env={**os.environ, "RESULTS": json.dumps(results)},
-        capture_output=True,
-        text=True,
-    )
-    assert process.returncode == 1
-    assert f"{name}: skipped" in process.stdout
+    report = REPORTER.aggregate(gate_plan(), results, tmp_path, 1)
+    assert report["status"] != "passed"
+    assert any(name + ":" in e and "skipped" in e for e in report["errors"])
 
 
 def _container_expression(name):
@@ -233,63 +302,45 @@ def test_the_one_platform_without_a_container_is_apple():
     assert empty == ["apple"]
 
 
-def test_the_loader_accepts_an_empty_image_but_rejects_null_or_non_strings(tmp_path):
-    """The empty string passes through; null and non-strings do not."""
-    text = (WORKFLOWS / "load-platform-config.yml").read_text(encoding="utf-8")
-    assert '-z "$CI_IMAGE"' not in text
-    assert ".ci_image | type" in text and "!!str" in text
-    condition = next(
-        line.strip()
-        for line in text.splitlines()
-        if line.lstrip().startswith('if [[ "$CI_IMAGE" == "null"')
+@pytest.mark.parametrize(
+    "image,accepted", [("", True), ("vendor/image", True), (None, False), (42, False)]
+)
+def test_the_loader_accepts_an_empty_image_but_rejects_null_or_non_strings(
+    tmp_path, image, accepted
+):
+    import shutil
+
+    shutil.copytree(ROOT / ".github/configs", tmp_path / ".github/configs")
+    (tmp_path / ".github/scripts").mkdir()
+    shutil.copyfile(
+        ROOT / ".github/scripts/set_env.sh", tmp_path / ".github/scripts/set_env.sh"
     )
-    script = "\n".join(
+    shutil.copyfile(
+        ROOT / ".github/integration-manifest.yml",
+        tmp_path / ".github/integration-manifest.yml",
+    )
+    config_path = tmp_path / ".github/configs/nvidia.yml"
+    config = yaml.safe_load(config_path.read_text())
+    config["ci_image"] = image
+    config_path.write_text(yaml.safe_dump(config))
+    result = subprocess.run(
         [
-            "CI_IMAGE=$(yq -r '.ci_image' \"$CONFIG_FILE\")",
-            f"{condition}",
-            "  exit 1",
-            "fi",
-        ]
+            sys.executable,
+            str(ROOT / ".github/scripts/platform_config.py"),
+            "--source",
+            str(tmp_path),
+            "--lane",
+            "nvidia",
+            "--output",
+            str(tmp_path / "outputs"),
+        ],
+        capture_output=True,
+        text=True,
     )
-    script_directory = tmp_path / "stub-bin"
-    script_directory.mkdir()
-    stub_yq = script_directory / "yq"
-    stub_yq.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys, yaml\n"
-        "expression = sys.argv[-2]\n"
-        "key = expression.split()[0].removeprefix('.')\n"
-        "path = os.environ['CONFIG_FILE']\n"
-        "value = yaml.safe_load(open(path))[key]\n"
-        "if expression.endswith('| type'):\n"
-        "    print({str: '!!str', int: '!!int'}.get(type(value), '!!null' if value is None else '!!other'))\n"
-        "elif expression == '.ci_image':\n"
-        "    print('null' if value is None else value)\n"
-        "else:\n"
-        "    raise SystemExit(f'unsupported expression: {expression}')\n",
-        encoding="utf-8",
-    )
-    stub_yq.chmod(0o755)
-    for image, accepted in (
-        ('""', True),
-        ('"vendor/image"', True),
-        ("null", False),
-        ("42", False),
-    ):
-        config = tmp_path / "platform.yml"
-        config.write_text(f"ci_image: {image}\n", encoding="utf-8")
-        env = dict(
-            os.environ,
-            CONFIG_FILE=str(config),
-            PATH=f"{script_directory}:{os.environ['PATH']}",
-        )
-        run = subprocess.run(
-            ["bash", "-e", "-c", script],
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        assert (run.returncode == 0) is accepted, (image, run.stdout, run.stderr)
+    assert (result.returncode == 0) is accepted, result.stderr
+    if not accepted:
+        assert "ci_image" in result.stderr
+        assert not (tmp_path / "outputs").exists()
 
 
 def test_the_apple_lane_is_locked_to_the_standard_hosted_apple_silicon_runner():
@@ -298,3 +349,43 @@ def test_the_apple_lane_is_locked_to_the_standard_hosted_apple_silicon_runner():
     assert config["runner_labels"] == ["macos-15"]
     assert config["ci_image"] == ""
     assert config["environment_check"]["flagos_devices"] == {"at_least": 1}
+
+
+def test_gate_import_remains_isolated_when_hardware_reporting_plugin_is_loaded(
+    tmp_path,
+):
+    env = os.environ.copy()
+    for key in (
+        "CI_PLAN_CONTEXT",
+        "FLAGCICD_TEST_GROUP",
+        "FLAGCICD_GROUP_ID",
+        "FLAGCICD_COVERAGE_DIR",
+        "PYTEST_ADDOPTS",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    ):
+        env.pop(key, None)
+    env.update(
+        PYTHONPATH=str(ROOT / ".github/scripts/pytest_reporting"),
+        PYTEST_PLUGINS="flagcicd_report",
+        FLAGCICD_REPORT_DIR=str(tmp_path / "reports"),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(Path(__file__)),
+            "-k",
+            "required_gate_rejects_skipped_shared_checks",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5 passed" in result.stdout

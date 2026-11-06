@@ -145,7 +145,7 @@ def test_config_discovery_exports_the_platform():
     """
     text = (WORKFLOWS / "load-platform-config.yml").read_text(encoding="utf-8")
     assert "setup_platform: ${{ steps.config.outputs.setup_platform }}" in text
-    assert 'emit setup_platform "$SETUP_PLATFORM"' in text
+    assert "value: ${{ jobs.configuration.outputs.setup_platform }}" in text
 
 
 def test_runner_applies_the_pip_constraints():

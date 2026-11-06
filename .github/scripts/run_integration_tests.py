@@ -13,10 +13,15 @@
 # limitations under the License.
 
 import argparse
+import codecs
+import ctypes
 import json
 import os
 import re
+import resource
 import signal
+import selectors
+import time
 import shlex
 import subprocess
 import sys
@@ -54,6 +59,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--allow-empty", action="store_true")
+    parser.add_argument("--supervise-command", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -64,6 +70,11 @@ def load_configuration(allow_empty):
     except json.JSONDecodeError as error:
         raise SystemExit(f"Invalid integration configuration JSON: {error}") from error
 
+    return validate_configuration(tests, environment, allow_empty)
+
+
+def validate_configuration(tests, environment, allow_empty=False):
+    """Validate the same command contract in planning and execution."""
     if not isinstance(tests, list):
         raise SystemExit("integration_tests must be an array")
     if not allow_empty and not tests:
@@ -218,41 +229,190 @@ def required_mpirun(command, test_environment):
     )
 
 
-def run_command(command, test_environment, workdir):
-    """Run one group command, streaming its output live while capturing it.
+def descendant_pids(root_pid):
+    """Return descendants using procfs, with a portable ps fallback."""
+    children = {}
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for task in proc_root.glob("*/task/*/children"):
+            try:
+                parent = int(task.parts[2])
+                values = task.read_text().split()
+                children.setdefault(parent, []).extend(int(value) for value in values)
+            except (OSError, ValueError):
+                continue
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,ppid="],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            result = None
+        if result and result.returncode == 0:
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) == 2:
+                    try:
+                        children.setdefault(int(fields[1]), []).append(int(fields[0]))
+                    except ValueError:
+                        continue
+    found = []
+    pending = list(children.get(root_pid, ()))
+    while pending:
+        pid = pending.pop()
+        if pid in found:
+            continue
+        found.append(pid)
+        pending.extend(children.get(pid, ()))
+    return found
 
-    Streaming (not print-at-end) keeps long hardware groups observable and
-    leaves the log behind if the runner itself is killed; the captured copy
-    feeds the teardown-crash check.
+
+def supervise_command(command):
+    """Keep escaped Linux workers parented to a dedicated command supervisor.
+
+    A launcher can exit before its setsid worker. A Linux child subreaper keeps
+    that worker in this command's tree instead of losing it to PID 1. The
+    supervisor is a separate process: unrelated children of the caller must
+    never be adopted or killed. Other POSIX hosts retain process-group cleanup.
     """
+    if sys.platform != "linux":
+        os.execvp("bash", ["bash", "-c", f"set -euo pipefail\n{command}"])
+    prctl = ctypes.CDLL(None, use_errno=True).prctl
+    prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    prctl.restype = ctypes.c_int
+    if prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    process = subprocess.Popen(["bash", "-c", f"set -euo pipefail\n{command}"])
+    code = process.wait()
+    while True:
+        try:
+            os.waitpid(-1, 0)
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            break
+    if code < 0:
+        # Preserve Popen's negative signal result without creating a second
+        # core dump for the supervisor. The command kept its original limit.
+        resource.setrlimit(
+            resource.RLIMIT_CORE, (0, resource.getrlimit(resource.RLIMIT_CORE)[1])
+        )
+        signum = -code
+        if signum not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    return code
+
+
+def run_command(command, test_environment, workdir):
+    """Stream one command with a bounded reader and command-owned cleanup."""
     required_mpirun(command, test_environment)
+    timeout = int(test_environment.get("FLAGCICD_CASE_TIMEOUT", "1800"))
+    if not 1 <= timeout <= 43200:
+        raise ValueError("FLAGCICD_CASE_TIMEOUT must be between 1 and 43200 seconds")
     process = subprocess.Popen(
-        ["bash", "-c", f"set -euo pipefail\n{command}"],
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            f"--supervise-command={command}",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
         env=test_environment,
         cwd=workdir,
+        start_new_session=True,
     )
+
+    def kill_group():
+        descendants = descendant_pids(process.pid)
+        for pid in reversed(descendants):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if sys.platform == "linux" and descendants:
+            # Let the dedicated supervisor reap workers before terminating it;
+            # otherwise a container's PID 1 may retain them as zombies.
+            try:
+                process.wait(timeout=0.5)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    chunks = []
+    timed_out = False
+    deadline = time.monotonic() + timeout
+
+    def emit(data, final=False):
+        text = decoder.decode(data, final=final)
+        if text:
+            chunks.append(text)
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
     try:
-        lines = []
-        for line in process.stdout:
-            sys.stdout.write(line)
-            lines.append(line)
-        sys.stdout.flush()
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            if not selector.select(timeout=remaining):
+                timed_out = True
+                break
+            data = os.read(process.stdout.fileno(), 65536)
+            if not data:
+                break
+            emit(data)
+        if not timed_out:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        if timed_out:
+            kill_group()
         returncode = process.wait()
-    except KeyboardInterrupt:
-        # A cancelled runner must not leave a pytest process writing to the
-        # report directory or to a retry's workspace.
-        process.kill()
+        # Drain only currently available bytes; an unclosed pipe must never
+        # turn the deadline into another blocking read.
+        while selector.select(timeout=0):
+            data = os.read(process.stdout.fileno(), 65536)
+            if not data:
+                break
+            emit(data)
+        emit(b"", final=True)
+    except BaseException:
+        kill_group()
         process.wait()
         raise
-    return returncode, "".join(lines)
+    finally:
+        selector.close()
+        process.stdout.close()
+    return (124 if timed_out else returncode), "".join(chunks)
+
+
+def requires_pytest(command):
+    return any(
+        Path(word).name in ("pytest", "run_unit_tests.py")
+        for word in shlex.split(command)
+    )
 
 
 def main():
     args = parse_args()
+    if getattr(args, "supervise_command", None) is not None:
+        return supervise_command(args.supervise_command)
     tests, environment = load_configuration(args.allow_empty)
     if args.validate_only:
         print(f"Validated {len(tests)} configured integration test(s)")
@@ -263,6 +423,58 @@ def main():
     workdir = os.environ.get("INTEGRATION_WORKDIR")
     if workdir and not os.path.isdir(workdir):
         raise SystemExit(f"INTEGRATION_WORKDIR does not exist: {workdir}")
+    records = [
+        {
+            "name": test["name"],
+            "command": test["command"],
+            "status": "not_run",
+            "group_id": test.get("group_id", test.get("manifest_id", test["name"])),
+            "environment": test.get("environment", {}),
+            "requires_pytest": requires_pytest(test["command"]),
+            "min_passed": test.get("min_passed", 0),
+        }
+        for test in tests
+    ]
+    report_dir = command_environment.get("FLAGCICD_REPORT_DIR")
+    context = json.loads(os.environ.get("CI_PLAN_CONTEXT") or "{}")
+    if context:
+        source = Path(__file__).resolve().parents[2]
+        # Vendor containers can run as a different user from the checkout owner.
+        # Trust only this checkout for this read, without persisting Git config.
+        sha = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                f"safe.directory={source}",
+                "-C",
+                str(source),
+                "rev-parse",
+                "HEAD",
+            ],
+            text=True,
+        ).strip()
+        if sha != context["source_sha"] or context["run_id"] != os.environ.get(
+            "GITHUB_RUN_ID"
+        ):
+            raise SystemExit("execution source or run differs from the plan")
+
+    def save_execution():
+        if report_dir:
+            Path(report_dir).mkdir(parents=True, exist_ok=True)
+            Path(report_dir, "groups.json").write_text(
+                json.dumps(
+                    {
+                        "expected": [r["name"] for r in records],
+                        "groups": records,
+                        "context": context,
+                        "environment": environment,
+                        "platform": os.environ.get("REPORT_PLATFORM", ""),
+                        "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+                    }
+                )
+            )
+
+    save_execution()
     for index, test in enumerate(tests, start=1):
         print(
             f"===== [{index}/{len(tests)}] {test['name']} =====",
@@ -273,6 +485,10 @@ def main():
             test_environment[key] = os.path.expandvars(value)
         if test_environment.get("FLAGCICD_REPORT_DIR"):
             test_environment["FLAGCICD_TEST_GROUP"] = test["name"]
+            test_environment["FLAGCICD_GROUP_ID"] = records[index - 1]["group_id"]
+        record = records[index - 1]
+        record.update(status="running", started_at=time.time())
+        save_execution()
         missing = _unset_variables(test["command"], test_environment)
         if missing:
             # The command runs under `set -u`, so a variable no layer supplies
@@ -286,12 +502,43 @@ def main():
                 f"nothing supplies {', '.join(f'${name}' for name in missing)}, "
                 f"which its command expands\n"
             )
+            record.update(
+                status="failed", error=output.strip(), finished_at=time.time()
+            )
+            save_execution()
             print(output, flush=True)
             raise SystemExit(1)
         allow_crash = teardown_crash_allowed(test_environment)
-        returncode, output = run_command(test["command"], test_environment, workdir)
+        try:
+            returncode, output = run_command(test["command"], test_environment, workdir)
+        except BaseException as error:
+            record.update(
+                status="cancelled"
+                if isinstance(error, KeyboardInterrupt)
+                else "failed",
+                error=str(error),
+                finished_at=time.time(),
+            )
+            save_execution()
+            raise
         ok, tolerated = classify_command_result(returncode, output, allow_crash)
-        if tolerated:
+        evidence_error = ""
+        if ok and test.get("min_passed", 0):
+            from merge_pytest_reports import check_group_minimum
+
+            try:
+                check_group_minimum(report_dir, test)
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                ok, evidence_error = False, str(error)
+                record["error"] = evidence_error
+        record.update(
+            status="passed" if ok else "failed",
+            returncode=returncode,
+            teardown_tolerated=bool(tolerated and ok),
+            finished_at=time.time(),
+        )
+        save_execution()
+        if tolerated and ok:
             print(
                 f"Integration test '{test['name']}' passed "
                 f"({clean_summary(output)}), then the command died with "
@@ -302,13 +549,20 @@ def main():
             )
             continue
         if not ok:
-            print(
-                f"Integration test '{test['name']}' failed with exit code {returncode}",
-                flush=True,
+            reason = (
+                "evidence check failed: " + evidence_error
+                if evidence_error
+                else f"failed with exit code {returncode}"
             )
-            raise SystemExit(returncode)
+            print(f"Integration test '{test['name']}' {reason}", flush=True)
+            raise SystemExit(returncode or 1)
     return 0
 
 
 if __name__ == "__main__":
+
+    def cancel(signum, frame):
+        raise KeyboardInterrupt("integration runner cancelled")
+
+    signal.signal(signal.SIGTERM, cancel)
     raise SystemExit(main())

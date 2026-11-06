@@ -102,6 +102,8 @@ def merge(directory, output, platform, outcome, source_repository, source_ref):
     report = json.loads(output.read_text(encoding="utf-8"))
     metadata = {
         "platform": platform,
+        "context": json.loads(os.environ.get("CI_PLAN_CONTEXT") or "{}"),
+        "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
         "scope": "installed torch_fl Python files; line coverage",
         "outcome": outcome,
         "source_repository": source_repository,

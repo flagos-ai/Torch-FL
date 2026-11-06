@@ -35,6 +35,8 @@ def pytest_configure(config):
     if not directory:
         return
     group = os.environ.pop("FLAGCICD_TEST_GROUP", "")
+    group_id = os.environ.pop("FLAGCICD_GROUP_ID", group)
+    context = json.loads(os.environ.pop("CI_PLAN_CONTEXT", "") or "{}")
     plugins = os.environ.get("PYTEST_PLUGINS", "").split(",")
     plugins = [name for name in plugins if name.strip() not in ("", "flagcicd_report")]
     if plugins:
@@ -48,9 +50,28 @@ def pytest_configure(config):
     directory.mkdir(parents=True, exist_ok=True)
     report = directory / f"pytest-{uuid.uuid4().hex}.json"
     report.with_suffix(".pending").write_text(
-        json.dumps({"group": group, "args": config.invocation_params.args}),
+        json.dumps(
+            {
+                "group": group,
+                "group_id": group_id,
+                "context": context,
+                "platform": os.environ.get("REPORT_PLATFORM", ""),
+                "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+                "args": config.invocation_params.args,
+            }
+        ),
         encoding="utf-8",
     )
+    config._flagcicd_marker = report.with_suffix(".pending")
     # Run before pytest-json-report's configure hook, retaining its native schema.
     config.option.json_report = True
     config.option.json_report_file = str(report)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session):
+    marker = getattr(session.config, "_flagcicd_marker", None)
+    if marker:
+        data = json.loads(marker.read_text())
+        data["selected_nodeids"] = [item.nodeid for item in session.items]
+        marker.write_text(json.dumps(data), encoding="utf-8")

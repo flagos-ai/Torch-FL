@@ -22,6 +22,8 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
+from compose_integration_manifest import validate_profile
+
 
 def text(value, field):
     if (
@@ -60,6 +62,8 @@ def resolve(event, event_name, repository, event_sha):
         )
     if not isinstance(request, dict):
         raise ValueError("dispatch request must be an object")
+    profile = request.get("profile", "pr")
+    validate_profile(profile)
     number = str(request.get("pr_number", ""))
     checkout_ref = text(request.get("checkout_ref", ""), "checkout_ref")
     base_ref = text(request.get("base_ref", ""), "base_ref")
@@ -96,6 +100,7 @@ def resolve(event, event_name, repository, event_sha):
         "base_sha": base_sha,
         "platforms": request.get("platforms", "all"),
         "requested_level": requested_level,
+        "profile": profile,
         "task_id": text(request.get("task_id", ""), "task_id"),
         "parent_run_id": text(request.get("parent_run_id", ""), "parent_run_id"),
     }

@@ -441,6 +441,11 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
         )
         assert verify_at > build_at, path
         assert "--check-build-env" in source[verify_at : verify_at + 160], path
+        if path.name in ("build-wheel-common.yml", "integration-tests.yml"):
+            assert (
+                '--platform "$FLAGOS_ACCELERATOR"'
+                in source[verify_at : verify_at + 180]
+            ), path
         install_at = source.find("python -m pip install", build_at)
         if install_at >= 0:
             assert verify_at < install_at, path
