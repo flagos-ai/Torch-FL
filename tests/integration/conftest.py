@@ -118,8 +118,27 @@ def pytest_configure(config):
 
     import torch_fl
 
+    # A missing device or a failed init is a broken environment, not a test
+    # result. `pytest.exit` was the old outcome: it stops pytest through its
+    # own exit code, which a CI reader has to be told is not a pass, and it
+    # could not say whether the device was absent or the runtime failed to
+    # come up. Exiting through the standard path here makes either case a
+    # hard error -- pytest's internal-error status, non-zero in every CI
+    # wrapper -- with the cause in the message.
     if not torch_fl.flagos.is_available():
-        pytest.exit("flagos device is not available.")
+        raise pytest.UsageError(
+            "flagos device is not available: torch_fl imported, but "
+            "torch_fl.flagos.is_available() is False. This is an "
+            "environment/setup failure, not a test result."
+        )
 
-    # Initialize flagos device to ensure ACL runtime is properly set up
-    torch_fl.flagos.init()
+    # Initialize the flagos device; a runtime that cannot come up is the same
+    # kind of environment failure as a missing device.
+    try:
+        torch_fl.flagos.init()
+    except Exception as exc:
+        raise pytest.UsageError(
+            "flagos device initialization failed: "
+            f"{type(exc).__name__}: {exc}. This is an "
+            "environment/setup failure, not a test result."
+        ) from exc

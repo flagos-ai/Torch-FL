@@ -1030,6 +1030,17 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible_on_flaggems_path",
         ),
     ),
+    "flaggems_python_override": (
+        (
+            "asserts that `FLAGOS_OP_<op>=flaggems_python` moves that op to the "
+            "FlagGems Python path. Every `vendor_ops` variant spells "
+            "`not flaggems_python`, and no other group selects the marker, so on "
+            "a tree without the `flaggems_python_override` group of "
+            "`.github/integration-manifest.yml` (upstream before #703) no command "
+            "collects these 27 cases; the group is what makes them run"
+        ),
+        (),
+    ),
 }
 
 
@@ -1153,3 +1164,160 @@ def test_the_known_unselected_list_has_not_gone_stale():
             f"{shadowed} sit in files _KNOWN_UNREACHABLE already excludes "
             "whole; drop the case entries and leave the file entry"
         )
+
+
+_RAT_HOOK_START = "    import torch_fl\n"
+_HOOK_END = "from exc\n"
+
+# The hook this change replaced: a bare ``pytest.exit`` for an unavailable
+# device and no wrapper around the init call.
+_ORIGINAL_READINESS_HOOK = """
+
+
+def pytest_configure(config):
+    import torch_fl
+
+    if not torch_fl.flagos.is_available():
+        pytest.exit("flagos device is not available.")
+    torch_fl.flagos.init()
+"""
+
+# Imports the hook file of a temporary root the way pytest does -- from the
+# root's conftest, at collection, with ``pytest`` already imported -- runs its
+# ``pytest_configure`` against the stand-in ``torch_fl`` in ``torch_fl_stub``
+# (also written to the same root), and prints what came out of the call.
+_RUNNER = """
+import importlib.util
+import sys
+import traceback
+
+sys.path.insert(0, sys.argv[2])
+import torch_fl_stub  # noqa: E402,F401
+
+spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+
+from _pytest.outcomes import Exit  # noqa: E402
+
+try:
+    hook.pytest_configure(None)
+except Exit as exc:
+    print("Exit", exc.msg)
+except Exception as exc:
+    print(type(exc).__name__, exc)
+else:
+    print("returned")
+"""
+
+_STUB = """
+import sys
+import types
+
+torch_fl = types.ModuleType("torch_fl")
+torch_fl.flagos = types.SimpleNamespace(
+    is_available=lambda: {available},
+    init=_init,
+)
+sys.modules["torch_fl"] = torch_fl
+"""
+
+
+def test_integration_readiness_failure_is_a_hard_error():
+    """A missing device or a failed init must fail the run, not skip it.
+
+    The conftest used to leave through ``pytest.exit``, which is pytest's own
+    exit path: the distinction between "no accelerator" and "the runtime did
+    not come up" was lost, and a CI reader had to be told the exit was not a
+    pass. Both cases now raise ``pytest.UsageError``, which pytest reports as
+    an internal error and exits non-zero for.
+
+    The block sits in the ``pytest_configure`` the integration conftest
+    registers -- the one conftest the whole tree shares -- so it is exercised
+    on its own: a temporary root holds the hook as its conftest, the runner
+    imports it the way pytest does (``pytest`` already in ``sys.modules``),
+    and the call runs against a stand-in ``torch_fl``. The tree's real one is
+    only read, for the hook text, so no accelerator or built extension is
+    needed.
+    """
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+
+    repo = Path(__file__).resolve().parents[2]
+    current = (repo / "tests/integration/conftest.py").read_text()
+    head, keyword, tail = current.partition(_RAT_HOOK_START)
+    assert keyword, "the readiness block moved; update this test"
+    assert _HOOK_END in tail, "the readiness block moved; update this test"
+    cut = len(tail) - len(tail[tail.index(_HOOK_END) + len(_HOOK_END) :])
+    # The current block, on its own, as a function body the runner can call.
+    body = head[head.rindex("\n") + 1 :] + tail[: cut + len(_HOOK_END)]
+    block = (
+        "import pytest\n\n\ndef pytest_configure(config):\n    import torch_fl\n" + body
+    )
+    stripped = "import pytest\n" + _ORIGINAL_READINESS_HOOK
+
+    if not _pytest_available(repo):
+        pytest.skip("pytest is not importable in the interpreter under test")
+
+    def outcome(hook_text, init_body, available):
+        root = Path(tempfile.mkdtemp())
+        try:
+            (root / "hook_source.py").write_text(hook_text)
+            (root / "torch_fl_stub.py").write_text(
+                "import types, sys\n"
+                f"def _init():\n{textwrap.indent(init_body, '    ')}\n"
+                + _STUB.replace("{available}", available)
+            )
+            (root / "run.py").write_text(_RUNNER)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(root / "run.py"),
+                    str(root / "hook_source.py"),
+                    str(root),
+                ],
+                env={**os.environ, "PYTHONPATH": str(repo)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return result
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    result = outcome(stripped, "pass", "False")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("Exit flagos device is not available"), (
+        result.stdout + result.stderr
+    )
+
+    result = outcome(block, "pass", "False")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("UsageError flagos device is not available"), (
+        result.stdout + result.stderr
+    )
+
+    result = outcome(block, "raise RuntimeError('ACL runtime broken')", "True")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("UsageError flagos device initialization failed"), (
+        result.stdout + result.stderr
+    )
+    assert "RuntimeError: ACL runtime broken" in result.stdout
+
+
+def _pytest_available(repo: Path) -> bool:
+    """Whether the interpreter running this test can import pytest."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import pytest"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result.returncode == 0
