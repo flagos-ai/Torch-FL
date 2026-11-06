@@ -45,16 +45,24 @@ GEN_DIR = ATEN_DIR / "generated"
 BACKENDS_DIR = ATEN_DIR / "backends"
 
 # Ops registered straight from register.cc rather than an ``.inc``, invisible
-# to the ``m.impl`` scan. Mirrors ``EXTRA_NATIVE`` / ``EXTRA_ROUTED`` in
+# to the ``m.impl`` scan. Mirrors ``EXTRA_NATIVE`` / ``SELF_REGISTERED_NATIVE``
+# / ``EXTRA_ROUTED`` in
 # ``scripts/codegen/gen_vendor_confs.py``.
 EXTRA_NATIVE = {
     "ascend": {"matmul", "matmul_backward"},
     "iluvatar": {
         "_conj",
         "view_as_real",
+        "div_.Tensor",
+        # The add family is registered against all six of its schemas in the
+        # FLAGOS_ILUVATAR_KERNEL arm of register.cc, in no ``.inc`` at all; it
+        # answers the same native slot.
+        "add.Tensor",
+        "add.Scalar",
+        "add.out",
+        "add.Scalar_out",
         "add_.Tensor",
         "add_.Scalar",
-        "div_.Tensor",
     },
     # The conv pair is claimed straight from register.cc's ``#else`` arm on
     # every platform there, because ATen's only other kernel for these ops
