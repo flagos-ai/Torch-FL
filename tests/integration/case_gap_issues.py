@@ -99,14 +99,15 @@ _ISSUES = (
 
 def open_case_gap(key: str) -> CaseGapIssue:
     """Return the open issue that owns a case ID or route key."""
-    case_key = key.startswith("#")
-    owned = any(key in (entry.cases if case_key else entry.routes) for entry in _ISSUES)
-    matches = [
-        entry for entry in _ISSUES if (entry.cases if case_key else entry.routes)
-    ]
-    if not owned or len(matches) != 1:
+    matches = {}
+    for entry in _ISSUES:
+        issue_key = key.startswith("#")
+        owned = entry.number == key if issue_key else key in entry.routes
+        if owned:
+            matches.setdefault(entry.number, entry)
+    if len(matches) != 1:
         raise LookupError(f"{key} is not owned by one open registered case gap")
-    return matches[0]
+    return next(iter(matches.values()))
 
 
 def tracked_skip(condition: bool, *, issue: str) -> Any:

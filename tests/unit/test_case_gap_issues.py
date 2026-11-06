@@ -136,6 +136,12 @@ def test_registry_groups_rows_with_the_same_issue(tmp_path):
     ]
 
 
+def test_runtime_skip_finds_one_issue_across_case_and_route_rows():
+    runtime = importlib.import_module("tests.integration.case_gap_issues")
+    assert runtime.open_case_gap("#710").number == "#710"
+    assert runtime.open_case_gap("all").number == "#710"
+
+
 def test_registry_rejects_different_upstreams_for_one_issue(tmp_path):
     path = tmp_path / "case_gap_issues.py"
     path.write_text(
