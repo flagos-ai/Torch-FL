@@ -96,6 +96,24 @@ namespace at::native::flagos {
 #include "aten/backends/cambricon/attention.h"
 #endif
 
+// `clone` is served through this table by a vendor backend, and by ATen
+// everywhere else. It has no dispatcher slot of its own -- register.cc installs
+// WrapperClone unconditionally -- so a backend that can gather a view faster
+// installs its kernel here, from a static initialiser in its own object file.
+//
+// Global scope on purpose: inside at::flagos below, both names would get
+// internal linkage and no other object could set them.
+using CloneVendorFn = ::std::optional<at::Tensor> (*)(
+    const at::Tensor&, ::std::optional<at::MemoryFormat>);
+
+// Weak, so a build with no backend defining it still links; null then means
+// every clone keeps the ATen route.
+#if defined(__GNUC__) || defined(__clang__)
+extern CloneVendorFn g_clone_vendor __attribute__((weak, visibility("default")));
+#else
+extern CloneVendorFn g_clone_vendor;
+#endif
+
 namespace at::flagos {
 
 namespace {
@@ -207,6 +225,19 @@ at::Tensor WrapperContiguous(
 at::Tensor WrapperClone(
     const at::Tensor& self,
     ::std::optional<at::MemoryFormat> memory_format) {
+  // A vendor kernel may serve this for tensors it owns, which is why the hook
+  // exists at all: on Cambricon a clone of a transposed view is the gather
+  // sdpa's attention forward performs around its kernel, and aten's route
+  // through flagos::clone spends 14803 us on it against 1937 us for the same
+  // copy through cnnlCopy_v2. The hook is null everywhere else, so every other
+  // platform keeps the route it had.
+  if (self.is_privateuseone()) {
+    if (auto* vendor_clone = g_clone_vendor) {
+      if (auto vendored = vendor_clone(self, memory_format)) {
+        return *vendored;
+      }
+    }
+  }
   return at::native::flagos::clone(self, memory_format);
 }
 

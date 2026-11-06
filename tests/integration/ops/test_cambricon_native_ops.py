@@ -279,3 +279,88 @@ def test_neg_does_not_square():
     x = torch.tensor([1.0, -2.0, 3.0, -4.0])
     got = torch.neg(x.to("flagos"))
     assert got.cpu().tolist() == [-1.0, 2.0, -3.0, 4.0]
+
+
+# ---------------------------------------------------------------------------
+# The three ops this round moved onto CNNL entry points: neg, _safe_softmax and
+# clone. Each was served by FlagGems or by the generic contiguous path, and each
+# is reached in a training step through a transposed view.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_neg_on_the_transposed_view_sdpa_produces(dtype):
+    """neg's operand is [B, heads, S, head_dim] with a non-unit outer stride.
+
+    The first implementation gathered that view into a dense buffer before
+    negating it, which cost 378 us against 13 us for the negation itself; the
+    kernel now describes the view's own strides. Exact because a negation has no
+    rounding to disagree about.
+    """
+    torch.manual_seed(81)
+    base = torch.randn(2, 4, 8, 16).to(dtype)
+    view = base.transpose(1, 2)
+    got = torch.neg(view.to("flagos"))
+    assert got.dtype == dtype
+    assert torch.equal(got.cpu(), torch.neg(view))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(2, 4, 64, 64), (2, 4, 8, 8), (16, 32)])
+def test_safe_softmax(dtype, shape):
+    """_safe_softmax is what SDPA's backward calls.
+
+    CNNL's softmax takes a three-dimensional descriptor only -- a probe showed
+    rank 2 and rank 4 both rejected -- so the kernel folds the leading axes. Both
+    a rank-4 and a rank-2 operand are checked, since they take different folds.
+    """
+    torch.manual_seed(82)
+    x = torch.randn(*shape).to(dtype)
+    got = torch.ops.aten._safe_softmax(x.to("flagos"), -1)
+    ref = torch.ops.aten._safe_softmax(x, -1)
+    assert got.dtype == ref.dtype
+    torch.testing.assert_close(got.cpu().float(), ref.float(), rtol=0, atol=1e-2)
+    # A softmax over a row sums to one; the reduction order may differ but the
+    # answer may not.
+    torch.testing.assert_close(
+        got.cpu().float().sum(-1),
+        torch.ones_like(ref.float().sum(-1)),
+        rtol=0,
+        atol=1e-2,
+    )
+
+
+def test_safe_softmax_refuses_a_non_last_axis():
+    """Any other axis would need a different CNNL mode, so it is refused rather
+    than answered with the last axis's result."""
+    x = torch.randn(4, 8, device="flagos:0")
+    with pytest.raises(RuntimeError, match="last axis"):
+        torch.ops.aten._safe_softmax(x, 0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_clone_of_a_transposed_view(dtype):
+    """This is the [B,H,S,D] <-> [B,S,H,D] copy sdpa's attention forward does.
+
+    The ATen route through BlockingMemcpy measured 14813 us on it; cnnlCopy_v2
+    describes the view's strides and takes 18.5 us.
+    """
+    torch.manual_seed(83)
+    base = torch.randn(2, 8, 4, 16).to(dtype)
+    view = base.transpose(1, 2)
+    got = view.to("flagos").clone()
+    assert got.is_contiguous()
+    assert torch.equal(got.cpu(), view.clone())
+
+
+def test_clone_leaves_other_layouts_and_dtypes_alone():
+    """The vendor path declines what it does not serve, so these must still be
+    correct -- they take the ATen route."""
+    ints = torch.arange(24, dtype=torch.int32).reshape(2, 3, 4).transpose(0, 1)
+    assert torch.equal(ints.to("flagos").clone().cpu(), ints.clone())
+
+    empty = torch.empty(0, 4).transpose(0, 1)
+    assert tuple(empty.to("flagos").clone().shape) == (4, 0)
+
+    # A CPU tensor never reaches the vendor path at all.
+    assert torch.randn(3).clone().device.type == "cpu"
