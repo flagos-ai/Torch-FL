@@ -1,8 +1,11 @@
 """Regression coverage for the Cambricon CNNL operators a training step uses.
 
-`mul.Tensor`, its `out=`/in-place spellings and `embedding_dense_backward`: the
-three ops a Qwen3 causal-LM training step reached instead of the device before
-these kernels existed.
+The set a Qwen3 causal-LM training step reaches, in the two groups it was added
+in. `mul.Tensor`, its `out=` spelling and `embedding_dense_backward` were the ops
+FlagGems could not serve at all. The rest -- elementwise, reductions, the two
+matmuls -- FlagGems does serve, but through its Python/Triton path, where one
+launch costs hundreds of microseconds whatever the tensor holds; for those the
+assertions are about correctness, and the timing evidence lives in the PR.
 """
 
 import os
@@ -156,3 +159,123 @@ def test_broadcast_backward():
     (a * b).sum().backward()
     torch.testing.assert_close(ad.grad.cpu(), a.grad)
     torch.testing.assert_close(bd.grad.cpu(), b.grad)
+
+
+# ---------------------------------------------------------------------------
+# The ops that move a Qwen3 forward pass. Each is checked against the CPU
+# reference, including the shapes and views the model actually produces rather
+# than only the contiguous case.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("fn", [torch.abs, torch.rsqrt, torch.neg])
+def test_unary_ops(dtype, fn):
+    torch.manual_seed(71)
+    # rsqrt's domain is positive; abs and neg accept anything.
+    x = torch.randn(4, 8, 16)
+    if fn is torch.rsqrt:
+        x = x.abs() + 0.5
+    # The reference is taken on the same dtype the kernel sees: the kernel works
+    # in float32 internally and narrows once, so comparing a half answer against
+    # a float32 reference would be checking the wrong pair.
+    xd = x.to(dtype)
+    ref = fn(xd)
+    got = fn(xd.to("flagos"))
+    assert got.dtype == ref.dtype
+    torch.testing.assert_close(got.cpu(), ref, rtol=0, atol=5e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("scalar", [2.5, -1.0, 0.0])
+def test_scalar_arithmetic(dtype, scalar):
+    """`x * 2.0` wraps the number in a rank-0 tensor; CNNL cannot describe rank
+    zero, so this is the shape that used to fail before the kernel reshaped it."""
+    torch.manual_seed(72)
+    x = torch.randn(2, 4, 8)
+    xd = x.to(dtype).to("flagos")
+    torch.testing.assert_close(
+        (xd * scalar).cpu(), (x * scalar).to(dtype), rtol=0, atol=5e-2
+    )
+    torch.testing.assert_close(
+        (xd + scalar).cpu(), (x + scalar).to(dtype), rtol=0, atol=5e-2
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dim,keepdim", [(-1, False), (0, True), (None, False), ((0, 2), False)]
+)
+@pytest.mark.parametrize("fn", [torch.sum, torch.mean])
+def test_reductions(dtype, dim, keepdim, fn):
+    torch.manual_seed(73)
+    x = torch.randn(2, 4, 16)
+    xd = x.to(dtype).to("flagos")
+    if dim is None:
+        got, ref = fn(xd), fn(x)
+    else:
+        got, ref = fn(xd, dim=dim, keepdim=keepdim), fn(x, dim=dim, keepdim=keepdim)
+    # The reference is computed on the half-precision tensor and compared as
+    # PyTorch returns it: mean and sum promote half inputs to float32, so
+    # narrowing the answer to `dtype` here would compare the wrong two things.
+    assert got.dtype == ref.dtype
+    torch.testing.assert_close(got.cpu(), ref, rtol=0, atol=5e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_matmul_against_a_transposed_weight(dtype):
+    """`x @ w.t()` is how every Linear layer spells its product.
+
+    The transposed operand is described by its storage plus the Ex descriptor's
+    transpose flag; an earlier version copied the weight on every call, which
+    was correct but 122 times slower than the same product on a contiguous
+    operand. Both paths are compared so the fast one cannot silently disagree.
+    """
+    torch.manual_seed(74)
+    x = torch.randn(16, 32)
+    w = torch.randn(24, 32)
+    xd, wd = x.to(dtype).to("flagos"), w.to(dtype).to("flagos")
+    torch.testing.assert_close(
+        torch.mm(xd, wd.t()).cpu(), torch.mm(x, w.t()).to(dtype), rtol=0, atol=5e-2
+    )
+    torch.testing.assert_close(
+        torch.nn.functional.linear(xd, wd).cpu(),
+        torch.nn.functional.linear(x, w).to(dtype),
+        rtol=0,
+        atol=5e-2,
+    )
+
+
+def test_bmm_matches_matmul_per_batch():
+    torch.manual_seed(75)
+    a = torch.randn(4, 8, 16)
+    b = torch.randn(4, 16, 8)
+    got = torch.bmm(a.to("flagos"), b.to("flagos"))
+    torch.testing.assert_close(got.cpu(), torch.bmm(a, b), rtol=0, atol=1e-5)
+
+
+def test_broadcast_add_is_not_materialised():
+    """cnnlOpTensor broadcasts from the operand's own rank, so [2,512,1] against
+    [2,512,1024] must answer without the result-shaped copy the first version
+    made. The assertion is on the answer; the cost is what the PR measures."""
+    torch.manual_seed(76)
+    a = torch.randn(2, 8, 16)
+    b = torch.randn(2, 8, 1)
+    torch.testing.assert_close(
+        torch.add(a.to("flagos"), b.to("flagos")).cpu(), a + b, rtol=0, atol=1e-6
+    )
+
+
+def test_ones_like():
+    x = torch.randn(3, 5)
+    got = torch.ones_like(x.to("flagos"))
+    assert torch.equal(got.cpu(), torch.ones_like(x))
+
+
+def test_neg_does_not_square():
+    """The first implementation passed the operand twice to cnnlOpTensor, which
+    computes -x*x rather than -x. Pinned because the wrong answer is plausible
+    enough to survive a loose tolerance."""
+    x = torch.tensor([1.0, -2.0, 3.0, -4.0])
+    got = torch.neg(x.to("flagos"))
+    assert got.cpu().tolist() == [-1.0, 2.0, -3.0, 4.0]
