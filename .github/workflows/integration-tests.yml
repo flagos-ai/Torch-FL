@@ -132,6 +132,15 @@ jobs:
       # shared common workflow used before every platform had its own pipeline
       # (GCU was the last one on it), so a warm cache from that era is still
       # found on the first run instead of being re-downloaded.
+      #
+      # The key names the base platform, not the lane, so a platform's two lanes
+      # share one entry. `needs.configuration.outputs.platform` is the config
+      # basename with the -boxing suffix already stripped, and boxing only
+      # changes which kernels the wheel compiles -- the pip cache holds the same
+      # packages either way (measured: thead and thead-boxing install a
+      # byte-identical package set, and their 619 MB entries were duplicates of
+      # each other). Keying on the lane cost one redundant entry per boxing
+      # platform, about 2 GB of the 4.3 GB main held.
       - name: Look up pip downloads
         id: pip-cache-lookup
         uses: actions/cache/restore@v4
@@ -139,10 +148,10 @@ jobs:
         timeout-minutes: 1
         with:
           path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ inputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.platform), format('.github/configs/{0}.yml', inputs.platform), '.github/workflows/integration-tests.yml') }}
+          key: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), '.github/workflows/integration-tests.yml') }}
           lookup-only: true
           restore-keys: |
-            ${{ inputs.platform }}-pip-${{ runner.os }}-
+            ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-
             ${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-
             ${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-
             ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-

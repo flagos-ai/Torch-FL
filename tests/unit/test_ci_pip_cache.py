@@ -331,8 +331,14 @@ def test_cache_key_tracks_the_effective_dependencies(workflow):
         assert "inputs.setup_platform" in key
         assert "format('.github/configs/{0}.yml', inputs.setup_platform)" in key
     else:
-        assert "inputs.platform" in key
-        assert "format('.github/configs/{0}.yml', inputs.platform)" in key
+        # The base platform, not the lane: a platform's two lanes install the
+        # same package set, so keying on the lane stored a duplicate entry.
+        assert "needs.configuration.outputs.platform" in key
+        assert (
+            "format('.github/configs/{0}.yml', needs.configuration.outputs.platform)"
+            in key
+        )
+        assert "${{ inputs.platform }}-pip-" not in key
 
 
 def test_gcu_can_reuse_caches_from_the_retired_split_jobs():
@@ -344,9 +350,11 @@ def test_gcu_can_reuse_caches_from_the_retired_split_jobs():
         for step in _steps("integration-tests.yml")
         if step.get("id") == "pip-cache-lookup"
     )
-    assert lookup["with"]["key"].startswith("${{ inputs.platform }}-pip-")
+    assert lookup["with"]["key"].startswith(
+        "${{ needs.configuration.outputs.platform }}-pip-"
+    )
     for prefix in (
-        "${{ inputs.platform }}-pip-${{ runner.os }}-",
+        "${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-",
         "${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-",
         "${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-",
         (
@@ -500,3 +508,27 @@ def test_kunlunxin_keeps_its_oversized_flagtree_wheel_out_of_the_cache():
     for name in ("nvidia", "ascend", "mthreads", "hygon", "metax", "enflame"):
         other = (ROOT / f".github/scripts/hooks/set_env_{name}.sh").read_text()
         assert not re.search(r"PIP_RETRY_NO_CACHE=1", other), name
+
+
+def test_a_platforms_two_lanes_share_one_cache_entry():
+    """Boxing changes the kernels compiled, not the packages downloaded.
+
+    Measured on run 41976848532: thead and thead-boxing install a byte-identical
+    package set, and their cache entries were both 619 MB -- duplicates of each
+    other. Keying on the lane cost about 2 GB of the 4.3 GB main held across
+    nvidia, metax, hygon and thead, which is what kept the 10 GB budget full.
+    """
+    lookup = next(
+        step
+        for step in _steps("integration-tests.yml")
+        if step.get("id") == "pip-cache-lookup"
+    )
+    key = lookup["with"]["key"]
+    # `needs.configuration.outputs.platform` is the config basename with the
+    # -boxing suffix already stripped (load-platform-config.yml documents it).
+    assert "needs.configuration.outputs.platform" in key
+    assert "inputs.platform" not in key
+    for pattern in re.findall(r"format\('([^']+)'", key):
+        assert "{0}" in pattern
+    # The hook and config are still hashed, now through the base platform.
+    assert "format('.github/scripts/hooks/set_env_{0}.sh'" in key
