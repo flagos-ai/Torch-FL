@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # A skipped shared case is allowed only while its Torch-FL and upstream issues
-# are open. The trusted base owns the query and source check. The submitted
-# checkout supplies data only and is never imported or executed.
+# are open. The query and source check parse the submitted registry, declarations
+# and migrated sources as data. None of that submitted source is imported or
+# executed.
 
 name: Case gap issues
 
@@ -68,16 +69,15 @@ jobs:
             tests/unit/test_integration_source_contract.py
           sparse-checkout-cone-mode: false
 
-      # This commit is the first tree containing the shared source contract.
-      # On the first pull request run the base cannot yet resolve this reusable
-      # workflow, so its checkout is the controller pinned for that commit. The
-      # later revision checks out the actual base revision. Only the registry
-      # and tests below are read, and their paths are passed to the AST parser.
-      - name: Check out trusted issue query
+      # The base selected its controller above. On the first pull request run,
+      # the base cannot contain this workflow because the merge revision had to
+      # supply it. Read the controller from the submitted tree so the source
+      # contract travels with the workflow definition that is running.
+      - name: Check out selected issue query
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.checkout_repository || github.repository }}
-          ref: ${{ inputs.checkout_ref || github.event.pull_request.base.sha || github.sha }}
+          repository: ${{ inputs.registry_repository || github.repository }}
+          ref: ${{ inputs.registry_ref || github.sha }}
           path: trusted
           persist-credentials: false
           sparse-checkout: |

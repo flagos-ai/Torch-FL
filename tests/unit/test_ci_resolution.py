@@ -165,3 +165,24 @@ def test_privileged_control_workflows_only_checkout_the_trusted_event_commit():
             assert checkouts[0]["with"]["ref"] == "${{ github.sha }}"
             assert checkouts[0]["with"]["persist-credentials"] is False
         assert "contents" in workflow["permissions"]
+
+
+def test_case_gap_controller_and_data_come_from_the_same_submitted_revision():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/case-gap-issues.yml").read_text()
+    )
+    checkouts = [
+        step
+        for step in workflow["jobs"]["verify-gate"]["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert len(checkouts) == 2
+    registry, trusted = (step["with"] for step in checkouts)
+    assert (
+        trusted["repository"]
+        == "${{ inputs.registry_repository || github.repository }}"
+    )
+    assert trusted["ref"] == "${{ inputs.registry_ref || github.sha }}"
+    assert registry["repository"].startswith("${{ inputs.registry_repository || ")
+    assert registry["ref"].startswith("${{ inputs.registry_ref || ")
+    assert all(step["with"]["persist-credentials"] is False for step in checkouts)

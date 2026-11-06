@@ -37,7 +37,7 @@ def _workflow(name):
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
-def test_case_gate_reads_issues_only_from_the_trusted_base_revision():
+def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
     workflow = _workflow("case-gap-issues.yml")
     assert set(workflow[True]) == {
         "workflow_call",
@@ -50,11 +50,9 @@ def test_case_gate_reads_issues_only_from_the_trusted_base_revision():
     ]
     assert [step["with"]["path"] for step in checkouts] == ["registry", "trusted"]
     registry, trusted = (step["with"] for step in checkouts)
-    assert trusted["ref"] == (
-        "${{ inputs.checkout_ref || github.event.pull_request.base.sha || github.sha }}"
-    )
+    assert trusted["ref"] == "${{ inputs.registry_ref || github.sha }}"
     assert trusted["repository"] == (
-        "${{ inputs.checkout_repository || github.repository }}"
+        "${{ inputs.registry_repository || github.repository }}"
     )
     assert registry["ref"] == (
         "${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}"
@@ -62,7 +60,6 @@ def test_case_gate_reads_issues_only_from_the_trusted_base_revision():
     assert registry["repository"] == (
         "${{ inputs.registry_repository || inputs.checkout_repository || github.repository }}"
     )
-    assert registry["ref"] != trusted["ref"]
     assert registry["fetch-depth"] == 0
     assert "fetch-depth" not in trusted
     assert (
