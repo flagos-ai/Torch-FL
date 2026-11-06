@@ -1476,12 +1476,12 @@ REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend
 // after the at::native::flagos::cambricon namespace closes, because it has to
 // name both the kernel and a variable that lives outside it.
 //
-// register.cc declares this weak and consults it for a PrivateUse1 tensor,
-// falling through to flagos::clone when no backend defined it. Defining it here
-// rather than there is deliberate: a definition in the same translation unit as
-// its only reader was folded away by the optimiser, and the variable never
-// reached the link.
-__attribute__((visibility("default"))) CloneVendorFn g_clone_vendor = nullptr;
+// register.cc owns this table -- weak there, so a build with no backend that
+// fills it still links -- and consults it for a PrivateUse1 tensor. This file
+// only installs into it; the variable is not defined here, because two
+// definitions of one global in different objects is an ODR violation even when
+// one of them is weak.
+extern CloneVendorFn g_clone_vendor;
 
 namespace {
 

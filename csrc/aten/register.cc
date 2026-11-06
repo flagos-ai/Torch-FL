@@ -106,12 +106,17 @@ namespace at::native::flagos {
 using CloneVendorFn = ::std::optional<at::Tensor> (*)(
     const at::Tensor&, ::std::optional<at::MemoryFormat>);
 
-// Weak, so a build with no backend defining it still links; null then means
-// every clone keeps the ATen route.
+// A weak *definition*, not a weak declaration. On ELF `extern` plus `weak`
+// leaves an undefined-but-null symbol, which is what a backend overrides; on
+// Darwin (the MPS lane, clang) the same declaration is an ordinary undefined
+// symbol and the link fails outright when no backend defines it -- which is
+// exactly the MPS build, since Cambricon is the only platform that fills it in.
+// Defining it weak here costs one pointer-sized null and works on both.
 #if defined(__GNUC__) || defined(__clang__)
-extern CloneVendorFn g_clone_vendor __attribute__((weak, visibility("default")));
+__attribute__((weak, visibility("default"))) CloneVendorFn g_clone_vendor =
+    nullptr;
 #else
-extern CloneVendorFn g_clone_vendor;
+CloneVendorFn g_clone_vendor = nullptr;
 #endif
 
 namespace at::flagos {
