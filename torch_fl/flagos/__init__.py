@@ -2181,23 +2181,17 @@ def _flaggems_autotune_knob(triton_knobs):
     returns True so the caller proceeds: this function exists to avoid
     overwriting a deliberate setting, not to veto enabling the cache.
 
-    Parsed through ``env_bool.from_env`` -- the same parser ``env_bool.get``
-    uses -- rather than a hand-rolled truthiness test, so "on"/"yes"/"1" mean
-    here exactly what they mean to Triton. Reached from the descriptor because
-    the module-level ``getenv_bool`` helper it wraps is not part of every Triton
-    build (the Cambricon 3.4 line has no such name), and a missing name here
-    would otherwise be swallowed by the caller's ``except Exception`` and turn
-    into a silent no-op instead of a slow run.
+    Parsed through the module-level ``getenv_bool`` -- the same parser
+    ``env_bool.get`` calls -- rather than a hand-rolled truthiness test, so
+    "on"/"yes"/"1" mean here exactly what they mean to Triton. Guarded by
+    ``hasattr`` because that helper is not part of every Triton build (the
+    Cambricon 3.4 line has no such name); a build without it proceeds rather
+    than being silently vetoed.
     """
-    knob = triton_knobs.autotuning
-    descriptor = type(knob).__dict__.get("cache")
-    try:
-        raw = descriptor.env_val if descriptor is not None else None
-        if raw is None:
-            return True
-        return bool(descriptor.from_env(raw))
-    except Exception:  # noqa: BLE001 - an unreadable knob is "not set"
+    getenv_bool = getattr(triton_knobs, "getenv_bool", None)
+    if getenv_bool is None:
         return True
+    return bool(getenv_bool("TRITON_CACHE_AUTOTUNING", True))
 
 
 def _enable_flaggems_autotune_cache():
@@ -2258,8 +2252,9 @@ def _enable_flaggems_autotune_cache():
     ``setdefault``: ``env_bool`` is a data descriptor whose ``__set__`` calls
     ``knobs.setenv``, so assigning the knob *writes the variable*, and a
     ``setdefault`` followed by that assignment overwrites the user's ``0`` with
-    the ``1`` it just wrote. The existing value is therefore parsed with the same
-    ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
+    the ``1`` it just wrote. The existing value is therefore parsed with the
+    same ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by
+    construction -- and the value is only written when that parse says yes.
 
     Scoped to the builds and confs whose routed ops are FlagGems Python launches
     -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- like the patches around it. No op
@@ -2276,12 +2271,10 @@ def _enable_flaggems_autotune_cache():
 
         # Default True on purpose: unset is the state this exists to change, and
         # anything a user did set that does not parse as truthy is a "no".
-        #
-        # Reached through the knob object rather than ``triton_knobs.getenv_bool``
-        # directly: that helper is not part of every Triton build (the Cambricon
-        # 3.4 line has no such name), and the whole function is wrapped in
-        # ``except Exception: pass`` -- so calling it unconditionally turned the
-        # per-platform mismatch into a silent no-op instead of a slow run.
+        # Never call ``triton_knobs.getenv_bool`` unguarded: the rest of this
+        # function is under ``except Exception: pass``, so a Triton build
+        # without that helper would turn into a silent no-op instead of a slow
+        # run. ``_flaggems_autotune_knob`` owns that check.
         if not _flaggems_autotune_knob(triton_knobs):
             return
 
