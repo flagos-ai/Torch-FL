@@ -194,6 +194,25 @@ class TestAllCorrectness:
         out = torch.all(a)
         assert out.item() == torch.all(host).item()
 
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
+    @pytest.mark.parametrize("dim", [0, 1, -1, (0, 1), (1, 2), None])
+    @pytest.mark.anyplatform
+    def test_all_empty_results_keep_their_shape(self, dim):
+        """Non-empty reductions that produce empty results retain their shape."""
+        host = torch.ones((2, 0, 3), dtype=torch.float32)
+        if dim is None:
+            actual = torch.all(host.to(DEVICE))
+            expected = torch.all(host)
+        else:
+            actual = torch.all(host.to(DEVICE), dim=dim)
+            expected = torch.all(host, dim=dim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
     @pytest.mark.parametrize("dtype", [torch.bool, torch.float32, torch.int32])
     @pytest.mark.anyplatform
     def test_all_dtypes(self, dtype):

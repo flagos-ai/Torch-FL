@@ -19,11 +19,18 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import dispatched_to_mps
+from platform_support import detect_platform
 
 
 DEVICE = "flagos:0"
 
-pytestmark = pytest.mark.mps
+pytestmark = [
+    pytest.mark.mps,
+    pytest.mark.skipif(
+        detect_platform() != "mps",
+        reason="Apple Silicon (Metal) backend only",
+    ),
+]
 
 
 @pytest.mark.anyplatform

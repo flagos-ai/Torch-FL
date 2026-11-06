@@ -35,8 +35,6 @@ import pytest
 MIGRATED_CASE_FILES = frozenset(
     {
         "tests/integration/ops/test_all_dispatch.py",
-        "tests/integration/ops/test_mps_all.py",
-        "tests/integration/ops/test_mps_argmax.py",
     }
 )
 
@@ -80,6 +78,8 @@ _ISSUES = (
             "::TestAllCorrectness::test_all_empty_tensor",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_dim_reduction",
+            "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_results_keep_their_shape",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_full_reduction",
             "tests/integration/ops/test_all_dispatch.py"

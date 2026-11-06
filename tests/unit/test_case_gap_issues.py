@@ -235,7 +235,7 @@ def test_main_rejects_the_script_outside_its_trusted_root(tmp_path):
 
 def test_main_checks_skip_forms_in_every_migrated_source(tmp_path):
     module = _checker()
-    relative = "tests/integration/ops/test_mps_all.py"
+    relative = "tests/integration/ops/test_all_dispatch.py"
     contract = module.CaseGapContract("", (relative,))
     source = "import pytest\ndef test_x():\n    pytest.skip('gap')\n"
     submitted = tmp_path / relative

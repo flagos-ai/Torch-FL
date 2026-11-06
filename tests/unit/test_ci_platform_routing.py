@@ -72,8 +72,6 @@ def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
         ".github/scripts/ci/check_case_gap_issues.py\n"
         "tests/integration/case_gap_issues.py\n"
         "tests/integration/ops/test_all_dispatch.py\n"
-        "tests/integration/ops/test_mps_all.py\n"
-        "tests/integration/ops/test_mps_argmax.py\n"
         "tests/unit/test_integration_source_contract.py\n"
     )
     assert all(step["persist-credentials"] is False for step in (trusted, registry))

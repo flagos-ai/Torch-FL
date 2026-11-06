@@ -488,10 +488,7 @@ def test_no_new_platform_branch_changes_the_integration_suite_shape():
 def test_migration_exemptions_are_exact_and_still_necessary():
     violations = _collection_violations()
     observed = {path for path, _, _ in violations}
-    migrated_files = {
-        "tests/integration/ops/test_mps_all.py",
-        "tests/integration/ops/test_mps_argmax.py",
-    }
+    migrated_files = set()
     assert observed & _MIGRATION_EXEMPTIONS
     assert observed == _MIGRATION_EXEMPTIONS - migrated_files, (
         "platform-specific files must be migrated or stay on the frozen exemption list: "

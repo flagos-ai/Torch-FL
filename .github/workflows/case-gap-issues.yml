@@ -64,8 +64,6 @@ jobs:
             .github/scripts/ci/check_case_gap_issues.py
             tests/integration/case_gap_issues.py
             tests/integration/ops/test_all_dispatch.py
-            tests/integration/ops/test_mps_all.py
-            tests/integration/ops/test_mps_argmax.py
             tests/unit/test_integration_source_contract.py
           sparse-checkout-cone-mode: false
 

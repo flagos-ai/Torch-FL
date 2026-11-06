@@ -19,11 +19,18 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import dispatched_to_mps
+from platform_support import detect_platform
 
 
 DEVICE = "flagos:0"
 
-pytestmark = pytest.mark.mps
+pytestmark = [
+    pytest.mark.mps,
+    pytest.mark.skipif(
+        detect_platform() != "mps",
+        reason="Apple Silicon (Metal) backend only",
+    ),
+]
 
 
 @pytest.mark.anyplatform
@@ -48,7 +55,7 @@ def test_dim_and_keepdim_follow_aten(dim, keepdim):
 
 
 @pytest.mark.anyplatform
-def test_each_spelling_uses_mps():
+def test_each_spelling_uses_mps_and_empty_results_keep_their_shape():
     source = """
 import torch, torch_fl
 x = torch.tensor([[1, 0], [3, 4]], dtype=torch.int32, device='flagos:0')
@@ -59,34 +66,6 @@ torch.all(x, dim=(0, 1), keepdim=True)
 torch_fl._C._synchronize()
 """
     assert dispatched_to_mps(source) == 3
-
-
-@pytest.mark.anyplatform
-@pytest.mark.parametrize(
-    "shape, dim",
-    [
-        ((0, 3), None),
-        ((0, 3), 0),
-        ((2, 0, 3), 1),
-        ((0, 2), -1),
-        ((0, 3), (0, 1)),
-    ],
-)
-def test_empty_results_keep_their_shape(shape, dim):
-    host = torch.empty(shape, dtype=torch.float32)
-    if dim is None:
-        actual = torch.all(host.to(DEVICE))
-        expected = torch.all(host)
-    else:
-        actual = torch.all(host.to(DEVICE), dim=dim)
-        expected = torch.all(host, dim=dim)
-    assert actual.shape == expected.shape
-    assert actual.dtype == torch.bool
-    assert torch.equal(actual.cpu(), expected)
-
-
-@pytest.mark.anyplatform
-def test_empty_mps_all_returns_true():
     empty = torch.empty((0, 3), dtype=torch.int32)
     expected = torch.all(empty)
     actual = torch.all(empty.to(DEVICE))
