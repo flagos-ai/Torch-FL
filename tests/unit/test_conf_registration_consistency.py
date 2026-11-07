@@ -680,6 +680,10 @@ def test_flaggems_conformance_counts_match_committed_confs(monkeypatch):
         conf = CONF_DIR / f"backends_{vendor}{suffix}.conf"
         monkeypatch.setattr(caps, "conf_path", lambda conf=conf: conf)
         measured[label] = caps.flaggems_coverage_count()
+        assert (
+            _parse_conf(conf).get("scaled_dot_product_attention")
+            == caps.EXPECTED_SDPA_ROUTE[label]
+        ), f"{label}: SDPA route snapshot is stale"
     assert measured == caps.EXPECTED_FLAGGEMS_ROUTES
 
 
@@ -1049,13 +1053,13 @@ def test_soft_lowp_claims_do_not_duplicate_the_generated_list(platform):
 # TORCH_LIBRARY_IMPL body -- a compile error).
 CONV_CPU_CROSSING = {
     "nvidia": {"convolution_overrideable", "convolution_backward_overrideable"},
-    "hygon": {"none": 1586, "flaggems": 456},
+    "hygon": {"convolution_overrideable", "convolution_backward_overrideable"},
     "tsingmicro": {
         "convolution_overrideable",
         "convolution_backward_overrideable",
     },
-    "metax": {"none": 1441, "flaggems": 586, "flaggems_cpp": 15},
-    "thead": {"none": 1450, "flaggems": 592},
+    "metax": {"convolution_backward_overrideable"},
+    "thead": {"convolution_backward_overrideable"},
 }
 
 
@@ -1072,6 +1076,9 @@ def test_conv_overrideable_is_claimed_on_flaggems_primary_builds(platform):
     implemented" on 8x H100.
     """
     register_cc = (ATEN_DIR / "register.cc").read_text()
+    assert isinstance(CONV_CPU_CROSSING[platform], set), (
+        f"{platform}: convolution claims must contain operator names, not route counts"
+    )
     for op in CONV_CPU_CROSSING[platform]:
         assert op in register_cc, (
             f"{platform}: {op} is not claimed anywhere in register.cc, so a "
@@ -1140,4 +1147,41 @@ def test_flaggems_list_already_covers_the_forward_on_metax_and_ppu(platform):
     assert "convolution_backward_overrideable" not in inc, (
         f"{platform}: the generated list now claims the backward, so "
         "register.cc's wrapper claim would duplicate it"
+    )
+
+
+def test_default_cuda_cast_keeps_native_and_unsigned_fallback_paths():
+    """Pin the arm itself, not a runtime property.
+
+    A cast that goes through host memory costs three blocking `cudaMemcpy`
+    calls; the on-device arm costs none, because the native copy kernel is a
+    kernel. This asserts on the source so it runs on any host -- the runtime
+    check runs separately on CUDA hardware.
+
+    The arm must retain both routes: box only when the linked torch supplies
+    CUDA kernels, and use the host path when that torch is CPU-only.
+    """
+    src = (ATEN_DIR / "copy_ops.cc").read_text()
+    # The non-boxing arm is the second `#else` of the FLAGOS_BOXING_BUILD pair
+    # inside the same-device flagos->flagos branch.
+    # Anchor on the _to_copy dtype branch specifically: the file also has a
+    # "CUDA platform without the boxing kernels" comment on the _copy_from
+    # path, which takes a different (host) route by design.
+    marker = "if (src_is_flagos && dst_is_flagos) {"
+    branch = src.find(marker)
+    assert branch != -1, "the same-device flagos copy branch is gone"
+    start = src.find("// CUDA platform without the boxing kernels", branch)
+    assert start != -1, (
+        "the non-boxing CUDA cast arm is gone; decouple this test from the source "
+        "if the arm was deliberately removed"
+    )
+    arm = src[start : start + 2400]
+    assert "FLAGOS_TORCH_LINKS_LIBTORCH_CUDA" in arm, (
+        "the cast arm must not box into an empty CUDA stub on CPU-only torch"
+    )
+    assert "DeviceBoxingGuard" in arm, (
+        "a build linking libtorch_cuda must retain its native cast path"
+    )
+    assert "strided_copy_cast_via_cpu(self_contig, result);" in arm, (
+        "the CPU-only torch and unsigned-dtype fallback is missing from the arm"
     )

@@ -316,6 +316,7 @@ def test_install_cpu_torch_installs_from_the_mirror_when_it_is_faster():
 def test_install_cpu_torch_skips_the_probe_when_the_mirror_is_disabled():
     done = _run_bash(
         "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_MIRROR_INDEX_URL_DEFAULT=https://mirror.example/cpu\n"
         "CPU_TORCH_VERSION=2.10.0\n"
         "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=\n"
         "index_download_bps() { echo PROBE-CALLED; }\n"

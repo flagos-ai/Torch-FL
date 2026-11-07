@@ -41,10 +41,13 @@ Usage:
 import argparse
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
 
 # pytest prints its counts on the last line that mentions a duration, e.g.
 # "24 passed in 19.28s" (with a banner when not run under -q). Matching on the
@@ -72,7 +75,56 @@ def parse_args():
     parser.add_argument("--pattern", default="test_*.py")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument(
+        "--exclude-shared-cpu",
+        action="store_true",
+        help="Leave complete CPU-owned files to the shared workflow checks",
+    )
+    parser.add_argument(
+        "--retain",
+        action="append",
+        default=[],
+        help="Retain a CPU-owned file that also contains installed-wheel checks",
+    )
     return parser.parse_args()
+
+
+def shared_cpu_files(root):
+    """Read existing workflow commands; filtered pytest calls own no whole file."""
+    import yaml
+
+    owned = set()
+    for name in ("agnostic-checks.yml", "codegen-checks.yml"):
+        workflow = yaml.safe_load((root / ".github/workflows" / name).read_text())
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                for line in step.get("run", "").replace("\\\n", " ").splitlines():
+                    args = shlex.split(line, comments=True)
+                    if args[:3] not in (
+                        ["python", "-m", "pytest"],
+                        ["python3", "-m", "pytest"],
+                    ):
+                        continue
+                    paths, index = set(), 3
+                    while index < len(args):
+                        arg = args[index]
+                        if arg.startswith("tests/unit/") and arg.endswith(".py"):
+                            path = (root / arg).resolve()
+                            if "::" in arg or not path.is_relative_to(root.resolve()):
+                                break
+                            paths.add(path)
+                        elif arg in ("-v", "-vv", "-q", "-s", "--disable-warnings"):
+                            pass
+                        elif arg.startswith("--tb="):
+                            pass
+                        elif arg == "-p" and index + 1 < len(args):
+                            index += 1
+                        else:
+                            break
+                        index += 1
+                    else:
+                        owned.update(paths)
+    return owned
 
 
 def clean_summary(output):
@@ -124,7 +176,10 @@ def run_file(python, test_file, timeout):
         output, _ = process.communicate(timeout=timeout)
         return process.returncode, output, False
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         output, _ = process.communicate()
         return 124, output, True
 
@@ -138,6 +193,18 @@ def main():
     files = sorted(test_dir.glob(args.pattern))
     if not files:
         raise SystemExit(f"no test files matched {test_dir}/{args.pattern}")
+    if args.retain and not args.exclude_shared_cpu:
+        raise SystemExit("--retain requires --exclude-shared-cpu")
+    if args.exclude_shared_cpu:
+        owned = shared_cpu_files(ROOT)
+        retained = {(ROOT / path).resolve() for path in args.retain}
+        if not retained <= owned:
+            raise SystemExit("--retain must name complete CPU-owned test files")
+        selected = [path for path in files if path.resolve() not in owned - retained]
+        print(f"Shared CPU workflows own {len(files) - len(selected)} test files")
+        files = selected
+        if not files:
+            raise SystemExit("no hardware unit test files remain after CPU ownership")
 
     results = []
     for test_file in files:

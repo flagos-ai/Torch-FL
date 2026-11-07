@@ -41,6 +41,11 @@ name: Load platform configuration
 on:
   workflow_call:
     inputs:
+      test_profile:
+        description: Functional test selection (pr or nightly; weekly is reserved)
+        type: string
+        required: false
+        default: pr
       platform:
         description: >-
           Config basename under .github/configs (without .yml), optionally
@@ -236,6 +241,7 @@ jobs:
           fi
           INTEGRATION_TESTS=$(python .github/scripts/compose_integration_manifest.py \
             --platform "$PLATFORM" \
+            --profile "${{ inputs.test_profile }}" \
             ${BOXING_LANE:+--boxing-lane} \
             --environment-check "$ENVIRONMENT_CHECK_JSON" \
             --manifest "$MANIFEST_JSON" \

@@ -80,6 +80,8 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    "cuda_flaggems_mul": tuple(p for p in _PLATFORMS if p != "nvidia"),
+    "cuda_dtype_cast_performance": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "iluvatar_runtime": (
         "apple",
         "ascend",
@@ -379,20 +381,29 @@ def test_a_boxing_platform_runs_the_same_groups_on_both_builds(platform):
 
     A group that only one build ran would be coverage nobody sees the other
     half of: the boxing build is the same model suite, built the other way.
-    `vendor_ops` is the one step whose entry names its build, so it is the one
-    group the vendor build does not run.
+    Explicit vendor-only groups are checked on the vendor build; vendor_ops
+    uses the boxing build's own selection.
     """
     vendor = composed_steps(platform)
     boxing = composed_steps(platform, boxing_lane=True)
-    # `vendor_ops` is the step whose entry names its build (`boxing_variant`):
-    # the vendor build's own selection cannot answer the boxing conf, so that
-    # entry runs on the boxing build and only there. Every other group is the
-    # same entry run on both builds, in the same order.
+    # Explicit boxing variants cover paths unavailable on the vendor build.
+    # All remaining shared groups retain the same order on both builds.
     vendor_ids = [group["manifest_id"] for group in vendor]
     boxing_ids = [group["manifest_id"] for group in boxing]
     assert vendor_ids.count("vendor_ops") == 0
     assert boxing_ids.count("vendor_ops") == 1
-    assert [i for i in boxing_ids if i != "vendor_ops"] == vendor_ids
+    vendor_only = {entry["id"] for entry in _entries() if entry.get("vendor_only")}
+    boxing_only = {
+        entry["id"]
+        for entry in _entries()
+        if platform in entry.get("boxing_variant", [])
+    }
+    for group_id in boxing_only:
+        assert vendor_ids.count(group_id) == 0
+        assert boxing_ids.count(group_id) == 1
+    assert [i for i in boxing_ids if i not in boxing_only] == [
+        i for i in vendor_ids if i not in vendor_only
+    ]
 
 
 def test_the_only_substitution_is_the_display_name():
@@ -748,6 +759,8 @@ def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
     assert (
         composer.main(
             [
+                "--profile",
+                "nightly",
                 "--platform",
                 "nvidia",
                 "--manifest",
@@ -777,6 +790,8 @@ def test_the_loader_refuses_a_platform_with_no_config(tmp_path, capsys):
     assert (
         composer.main(
             [
+                "--profile",
+                "nightly",
                 "--platform",
                 "nvidia_h100",
                 "--manifest",

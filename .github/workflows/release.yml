@@ -144,7 +144,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ascend, cuda, dcu, gcu, metax, musa, ppu]
+        platform: [ascend, nvidia, hygon, enflame, metax, mthreads, thead]
     uses: ./.github/workflows/build-wheel.yml
     with:
       platform: ${{ matrix.platform }}

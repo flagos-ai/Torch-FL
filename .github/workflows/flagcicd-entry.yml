@@ -17,6 +17,11 @@ name: FlagCICD Entry
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: pr or full nightly; weekly is reserved
+        type: choice
+        default: pr
+        options: [pr, nightly, weekly]
       pr_number:
         description: Optional open PR number; resolves the actual head and base SHAs
         type: string
@@ -76,6 +81,7 @@ jobs:
     outputs:
       context: ${{ steps.plan.outputs.context }}
       test_level: ${{ steps.plan.outputs.test_level }}
+      profile: ${{ steps.plan.outputs.profile }}
       platforms: ${{ steps.plan.outputs.platforms }}
       validated_platforms: ${{ steps.plan.outputs.validated_platforms }}
       source_repository: ${{ steps.resolve.outputs.source_repository }}
@@ -145,6 +151,7 @@ jobs:
     uses: ./.github/workflows/load-platform-config.yml
     with:
       platform: ${{ matrix.platform }}
+      test_profile: ${{ needs.plan.outputs.profile }}
       checkout_repository: ${{ needs.plan.outputs.source_repository }}
       checkout_ref: ${{ needs.plan.outputs.source_sha }}
 
@@ -176,6 +183,7 @@ jobs:
       FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ matrix.platform }}
+      test_profile: ${{ needs.plan.outputs.profile }}
       checkout_repository: ${{ needs.plan.outputs.source_repository }}
       checkout_ref: ${{ needs.plan.outputs.source_sha }}
       flagcicd_plan: ${{ needs.plan.outputs.context }}

@@ -16,6 +16,7 @@
 
 import importlib.util
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -149,3 +150,116 @@ def test_a_real_failure_still_fails_the_run(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
     assert _RUNNER.main() == 1
+
+
+@pytest.mark.parametrize(
+    "command,owned",
+    [
+        (
+            "python -m pytest tests/unit/test_cpu.py -v --tb=short -p no:cacheprovider",
+            True,
+        ),
+        ("python3 -m pytest tests/unit/test_cpu.py -k smoke", False),
+        ("python -m pytest tests/unit/test_cpu.py::test_one", False),
+        ("python -m pytest tests/unit/test_cpu.py --deselect x", False),
+    ],
+)
+def test_only_complete_pytest_files_have_a_shared_cpu_owner(tmp_path, command, owned):
+    import yaml
+
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    for name in ("agnostic-checks.yml", "codegen-checks.yml"):
+        (workflows / name).write_text(
+            yaml.safe_dump({"jobs": {"cpu": {"steps": [{"run": command}]}}})
+        )
+    assert (
+        (tmp_path / "tests/unit/test_cpu.py").resolve()
+        in _RUNNER.shared_cpu_files(tmp_path)
+    ) is owned
+
+
+def test_hardware_runner_leaves_cpu_checks_to_their_owner_and_retains_runtime(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    tests = tmp_path / "tests/unit"
+    tests.mkdir(parents=True)
+    for name in ("test_cpu.py", "test_runtime.py", "test_device.py"):
+        (tests / name).write_text("")
+    command = "python -m pytest tests/unit/test_cpu.py tests/unit/test_runtime.py -v"
+    for name in ("agnostic-checks.yml", "codegen-checks.yml"):
+        (workflows / name).write_text(
+            yaml.safe_dump({"jobs": {"cpu": {"steps": [{"run": command}]}}})
+        )
+    ran = []
+
+    def run_file(python, path, timeout):
+        ran.append(path.name)
+        return 0, _CLEAN, False
+
+    monkeypatch.setattr(_RUNNER, "ROOT", tmp_path)
+    monkeypatch.setattr(_RUNNER, "run_file", run_file)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_unit_tests.py",
+            "--test-dir",
+            str(tests),
+            "--exclude-shared-cpu",
+            "--retain",
+            "tests/unit/test_runtime.py",
+        ],
+    )
+    assert _RUNNER.main() == 0
+    assert ran == ["test_device.py", "test_runtime.py"]
+
+
+def test_cpu_ownership_keeps_hardware_variants_explicit():
+    import shlex
+    import yaml
+
+    root = _RUNNER_PATH.parents[2]
+    owned = _RUNNER.shared_cpu_files(root)
+    assert (root / "tests/unit/test_ci_functional_profiles.py").resolve() in owned
+    assert (
+        root / "tests/unit/test_conf_registration_consistency.py"
+    ).resolve() in owned
+    manifest = yaml.safe_load((root / ".github/integration-manifest.yml").read_text())
+    command = next(
+        s["command"] for s in manifest["steps"] if s["id"] == "unit_tests_per_file"
+    )
+    words = shlex.split(command)
+    assert "--exclude-shared-cpu" in words
+    retained = {words[i + 1] for i, word in enumerate(words) if word == "--retain"}
+    assert retained == {
+        "tests/unit/test_startup_subprocess.py",
+        "tests/unit/test_vendor_libtorch_overlay.py",
+    }
+    assert {(root / path).resolve() for path in retained} <= owned
+    assert (root / "tests/unit/test_compile_platform_profile.py").resolve() not in owned
+
+
+def test_exited_process_group_during_timeout_is_still_a_timeout(monkeypatch):
+    class FinishedProcess:
+        pid = 12345
+        calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("pytest", timeout)
+            return _CLEAN, None
+
+    process = FinishedProcess()
+    monkeypatch.setattr(_RUNNER.subprocess, "Popen", lambda *a, **k: process)
+
+    def gone(*args):
+        raise ProcessLookupError("the process group exited before killpg")
+
+    monkeypatch.setattr(_RUNNER.os, "killpg", gone)
+    assert _RUNNER.run_file(sys.executable, "test_example.py", 1) == (124, _CLEAN, True)
