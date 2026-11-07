@@ -21,6 +21,10 @@
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
+// Cambricon is native like Kunlunxin but its declaration is header-only, so it
+// is safe to include unconditionally: the namespace exists in every build and
+// StridedCopy is only called from the USE_CAMBRICON arm below.
+#include "backends/cambricon/cambricon_copy.h"
 #if defined(USE_MPS)
 #include "backends/apple/mps_copy.h"
 #endif
@@ -261,9 +265,12 @@ at::Tensor contiguous(
 #elif defined(USE_KUNLUNXIN)
       const bool copied_on_device = kunlunxin::StridedCopy(result, self);
 #elif defined(USE_CAMBRICON)
-      // No CNNL strided-copy kernel yet: report false and take the CPU
-      // round-trip below, the same arm copy_ops.cc uses.
-      const bool copied_on_device = false;
+      // cnnlCopy_v2 describes the source with cnnlSetTensorDescriptorEx, so a
+      // strided gather runs on the device. Before this arm the CPU round-trip
+      // below served it, and that was the most expensive call in a training
+      // step: 16228 us for the (2,64,16,512) view RoPE produces, against 18 us
+      // through cnnlCopy_v2.
+      const bool copied_on_device = cambricon::StridedCopy(result, self);
 #else
       const bool copied_on_device = ascend::StridedCopy(result, self);
 #endif
