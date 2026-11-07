@@ -220,6 +220,25 @@ def get_iluvatar_current_raw_stream(device: Any = None) -> int:
     return _C._get_iluvatar_current_raw_stream(_musa_device_index(device))
 
 
+def get_cambricon_current_raw_stream(device: Any = None) -> int:
+    """The ``cnrtQueue_t`` handle compiled and eager kernels both submit to.
+
+    Handle 0 is the right answer rather than a fallback, the same way it is for
+    TsingMicro: MLU has one default queue per device, and the eager CNNL kernels
+    this backend already runs are submitted to ``GetCurrentStreamForDevice``,
+    whose value for the default queue is 0. Sharing that handle is what orders a
+    compiled kernel against the eager work producing its inputs.
+
+    Read through ``torch.flagos`` rather than ``torch._C`` because the build
+    links the CPU torch wheel, which has no ``_cuda_getCurrentRawStream``.
+    """
+    from torch_fl import flagos
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+    index = int(FlagOSDeviceInterface._vendor_device(device))
+    return flagos.current_stream(index).handle
+
+
 def get_tsingmicro_current_raw_stream(device: Any = None) -> int:
     """The raw TX stream handle kernels must be launched on.
 

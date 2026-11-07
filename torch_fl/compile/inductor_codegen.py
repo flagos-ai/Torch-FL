@@ -121,6 +121,16 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
                 "from torch_fl.compile.flagtree_shim import "
                 f"get_tsingmicro_current_raw_stream as {name}"
             )
+        if ACCELERATOR == "cambricon":
+            # Same on MLU: the launcher takes a raw cnrtQueue_t and this wheel
+            # pairs with the CPU-only torch, which has no
+            # _cuda_getCurrentRawStream. The handle comes from torch_fl's own
+            # stream registry, so a compiled kernel is ordered against the eager
+            # CNNL kernels producing its inputs.
+            return (
+                "from torch_fl.compile.flagtree_shim import "
+                f"get_cambricon_current_raw_stream as {name}"
+            )
         # Boxing-backed flagos streams are CUDA streams on the same device.
         return f"from torch._C import _cuda_getCurrentRawStream as {name}"
 
