@@ -28,11 +28,21 @@ RUN = WORKFLOW["jobs"]["resolve-checkout"]["steps"][0]["run"]
 SHA = "a" * 40
 
 
-def _resolve(tmp_path, number="", pr=None):
+def _resolve(tmp_path, number="", pr=None, base_sha="", main_sha=None):
     binary = tmp_path / "bin"
     binary.mkdir()
     gh = binary / "gh"
-    gh.write_text("#!/usr/bin/env python3\nimport os\nprint(os.environ['FAKE_PR'])\n")
+    gh.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "if '--jq' in args:\n"
+        "    args = args[:args.index('--jq')]\n"
+        "if 'commits/main' in args[-1]:\n"
+        "    print(os.environ['FAKE_MAIN_SHA'])\n"
+        "else:\n"
+        "    print(os.environ['FAKE_PR'])\n"
+    )
     gh.chmod(0o755)
     output = tmp_path / "output"
     output.touch()
@@ -42,8 +52,10 @@ def _resolve(tmp_path, number="", pr=None):
         "EVENT_REPOSITORY": "flagos-ai/Torch-FL",
         "EVENT_REF": SHA,
         "PR_NUMBER": number,
+        "PR_BASE_SHA": base_sha,
         "GITHUB_OUTPUT": str(output),
         "FAKE_PR": json.dumps(pr or {}),
+        "FAKE_MAIN_SHA": main_sha or SHA,
     }
     process = subprocess.run(
         ["bash", "-e", "-c", RUN], env=env, capture_output=True, text=True
@@ -54,7 +66,12 @@ def _resolve(tmp_path, number="", pr=None):
 def test_normal_run_pins_the_event_commit(tmp_path):
     process, output = _resolve(tmp_path)
     assert process.returncode == 0, process.stderr
-    assert output == f"repository=flagos-ai/Torch-FL\nref={SHA}\n"
+    assert output == (
+        f"repository=flagos-ai/Torch-FL\n"
+        f"ref={SHA}\n"
+        "base_repository=flagos-ai/Torch-FL\n"
+        f"base_ref={SHA}\n"
+    )
 
 
 def test_fork_run_resolves_both_repository_and_immutable_head(tmp_path):
@@ -64,7 +81,34 @@ def test_fork_run_resolves_both_repository_and_immutable_head(tmp_path):
     }
     process, output = _resolve(tmp_path, "42", pr)
     assert process.returncode == 0, process.stderr
-    assert output == f"repository=contributor/fork\nref={'b' * 40}\n"
+    assert output == (
+        f"repository=contributor/fork\n"
+        f"ref={'b' * 40}\n"
+        "base_repository=flagos-ai/Torch-FL\n"
+        f"base_ref={SHA}\n"
+    )
+
+
+def test_pull_request_uses_the_base_sha_for_the_issue_query(tmp_path):
+    base_sha = "c" * 40
+    pr = {
+        "state": "open",
+        "head": {"repo": {"full_name": "contributor/fork"}, "sha": "b" * 40},
+    }
+    process, output = _resolve(tmp_path, "42", pr, base_sha)
+    assert process.returncode == 0, process.stderr
+    assert "base_repository=flagos-ai/Torch-FL\n" in output
+    assert f"base_ref={base_sha}\n" in output
+
+
+def test_invalid_pull_request_base_fails_closed(tmp_path):
+    pr = {
+        "state": "open",
+        "head": {"repo": {"full_name": "contributor/fork"}, "sha": SHA},
+    }
+    process, output = _resolve(tmp_path, "42", pr, "main")
+    assert process.returncode == 1
+    assert output == ""
 
 
 @pytest.mark.parametrize("number", ["0", "-1", "01", "42; echo unsafe", "$(whoami)"])
@@ -121,3 +165,24 @@ def test_privileged_control_workflows_only_checkout_the_trusted_event_commit():
             assert checkouts[0]["with"]["ref"] == "${{ github.sha }}"
             assert checkouts[0]["with"]["persist-credentials"] is False
         assert "contents" in workflow["permissions"]
+
+
+def test_case_gap_controller_and_data_come_from_the_same_submitted_revision():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/case-gap-issues.yml").read_text()
+    )
+    checkouts = [
+        step
+        for step in workflow["jobs"]["verify-gate"]["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert len(checkouts) == 2
+    registry, trusted = (step["with"] for step in checkouts)
+    assert (
+        trusted["repository"]
+        == "${{ inputs.registry_repository || github.repository }}"
+    )
+    assert trusted["ref"] == "${{ inputs.registry_ref || github.sha }}"
+    assert registry["repository"].startswith("${{ inputs.registry_repository || ")
+    assert registry["ref"].startswith("${{ inputs.registry_ref || ")
+    assert all(step["with"]["persist-credentials"] is False for step in checkouts)

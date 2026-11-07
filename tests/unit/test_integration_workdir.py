@@ -911,8 +911,6 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_acos_dispatch.py::TestAcosCorrectness::test_acos_matches_cuda",
             "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_cuda_override",
             "tests/integration/ops/test_add_dispatch.py::TestAddTensorCorrectness::test_add_matches_cuda",
-            "tests/integration/ops/test_all_dispatch.py::TestAllCorrectness::test_all_matches_cuda",
-            "tests/integration/ops/test_all_dispatch.py::TestAllDispatch::test_dispatch_log_cuda_override",
             "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_cuda_override",
             "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatch::test_bmm_matches_cuda_ref",
             "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_bmm_out_cuda_override",
@@ -1029,6 +1027,17 @@ _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
             "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_mm_out_flaggems_runtime",
             "tests/integration/ops/test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible_on_flaggems_path",
         ),
+    ),
+    "flaggems_python_override": (
+        (
+            "asserts that `FLAGOS_OP_<op>=flaggems_python` moves that op to the "
+            "FlagGems Python path. Every `vendor_ops` variant spells "
+            "`not flaggems_python`, and no other group selects the marker, so on "
+            "a tree without the `flaggems_python_override` group of "
+            "`.github/integration-manifest.yml` (upstream before #703) no command "
+            "collects these 27 cases; the group is what makes them run"
+        ),
+        (),
     ),
 }
 
@@ -1153,3 +1162,192 @@ def test_the_known_unselected_list_has_not_gone_stale():
             f"{shadowed} sit in files _KNOWN_UNREACHABLE already excludes "
             "whole; drop the case entries and leave the file entry"
         )
+
+
+_RAT_HOOK_START = "import torch_fl"
+
+# The hook this change replaced: a bare ``pytest.exit`` for an unavailable
+# device and no wrapper around the init call.
+_ORIGINAL_READINESS_HOOK = """
+
+
+def pytest_configure(config):
+    import torch_fl
+
+    if not torch_fl.flagos.is_available():
+        pytest.exit("flagos device is not available.")
+    torch_fl.flagos.init()
+"""
+
+# Imports the hook file of a temporary root the way pytest does -- from the
+# root's conftest, at collection, with ``pytest`` already imported -- runs its
+# ``pytest_configure`` against the stand-in ``torch_fl`` in ``torch_fl_stub``
+# (also written to the same root), and prints what came out of the call.
+_RUNNER = """
+import importlib.util
+import sys
+import traceback
+
+sys.path.insert(0, sys.argv[2])
+import torch_fl_stub  # noqa: E402,F401
+
+spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+
+from _pytest.outcomes import Exit  # noqa: E402
+
+try:
+    hook.pytest_configure(None)
+except Exit as exc:
+    print("Exit", exc.msg)
+except Exception as exc:
+    print(type(exc).__name__, exc)
+else:
+    print("returned")
+"""
+
+_STUB = """
+import sys
+import types
+
+torch_fl = types.ModuleType("torch_fl")
+torch_fl.flagos = types.SimpleNamespace(
+    is_available=lambda: {available},
+    init=_init,
+)
+sys.modules["torch_fl"] = torch_fl
+"""
+
+
+def test_integration_readiness_failure_is_a_hard_error():
+    """A missing device or a failed init must fail the run, not skip it.
+
+    The conftest used to leave through ``pytest.exit``, which is pytest's own
+    exit path: the distinction between "no accelerator" and "the runtime did
+    not come up" was lost, and a CI reader had to be told the exit was not a
+    pass. Both cases now raise ``pytest.UsageError``, which pytest reports as
+    an internal error and exits non-zero for.
+
+    The block sits in the ``pytest_configure`` the integration conftest
+    registers -- the one conftest the whole tree shares -- so it is exercised
+    on its own: the runner imports it the way pytest does (``pytest`` already
+    in ``sys.modules``), executes only the readiness block, and runs that
+    against a stand-in ``torch_fl``. The tree's real one is only read, for the
+    hook text, so no accelerator or built extension is needed.
+    """
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+
+    repo = Path(__file__).resolve().parents[2]
+    tree = ast.parse((repo / "tests/integration/conftest.py").read_text())
+    hook_source = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "pytest_configure"
+    )
+    setup = next(
+        statement
+        for statement in hook_source.body
+        if isinstance(statement, ast.Try) and "UsageError" in ast.unparse(statement)
+    )
+    readiness = [setup]
+    assert not any(
+        isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.ImportFrom,
+            ),
+        )
+        for statement in readiness
+        for node in ast.walk(statement)
+    )
+    readiness = [
+        *(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name.startswith("_")
+            and node.name != "__name__"
+        ),
+        *readiness,
+    ]
+    runner_hook = (
+        "import pytest\n\n\n"
+        + "\n\n".join(
+            ast.unparse(statement) for statement in readiness if statement is not setup
+        )
+        + "\n\n\ndef pytest_configure(config):\n"
+        + "    import torch_fl\n"
+        + textwrap.indent(ast.unparse(setup), "    ")
+    )
+    stripped = "import pytest\n" + _ORIGINAL_READINESS_HOOK
+
+    if not _pytest_available(repo):
+        pytest.skip("pytest is not importable in the interpreter under test")
+
+    def outcome(hook_text, init_body, available):
+        root = Path(tempfile.mkdtemp())
+        try:
+            (root / "hook_source.py").write_text(hook_text)
+            (root / "torch_fl_stub.py").write_text(
+                "import types, sys\n"
+                f"def _init():\n{textwrap.indent(init_body, '    ')}\n"
+                + _STUB.replace("{available}", available)
+            )
+            (root / "run.py").write_text(_RUNNER)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(root / "run.py"),
+                    str(root / "hook_source.py"),
+                    str(root),
+                ],
+                env={**os.environ, "PYTHONPATH": str(repo)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return result
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    result = outcome(stripped, "pass", "False")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("Exit flagos device is not available"), (
+        result.stdout + result.stderr
+    )
+
+    result = outcome(runner_hook, "pass", "False")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("UsageError flagos device is not available"), (
+        result.stdout + result.stderr
+    )
+
+    result = outcome(runner_hook, "raise RuntimeError('ACL runtime broken')", "True")
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.startswith("UsageError flagos integration setup failed"), (
+        result.stdout + result.stderr
+    )
+    assert "RuntimeError: ACL runtime broken" in result.stdout
+
+
+def _pytest_available(repo: Path) -> bool:
+    """Whether the interpreter running this test can import pytest."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import pytest"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result.returncode == 0
