@@ -128,10 +128,16 @@ jobs:
       # uses. The dedicated per-platform pipelines this replaced hashed their own
       # workflow file; the single pipeline hashes itself instead.
       #
-      # The restore-keys keep a display-name fallback because that is the lane the
-      # shared common workflow used before every platform had its own pipeline
-      # (GCU was the last one on it), so a warm cache from that era is still
-      # found on the first run instead of being re-downloaded.
+      # The restore-key is the base platform's prefix, which is the only shape
+      # this workflow has ever written. Three display-name fallbacks
+      # (CUDA-pip-..., CUDA-build-pip-..., and the same per vendor) used to sit
+      # here for caches left by the split per-platform pipelines that #519
+      # collapsed. They never matched: every one of the 14 cache key prefixes in
+      # this repository is a platform name, and a display-name entry would have
+      # expired 7 days after #519 last wrote one. On a boxing lane they were also
+      # wrong rather than merely idle -- display_name appends " (CUDA boxing)",
+      # so the prefix was the literal "CUDA (CUDA boxing)-pip-Linux-", which no
+      # cache key can begin with.
       #
       # The key names the base platform, not the lane, so a platform's two lanes
       # share one entry. `needs.configuration.outputs.platform` is the config
@@ -152,9 +158,6 @@ jobs:
           lookup-only: true
           restore-keys: |
             ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-
-            ${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-
-            ${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-
-            ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
       #

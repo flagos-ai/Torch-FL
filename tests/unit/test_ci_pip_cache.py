@@ -341,28 +341,47 @@ def test_cache_key_tracks_the_effective_dependencies(workflow):
         assert "${{ inputs.platform }}-pip-" not in key
 
 
-def test_gcu_can_reuse_caches_from_the_retired_split_jobs():
-    # GCU was the last platform on the shared common workflow, whose cache keys
-    # were built from the display name. The unified pipeline keeps those prefixes
-    # as restore-keys so the first run after the collapse still finds them.
+def test_every_restore_key_can_match_a_cache_this_workflow_wrote():
+    """A restore-key that cannot prefix a real key is dead weight.
+
+    This pipeline keys its entries on the base platform name, so that is the
+    only prefix it can fall back to. It used to carry display-name fallbacks for
+    caches from the split per-platform pipelines #519 collapsed; those never
+    matched, because all 14 key prefixes in the repository are platform names
+    and a display-name entry would have expired 7 days after #519 last wrote
+    one. On a boxing lane the fallbacks were also *wrong* rather than idle:
+    display_name appends " (CUDA boxing)", which no key can begin with.
+    """
     lookup = next(
         step
         for step in _steps("integration-tests.yml")
         if step.get("id") == "pip-cache-lookup"
     )
-    assert lookup["with"]["key"].startswith(
-        "${{ needs.configuration.outputs.platform }}-pip-"
+    key = lookup["with"]["key"]
+    prefix = "${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-"
+    assert key.startswith("${{ needs.configuration.outputs.platform }}-pip-")
+
+    restore_keys = [
+        line.strip()
+        for line in lookup["with"]["restore-keys"].splitlines()
+        if line.strip()
+    ]
+    assert restore_keys == [prefix]
+    assert key.startswith(prefix)
+
+    # build-wheel-common.yml keys on the display name, so its fallbacks are the
+    # same shape as its key and stay as they are.
+    common = next(
+        step
+        for step in _steps("build-wheel-common.yml")
+        if step.get("id") == "pip-cache-lookup"
     )
-    for prefix in (
-        "${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-",
-        "${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-",
-        "${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-",
-        (
-            "${{ needs.configuration.outputs.display_name }}"
-            "-integration-pip-${{ runner.os }}-"
-        ),
-    ):
-        assert prefix in lookup["with"]["restore-keys"]
+    assert common["with"]["key"].startswith("${{ inputs.display_name }}-pip-")
+    assert all(
+        line.strip().startswith("${{ inputs.display_name }}-")
+        for line in common["with"]["restore-keys"].splitlines()
+        if line.strip()
+    )
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
