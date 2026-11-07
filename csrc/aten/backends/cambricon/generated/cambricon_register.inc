@@ -6,12 +6,19 @@
 // file to build backends_cambricon.conf, so the routes and the registrations
 // cannot drift apart. Included from the USE_CAMBRICON arm of
 // csrc/aten/register.cc when FLAGOS_CAMBRICON_KERNEL is defined.
+  m.impl("_log_softmax", WrapperPrivLogSoftmax);
   m.impl("_safe_softmax", WrapperPrivSafeSoftmax);
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
   m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("arange", WrapperArange);
+  m.impl("arange.start", WrapperArangeStart);
   m.impl("bmm", WrapperBmm);
+  m.impl("cat", WrapperCat);
+  m.impl("cumsum", WrapperCumsum);
+  m.impl("embedding", WrapperEmbedding);
   m.impl("embedding_dense_backward", WrapperEmbeddingDenseBackward);
+  m.impl("fill_.Scalar", WrapperFillInplaceScalar);
   m.impl("mean", WrapperMean);
   m.impl("mean.dim", WrapperMeanDim);
   m.impl("mm", WrapperMm);
@@ -19,7 +26,11 @@
   m.impl("mul.Tensor", WrapperMulTensor);
   m.impl("mul.out", WrapperMulOut);
   m.impl("neg", WrapperNeg);
+  m.impl("new_ones", WrapperNewOnes);
+  m.impl("ones", WrapperOnes);
   m.impl("ones_like", WrapperOnesLike);
+  m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("rsqrt", WrapperRsqrt);
+  m.impl("scalar_tensor", WrapperScalarTensor);
   m.impl("sum", WrapperSum);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);

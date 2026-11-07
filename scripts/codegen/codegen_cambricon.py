@@ -47,6 +47,7 @@
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -252,6 +253,17 @@ OPS = {
     "sum": "reduce_all",
     "mean": "reduce_all",
     "ones_like": "ones_like",
+    "fill_.Scalar": "fill",
+    "ones": "ones",
+    "scalar_tensor": "host_built",
+    "arange": "host_built",
+    "arange.start": "host_built",
+    "_log_softmax": "log_softmax",
+    "embedding": "embedding",
+    "cumsum": "cumsum",
+    "cat": "cat",
+    "pow.Tensor_Scalar": "pow",
+    "new_ones": "new_ones",
     "mm": "matmul",
     "bmm": "bmm",
     "sum.dim_IntList": "sum_dim",
@@ -417,6 +429,21 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 # operand descriptor.
 # The CNNL entry point each `unary_op` member calls. These take (input, output)
 # and nothing else, which is what lets one body serve them all.
+HOST_BUILT_OPS = {
+    "scalar_tensor": (
+        "const at::Scalar& s, std::optional<at::ScalarType> dtype_opt,\n    std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,\n    std::optional<bool> pin_memory_opt",
+        "auto host = at::scalar_tensor(s, opts);",
+    ),
+    "arange": (
+        "const at::Scalar& end, std::optional<at::ScalarType> dtype_opt,\n    std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,\n    std::optional<bool> pin_memory_opt",
+        "auto host = at::arange(end, opts);",
+    ),
+    "arange.start": (
+        "const at::Scalar& start, const at::Scalar& end,\n    std::optional<at::ScalarType> dtype_opt, std::optional<at::Layout> layout_opt,\n    std::optional<at::Device> device_opt, std::optional<bool> pin_memory_opt",
+        "auto host = at::arange(start, end, opts);",
+    ),
+}
+
 UNARY_ENTRY = {
     "rsqrt": "cnnlRsqrt",
     "abs": "cnnlAbs",
@@ -553,6 +580,396 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 # ones_like is a fill of a freshly allocated result. The 1.3 ms the FlagGems
 # path costs is its Python dispatch, not the fill.
+T_FILL = """\
+at::Tensor& {kernel}(at::Tensor& self, const at::Scalar& value) {{
+  TORCH_CHECK(
+      self.device().type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires a device tensor");
+  const auto dtype = self.scalar_type();
+  TORCH_CHECK(
+      SupportedFloatDtype(dtype) || dtype == at::kInt || dtype == at::kBool ||
+          dtype == at::kLong,
+      "flagos cambricon: {op} does not serve ", dtype);
+  if (self.numel() == 0) {{
+    return self;
+  }}
+  // A CNNL descriptor cannot express rank zero, and `torch.ones([])` -- which
+  // FlagGems' `all` builds as its reduction accumulator -- is exactly that. The
+  // one element is written through a rank-one view of the same storage.
+  if (self.dim() == 0) {{
+    auto flat = self.reshape({{1}});
+    flat.fill_(value);
+    return self;
+  }}
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+
+  // The value travels in host memory. cnnlFill_v3 has a pointer mode that says
+  // so; cnnlFill_v4 dropped the argument, and neither alternative to it works:
+  // handed a host pointer v4 wrote nothing at all, and handed a one-element
+  // device tensor the fill could read it after the temporary had been recycled,
+  // which showed up as one call's value landing in the next one's buffer.
+  //
+  // The bytes are produced by a one-element host tensor of the destination
+  // dtype, because the descriptor requires the two dtypes to match and a
+  // bfloat16 bit pattern is not reachable from a plain C++ cast here.
+  auto host_value = at::empty({{1}}, self.options().dtype(dtype).device(at::kCPU));
+  host_value.fill_(value);
+  TensorDesc out_d;
+  // cnnlFill_v3 honours a strided descriptor, so a view is written in place
+  // rather than through an intermediate buffer.
+  if (self.is_contiguous()) {{
+    out_d.Set(self);
+  }} else {{
+    out_d.SetStrided(self);
+  }}
+  CheckCnnl(
+      cnnlFill_v3(handle, CNNL_POINTER_MODE_HOST, host_value.const_data_ptr(),
+                  out_d.get(), self.mutable_data_ptr()),
+      "cnnlFill_v3 ({op})");
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_ONES = """\
+at::Tensor {kernel}(
+    at::IntArrayRef size, std::optional<at::ScalarType> dtype_opt,
+    std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,
+    std::optional<bool> pin_memory_opt) {{
+  TORCH_CHECK(
+      !layout_opt.has_value() || *layout_opt == at::kStrided,
+      "flagos cambricon: {op} only serves strided layout");
+  TORCH_CHECK(
+      !pin_memory_opt.has_value() || !*pin_memory_opt,
+      "flagos cambricon: {op} does not serve pinned memory");
+  const auto device = c10::device_or_default(device_opt);
+  TORCH_CHECK(
+      device.type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires the flagos device");
+  auto result = at::empty(
+      size, at::TensorOptions().dtype(c10::dtype_or_default(dtype_opt))
+                .device(device));
+  // The same fill the in place op uses, which handles a rank-zero request by
+  // writing through a rank-one view. FlagGems' ones costs 1.37 ms for the
+  // (512,512) causal mask each attention layer builds.
+  result.fill_(1);
+  return result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_HOST_BUILT = """\
+at::Tensor {kernel}({params}) {{
+  TORCH_CHECK(
+      !layout_opt.has_value() || *layout_opt == at::kStrided,
+      "flagos cambricon: {op} only serves strided layout");
+  TORCH_CHECK(
+      !pin_memory_opt.has_value() || !*pin_memory_opt,
+      "flagos cambricon: {op} does not serve pinned memory");
+  const auto device = c10::device_or_default(device_opt);
+  TORCH_CHECK(
+      device.type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires the flagos device");
+
+  // The sequence is built by aten on the host and copied in. It is a ramp, which
+  // CNNL has no entry point for that this build can call safely (cnnlArange_v3
+  // faulted with both host and device start/step), and every call in a model is
+  // a few hundred elements -- one small copy, ~30 us, against the 1234 us
+  // FlagGems spends per call.
+  //
+  // Building it on the host is also what keeps the dtype right: aten's own
+  // overload picks int64 for an all-integer argument list and float32
+  // otherwise, and reproducing that rule here would be a second source of truth
+  // for something aten already decides.
+  auto opts = at::TensorOptions().device(at::kCPU);
+  if (dtype_opt.has_value()) {{
+    opts = opts.dtype(*dtype_opt);
+  }}
+  {host_build}
+  return host.to(device);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_EMBEDDING = """\
+at::Tensor {kernel}(
+    const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx,
+    bool scale_grad_by_freq, bool sparse) {{
+  TORCH_CHECK(
+      !sparse, "flagos cambricon: {op} does not serve a sparse gradient");
+  TORCH_CHECK(
+      !scale_grad_by_freq,
+      "flagos cambricon: {op} does not serve scale_grad_by_freq");
+  TORCH_CHECK(
+      weight.device() == indices.device(),
+      "flagos cambricon: {op} needs both operands on one device");
+  TORCH_CHECK(
+      SupportedFloatDtype(weight.scalar_type()),
+      "flagos cambricon: {op} does not serve ", weight.scalar_type());
+  TORCH_CHECK(weight.dim() == 2, "flagos cambricon: {op} needs a 2-D weight");
+
+  const auto w = weight.contiguous();
+  auto idx = indices.contiguous();
+  // cnnlEmbeddingForward takes int32 indices. aten allows int32 or int64, and
+  // the cast is one small kernel over the index tensor.
+  if (idx.scalar_type() != at::kInt) {{
+    idx = idx.to(at::kInt);
+  }}
+  auto out_sizes = idx.sizes().vec();
+  out_sizes.push_back(w.size(1));
+  auto output = at::empty(out_sizes, w.options());
+  if (output.numel() == 0) {{
+    return output;
+  }}
+  CambriconDeviceGuard guard(w);
+  const auto handle = HandleForDevice(static_cast<int>(w.device().index()));
+  TensorDesc wd, id, od;
+  wd.Set(w);
+  id.Set(idx);
+  od.Set(output);
+  // max_norm and norm_type are pointers in the signature; both are null unless
+  // the caller asked for renormalisation, which aten's embedding never does.
+  CheckCnnl(
+      cnnlEmbeddingForward_v2(
+          handle, wd.get(), w.const_data_ptr(), id.get(), idx.const_data_ptr(),
+          static_cast<int>(padding_idx), static_cast<const float*>(nullptr),
+          static_cast<const float*>(nullptr), od.get(),
+          output.mutable_data_ptr()),
+      "cnnlEmbeddingForward_v2 ({op})");
+  return output;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_CUMSUM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self, int64_t dim, std::optional<at::ScalarType> dtype) {{
+  TORCH_CHECK(
+      self.device().type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires a device tensor");
+  TORCH_CHECK(self.dim() > 0, "flagos cambricon: {op} needs rank >= 1");
+  const int64_t axis = dim < 0 ? dim + self.dim() : dim;
+  TORCH_CHECK(
+      axis >= 0 && axis < self.dim(),
+      "flagos cambricon: {op} got dim ", dim);
+  const auto out_dtype = dtype.has_value() ? *dtype : self.scalar_type();
+  // Integral accumulation would have to run in int64 to match aten's promotion;
+  // this path is the float one, and anything else crosses to the host so the
+  // answer stays exact. Models accumulate in float, so the fallback is cold.
+  if (!SupportedFloatDtype(self.scalar_type()) ||
+      !SupportedFloatDtype(out_dtype)) {{
+    return at::cumsum(self.to(at::kCPU), dim, dtype)
+        .to(self.device());
+  }}
+
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+  const auto input = self.contiguous();
+  const auto wide = Widen(input, handle);
+  auto wide_out = at::empty(self.sizes(), self.options().dtype(at::kFloat));
+
+  TensorDesc in_d, out_d;
+  in_d.Set(wide);
+  out_d.Set(wide_out);
+  size_t workspace_size = 0;
+  CheckCnnl(
+      cnnlGetCumsumWorkspaceSize(handle, in_d.get(), static_cast<int>(axis),
+                                 &workspace_size),
+      "cnnlGetCumsumWorkspaceSize");
+  at::Tensor workspace;
+  if (workspace_size > 0) {{
+    workspace = at::empty(
+        {{static_cast<int64_t>(workspace_size)}},
+        self.options().dtype(at::kByte));
+  }}
+  CheckCnnl(
+      cnnlCumsum_v2(
+          handle, in_d.get(), wide.const_data_ptr(), static_cast<int>(axis),
+          /*exclusive=*/false, /*reverse=*/false, CNNL_NOT_PROPAGATE_NAN,
+          out_d.get(), wide_out.mutable_data_ptr(),
+          workspace_size > 0 ? workspace.mutable_data_ptr() : nullptr,
+          workspace_size),
+      "cnnlCumsum_v2 ({op})");
+
+  if (wide_out.scalar_type() == out_dtype) {{
+    return wide_out;
+  }}
+  auto result = at::empty(self.sizes(), self.options().dtype(out_dtype));
+  Narrow(wide_out, result, handle);
+  return result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_CAT = """\
+at::Tensor {kernel}(const c10::IListRef<at::Tensor>& tensors, int64_t dim) {{
+  TORCH_CHECK(tensors.size() > 0, "flagos cambricon: {op} needs one tensor");
+  // Copied into a vector once -- a refcount bump each -- so every later read is
+  // a plain lookup instead of an IListRef tag switch. materialize() is not used
+  // because its elements are std::reference_wrapper, not tensors.
+  std::vector<at::Tensor> parts;
+  parts.reserve(tensors.size());
+  for (const auto& t : tensors) {{
+    parts.emplace_back(t);
+  }}
+  const at::Tensor& first = parts[0];
+  TORCH_CHECK(
+      first.device().type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires device tensors");
+  const int64_t rank = first.dim();
+  const int64_t axis = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(axis >= 0 && axis < rank, "flagos cambricon: {op} got dim ", dim);
+  for (const auto& t : parts) {{
+    TORCH_CHECK(
+        t.device() == first.device() && t.scalar_type() == first.scalar_type(),
+        "flagos cambricon: {op} needs one device and one dtype");
+  }}
+  if (!SupportedFloatDtype(first.scalar_type())) {{
+    std::vector<at::Tensor> host;
+    host.reserve(parts.size());
+    for (const auto& t : parts) {{
+      host.push_back(t.to(at::kCPU));
+    }}
+    return at::cat(at::TensorList(host), dim).to(first.device());
+  }}
+
+  auto sizes = first.sizes().vec();
+  int64_t joined = 0;
+  for (const auto& t : parts) {{
+    joined += t.size(axis);
+  }}
+  sizes[axis] = joined;
+  auto output = at::empty(sizes, first.options());
+  if (output.numel() == 0) {{
+    return output;
+  }}
+
+  CambriconDeviceGuard guard(first);
+  const auto handle = HandleForDevice(static_cast<int>(first.device().index()));
+  int64_t offset = 0;
+  for (const auto& t : parts) {{
+    if (t.numel() == 0) {{
+      continue;
+    }}
+    const auto src = t.contiguous();
+    // Each input lands in a slice of the result. The slice keeps the result's
+    // stride on every axis, so cnnlCopy_v2 is given a strided destination
+    // descriptor and writes exactly the elements the slice covers.
+    auto dst = output.narrow(axis, offset, t.size(axis));
+    TensorDesc in_d, out_d;
+    in_d.Set(src);
+    out_d.SetStrided(dst);
+    CheckCnnl(
+        cnnlCopy_v2(
+            handle, in_d.get(), src.const_data_ptr(), out_d.get(),
+            dst.mutable_data_ptr(), nullptr, 0),
+        "cnnlCopy_v2 ({op})");
+    offset += t.size(axis);
+  }}
+  return output;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_POW = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& exponent) {{
+  TORCH_CHECK(
+      self.device().type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires a device tensor");
+  // Integer and bool bases follow aten's promotion rules, which this path does
+  // not reproduce; they cross to the host so the answer stays exact. Models
+  // raise float tensors to a power, so the fallback is cold.
+  if (!SupportedFloatDtype(self.scalar_type())) {{
+    return at::pow(self.to(at::kCPU), exponent).to(self.device());
+  }}
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+  // A CNNL descriptor cannot express rank zero, so a scalar input is treated as
+  // one element and reshaped back at the end.
+  const bool flat = self.dim() == 0;
+  const auto input = (flat ? self.reshape({{1}}) : self).contiguous();
+  const auto wide_input = ComputesInFloat32(input.scalar_type())
+      ? Widen(input, handle)
+      : input;
+
+  // The exponent is carried the same way mul.Scalar carries its operand: at the
+  // input's rank with size 1 on every axis, which is the shape cnnlPow_v2
+  // broadcasts across.
+  std::vector<int64_t> scalar_shape(input.dim(), 1);
+  const double value = exponent.toDouble();
+  auto host_scalar = at::empty(scalar_shape, at::kDouble);
+  host_scalar.fill_(value);
+  auto scalar = host_scalar.to(self.options().dtype(at::kFloat));
+
+  auto output = at::empty(input.sizes(), self.options().dtype(at::kFloat));
+  TensorDesc xd, yd, zd;
+  xd.Set(wide_input);
+  yd.Set(scalar);
+  zd.Set(output);
+  CheckCnnl(
+      cnnlPow_v2(
+          handle, xd.get(), wide_input.const_data_ptr(), yd.get(),
+          scalar.const_data_ptr(), nullptr, 0, zd.get(),
+          output.mutable_data_ptr()),
+      "cnnlPow_v2 ({op})");
+
+  at::Tensor result = output;
+  if (result.scalar_type() != self.scalar_type()) {{
+    result = at::empty(input.sizes(), self.options());
+    Narrow(output, result, handle);
+  }}
+  return flat ? result.reshape({{}}) : result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_NEW_ONES = """\
+at::Tensor {kernel}(
+    const at::Tensor& self, at::IntArrayRef size,
+    std::optional<at::ScalarType> dtype_opt, std::optional<at::Layout> layout_opt,
+    std::optional<at::Device> device_opt,
+    std::optional<bool> pin_memory_opt) {{
+  TORCH_CHECK(
+      !layout_opt.has_value() || *layout_opt == at::kStrided,
+      "flagos cambricon: {op} only serves strided layout");
+  TORCH_CHECK(
+      !pin_memory_opt.has_value() || !*pin_memory_opt,
+      "flagos cambricon: {op} does not serve pinned memory");
+  // new_ones inherits the receiver's dtype and device. c10::dtype_or_default
+  // and c10::device_or_default answer with the *global* defaults instead, which
+  // turned a float16 receiver into float32 on the host -- the bug that made
+  // this op look like it did not dispatch.
+  const auto options = self.options()
+                           .dtype(dtype_opt.has_value() ? *dtype_opt
+                                                        : self.scalar_type())
+                           .device(device_opt.has_value() ? *device_opt
+                                                          : self.device());
+  auto result = at::empty(size, options);
+  if (result.numel() > 0) {{
+    result.fill_(1);
+  }}
+  return result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_ONES_LIKE = """\
 at::Tensor {kernel}(
     const at::Tensor& self, std::optional<at::ScalarType> dtype_opt,
@@ -982,6 +1399,116 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
   const int64_t cols = mat2.size(2);
   auto wide = at::empty({{batch, rows, cols}}, self.options().dtype(compute));
 
+  // The batch case takes the whole product in one call when each operand is
+  // either contiguous or a transpose of contiguous storage -- which covers
+  // attention, where the second operand is k.transpose(-2, -1). CNNL describes
+  // a transposed operand by its storage and applies the transpose itself, so
+  // the descriptor is built over the contiguous view. A strided operand that is
+  // neither keeps the per-slice loop below.
+  bool a_batched_transposed = false;
+  bool b_batched_transposed = false;
+  at::Tensor a_use = aw;
+  at::Tensor b_use = bw;
+  if (!aw.is_contiguous() && aw.transpose(1, 2).is_contiguous()) {{
+    a_batched_transposed = true;
+    a_use = aw.transpose(1, 2);
+  }}
+  if (!bw.is_contiguous() && bw.transpose(1, 2).is_contiguous()) {{
+    b_batched_transposed = true;
+    b_use = bw.transpose(1, 2);
+  }}
+  if (a_use.is_contiguous() && b_use.is_contiguous() && batch > 0) {{
+    // With the transpose flag set the descriptor spans the storage, whose last
+    // two axes are the logical matrix's in the other order.
+    auto a3 = a_use.view({{batch, a_batched_transposed ? inner : rows,
+                           a_batched_transposed ? rows : inner}});
+    auto b3 = b_use.view({{batch, b_batched_transposed ? cols : inner,
+                           b_batched_transposed ? inner : cols}});
+    TensorDesc a3d, b3d, c3d;
+    a3d.Set(a3);
+    b3d.Set(b3);
+    c3d.Set(wide);
+    cnnlMatMulDescriptor_t bdesc = nullptr;
+    CheckCnnl(cnnlCreateMatMulDescriptor(&bdesc), "cnnlCreateMatMulDescriptor");
+    const bool flag = true;
+    if (a_batched_transposed) {{
+      CheckCnnl(
+          cnnlSetMatMulDescAttr(
+              bdesc, CNNL_MATMUL_DESC_TRANSA, &flag, sizeof(flag)),
+          "cnnlSetMatMulDescAttr (TRANSA)");
+    }}
+    if (b_batched_transposed) {{
+      CheckCnnl(
+          cnnlSetMatMulDescAttr(
+              bdesc, CNNL_MATMUL_DESC_TRANSB, &flag, sizeof(flag)),
+          "cnnlSetMatMulDescAttr (TRANSB)");
+    }}
+    // A bare cnnlCreateMatMulAlgo leaves the algorithm untuned: measured 163 us
+    // for a (32, 512, 64) x (32, 64, 512) product against 31 us once the
+    // heuristic had chosen one. The heuristic is only exposed for the Ex
+    // descriptor and answers with an Ex algorithm, which is the same underlying
+    // handle cnnlBatchMatMulEx takes. Exactly one of these two handles exists at
+    // the end, and each is destroyed by the call that made it -- swapping one
+    // into the other's variable freed the same pointer twice.
+    cnnlMatMulAlgo_t plain_algo = nullptr;
+    cnnlMatMulExDescriptor_t hdesc = nullptr;
+    cnnlMatMulExHeuristicResult_t hresult = nullptr;
+    cnnlMatMulExAlgo_t tuned_algo = nullptr;
+    cnnlMatMulAlgo_t algo_in_use = nullptr;
+    size_t batch_workspace_size = 0;
+    CheckCnnl(cnnlCreateMatMulExDescriptor(&hdesc), "cnnlCreateMatMulExDescriptor");
+    CheckCnnl(
+        cnnlCreateMatMulExHeuristicResult(&hresult),
+        "cnnlCreateMatMulExHeuristicResult");
+    const cnnlMatMulExPrefer_t no_preference = nullptr;
+    int returned_algo = 0;
+    const auto heuristic_status = cnnlGetMatMulExAlgoHeuristic(
+        handle, hdesc, a3d.get(), b3d.get(), c3d.get(), c3d.get(),
+        no_preference, /*requested_algo_count=*/1, &hresult, &returned_algo);
+    if (heuristic_status == CNNL_STATUS_SUCCESS && returned_algo > 0) {{
+      CheckCnnl(cnnlCreateMatMulExAlgo(&tuned_algo), "cnnlCreateMatMulExAlgo");
+      CheckCnnl(
+          cnnlGetMatMulExHeuristicResult(
+              hresult, tuned_algo, &batch_workspace_size),
+          "cnnlGetMatMulExHeuristicResult (bmm)");
+      algo_in_use = reinterpret_cast<cnnlMatMulAlgo_t>(tuned_algo);
+    }} else {{
+      CheckCnnl(cnnlCreateMatMulAlgo(&plain_algo), "cnnlCreateMatMulAlgo");
+      algo_in_use = plain_algo;
+    }}
+    at::Tensor batch_workspace;
+    if (batch_workspace_size > 0) {{
+      batch_workspace = at::empty(
+          {{static_cast<int64_t>(batch_workspace_size)}},
+          self.options().dtype(at::kByte));
+    }}
+    const float fast_one = 1.0f;
+    const float fast_zero = 0.0f;
+    const auto status = cnnlBatchMatMulEx(
+        handle, bdesc, algo_in_use, &fast_one, a3d.get(), a3.const_data_ptr(),
+        b3d.get(), b3.const_data_ptr(), &fast_zero, c3d.get(),
+        wide.mutable_data_ptr(),
+        batch_workspace_size > 0 ? batch_workspace.mutable_data_ptr() : nullptr,
+        batch_workspace_size);
+    if (tuned_algo != nullptr) {{
+      cnnlDestroyMatMulExAlgo(tuned_algo);
+    }}
+    if (plain_algo != nullptr) {{
+      cnnlDestroyMatMulAlgo(plain_algo);
+    }}
+    cnnlDestroyMatMulExHeuristicResult(hresult);
+    cnnlDestroyMatMulExDescriptor(hdesc);
+    cnnlDestroyMatMulDescriptor(bdesc);
+    if (status == CNNL_STATUS_SUCCESS) {{
+      if (!widen) {{
+        return wide;
+      }}
+      auto fast_result = at::empty({{batch, rows, cols}}, self.options());
+      Narrow(wide, fast_result, handle);
+      return fast_result;
+    }}
+  }}
+
   // CNNL's matmul is 2-D per call, so the batch axis is iterated here. Each
   // slice is a plain (rows, inner) x (inner, cols) product of contiguous
   // storage, which is exactly what the descriptor pair describes.
@@ -1358,18 +1885,50 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, std::optional<at::Scala
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 """
+# _log_softmax is the same kernel with CNNL's log algorithm. Derived rather than
+# copied: the two differ in exactly three places, and a copy silently drifts the
+# moment either changes -- which is how a stale check on a `dtype` parameter this
+# signature does not have reached the compiler.
+T_LOG_SOFTMAX = (
+    T_SOFTMAX.replace(
+        "at::Tensor {kernel}(const at::Tensor& self, int64_t dim, "
+        "std::optional<at::ScalarType> dtype) {{",
+        "at::Tensor {kernel}(const at::Tensor& self, int64_t dim, "
+        "bool half_to_float) {{",
+    )
+    .replace("CNNL_SOFTMAX_ACCURATE", "CNNL_SOFTMAX_LOG")
+    .replace(
+        "  TORCH_CHECK(\n"
+        "      !dtype.has_value() || *dtype == at::kFloat || *dtype == input_dtype,\n"
+        '      "flagos cambricon: {op} does not serve the requested dtype");',
+        "  // half_to_float asks for a float32 answer from a half input;\n"
+        "  // there is no dtype argument to validate here.\n"
+        "  TORCH_CHECK(\n"
+        "      !half_to_float || input_dtype == at::kHalf ||\n"
+        "          input_dtype == at::kBFloat16,\n"
+        '      "flagos cambricon: {op} serves half_to_float on a half tensor only");',
+    )
+    .replace(
+        "  const auto result_dtype = dtype.has_value() ? *dtype : input_dtype;",
+        "  const auto result_dtype = half_to_float ? at::kFloat : input_dtype;",
+    )
+)
 
-# clone, which in a training step is the [B,H,S,D] <-> [B,S,H,D] copy sdpa's
-# attention forward does around its kernel. Every source is a transposed view, so
-# this is a strided read into a dense buffer -- the one thing cnnlCopy_v2 does
-# well: it measured 1937 us on (2,16,512,64) stride (524288,64,1024,1), against
-# 14993 us for the FlagGems clone on the same view and 18188 us for
-# at::contiguous.
-#
-# clone has no dispatcher slot of its own (register.cc calls flagos::clone
-# directly), so the kernel is reached through CloneVendorHook -- a weak symbol in
-# register.cc that this file overrides. It returns nullopt rather than failing
-# for anything it does not serve, which leaves the ATen route in place.
+# The derivation must have changed all three, or the template did not match.
+assert "CNNL_SOFTMAX_LOG" in T_LOG_SOFTMAX
+assert "half_to_float ? at::kFloat" in T_LOG_SOFTMAX
+# Comment lines are stripped first: the replacement above introduces a comment
+# that mentions the word.
+_CODE_ONLY = "\n".join(
+    ln
+    for ln in T_LOG_SOFTMAX.split("CambriconDeviceGuard")[0].split("\n")
+    if not ln.lstrip().startswith("//")
+)
+for _stale in ("dtype.has_value()", "*dtype ==", "!dtype"):
+    assert _stale not in _CODE_ONLY, (
+        "T_LOG_SOFTMAX still reads a `dtype` parameter it does not have: " + _stale
+    )
+
 T_CLONE = """\
 namespace {{
 
@@ -1465,7 +2024,6 @@ CATEGORIES = {
 
 def wrapper_map():
     """op name -> wrapper function, read from the generated register file."""
-    import re
 
     text = REGISTER_INC.read_text()
     return dict(re.findall(r'm\.impl\(\s*"([^"]+)"\s*,\s*(\w+)\)', text))
@@ -1521,6 +2079,27 @@ def render():
                 op=op,
                 entry=UNARY_ENTRY[op],
             )
+        elif category == "fill":
+            body = T_FILL.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "log_softmax":
+            body = T_LOG_SOFTMAX.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "embedding":
+            body = T_EMBEDDING.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "cumsum":
+            body = T_CUMSUM.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "new_ones":
+            body = T_NEW_ONES.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "pow":
+            body = T_POW.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "cat":
+            body = T_CAT.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "host_built":
+            params, build = HOST_BUILT_OPS[op]
+            body = T_HOST_BUILT.format(
+                kernel=kernel, fn=fn, disp=disp, op=op, params=params, host_build=build
+            )
+        elif category == "ones":
+            body = T_ONES.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "reduce_all":
             body = T_REDUCE_ALL.format(
                 kernel=kernel,
