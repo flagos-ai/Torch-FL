@@ -32,5 +32,6 @@
   m.impl("pow.Tensor_Scalar", WrapperPowTensorScalar);
   m.impl("rsqrt", WrapperRsqrt);
   m.impl("scalar_tensor", WrapperScalarTensor);
+  m.impl("silu", WrapperSilu);
   m.impl("sum", WrapperSum);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);

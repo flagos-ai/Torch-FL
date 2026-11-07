@@ -264,6 +264,7 @@ OPS = {
     "cat": "cat",
     "pow.Tensor_Scalar": "pow",
     "new_ones": "new_ones",
+    "silu": "silu",
     "mm": "matmul",
     "bmm": "bmm",
     "sum.dim_IntList": "sum_dim",
@@ -963,6 +964,61 @@ at::Tensor {kernel}(
   if (result.numel() > 0) {{
     result.fill_(1);
   }}
+  return result;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
+T_SILU = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  TORCH_CHECK(
+      self.device().type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: {op} requires a device tensor");
+  TORCH_CHECK(
+      SupportedFloatDtype(self.scalar_type()),
+      "flagos cambricon: {op} does not serve ", self.scalar_type());
+  CambriconDeviceGuard guard(self);
+  const auto handle = HandleForDevice(static_cast<int>(self.device().index()));
+  const auto input = self.contiguous();
+  // half and bfloat16 are computed in float32 like every other kernel here;
+  // cnnlActivationForward takes one dtype for input and output.
+  const bool widen = ComputesInFloat32(input.scalar_type());
+  const auto wide = widen ? Widen(input, handle) : input;
+  auto output = at::empty(input.sizes(), self.options().dtype(at::kFloat));
+
+  // silu: x * sigmoid(x), one CNNL call against the ~196 us FlagGems spends on
+  // a (2, 512, 3072) input. CNNL_ACTIVATION_SWISH is the same function under a
+  // deprecated name -- this driver rejects it with "Activation mode 13 is not
+  // supported" and lists CNNL_ACTIVATION_SILU as the supported spelling.
+  cnnlActivationDescriptor_t act_desc = nullptr;
+  CheckCnnl(
+      cnnlCreateActivationDescriptor(&act_desc),
+      "cnnlCreateActivationDescriptor");
+  cnnlActivationMode_t mode = CNNL_ACTIVATION_SILU;
+  const auto set_mode = cnnlSetActivationDescAttr(
+      act_desc, CNNL_ACTIVATION_MODE, &mode, sizeof(mode));
+  if (set_mode != CNNL_STATUS_SUCCESS) {{
+    cnnlDestroyActivationDescriptor(act_desc);
+    CheckCnnl(set_mode, "cnnlSetActivationDescAttr ({op})");
+  }}
+  TensorDesc xd, yd;
+  xd.Set(wide);
+  yd.Set(output);
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  const auto status = cnnlActivationForward(
+      handle, act_desc, &alpha, xd.get(), wide.const_data_ptr(), &beta,
+      yd.get(), output.mutable_data_ptr());
+  cnnlDestroyActivationDescriptor(act_desc);
+  CheckCnnl(status, "cnnlActivationForward ({op})");
+
+  if (!widen) {{
+    return output;
+  }}
+  auto result = at::empty(input.sizes(), self.options());
+  Narrow(output, result, handle);
   return result;
 }}
 
@@ -2087,6 +2143,8 @@ def render():
             body = T_EMBEDDING.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "cumsum":
             body = T_CUMSUM.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "silu":
+            body = T_SILU.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "new_ones":
             body = T_NEW_ONES.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "pow":
