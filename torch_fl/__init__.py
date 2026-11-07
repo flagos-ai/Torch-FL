@@ -29,6 +29,23 @@ from torch_fl import _platform
 from torch_fl import _vendor
 
 
+# The answer is fixed for the life of the process: a different wheel is a
+# different process, and nothing in this one can swap _build_config.py out from
+# under it. Reading it is not cheap, though -- find_spec, a Path.resolve (a
+# realpath syscall) and an exec_module -- and _remap asks for it on every call
+# that carries a device argument, which is every factory call in a model.
+# Measured on an MLU590 with no cache: torch.device("flagos:0") took 197us and
+# torch.empty(4, device=...) 207.5us, against 2us and 6.8us with it.
+#
+# The memo lives here rather than in _platform.build_accelerator() on purpose.
+# The integration test trees load _platform.py by path -- under their own module
+# names, and not through sys.modules -- to stand in for "a process running a
+# different wheel", and a memo inside _platform would follow them across the
+# swap and answer with the previous test's platform. Here, only the alias the
+# runtime itself calls is memoised and those callers keep reading through.
+_ACCELERATOR = (None, "")
+
+
 def _build_accelerator() -> str:
     """Accelerator this wheel was built for, lowercased ("" if unknown).
 
@@ -40,8 +57,22 @@ def _build_accelerator() -> str:
     own. A stale FLAGOS_ACCELERATOR from another build must not select a conf the
     wheel was not built for; to route through a different conf on purpose,
     FLAGOS_BACKEND_CONFIG names the file directly.
+
+    Memoised after the first call; see _ACCELERATOR.
     """
-    return _platform.build_accelerator()
+    global _ACCELERATOR
+    # Keyed on the delegate's identity, not on nothing. In a real process
+    # _platform.build_accelerator is the same function object for the life of the
+    # runtime and this is a hit every time. A test that pins a different record
+    # replaces that attribute on the module (tests/unit/test_ascend_platform_marker.py
+    # does exactly this), which makes the identity differ and re-reads -- so the
+    # memo cannot shadow a monkeypatched source.
+    source = _platform.build_accelerator
+    if _ACCELERATOR[0] is source:
+        return _ACCELERATOR[1]
+    value = source()
+    _ACCELERATOR = (source, value)
+    return value
 
 
 def _is_ppu_build() -> bool:
