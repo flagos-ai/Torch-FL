@@ -24,6 +24,10 @@
 // included, for the duplicate-registration reason above.
 
   m.impl("_convolution", WrapperPrivConvolution);
+  m.impl("add.Scalar", WrapperAddScalar);
+  m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("add_.Scalar", WrapperAddInplaceScalar);
+  m.impl("add_.Tensor", WrapperAddInplaceTensor);
   m.impl("addmm", WrapperAddmm);
   m.impl("baddbmm", WrapperBaddbmm);
   m.impl("baddbmm_", WrapperBaddbmmInplace);

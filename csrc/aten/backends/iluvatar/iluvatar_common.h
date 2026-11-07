@@ -266,6 +266,21 @@ inline bool IluvatarSupportsGemmDtype(at::ScalarType type) {
   return type == at::kHalf || type == at::kFloat || type == at::kBFloat16;
 }
 
+// Whether `ixblasAxpyEx` serves this scalar type on a BI-V150.
+//
+// Measured on u180 (corex 4.5.0), `add.Tensor` shapes: float32 and float16
+// return IXBLAS_STATUS_SUCCESS and match the CPU reference exactly; float64,
+// bfloat16, complex64, complex128, int32 and int64 return status 15
+// (IXBLAS_STATUS_NOT_SUPPORTED) for every alpha and execution type tried, and
+// `executionType` must be 0 -- the enum's named values (16F, 32F, 64F, 32I)
+// all return 15. So this is a deliberately narrow gate, not
+// `IluvatarSupportsDtype`: a wider gate would hand the kernel a call that
+// fails, and a kernel that caught the failure and took the host round trip
+// instead would be the cpu_fallback this backend exists to avoid.
+inline bool IluvatarSupportsAxpyDtype(at::ScalarType type) {
+  return type == at::kFloat || type == at::kHalf;
+}
+
 // Whether a `Tensor?` argument actually carries a tensor.
 //
 // `has_value()` alone is not the test. C++ composite code forwards its own
@@ -381,8 +396,6 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
       std::to_string(static_cast<int>(status)) + ")";
 }
 
-} // namespace at::native::flagos::iluvatar
-
 // Issues one vendor call and raises on failure with the status enum's name.
 //
 // `status` is the expression returning an ixdnnStatus_t or ixblasStatus_t and
@@ -408,4 +421,189 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
         ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
   } while (0)
 
-#endif // USE_ILUVATAR
+// `x` laid out one element per index of the output's shape, for the
+// add whose operand broadcasts or follows the output's layout. It must not go
+// through `x.expand(out).contiguous()`, and not through a plain `contiguous()`
+// either: both tensors are ventored on this backend, so `contiguous()` on a
+// broadcast operand is a no-op (it already has no element twice) and on an
+// operand that shares the output's transposed layout it reads in memory order.
+// The strides are built for the output's shape and `as_strided` expands them,
+// so `clone` is the strided copy that materialises either case. Leading
+// dimensions are broadcast (stride 0), which is what ATen's right-aligned
+// broadcast does. A 0-dim operand is the scalar branch's case and is not
+// passed here.
+inline at::Tensor IluvatarAxpyOperand(
+    const at::Tensor& x, at::IntArrayRef out) {
+  const at::Tensor xc = x.contiguous();
+  const int64_t lead = static_cast<int64_t>(out.size()) - xc.dim();
+  std::vector<int64_t> strides(static_cast<size_t>(lead), 0);
+  for (const auto d : c10::irange(xc.dim())) {
+    strides.push_back(xc.size(d) == 1 && out[d + lead] != 1 ? 0
+                                                            : xc.stride(d));
+  }
+  // Sized by the operand's own dims, so as_strided checks the storage the copy
+  // reads; the output's shape and the broadcast strides are applied to the
+  // dense buffer the copy leaves behind.
+  std::vector<int64_t> src_sizes(static_cast<size_t>(lead), 1);
+  src_sizes.insert(src_sizes.end(), xc.sizes().begin(), xc.sizes().end());
+  return xc.as_strided(src_sizes, strides).clone().as_strided(out, strides);
+}
+
+// y += alpha * x on the device, where `x` may broadcast over `y`.
+//
+// ixblasAxpyEx reads both vectors linearly, so a broadcasting operand has to be
+// one vector before it arrives; the copies that would serve that directly do
+// not work here -- both tensors are ventored on this backend, so `contiguous()`
+// on a broadcast operand is a no-op, `expand` is refused on the way to
+// `reshape`, and an `as_strided` view of the output's shape fails the storage
+// check. What does work is ATen's own `copy_`, which every backend implements
+// as a broadcast.
+//
+// The axpy runs over the output's own element count, with `x` staged into a
+// dense buffer of that shape by a broadcast `copy_`. That buffer is one extra
+// tensor beside the output for the broadcast case; the axpy is still one
+// vendored call, and nothing on the way goes through a FlagGems elementwise
+// kernel.
+inline void IluvatarAxpy(
+    at::Tensor& y,
+    const at::Tensor& x,
+    const at::Scalar& alpha) {
+  const int64_t n = y.numel();
+  if (n == 0 || alpha.to<double>() == 0.0) {
+    return;
+  }
+  const bool elementwise = x.sizes().equals(y.sizes());
+  // The axpy writes the output in storage order, so a `y` that is not
+  // contiguous is served through a dense copy and written back. This comes
+  // before the operand staging, which sizes that buffer off `y`.
+  at::Tensor dense;
+  at::Tensor* dst = &y;
+  if (!y.is_contiguous()) {
+    dense = y.reshape({-1}).clone(at::MemoryFormat::Contiguous);
+    dst = &dense;
+  }
+  at::Tensor staged;
+  const at::Tensor* src = &x;
+  if (!elementwise) {
+    if (x.numel() > n) {
+      TORCH_CHECK(
+          false, "iluvatar: an add operand of ", x.sizes(),
+          " does not broadcast over ", y.sizes());
+    }
+    staged = at::zeros(dst->sizes(), dst->options());
+    staged.copy_(x);
+    src = &staged;
+  }
+  const int device = IluvatarDeviceIndex(y);
+  cublasHandle_t handle = GetCublasHandle(device);
+  // alpha is float32 in both arms: the vendor takes alpha in its own type tag
+  // and was measured to accept a float32 alpha beside float16 operands
+  // (IX_R_16F x/y, IX_R_32F alpha -> status 0, exact), while a float16 alpha
+  // returns status 15 for every execution type tried. So one alpha width
+  // serves both dtypes.
+  const float alpha_f = static_cast<float>(alpha.to<double>());
+  if (x.scalar_type() == at::kHalf) {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            src->const_data_ptr(),
+            IX_R_16F,
+            1,
+            dst->data_ptr(),
+            IX_R_16F,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  } else {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            src->const_data_ptr(),
+            IX_R_32F,
+            1,
+            dst->data_ptr(),
+            IX_R_32F,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  }
+  IluvatarSynchronizeStream(device);
+  if (!y.is_contiguous()) {
+    y.copy_(dense.reshape(y.sizes()));
+  }
+}
+
+// y += alpha * s on every element of y, for `t + 1.0`. Built on ixblasAxpyEx
+// rather than ixblasScal: corex exports only the typed Sscal/Dscal/Cscal/
+// Zscal entry points, and every one of them is single precision or wider.
+// y += alpha * s is the axpy y += (alpha * s) * ones, and that broadcast is
+// not free: sizing that vector against the tensor route would need a fill
+// kernel first (fused_ops has `fill_`, not `full`), so the scalar call's
+// advantage over routing the 0-dim tensor through add.Tensor is that it skips
+// the contiguous() copy, not the ones buffer.
+inline void IluvatarAxpyScalar(
+    at::Tensor& y,
+    const at::Scalar& s,
+    const at::Scalar& alpha) {
+  const int64_t n = y.numel();
+  if (n == 0 || alpha.to<double>() == 0.0) {
+    return;
+  }
+  const int device = IluvatarDeviceIndex(y);
+  cublasHandle_t handle = GetCublasHandle(device);
+  const float alpha_f = static_cast<float>(alpha.to<double>());
+  // `ones` stands in for the x operand: n elements of 1 in the output's type,
+  // with alpha carrying `alpha * s`. The value is rounded to the output's type
+  // rather than the multiply being narrowed, which is what ATen does for a
+  // python number.
+  at::Tensor ones;
+  if (y.scalar_type() == at::kHalf) {
+    ones = at::full({n}, 1, y.options());
+    const float scaled =
+        alpha_f * static_cast<float>(s.to<at::Half>());
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &scaled,
+            IX_R_32F,
+            ones.const_data_ptr(),
+            IX_R_16F,
+            1,
+            y.data_ptr(),
+            IX_R_16F,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  } else {
+    ones = at::full({n}, 1, y.options());
+    const float scaled = alpha_f * static_cast<float>(s.to<double>());
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &scaled,
+            IX_R_32F,
+            ones.const_data_ptr(),
+            IX_R_32F,
+            1,
+            y.data_ptr(),
+            IX_R_32F,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  }
+  IluvatarSynchronizeStream(y.get_device());
+}
+
+
+
+} // namespace at::native::flagos::iluvatar
+
+#endif  // USE_ILUVATAR

@@ -535,36 +535,22 @@ at::Tensor FlagosWrapperPrivViewAsReal(const at::Tensor& self) {
   return at::native::view_as_real(self);
 }
 
-// add/div are the consumer ops the Conjugate contract measures in
+// div is the other op the Conjugate contract measures in
 // tests/integration/test_math_bits_contract.py. FlagGems' complex path
-// decomposes both operands with view_as_real and then runs its own kernel,
-// and on iluvatar that kernel returns zeros for complex128 in `add` and
-// raises for complex64 in `div`, so the conf routes these overloads here
-// instead (see the entries in NATIVE_TRITON_GAPS).
+// decomposes both operands with view_as_real and then runs its own kernel, and
+// on iluvatar that kernel raises for complex64 in `div`, so the conf routes
+// div_.Tensor here instead (see its entry in NATIVE_TRITON_GAPS).
 //
-// The conf names these three in-place schemas, not add.Tensor, for a
+// add/ took the same route until the add_ pair moved to a generated vendor
+// kernel (ixblasAxpyEx); it is registered from
+// backends/iluvatar/generated/iluvatar_register.inc and is no longer published
+// here, because an m.impl in this arm and one in that .inc are the same
+// duplicate registration the two .inc files are kept disjoint for.
+//
+// The conf names div_.Tensor, not the out-of-place spelling, for a
 // registration reason: an m.impl on the PrivateUse1 key belongs to the schema's
-// own C++ signature, so a four-argument out= kernel under add.Tensor aborts at
-// load with "Mismatch in kernel C++ signatures" (measured on u180). ATen's
-// `add` lowers the out-of-place spelling to add_.Tensor, so `z + t`, `z + 1`
-// and the conjugated `z + 0` reach these kernels through that lowering.
-//
-// They return Tensor& because ATen's add_.Tensor family (CPU, meta) does, and
-// the registrar matches signatures exactly. add_ calls the operator
-// (at::add_out), not a lower-level kernel: ATen registers the complex out=
-// kernel through its structured meta/decomposition path, which only a call
-// through at:: picks up. `at::native::add_out` does not exist in this build
-// (measured: "not a member of at::native").
-at::Tensor& FlagosWrapperPrivAddTensorInplace(
-    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
-  return at::add_out(self, self, other, alpha);
-}
-
-at::Tensor& FlagosWrapperPrivAddScalarInplace(
-    at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
-  return at::add_out(self, self, other, alpha);
-}
-
+// own C++ signature, so an out= kernel under add.Tensor aborts at load with
+// "Mismatch in kernel C++ signatures" (measured on u180).
 at::Tensor& FlagosWrapperPrivDivInplace(
     at::Tensor& self, const at::Tensor& other) {
   // ATen's complex div kernel writes its destination before it reads its
@@ -748,11 +734,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_conj", FlagosWrapperPrivConj);
     m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
     m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
-    // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
-    // wrong for add (complex128) and raises for div (complex64) here, so these
-    // run ATen's kernels instead.
-    m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
-    m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
+    // The add_ pair is a generated vendor kernel now (ixblasAxpyEx, see
+    // codegen_iluvatar.py's add_tensor_inplace category) and is claimed by
+    // iluvatar_register.inc. div_ stays here: ATen's complex div writes its
+    // destination before it reads its sources, so its kernel has to be the host
+    // round trip below. See FlagosWrapperPrivDivInplace.
     m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
   #elif defined(USE_CAMBRICON)
     // Cambricon MLU is FlagGems-primary with a short CNNL vendor half. An op in

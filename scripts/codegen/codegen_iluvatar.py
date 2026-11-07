@@ -109,6 +109,15 @@ OPS = {
     "baddbmm": "baddbmm",
     "baddbmm_": "baddbmm_inplace",
     "addmm": "addmm",
+    # The out-of-place `add` spellings, for the dtypes FlagGems returns zeros
+    # or wrong values on here (see the NATIVE_TRITON_GAPS note). add.Scalar has
+    # the same body: aten's add.Scalar is add.Tensor with the scalar wrapped in
+    # a 0-dim tensor on the same device, so the kernel sees a same-shape
+    # operand either way.
+    "add.Tensor": "add_tensor",
+    "add.Scalar": "add_scalar",
+    "add_.Tensor": "add_tensor_inplace",
+    "add_.Scalar": "add_scalar_inplace",
 }
 
 # The per-op dtype predicate each kernel gates on (iluvatar_common.h). The base
@@ -127,6 +136,10 @@ SUPPORTS = {
     "baddbmm": "IluvatarSupportsGemmDtype",
     "baddbmm_inplace": "IluvatarSupportsGemmDtype",
     "addmm": "IluvatarSupportsGemmDtype",
+    "add_tensor": "IluvatarSupportsAxpyDtype",
+    "add_scalar": "IluvatarSupportsAxpyDtype",
+    "add_tensor_inplace": "IluvatarSupportsAxpyDtype",
+    "add_scalar_inplace": "IluvatarSupportsAxpyDtype",
 }
 
 # `{at_op}` names the aten function the CPU round-trip calls. For the private
@@ -144,6 +157,10 @@ AT_OP = {
     "baddbmm": "baddbmm",
     "baddbmm_": "baddbmm_",
     "addmm": "addmm",
+    "add.Tensor": "add_tensor",
+    "add.Scalar": "add_scalar",
+    "add_.Tensor": "add_tensor_inplace",
+    "add_.Scalar": "add_scalar_inplace",
 }
 
 # ==========================================================================
@@ -1042,6 +1059,161 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})
 """
 )
 
+# ==========================================================================
+# The shared elementwise-add body.
+#
+# `add` and `add_` have the same job -- out = self + alpha * other, elementwise
+# -- and differ only in whether they allocate (`add`) or write on top of `self`
+# (`add_`) and in whether `other` is a tensor or a scalar. Emitting them from
+# one routine is what keeps the gate, the alpha handling and the vendor call
+# from drifting apart across four schemas: _ADD_GATE and _ADD_OUT are shared by
+# add.Tensor / add.Scalar, _ADD_GATE and _ADD_IN_PLACE by their in-place pair.
+#
+# Why there is a vendor kernel at all: on this chip FlagGems' `add` returns
+# zeros for complex128 and wrong values for float64 (measured on u180), so the
+# conf routes the spellings here instead. `ixblasAxpyEx` is the vendor entry
+# point that was measured to serve them, and `IluvatarAxpy` (iluvatar_common.h)
+# is where the alpha width and the execution type it needs live.
+#
+# Scalar-operand add category -> the tensor-operand kernel it delegates to.
+_ADD_DELEGATE = {
+    "add_scalar": "AddTensorKernelIluvatar",
+    "add_scalar_inplace": "AddInplaceTensorKernelIluvatar",
+}
+
+
+# `self` is the result: ATen hands the kernel the promoted type, so every
+# refusal and every conversion below is about the *addend*. No dtype escape
+# can decide this -- the conf routes the op to `iluvatar`, so ResolveFn never
+# reaches its FlagGems substitution and the kernel is what has to answer.
+_ADD_GATE = """\
+  iluvatar::IluvatarDeviceGuard guard(self);
+  // a python number arrives as a 0-dim tensor (`t + 1.0`); the broadcast
+  // scalar call below serves it, and it has no operand dtype of its own.
+  const bool is_scalar = other.dim() == 0;
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  // add promotes a mixed-type pair, so a float16 addend beside a float32
+  // result (a python float with a float16 tensor) arrives in its own type and
+  // has to be widened with the result; ixblasAxpyEx reads the addend at the
+  // output's width. A same-type pair needs no cast. The widen is a no-op when
+  // `self` keeps the addend's layout: `add_` on a transposed `self` arrives
+  // with the addend sharing that layout, and only a dtype change (or a
+  // non-contiguous `self`) materialises it.
+  const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(
+            self.options(), self.is_contiguous(), false,
+            self.suggest_memory_format());
+  const bool x_served =
+      is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
+  TORCH_CHECK(
+      x_served,
+      "iluvatar: {op_name} has no vendor kernel for an addend of ",
+      other.scalar_type(), " beside ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+
+"""
+
+# The tensor-operand spellings: add.Tensor (allocating) and add_.Tensor.
+_ADD_OUT = """\
+  // The axpy writes its output in full, so only the scalar path seeds its
+  // output from `self`.
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  if (is_scalar) {{
+    out.copy_(self.is_contiguous() ? self : self.contiguous());
+    iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
+  }} else {{
+    iluvatar::IluvatarAxpy(out, x, alpha);
+  }}
+  return out;
+}}
+"""
+_ADD_IN_PLACE = """\
+  if (is_scalar) {{
+    iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
+    return self;
+  }}
+  iluvatar::IluvatarAxpy(self, x, alpha);
+  return self;
+}}
+"""
+
+# The tensor-operand spellings: add.Tensor (allocating) and add_.Tensor.
+T_ADD_TENSOR = (
+    """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar& alpha) {{
+"""
+    + _ADD_GATE
+    + _ADD_OUT
+    + """\
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})
+"""
+)
+
+# The scalar-operand spellings. aten lowers a python number to a 0-dim tensor
+# before it reaches add.Tensor (`z + 1` arrives there), so these two are
+# reached only by an explicit call; they are routed with their tensor siblings
+# because one kernel serves both and the same FlagGems defect applies.
+T_ADD_SCALAR = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Scalar& other,
+    const at::Scalar& alpha) {{
+  iluvatar::IluvatarDeviceGuard guard(self);
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self.is_contiguous() ? self : self.contiguous());
+  iluvatar::IluvatarAxpyScalar(out, other, alpha);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})
+"""
+
+# The in-place pair. `self` is both the seed and the output, so there is no
+# allocation and no copy; the kernel writes over it through the same axpy.
+T_ADD_TENSOR_INPLACE = (
+    """\
+at::Tensor& {kernel}(
+    at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar& alpha) {{
+"""
+    + _ADD_GATE
+    + _ADD_IN_PLACE
+    + """\
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})
+"""
+)
+
+T_ADD_SCALAR_INPLACE = """\
+at::Tensor& {kernel}(
+    at::Tensor& self,
+    const at::Scalar& other,
+    const at::Scalar& alpha) {{
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: {op_name} has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  iluvatar::IluvatarDeviceGuard guard(self);
+  iluvatar::IluvatarAxpyScalar(self, other, alpha);
+  return self;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kIluvatar, {kernel})
+"""
+
 T_ADDMM = (
     """\
 at::Tensor {kernel}(
@@ -1132,6 +1304,12 @@ CATEGORIES = {
     "baddbmm": T_BADDBMM,
     "baddbmm_inplace": T_BADDBMM_INPLACE,
     "addmm": T_ADDMM,
+    "add_tensor": T_ADD_TENSOR,
+    # add.Scalar shares the axpy body; its C++ name comes from
+    # schema_to_cpp_name, so only the category entry is needed.
+    "add_scalar": T_ADD_SCALAR,
+    "add_tensor_inplace": T_ADD_TENSOR_INPLACE,
+    "add_scalar_inplace": T_ADD_SCALAR_INPLACE,
 }
 
 # `{training_expr}` / `{rm_expr}` / `{rv_expr}` / `{fallback}` fill the shared
@@ -1189,6 +1367,7 @@ FILE_HEADER = """\
 #include <ATen/ops/_convolution.h>
 #include <ATen/ops/_native_batch_norm_legit.h>
 #include <ATen/ops/_native_batch_norm_legit_no_training.h>
+#include <ATen/ops/add.h>
 #include <ATen/ops/addmm.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
@@ -1316,6 +1495,13 @@ def render():
     bodies = []
     covered = []
     for op, category in OPS.items():
+        # A FlagGems-claimed op keeps its kernel -- that is what the escape
+        # route (FLAGOS_FORCE_BACKEND=vendor / FLAGOS_OP_<name>=iluvatar) reaches
+        # -- but gets no m.impl here: the FlagGems .inc is included into the same
+        # library body, and a second one for the same op refuses to load. The
+        # m.impl for an op is only emitted once the FlagGems file stops claiming
+        # it, which for the FlagGems-primary build means the op is gapped (and
+        # for the escape-only `_native_batch_norm_legit*` pair, never).
         wrapper = wrappers.get(op)
         if wrapper is None:
             raise SystemExit(
@@ -1330,6 +1516,10 @@ def render():
             disp=disp,
             supports=SUPPORTS[category],
             at_op=AT_OP[op],
+            op_name=op,
+            # The scalar add spellings build a 0-dim operand and call their
+            # tensor sibling, so each names the kernel it delegates to.
+            tensor_kernel=_ADD_DELEGATE.get(category, kernel),
         )
         if category in _BN_ARGS:
             fmt.update(_BN_ARGS[category])
