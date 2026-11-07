@@ -486,28 +486,41 @@ def test_reporting_tools_install_through_the_pypi_fallback():
     assert '--index-url "$pinned"' in helper.group(1)
 
 
-def test_kunlunxin_keeps_its_oversized_flagtree_wheel_out_of_the_cache():
-    """The 3.2 GB XPU wheel is bigger than the cache can hold and slower from it.
+def test_every_platform_takes_flagtree_out_of_the_cache():
+    """FlagTree wheels are 190-3283 MB and restore slower than they download.
 
-    Restoring that wheel took 418 s to transfer at 8 MB/s (run 41972928483); the
-    same kind of wheel downloads from resource.flagos.net at 86 MB/s, so about
-    39 s. Holding it in the cache also evicted the other platforms' caches, so
-    the CUDA lane's restore fell through every restore-key and re-downloaded its
-    own wheels. Only this one install opts out; the hook's others still cache.
+    Measured across the platforms that install one: the cache restored at
+    5.8-7.7 MB/s (341 MB in 55 s up to 3348 MB in 435 s, run 41976848532),
+    while resource.flagos.net served at 54.7 MB/s (run 42084793856). Every
+    wheel is faster uncached -- 48-375 s per platform -- and together they were
+    holding ~2.4 GB of the 10 GB budget.
+
+    The opt-out lives in the shared install_flagtree rather than in each hook,
+    because there is no platform whose wheel is small enough for the cache to
+    win. Raising PIP_RETRY_NO_CACHE for that one call is what keeps every other
+    install in a hook cached.
     """
-    hook = (ROOT / ".github/scripts/hooks/set_env_kunlunxin.sh").read_text()
-    assert re.search(
-        r"^PIP_RETRY_NO_CACHE=1\ninstall_flagtree\nPIP_RETRY_NO_CACHE=0$", hook, re.M
-    )
+    common = (ROOT / ".github/scripts/lib/set_env_common.sh").read_text()
+    tree = re.search(r"^install_flagtree\(\) \{\n(.*?)^\}", common, re.M | re.S)
+    assert tree
+    assert "PIP_RETRY_NO_CACHE=1 pip_retry" in tree.group(1)
+    # The override is per-call, so the rest of the library still caches.
+    assert not re.search(r"^export PIP_RETRY_NO_CACHE=1", common, re.M)
 
-    # The override is scoped to that one install, so the rest of the hook caches.
-    assert re.search(r"^install_flag_gems$", hook, re.M)
-    assert not re.search(r"^export PIP_RETRY_NO_CACHE=1", hook, re.M)
-
-    # Every other platform still installs FlagTree through the cached path.
-    for name in ("nvidia", "ascend", "mthreads", "hygon", "metax", "enflame"):
-        other = (ROOT / f".github/scripts/hooks/set_env_{name}.sh").read_text()
-        assert not re.search(r"PIP_RETRY_NO_CACHE=1", other), name
+    # No hook re-implements it; the shared phase is the one place it is decided.
+    for name in (
+        "nvidia",
+        "ascend",
+        "mthreads",
+        "hygon",
+        "metax",
+        "enflame",
+        "kunlunxin",
+        "iluvatar",
+        "thead",
+    ):
+        hook = (ROOT / f".github/scripts/hooks/set_env_{name}.sh").read_text()
+        assert not re.search(r"PIP_RETRY_NO_CACHE=1", hook), name
 
 
 def test_a_platforms_two_lanes_share_one_cache_entry():

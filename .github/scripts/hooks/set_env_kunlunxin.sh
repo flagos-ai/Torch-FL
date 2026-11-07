@@ -274,27 +274,7 @@ done
 # wheel that builds and runs on a stock CPU torch.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.7.0+xpu3.6}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-# Keep this one wheel out of PIP_CACHE_DIR: it is 3.2 GB, a third of this
-# repository's whole GitHub Actions cache quota (10 GB), and caching it turns out
-# to be slower than not caching it.
-#
-# Measured: restoring it from the cache took 418 s to transfer plus 15 s to
-# unpack -- 8 MB/s (run 41972928483, job 127079168497). Fetching the same kind
-# of wheel fresh from resource.flagos.net ran at 86 MB/s on the same runner
-# generation: the CUDA lane's 388.3 MB FlagTree arrived in 4.5 s (run
-# 41976848532), so 3.2 GB is about 39 s. The cache service is roughly ten times
-# slower than the index it is caching, and keeping this wheel there evicted the
-# other platforms' caches -- with 13 entries the repository sat at 9.84 GB of a
-# 10 GB budget, and the CUDA lane's restore fell through every restore-key and
-# re-downloaded its own wheels from scratch.
-#
-# Everything else this hook installs is still cached; only the oversized wheel
-# opts out, which is what PIP_RETRY_NO_CACHE is for (see set_env_common.sh).
-# Set it back before anything else installs: every later pip_retry in this hook
-# reads the same variable.
-PIP_RETRY_NO_CACHE=1
 install_flagtree
-PIP_RETRY_NO_CACHE=0
 
 # FlagTree is published to flagos-pypi-hosted for every platform; FlagGems sits
 # in the per-vendor lane. Select the Kunlunxin lane so this job never needs a

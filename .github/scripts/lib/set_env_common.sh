@@ -523,8 +523,23 @@ install_flagtree() {
   # The probe lives here rather than at each call site because every platform
   # installs FlagTree from this index.
   prefer_direct_route "$FLAGTREE_INDEX_URL" "FlagTree wheel"
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGTREE_INDEX_URL" \
-    "flagtree===${FLAGTREE_VERSION}"
+  # FlagTree wheels are 190-3283 MB and the cache restores at about a tenth of
+  # the index's speed, so every one of them arrives faster uncached. Measured
+  # across the platforms that install one: the cache restored at 5.8-7.7 MB/s
+  # (6.5 MB/s mean, from 341 MB in 55 s up to 3348 MB in 435 s -- run
+  # 41976848532), while a fresh fetch from resource.flagos.net ran at 54.7 MB/s
+  # (the XPU wheel, 3283 MB in 60 s, run 42084793856) and 38.8 MB/s on the CUDA
+  # lane's 388 MB.
+  #
+  # Per platform that saves 48-375 s: kunlunxin 375 s, enflame 174 s, ascend
+  # 104 s, thead 99 s, mthreads 65 s, iluvatar 48 s. Holding them in the cache
+  # also spent ~2.4 GB of the repository's 10 GB budget on wheels the
+  # per-platform entries could use.
+  #
+  # FlagGems, torch and the rest of what a hook installs stay cached: at 9-189
+  # MB they are small enough for the cache to win.
+  PIP_RETRY_NO_CACHE=1 pip_retry --no-deps --only-binary=:all: \
+    --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
 }
 
 # Install the published FlagCX wheel and point torch at the flagos backend.
