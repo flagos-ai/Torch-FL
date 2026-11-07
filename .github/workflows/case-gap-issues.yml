@@ -1,0 +1,100 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A skipped shared case is allowed only while its Torch-FL and upstream issues
+# are open. The query and source check parse the submitted registry, declarations
+# and migrated sources as data. None of that submitted source is imported or
+# executed.
+
+name: Case gap issues
+
+permissions:
+  contents: read
+  issues: read
+
+on:
+  workflow_call:
+    inputs:
+      checkout_repository:
+        required: true
+        type: string
+      checkout_ref:
+        required: true
+        type: string
+      registry_repository:
+        required: true
+        type: string
+      registry_ref:
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+  workflow_dispatch:
+
+jobs:
+  verify-gate:
+    name: Verify case gap issues
+    permissions:
+      contents: read
+      issues: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out submitted case-gap data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.registry_repository || inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}
+          path: registry
+          persist-credentials: false
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/scripts/ci/check_case_gap_issues.py
+            tests/integration/case_gap_issues.py
+            tests/integration/ops/test_all_dispatch.py
+            tests/unit/test_integration_source_contract.py
+          sparse-checkout-cone-mode: false
+
+      # The base selected its controller above. On the first pull request run,
+      # the base cannot contain this workflow because the merge revision had to
+      # supply it. Read the controller from the submitted tree so the source
+      # contract travels with the workflow definition that is running.
+      - name: Check out selected issue query
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.registry_repository || github.repository }}
+          ref: ${{ inputs.registry_ref || github.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/ci/check_case_gap_issues.py
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Require every registered case gap to have open issues
+        id: query
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python .github/scripts/ci/check_case_gap_issues.py \
+            --script-root "$GITHUB_WORKSPACE/trusted/.github/scripts/ci" \
+            --registry "$GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py" \
+            --source-contract "$GITHUB_WORKSPACE/registry/tests/unit/test_integration_source_contract.py"
