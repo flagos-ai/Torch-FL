@@ -129,20 +129,6 @@ def _torch_fl_package_dir() -> Path | None:
     return Path(spec.origin).resolve().parent
 
 
-# The record below is fixed for the life of a process: it is the marker setup.py
-# wrote into the wheel, and a different wheel is a different process. Reading it
-# is expensive, though -- find_spec, a Path.resolve (a realpath syscall), and an
-# exec_module of the record -- and `_remap` asks for it on every call with a
-# device argument, which is every factory call in a model. Measured on an MLU590
-# with no cache: `torch.device("flagos:0")` took 197 us, of which 330 us of
-# self-time was this read plus its path work; with the cache it is 2 us.
-#
-# Keyed on nothing and never invalidated on purpose. A process cannot observe a
-# different wheel, and the alternative -- keying on the package path -- would put
-# the resolve back on the hot path, which is the thing being removed.
-_BUILD_ACCELERATOR: str | None = None
-
-
 def build_accelerator() -> str:
     """The accelerator the installed wheel was built for ("" if unknown).
 
@@ -150,25 +136,7 @@ def build_accelerator() -> str:
     so a caller that must not execute ``torch_fl/__init__.py`` still gets an
     answer. find_spec() finds the package without importing it; the record
     itself imports nothing.
-
-    The answer is memoised after the first read; see ``_BUILD_ACCELERATOR``. A
-    caller that needs an uncached answer (a test setup, which may swap the
-    package out from under this) calls ``reset_build_accelerator_cache``.
     """
-    global _BUILD_ACCELERATOR
-    if _BUILD_ACCELERATOR is not None:
-        return _BUILD_ACCELERATOR
-    _BUILD_ACCELERATOR = _read_build_accelerator()
-    return _BUILD_ACCELERATOR
-
-
-def reset_build_accelerator_cache() -> None:
-    """Drop the memoised build record. Only a test has a reason to call this."""
-    global _BUILD_ACCELERATOR
-    _BUILD_ACCELERATOR = None
-
-
-def _read_build_accelerator() -> str:
     package = _torch_fl_package_dir()
     if package is None:
         return ""
