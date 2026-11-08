@@ -125,6 +125,7 @@ def test_gate_reads_all_job_pages_and_bounds_optional_diagnostics(
             "lint",
             "agnostic-checks",
             "codegen-checks",
+            "case-gap-issues",
             "discover-platforms",
             "platform-pipeline",
         ]
