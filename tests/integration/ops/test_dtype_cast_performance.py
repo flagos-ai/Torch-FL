@@ -27,14 +27,16 @@ import torch
 
 from torch_fl._platform import detect_platform
 
+
+def _is_cuda_platform():
+    """Keep the platform probe out of collection-shape analysis."""
+    return detect_platform() == "cuda"
+
+
+if not _is_cuda_platform():
+    pytest.skip("CUDA dtype-cast performance regression", allow_module_level=True)
+
 pytestmark = [pytest.mark.profiler, pytest.mark.usefixtures("native_cuda_copy")]
-
-
-@pytest.fixture(autouse=True)
-def require_cuda_platform():
-    """Keep the CUDA capability probe inside a test fixture."""
-    if detect_platform() != "cuda":
-        pytest.skip("CUDA dtype-cast performance regression")
 
 
 def _device():
