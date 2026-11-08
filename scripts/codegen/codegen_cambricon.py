@@ -246,6 +246,7 @@ INC_HEADER = """\
 # ---------------------------------------------------------------------------
 OPS = {
     "add.Tensor": "binary",
+    "sub.Tensor": "binary",
     "mul.Tensor": "binary",
     "mul.out": "binary_out",
     "neg": "unary_op",
@@ -287,15 +288,30 @@ OPS = {
 BINARY_OPS = {
     "add.Tensor": ("CNNL_OP_TENSOR_ADD", "add"),
     "mul.Tensor": ("CNNL_OP_TENSOR_MUL", "mul"),
+    "sub.Tensor": ("CNNL_OP_TENSOR_SUB", "sub"),
 }
 BINARY_SIGNATURE_EXTRA = {
     "add.Tensor": ", const at::Scalar& alpha",
+    "sub.Tensor": ", const at::Scalar& alpha",
 }
 BINARY_PROLOGUE_EXTRA = {
     "add.Tensor": """\
   TORCH_CHECK(
       alpha.toComplexDouble() == 1.0,
       "flagos cambricon: add.Tensor only serves alpha = 1, got ", alpha);
+""",
+    # cnnlOpTensor serves the float case with alpha = 1. Everything else -- an
+    # integral dtype, where the subtract is index arithmetic on the causal mask,
+    # or a scaled subtract -- goes to the host rather than raising, so a caller
+    # that hits either keeps its old correctness at its old cost. The first
+    # attempt rejected Long outright and took the model down in mask
+    # construction.
+    "sub.Tensor": """\
+  if (!self.is_floating_point() || !other.is_floating_point() ||
+      alpha.toComplexDouble() != 1.0) {
+    return at::sub(self.to(at::kCPU), other.to(at::kCPU), alpha)
+        .to(self.device());
+  }
 """,
 }
 
