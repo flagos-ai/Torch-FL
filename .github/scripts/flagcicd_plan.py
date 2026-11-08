@@ -156,7 +156,7 @@ def build_ci_plan(
         source / ".github/configs", list(platform_configs), platform_configs
     )
     _inferred, risk, matched, diff_status = infer_level(changed, contract)
-    # Ordinary CI always runs all three shared checks, including documentation
+    # Ordinary CI always runs all required shared checks, including documentation
     # PRs. An empty hardware matrix is valid here, even when risk inference
     # would raise an explicit external request to L2.
     level = "L2" if selected else "L1"
@@ -182,6 +182,7 @@ def build_ci_plan(
                 "lint",
                 "agnostic-checks",
                 "codegen-checks",
+                "case-gap-issues",
                 "discover-platforms",
             ],
             "selection_reasons": reasons,

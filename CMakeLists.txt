@@ -14,7 +14,7 @@
 
 cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
-set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, kunlunxin, iluvatar, or bpu")
+set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, kunlunxin, iluvatar, cambricon, or bpu")
 
 # Vendor driver/runtime dirs to embed in RUNPATH. Never bundled into the wheel
 # (a machine with the card has the driver), mirroring MetaX's /opt/maca.
@@ -38,7 +38,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FlagosPlatforms.cmake)
 # through to the CUDA branch, or skipped its own.
 macro(_flagos_resolve_platforms)
   foreach(_name ascend metax enflame tsingmicro dcu kunlunxin iluvatar mps cuda ppu
-               mthreads musa gcu bpu hygon nvidia thead apple)
+               mthreads musa gcu bpu hygon nvidia thead apple cambricon)
     string(JSON _name_vendor ERROR_VARIABLE _name_err GET
            "${_flagos_platforms}" accelerators "${_name}" vendor)
     if(_name_err)
@@ -763,6 +763,84 @@ elseif(_flagos_is_metax)
   # cuda.cmake guard: if(TARGET torch::cudart) return() endif()
   add_library(torch::cudart INTERFACE IMPORTED)
 
+  if(NOT TARGET CUDA::nvToolsExt)
+    add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+  endif()
+elseif(_flagos_is_cambricon)
+  # Cambricon MLU (BANG) toolkit: libcnrt is the runtime and libcnnl the op
+  # library. There is no CUDA-compat layer -- cnrt is its own API, and unlike
+  # MUSA the runtime sources under csrc/runtime/accelerator/cambricon/ call
+  # cnrtMalloc/cnrtQueueCreate directly -- so nothing pretends to be CUDA.
+  #
+  # The wheel runs on the stock torch+cpu. torch_mlu is deliberately NOT a
+  # dependency: it hard-links its own libtorch and is ABI-bound to one vendor
+  # torch minor. The torch.mlu surface FlagGems and FlagTree's mlu driver read
+  # is synthesized at import time instead (torch_fl/accelerator/cambricon/
+  # _cambricon_compat.py), backed by the runtime built here.
+  flagos_resolve_sdk_root(NEUWARE_HOME "/usr/local/neuware" NEUWARE_HOME)
+  if(NOT EXISTS "${NEUWARE_HOME}/include/cnrt.h")
+    message(FATAL_ERROR
+        "FLAGOS_ACCELERATOR=cambricon selected, but the Neuware toolkit was not "
+        "found (no ${NEUWARE_HOME}/include/cnrt.h). Set NEUWARE_HOME to a valid "
+        "Neuware installation.")
+  endif()
+
+  # The SDK keeps its libraries in lib64/ on newer releases and lib/ on some
+  # older layouts, so resolve whichever exists rather than pin one.
+  if(EXISTS "${NEUWARE_HOME}/lib64/libcnrt.so")
+    set(NEUWARE_LIB_DIR "${NEUWARE_HOME}/lib64")
+  elseif(EXISTS "${NEUWARE_HOME}/lib/libcnrt.so")
+    set(NEUWARE_LIB_DIR "${NEUWARE_HOME}/lib")
+  else()
+    message(FATAL_ERROR
+        "Neuware found at ${NEUWARE_HOME} but no libcnrt.so under lib64/ or lib/. "
+        "Install the full Neuware package, not only its headers.")
+  endif()
+  message(STATUS "Cambricon Neuware path: ${NEUWARE_HOME} (libs ${NEUWARE_LIB_DIR})")
+  set(NEUWARE_HOME "${NEUWARE_HOME}" CACHE PATH "Cambricon Neuware installation root")
+
+  add_library(cuda_runtime_compat INTERFACE IMPORTED)
+  set_target_properties(cuda_runtime_compat PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${NEUWARE_HOME}/include"
+  )
+  target_link_directories(cuda_runtime_compat INTERFACE "${NEUWARE_LIB_DIR}")
+  # cnrt is the whole runtime surface this build needs; every compute op comes
+  # from the vendor kernels compiled against CNNL below.
+  target_link_libraries(cuda_runtime_compat INTERFACE cnrt)
+
+  set(CUDA_RUNTIME_LIB cuda_runtime_compat)
+  # Embed the toolkit path so LD_LIBRARY_PATH is not needed at runtime.
+  list(APPEND CMAKE_INSTALL_RPATH "${NEUWARE_LIB_DIR}")
+  set(FLAGOS_VENDOR_RPATH_DIRS "${NEUWARE_LIB_DIR}")
+
+  # The vendor operator library, when FLAGOS_BUILD_VENDOR=ON. Found here rather
+  # than by the per-op CMakeLists so the accelerator arm owns its own SDK.
+  if(FLAGOS_BUILD_VENDOR)
+    find_library(CNNL_LIB cnnl PATHS "${NEUWARE_LIB_DIR}" NO_DEFAULT_PATH)
+    if(NOT CNNL_LIB)
+      message(FATAL_ERROR
+          "FLAGOS_BUILD_VENDOR=ON but libcnnl.so was not found under "
+          "${NEUWARE_LIB_DIR}. Install the CNNL component of the Neuware "
+          "toolkit, or build with -DFLAGOS_BUILD_VENDOR=OFF to fall back to CPU "
+          "for compute ops.")
+    endif()
+    message(STATUS "cnnl op library: ${CNNL_LIB}")
+    # The fused transformer ops (flash attention) live in libcnnl_extra, which
+    # ships in the same directory but is a separate library. Optional: a
+    # toolkit without it still builds, and the attention kernel is left out.
+    find_library(CNNL_EXTRA_LIB cnnl_extra PATHS "${NEUWARE_LIB_DIR}" NO_DEFAULT_PATH)
+    if(CNNL_EXTRA_LIB)
+      message(STATUS "cnnl extra op library: ${CNNL_EXTRA_LIB}")
+    else()
+      message(STATUS "cnnl extra op library: not found (fused attention disabled)")
+    endif()
+    set(CNNL_INCLUDE_DIRS "${NEUWARE_HOME}/include")
+  endif()
+
+  # Pre-create torch::cudart so PyTorch's cuda.cmake returns early
+  # (guard: if(TARGET torch::cudart) return()) rather than probing for an NVIDIA
+  # toolkit this host does not have.
+  add_library(torch::cudart INTERFACE IMPORTED)
   if(NOT TARGET CUDA::nvToolsExt)
     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
   endif()

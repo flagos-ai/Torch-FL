@@ -17,7 +17,7 @@ all dispatch tests
 
 Verifies that torch.all:
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems_python backend (default)
+  - configured routes are reported by the dispatch log
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -32,10 +32,19 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import routed_backend_or_none
+from backend_conf import override_is_logged, route_is_served
+
+from tests.integration.case_gap_issues import tracked_skip
 
 
 DEVICE = "flagos:0"
+
+# This file's correctness group is part of the shared case cohort. The standard
+# CI sweep selects `main_ops` on each platform's vendor and FlagGems lanes, so
+# leaving only `anyplatform` here made every one of the eleven cases invisible
+# to CI on the five lanes that accept only standard marks. Keep the backend
+# dispatch cases below outside this sweep: they assert one named route.
+pytestmark = pytest.mark.main_ops
 
 
 def _run_all_subprocess(
@@ -79,13 +88,94 @@ class TestAllCorrectness:
         out = torch.all(a)
         assert out.item() is False
 
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
     @pytest.mark.anyplatform
-    @pytest.mark.skip(reason="FlagGems all() kernel cannot handle empty tensors")
     def test_all_empty_tensor(self):
-        """Empty tensor: all() is vacuously true."""
+        """Empty tensor: all() is vacuously true.
+
+        The historical skip ("FlagGems all() kernel cannot handle empty
+        tensors") is not what breaks. Full reduction is fine on every empty
+        shape measured (1-D `[]`, `(0,0)`, `(3,0)`, `(0,3)`, bool and float);
+        it is the dimension reduction that fails, and it is covered separately
+        below. Issue #710 tracked the missing evidence for this case.
+        """
         a = torch.tensor([], device=DEVICE, dtype=torch.bool)
         out = torch.all(a)
         assert out.item() is True
+
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize(
+        "shape, dim",
+        [
+            ((0, 3), 0),
+            ((2, 0, 3), 1),
+            ((0, 2), -1),
+            ((0, 3), (0, 1)),
+        ],
+    )
+    def test_all_empty_dimensions(self, shape, dim):
+        """Reductions along empty dimensions keep the aten result and shape."""
+        host = torch.empty(shape, dtype=torch.float32)
+        expected = torch.all(host, dim=dim)
+        actual = torch.all(host.to(DEVICE), dim=dim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("keepdim", [False, True])
+    def test_all_dim_empty_reduction_reaches_its_route(self, keepdim):
+        """The dimension overload is tested when the global reduction has no route."""
+        host = torch.empty((3, 0), dtype=torch.float32)
+        expected = torch.all(host, dim=-1, keepdim=keepdim)
+        actual = torch.all(host.to(DEVICE), dim=-1, keepdim=keepdim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("shape", [(0, 0), (3, 0), (0, 3)])
+    def test_all_empty_full_reduction(self, shape):
+        """Full reduction over an empty N-D tensor is vacuously true.
+
+        The MUSA FlagGems route raises ``ZeroDivisionError: integer division or
+        modulo by zero`` here: its ``all`` kernel computes
+        ``triton.cdiv(n_elements, block_size)`` and derives ``block_size`` from
+        the element count, which is 0. Owned by the same issue as the other
+        empty-input cases above.
+        """
+        for dtype in (torch.bool, torch.float32):
+            a = torch.empty(shape, device=DEVICE, dtype=dtype)
+            assert torch.all(a).item() is True
+
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    def test_all_empty_dim_reduction(self):
+        """Reducing an empty axis returns True for every output element."""
+        host = torch.empty((0, 3), dtype=torch.bool)
+        expected = torch.all(host, dim=0)
+        out = torch.all(host.to(DEVICE), dim=0)
+        assert out.shape == (3,)
+        assert out.dtype == torch.bool
+        assert torch.equal(out.cpu(), expected)
 
     @pytest.mark.anyplatform
     def test_all_numeric_types(self):
@@ -96,16 +186,32 @@ class TestAllCorrectness:
         ref = torch.all(a.cpu())
         assert out.item() == ref.item()
 
-    @pytest.mark.cuda
-    def test_all_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+    @pytest.mark.anyplatform
+    def test_all_matches_cpu_reference(self):
         torch.manual_seed(1)
-        a_cuda = torch.randint(0, 2, (64, 64), device="cuda:0", dtype=torch.bool)
-        ref = torch.all(a_cuda)
-        a = a_cuda.to(DEVICE)
+        host = torch.randint(0, 2, (64, 64), dtype=torch.bool)
+        a = host.to(DEVICE)
         out = torch.all(a)
-        assert out.item() == ref.item()
+        assert out.item() == torch.all(host).item()
+
+    @tracked_skip(
+        condition=True,
+        issue="#710",
+    )
+    @pytest.mark.parametrize("dim", [0, 1, -1, (0, 1), (1, 2), None])
+    @pytest.mark.anyplatform
+    def test_all_empty_results_keep_their_shape(self, dim):
+        """Non-empty reductions that produce empty results retain their shape."""
+        host = torch.ones((2, 0, 3), dtype=torch.float32)
+        if dim is None:
+            actual = torch.all(host.to(DEVICE))
+            expected = torch.all(host)
+        else:
+            actual = torch.all(host.to(DEVICE), dim=dim)
+            expected = torch.all(host, dim=dim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
 
     @pytest.mark.parametrize("dtype", [torch.bool, torch.float32, torch.int32])
     @pytest.mark.anyplatform
@@ -123,16 +229,15 @@ class TestAllCorrectness:
 class TestAllDispatch:
     """Verify dispatch routing for all op."""
 
+    @pytest.mark.main_ops
     @pytest.mark.flaggems_python
+    @tracked_skip(
+        condition=not override_is_logged("all", "flaggems_python"),
+        issue="#710",
+    )
     def test_dispatch_log_flaggems_python(self):
-        """The per-op override selects the FlagGems Python path for ``all``.
-
-        Skipped where the conf routes ``all`` to ``none``: the op is then not
-        claimed on PrivateUse1 at all, so the call reaches cpu_fallback before
-        the dispatcher and no override can show up in the log.
-        """
-        if routed_backend_or_none("all") is None:
-            pytest.skip("all is routed to 'none' on this platform")
+        """The override selects the FlagGems Python path on a serving wheel."""
+        assert route_is_served("all")
         result = _run_all_subprocess(
             {
                 "FLAGOS_LOG": "dispatch",
@@ -143,6 +248,7 @@ class TestAllDispatch:
         assert "[flagos dispatch] all -> flagos_python" in result.stderr
 
     @pytest.mark.cuda
+    @pytest.mark.main_ops
     def test_dispatch_log_cuda_override(self):
         result = _run_all_subprocess(
             {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_all": "cuda"}

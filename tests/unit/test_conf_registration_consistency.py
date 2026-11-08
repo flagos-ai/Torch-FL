@@ -807,14 +807,29 @@ def test_conf_route_counts_are_stable():
         # ``cat``, ``masked_fill``, ``all``, ``argmax``, ``triu`` and
         # ``SOLVE_TRIANGULAR``, ``index``, ``cumsum``, ``softplus``, the
         # trigonometric and predicate spellings, the vision interpolation
-        # factories, clamp, GELU, rsub.Scalar and the eight metadata views
-        # (66 ops so far), so the conf routes those to
+        # factories, clamp, GELU, rsub.Scalar, the eight metadata views and
+        # ``addmm`` -- the spelling ``nn.Linear`` lowers to, added so a model's
+        # linear layers stop round-tripping the weight through the host -- and
+        # the eight inverse-hyperbolic and hyperbolic trigonometric spellings
+        # (``asin``, ``acos``, ``atan``, ``asinh``, ``acosh``, ``atanh``,
+        # ``sinh``, ``cosh``), which are one MPSGraph node each, the rounding
+        # spellings ``ceil``/``floor``/``trunc`` and the predicates ``isnan``,
+        # ``isinf``, ``isneginf``, ``isposinf`` and ``signbit`` -- ``round`` is
+        # deliberately absent, because MPSGraph's node rounds half away from zero
+        # where the reference rounds half to even, and the whole comparison family
+        # (``eq``/``ne``/``lt``/``le``/``gt``/``ge`` over tensors and over a
+        # scalar) with ``maximum``/``minimum``, and the extrema and product
+        # reductions ``amax``/``amin``/``prod.dim_int``, and the activations
+        # ``leaky_relu``/``elu`` (99 ops so far; ``relu`` is deliberately left on
+        # the reference because it measures slower there than the round-trip),
+        # and ``tan`` and ``logical_not`` (101 ops so far) -- so the conf routes
+        # those to
         # ``mps`` and every other op to ``none``. The ``softmax`` category is registered
         # under ``_softmax`` alone because ``softmax.int`` is
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"none": 1976, "apple": 66},
+        "apple": {"none": 1935, "apple": 107},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then

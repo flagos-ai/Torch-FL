@@ -133,6 +133,7 @@ class Dispatcher {
       case Backend::kEnflame:       enflame_fn_ = fn;         break;
       case Backend::kKunlunxin:     kunlunxin_fn_ = fn;        break;
       case Backend::kIluvatar:      iluvatar_fn_ = fn;         break;
+      case Backend::kCambricon:     cambricon_fn_ = fn;        break;
       case Backend::kTileOps:       tileops_fn_ = fn;          break;
       case Backend::kApple:         apple_fn_ = fn;           break;
       // Neither names a kernel set, so there is no slot to fill. kNone is the
@@ -424,6 +425,7 @@ class Dispatcher {
       case Backend::kEnflame:       return enflame_fn_;
       case Backend::kKunlunxin:     return kunlunxin_fn_;
       case Backend::kIluvatar:      return iluvatar_fn_;
+      case Backend::kCambricon:     return cambricon_fn_;
       case Backend::kApple:         return apple_fn_;
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
@@ -554,6 +556,7 @@ class Dispatcher {
       case Backend::kEnflame:     return "vendor";
       case Backend::kKunlunxin:   return "vendor";
       case Backend::kIluvatar:    return "vendor";
+      case Backend::kCambricon:   return "vendor";
       case Backend::kApple:       return "vendor";
       case Backend::kDrobotics:   return "vendor";
       case Backend::kNone:
@@ -588,6 +591,7 @@ class Dispatcher {
       case Backend::kEnflame:       name = "gcu"; break;
       case Backend::kKunlunxin:     name = "kunlunxin"; break;
       case Backend::kIluvatar:      name = "iluvatar"; break;
+      case Backend::kCambricon:     name = "cambricon"; break;
       case Backend::kTileOps:       name = "tileops"; break;
       case Backend::kApple:         name = "mps"; break;
       case Backend::kDrobotics:     name = "drobotics"; break;
@@ -612,6 +616,7 @@ class Dispatcher {
   FnPtr enflame_fn_        = nullptr;
   FnPtr kunlunxin_fn_      = nullptr;
   FnPtr iluvatar_fn_       = nullptr;
+  FnPtr cambricon_fn_      = nullptr;
   FnPtr tileops_fn_        = nullptr;
   FnPtr apple_fn_          = nullptr;
 };

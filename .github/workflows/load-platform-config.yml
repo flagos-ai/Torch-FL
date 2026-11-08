@@ -163,12 +163,16 @@ jobs:
           PLAN_CONTEXT: ${{ inputs.execution_plan_context }}
         run: |
           set -euo pipefail
-          args=()
+          command=(
+            python control/.github/scripts/platform_config.py
+            --source source
+            --lane "$PLATFORM"
+            --profile "$TEST_PROFILE"
+          )
           if [[ -n "$PLAN_ARTIFACT" ]]; then
-            args+=(--plan "$RUNNER_TEMP/ci-execution-plan/flagcicd-plan.json")
+            command+=(--plan "$RUNNER_TEMP/ci-execution-plan/flagcicd-plan.json")
           elif [[ -n "$PLAN_CONTEXT" ]]; then
             echo "::error::plan context requires an execution plan artifact"
             exit 1
           fi
-          python control/.github/scripts/platform_config.py \
-            --source source --lane "$PLATFORM" --profile "$TEST_PROFILE" "${args[@]}"
+          "${command[@]}"

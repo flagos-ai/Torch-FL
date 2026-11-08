@@ -118,6 +118,93 @@ def _workflow(name):
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
+def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
+    workflow = _workflow("case-gap-issues.yml")
+    assert set(workflow[True]) == {
+        "workflow_call",
+        "workflow_dispatch",
+    }
+    assert workflow["permissions"] == {"contents": "read", "issues": "read"}
+    steps = workflow["jobs"]["verify-gate"]["steps"]
+    checkouts = [
+        step for step in steps if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert [step["with"]["path"] for step in checkouts] == ["registry", "trusted"]
+    registry, trusted = (step["with"] for step in checkouts)
+    assert trusted["ref"] == "${{ inputs.registry_ref || github.sha }}"
+    assert trusted["repository"] == (
+        "${{ inputs.registry_repository || github.repository }}"
+    )
+    assert registry["ref"] == (
+        "${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}"
+    )
+    assert registry["repository"] == (
+        "${{ inputs.registry_repository || inputs.checkout_repository || github.repository }}"
+    )
+    assert registry["fetch-depth"] == 0
+    assert "fetch-depth" not in trusted
+    assert (
+        ".github/scripts/ci/check_case_gap_issues.py\n" in registry["sparse-checkout"]
+    )
+    assert trusted["sparse-checkout"] == (
+        ".github/scripts/ci/check_case_gap_issues.py\n"
+    )
+    assert registry["sparse-checkout"] == (
+        ".github/scripts/ci/check_case_gap_issues.py\n"
+        "tests/integration/case_gap_issues.py\n"
+        "tests/integration/ops/test_all_dispatch.py\n"
+        "tests/unit/test_integration_source_contract.py\n"
+    )
+    assert all(step["persist-credentials"] is False for step in (trusted, registry))
+    query = next(
+        step for step in steps if step.get("name", "").startswith("Require every")
+    )
+    assert query["working-directory"] == "trusted"
+    assert "--script-root" in query["run"]
+    assert "--registry" in query["run"]
+    assert (
+        "GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py" in query["run"]
+    )
+
+
+def test_main_ci_runs_the_issue_gate_for_pull_requests():
+    main = _workflow("ci.yml")
+    job = main["jobs"]["case-gap-issues"]
+    assert job["uses"] == "./.github/workflows/case-gap-issues.yml"
+    assert set(job["secrets"]) == {"GH_TOKEN"}
+    assert job["permissions"] == {"contents": "read", "issues": "read"}
+    assert "case-gap-issues" in main["jobs"]["ci-complete"]["needs"]
+    assert "case-gap-issues" in main["jobs"]["discover-platforms"]["needs"]
+    reusable = _workflow("case-gap-issues.yml")
+    inputs = reusable[True]["workflow_call"]
+    assert inputs["inputs"]["checkout_repository"]["required"] is True
+    assert inputs["inputs"]["checkout_ref"]["required"] is True
+    assert inputs["inputs"]["registry_repository"]["required"] is True
+    assert inputs["inputs"]["registry_ref"]["required"] is True
+    assert {"GH_TOKEN"} <= inputs["secrets"].keys()
+    assert "statuses" not in reusable["jobs"]["verify-gate"]["permissions"]
+    assert job["with"] == {
+        "checkout_repository": "${{ needs.resolve-checkout.outputs.base_repository }}",
+        "checkout_ref": "${{ needs.resolve-checkout.outputs.base_ref }}",
+        "registry_repository": "${{ needs.resolve-checkout.outputs.repository }}",
+        "registry_ref": "${{ needs.resolve-checkout.outputs.ref }}",
+    }
+    resolve = main["jobs"]["resolve-checkout"]
+    assert resolve["outputs"]["base_repository"] == (
+        "${{ steps.resolve.outputs.base_repository }}"
+    )
+    assert resolve["outputs"]["base_ref"] == ("${{ steps.resolve.outputs.base_ref }}")
+
+
+def test_main_ci_runs_the_issue_checker_from_the_main_after_this_change():
+    """The base is exposed so the first-commit run can be retried after merge."""
+    main = _workflow("ci.yml")
+    gate = main["jobs"]["ci-complete"]
+    assert gate["outputs"]["base_sha"] == (
+        "${{ needs.resolve-checkout.outputs.base_ref }}"
+    )
+
+
 def test_required_gate_covers_matrix_pipeline():
     jobs = _workflow("ci.yml")["jobs"]
     gate = jobs["ci-complete"]
@@ -126,6 +213,7 @@ def test_required_gate_covers_matrix_pipeline():
         "lint",
         "agnostic-checks",
         "codegen-checks",
+        "case-gap-issues",
         "discover-platforms",
         "platform-pipeline",
     }
@@ -229,6 +317,7 @@ def test_required_gate_checks_platform_result(tmp_path, selected, result):
         "lint",
         "agnostic-checks",
         "codegen-checks",
+        "case-gap-issues",
         "discover-platforms",
     ],
 )
@@ -388,4 +477,4 @@ def test_gate_import_remains_isolated_when_hardware_reporting_plugin_is_loaded(
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "5 passed" in result.stdout
+    assert "6 passed" in result.stdout

@@ -55,6 +55,7 @@ _VENDOR_TO_PLATFORM = {
     "nvidia": "cuda",
     "thead": "ppu",
     "tsingmicro": "tsingmicro",
+    "cambricon": "cambricon",
 }
 
 

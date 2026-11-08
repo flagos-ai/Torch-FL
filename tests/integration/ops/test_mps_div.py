@@ -37,10 +37,13 @@ just a copy of ``test_mps_binary.py``.
   the one measured difference from the reference and the one place the tests
   assert *against* the CPU rather than with it. ``1e-38 / 2.0`` returns
   ``5e-39`` and ``torch.tensor(1e-38, device=...) / torch.tensor(2.0, ...)``
-  returns ``0`` -- same values, different divisor spelling -- and ``mul.Tensor``
-  has behaved identically since stage 2. The boundary is the result, at the
-  smallest normal float; the tests below walk both sides of it so the property
-  is met as a documented edge rather than bisected out of a model.
+  returns ``0`` -- same values, different divisor spelling. The boundary is the
+  result, at the smallest normal float; the tests below walk both sides of it
+  so the property is met as a documented edge rather than bisected out of a
+  model. The flush belongs to the *node family* rather than to the graph: a
+  sibling such as ``mul.Tensor`` keeps the same subnormal on a host where this
+  division flushes, so each family is probed on its own rather than inheriting
+  the other's answer.
 * **``reciprocal`` is gated by the division predicate, not the unary one.** The
   unary gate is wider (it serves the integer widths). It must not be used here:
   ``x / 2`` and ``1 / x`` are one node family, and two ops built on it that
@@ -124,37 +127,41 @@ def _scalar_div(self: torch.Tensor, other) -> torch.Tensor:
     return torch.ops.aten.div.Scalar(self, other)
 
 
-def _graph_flushes_subnormals() -> bool:
-    """Whether this GPU's MPSGraph flushes a subnormal *result* to zero.
+def _measure_flushes_subnormals(probe) -> bool:
+    """Whether ``probe`` answers a subnormal *result* with zero.
 
     The boundary ``TestSubnormalBoundaryIsDocumented`` walks is real, but which
-    side of it the graph lands on is a property of the Metal the process is
-    running on rather than of this backend. Measured on the two lanes this
-    suite runs on: an **M5** (macOS 26 / Metal 4) returns ``0`` for
-    ``1e-38 / 2.0``, and an **M1** (macOS 14 / Metal 3, the earlier hosted
-    ``macos-14`` runner) returns ``5e-39`` -- the subnormal itself. The same
-    split shows through ``mul.Tensor``, which has shared the behaviour since
-    stage 2, so it is the graph's arithmetic rather than this op's.
+    side of it a graph lands on is a property of the Metal the process is
+    running on *and of the node*, not of this backend. Measured on the lanes
+    this suite runs on, a ``divisionWithPrimaryTensor:`` of ``1e-38 / 2.0``
+    returns ``0`` on an **M5** (macOS 26 / Metal 4) and ``5e-39`` -- the
+    subnormal itself -- on an **M1** (macOS 14 / Metal 3, the earlier hosted
+    ``macos-14`` runner).
 
-    The cases below therefore assert *the documented outcome for the policy the
-    machine actually has*, and this probe is what tells them which one that is.
-    It is measured once at import rather than assumed from the OS version: the
+    The node half of that is measured too, and it is why this takes a probe and
+    is not one shared answer: on the M5 above, ``multiplicationWithPrimaryTensor:``
+    and ``additionWithPrimaryTensor:`` keep the subnormal their siblings' bodies
+    record as flushed (``1e-38 * 0.5`` and ``1e-39 + 1e-39`` both return it),
+    while every division spelling returns ``0``. So the flush belongs to the
+    node family, and a suite that pinned one family's answer onto another's
+    would fail on a machine where they disagree -- which is exactly what an
+    older single-probe version of this helper did.
+
+    Measured once per process rather than assumed from the OS version: the
     version string is a proxy for the Metal feature set, and the feature set is
-    what the assertion is about. A machine whose graph flushes and one whose
-    graph keeps the subnormal are both pinned -- a machine that does something
-    in between still fails, because the probe compares against zero exactly.
+    what the assertion is about. A machine that flushes and one that keeps the
+    subnormal are both pinned -- a machine that does something in between still
+    fails, because the probe compares against zero exactly.
     """
-    operand = torch.tensor([1e-38]).to(DEVICE)
-    divisor = torch.tensor([2.0]).to(DEVICE)
-    return torch.ops.aten.div.Tensor(operand, divisor).cpu().item() == 0.0
+    return probe() == 0.0
 
 
-#: The probe's answer, measured once on the first MPS case that asks.
+#: The division family's answer, measured once on the first MPS case that asks.
 _GRAPH_FLUSHES_SUBNORMALS: list[bool] = []
 
 
 def graph_flushes_subnormals() -> bool:
-    """``_graph_flushes_subnormals()``, measured at most once per process.
+    """``_measure_flushes_subnormals()`` for the division node family.
 
     Called from the test bodies rather than at import: the suites share a
     default platform mark, so another platform's lane collects this module
@@ -162,22 +169,67 @@ def graph_flushes_subnormals() -> bool:
     collection into an error on a machine that never runs a case here.
     """
     if not _GRAPH_FLUSHES_SUBNORMALS:
-        _GRAPH_FLUSHES_SUBNORMALS.append(_graph_flushes_subnormals())
+        _GRAPH_FLUSHES_SUBNORMALS.append(
+            _measure_flushes_subnormals(
+                lambda: (
+                    torch.ops.aten.div.Tensor(
+                        torch.tensor([1e-38]).to(DEVICE),
+                        torch.tensor([2.0]).to(DEVICE),
+                    )
+                    .cpu()
+                    .item()
+                )
+            )
+        )
     return _GRAPH_FLUSHES_SUBNORMALS[0]
 
 
-def _assert_subnormal_policy(got: torch.Tensor, expected: torch.Tensor) -> None:
-    """Assert a subnormal *result* against whichever policy this GPU has.
+#: ``multiplicationWithPrimaryTensor:``'s answer, measured once on demand.
+_GRAPH_FLUSHES_SUBNORMALS_MUL: list[bool] = []
+
+
+def mul_graph_flushes_subnormals() -> bool:
+    """The same probe for the multiplication node.
+
+    Separate from :func:`graph_flushes_subnormals` because the two nodes do not
+    have to agree, and on an M5 measured for this suite they do not: the
+    division flushes and the multiplication keeps the subnormal. The cases that
+    assert ``mul``'s policy read this one.
+    """
+    if not _GRAPH_FLUSHES_SUBNORMALS_MUL:
+        _GRAPH_FLUSHES_SUBNORMALS_MUL.append(
+            _measure_flushes_subnormals(
+                lambda: (
+                    torch.ops.aten.mul(
+                        torch.tensor([1e-38]).to(DEVICE),
+                        torch.tensor([0.5]).to(DEVICE),
+                    )
+                    .cpu()
+                    .item()
+                )
+            )
+        )
+    return _GRAPH_FLUSHES_SUBNORMALS_MUL[0]
+
+
+def _assert_subnormal_policy(
+    got: torch.Tensor, expected: torch.Tensor, *, flushes: bool
+) -> None:
+    """Assert a subnormal *result* against whichever policy the node has.
 
     ``expected`` is the CPU reference and is the subnormal itself, so the two
-    documented outcomes are ``0`` (this graph flushes) and ``expected`` (this
-    graph represents it). Anything else is neither policy and fails here rather
+    documented outcomes are ``0`` (this node flushes) and ``expected`` (this
+    node represents it). Anything else is neither policy and fails here rather
     than in a model -- which is what keeps this a boundary rather than a
     tolerance.
+
+    ``flushes`` is the caller's own node family's probe rather than a single
+    process-wide answer, because the two are not the same measurement: see
+    :func:`_measure_flushes_subnormals` for the M5 that separates them.
     """
     assert expected.item() < torch.finfo(expected.dtype).tiny
     assert expected.item() != 0.0
-    if graph_flushes_subnormals():
+    if flushes:
         assert got.item() == 0.0
     else:
         assert got.item() == expected.item()
@@ -537,21 +589,22 @@ class TestSubnormalBoundaryIsDocumented:
     """The one measured difference from the reference, pinned as intentional.
 
     A subnormal *result* lands on a boundary between this backend and the CPU
-    reference, and which side of it the graph falls on is a property of the GPU
-    the process is running on rather than of division: the M5 (macOS 26 /
-    Metal 4) flushes it to zero, and the M1 (macOS 14 / Metal 3, the earlier
-    hosted ``macos-14`` runner) represents it. Both are the same arithmetic
-    seen through different Metal feature sets, and the case is shared with the
-    ops already routed to this backend since stage 2, so it is recorded here --
-    as a boundary a reader meets deliberately -- rather than quietly tolerated
-    by a loose tolerance.
+    reference, and which side of it a graph falls on is a property of the GPU
+    the process is running on *and of the node*: the M5 (macOS 26 / Metal 4)
+    flushes a division's subnormal to zero, the M1 (macOS 14 / Metal 3, the
+    earlier hosted ``macos-14`` runner) represents it, and on that same M5 the
+    ``mul`` and ``add`` nodes keep the subnormal their division sibling
+    flushes. Both readings are the same arithmetic seen through different Metal
+    feature sets and different node families, and the boundary is recorded here
+    -- as one a reader meets deliberately -- rather than quietly tolerated by a
+    loose tolerance.
 
-    ``graph_flushes_subnormals()`` measures once, on the first case that asks,
-    and the cases below
-    assert the documented outcome for whichever policy is present, so each
+    :func:`graph_flushes_subnormals` and :func:`mul_graph_flushes_subnormals`
+    each measure once, on the first case that asks, and the cases below assert
+    the documented outcome for whichever policy the node actually has, so each
     machine's behaviour is pinned rather than one machine's being hard-coded.
     The boundary is the result rather than either operand, and it holds through
-    both bodies, which is what the cases below walk.
+    both division bodies, which is what the cases below walk.
     """
 
     @pytest.mark.anyplatform
@@ -560,15 +613,16 @@ class TestSubnormalBoundaryIsDocumented:
 
         On its own this looks like a bug, which is why the cases beside it exist:
         the same operand over a *normal* quotient is returned unchanged, and the
-        already-shipped ``mul.Tensor`` flushes the identical way. Together they
-        say the flush is a representation boundary in the graph's arithmetic
-        rather than a wrong answer from this kernel.
+        already-shipped ``mul.Tensor`` is measured beside it on a gate of its own
+        rather than assumed to share this node's answer. Together they say the
+        flush is a representation boundary in the graph's arithmetic rather than
+        a wrong answer from this kernel.
         """
         tiny_operand = torch.tensor([1e-38])
         divisor = torch.tensor([2.0])
         got = _tensor_div(_to_device(tiny_operand), _to_device(divisor)).cpu()
         expected = tiny_operand / divisor
-        _assert_subnormal_policy(got, expected)
+        _assert_subnormal_policy(got, expected, flushes=graph_flushes_subnormals())
 
     @pytest.mark.anyplatform
     def test_the_scalar_body_flushes_the_same_way(self):
@@ -584,33 +638,46 @@ class TestSubnormalBoundaryIsDocumented:
         tiny_operand = torch.tensor([1e-38])
         expected = tiny_operand / 2.0
         got = _scalar_div(_to_device(tiny_operand), 2.0).cpu()
-        _assert_subnormal_policy(got, expected)
+        _assert_subnormal_policy(got, expected, flushes=graph_flushes_subnormals())
 
     @pytest.mark.anyplatform
-    def test_the_already_routed_mul_tensor_flushes_the_same_way(self):
-        """``mul.Tensor`` has behaved identically since stage 2.
+    def test_the_already_routed_mul_tensor_has_its_own_policy(self):
+        """``mul.Tensor`` has been served since stage 2, on its own node.
 
-        If this case ever fails, the subnormal policy of the two ops has
-        diverged and the note in ``mps_common.h`` -- which says ``div`` inherits
-        ``mul``'s policy rather than inventing a second one -- is stale.
+        This case used to assert that ``mul`` flushes *identically* to ``div``,
+        on the measurement that made ``div`` inherit ``mul``'s policy rather than
+        invent a second one. That inheritance is not what the hardware does: on
+        the M5 this was re-measured on, ``multiplicationWithPrimaryTensor:``
+        over two runtime operands keeps ``1e-38 * 0.5`` while every division
+        spelling returns ``0``, so the flush is a property of the node body and
+        the two nodes are two families. ``mul`` is therefore held to its *own*
+        probe -- one per body, because the constant one below is a third reading.
         """
         operand = torch.tensor([1e-38])
         factor = torch.tensor([0.5])
         got = (operand.to(DEVICE) * factor.to(DEVICE)).cpu()
         expected = operand * factor
-        _assert_subnormal_policy(got, expected)
+        flushes = mul_graph_flushes_subnormals()
+        _assert_subnormal_policy(got, expected, flushes=flushes)
 
-        # Same shape as the division cases: on a flushing graph the opaque
-        # spelling reaches the kernel and flushes, while the Python operator
-        # resolves to a composite that never builds the graph and keeps the
-        # subnormal. That pair is what says the value belongs to the graph
-        # rather than to the dtype. On a graph that keeps the subnormal there is
-        # no difference to see, and both spellings agree with the reference.
+        # The folded-constant body is the *same* selector but not the same
+        # reading, so it gets a probe of its own rather than the tensor body's
+        # answer. `mul.Scalar` and a Python float both reach `MpsConstant`,
+        # whose `constantWithScalar:` is folded when the graph compiles, and on
+        # the M5 that folded body flushes the subnormal the two-operand body
+        # keeps. Holding both bodies to one answer is what failed before this
+        # probe existed; each is asserted against its own policy instead.
+        scalar_flushes = _measure_flushes_subnormals(
+            lambda: torch.ops.aten.mul.Scalar(operand.to(DEVICE), 0.5).cpu().item()
+        )
         opaque = torch.ops.aten.mul.Scalar(operand.to(DEVICE), 0.5).cpu()
-        if graph_flushes_subnormals():
+        if scalar_flushes:
             assert opaque.item() == 0.0
         else:
             assert opaque.item() == expected.item()
+        # The Python operator resolves inside the composite wrapper, so it never
+        # builds the constant node and always reaches the reference's value --
+        # whichever policy the folded node has.
         assert (operand.to(DEVICE) * 0.5).cpu().item() == expected.item()
 
     @pytest.mark.anyplatform
@@ -671,7 +738,9 @@ class TestSubnormalBoundaryIsDocumented:
             _to_device(torch.tensor([just_below])),
             _to_device(torch.tensor([2.0])),
         ).cpu()
-        _assert_subnormal_policy(below, torch.tensor(just_below / 2.0))
+        _assert_subnormal_policy(
+            below, torch.tensor(just_below / 2.0), flushes=graph_flushes_subnormals()
+        )
 
     @pytest.mark.anyplatform
     def test_a_reciprocal_that_overflows_from_a_subnormal_operand(self):
@@ -716,7 +785,7 @@ class TestSubnormalBoundaryIsDocumented:
         expected = operand / divisor
         assert expected.item() < tiny_bf16
         got = _tensor_div(_to_device(operand), _to_device(divisor)).cpu()
-        _assert_subnormal_policy(got, expected)
+        _assert_subnormal_policy(got, expected, flushes=graph_flushes_subnormals())
 
 
 class TestDivDeclinedDtypes:

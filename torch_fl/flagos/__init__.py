@@ -18,6 +18,7 @@ import importlib
 import os
 import sys
 import time
+import types
 
 import torch
 
@@ -537,6 +538,21 @@ class Stream(torch.cuda.Stream):
         return self.cuda_stream
 
     @property
+    def mlu_stream(self):
+        """Raw cnrt queue handle, the name Triton's mlu driver reads.
+
+        ``triton/backends/mlu/driver.py`` does
+        ``torch.mlu.current_stream(idx).mlu_stream``. On this platform torch.mlu
+        is torch_fl's own shim over this module (see
+        torch_fl/accelerator/cambricon/_cambricon_compat.py), so the attribute
+        belongs here next to the musa/gcu spellings rather than being arranged
+        around in the shim.
+        """
+        if hasattr(self, "_stream"):
+            return self._stream.handle
+        return self.cuda_stream
+
+    @property
     def device_index(self):
         if hasattr(self, "_stream"):
             return self._stream.device_index
@@ -571,6 +587,7 @@ class _DefaultStreamHandle:
         "cuda_stream",
         "gcu_stream",
         "musa_stream",
+        "mlu_stream",
         "txda_stream",
         "device_index",
     )
@@ -580,6 +597,11 @@ class _DefaultStreamHandle:
         self.gcu_stream = 0
         get_musa_stream = getattr(_C, "_get_musa_current_raw_stream", None)
         self.musa_stream = get_musa_stream(device_index) if get_musa_stream else 0
+        # Cambricon's Triton driver reads `.mlu_stream`. A cnrt queue is a real
+        # per-device handle rather than a fixed 0, so it is asked for when the
+        # runtime layer that owns it is compiled in.
+        get_mlu_stream = getattr(_C, "_get_cambricon_current_raw_stream", None)
+        self.mlu_stream = get_mlu_stream(device_index) if get_mlu_stream else 0
         # TsingMicro's triton launcher (triton.backends.tsingmicro.driver) reads
         # `.txda_stream`; the TX runtime only has the default stream, handle 0.
         self.txda_stream = 0
@@ -764,6 +786,20 @@ class _HostTimedEvent:
         if self._t is None or end_event._t is None:
             raise RuntimeError("elapsed_time called on an unrecorded event")
         return (end_event._t - self._t) * 1000.0  # ms, matching torch.cuda.Event
+
+    def hardware_time(self, end_event):
+        """Device-side duration in nanoseconds, the name Triton's mlu bench uses.
+
+        ``triton/testing.py``'s Cambricon ``do_bench`` estimates a kernel from
+        ``start_event.hardware_time(end_event) / 1000 / 5`` and expects
+        nanoseconds, which on real torch_mlu comes from
+        ``cnrtNotifierElapsedTime``. This event has no device timestamp to read --
+        ``record`` drains the queue and reads the host clock -- so the host-clock
+        duration is reported in the unit the caller expects. That is a wall-time
+        estimate of a drained launch, which is what an autotuner compares
+        candidates by; it is not device-only occupancy time.
+        """
+        return self.elapsed_time(end_event) * 1e6
 
 
 class Event(torch.cuda.Event):
@@ -2136,6 +2172,28 @@ def _align_flagtree_autotuning_knobs():
         pass
 
 
+def _flaggems_autotune_knob(triton_knobs):
+    """Whether the user turned ``TRITON_CACHE_AUTOTUNING`` off, parsed as Triton does.
+
+    Returns True when the knob may be enabled (unset, or set to anything Triton
+    reads as on) and False when the user explicitly declined -- that "no" is what
+    the caller must respect. A build whose knobs module cannot answer at all
+    returns True so the caller proceeds: this function exists to avoid
+    overwriting a deliberate setting, not to veto enabling the cache.
+
+    Parsed through the module-level ``getenv_bool`` -- the same parser
+    ``env_bool.get`` calls -- rather than a hand-rolled truthiness test, so
+    "on"/"yes"/"1" mean here exactly what they mean to Triton. Guarded by
+    ``hasattr`` because that helper is not part of every Triton build (the
+    Cambricon 3.4 line has no such name); a build without it proceeds rather
+    than being silently vetoed.
+    """
+    getenv_bool = getattr(triton_knobs, "getenv_bool", None)
+    if getenv_bool is None:
+        return True
+    return bool(getenv_bool("TRITON_CACHE_AUTOTUNING", True))
+
+
 def _enable_flaggems_autotune_cache():
     """Stop Triton from re-benchmarking the same autotune configs every process.
 
@@ -2194,8 +2252,9 @@ def _enable_flaggems_autotune_cache():
     ``setdefault``: ``env_bool`` is a data descriptor whose ``__set__`` calls
     ``knobs.setenv``, so assigning the knob *writes the variable*, and a
     ``setdefault`` followed by that assignment overwrites the user's ``0`` with
-    the ``1`` it just wrote. The existing value is therefore parsed with the same
-    ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by construction.
+    the ``1`` it just wrote. The existing value is therefore parsed with the
+    same ``getenv_bool`` that ``env_bool.get`` uses, so the two agree by
+    construction -- and the value is only written when that parse says yes.
 
     Scoped to the builds and confs whose routed ops are FlagGems Python launches
     -- see ``_FLAGGEMS_LAUNCH_PATCH_BUILDS`` -- like the patches around it. No op
@@ -2212,7 +2271,11 @@ def _enable_flaggems_autotune_cache():
 
         # Default True on purpose: unset is the state this exists to change, and
         # anything a user did set that does not parse as truthy is a "no".
-        if not triton_knobs.getenv_bool("TRITON_CACHE_AUTOTUNING", True):
+        # Never call ``triton_knobs.getenv_bool`` unguarded: the rest of this
+        # function is under ``except Exception: pass``, so a Triton build
+        # without that helper would turn into a silent no-op instead of a slow
+        # run. ``_flaggems_autotune_knob`` owns that check.
+        if not _flaggems_autotune_knob(triton_knobs):
             return
 
         os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
@@ -2909,7 +2972,6 @@ def _stand_down_foreign_triton_drivers():
         import triton.backends
     except ImportError:
         return
-
     backend = triton.backends.backends.get("nvidia")
     if backend is None:
         return
@@ -3139,6 +3201,54 @@ def get_device_properties(device=None):
     return _DeviceProperties(_device_index(device))
 
 
+def _utils_get_device_index(device, optional=False, allow_cpu=False):
+    """`torch.cuda._utils._get_device_index`, for the privateuse1 device module.
+
+    This exists for one caller that is not ours.
+    `torch.serialization._validate_device` resolves a `map_location` by asking
+    the device module for `_utils._get_device_index`, and its docstring names
+    that attribute as the contract a privateuse1 backend has to implement. With
+    no `_utils` it takes an `else` branch that calls `torch.device(location)`
+    directly, so `map_location="cuda:3"` deserializes onto a **cuda** device
+    rather than onto flagos -- which on a CPU-only torch is not a device at all,
+    and on a boxing build is the wrong one. Most of the ecosystem checkpoints
+    with `map_location="cuda"`, so the CUDA spellings are the ones that matter
+    (issue #531).
+
+    `_device_index` already accepts every form the CUDA function documents,
+    including the `"cuda:1"` string, and returns only the index -- which is the
+    whole answer here, because flagos has a single device type. The two flags
+    are the CUDA signature's, honoured rather than ignored: `allow_cpu` lets a
+    caller pass `"cpu"` and get -1, and `optional` is what `None` means. A
+    non-optional `None` is an error in the CUDA function and stays one here.
+    """
+    if allow_cpu:
+        if isinstance(device, str):
+            device = torch.device(device)
+        if isinstance(device, torch.device) and device.type == "cpu":
+            return -1
+    if device is None and not optional:
+        raise ValueError(
+            "_get_device_index: `device` is None and `optional` is False; pass a "
+            "device index, a torch.device, a '<type>[:<index>]' string, or set "
+            "optional=True to mean the current device"
+        )
+    return _device_index(device)
+
+
+#: The submodule `torch.serialization._validate_device` looks for. Built here
+#: rather than shipped as a `torch_fl/flagos/_utils.py` file because it is one
+#: function and it has to be an attribute of the registered device module --
+#: a real submodule would also be importable as `torch_fl.flagos._utils`, which
+#: would advertise a second, unowned entry point to the same shim.
+_utils = types.ModuleType(f"{__name__}._utils")
+_utils.__doc__ = (
+    "The privateuse1 device-module hook torch.serialization._validate_device "
+    "reads. See _utils_get_device_index."
+)
+_utils._get_device_index = _utils_get_device_index
+
+
 __all__ = [
     "device",
     "device_count",
@@ -3167,6 +3277,7 @@ __all__ = [
     "mem_get_info",
     "reset_peak_memory_stats",
     "get_device_properties",
+    "_utils",
 ]
 
 

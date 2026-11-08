@@ -179,6 +179,14 @@ elseif(_flagos_is_iluvatar)
   # would want a CUDA toolkit the corex-only host does not provide.
   target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
+elseif(_flagos_is_cambricon)
+  # Cambricon MLU: the runtime sources are the cambricon/ ones (cnrtMalloc,
+  # cnrtQueue_t, cnrtNotifier_t) and there is no CUDA toolkit on the host, so
+  # link the shim rather than find_package -- the same reason iluvatar takes this
+  # arm. ${CUDA_RUNTIME_LIB} is cuda_runtime_compat, which carries cnrt's
+  # include and library directories from the top-level accelerator arm.
+  target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${CUDA_RUNTIME_LIB})
 elseif(_flagos_is_mps)
   # Apple Metal. There is no vendor SDK to find: Metal and Foundation ship with
   # the macOS SDK, and torch's own MPS support is already in the macOS torch

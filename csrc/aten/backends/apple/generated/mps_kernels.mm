@@ -354,6 +354,234 @@ at::Tensor MulTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kApple, MulTensorKernelMps)
 
 
+at::Tensor MaximumKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self.sizes(), other.sizes());
+  } catch (const std::exception&) {
+    return at::maximum(self.cpu(), other.cpu()).to(self.device());
+  }
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::maximum(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool broadcast =
+      !self_c.sizes().equals(at::IntArrayRef(out_shape)) ||
+      !other_c.sizes().equals(at::IntArrayRef(out_shape));
+  // A NaN that would have to be broadcast selects against the wrong shape in a
+  // graph built the way every other body here is built, so it round-trips.
+  // Only a floating operand can hold a NaN, and asking an integral one is not
+  // free of surprises in this tree -- the check runs on the host copy with the
+  // floating-width test in front of it.
+  if (broadcast && self_c.is_floating_point()) {
+    const at::Tensor self_host = self_c.to(at::kCPU);
+    const at::Tensor other_host = other_c.to(at::kCPU);
+    if (at::isnan(self_host).any().item<bool>() ||
+        at::isnan(other_host).any().item<bool>()) {
+      return at::maximum(self.cpu(), other.cpu()).to(self.device());
+    }
+  }
+  // A one-element secondary is expanded on the host before the graph. Asking
+  // MpsRunGraph to place a numel-1 operand at a larger `argument_shapes` entry
+  // fails module verification on this SDK (measured), and the expansion is a
+  // copy of one element.
+  const bool scalar_rhs = other_c.numel() == 1;
+  std::vector<at::Tensor> operands{self_c};
+  if (scalar_rhs && !other_c.sizes().equals(at::IntArrayRef(out_shape))) {
+    operands.push_back(other_c.expand(out_shape).contiguous());
+  } else {
+    operands.push_back(other_c);
+  }
+  const std::vector<std::vector<int64_t>> argument_shapes = {
+      self_c.sizes().vec(), operands[1].sizes().vec()};
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("maximum"),
+      operands,
+      out,
+      argument_shapes,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args.count == 2 ? args[1] : primary;
+        // The secondary is broadcast explicitly whenever it is not already the
+        // output's shape. That covers a one-element operand too: MPSGraph will
+        // not widen a rank-0 tensor into a rank-N result (measured, the module
+        // fails verification without this).
+        // `MpsRunGraph` already placed every operand at the shape in
+        // `argument_shapes`, so a one-element secondary arrives as the output's
+        // shape and needs nothing here. Only a genuinely broadcast operand --
+        // one whose own shape differs from the output's -- is widened.
+        if (!scalar_rhs && broadcast) {
+          secondary = [graph broadcastTensor:secondary
+                                     toShape:mps::MpsAxesArray(out_shape)
+                                        name:nil];
+          if (secondary == nil) {
+            return nil;
+          }
+        }
+        MPSGraphTensor* answer =
+            [graph maximumWithPrimaryTensor:primary secondaryTensor:secondary name:nil];
+        if (answer == nil) {
+          return nil;
+        }
+        // A NaN back over the node's answer wherever either operand was one.
+        // `x - x` is a NaN exactly where `x` was and neutral everywhere else, so
+        // it produces the replacement without a NaN constant, which MpsConstant
+        // cannot express.
+        MPSGraphTensor* primary_nan =
+            [graph subtractionWithPrimaryTensor:primary secondaryTensor:primary name:nil];
+        MPSGraphTensor* self_nan = [graph isNaNWithTensor:primary name:nil];
+        if (primary_nan == nil || self_nan == nil) {
+          return nil;
+        }
+        MPSGraphTensor* either_nan = self_nan;
+        if (!scalar_rhs && secondary != primary) {
+          MPSGraphTensor* secondary_nan =
+              [graph subtractionWithPrimaryTensor:secondary secondaryTensor:secondary name:nil];
+          MPSGraphTensor* other_nan = [graph isNaNWithTensor:secondary name:nil];
+          if (secondary_nan == nil || other_nan == nil) {
+            return nil;
+          }
+          primary_nan =
+              [graph additionWithPrimaryTensor:primary_nan secondaryTensor:secondary_nan name:nil];
+          either_nan =
+              [graph logicalORWithPrimaryTensor:self_nan secondaryTensor:other_nan name:nil];
+          if (primary_nan == nil || either_nan == nil) {
+            return nil;
+          }
+        }
+        return [graph selectWithPredicateTensor:either_nan
+                           truePredicateTensor:primary_nan
+                          falsePredicateTensor:answer
+                                          name:nil];
+      });
+  if (!ran) {
+    return at::maximum(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MaximumFn, maximum_dispatcher, Backend::kApple, MaximumKernelMps)
+
+
+at::Tensor MinimumKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self.sizes(), other.sizes());
+  } catch (const std::exception&) {
+    return at::minimum(self.cpu(), other.cpu()).to(self.device());
+  }
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::minimum(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool broadcast =
+      !self_c.sizes().equals(at::IntArrayRef(out_shape)) ||
+      !other_c.sizes().equals(at::IntArrayRef(out_shape));
+  // A NaN that would have to be broadcast selects against the wrong shape in a
+  // graph built the way every other body here is built, so it round-trips.
+  // Only a floating operand can hold a NaN, and asking an integral one is not
+  // free of surprises in this tree -- the check runs on the host copy with the
+  // floating-width test in front of it.
+  if (broadcast && self_c.is_floating_point()) {
+    const at::Tensor self_host = self_c.to(at::kCPU);
+    const at::Tensor other_host = other_c.to(at::kCPU);
+    if (at::isnan(self_host).any().item<bool>() ||
+        at::isnan(other_host).any().item<bool>()) {
+      return at::minimum(self.cpu(), other.cpu()).to(self.device());
+    }
+  }
+  // A one-element secondary is expanded on the host before the graph. Asking
+  // MpsRunGraph to place a numel-1 operand at a larger `argument_shapes` entry
+  // fails module verification on this SDK (measured), and the expansion is a
+  // copy of one element.
+  const bool scalar_rhs = other_c.numel() == 1;
+  std::vector<at::Tensor> operands{self_c};
+  if (scalar_rhs && !other_c.sizes().equals(at::IntArrayRef(out_shape))) {
+    operands.push_back(other_c.expand(out_shape).contiguous());
+  } else {
+    operands.push_back(other_c);
+  }
+  const std::vector<std::vector<int64_t>> argument_shapes = {
+      self_c.sizes().vec(), operands[1].sizes().vec()};
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("minimum"),
+      operands,
+      out,
+      argument_shapes,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args.count == 2 ? args[1] : primary;
+        // The secondary is broadcast explicitly whenever it is not already the
+        // output's shape. That covers a one-element operand too: MPSGraph will
+        // not widen a rank-0 tensor into a rank-N result (measured, the module
+        // fails verification without this).
+        // `MpsRunGraph` already placed every operand at the shape in
+        // `argument_shapes`, so a one-element secondary arrives as the output's
+        // shape and needs nothing here. Only a genuinely broadcast operand --
+        // one whose own shape differs from the output's -- is widened.
+        if (!scalar_rhs && broadcast) {
+          secondary = [graph broadcastTensor:secondary
+                                     toShape:mps::MpsAxesArray(out_shape)
+                                        name:nil];
+          if (secondary == nil) {
+            return nil;
+          }
+        }
+        MPSGraphTensor* answer =
+            [graph minimumWithPrimaryTensor:primary secondaryTensor:secondary name:nil];
+        if (answer == nil) {
+          return nil;
+        }
+        // A NaN back over the node's answer wherever either operand was one.
+        // `x - x` is a NaN exactly where `x` was and neutral everywhere else, so
+        // it produces the replacement without a NaN constant, which MpsConstant
+        // cannot express.
+        MPSGraphTensor* primary_nan =
+            [graph subtractionWithPrimaryTensor:primary secondaryTensor:primary name:nil];
+        MPSGraphTensor* self_nan = [graph isNaNWithTensor:primary name:nil];
+        if (primary_nan == nil || self_nan == nil) {
+          return nil;
+        }
+        MPSGraphTensor* either_nan = self_nan;
+        if (!scalar_rhs && secondary != primary) {
+          MPSGraphTensor* secondary_nan =
+              [graph subtractionWithPrimaryTensor:secondary secondaryTensor:secondary name:nil];
+          MPSGraphTensor* other_nan = [graph isNaNWithTensor:secondary name:nil];
+          if (secondary_nan == nil || other_nan == nil) {
+            return nil;
+          }
+          primary_nan =
+              [graph additionWithPrimaryTensor:primary_nan secondaryTensor:secondary_nan name:nil];
+          either_nan =
+              [graph logicalORWithPrimaryTensor:self_nan secondaryTensor:other_nan name:nil];
+          if (primary_nan == nil || either_nan == nil) {
+            return nil;
+          }
+        }
+        return [graph selectWithPredicateTensor:either_nan
+                           truePredicateTensor:primary_nan
+                          falsePredicateTensor:answer
+                                          name:nil];
+      });
+  if (!ran) {
+    return at::minimum(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MinimumFn, minimum_dispatcher, Backend::kApple, MinimumKernelMps)
+
+
 at::Tensor RsubScalarKernelMps(
     const at::Tensor& self,
     const at::Scalar& other,
@@ -594,6 +822,106 @@ at::Tensor MeanDimKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(MeanDimFn, mean_dim_dispatcher, Backend::kApple, MeanDimKernelMps)
 
 
+at::Tensor AmaxKernelMps(
+    const at::Tensor& self,
+    at::IntArrayRef dim,
+    bool keepdim) {
+  if (!mps::MpsSupportsReduceDtype(self.scalar_type())) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("amax", axes, keepdim),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionMaximumPropagateNaNWithTensor:args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      });
+  if (!ran) {
+    return at::amax(self.cpu(), dim, keepdim).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AmaxFn, amax_dispatcher, Backend::kApple, AmaxKernelMps)
+
+
+at::Tensor AminKernelMps(
+    const at::Tensor& self,
+    at::IntArrayRef dim,
+    bool keepdim) {
+  if (!mps::MpsSupportsReduceDtype(self.scalar_type())) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("amin", axes, keepdim),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionMinimumPropagateNaNWithTensor:args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      });
+  if (!ran) {
+    return at::amin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kApple, AminKernelMps)
+
+
+at::Tensor ProdDimIntKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    bool keepdim,
+    std::optional<at::ScalarType> dtype) {
+  if (!mps::MpsSupportsReduceDtype(self.scalar_type(), dtype)) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("prod.dim_int", dim, keepdim, dtype.has_value() ? static_cast<int64_t>(*dtype) : int64_t{-1}),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionProductWithTensor:args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      });
+  if (!ran) {
+    return at::prod(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ProdDimIntFn, prod_dim_int_dispatcher, Backend::kApple, ProdDimIntKernelMps)
+
+
 at::Tensor AllKernelMps(const at::Tensor& self) {
   if (!mps::MpsSupportsAllDtype(self.scalar_type())) {
     return at::all(self.cpu()).to(self.device());
@@ -793,6 +1121,61 @@ at::Tensor TriuKernelMps(const at::Tensor& self, int64_t diagonal) {
 REGISTER_IMPL_TO_DISPATCHER(TriuFn, triu_dispatcher, Backend::kApple, TriuKernelMps)
 
 
+at::Tensor TrilKernelMps(const at::Tensor& self, int64_t diagonal) {
+  if (!mps::MpsSupportsTriuDtype(self.scalar_type())) {
+    return at::tril(self.cpu(), diagonal).to(self.device());
+  }
+  if (self.dim() < 2 || self.size(-1) == 0 || self.size(-2) == 0) {
+    return at::tril(self.cpu(), diagonal).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("tril", diagonal),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSShape* shape = mps::MpsShapeOf(self_c.sizes());
+        MPSGraphTensor* column =
+            [graph coordinateAlongAxis:-1 withShape:shape name:nil];
+        MPSGraphTensor* row =
+            [graph coordinateAlongAxis:-2 withShape:shape name:nil];
+        MPSGraphTensor* difference =
+            [graph subtractionWithPrimaryTensor:column
+                                secondaryTensor:row
+                                           name:nil];
+        // Coordinates are int32. Cast the offset before comparing: a scalar
+        // constant in int64 is not broadcastable against an int32 tensor on
+        // this SDK, and the graph compiler aborts on that mismatch.
+        MPSGraphTensor* diagonal_t =
+            mps::MpsConstant(graph, diagonal, at::kInt);
+        MPSGraphTensor* offset = diagonal_t == nil ? nil :
+            [graph broadcastTensor:diagonal_t
+                           toShape:shape
+                              name:nil];
+        MPSGraphTensor* lower =
+            [graph lessThanOrEqualToWithPrimaryTensor:difference
+                                      secondaryTensor:offset
+                                                 name:nil];
+        MPSGraphTensor* zero =
+            mps::MpsConstant(graph, 0, self_c.scalar_type());
+        if (lower == nil || zero == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:lower
+                            truePredicateTensor:args[0]
+                           falsePredicateTensor:zero
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::tril(self.cpu(), diagonal).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TrilFn, tril_dispatcher, Backend::kApple, TrilKernelMps)
+
+
 at::Tensor ArgmaxKernelMps(
     const at::Tensor& self,
     std::optional<int64_t> dim,
@@ -870,8 +1253,9 @@ at::Tensor ArgmaxKernelMps(
                         truePredicateTensor:positions_float
                        falsePredicateTensor:minus_one
                                        name:nil];
+        // The *first* NaN, because that is the index the reference names.
         MPSGraphTensor* has_nan =
-            [graph reductionMaximumWithTensor:nan_positions
+            [graph reductionMinimumWithTensor:nan_positions
                                          axis:axis
                                          name:nil];
         MPSGraphTensor* equals =
@@ -883,15 +1267,25 @@ at::Tensor ArgmaxKernelMps(
             : [graph logicalANDWithPrimaryTensor:no_nan
                                  secondaryTensor:equals
                                             name:nil];
+        // `has_nan` is the *first* NaN's coordinate, and `>=` makes that
+        // coordinate a candidate. Both halves are needed: with a strict `>` against
+        // the last NaN, a slice whose only NaN sat at position 0 produced no
+        // candidate at all and the reduction answered `no_match`. The
+        // `reductionMinimum` below then takes the first candidate, which is the
+        // index the reference names.
         MPSGraphTensor* selected_nan =
-            [graph greaterThanWithPrimaryTensor:positions_float
-                                secondaryTensor:has_nan
-                                           name:nil];
+            [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
+                                        secondaryTensor:has_nan
+                                                   name:nil];
         MPSGraphTensor* matches =
             [graph selectWithPredicateTensor:nan
                         truePredicateTensor:selected_nan
                        falsePredicateTensor:finite
                                        name:nil];
+        // The value a non-matching position contributes. It is outside the range
+        // of a real index, so the `reductionMinimum` above ignores it while every
+        // position is considered, and the host-side check after the run turns any
+        // slice that is *all* marker into a reference call rather than an answer.
         MPSGraphTensor* no_match = mps::MpsConstant(
             graph, self_c.size(axis), at::ScalarType::Int);
         if (matches == nil || no_match == nil) {
@@ -916,6 +1310,16 @@ at::Tensor ArgmaxKernelMps(
   if (!ran) {
     return at::argmax(self.cpu(), dim, keepdim).to(self.device());
   }
+  // `size(axis)` is the graph's internal "no position matched" marker, not an
+  // answer the reference ever produces: a real index is in `[0, size(axis))`.
+  // If it reaches the output, the candidate set was wrong -- which is exactly
+  // what `argmax([nan, 1, 2])` used to return, as `3`. That value is a valid
+  // index on a longer slice, so returning it looks like an answer; a CPU round
+  // trip would hide the defect as a slow call. Raising names it instead.
+  TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
+              "argmax: the MPS graph produced no matching position along dim ",
+              axis, " for at least one element. This is a defect in the graph, "
+              "not in the input; please report it.");
   return selected;
 }
 
@@ -1235,6 +1639,45 @@ at::Tensor CumsumKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kApple, CumsumKernelMps)
 
 
+at::Tensor CumprodKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    std::optional<at::ScalarType> dtype) {
+  if (!mps::MpsSupportsCumsumDtype(self.scalar_type(), dtype)) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  const at::ScalarType result_dtype = dtype.value_or(self.scalar_type());
+  int64_t axis = 0;
+  if (!mps::MpsCumsumAxis(self, dim, &axis)) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  if (result_dtype != self_c.scalar_type()) {
+    self_c = self_c.to(result_dtype);
+  }
+  at::Tensor out = at::empty(
+      self_c.sizes(), self_c.options().dtype(result_dtype));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("cumprod", axis),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph cumulativeProductWithTensor:args[0]
+                                               axis:axis
+                                               name:nil];
+      });
+  if (!ran) {
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CumprodFn, cumprod_dispatcher, Backend::kApple, CumprodKernelMps)
+
+
 at::Tensor SoftplusKernelMps(
     const at::Tensor& self,
     const at::Scalar& beta,
@@ -1411,6 +1854,531 @@ at::Tensor CosKernelMps(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(CosFn, cos_dispatcher, Backend::kApple, CosKernelMps)
 
 
+at::Tensor AsinKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::asin(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("asin"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph asinWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::asin(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AsinFn, asin_dispatcher, Backend::kApple, AsinKernelMps)
+
+
+at::Tensor AcosKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::acos(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("acos"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph acosWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::acos(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AcosFn, acos_dispatcher, Backend::kApple, AcosKernelMps)
+
+
+at::Tensor AtanKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::atan(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("atan"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* atan = [graph atanWithTensor:args[0] name:nil];
+        if (atan == nil) {
+          return nil;
+        }
+        // The node drops the sign of a zero operand: `atan(-0.0)` comes back
+        // `+0.0` where the reference keeps the sign bit, which is the one
+        // deviation of this body from `at::atan`. The node is right about every
+        // other operand, including every negative one, so the guard has to
+        // fire *only* where the operand is a zero carrying the sign -- a
+        // `signbit` alone would negate every negative answer.
+        MPSGraphTensor* negative_sign = [graph signbitWithTensor:args[0] name:nil];
+        MPSGraphTensor* is_zero =
+            [graph equalWithPrimaryTensor:args[0]
+                          secondaryTensor:[graph constantWithScalar:0.0
+                                                           dataType:args[0].dataType]
+                                     name:nil];
+        if (negative_sign == nil || is_zero == nil) {
+          return nil;
+        }
+        MPSGraphTensor* signed_zero =
+            [graph logicalANDWithPrimaryTensor:negative_sign
+                               secondaryTensor:is_zero
+                                          name:nil];
+        MPSGraphTensor* negated = [graph negativeWithTensor:atan name:nil];
+        if (signed_zero == nil || negated == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:signed_zero
+                            truePredicateTensor:negated
+                           falsePredicateTensor:atan
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::atan(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AtanFn, atan_dispatcher, Backend::kApple, AtanKernelMps)
+
+
+at::Tensor AsinhKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::asinh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("asinh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph asinhWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::asinh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AsinhFn, asinh_dispatcher, Backend::kApple, AsinhKernelMps)
+
+
+at::Tensor AcoshKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::acosh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("acosh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph acoshWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::acosh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AcoshFn, acosh_dispatcher, Backend::kApple, AcoshKernelMps)
+
+
+at::Tensor AtanhKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::atanh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("atanh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph atanhWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::atanh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AtanhFn, atanh_dispatcher, Backend::kApple, AtanhKernelMps)
+
+
+at::Tensor TanKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::tan(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("tan"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph tanWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::tan(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TanFn, tan_dispatcher, Backend::kApple, TanKernelMps)
+
+
+at::Tensor LogicalNotKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::logical_not(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("logical_not"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* zero =
+            [graph constantWithScalar:0.0 dataType:args[0].dataType];
+        if (zero == nil) {
+          return nil;
+        }
+        return [graph equalWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];
+      });
+  if (!ran) {
+    return at::logical_not(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LogicalNotFn, logical_not_dispatcher, Backend::kApple, LogicalNotKernelMps)
+
+
+at::Tensor SinhKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::sinh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("sinh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph sinhWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::sinh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SinhFn, sinh_dispatcher, Backend::kApple, SinhKernelMps)
+
+
+at::Tensor CoshKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsTrigDtype(self.scalar_type())) {
+    return at::cosh(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("cosh"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph coshWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::cosh(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CoshFn, cosh_dispatcher, Backend::kApple, CoshKernelMps)
+
+
+at::Tensor CeilKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRoundingDtype(self.scalar_type())) {
+    return at::ceil(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("ceil"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph ceilWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::ceil(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(CeilFn, ceil_dispatcher, Backend::kApple, CeilKernelMps)
+
+
+at::Tensor FloorKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRoundingDtype(self.scalar_type())) {
+    return at::floor(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("floor"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph floorWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::floor(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(FloorFn, floor_dispatcher, Backend::kApple, FloorKernelMps)
+
+
+at::Tensor TruncKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsRoundingDtype(self.scalar_type())) {
+    return at::trunc(self.cpu()).to(self.device());
+  }
+  if (self.dim() == 0) {
+    // The node aborts on a rank-0 operand rather than declining -- see the note
+    // above -- and a one-element answer is free on the host.
+    return at::trunc(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("trunc"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph truncateWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::trunc(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TruncFn, trunc_dispatcher, Backend::kApple, TruncKernelMps)
+
+
+at::Tensor IsnanKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isnan(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isnan"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph isNaNWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::isnan(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsnanFn, isnan_dispatcher, Backend::kApple, IsnanKernelMps)
+
+
+at::Tensor IsinfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isinf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isinf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph isInfiniteWithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::isinf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsinfFn, isinf_dispatcher, Backend::kApple, IsinfKernelMps)
+
+
+at::Tensor SignbitKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::signbit(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("signbit"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];
+        if (sign == nil) {
+          return nil;
+        }
+        return [graph notEqualWithPrimaryTensor:sign
+                             secondaryTensor:[graph constantWithScalar:0.0
+                                                              dataType:args[0].dataType]
+                                        name:nil];
+      });
+  if (!ran) {
+    return at::signbit(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SignbitFn, signbit_dispatcher, Backend::kApple, SignbitKernelMps)
+
+
+at::Tensor IsneginfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isneginf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isneginf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];
+        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];
+        if (infinite == nil || sign == nil) {
+          return nil;
+        }
+        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign
+                             secondaryTensor:[graph constantWithScalar:0.0
+                                                              dataType:args[0].dataType]
+                                        name:nil];
+        if (negative == nil) {
+          return nil;
+        }
+        return [graph logicalANDWithPrimaryTensor:infinite
+                               secondaryTensor:negative
+                                          name:nil];
+      });
+  if (!ran) {
+    return at::isneginf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsneginfFn, isneginf_dispatcher, Backend::kApple, IsneginfKernelMps)
+
+
+at::Tensor IsposinfKernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsPredicateDtype(self.scalar_type())) {
+    return at::isposinf(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("isposinf"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];
+        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];
+        if (infinite == nil || sign == nil) {
+          return nil;
+        }
+        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign
+                             secondaryTensor:[graph constantWithScalar:0.0
+                                                              dataType:args[0].dataType]
+                                        name:nil];
+        if (negative == nil) {
+          return nil;
+        }
+        return [graph logicalANDWithPrimaryTensor:infinite
+                               secondaryTensor:[graph notWithTensor:negative name:nil]
+                                          name:nil];
+      });
+  if (!ran) {
+    return at::isposinf(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(IsposinfFn, isposinf_dispatcher, Backend::kApple, IsposinfKernelMps)
+
+
 at::Tensor PowTensorScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   if (!mps::MpsSupportsPowDtype(self.scalar_type(), other)) {
     return at::pow(self.cpu(), other).to(self.device());
@@ -1563,6 +2531,118 @@ at::Tensor BmmKernelMps(const at::Tensor& self, const at::Tensor& mat2) {
 REGISTER_IMPL_TO_DISPATCHER(BmmFn, bmm_dispatcher, Backend::kApple, BmmKernelMps)
 
 
+at::Tensor AddmmKernelMps(
+    const at::Tensor& self,
+    const at::Tensor& mat1,
+    const at::Tensor& mat2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {
+  if (!mps::MpsSupportsGemmDtype(mat1.scalar_type(), mat2.scalar_type())) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  // The bias takes the result's width and device. A bias of another float width
+  // or device is the reference's to promote rather than the graph's to coerce.
+  if (self.scalar_type() != mat1.scalar_type() ||
+      self.device() != mat1.device()) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  if (mat1.dim() != 2 || mat2.dim() != 2 ||
+      mat1.size(-1) != mat2.size(-2)) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  // The reference's own broadcast rule, asked rather than restated: a bias that
+  // does not reach (M, N) is an error, and `at::infer_size` is what says so.
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self.sizes(), {mat1.size(0), mat2.size(1)});
+  } catch (const std::exception&) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, mat1.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  if (mat1.numel() == 0 || mat2.numel() == 0) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  const mps::MpsGemmOperand mat1_operand = mps::MpsGemmOperandOf(mat1);
+  const mps::MpsGemmOperand mat2_operand = mps::MpsGemmOperandOf(mat2);
+  const bool mat1_transposed = mat1_operand.transposed;
+  const bool mat2_transposed = mat2_operand.transposed;
+  const bool folds_bias = !beta.equal(0);
+  const bool scales_product = !alpha.equal(1);
+  const bool scales_bias = folds_bias && !beta.equal(1);
+  const at::ScalarType dtype = mat1.scalar_type();
+  // Each operand reaches the graph at the shape its own buffer holds -- the
+  // operand itself, or its transpose view when `transposed` -- which is what
+  // MpsRunGraph describes. There is no shared "product shape": a transposed
+  // weight's buffer is (N, K) and the dense one's is (K, N), and describing
+  // both as (M, N) reads the wrong bytes.
+  std::vector<at::Tensor> inputs{mat1_operand.buffer, mat2_operand.buffer};
+  if (folds_bias) {
+    inputs.push_back(self.contiguous());
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("addmm", mat1_transposed, mat2_transposed, out_shape, alpha, beta),
+      inputs,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        if (args.count != (folds_bias ? 3u : 2u)) {
+          return nil;
+        }
+        // MpsRunGraph describes every operand densely at the shape its buffer
+        // holds, so a transposed one carries its transpose as a node -- the
+        // layout T_GEMM resolves the same way.
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args[1];
+        if (mat1_transposed) {
+          primary =
+              [graph transposeTensor:primary dimension:0 withDimension:1 name:nil];
+        }
+        if (mat2_transposed) {
+          secondary =
+              [graph transposeTensor:secondary dimension:0 withDimension:1 name:nil];
+        }
+        MPSGraphTensor* product =
+            [graph matrixMultiplicationWithPrimaryTensor:primary
+                                         secondaryTensor:secondary
+                                                    name:nil];
+        if (scales_product) {
+          product = mps::MpsScaledByScalar(graph, product, alpha, dtype);
+          if (product == nil) {
+            return nil;
+          }
+        }
+        if (!folds_bias) {
+          return product;
+        }
+        MPSGraphTensor* bias = args[2];
+        if (scales_bias) {
+          bias = mps::MpsScaledByScalar(graph, bias, beta, dtype);
+          if (bias == nil) {
+            return nil;
+          }
+        }
+        // The product is (M, N) and the bias is whatever aten broadcast to it;
+        // the node broadcasts the pair the way the reference did.
+        return [graph additionWithPrimaryTensor:product secondaryTensor:bias name:nil];
+      });
+  if (!ran) {
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kApple, AddmmKernelMps)
+
+
+\
 at::Tensor ConvolutionOverrideableKernelMps(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -1730,6 +2810,225 @@ at::Tensor ConvolutionOverrideableKernelMps(
 REGISTER_IMPL_TO_DISPATCHER(ConvolutionOverrideableFn, convolution_overrideable_dispatcher, Backend::kApple, ConvolutionOverrideableKernelMps)
 
 
+\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> ConvolutionBackwardOverrideableKernelMps(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups,
+    ::std::array<bool, 3> output_mask) {
+  // The round-trip cannot re-enter `convolution_backward_overrideable`: that op
+  // is the overrideable contract, not an implementation, and it is unimplemented
+  // on CPU too (measured -- calling it on host tensors raises the same
+  // NotImplementedError). The real implementation is `convolution_backward`,
+  // which takes the forward bias *sizes* the overrideable form does not carry.
+  // A convolution with a bias therefore cannot be reversed exactly here, and the
+  // bias-gradient case is the one that needs its shape; without a bias the sizes
+  // list is empty and the call is exact.
+// `convolution_backward` expects one entry per output channel when a bias
+  // exists. `output_mask[2]` is the only signal this body gets about that, so a
+  // requested bias gradient is spelled with the weight's channel count.
+  std::vector<int64_t> bias_channels;
+  if (output_mask[2]) {
+    bias_channels.push_back(weight.size(0));
+  }
+  const auto fallback = [&]() {
+    auto host = at::convolution_backward(
+        grad_output.cpu(), input.cpu(), weight.cpu(), bias_channels, stride,
+        padding, dilation, transposed, output_padding, groups, output_mask);
+    const auto move = [](const at::Tensor& t, at::Device device) {
+      return t.defined() ? t.to(device) : t;
+    };
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        move(std::get<0>(host), grad_output.device()),
+        move(std::get<1>(host), grad_output.device()),
+        move(std::get<2>(host), grad_output.device()));
+  };
+  const int64_t dim = input.dim() - 2;
+  const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
+  const bool padding_ok =
+      (dim == 1 && (padding.size() == 1 || padding.size() == 2)) ||
+      (dim > 1 && padding.size() == 2 * ndim);
+  // Only the 2-D data/weights gradient selectors exist; a 1-D convolution is
+  // folded into them the way the forward folds it, and a 3-D one takes the
+  // round-trip.
+  if (dim < 1 || dim > 2 || weight.dim() != input.dim() ||
+      stride.size() != ndim || !padding_ok || dilation.size() != ndim ||
+      groups < 1 || transposed || output_padding.size() != ndim) {
+    return fallback();
+  }
+  for (const int64_t entry : stride) {
+    if (entry <= 0) {
+      return fallback();
+    }
+  }
+  for (const int64_t entry : dilation) {
+    if (entry <= 0) {
+      return fallback();
+    }
+  }
+  for (const int64_t entry : output_padding) {
+    if (entry != 0) {
+      return fallback();
+    }
+  }
+  if (input.size(1) / groups != weight.size(1) ||
+      weight.size(0) % groups != 0) {
+    return fallback();
+  }
+  mps::MpsConvParams params;
+  std::vector<int64_t> out_shape;
+  if (!mps::MpsConvResolve(
+          input, weight, stride, padding, dilation, groups, &params, &out_shape)) {
+    return fallback();
+  }
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor input_c = input.contiguous();
+  at::Tensor weight_c = weight.contiguous();
+  if (grad_output_c.numel() == 0 || input_c.numel() == 0 ||
+      weight_c.numel() == 0) {
+    return fallback();
+  }
+  at::Tensor grad_input;
+  at::Tensor grad_weight;
+  at::Tensor grad_bias;
+
+  // Both halves are 2-D graph calls, so a 1-D convolution has the same trailing
+  // axis inserted that the forward inserts.
+  std::vector<int64_t> source_shape(input_c.sizes().vec());
+  std::vector<int64_t> weight_shape(weight_c.sizes().vec());
+  std::vector<int64_t> grad_shape(grad_output_c.sizes().vec());
+  if (dim == 1) {
+    source_shape.insert(source_shape.end() - 1, 1);
+    weight_shape.insert(weight_shape.end() - 1, 1);
+    grad_shape.insert(grad_shape.end() - 1, 1);
+  }
+
+  if (output_mask[0]) {
+    at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("convolution_backward_overrideable.input", dim),
+        {grad_output_c, weight_c},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+          MPSGraphObject* descriptor =
+              mps::MpsConvDescriptor(input_c.scalar_type(), 2, params);
+          if (descriptor == nil) {
+            return nil;
+          }
+          MPSGraphTensor* grad = args[0];
+          MPSGraphTensor* kernel = args[1];
+          if (dim == 1) {
+            grad = mps::MpsReshape(graph, grad, grad_shape);
+            kernel = mps::MpsReshape(graph, kernel, weight_shape);
+            if (grad == nil || kernel == nil) {
+              mps::MpsRelease(descriptor);
+              return nil;
+            }
+          }
+          MPSGraphTensor* y =
+              [graph convolution2DDataGradientWithIncomingGradientTensor:grad
+                                                    weightsTensor:kernel
+                                                      outputShape:mps::MpsAxesArray(source_shape)
+                                       forwardConvolutionDescriptor:
+                                           (MPSGraphConvolution2DOpDescriptor*)descriptor
+                                                             name:nil];
+          mps::MpsRelease(descriptor);
+          if (y == nil || dim != 1) {
+            return y;
+          }
+          return mps::MpsReshape(graph, y, input_c.sizes().vec());
+        });
+    if (!ran) {
+      return fallback();
+    }
+    grad_input = out;
+  }
+
+  if (output_mask[1]) {
+    at::Tensor out = at::empty(weight_c.sizes(), weight_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("convolution_backward_overrideable.weight", dim),
+        {grad_output_c, input_c},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+          MPSGraphObject* descriptor =
+              mps::MpsConvDescriptor(input_c.scalar_type(), 2, params);
+          if (descriptor == nil) {
+            return nil;
+          }
+          MPSGraphTensor* grad = args[0];
+          MPSGraphTensor* source = args[1];
+          if (dim == 1) {
+            grad = mps::MpsReshape(graph, grad, grad_shape);
+            source = mps::MpsReshape(graph, source, source_shape);
+            if (grad == nil || source == nil) {
+              mps::MpsRelease(descriptor);
+              return nil;
+            }
+          }
+          MPSGraphTensor* y =
+              [graph convolution2DWeightsGradientWithIncomingGradientTensor:grad
+                                                             sourceTensor:source
+                                                              outputShape:mps::MpsAxesArray(weight_shape)
+                                              forwardConvolutionDescriptor:
+                                                  (MPSGraphConvolution2DOpDescriptor*)descriptor
+                                                                    name:nil];
+          mps::MpsRelease(descriptor);
+          if (y == nil || dim != 1) {
+            return y;
+          }
+          return mps::MpsReshape(graph, y, weight_c.sizes().vec());
+        });
+    if (!ran) {
+      return fallback();
+    }
+    grad_weight = out;
+  }
+
+  if (output_mask[2]) {
+    // The bias gradient is the incoming gradient summed over batch and space.
+    std::vector<int64_t> axes;
+    axes.push_back(0);
+    std::vector<int64_t> reduced_shape(grad_output_c.sizes().vec());
+    reduced_shape[1] = 1;
+    for (int64_t d = 2; d < grad_output_c.dim(); ++d) {
+      axes.push_back(d);
+      reduced_shape[d] = 1;
+    }
+    at::Tensor out = at::empty(reduced_shape, grad_output_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("convolution_backward_overrideable.bias", dim),
+        {grad_output_c},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+          MPSGraphTensor* y =
+              [graph reductionSumWithTensor:args[0]
+                                     axes:mps::MpsAxesArray(axes)
+                                     name:nil];
+          if (y == nil || dim != 1) {
+            return y;
+          }
+          return mps::MpsReshape(graph, y, reduced_shape);
+        });
+    if (!ran) {
+      return fallback();
+    }
+    grad_bias = out.reshape({weight_c.size(0)});
+  }
+
+  return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+      grad_input, grad_weight, grad_bias);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ConvolutionBackwardOverrideableFn, convolution_backward_overrideable_dispatcher, Backend::kApple, ConvolutionBackwardOverrideableKernelMps)
+
+
 at::Tensor SiluKernelMps(const at::Tensor& self) {
   if (!mps::MpsSupportsSiluDtype(self.scalar_type())) {
     return at::silu(self.cpu()).to(self.device());
@@ -1759,6 +3058,116 @@ at::Tensor SiluKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kApple, SiluKernelMps)
+
+
+at::Tensor LeakyReluKernelMps(
+    const at::Tensor& self,
+    const at::Scalar& negative_slope) {
+  if (!mps::MpsSupportsUnaryDtype(self.scalar_type())) {
+    return at::leaky_relu(self.cpu(), negative_slope).to(self.device());
+  }
+  at::Tensor input = self.contiguous();
+  at::Tensor out = at::empty(input.sizes(), input.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("leaky_relu", negative_slope.toFloat()),
+      {input},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+return [graph leakyReLUWithTensor:args[0]
+                            alpha:negative_slope.toFloat()
+                             name:nil];
+      });
+  if (!ran) {
+    return at::leaky_relu(self.cpu(), negative_slope).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LeakyReluFn, leaky_relu_dispatcher, Backend::kApple, LeakyReluKernelMps)
+
+
+at::Tensor EluKernelMps(
+    const at::Tensor& self,
+    const at::Scalar& alpha,
+    const at::Scalar& scale,
+    const at::Scalar& input_scale) {
+  if (!mps::MpsSupportsUnaryDtype(self.scalar_type())) {
+    return at::elu(self.cpu(), alpha, scale, input_scale).to(self.device());
+  }
+  at::Tensor input = self.contiguous();
+  at::Tensor out = at::empty(input.sizes(), input.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("elu", alpha.toFloat(), scale.toFloat(), input_scale.toFloat()),
+      {input},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+MPSGraphTensor* scale_t =
+            mps::MpsConstant(graph, scale, self.scalar_type());
+        MPSGraphTensor* shifted =
+            mps::MpsConstant(graph, alpha, self.scalar_type());
+        MPSGraphTensor* input_scale_t =
+            mps::MpsConstant(graph, input_scale, self.scalar_type());
+        MPSGraphTensor* zero =
+            [graph constantWithScalar:0.0 dataType:args[0].dataType];
+        if (scale_t == nil || shifted == nil || input_scale_t == nil ||
+            zero == nil) {
+          return nil;
+        }
+        // exp(input_scale * x) - 1, then * alpha, then * scale.
+        MPSGraphTensor* scaled_in = [graph multiplicationWithPrimaryTensor:args[0]
+                                                          secondaryTensor:input_scale_t
+                                                                     name:nil];
+        MPSGraphTensor* ex = [graph exponentWithTensor:scaled_in name:nil];
+        MPSGraphTensor* negative = [graph subtractionWithPrimaryTensor:ex
+                                                     secondaryTensor:
+                                                         [graph constantWithScalar:1.0
+                                                                          dataType:args[0].dataType]
+                                                                name:nil];
+        negative = [graph multiplicationWithPrimaryTensor:negative
+                                         secondaryTensor:shifted
+                                                    name:nil];
+        MPSGraphTensor* positive = [graph multiplicationWithPrimaryTensor:args[0]
+                                                          secondaryTensor:scale_t
+                                                                     name:nil];
+        MPSGraphTensor* positive_branch =
+            [graph greaterThanWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];
+        if (scaled_in == nil || ex == nil || negative == nil ||
+            positive == nil || positive_branch == nil) {
+          return nil;
+        }
+        MPSGraphTensor* picked = [graph selectWithPredicateTensor:positive_branch
+                                              truePredicateTensor:positive
+                                             falsePredicateTensor:
+                                                 [graph multiplicationWithPrimaryTensor:negative
+                                                                      secondaryTensor:scale_t
+                                                                                 name:nil]
+                                                             name:nil];
+        if (picked == nil) {
+          return nil;
+        }
+        // A NaN operand takes itself, as `relu` and `tanh` do.
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (nan == nil) {
+          return nil;
+        }
+        return [graph selectWithPredicateTensor:nan
+                            truePredicateTensor:args[0]
+                           falsePredicateTensor:picked
+                                           name:nil];
+      });
+  if (!ran) {
+    return at::elu(self.cpu(), alpha, scale, input_scale).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EluFn, elu_dispatcher, Backend::kApple, EluKernelMps)
 
 
 at::Tensor SiluBackwardKernelMps(const at::Tensor& grad_output, const at::Tensor& self) {
@@ -1867,6 +3276,81 @@ at::Tensor ExpKernelMps(const at::Tensor& self) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ExpFn, exp_dispatcher, Backend::kApple, ExpKernelMps)
+
+
+at::Tensor Exp2KernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::exp2(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("exp2"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph exponentBase2WithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::exp2(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(Exp2Fn, exp2_dispatcher, Backend::kApple, Exp2KernelMps)
+
+
+at::Tensor Log2KernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::log2(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("log2"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph logarithmBase2WithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::log2(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(Log2Fn, log2_dispatcher, Backend::kApple, Log2KernelMps)
+
+
+at::Tensor Log10KernelMps(const at::Tensor& self) {
+  if (!mps::MpsSupportsExpDtype(self.scalar_type())) {
+    return at::log10(self.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {
+    return out;
+  }
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("log10"),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph logarithmBase10WithTensor:args[0] name:nil];
+      });
+  if (!ran) {
+    return at::log10(self.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(Log10Fn, log10_dispatcher, Backend::kApple, Log10KernelMps)
 
 
 at::Tensor LogKernelMps(const at::Tensor& self) {
@@ -2929,6 +4413,151 @@ at::Tensor LeTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kApple, LeTensorKernelMps)
 
 
+at::Tensor EqTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::eq(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::eq(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("eq.Tensor"),
+      {self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph equalWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+      });
+  if (!ran) {
+    return at::eq(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kApple, EqTensorKernelMps)
+
+
+at::Tensor NeTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::ne(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::ne(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("ne.Tensor"),
+      {self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph notEqualWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+      });
+  if (!ran) {
+    return at::ne(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kApple, NeTensorKernelMps)
+
+
+at::Tensor LtTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::lt(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::lt(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("lt.Tensor"),
+      {self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph lessThanWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+      });
+  if (!ran) {
+    return at::lt(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kApple, LtTensorKernelMps)
+
+
+at::Tensor GtTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::gt(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::gt(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("gt.Tensor"),
+      {self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph greaterThanWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+      });
+  if (!ran) {
+    return at::gt(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kApple, GtTensorKernelMps)
+
+
+at::Tensor GeTensorKernelMps(const at::Tensor& self, const at::Tensor& other) {
+  if (!mps::MpsSupportsBinaryDtype(self.scalar_type(), other.scalar_type())) {
+    return at::ge(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  std::vector<int64_t> out_shape;
+  try {
+    out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
+  } catch (const std::exception&) {
+    return at::ge(self.cpu(), other.cpu()).to(self.device());
+  }
+  at::Tensor out = at::empty(out_shape, self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("ge.Tensor"),
+      {self_c, other_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph greaterThanOrEqualToWithPrimaryTensor:args[0] secondaryTensor:args[1] name:nil];
+      });
+  if (!ran) {
+    return at::ge(self.cpu(), other.cpu()).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kApple, GeTensorKernelMps)
+
+
 at::Tensor NeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
   if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
     return at::ne(self.cpu(), other).to(self.device());
@@ -2954,6 +4583,114 @@ at::Tensor NeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
 }
 
 REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kApple, NeScalarKernelMps)
+
+
+at::Tensor LtScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
+  if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
+    return at::lt(self.cpu(), other).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("lt.Scalar", other),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* other_t =
+            mps::MpsConstant(graph, other, self_c.scalar_type());
+        if (other_t == nil) {
+          return nil;
+        }
+        return [graph lessThanWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+      });
+  if (!ran) {
+    return at::lt(self.cpu(), other).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kApple, LtScalarKernelMps)
+
+
+at::Tensor LeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
+  if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
+    return at::le(self.cpu(), other).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("le.Scalar", other),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* other_t =
+            mps::MpsConstant(graph, other, self_c.scalar_type());
+        if (other_t == nil) {
+          return nil;
+        }
+        return [graph lessThanOrEqualToWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+      });
+  if (!ran) {
+    return at::le(self.cpu(), other).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kApple, LeScalarKernelMps)
+
+
+at::Tensor GtScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
+  if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
+    return at::gt(self.cpu(), other).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("gt.Scalar", other),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* other_t =
+            mps::MpsConstant(graph, other, self_c.scalar_type());
+        if (other_t == nil) {
+          return nil;
+        }
+        return [graph greaterThanWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+      });
+  if (!ran) {
+    return at::gt(self.cpu(), other).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kApple, GtScalarKernelMps)
+
+
+at::Tensor GeScalarKernelMps(const at::Tensor& self, const at::Scalar& other) {
+  if (!mps::MpsSupportsScalarDtype(self.scalar_type(), other)) {
+    return at::ge(self.cpu(), other).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("ge.Scalar", other),
+      {self_c},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* other_t =
+            mps::MpsConstant(graph, other, self_c.scalar_type());
+        if (other_t == nil) {
+          return nil;
+        }
+        return [graph greaterThanOrEqualToWithPrimaryTensor:args[0] secondaryTensor:other_t name:nil];
+      });
+  if (!ran) {
+    return at::ge(self.cpu(), other).to(self.device());
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(GeScalarFn, ge_scalar_dispatcher, Backend::kApple, GeScalarKernelMps)
 
 
 at::Tensor CatKernelMps(const at::ITensorListRef& tensors, int64_t dim) {
@@ -3251,7 +4988,7 @@ at::Tensor ClampKernelMps(
     return host.to(self.device());
   }
   const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("clamp"),
+      mps::MpsGraphKey("clamp", min.has_value() ? min->toDouble() : NAN, max.has_value() ? max->toDouble() : NAN),
       {input},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
@@ -3262,8 +4999,15 @@ at::Tensor ClampKernelMps(
           if (lower == nil) {
             return nil;
           }
+          // Broadcast to the operand's own shape, not to its element count.
+          // Measured: broadcasting a 0-d constant to `numel()` and then asking
+          // `mps.maximum` to combine it with an N-D operand aborts the graph
+          // (`mps.maximum op requires the same element type ... (tensor<2x2xsi64>,
+          // tensor<4xsi64>)`), and on an integral operand it takes the process
+          // with it. The float path hid this because its element type matched
+          // anyway; the shape did not.
           lower = [graph broadcastTensor:lower
-                                 toShape:mps::MpsFlatShape(input.numel())
+                                 toShape:args[0].shape
                                     name:nil];
           value = [graph maximumWithPrimaryTensor:value
                                  secondaryTensor:lower
@@ -3276,11 +5020,31 @@ at::Tensor ClampKernelMps(
             return nil;
           }
           upper = [graph broadcastTensor:upper
-                                 toShape:mps::MpsFlatShape(input.numel())
+                                 toShape:args[0].shape
                                     name:nil];
           value = [graph minimumWithPrimaryTensor:value
                                  secondaryTensor:upper
                                             name:nil];
+        }
+        // A NaN operand comes back as a bound, where the reference propagates
+        // it -- measured, `clamp([nan, -3, 3], -1, 1)` answers [-1.0, -1.0, 1.0]
+        // without a guard. The one-sided `clamp_min`/`clamp_max` paths are
+        // separate kernels and already propagate, which is why this only shows
+        // through the two-bound form.
+        //
+        // The guard is floating-point only: `isNaNWithTensor:` over an integral
+        // operand does not decline, it raises `object cannot be nil (key:
+        // isNaN_i8)` from inside MPSGraph and aborts the process. An integral
+        // operand has no NaN to propagate, so there is nothing to guard.
+        if (!c10::isIntegralType(self.scalar_type(), /*includeBool=*/false)) {
+          MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+          if (nan == nil) {
+            return nil;
+          }
+          value = [graph selectWithPredicateTensor:nan
+                               truePredicateTensor:args[0]
+                              falsePredicateTensor:value
+                                              name:nil];
         }
         return value;
       });

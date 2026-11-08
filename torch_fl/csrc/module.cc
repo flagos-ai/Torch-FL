@@ -483,6 +483,29 @@ static PyObject* _getKunlunxinDeviceProperties(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
+// The cnrt queue FlagGems' kernels must launch on. Triton's mlu driver reads it
+// as ``torch.mlu.current_stream(idx).mlu_stream``, and torch.mlu on this
+// platform is torch_fl's shim, so the value comes from here rather than from a
+// vendor plugin. Unlike MUSA, a cnrt queue is not a fixed handle: the runtime
+// layer creates one per device on demand (runtime/accelerator/cambricon/
+// stream.cc), which is why this asks for it instead of returning 0.
+static PyObject* _getCambriconCurrentRawStream(PyObject* self, PyObject* arg) {
+  HANDLE_TH_ERRORS
+#ifdef USE_CAMBRICON
+  TORCH_CHECK(
+      THPUtils_checkLong(arg),
+      "_get_cambricon_current_raw_stream expects an int, but got ",
+      THPUtils_typename(arg));
+  auto idx = static_cast<int>(THPUtils_unpackLong(arg));
+  auto stream = GetCurrentStreamForDevice(idx);
+  return PyLong_FromUnsignedLongLong(
+      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(stream)));
+#else
+  TORCH_CHECK(false, "Cambricon streams are unavailable in this build");
+#endif
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* _setDevice(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
   TORCH_CHECK(THPUtils_checkLong(arg), "invalid argument to setDevice");
@@ -769,6 +792,10 @@ static PyMethodDef methods[] = {
 #endif
 #ifdef USE_KUNLUNXIN
     {"_get_kunlunxin_device_properties", _getKunlunxinDeviceProperties, METH_O,
+     nullptr},
+#endif
+#ifdef USE_CAMBRICON
+    {"_get_cambricon_current_raw_stream", _getCambriconCurrentRawStream, METH_O,
      nullptr},
 #endif
     {"_get_device", _getDevice, METH_NOARGS, nullptr},

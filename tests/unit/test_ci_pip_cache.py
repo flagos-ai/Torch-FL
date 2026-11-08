@@ -39,8 +39,12 @@ def _steps(workflow):
     return next(job["steps"] for job in document["jobs"].values() if "steps" in job)
 
 
-def _condition(expression, states, cancelled=False, success=True):
-    """Evaluate the workflow's boolean expression against recorded action outputs."""
+def _condition(expression, states, cancelled=False, success=True, event_name="push"):
+    """Evaluate the workflow's boolean expression against recorded action outputs.
+
+    `event_name` stands in for the context's `github.event_name`. It defaults to
+    `push`, the run that is allowed to write the cache.
+    """
 
     def output(match):
         step, field, name = match.groups()
@@ -56,6 +60,7 @@ def _condition(expression, states, cancelled=False, success=True):
     expression = re.sub(
         r"steps\.([a-z-]+)\.(outcome|outputs\.([a-z-]+))", output, expression
     )
+    expression = re.sub(r"github\.event_name", repr(event_name), expression)
     expression = expression.replace("cancelled()", repr(cancelled))
     expression = expression.replace("success()", repr(success))
     expression = expression.replace("failure()", repr(not success and not cancelled))
@@ -239,13 +244,37 @@ def test_cache_transfer_decisions(
         == "${{ steps.pip-cache-lookup.outputs.cache-primary-key }}"
     )
 
+    # A pull request restores exactly as a push does, but never writes: its
+    # cache would land in a refs/pull/<n>/merge scope no branch can read, while
+    # counting against the same 10 GB budget.
+    assert _condition(restore["if"], states, cancelled, success=job_success) is (
+        download and job_success
+    )
+    assert (
+        _condition(
+            upload["if"],
+            states,
+            cancelled,
+            success=job_success,
+            event_name="pull_request",
+        )
+        is False
+    )
+
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
 def test_cache_failure_budgets_do_not_gate_installation(workflow):
     # Every transfer is bounded so a stalled cache service cannot turn into an
     # unbounded wait before the install and the tests. Keep these caps explicit
     # so tuning stays visible.
-    restore_maximum, segment_maximum = 3, 2
+    #
+    # The restore cap is 10 minutes because a failed transfer is a cold miss, not
+    # a failure: at 3 minutes the largest cache (Ascend's, which holds the
+    # FlagTree wheel) timed out on every run of PRs #707/#712 and was then
+    # re-downloaded from the index, so the cap cost a second transfer instead of
+    # saving one. The wait is still bounded, and the segment stall detector is
+    # what catches a wedged transfer inside that budget.
+    restore_maximum, segment_maximum = 10, 5
     save_maximum = 3
     for step in _steps(workflow):
         if step.get("uses", "").startswith("actions/cache/"):
@@ -302,30 +331,57 @@ def test_cache_key_tracks_the_effective_dependencies(workflow):
         assert "inputs.setup_platform" in key
         assert "format('.github/configs/{0}.yml', inputs.setup_platform)" in key
     else:
-        assert "inputs.platform" in key
-        assert "format('.github/configs/{0}.yml', inputs.platform)" in key
+        # The base platform, not the lane: a platform's two lanes install the
+        # same package set, so keying on the lane stored a duplicate entry.
+        assert "needs.configuration.outputs.platform" in key
+        assert (
+            "format('.github/configs/{0}.yml', needs.configuration.outputs.platform)"
+            in key
+        )
+        assert "${{ inputs.platform }}-pip-" not in key
 
 
-def test_gcu_can_reuse_caches_from_the_retired_split_jobs():
-    # GCU was the last platform on the shared common workflow, whose cache keys
-    # were built from the display name. The unified pipeline keeps those prefixes
-    # as restore-keys so the first run after the collapse still finds them.
+def test_every_restore_key_can_match_a_cache_this_workflow_wrote():
+    """A restore-key that cannot prefix a real key is dead weight.
+
+    This pipeline keys its entries on the base platform name, so that is the
+    only prefix it can fall back to. It used to carry display-name fallbacks for
+    caches from the split per-platform pipelines #519 collapsed; those never
+    matched, because all 14 key prefixes in the repository are platform names
+    and a display-name entry would have expired 7 days after #519 last wrote
+    one. On a boxing lane the fallbacks were also *wrong* rather than idle:
+    display_name appends " (CUDA boxing)", which no key can begin with.
+    """
     lookup = next(
         step
         for step in _steps("integration-tests.yml")
         if step.get("id") == "pip-cache-lookup"
     )
-    assert lookup["with"]["key"].startswith("${{ inputs.platform }}-pip-")
-    for prefix in (
-        "${{ inputs.platform }}-pip-${{ runner.os }}-",
-        "${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-",
-        "${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-",
-        (
-            "${{ needs.configuration.outputs.display_name }}"
-            "-integration-pip-${{ runner.os }}-"
-        ),
-    ):
-        assert prefix in lookup["with"]["restore-keys"]
+    key = lookup["with"]["key"]
+    prefix = "${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-"
+    assert key.startswith("${{ needs.configuration.outputs.platform }}-pip-")
+
+    restore_keys = [
+        line.strip()
+        for line in lookup["with"]["restore-keys"].splitlines()
+        if line.strip()
+    ]
+    assert restore_keys == [prefix]
+    assert key.startswith(prefix)
+
+    # build-wheel-common.yml keys on the display name, so its fallbacks are the
+    # same shape as its key and stay as they are.
+    common = next(
+        step
+        for step in _steps("build-wheel-common.yml")
+        if step.get("id") == "pip-cache-lookup"
+    )
+    assert common["with"]["key"].startswith("${{ inputs.display_name }}-pip-")
+    assert all(
+        line.strip().startswith("${{ inputs.display_name }}-")
+        for line in common["with"]["restore-keys"].splitlines()
+        if line.strip()
+    )
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
@@ -381,3 +437,130 @@ def test_cuda_caches_cpu_torch_without_the_vendor_wheel_set():
     assert re.search(
         r"pip_retry --no-cache-dir --index-url \"\$VENDOR_TORCH_INDEX_URL\"", hook
     )
+
+
+def test_cuda_bootstraps_the_vendor_torch_only_on_the_boxing_lane():
+    """The vendor lane runs on the +cpu torch; only boxing stages a libtorch_cuda.
+
+    The vendor lane builds the wheel whose premise is that it carries no
+    libtorch_cuda.so, and nothing downstream of the bootstrap reads
+    VENDOR_PYTHON there. Bootstrapping it anyway downloaded the multi-GB
+    torch+cu130 wheel for an unread path, and that download is what failed the
+    lane while the PyTorch index answered 503 through the runner proxy.
+    """
+    hook = (ROOT / ".github/scripts/hooks/set_env_nvidia.sh").read_text()
+
+    # The bootstrap is guarded by BOXING_LANE: the vendor lane resolves the
+    # source as "none" instead of installing one.
+    assert (
+        'elif [[ "${BOXING_LANE:-}" == "1" ]]; then\n'
+        '  VENDOR_SOURCE="bootstrap"\n'
+        "  ensure_system_prerequisites\n"
+        "  bootstrap_vendor_python\n"
+        "else\n"
+        "  # The vendor lane: no accelerator torch is installed, and none is read below.\n"
+        '  VENDOR_SOURCE="none"\n'
+        "fi" in hook
+    )
+
+    # The explicit mode override cannot smuggle a bootstrap onto the vendor lane.
+    assert "TORCH_FL_CUDA_VENDOR_MODE=bootstrap asks for an accelerator PyTorch" in hook
+
+    # The probe reads the accelerator torch, so it must not run without one.
+    assert (
+        'if [[ "$VENDOR_SOURCE" != "none" ]]; then\n'
+        "  resolve_vendor_torch\n"
+        "else\n"
+        '  echo "Vendor lane: no accelerator PyTorch is resolved or installed; '
+        'tests run on the +cpu torch"\n'
+        "fi" in hook
+    )
+
+
+def test_reporting_tools_install_through_the_pypi_fallback():
+    """A reporting tool must not fail a lane whose tests can still pass.
+
+    The vendor images inherit a pip index of their own (MUSA's is TUNA) and
+    those are VCS mirrors: TUNA listed pytest-json-report and then answered 403
+    for the wheel's own file, so PR #714's MUSA lane died before running any
+    test. The step installs through install_with_pypi_fallback, which retries on
+    the pinned index, rather than a bare `pip install` that lands on whatever
+    index the image configured.
+    """
+    steps = _steps(WORKFLOW_DIR / "integration-tests.yml")
+    step = next(
+        step for step in steps if step.get("name") == "Install pytest JSON reporting"
+    )
+    run = step["run"]
+    assert "install_with_pypi_fallback" in run
+    assert ".github/version-pins.env" in run
+    assert re.search(r"^\s*python -m pip install\b", run, re.M) is None
+
+    # The helper falls back only when the caller did not pin an index itself.
+    common = (ROOT / ".github/scripts/lib/set_env_common.sh").read_text()
+    helper = re.search(
+        r"^install_with_pypi_fallback\(\) \{\n(.*?)^\}", common, re.M | re.S
+    )
+    assert helper
+    assert '--index-url "$pinned"' in helper.group(1)
+
+
+def test_every_platform_takes_flagtree_out_of_the_cache():
+    """FlagTree wheels are 190-3283 MB and restore slower than they download.
+
+    Measured across the platforms that install one: the cache restored at
+    5.8-7.7 MB/s (341 MB in 55 s up to 3348 MB in 435 s, run 41976848532),
+    while resource.flagos.net served at 54.7 MB/s (run 42084793856). Every
+    wheel is faster uncached -- 48-375 s per platform -- and together they were
+    holding ~2.4 GB of the 10 GB budget.
+
+    The opt-out lives in the shared install_flagtree rather than in each hook,
+    because there is no platform whose wheel is small enough for the cache to
+    win. Raising PIP_RETRY_NO_CACHE for that one call is what keeps every other
+    install in a hook cached.
+    """
+    common = (ROOT / ".github/scripts/lib/set_env_common.sh").read_text()
+    tree = re.search(r"^install_flagtree\(\) \{\n(.*?)^\}", common, re.M | re.S)
+    assert tree
+    assert "PIP_RETRY_NO_CACHE=1 pip_retry" in tree.group(1)
+    # The override is per-call, so the rest of the library still caches.
+    assert not re.search(r"^export PIP_RETRY_NO_CACHE=1", common, re.M)
+
+    # No hook re-implements it; the shared phase is the one place it is decided.
+    for name in (
+        "nvidia",
+        "ascend",
+        "mthreads",
+        "hygon",
+        "metax",
+        "enflame",
+        "kunlunxin",
+        "iluvatar",
+        "thead",
+    ):
+        hook = (ROOT / f".github/scripts/hooks/set_env_{name}.sh").read_text()
+        assert not re.search(r"PIP_RETRY_NO_CACHE=1", hook), name
+
+
+def test_a_platforms_two_lanes_share_one_cache_entry():
+    """Boxing changes the kernels compiled, not the packages downloaded.
+
+    Measured on run 41976848532: thead and thead-boxing install a byte-identical
+    package set, and their cache entries were both 619 MB -- duplicates of each
+    other. Keying on the lane cost about 2 GB of the 4.3 GB main held across
+    nvidia, metax, hygon and thead, which is what kept the 10 GB budget full.
+    """
+    lookup = next(
+        step
+        for step in _steps("integration-tests.yml")
+        if step.get("id") == "pip-cache-lookup"
+    )
+    key = lookup["with"]["key"]
+    # `needs.configuration.outputs.platform` is the config basename with the
+    # -boxing suffix already stripped (load-platform-config.yml documents it).
+    assert "needs.configuration.outputs.platform" in key
+    assert "inputs.platform" not in key
+    for pattern in re.findall(r"format\('([^']+)'", key):
+        assert "{0}" in pattern
+    # The hook and config are still hashed, now through the base platform.
+    assert "format('.github/scripts/hooks/set_env_{0}.sh'" in key

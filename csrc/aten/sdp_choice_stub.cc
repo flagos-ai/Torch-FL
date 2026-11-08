@@ -87,15 +87,25 @@
 #include <ATen/ops/zeros_like.h>
 #include <torch/library.h>
 
+#include <cmath>
 #include <optional>
 
 #include "common.h"
 #include "device_boxing.h"
 
+#if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
+#include "backends/cambricon/attention.h"
+#endif
+
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 #include "backends/flagos/python_op_caller.h"
 #endif
 
+// Cambricon is in this list despite being FlagGems-primary: it has a fused
+// attention of its own (cnnlFlashAttentionForward_v2), and without an override
+// on this composite the call would decompose -- the composite decides the leaf
+// kernel from query.device().type(), which sends PrivateUse1 to the CPU flash
+// leaf no matter what the leaf route says.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS)
@@ -400,6 +410,54 @@ at::Tensor RouteMask(const at::Tensor& mask, const at::Tensor& query,
 }
 #endif // FLAGOS_FLAGGEMS_PYTHON
 
+#if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
+// Whether the CNNL fused attention can serve this call.
+//
+// Every bound here is a shape the kernel was not measured on, so the answer is
+// "decompose instead" rather than "raise": those calls are correct today and a
+// regression is worse than a slow path.
+//
+//   * half and bfloat16 only -- the fp32 descriptor path is untested, and the
+//     kernel reads its compute dtype off the flash-attention descriptor;
+//   * no attention mask -- the API takes one, but none of the mask modes have
+//     been checked against a reference here;
+//   * no dropout -- it needs a Philox state, which this backend has no
+//     generator for;
+//   * no GQA expansion -- enable_gqa means key/value have fewer heads than
+//     query and have to be repeated first, and the repeated operands were not
+//     part of the measurement;
+//   * dense 4-D operands -- the kernel transposes into the packed layout itself
+//     and needs the strides it computes from to be plain.
+bool FusedAttentionEligible(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const std::optional<at::Tensor>& attn_mask,
+    double dropout_p,
+    bool enable_gqa) {
+  if (attn_mask.has_value() || dropout_p != 0.0 || enable_gqa) {
+    return false;
+  }
+  if (!query.is_contiguous() || !key.is_contiguous() ||
+      !value.is_contiguous()) {
+    return false;
+  }
+  if (query.dim() != 4 || key.dim() != 4 || value.dim() != 4) {
+    return false;
+  }
+  const auto dtype = query.scalar_type();
+  if (dtype != at::kHalf && dtype != at::kBFloat16) {
+    return false;
+  }
+  if (key.scalar_type() != dtype || value.scalar_type() != dtype) {
+    return false;
+  }
+  // Equal head counts: no GQA repeat to materialise.
+  return key.size(1) == query.size(1) && value.size(1) == query.size(1) &&
+      key.size(0) == query.size(0) && value.size(0) == query.size(0);
+}
+#endif
+
 at::Tensor WrapperScaledDotProductAttention(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -409,6 +467,27 @@ at::Tensor WrapperScaledDotProductAttention(
     bool is_causal,
     std::optional<double> scale,
     bool enable_gqa) {
+#if defined(USE_CAMBRICON) && defined(FLAGOS_CAMBRICON_CNNL_EXTRA)
+  // Cambricon's fused kernel, ahead of the training-path check below.
+  //
+  // That check exists because the CUDA-boxing route records its autograd node
+  // on boxed tensors the guard then unboxes. This route has no such problem: the
+  // Function in attention.cc saves the flagos tensors it was given and returns
+  // flagos gradients, so it serves both inference and training, and putting it
+  // first is what makes a training step get the fused forward and backward.
+  //
+  // The bounds are what the kernel was measured on: half/bfloat16, no mask, no
+  // dropout, no GQA group expansion, and q/k/v already dense in the 4-D form the
+  // CNNL API describes.
+  if (FusedAttentionEligible(query, key, value, attn_mask, dropout_p,
+                             enable_gqa)) {
+    const double resolved_scale =
+        scale.has_value() ? *scale
+                          : 1.0 / std::sqrt(static_cast<double>(query.size(3)));
+    return at::native::flagos::cambricon::ScaledDotProductAttention(
+        query, key, value, resolved_scale, is_causal);
+  }
+#endif
   // Training path: when a grad-requiring input is present the composite's flash
   // forward records its autograd node on the CUDA-boxed tensors, but the guard
   // below unboxes them on scope exit -- so backward would later see PrivateUse1

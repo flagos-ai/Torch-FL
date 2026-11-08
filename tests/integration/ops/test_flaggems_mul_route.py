@@ -37,9 +37,6 @@ import torch
 
 from torch_fl._platform import detect_platform
 
-if detect_platform() != "cuda":
-    pytest.skip("CUDA FlagGems route regression", allow_module_level=True)
-
 DEVICE = "flagos:0"
 
 pytest.importorskip("flag_gems", reason="flag_gems is not installed")
@@ -67,6 +64,13 @@ pytestmark = [
     pytest.mark.flaggems,
     pytest.mark.skipif(not _device_available(), reason="no flagos device"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def require_cuda_platform():
+    """Keep the CUDA capability probe inside a test fixture."""
+    if detect_platform() != "cuda":
+        pytest.skip("CUDA FlagGems route regression")
 
 
 def test_flaggems_mul_guard_matches_the_device_name():

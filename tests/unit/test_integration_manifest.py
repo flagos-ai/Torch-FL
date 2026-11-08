@@ -124,10 +124,7 @@ _KNOWN_GAPS = {
         "nvidia",
         "thead",
     ),
-    "rng": (
-        "apple",
-        "thead",
-    ),
+    "rng": ("apple", "thead"),
     "soft_lowp_matrix": (
         "apple",
         "ascend",
@@ -138,16 +135,8 @@ _KNOWN_GAPS = {
         "nvidia",
         "thead",
     ),
-    "amp_contract": (
-        "apple",
-        "kunlunxin",
-        "thead",
-    ),
-    "profiler_contract": (
-        "apple",
-        "enflame",
-        "kunlunxin",
-    ),
+    "amp_contract": ("apple", "kunlunxin", "thead"),
+    "profiler_contract": ("apple", "enflame", "kunlunxin"),
     "profiler_parity": (
         "apple",
         "ascend",
@@ -157,13 +146,7 @@ _KNOWN_GAPS = {
         "mthreads",
         "thead",
     ),
-    "torch_compile": (
-        "apple",
-        "ascend",
-        "hygon",
-        "mthreads",
-        "thead",
-    ),
+    "torch_compile": ("apple", "ascend", "hygon", "mthreads", "thead"),
     "inference": (
         "apple",
         "ascend",

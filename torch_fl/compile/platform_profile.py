@@ -170,6 +170,18 @@ _TSINGMICRO_PROFILE = PlatformProfile(
     vendor="tsingmicro",
 )
 
+# Cambricon (MLU): the lane's triton wheel registers exactly one backend, named
+# "mlu", so both the reported target and the backend key are that name. The
+# build links the CPU torch wheel, so is_cuda_like is false for the same reason
+# as iluvatar -- torch.cuda cannot answer hardware or stream queries here, and
+# the raw stream comes from torch_fl's own registry instead (see _raw_stream).
+_CAMBRICON_PROFILE = PlatformProfile(
+    triton_device_type="mlu",
+    triton_backend_key="mlu",
+    is_cuda_like=False,
+    vendor="cambricon",
+)
+
 # Both spellings of a platform are keys: the platform id, and the vendor name
 # setup.py writes into the build record where the two differ (hygon/dcu,
 # mthreads/musa, nvidia/cuda, thead/ppu). nvidia/cuda and thead/ppu are absent
@@ -186,6 +198,7 @@ _PROFILES = {
     "kunlunxin": _KUNLUNXIN_PROFILE,
     "iluvatar": _ILUVATAR_PROFILE,
     "tsingmicro": _TSINGMICRO_PROFILE,
+    "cambricon": _CAMBRICON_PROFILE,
 }
 
 

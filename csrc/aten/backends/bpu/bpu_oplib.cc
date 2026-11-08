@@ -27,11 +27,14 @@
 
 #include "bpu_oplib.h"
 
+#include <ATen/ops/empty.h>
+
 #include <dlfcn.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,7 +45,7 @@ namespace bpu {
 namespace oplib {
 namespace {
 
-constexpr int kMaxDims = 8;      // HB_DNN_MAX_DIMS
+constexpr int kMaxDims = 10;     // HB_DNN_TENSOR_MAX_DIMENSIONS, from /usr/include/hobot/dnn/hb_dnn.h
 constexpr int kF32 = 7;          // hbDNNDataType::HB_DNN_TENSOR_TYPE_F32
 constexpr int kCacheClean = 2;
 constexpr int kCacheInvalidate = 1;
@@ -95,15 +98,18 @@ struct UCPSchedParam {
 
 // Pinned to the sizes the Python side asserts, so a layout change here breaks
 // the build instead of corrupting a call.
-static_assert(sizeof(DNNShape) == 36, "DNNShape layout drifted");
+static_assert(sizeof(DNNShape) == 44, "DNNShape layout drifted");
 static_assert(sizeof(UCPSysMem) == 24, "UCPSysMem layout drifted");
 static_assert(sizeof(UCPSchedParam) == 32, "UCPSchedParam layout drifted");
+static_assert(sizeof(DNNTensorProperties) == 176,
+              "DNNTensorProperties layout drifted: stride[] must hold 10 dims");
 
 using InitFromFilesFn = int (*)(void**, const char* const*, int);
 using GetModelHandleFn = int (*)(void**, void*, const char*);
 using ReleaseFn = int (*)(void*);
 using GetPropsFn = int (*)(DNNTensorProperties*, const void*, int);
 using InferV2Fn = int (*)(void**, DNNTensor*, DNNTensor*, const void*);
+using GetCountFn = int (*)(int32_t*, const void*);
 using MallocFn = int (*)(UCPSysMem*, uint64_t, int);
 using FreeFn = int (*)(UCPSysMem*);
 using MemFlushFn = int (*)(UCPSysMem*, int);
@@ -118,6 +124,7 @@ struct Libs {
   GetPropsFn get_in_props = nullptr;
   GetPropsFn get_out_props = nullptr;
   InferV2Fn infer_v2 = nullptr;
+  GetCountFn get_in_count = nullptr;
   MallocFn malloc_cached = nullptr;
   FreeFn free_mem = nullptr;
   MemFlushFn mem_flush = nullptr;
@@ -127,8 +134,8 @@ struct Libs {
 
   bool ok() const {
     return init_from_files && get_model_handle && get_in_props && get_out_props &&
-           infer_v2 && malloc_cached && free_mem && mem_flush && submit && wait &&
-           release_task;
+           infer_v2 && get_in_count && malloc_cached && free_mem && mem_flush &&
+           submit && wait && release_task;
   }
 };
 
@@ -150,6 +157,8 @@ Libs& Libraries() {
     libs.get_out_props =
         reinterpret_cast<GetPropsFn>(sym(dnn, "hbDNNGetOutputTensorProperties"));
     libs.infer_v2 = reinterpret_cast<InferV2Fn>(sym(dnn, "hbDNNInferV2"));
+    libs.get_in_count =
+        reinterpret_cast<GetCountFn>(sym(dnn, "hbDNNGetInputCount"));
     libs.malloc_cached = reinterpret_cast<MallocFn>(sym(ucp, "hbUCPMallocCached"));
     libs.free_mem = reinterpret_cast<FreeFn>(sym(ucp, "hbUCPFree"));
     libs.mem_flush = reinterpret_cast<MemFlushFn>(sym(ucp, "hbUCPMemFlush"));
@@ -172,7 +181,19 @@ struct Kernel {
   UCPSysMem in_mem{};
   UCPSysMem out_mem{};
   int64_t bytes = 0;
+  int64_t out_bytes = 0;
   bool ready = false;
+  // Tensor properties are a property of the artifact, not of a call. Fetching
+  // them per call cost two driver round trips on a path that is otherwise
+  // three; they are filled once when the kernel is built.
+  bool props_ready = false;
+  DNNTensorProperties in_props{};
+  DNNTensorProperties in_props1{};
+  DNNTensorProperties out_props{};
+  DNNTensor in_tensor{};
+  DNNTensor in_tensor1{};   // second operand of a two-input artifact
+  DNNTensor out_tensor{};
+  int in_count = 0;
 
   ~Kernel() {
     Libs& libs = Libraries();
@@ -190,6 +211,8 @@ struct Kernel {
 
 std::mutex g_mutex;
 std::unordered_map<std::string, Kernel*> g_kernels;
+// Keyed by whatever the Python compiler chose; see RegisterArtifact.
+std::unordered_map<std::string, std::string> g_artifacts;
 long g_hits = 0;
 long g_misses = 0;
 std::string g_summary;
@@ -210,12 +233,20 @@ Kernel* LoadKernel(const std::string& stem) {
   if (!libs.ok()) {
     return nullptr;
   }
-  const char* root = Root();
-  if (root == nullptr || root[0] == '\0') {
-    return nullptr;
+  // An absolute path is already the file: the Python compiler names its cached
+  // artifacts by a hash and puts them under FLAGOS_BPU_CACHE, which this side
+  // has no way to reconstruct. A bare stem still resolves under the operator
+  // library, which is how the elementwise artifacts are found.
+  std::string path;
+  if (!stem.empty() && stem[0] == '/') {
+    path = stem;
+  } else {
+    const char* root = Root();
+    if (root == nullptr || root[0] == '\0') {
+      return nullptr;
+    }
+    path = std::string(root) + "/" + stem + ".hbm";
   }
-
-  std::string path = std::string(root) + "/" + stem + ".hbm";
   FILE* probe = fopen(path.c_str(), "rb");
   if (!probe) {
     return nullptr;
@@ -227,15 +258,31 @@ Kernel* LoadKernel(const std::string& stem) {
   if (libs.init_from_files(&kernel->packed, paths, 1) != 0) {
     return nullptr;
   }
-  std::string model_name = stem;
+  // The library's artifacts are named <op>_1x<N>_f32.hbm and carry a model of
+  // the same name minus the dtype, so the name can be derived from the file.
+  // A compiler-cached artifact is named by a hash and calls its model
+  // "main_graph", which no amount of string surgery recovers. Ask for the
+  // derived name and fall back to the one model these files hold.
+  std::string model_name = path.substr(path.find_last_of('/') + 1);
+  if (model_name.size() > 4 && model_name.compare(model_name.size() - 4, 4, ".hbm") == 0) {
+    model_name.resize(model_name.size() - 4);
+  }
   const std::string suffix = "_f32";
   if (model_name.size() > suffix.size() &&
       model_name.compare(model_name.size() - suffix.size(), suffix.size(), suffix) == 0) {
     model_name.resize(model_name.size() - suffix.size());
   }
-  if (libs.get_model_handle(&kernel->model, kernel->packed, model_name.c_str()) != 0) {
-    return nullptr;
+  // Ask into a local first. A lookup that names a model the file does not hold
+  // is the common case for a compiler-cached artifact, and what
+  // hbDNNGetModelHandle leaves behind on that path is not worth relying on.
+  void* handle = nullptr;
+  if (libs.get_model_handle(&handle, kernel->packed, model_name.c_str()) != 0) {
+    handle = nullptr;
+    if (libs.get_model_handle(&handle, kernel->packed, "main_graph") != 0) {
+      return nullptr;
+    }
   }
+  kernel->model = handle;
 
   DNNTensorProperties in_props{};
   DNNTensorProperties out_props{};
@@ -244,22 +291,99 @@ Kernel* LoadKernel(const std::string& stem) {
     return nullptr;
   }
 
-  // One bucket per Fortran-order f32 tensor: bytes = width * 4.
-  int64_t width = 1;
-  for (int d = 0; d < in_props.validShape.numDimensions; ++d) {
-    width *= in_props.validShape.dimensionSize[d];
+  // An elementwise artifact folds its operands into one input and both sides
+  // are the same width. An operator with parameters does not: the number of
+  // inputs and each one's extent come from the file, and the output can be a
+  // different size again (a pooling window shrinks it). Sum the declarations
+  // so the buffers fit whatever this artifact actually is.
+  // Ask the model how many inputs it has; probing index by index runs
+  // hbDNNGetInputTensorProperties past the end and faults.
+  int32_t in_count = 0;
+  if (libs.get_in_count(&in_count, kernel->model) != 0 || in_count <= 0) {
+    return nullptr;
   }
-  kernel->bytes = width * static_cast<int64_t>(sizeof(float));
-  if (kernel->bytes <= 0) {
+  int64_t in_elems = 0;
+  for (int32_t i = 0; i < in_count; ++i) {
+    DNNTensorProperties props{};
+    if (libs.get_in_props(&props, kernel->model, i) != 0) {
+      return nullptr;
+    }
+    int64_t n = 1;
+    for (int d = 0; d < props.validShape.numDimensions; ++d) {
+      n *= props.validShape.dimensionSize[d];
+    }
+    if (n <= 0) {
+      return nullptr;
+    }
+    in_elems += n;
+  }
+  if (in_elems <= 0) {
+    return nullptr;
+  }
+  int64_t out_elems = 1;
+  for (int d = 0; d < out_props.validShape.numDimensions; ++d) {
+    out_elems *= out_props.validShape.dimensionSize[d];
+  }
+  if (out_elems <= 0) {
     return nullptr;
   }
 
+  // The runtime buffers are sized in aligned bytes, not element count:
+  // HB_DNN reports alignedByteSize and the task validator rejects anything
+  // smaller (a 200704-element output wanted 917504 bytes, not 802816). Take
+  // the larger of the two so neither an aligned nor an unaligned declaration
+  // under-allocates.
+  int64_t in_aligned = 0;
+  for (int32_t i = 0; i < in_count; ++i) {
+    DNNTensorProperties props{};
+    if (libs.get_in_props(&props, kernel->model, i) != 0) {
+      return nullptr;
+    }
+    int64_t n = 1;
+    for (int d = 0; d < props.validShape.numDimensions; ++d) {
+      n *= props.validShape.dimensionSize[d];
+    }
+    const int64_t raw = n * static_cast<int64_t>(sizeof(float));
+    in_aligned += props.alignedByteSize > raw ? props.alignedByteSize : raw;
+  }
+  const int64_t out_raw = out_elems * static_cast<int64_t>(sizeof(float));
+  kernel->bytes = in_aligned > 0 ? in_aligned : in_elems * static_cast<int64_t>(sizeof(float));
+  kernel->out_bytes = out_props.alignedByteSize > out_raw ? out_props.alignedByteSize : out_raw;
   if (libs.malloc_cached(&kernel->in_mem, kernel->bytes, 0) != 0) {
     return nullptr;
   }
-  if (libs.malloc_cached(&kernel->out_mem, kernel->bytes, 0) != 0) {
+  if (libs.malloc_cached(&kernel->out_mem, kernel->out_bytes, 0) != 0) {
     return nullptr;
   }
+  // Fill the tensor descriptors once. Run() rebuilds neither the properties
+  // nor the two DNNTensor shells per call any more; both are a function of
+  // the artifact, and rebuilding them cost two extra driver round trips on a
+  // path that is otherwise three.
+  if (libs.get_in_props(&kernel->in_props, kernel->model, 0) != 0 ||
+      libs.get_out_props(&kernel->out_props, kernel->model, 0) != 0) {
+    return nullptr;
+  }
+  kernel->in_props.tensorType = kF32;
+  kernel->out_props.tensorType = kF32;
+  kernel->in_count = in_count;
+  if (in_count > 1) {
+    // The second operand gets its own properties and its own region of the
+    // input buffer. hbDNN takes an array of tensor descriptors, one per
+    // input; packing both operands into one descriptor made `add` answer with
+    // the wrong values (maxerr 5.3 against a+b).
+    DNNTensorProperties props1{};
+    if (libs.get_in_props(&props1, kernel->model, 1) != 0) {
+      return nullptr;
+    }
+    props1.tensorType = kF32;
+    kernel->in_props1 = props1;
+  }
+  kernel->in_tensor.sysMem = kernel->in_mem;
+  kernel->in_tensor.properties = kernel->in_props;
+  kernel->out_tensor.sysMem = kernel->out_mem;
+  kernel->out_tensor.properties = kernel->out_props;
+  kernel->props_ready = true;
+
   kernel->ready = true;
   return kernel.release();
 }
@@ -288,9 +412,30 @@ int64_t BucketFor(const char* op, int nargs, int64_t width) {
   if (op == nullptr || width <= 0) {
     return 0;
   }
+  // Resolved buckets are cached: the loop below stats a file per rung, which
+  // put a dozen failed fopen() calls on a path that otherwise does no I/O at
+  // all.
+  static std::unordered_map<std::string, int64_t> resolved;
+  static std::mutex resolved_mutex;
+  char key[96];
+  std::snprintf(key, sizeof(key), "%s|%d|%lld", op, nargs,
+                static_cast<long long>(width));
+  {
+    std::lock_guard<std::mutex> guard(resolved_mutex);
+    auto it = resolved.find(key);
+    if (it != resolved.end()) {
+      return it->second;
+    }
+  }
   // The ladder mirrors DEFAULT_BUCKETS in build_bpu_oplib.py. Consulting the
   // files rather than a table means a library built with --shapes is honoured.
-  static const int64_t kLadder[] = {8, 16, 32, 48, 64, 96, 128, 192, 256, 384, 512};
+  static const int64_t kLadder[] = {
+      8,       16,      32,      48,      64,       96,      128,
+      192,     256,     384,     512,     768,      1024,    1536,
+      2048,    3072,    4096,    6144,    8192,     12288,   16384,
+      24576,   32768,   49152,   65536,   98304,    131072,  196608,
+      262144,  393216,  524288,  786432,  1048576,  1572864, 2097152,
+      3145728, 4194304};
   for (int64_t bucket : kLadder) {
     if (bucket < width) {
       continue;
@@ -300,8 +445,14 @@ int64_t BucketFor(const char* op, int nargs, int64_t width) {
     FILE* probe = fopen(path.c_str(), "rb");
     if (probe) {
       fclose(probe);
+      std::lock_guard<std::mutex> guard(resolved_mutex);
+      resolved[key] = bucket;
       return bucket;
     }
+  }
+  {
+    std::lock_guard<std::mutex> guard(resolved_mutex);
+    resolved[key] = 0;
   }
   return 0;
 }
@@ -309,6 +460,16 @@ int64_t BucketFor(const char* op, int nargs, int64_t width) {
 bool Run(const char* op, int nargs, const float* const* in, int64_t width,
          float* out) {
   if (op == nullptr || in == nullptr || out == nullptr || width <= 0) {
+    return false;
+  }
+  if (nargs != 1) {
+    // Two-input artifacts declare two named inputs (input_0, input_1) with
+    // their own shapes and strides, and hbDNNInferV2 takes an array of
+    // descriptors -- not two operands packed into one. Serving them needs the
+    // second descriptor wired up; until then a miss sends the caller to the
+    // path that does handle them, rather than answering with wrong numbers.
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
     return false;
   }
   const int64_t bucket = BucketFor(op, nargs, width);
@@ -329,15 +490,26 @@ bool Run(const char* op, int nargs, const float* const* in, int64_t width,
   const int64_t elements = bucket;
   const int64_t bytes = elements * static_cast<int64_t>(sizeof(float));
   auto* dst = static_cast<float*>(kernel->in_mem.virAddr);
-  // Zero first: every library op is elementwise, so the padded lanes cannot
-  // influence the ones inside the request, but they must not be stale garbage.
-  std::memset(dst, 0, static_cast<size_t>(bytes));
+  // Copy the request, then clear only the lanes past it. Every library op is
+  // elementwise, so the padding cannot influence the request's lanes -- but
+  // they must not be stale, and clearing the whole bucket first (a memset of
+  // 2x16384 floats for a two-input op) is the larger of the two writes when
+  // the request nearly fills the bucket.
   std::memcpy(dst, in[0], static_cast<size_t>(width * sizeof(float)));
-  if (nargs == 2) {
-    // A two-input artifact takes its operands as consecutive buffers.
-    std::memcpy(dst + elements, in[1], static_cast<size_t>(width * sizeof(float)));
-    std::memset(dst + width, 0, static_cast<size_t>((elements - width) * sizeof(float)));
+  if (width < elements) {
+    std::memset(dst + width, 0,
+                static_cast<size_t>((elements - width) * sizeof(float)));
   }
+  if (nargs == 2) {
+    // The operands live in separate regions of the input buffer and go to the
+    // device as two tensor descriptors, one per declared input.
+    std::memcpy(dst + elements, in[1], static_cast<size_t>(width * sizeof(float)));
+    if (width < elements) {
+      std::memset(dst + elements + width, 0,
+                  static_cast<size_t>((elements - width) * sizeof(float)));
+    }
+  }
+  (void)bytes;
 
   if (libs.mem_flush(&kernel->in_mem, kCacheClean) != 0) {
     std::lock_guard<std::mutex> guard(g_mutex);
@@ -345,24 +517,10 @@ bool Run(const char* op, int nargs, const float* const* in, int64_t width,
     return false;
   }
 
-  DNNTensor in_tensor{};
-  DNNTensor out_tensor{};
-  in_tensor.sysMem = kernel->in_mem;
-  out_tensor.sysMem = kernel->out_mem;
-
-  DNNTensorProperties in_props{};
-  DNNTensorProperties out_props{};
-  if (libs.get_in_props(&in_props, kernel->model, 0) != 0 ||
-      libs.get_out_props(&out_props, kernel->model, 0) != 0) {
-    return false;
-  }
-  in_props.tensorType = kF32;
-  out_props.tensorType = kF32;
-  in_tensor.properties = in_props;
-  out_tensor.properties = out_props;
-
   void* handle = nullptr;
-  if (libs.infer_v2(&handle, &out_tensor, &in_tensor, kernel->model) != 0) {
+  const int rc_infer = libs.infer_v2(
+      &handle, &kernel->out_tensor, &kernel->in_tensor, kernel->model);
+  if (rc_infer != 0) {
     std::lock_guard<std::mutex> guard(g_mutex);
     ++g_misses;
     return false;
@@ -391,6 +549,174 @@ bool Run(const char* op, int nargs, const float* const* in, int64_t width,
   std::lock_guard<std::mutex> guard(g_mutex);
   ++g_hits;
   return true;
+}
+
+extern "C" FLAGOS_EXPORT bool FlagosBpuOplibRun(const char* op, int nargs,
+                                                const float* const* in,
+                                                int64_t width, float* out) {
+  return Run(op, nargs, in, width, out);
+}
+
+FLAGOS_EXPORT bool RunArtifact(
+    const char* hbm_path, const std::vector<at::Tensor>& inputs, at::Tensor& out) {
+  if (hbm_path == nullptr || hbm_path[0] == '\0' || inputs.empty()) {
+    return false;
+  }
+  Libs& libs = Libraries();
+  if (!libs.ok()) {
+    return false;
+  }
+
+  Kernel* kernel = Cached(std::string(hbm_path));
+  if (kernel == nullptr || !kernel->ready) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+
+  // Walk the declarations in order, copying each argument into the region the
+  // artifact reserved for it. A mismatch is a miss, never a wrong answer: the
+  // file says how big each input is and that is what gets enforced.
+  int32_t in_count = 0;
+  const int rc_count = libs.get_in_count(&in_count, kernel->model);
+  if (rc_count != 0 || static_cast<size_t>(in_count) != inputs.size()) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+
+  int64_t offset = 0;
+  DNNTensorProperties first_props{};
+  bool have_first = false;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    DNNTensorProperties props{};
+    if (libs.get_in_props(&props, kernel->model, static_cast<int>(i)) != 0) {
+      std::lock_guard<std::mutex> guard(g_mutex);
+      ++g_misses;
+      return false;
+    }
+    int64_t declared = 1;
+    for (int d = 0; d < props.validShape.numDimensions; ++d) {
+      declared *= props.validShape.dimensionSize[d];
+    }
+    const at::Tensor& t = inputs[i];
+    if (t.scalar_type() != at::kFloat || t.numel() != declared) {
+      std::lock_guard<std::mutex> guard(g_mutex);
+      ++g_misses;
+      return false;
+    }
+    const at::Tensor c = t.contiguous();
+    const int64_t bytes = declared * static_cast<int64_t>(sizeof(float));
+    std::memcpy(static_cast<char*>(kernel->in_mem.virAddr) + offset,
+                c.const_data_ptr<float>(), static_cast<size_t>(bytes));
+    offset += bytes;
+    if (!have_first) {
+      first_props = props;
+      have_first = true;
+    }
+  }
+
+  if (libs.mem_flush(&kernel->in_mem, kCacheClean) != 0) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+
+  DNNTensorProperties out_props{};
+  if (libs.get_out_props(&out_props, kernel->model, 0) != 0) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+  int64_t out_elems = 1;
+  for (int d = 0; d < out_props.validShape.numDimensions; ++d) {
+    out_elems *= out_props.validShape.dimensionSize[d];
+  }
+  if (out.numel() != out_elems) {
+    std::vector<int64_t> sizes;
+    for (int d = 0; d < out_props.validShape.numDimensions; ++d) {
+      sizes.push_back(out_props.validShape.dimensionSize[d]);
+    }
+    out = at::empty(sizes, out.options());
+  }
+
+  DNNTensor in_tensor{};
+  DNNTensor out_tensor{};
+  in_tensor.sysMem = kernel->in_mem;
+  out_tensor.sysMem = kernel->out_mem;
+  first_props.tensorType = kF32;
+  out_props.tensorType = kF32;
+  in_tensor.properties = first_props;
+  out_tensor.properties = out_props;
+
+  void* handle = nullptr;
+  if (libs.infer_v2(&handle, &out_tensor, &in_tensor, kernel->model) != 0) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+  UCPSchedParam sched{};
+  sched.priority = 0;
+  sched.customId = 0;
+  sched.backend = kCoreAny;
+  sched.deviceId = 0;
+  if (libs.submit(handle, &sched) != 0) {
+    libs.release_task(handle);
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+  const int rc = libs.wait(handle, -1);
+  libs.release_task(handle);
+  if (rc != 0) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    ++g_misses;
+    return false;
+  }
+  libs.mem_flush(&kernel->out_mem, kCacheInvalidate);
+  std::memcpy(out.mutable_data_ptr<float>(), kernel->out_mem.virAddr,
+              static_cast<size_t>(out_elems * sizeof(float)));
+  std::lock_guard<std::mutex> guard(g_mutex);
+  ++g_hits;
+  return true;
+}
+
+FLAGOS_EXPORT std::string WeightedKey(const char* op,
+                                      const std::vector<at::Tensor>& operands) {
+  // Storage identity, not content. Hashing a convolution's weight per call cost
+  // 92 ms of a 163 ms ResNet-18 forward on the Python side for exactly this
+  // reason; aten hands the same tensors every time, so pointer plus the version
+  // counter (which catches an in-place edit) names the weight set.
+  std::string key = op == nullptr ? "" : op;
+  for (const at::Tensor& t : operands) {
+    key += "|";
+    key += std::to_string(reinterpret_cast<uintptr_t>(t.data_ptr()));
+    key += "@";
+    key += std::to_string(t.unsafeGetTensorImpl()->version_counter().current_version());
+    key += ":";
+    for (int64_t d : t.sizes()) {
+      key += std::to_string(d);
+      key += "x";
+    }
+  }
+  return key;
+}
+
+FLAGOS_EXPORT void RegisterArtifact(const char* key, const char* hbm_path) {
+  if (key == nullptr || key[0] == '\0' || hbm_path == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(g_mutex);
+  g_artifacts[key] = hbm_path;
+}
+
+FLAGOS_EXPORT const char* LookupArtifact(const char* key) {
+  if (key == nullptr || key[0] == '\0') {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> guard(g_mutex);
+  auto it = g_artifacts.find(key);
+  return it == g_artifacts.end() ? nullptr : it->second.c_str();
 }
 
 const char* Summary() {

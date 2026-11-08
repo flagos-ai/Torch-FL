@@ -26,6 +26,7 @@ environments), but the wiring is fully visible in their source.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -179,3 +180,75 @@ def test_every_local_in_the_library_is_initialized():
                     f"{name}: `local {variable}` has no initializer and is not a "
                     f"for-loop variable; under `set -u` bash 5 fails on it"
                 )
+
+
+def _library_function(name: str) -> str:
+    text = LIB.read_text(encoding="utf-8")
+    match = re.search(rf"^{name}\(\) \{{\n(.*?)^\}}", text, re.M | re.S)
+    assert match, f"{name} is not defined in {LIB}"
+    return match.group(1)
+
+
+def test_the_shared_wheel_installs_probe_the_unproxied_route():
+    """Both flagos-pypi installs route around a proxy that refuses the CONNECT.
+
+    resource.flagos.net is not on every vendor pod's proxy allowlist, and the
+    refused CONNECT surfaces as a tunnel 503 that pip retries for 35 minutes
+    before reporting it as a missing wheel (PRs #712/#705/#708). The probe used
+    to be wired only in the PPU and Iluvatar hooks, so the other seven platforms
+    hit that wall; putting it in the shared installs covers every platform.
+    """
+    assert "prefer_direct_route" in _library_function("install_flagtree")
+    assert "prefer_direct_route" in _library_function("install_flag_gems")
+
+    # The probe has to be resolved before the library that calls it is sourced.
+    # Match the `source` lines themselves: the files are also named in comments
+    # above, which is not where the ordering matters.
+    runner = (SCRIPTS_DIR / "set_env.sh").read_text(encoding="utf-8")
+    route = re.search(r'^source .*lib/proxy_route\.sh"$', runner, re.M)
+    common = re.search(r'^source .*lib/set_env_common\.sh"$', runner, re.M)
+    assert route and common
+    assert route.start() < common.start()
+
+
+def test_a_refused_proxy_tunnel_is_not_retried(tmp_path):
+    """A proxy that declines the CONNECT cannot clear inside a job.
+
+    It is distinguishable from a recoverable index 5xx: the request never
+    reached the index, so retrying asks the same closed door ten times per round
+    for five rounds. Measured at 35 minutes per affected lane.
+    """
+    tunnel = tmp_path / "tunnel.log"
+    tunnel.write_text(
+        "WARNING: Retrying (Retry(total=9)) after connection broken by "
+        "'OSError('Tunnel connection failed: 503 Service Unavailable')': "
+        "/repository/flagos-pypi-hosted/simple/flagtree/\n"
+    )
+    recoverable = tmp_path / "502.log"
+    recoverable.write_text(
+        "ERROR: Could not find a version that satisfies the requirement x\n"
+        "ERROR: No matching distribution found for x\n"
+    )
+
+    script = f"""
+set -euo pipefail
+source "{LIB}"
+pip_error_is_permanent "$1"
+"""
+    assert subprocess.run(["bash", "-c", script, "_", str(tunnel)]).returncode == 0
+    assert subprocess.run(["bash", "-c", script, "_", str(recoverable)]).returncode != 0
+
+    reason = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set -euo pipefail; source "{LIB}"; pip_permanent_error_reason "$1"',
+            "_",
+            str(tunnel),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "Tunnel connection failed: 503" in reason
+    assert "allowlist" in reason

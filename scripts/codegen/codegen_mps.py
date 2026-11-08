@@ -77,18 +77,26 @@ OPS = {
     "add.Tensor": "binary",
     "sub.Tensor": "binary",
     "mul.Tensor": "binary",
+    # maximum/minimum pick between two operands elementwise: the same binary
+    # body, one selector each.
+    "maximum": "nan_propagating",
+    "minimum": "nan_propagating",
     "rsub.Scalar": "rsub_scalar",
     "add.Scalar": "binary_scalar",
     "sub.Scalar": "binary_scalar",
     "mul.Scalar": "binary_scalar",
     "sum.dim_IntList": "reduce",
     "mean.dim": "reduce",
+    "amax": "reduce_intlist",
+    "amin": "reduce_intlist",
+    "prod.dim_int": "reduce_dim",
     "all": "all",
     "all.dim": "all_dim",
     "all.dims": "all_dims",
     # The fixed causal mask the model reads selects one triangle of the operand.
     # The graph uses MPSGraph's row and column coordinates. See T_TRIU.
     "triu": "triu",
+    "tril": "tril",
     "argmax": "argmax",
     # Qwen3.5's GatedDeltaNet solves a batched triangular system. MPSGraph has
     # no triangular-solve selector on the hosted SDK, so the body builds a
@@ -104,6 +112,7 @@ OPS = {
     # GatedDeltaNet accumulates its decay along the chunk axis. The graph uses
     # MPSGraph's cumulative-sum node with the operand's own dtype. See T_CUMSUM.
     "cumsum": "cumsum",
+    "cumprod": "cumprod",
     # Qwen3.5's linear-attention gate uses the linear branch of ATen's softplus.
     "softplus": "softplus",
     # `softmax` is the third stage-3 lane and the op a small model calls between
@@ -135,6 +144,28 @@ OPS = {
     # the scalar and tensor predicates around the same embedding.
     "sin": "trig",
     "cos": "trig",
+    "asin": "trig",
+    "acos": "trig",
+    "atan": "atan",
+    "asinh": "trig",
+    "acosh": "trig",
+    "atanh": "trig",
+    "tan": "trig",
+    # `logical_not` answers bool whatever its operand is, so it is a predicate.
+    # `bitwise_not` is deliberately absent: measured, it is 0.07x at (64, 64) and
+    # only 1.37x from about a million elements up -- the same shape-dependent cost
+    # `relu` showed, where a cheap host kernel loses to MPS's submission cost.
+    "logical_not": "predicate",
+    "sinh": "trig",
+    "cosh": "trig",
+    "ceil": "rounding",
+    "floor": "rounding",
+    "trunc": "trunc",
+    "isnan": "predicate",
+    "isinf": "predicate",
+    "signbit": "predicate",
+    "isneginf": "predicate",
+    "isposinf": "predicate",
     # A scalar exponent. MPSGraph's power is a real selector rather than an
     # exp/log composition, which is what keeps the NaN of a negative base to a
     # fractional exponent -- the case the reference produces and a composition
@@ -146,10 +177,14 @@ OPS = {
     # layer's device dispatch time, and at seq 1 -- where the whole layer's
     # arithmetic is 0.09 GFLOP -- the eight `mm` calls were still 84% of it, so
     # the cost is the host round trip around the weights rather than the flops.
-    # `addmm`, `mv`, `linear` and the `.out` spellings follow the same rule as
-    # the categories above: unregistered until a kernel exists.
+    # `addmm` is the spelling `nn.Linear` reaches on this build, so it is the
+    # gemm-family op a model actually waits on; it shares T_GEMM's layout work
+    # and adds the bias. `mv`, `matmul`, `addbmm`/`baddbmm` and the `.out`
+    # spellings follow the same rule as the categories above: unregistered until
+    # a kernel exists.
     "mm": "gemm",
     "bmm": "gemm",
+    "addmm": "addmm",
     # Convolution, the last lane of stage 3 and the op the two matmuls above are
     # not enough for: a vision model (and a Qwen3.5-class mixer's depthwise
     # conv1d) reaches `conv2d`/`conv1d` through `nn.Conv2d` and
@@ -164,6 +199,7 @@ OPS = {
     # are the CUDA/MPS-specific paths aten picks off the CUDA/MPS key and are not
     # the ones a PrivateUse1 tensor reaches, so they stay unregistered too.
     "convolution_overrideable": "conv",
+    "convolution_backward_overrideable": "conv_backward",
     # The first activation a transformer reaches: `silu` is what a SwiGLU MLP
     # multiplies its gate projection by, so it runs once per layer on the
     # (batch, seq, intermediate) tensor -- a bigger operand than the softmax
@@ -176,6 +212,8 @@ OPS = {
     # `silu_backward` is a separate body below: it uses the derivative
     # `sigmoid(x) * (1 + x * (1 - sigmoid(x)))` and has its own dtype gate.
     "silu": "silu",
+    "leaky_relu": "activation",
+    "elu": "activation",
     # The first backward body on this backend, and the one a SwiGLU projection
     # needs before it can train: the forward `silu` is already served, so every
     # autograd step that reaches its gradient would otherwise leave the device.
@@ -227,6 +265,9 @@ OPS = {
     # `exp2`'s and `expm1`'s selectors are separate nodes with their own width
     # questions that this increment does not answer.
     "exp": "exp",
+    "exp2": "exp",
+    "log2": "exp",
+    "log10": "exp",
     # The inverse of the node above and the second-largest elementwise unary left
     # on a small model's fallback profile: measured on an M5 on a (3, 512, 3072)
     # float32 operand, the `cpu_fallback` round-trip cost 4.51 ms. A model reaches
@@ -484,7 +525,16 @@ OPS = {
     # names the predicate rather than leaving it on the CPU reference.
     "eq.Scalar": "compare_scalar",
     "le.Tensor": "compare_tensor",
+    "eq.Tensor": "compare_tensor",
+    "ne.Tensor": "compare_tensor",
+    "lt.Tensor": "compare_tensor",
+    "gt.Tensor": "compare_tensor",
+    "ge.Tensor": "compare_tensor",
     "ne.Scalar": "compare_scalar",
+    "lt.Scalar": "compare_scalar",
+    "le.Scalar": "compare_scalar",
+    "gt.Scalar": "compare_scalar",
+    "ge.Scalar": "compare_scalar",
     # `cat` is the variadic concatenation, and the node is
     # `concatTensors:dimension:`. See T_CAT for the shape and dtype contract the
     # node would otherwise answer with a broadcasted wrong answer.
@@ -525,6 +575,169 @@ METADATA_VIEW_OPS = {
     "unsqueeze": "unsqueeze",
 }
 
+# The graph expression each predicate body builds, as the C++ text `render` splices
+# into T_PREDICATE. The single-node spellings name their selector there; the two
+# composed ones build `isinf AND signbit`, which is why they are not rows in
+# CALLS alone.
+PREDICATE_BODIES = {
+    "isnan": "return [graph isNaNWithTensor:args[0] name:nil];",
+    "isinf": "return [graph isInfiniteWithTensor:args[0] name:nil];",
+    # `signbitWithTensor:` answers a float (0.0/1.0), not a bool -- checked,
+    # its dataType is float32 -- so it is compared against zero. Without
+    # that comparison the float is copied into a bool buffer and the result
+    # is garbage: measured, `signbit(-inf)` came back false.
+    # `logical_not` is `x == 0`, not `notWithTensor:`. Measured, the `not` node
+    # is the *bitwise* complement over the operand's own width, so it answers
+    # false for `1.5` where the reference answers false for a nonzero and true
+    # for a zero: `logical_not([0.0, 1.5])` came back [False, False] against the
+    # reference's [True, False]. Comparing to zero is the definition.
+    "logical_not": (
+        "MPSGraphTensor* zero =\n"
+        "            [graph constantWithScalar:0.0 dataType:args[0].dataType];\n"
+        "        if (zero == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph equalWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];"
+    ),
+    "signbit": (
+        "MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
+        "        if (sign == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph notEqualWithPrimaryTensor:sign\n"
+        "                             secondaryTensor:[graph constantWithScalar:0.0\n"
+        "                                                              dataType:args[0].dataType]\n"
+        "                                        name:nil];"
+    ),
+    "isneginf": (
+        "MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];\n"
+        "        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
+        "        if (infinite == nil || sign == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign\n"
+        "                             secondaryTensor:[graph constantWithScalar:0.0\n"
+        "                                                              dataType:args[0].dataType]\n"
+        "                                        name:nil];\n"
+        "        if (negative == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph logicalANDWithPrimaryTensor:infinite\n"
+        "                               secondaryTensor:negative\n"
+        "                                          name:nil];"
+    ),
+    "isposinf": (
+        "MPSGraphTensor* infinite = [graph isInfiniteWithTensor:args[0] name:nil];\n"
+        "        MPSGraphTensor* sign = [graph signbitWithTensor:args[0] name:nil];\n"
+        "        if (infinite == nil || sign == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        MPSGraphTensor* negative = [graph notEqualWithPrimaryTensor:sign\n"
+        "                             secondaryTensor:[graph constantWithScalar:0.0\n"
+        "                                                              dataType:args[0].dataType]\n"
+        "                                        name:nil];\n"
+        "        if (negative == nil) {\n"
+        "          return nil;\n"
+        "        }\n"
+        "        return [graph logicalANDWithPrimaryTensor:infinite\n"
+        "                               secondaryTensor:[graph notWithTensor:negative name:nil]\n"
+        "                                          name:nil];"
+    ),
+}
+
+# The C++ body T_ACTIVATION splices in, per op, together with the parameters the
+# kernel takes beyond `self`. Three nodes, three shapes.
+ACTIVATION_BODIES = {
+    # `relu` is deliberately absent. It measures *slower* than the round-trip at
+    # every shape a model produces -- 0.09x at (64, 64), 0.51x at
+    # (1, 16, 512, 512), and only 1.63x faster from about a million elements up --
+    # and the reason is not the NaN guard this body would need. Measured against
+    # the already-served single-node `clamp_min`, that is 0.47x at the same large
+    # shape too: a ReLU is cheap enough on the host that MPS's per-call submission
+    # cost dominates until the operand is very large. Serving it would trade a
+    # cheap host kernel for a GPU dispatch, so it stays on the reference.
+    "leaky_relu": {
+        "params": ",\n    const at::Scalar& negative_slope",
+        "args": ", negative_slope",
+        "body": (
+            "return [graph leakyReLUWithTensor:args[0]\n"
+            "                            alpha:negative_slope.toFloat()\n"
+            "                             name:nil];"
+        ),
+    },
+    "elu": {
+        "params": ",\n    const at::Scalar& alpha,\n    const at::Scalar& scale,\n    const at::Scalar& input_scale",
+        "args": ", alpha, scale, input_scale",
+        # The node takes only `alpha`. aten's `scale` and `input_scale` reach
+        # different branches, which a naive `scale * elu(input_scale * x)` gets
+        # wrong: measured, that form answers 1.0 where the reference answers 2.0
+        # for the positive branch of `elu(x, 1, scale=2, input_scale=0.5)`.
+        #
+        # The reference is
+        #     x > 0  ->  scale * x
+        #     x <= 0 ->  scale * alpha * (exp(input_scale * x) - 1)
+        # so `input_scale` shapes only the negative branch and `scale` multiplies
+        # the result. With the defaults (scale=1, input_scale=1) this is the node
+        # exactly, so the composition below is built from primitives rather than
+        # around the node.
+        "body": (
+            "MPSGraphTensor* scale_t =\n"
+            "            mps::MpsConstant(graph, scale, self.scalar_type());\n"
+            "        MPSGraphTensor* shifted =\n"
+            "            mps::MpsConstant(graph, alpha, self.scalar_type());\n"
+            "        MPSGraphTensor* input_scale_t =\n"
+            "            mps::MpsConstant(graph, input_scale, self.scalar_type());\n"
+            "        MPSGraphTensor* zero =\n"
+            "            [graph constantWithScalar:0.0 dataType:args[0].dataType];\n"
+            "        if (scale_t == nil || shifted == nil || input_scale_t == nil ||\n"
+            "            zero == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        // exp(input_scale * x) - 1, then * alpha, then * scale.\n"
+            "        MPSGraphTensor* scaled_in = [graph multiplicationWithPrimaryTensor:args[0]\n"
+            "                                                          secondaryTensor:input_scale_t\n"
+            "                                                                     name:nil];\n"
+            "        MPSGraphTensor* ex = [graph exponentWithTensor:scaled_in name:nil];\n"
+            "        MPSGraphTensor* negative = [graph subtractionWithPrimaryTensor:ex\n"
+            "                                                     secondaryTensor:\n"
+            "                                                         [graph constantWithScalar:1.0\n"
+            "                                                                          dataType:args[0].dataType]\n"
+            "                                                                name:nil];\n"
+            "        negative = [graph multiplicationWithPrimaryTensor:negative\n"
+            "                                         secondaryTensor:shifted\n"
+            "                                                    name:nil];\n"
+            "        MPSGraphTensor* positive = [graph multiplicationWithPrimaryTensor:args[0]\n"
+            "                                                          secondaryTensor:scale_t\n"
+            "                                                                     name:nil];\n"
+            "        MPSGraphTensor* positive_branch =\n"
+            "            [graph greaterThanWithPrimaryTensor:args[0] secondaryTensor:zero name:nil];\n"
+            "        if (scaled_in == nil || ex == nil || negative == nil ||\n"
+            "            positive == nil || positive_branch == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        MPSGraphTensor* picked = [graph selectWithPredicateTensor:positive_branch\n"
+            "                                              truePredicateTensor:positive\n"
+            "                                             falsePredicateTensor:\n"
+            "                                                 [graph multiplicationWithPrimaryTensor:negative\n"
+            "                                                                      secondaryTensor:scale_t\n"
+            "                                                                                 name:nil]\n"
+            "                                                             name:nil];\n"
+            "        if (picked == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        // A NaN operand takes itself, as `relu` and `tanh` do.\n"
+            "        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];\n"
+            "        if (nan == nil) {\n"
+            "          return nil;\n"
+            "        }\n"
+            "        return [graph selectWithPredicateTensor:nan\n"
+            "                            truePredicateTensor:args[0]\n"
+            "                           falsePredicateTensor:picked\n"
+            "                                           name:nil];"
+        ),
+    },
+}
+
 # The aten op a kernel falls back to on the CPU for a case the MPSGraph path does
 # not compute (the SUPPORTS predicate below). The fallback keeps the result
 # correct and stays on the host: it is not a delegation to a CUDA kernel.
@@ -534,19 +747,26 @@ AT_OP = {
     "sub.Tensor": "sub",
     "rsub.Scalar": "rsub",
     "mul.Tensor": "mul",
+    "maximum": "maximum",
+    "minimum": "minimum",
     "add.Scalar": "add",
     "sub.Scalar": "sub",
     "mul.Scalar": "mul",
     "sum.dim_IntList": "sum",
     "mean.dim": "mean",
+    "amax": "amax",
+    "amin": "amin",
+    "prod.dim_int": "prod",
     "all": "all",
     "all.dim": "all",
     "all.dims": "all",
     "triu": "triu",
+    "tril": "tril",
     "argmax": "argmax",
     "linalg_solve_triangular": "linalg_solve_triangular",
     "index.Tensor": "index",
     "cumsum": "cumsum",
+    "cumprod": "cumprod",
     "softplus": "softplus",
     "_softmax": "_softmax",
     "neg": "neg",
@@ -554,25 +774,56 @@ AT_OP = {
     # operands need the reference's promotion to float32.
     "sin": "sin",
     "cos": "cos",
+    "asin": "asin",
+    "acos": "acos",
+    "atan": "atan",
+    "asinh": "asinh",
+    "acosh": "acosh",
+    "atanh": "atanh",
+    "tan": "tan",
+    "logical_not": "logical_not",
+    "sinh": "sinh",
+    "cosh": "cosh",
+    "ceil": "ceil",
+    "floor": "floor",
+    "trunc": "trunc",
+    "isnan": "isnan",
+    "isinf": "isinf",
+    "signbit": "signbit",
+    "isneginf": "isneginf",
+    "isposinf": "isposinf",
     # Qwen3.5's causal mask and rotary path build the predicates with these
     # three spellings. Each has the reference's own aten error contract.
     "eq.Scalar": "eq",
     "le.Tensor": "le",
+    "eq.Tensor": "eq",
+    "ne.Tensor": "ne",
+    "lt.Tensor": "lt",
+    "gt.Tensor": "gt",
+    "ge.Tensor": "ge",
+    "lt.Scalar": "lt",
+    "le.Scalar": "le",
+    "gt.Scalar": "gt",
+    "ge.Scalar": "ge",
     "ne.Scalar": "ne",
     "pow.Tensor_Scalar": "pow",
     "mm": "mm",
     "bmm": "bmm",
+    "addmm": "addmm",
     # The CPU reference the `conv` category round-trips to. `convolution` is the
     # composite that lowers to `convolution_overrideable`, and the reference
     # implementation behind it is the slow 2d/3d path, so this is what the
     # round-trip is written against -- it carries the same shape, stride, padding,
     # dilation, transposed, output_padding and groups arguments the kernel holds.
     "convolution_overrideable": "convolution",
+    "convolution_backward_overrideable": "convolution_backward",
     # The CPU reference the `silu` body round-trips to on a dtype it declines.
     # `silu` exists as its own aten kernel rather than a decomposition, so the
     # round-trip lands on the reference's own implementation rather than on a
     # composite that would re-enter the dispatcher.
     "silu": "silu",
+    "leaky_relu": "leaky_relu",
+    "elu": "elu",
     # The CPU reference behind a declined `silu_backward`. The op has its own
     # derivative kernel -- it is not a prompted composition -- so this is where
     # the reference's promotion rule and gradient values live.
@@ -589,6 +840,9 @@ AT_OP = {
     # why the gate sends those widths here rather than evaluating them in the
     # graph.
     "exp": "exp",
+    "exp2": "exp2",
+    "log2": "log2",
+    "log10": "log10",
     # The CPU reference the `log` body round-trips to on the widths it declines.
     # `log` is its own aten kernel rather than a composition, so the round-trip
     # lands on the reference's own implementation -- which is where its domain
@@ -693,23 +947,38 @@ AT_OP = {
 SUPPORTS = {
     "unary": "MpsSupportsUnaryDtype",
     "trig": "MpsSupportsTrigDtype",
+    "atan": "MpsSupportsTrigDtype",
+    "rounding": "MpsSupportsRoundingDtype",
+    "trunc": "MpsSupportsRoundingDtype",
+    "predicate": "MpsSupportsPredicateDtype",
     "binary": "MpsSupportsBinaryDtype",
     "binary_scalar": "MpsSupportsScalarDtype",
     "reduce": "MpsSupportsReduceDtype",
+    "reduce_intlist": "MpsSupportsReduceDtype",
+    "reduce_dim": "MpsSupportsReduceDtype",
     "all": "MpsSupportsAllDtype",
     "all_dim": "MpsSupportsAllDtype",
     "all_dims": "MpsSupportsAllDtype",
     "triu": "MpsSupportsTriuDtype",
+    "tril": "MpsSupportsTriuDtype",
     "argmax": "MpsSupportsArgmaxDtype",
     "SOLVE_TRIANGULAR": "MpsSupportsTriangularSolveDtype",
     "index": "",
     "cumsum": "MpsSupportsCumsumDtype",
+    "cumprod": "MpsSupportsCumsumDtype",
     "softplus": "MpsSupportsSoftplusDtype",
     "gemm": "MpsSupportsGemmDtype",
+    # The two `mat` operands are gated exactly as `mm`'s, and the bias is held
+    # to their width by the body rather than by this predicate: aten's `addmm`
+    # promotes nothing, so a bias of another width is a reference concern and a
+    # decline, not a wider graph.
+    "addmm": "MpsSupportsGemmDtype",
     "softmax": "MpsSupportsSoftmaxDtype",
     "pow_scalar": "MpsSupportsPowDtype",
     "conv": "MpsSupportsConvDtype",
+    "conv_backward": "MpsSupportsConvDtype",
     "silu": "MpsSupportsSiluDtype",
+    "activation": "MpsSupportsUnaryDtype",
     # Two equal float widths, float32 and float16. The reference promotes a
     # mixed pair to a common width, while MpsRunGraph requires every operand and
     # its result to share an element type, so a mixed pair takes the round-trip.
@@ -835,6 +1104,7 @@ SUPPORTS = {
     "arange_stop": "MpsSupportsFactoryDtype",
     "clamp": "MpsSupportsClampDtype",
     "gelu": "MpsSupportsGeluDtype",
+    "nan_propagating": "MpsSupportsBinaryDtype",
 }
 
 # The selector each body applies to the operand, up to and including the keyword
@@ -848,20 +1118,28 @@ CALLS = {
     "sub.Tensor": "subtractionWithPrimaryTensor:",
     "rsub.Scalar": "subtractionWithPrimaryTensor:",
     "mul.Tensor": "multiplicationWithPrimaryTensor:",
+    "maximum": "maximumWithPrimaryTensor:",
+    "minimum": "minimumWithPrimaryTensor:",
     "add.Scalar": "additionWithPrimaryTensor:",
     "sub.Scalar": "subtractionWithPrimaryTensor:",
     "mul.Scalar": "multiplicationWithPrimaryTensor:",
     "sum.dim_IntList": "reductionSumWithTensor:",
     "mean.dim": "reductionSumWithTensor:",
+    # amax/amin propagate NaN, so they take the PropagateNaN selectors.
+    "amax": "reductionMaximumPropagateNaNWithTensor:",
+    "amin": "reductionMinimumPropagateNaNWithTensor:",
+    "prod.dim_int": "reductionProductWithTensor:",
     # `all` and `triu` build their comparison and select in the body.
     "all": "",
     "all.dim": "",
     "all.dims": "",
     "triu": "",
+    "tril": "",
     "argmax": "",
     # T_CUMSUM writes the full selector because its axis binds to the first
     # argument, as MpsGatherIndex does for the gather family.
     "cumsum": "",
+    "cumprod": "",
     # T_SOFTPLUS builds the threshold comparison and both branches in the
     # operand's dtype. See the template.
     "softplus": "",
@@ -872,11 +1150,46 @@ CALLS = {
     # takes is the same node as the rank-2 pair mm takes.
     "mm": "matrixMultiplicationWithPrimaryTensor:",
     "bmm": "matrixMultiplicationWithPrimaryTensor:",
+    # T_ADDMM writes the whole body: the product, the optional alpha, and the
+    # bias with its own beta.
+    "addmm": "",
     "neg": "negativeWithTensor:",
     "sin": "sinWithTensor:",
     "cos": "cosWithTensor:",
+    "asin": "asinWithTensor:",
+    "acos": "acosWithTensor:",
+    "atan": "atanWithTensor:",
+    "asinh": "asinhWithTensor:",
+    "acosh": "acoshWithTensor:",
+    "atanh": "atanhWithTensor:",
+    "tan": "tanWithTensor:",
+    "logical_not": "",
+    "sinh": "sinhWithTensor:",
+    "cosh": "coshWithTensor:",
+    "ceil": "ceilWithTensor:",
+    "floor": "floorWithTensor:",
+    # The selector is `truncateWithTensor:`, not `truncWithTensor:` -- the
+    # one place in this family where the aten name and the selector part
+    # ways. A wrong name here aborts the process rather than declining:
+    # MPSGraph raises `unrecognized selector` from inside the graph block.
+    "trunc": "truncateWithTensor:",
+    "isnan": "isnanWithTensor:",
+    "isinf": "isinfWithTensor:",
+    "signbit": "signbitWithTensor:",
+    # isneginf/isposinf compose isinf + signbit in the body.
+    "isneginf": "",
+    "isposinf": "",
     "eq.Scalar": "equalWithPrimaryTensor:",
     "le.Tensor": "lessThanOrEqualToWithPrimaryTensor:",
+    "eq.Tensor": "equalWithPrimaryTensor:",
+    "ne.Tensor": "notEqualWithPrimaryTensor:",
+    "lt.Tensor": "lessThanWithPrimaryTensor:",
+    "gt.Tensor": "greaterThanWithPrimaryTensor:",
+    "ge.Tensor": "greaterThanOrEqualToWithPrimaryTensor:",
+    "lt.Scalar": "lessThanWithPrimaryTensor:",
+    "le.Scalar": "lessThanOrEqualToWithPrimaryTensor:",
+    "gt.Scalar": "greaterThanWithPrimaryTensor:",
+    "ge.Scalar": "greaterThanOrEqualToWithPrimaryTensor:",
     "ne.Scalar": "notEqualWithPrimaryTensor:",
     "_softmax": "softMaxWithTensor:",
     "pow.Tensor_Scalar": "powerWithPrimaryTensor:",
@@ -884,10 +1197,14 @@ CALLS = {
     # rank, so `{call}` names the shape-independent prefix both share and the
     # template fills the rank in.
     "convolution_overrideable": "convolution{dim}DWithSourceTensor:",
+    "convolution_backward_overrideable": "",
     # The body builds two nodes and the unary call table names one selector, so
     # this is the first node -- the sigmoid every silu is built from. See T_SILU
     # for why the multiply is written into the template rather than named here.
     "silu": "sigmoidWithTensor:",
+    # The activation bodies build their node inline; see ACTIVATION_BODIES.
+    "leaky_relu": "",
+    "elu": "",
     # Unused: T_SILU_BACKWARD writes the sigmoid, the residual `1 - sigmoid`
     # and both multiplies in full, because the second operand appears only in
     # the final multiply. The entry exists because `render` reads `CALLS[op]`
@@ -902,6 +1219,11 @@ CALLS = {
     # exponential directly. The node is the whole body, so the width list is the
     # only thing the increment decides.
     "exp": "exponentWithTensor:",
+    # Each has a base-specific node; the generic logarithm/exponent would need a
+    # constant multiply around it and lose the point of serving them.
+    "exp2": "exponentBase2WithTensor:",
+    "log2": "logarithmBase2WithTensor:",
+    "log10": "logarithmBase10WithTensor:",
     # Its own selector, named directly like the exponential's, and the reason `log`
     # is one node rather than the `log2`/`loge` composition a hand-written body
     # would need.
@@ -1036,25 +1358,60 @@ KEY_PARTS = {
     "abs": "",
     "neg": "",
     "sin": "",
+    "asin": "",
+    "acos": "",
+    "atan": "",
+    "asinh": "",
+    "acosh": "",
+    "atanh": "",
+    "tan": "",
+    "logical_not": "",
+    "sinh": "",
+    "cosh": "",
+    "ceil": "",
+    "floor": "",
+    "trunc": "",
+    "isnan": "",
+    "isinf": "",
+    "signbit": "",
+    "isneginf": "",
+    "isposinf": "",
     "cos": "",
     # The scalar predicates bake their stored value into the graph; the tensor
     # form is a function of its operands' signatures alone.
     "eq.Scalar": ", other",
     "le.Tensor": "",
+    "eq.Tensor": "",
+    "ne.Tensor": "",
+    "lt.Tensor": "",
+    "gt.Tensor": "",
+    "ge.Tensor": "",
     "ne.Scalar": ", other",
+    "lt.Scalar": ", other",
+    "le.Scalar": ", other",
+    "gt.Scalar": ", other",
+    "ge.Scalar": ", other",
     "add.Tensor": ", alpha",
     "sub.Tensor": ", alpha",
     "rsub.Scalar": ", other, alpha",
     "mul.Tensor": "",
+    "maximum": "",
+    "minimum": "",
     "add.Scalar": ", other, alpha",
     "sub.Scalar": ", other, alpha",
     "mul.Scalar": ", other",
     "sum.dim_IntList": ", axes",
     "mean.dim": ", axes",
+    "amax": ", axes, keepdim",
+    "amin": ", axes, keepdim",
+    "prod.dim_int": (
+        ", dim, keepdim, dtype.has_value() ? static_cast<int64_t>(*dtype) : int64_t{-1}"
+    ),
     "all": "",
     "all.dim": ", dimension, keepdim",
     "all.dims": ", axis_key, axes, keepdim",
     "triu": ", diagonal",
+    "tril": ", diagonal",
     "argmax": ", axis, keepdim",
     # The three host flags choose the substitution direction and which side of
     # the system B covers. They cannot be inferred from tensor signatures.
@@ -1064,10 +1421,18 @@ KEY_PARTS = {
     # shapes. The accumulator dtype is folded into the operand's dtype by the
     # body.
     "cumsum": ", axis",
+    "cumprod": ", axis",
     "softplus": ", beta, threshold",
     # Which of the two operands the graph has to transpose: see T_GEMM.
     "mm": ", self_transposed, mat2_transposed",
     "bmm": ", self_transposed, mat2_transposed",
+    # T_ADDMM reads the same two layout flags, the result shape the bias was
+    # broadcast to, and both scalings. The *values* go in, not the flags the
+    # body derives from them: `alpha=2` and `alpha=0.25` both set
+    # `scales_product`, so a key carrying the flag would make them one plan and
+    # the first product would answer both -- measured, that returned values up
+    # to 15.98 from the reference.
+    "addmm": (", mat1_transposed, mat2_transposed, out_shape, alpha, beta"),
     # The axis the body resolved against the operand's rank. The result dtype
     # `half_to_float` decides does not need naming here: the body widens the
     # operand to it first, and MpsRunGraph folds the operand's own dtype into the
@@ -1094,6 +1459,13 @@ KEY_PARTS = {
     # and shape, which MpsRunGraph folds into the key itself. A body with no
     # constants has no way to be handed a plan it did not build.
     "silu": "",
+    # The dimension is the only host value that changes this body's graph
+    # shape apart from the operands themselves, and it is in the key.
+    "convolution_backward_overrideable": ", dim",
+    "relu": "",
+    # Two slopes describe two graphs, so the value is in the key.
+    "leaky_relu": ", negative_slope.toFloat()",
+    "elu": ", alpha.toFloat(), scale.toFloat(), input_scale.toFloat()",
     # Empty for the same reason: the graph is a function of both operands'
     # dtypes and shapes, which MpsRunGraph folds into the key itself, and the
     # body bakes no host value into it.
@@ -1108,6 +1480,9 @@ KEY_PARTS = {
     # reads no other host value. A body that bakes nothing into the graph has no
     # way to be handed a plan it did not build.
     "exp": "",
+    "exp2": "",
+    "log2": "",
+    "log10": "",
     # Empty, for the same reason `exp`'s is: one selector over one operand, so the
     # graph is a function of the operand's dtype and shape alone -- which
     # MpsRunGraph folds into the cache key itself -- and the body bakes no host
@@ -1225,7 +1600,18 @@ KEY_PARTS = {
     # device allocation, so no mode-dependent endpoint or rounding rule is
     # baked into a graph.
     "arange.start_step": "",
-    "clamp": ", min, max",
+    # Both bounds are `optional<Scalar>` and MpsKeyAppend has no overload for
+    # that; `min.has_value()` plus the scalar is what distinguishes two plans, so
+    # the key folds the presence and the value rather than the optional itself.
+    # This entry was written when the body was added but the body did not splice
+    # it -- the key stayed `"clamp"` alone, so a second call with different
+    # bounds reused the first call's compiled graph and answered with the old
+    # bounds. Measured: clamping [[1,9],[2,3]] to (-2,2) and then to (0,5)
+    # answered [[1,0,2.0],[2,2.0]] for both.
+    "clamp": (
+        ", min.has_value() ? min->toDouble() : NAN, "
+        "max.has_value() ? max->toDouble() : NAN"
+    ),
     "gelu": ", approximate",
 }
 
@@ -1442,7 +1828,142 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other{alpha_param}
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
-# The elementwise body over a tensor and a host scalar. The scalar becomes a
+# `maximum` and `minimum` need one thing `T_BINARY` does not do: their nodes
+# **swallow a NaN** where the reference propagates it. Measured,
+# `maximum([nan, 1, 2, 3], arange(12).view(3, 4))` answers `0.0` in the first
+# column where the reference answers `nan` -- so a finite broadcast is exact and
+# only the NaN is lost, which is the kind of wrong answer that never raises.
+#
+# The guard is `isNaNWithTensor:` over each operand and a `select` back to a NaN,
+# built over the **broadcast** shapes so a `(4,)` predicate selects against a
+# `(3, 4)` result.
+#
+# A NaN that needs broadcasting declines instead of being selected. Getting the
+# broadcast right costs a second graph shape and a fifth node for a case that is
+# rare in practice, and the round-trip is correct where a half-built guard is
+# silent about being wrong -- the failure mode this body exists to remove. So the
+# rule is: same-shape operands are served with the guard, a broadcast pair whose
+# broadcast has no NaN in it is served unguarded (a finite broadcast is exact),
+# and a broadcast pair that actually contains a NaN takes the round-trip.
+#
+# Only this pair uses the body. The other `binary` ops -- add, sub, mul, div --
+# propagate NaN through the node by themselves and keep `T_BINARY`.
+T_NAN_PROPAGATING = """\
+at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self.sizes(), other.sizes());
+  }} catch (const std::exception&) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  if (!mps::{supports}(self.scalar_type(), other.scalar_type())) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor other_c = other.contiguous();
+  at::Tensor out = at::empty(out_shape, self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool broadcast =
+      !self_c.sizes().equals(at::IntArrayRef(out_shape)) ||
+      !other_c.sizes().equals(at::IntArrayRef(out_shape));
+  // A NaN that would have to be broadcast selects against the wrong shape in a
+  // graph built the way every other body here is built, so it round-trips.
+  // Only a floating operand can hold a NaN, and asking an integral one is not
+  // free of surprises in this tree -- the check runs on the host copy with the
+  // floating-width test in front of it.
+  if (broadcast && self_c.is_floating_point()) {{
+    const at::Tensor self_host = self_c.to(at::kCPU);
+    const at::Tensor other_host = other_c.to(at::kCPU);
+    if (at::isnan(self_host).any().item<bool>() ||
+        at::isnan(other_host).any().item<bool>()) {{
+      return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+    }}
+  }}
+  // A one-element secondary is expanded on the host before the graph. Asking
+  // MpsRunGraph to place a numel-1 operand at a larger `argument_shapes` entry
+  // fails module verification on this SDK (measured), and the expansion is a
+  // copy of one element.
+  const bool scalar_rhs = other_c.numel() == 1;
+  std::vector<at::Tensor> operands{{self_c}};
+  if (scalar_rhs && !other_c.sizes().equals(at::IntArrayRef(out_shape))) {{
+    operands.push_back(other_c.expand(out_shape).contiguous());
+  }} else {{
+    operands.push_back(other_c);
+  }}
+  const std::vector<std::vector<int64_t>> argument_shapes = {{
+      self_c.sizes().vec(), operands[1].sizes().vec()}};
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      operands,
+      out,
+      argument_shapes,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args.count == 2 ? args[1] : primary;
+        // The secondary is broadcast explicitly whenever it is not already the
+        // output's shape. That covers a one-element operand too: MPSGraph will
+        // not widen a rank-0 tensor into a rank-N result (measured, the module
+        // fails verification without this).
+        // `MpsRunGraph` already placed every operand at the shape in
+        // `argument_shapes`, so a one-element secondary arrives as the output's
+        // shape and needs nothing here. Only a genuinely broadcast operand --
+        // one whose own shape differs from the output's -- is widened.
+        if (!scalar_rhs && broadcast) {{
+          secondary = [graph broadcastTensor:secondary
+                                     toShape:mps::MpsAxesArray(out_shape)
+                                        name:nil];
+          if (secondary == nil) {{
+            return nil;
+          }}
+        }}
+        MPSGraphTensor* answer =
+            [graph {call}primary secondaryTensor:secondary name:nil];
+        if (answer == nil) {{
+          return nil;
+        }}
+        // A NaN back over the node's answer wherever either operand was one.
+        // `x - x` is a NaN exactly where `x` was and neutral everywhere else, so
+        // it produces the replacement without a NaN constant, which MpsConstant
+        // cannot express.
+        MPSGraphTensor* primary_nan =
+            [graph subtractionWithPrimaryTensor:primary secondaryTensor:primary name:nil];
+        MPSGraphTensor* self_nan = [graph isNaNWithTensor:primary name:nil];
+        if (primary_nan == nil || self_nan == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* either_nan = self_nan;
+        if (!scalar_rhs && secondary != primary) {{
+          MPSGraphTensor* secondary_nan =
+              [graph subtractionWithPrimaryTensor:secondary secondaryTensor:secondary name:nil];
+          MPSGraphTensor* other_nan = [graph isNaNWithTensor:secondary name:nil];
+          if (secondary_nan == nil || other_nan == nil) {{
+            return nil;
+          }}
+          primary_nan =
+              [graph additionWithPrimaryTensor:primary_nan secondaryTensor:secondary_nan name:nil];
+          either_nan =
+              [graph logicalORWithPrimaryTensor:self_nan secondaryTensor:other_nan name:nil];
+          if (primary_nan == nil || either_nan == nil) {{
+            return nil;
+          }}
+        }}
+        return [graph selectWithPredicateTensor:either_nan
+                           truePredicateTensor:primary_nan
+                          falsePredicateTensor:answer
+                                          name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), other.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+# The elementwise body over a tensor and a host scalar.# The elementwise body over a tensor and a host scalar. The scalar becomes a
 # one-element constant in the operand's own element type and the graph broadcasts
 # it; the dtype gate accepted only the scalars that element type can carry, so an
 # `int32` tensor takes an integer scalar and a float tensor anything real. A
@@ -1497,6 +2018,87 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # The named `axes:` selectors keep the rank and leave each reduced axis at size 1,
 # which is the keepdim shape; the aten shape is applied by the reshape MpsRunGraph
 # reads the result through, so keepdim and its absence are the same graph.
+# `amax`, `amin` and `prod` reduce over an `int[1]` dimension list and take no
+# `dtype` argument, so they cannot share `T_REDUCE`'s signature. The body is the
+# same otherwise: the axes go through `MpsReduceAxes`, an empty operand takes the
+# reference (a reduction over nothing is not nothing), and the graph receives the
+# axes as an `NSArray<NSNumber*>`.
+#
+# `amax`/`amin` take the `PropagateNaN` selectors rather than the plain
+# `reductionMaximum`/`reductionMinimum` ones: the reference propagates a NaN
+# through these two ops and the plain nodes drop it.
+# `prod.dim_int` reduces over a single dimension and takes an optional `dtype`,
+# so it shares neither `T_REDUCE`'s axis list nor `T_REDUCE_INTLIST`'s missing
+# dtype. The body is otherwise the reduce body with the one dimension wrapped.
+T_REDUCE_DIM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    bool keepdim,
+    std::optional<at::ScalarType> dtype) {{
+  if (!mps::{supports}(self.scalar_type(), dtype)) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, keepdim, dtype).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+T_REDUCE_INTLIST = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    at::IntArrayRef dim,
+    bool keepdim) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  std::vector<int64_t> axes;
+  if (!mps::MpsReduceAxes(self.sizes(), dim, &axes)) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  at::Tensor out = at::empty(
+      mps::MpsReduceOutShape(self_c.sizes(), dim, keepdim), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] axes:mps::MpsAxesArray(axes) name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_REDUCE = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -1743,6 +2345,71 @@ T_TRIU = r"""at::Tensor {kernel}(const at::Tensor& self, int64_t diagonal) {{
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
+# `tril` is `triu` with the comparison reversed: the same coordinate difference
+# against the same offset, `<=` instead of `>=`. The two bodies are otherwise
+# identical, including the int32 cast on the offset -- a scalar constant in int64
+# is not broadcastable against an int32 tensor on this SDK, and the graph compiler
+# aborts on that mismatch.
+#
+# Serving it matters more than the arithmetic suggests: `triu` is already on the
+# graph and `tril` was not, so a single tensor masked on one side cost a
+# round-trip while the other did not. Measured, `tril` on (1024, 1024) took
+# 0.58 ms through the fallback where `triu`'s graph answers in 0.29 ms.
+T_TRIL = r"""at::Tensor {kernel}(const at::Tensor& self, int64_t diagonal) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu(), diagonal).to(self.device());
+  }}
+  if (self.dim() < 2 || self.size(-1) == 0 || self.size(-2) == 0) {{
+    return at::{at_op}(self.cpu(), diagonal).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}", diagonal),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSShape* shape = mps::MpsShapeOf(self_c.sizes());
+        MPSGraphTensor* column =
+            [graph coordinateAlongAxis:-1 withShape:shape name:nil];
+        MPSGraphTensor* row =
+            [graph coordinateAlongAxis:-2 withShape:shape name:nil];
+        MPSGraphTensor* difference =
+            [graph subtractionWithPrimaryTensor:column
+                                secondaryTensor:row
+                                           name:nil];
+        // Coordinates are int32. Cast the offset before comparing: a scalar
+        // constant in int64 is not broadcastable against an int32 tensor on
+        // this SDK, and the graph compiler aborts on that mismatch.
+        MPSGraphTensor* diagonal_t =
+            mps::MpsConstant(graph, diagonal, at::kInt);
+        MPSGraphTensor* offset = diagonal_t == nil ? nil :
+            [graph broadcastTensor:diagonal_t
+                           toShape:shape
+                              name:nil];
+        MPSGraphTensor* lower =
+            [graph lessThanOrEqualToWithPrimaryTensor:difference
+                                      secondaryTensor:offset
+                                                 name:nil];
+        MPSGraphTensor* zero =
+            mps::MpsConstant(graph, 0, self_c.scalar_type());
+        if (lower == nil || zero == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:lower
+                            truePredicateTensor:args[0]
+                           falsePredicateTensor:zero
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), diagonal).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 # aten argmax takes the first maximum, with a later NaN replacing an earlier
 # one. MPSGraph's reduceArgMax tie rule is undocumented, so this graph compares
 # every position against a NaN-aware maximum and reduces the matching
@@ -1825,8 +2492,9 @@ at::Tensor {kernel}(
                         truePredicateTensor:positions_float
                        falsePredicateTensor:minus_one
                                        name:nil];
+        // The *first* NaN, because that is the index the reference names.
         MPSGraphTensor* has_nan =
-            [graph reductionMaximumWithTensor:nan_positions
+            [graph reductionMinimumWithTensor:nan_positions
                                          axis:axis
                                          name:nil];
         MPSGraphTensor* equals =
@@ -1838,15 +2506,25 @@ at::Tensor {kernel}(
             : [graph logicalANDWithPrimaryTensor:no_nan
                                  secondaryTensor:equals
                                             name:nil];
+        // `has_nan` is the *first* NaN's coordinate, and `>=` makes that
+        // coordinate a candidate. Both halves are needed: with a strict `>` against
+        // the last NaN, a slice whose only NaN sat at position 0 produced no
+        // candidate at all and the reduction answered `no_match`. The
+        // `reductionMinimum` below then takes the first candidate, which is the
+        // index the reference names.
         MPSGraphTensor* selected_nan =
-            [graph greaterThanWithPrimaryTensor:positions_float
-                                secondaryTensor:has_nan
-                                           name:nil];
+            [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
+                                        secondaryTensor:has_nan
+                                                   name:nil];
         MPSGraphTensor* matches =
             [graph selectWithPredicateTensor:nan
                         truePredicateTensor:selected_nan
                        falsePredicateTensor:finite
                                        name:nil];
+        // The value a non-matching position contributes. It is outside the range
+        // of a real index, so the `reductionMinimum` above ignores it while every
+        // position is considered, and the host-side check after the run turns any
+        // slice that is *all* marker into a reference call rather than an answer.
         MPSGraphTensor* no_match = mps::MpsConstant(
             graph, self_c.size(axis), at::ScalarType::Int);
         if (matches == nil || no_match == nil) {{
@@ -1871,6 +2549,16 @@ at::Tensor {kernel}(
   if (!ran) {{
     return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
   }}
+  // `size(axis)` is the graph's internal "no position matched" marker, not an
+  // answer the reference ever produces: a real index is in `[0, size(axis))`.
+  // If it reaches the output, the candidate set was wrong -- which is exactly
+  // what `argmax([nan, 1, 2])` used to return, as `3`. That value is a valid
+  // index on a longer slice, so returning it looks like an answer; a CPU round
+  // trip would hide the defect as a slow call. Raising names it instead.
+  TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
+              "argmax: the MPS graph produced no matching position along dim ",
+              axis, " for at least one element. This is a defect in the graph, "
+              "not in the input; please report it.");
   return selected;
 }}
 
@@ -2127,6 +2815,149 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # in float, hand back float -- and it is what the graph path does by widening
 # to `out_dtype`. The dtype gate above decides the widened result, so the two
 # paths agree on the answer for every width that reaches them.
+
+# `addmm` is the op `nn.Linear` actually reaches on this PyTorch build -- not
+# `mm`, which the stage-3 increment took first -- so it is the largest host
+# round-trip left in the gemm family. Measured on an M5 with a (2048, 2048)
+# float32 product, `torch.addmm(a, a, a)` cost 15.1 ms against 7.9 ms for
+# `torch.mm(a, a)` over the same operands, and the difference is the round-trip:
+# `mm` is served and `addmm` was not.
+#
+# The body is T_GEMM's with the bias folded in as two more nodes, so what is
+# worth recording is where it differs from that sibling rather than the product:
+#
+#   * **`alpha` and `beta` are host values the graph bakes in.** They scale the
+#     product and the bias respectively (`beta * input + alpha * (mat1 @ mat2)`),
+#     and neither is visible in any operand's dtype or shape, so both are in the
+#     plan key. A call that differed only in `alpha` would otherwise be answered
+#     by the graph the first call compiled -- a wrong answer, not a slow path.
+#   * **The bias broadcasts, and the product is rank-2.** aten's `addmm` takes
+#     only the 2-D `mat1`/`mat2` pair, so the product is `(M, N)` and the bias is
+#     broadcast onto it by the reference's own `infer_size`. The body asks
+#     `at::infer_size` for the result shape rather than restating the rule, and a
+#     bias that does not reach the product takes the round-trip and gets the
+#     reference's own message.
+#   * **`beta == 0` skips the bias entirely.** That is what the reference means
+#     by it -- the bias is not read -- so building the node anyway would read
+#     memory the reference does not and could turn a valid call into a decline on
+#     the bias's dtype.
+#
+# `alpha == 1` and `beta == 1` build no node at all, so the ordinary
+# `nn.Linear` path is the bare product plus the bias. The operands keep T_GEMM's
+# layout handling: `MpsGemmOperand` resolves each `mat` and carries the transpose
+# into the graph as a view rather than a copy.
+T_ADDMM = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    const at::Tensor& mat1,
+    const at::Tensor& mat2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {{
+  if (!mps::{supports}(mat1.scalar_type(), mat2.scalar_type())) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  // The bias takes the result's width and device. A bias of another float width
+  // or device is the reference's to promote rather than the graph's to coerce.
+  if (self.scalar_type() != mat1.scalar_type() ||
+      self.device() != mat1.device()) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  if (mat1.dim() != 2 || mat2.dim() != 2 ||
+      mat1.size(-1) != mat2.size(-2)) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  // The reference's own broadcast rule, asked rather than restated: a bias that
+  // does not reach (M, N) is an error, and `at::infer_size` is what says so.
+  std::vector<int64_t> out_shape;
+  try {{
+    out_shape = at::infer_size(self.sizes(), {{mat1.size(0), mat2.size(1)}});
+  }} catch (const std::exception&) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  at::Tensor out = at::empty(out_shape, mat1.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  if (mat1.numel() == 0 || mat2.numel() == 0) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  const mps::MpsGemmOperand mat1_operand = mps::MpsGemmOperandOf(mat1);
+  const mps::MpsGemmOperand mat2_operand = mps::MpsGemmOperandOf(mat2);
+  const bool mat1_transposed = mat1_operand.transposed;
+  const bool mat2_transposed = mat2_operand.transposed;
+  const bool folds_bias = !beta.equal(0);
+  const bool scales_product = !alpha.equal(1);
+  const bool scales_bias = folds_bias && !beta.equal(1);
+  const at::ScalarType dtype = mat1.scalar_type();
+  // Each operand reaches the graph at the shape its own buffer holds -- the
+  // operand itself, or its transpose view when `transposed` -- which is what
+  // MpsRunGraph describes. There is no shared "product shape": a transposed
+  // weight's buffer is (N, K) and the dense one's is (K, N), and describing
+  // both as (M, N) reads the wrong bytes.
+  std::vector<at::Tensor> inputs{{mat1_operand.buffer, mat2_operand.buffer}};
+  if (folds_bias) {{
+    inputs.push_back(self.contiguous());
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      inputs,
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        if (args.count != (folds_bias ? 3u : 2u)) {{
+          return nil;
+        }}
+        // MpsRunGraph describes every operand densely at the shape its buffer
+        // holds, so a transposed one carries its transpose as a node -- the
+        // layout T_GEMM resolves the same way.
+        MPSGraphTensor* primary = args[0];
+        MPSGraphTensor* secondary = args[1];
+        if (mat1_transposed) {{
+          primary =
+              [graph transposeTensor:primary dimension:0 withDimension:1 name:nil];
+        }}
+        if (mat2_transposed) {{
+          secondary =
+              [graph transposeTensor:secondary dimension:0 withDimension:1 name:nil];
+        }}
+        MPSGraphTensor* product =
+            [graph matrixMultiplicationWithPrimaryTensor:primary
+                                         secondaryTensor:secondary
+                                                    name:nil];
+        if (scales_product) {{
+          product = mps::MpsScaledByScalar(graph, product, alpha, dtype);
+          if (product == nil) {{
+            return nil;
+          }}
+        }}
+        if (!folds_bias) {{
+          return product;
+        }}
+        MPSGraphTensor* bias = args[2];
+        if (scales_bias) {{
+          bias = mps::MpsScaledByScalar(graph, bias, beta, dtype);
+          if (bias == nil) {{
+            return nil;
+          }}
+        }}
+        // The product is (M, N) and the bias is whatever aten broadcast to it;
+        // the node broadcasts the pair the way the reference did.
+        return [graph additionWithPrimaryTensor:product secondaryTensor:bias name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_SOFTMAX_BODY = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -2252,7 +3083,242 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # declined. That is what a per-category predicate is for. float64 has no
 # MPSGraph element type and the integral and bool widths are the reference's own
 # NotImplementedError, so those take the round-trip and get it.
-T_CONV = """\
+# The convolution backward. `convolution_overrideable` is served, and a
+# `PrivateUse1` forward has to register its own backward -- otherwise
+# `y.sum().backward()` on any convolution raises
+#   convolution_backward_overrideable: You are likely triggering this with tensor
+#   backend other than CPU
+# which is what a model trained on this backend hits, and it is a missing kernel
+# rather than a wrong gradient.
+#
+# The graph has both halves as nodes:
+#   convolution2DDataGradientWithIncomingGradientTensor:    -> grad_input
+#   convolution2DWeightsGradientWithIncomingGradientTensor: -> grad_weight
+# and the bias gradient is the incoming gradient summed over every axis but the
+# channel one, which a reduction node already expresses.
+#
+# The three results are optional -- `output_mask` says which the caller wants --
+# so a masked-out half is left undefined rather than computed and dropped.
+T_CONV_BACKWARD = """\\
+::std::tuple<at::Tensor, at::Tensor, at::Tensor> {kernel}(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    at::IntArrayRef stride,
+    at::IntArrayRef padding,
+    at::IntArrayRef dilation,
+    bool transposed,
+    at::IntArrayRef output_padding,
+    int64_t groups,
+    ::std::array<bool, 3> output_mask) {{
+  // The round-trip cannot re-enter `convolution_backward_overrideable`: that op
+  // is the overrideable contract, not an implementation, and it is unimplemented
+  // on CPU too (measured -- calling it on host tensors raises the same
+  // NotImplementedError). The real implementation is `convolution_backward`,
+  // which takes the forward bias *sizes* the overrideable form does not carry.
+  // A convolution with a bias therefore cannot be reversed exactly here, and the
+  // bias-gradient case is the one that needs its shape; without a bias the sizes
+  // list is empty and the call is exact.
+// `convolution_backward` expects one entry per output channel when a bias
+  // exists. `output_mask[2]` is the only signal this body gets about that, so a
+  // requested bias gradient is spelled with the weight's channel count.
+  std::vector<int64_t> bias_channels;
+  if (output_mask[2]) {{
+    bias_channels.push_back(weight.size(0));
+  }}
+  const auto fallback = [&]() {{
+    auto host = at::convolution_backward(
+        grad_output.cpu(), input.cpu(), weight.cpu(), bias_channels, stride,
+        padding, dilation, transposed, output_padding, groups, output_mask);
+    const auto move = [](const at::Tensor& t, at::Device device) {{
+      return t.defined() ? t.to(device) : t;
+    }};
+    return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+        move(std::get<0>(host), grad_output.device()),
+        move(std::get<1>(host), grad_output.device()),
+        move(std::get<2>(host), grad_output.device()));
+  }};
+  const int64_t dim = input.dim() - 2;
+  const size_t ndim = dim > 0 ? static_cast<size_t>(dim) : 0;
+  const bool padding_ok =
+      (dim == 1 && (padding.size() == 1 || padding.size() == 2)) ||
+      (dim > 1 && padding.size() == 2 * ndim);
+  // Only the 2-D data/weights gradient selectors exist; a 1-D convolution is
+  // folded into them the way the forward folds it, and a 3-D one takes the
+  // round-trip.
+  if (dim < 1 || dim > 2 || weight.dim() != input.dim() ||
+      stride.size() != ndim || !padding_ok || dilation.size() != ndim ||
+      groups < 1 || transposed || output_padding.size() != ndim) {{
+    return fallback();
+  }}
+  for (const int64_t entry : stride) {{
+    if (entry <= 0) {{
+      return fallback();
+    }}
+  }}
+  for (const int64_t entry : dilation) {{
+    if (entry <= 0) {{
+      return fallback();
+    }}
+  }}
+  for (const int64_t entry : output_padding) {{
+    if (entry != 0) {{
+      return fallback();
+    }}
+  }}
+  if (input.size(1) / groups != weight.size(1) ||
+      weight.size(0) % groups != 0) {{
+    return fallback();
+  }}
+  mps::MpsConvParams params;
+  std::vector<int64_t> out_shape;
+  if (!mps::MpsConvResolve(
+          input, weight, stride, padding, dilation, groups, &params, &out_shape)) {{
+    return fallback();
+  }}
+  at::Tensor grad_output_c = grad_output.contiguous();
+  at::Tensor input_c = input.contiguous();
+  at::Tensor weight_c = weight.contiguous();
+  if (grad_output_c.numel() == 0 || input_c.numel() == 0 ||
+      weight_c.numel() == 0) {{
+    return fallback();
+  }}
+  at::Tensor grad_input;
+  at::Tensor grad_weight;
+  at::Tensor grad_bias;
+
+  // Both halves are 2-D graph calls, so a 1-D convolution has the same trailing
+  // axis inserted that the forward inserts.
+  std::vector<int64_t> source_shape(input_c.sizes().vec());
+  std::vector<int64_t> weight_shape(weight_c.sizes().vec());
+  std::vector<int64_t> grad_shape(grad_output_c.sizes().vec());
+  if (dim == 1) {{
+    source_shape.insert(source_shape.end() - 1, 1);
+    weight_shape.insert(weight_shape.end() - 1, 1);
+    grad_shape.insert(grad_shape.end() - 1, 1);
+  }}
+
+  if (output_mask[0]) {{
+    at::Tensor out = at::empty(input_c.sizes(), input_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}.input", dim),
+        {{grad_output_c, weight_c}},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphObject* descriptor =
+              mps::MpsConvDescriptor(input_c.scalar_type(), 2, params);
+          if (descriptor == nil) {{
+            return nil;
+          }}
+          MPSGraphTensor* grad = args[0];
+          MPSGraphTensor* kernel = args[1];
+          if (dim == 1) {{
+            grad = mps::MpsReshape(graph, grad, grad_shape);
+            kernel = mps::MpsReshape(graph, kernel, weight_shape);
+            if (grad == nil || kernel == nil) {{
+              mps::MpsRelease(descriptor);
+              return nil;
+            }}
+          }}
+          MPSGraphTensor* y =
+              [graph convolution2DDataGradientWithIncomingGradientTensor:grad
+                                                    weightsTensor:kernel
+                                                      outputShape:mps::MpsAxesArray(source_shape)
+                                       forwardConvolutionDescriptor:
+                                           (MPSGraphConvolution2DOpDescriptor*)descriptor
+                                                             name:nil];
+          mps::MpsRelease(descriptor);
+          if (y == nil || dim != 1) {{
+            return y;
+          }}
+          return mps::MpsReshape(graph, y, input_c.sizes().vec());
+        }});
+    if (!ran) {{
+      return fallback();
+    }}
+    grad_input = out;
+  }}
+
+  if (output_mask[1]) {{
+    at::Tensor out = at::empty(weight_c.sizes(), weight_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}.weight", dim),
+        {{grad_output_c, input_c}},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphObject* descriptor =
+              mps::MpsConvDescriptor(input_c.scalar_type(), 2, params);
+          if (descriptor == nil) {{
+            return nil;
+          }}
+          MPSGraphTensor* grad = args[0];
+          MPSGraphTensor* source = args[1];
+          if (dim == 1) {{
+            grad = mps::MpsReshape(graph, grad, grad_shape);
+            source = mps::MpsReshape(graph, source, source_shape);
+            if (grad == nil || source == nil) {{
+              mps::MpsRelease(descriptor);
+              return nil;
+            }}
+          }}
+          MPSGraphTensor* y =
+              [graph convolution2DWeightsGradientWithIncomingGradientTensor:grad
+                                                             sourceTensor:source
+                                                              outputShape:mps::MpsAxesArray(weight_shape)
+                                              forwardConvolutionDescriptor:
+                                                  (MPSGraphConvolution2DOpDescriptor*)descriptor
+                                                                    name:nil];
+          mps::MpsRelease(descriptor);
+          if (y == nil || dim != 1) {{
+            return y;
+          }}
+          return mps::MpsReshape(graph, y, weight_c.sizes().vec());
+        }});
+    if (!ran) {{
+      return fallback();
+    }}
+    grad_weight = out;
+  }}
+
+  if (output_mask[2]) {{
+    // The bias gradient is the incoming gradient summed over batch and space.
+    std::vector<int64_t> axes;
+    axes.push_back(0);
+    std::vector<int64_t> reduced_shape(grad_output_c.sizes().vec());
+    reduced_shape[1] = 1;
+    for (int64_t d = 2; d < grad_output_c.dim(); ++d) {{
+      axes.push_back(d);
+      reduced_shape[d] = 1;
+    }}
+    at::Tensor out = at::empty(reduced_shape, grad_output_c.options());
+    const bool ran = mps::MpsRunGraph(
+        mps::MpsGraphKey("{op}.bias", dim),
+        {{grad_output_c}},
+        out,
+        ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+          MPSGraphTensor* y =
+              [graph reductionSumWithTensor:args[0]
+                                     axes:mps::MpsAxesArray(axes)
+                                     name:nil];
+          if (y == nil || dim != 1) {{
+            return y;
+          }}
+          return mps::MpsReshape(graph, y, reduced_shape);
+        }});
+    if (!ran) {{
+      return fallback();
+    }}
+    grad_bias = out.reshape({{weight_c.size(0)}});
+  }}
+
+  return ::std::tuple<at::Tensor, at::Tensor, at::Tensor>(
+      grad_input, grad_weight, grad_bias);
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+T_CONV = """\\
 at::Tensor {kernel}(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -3384,24 +4450,27 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # the one node.
 #
 # **The subnormal the graph does not keep.** This is the one measured difference
-# from the reference, and it is not a division property. Measured on an M5
-# through this backend: a subnormal *result* comes back as zero -- `1e-38 / 2`
-# is `5.0e-39` on the reference and `0` from the graph, while `2.35e-38 / 2` is
-# the normal `1.175494e-38` from both -- and the same through every spelling
-# (`div.Tensor` with a tensor or a folded constant, `div.Scalar`, and the
-# reciprocal, which returns `inf` for `1 / 1.17e-38` where the reference reaches
-# `8.5e37`). `mul.Tensor` flushes identically and has been routed to `mps` since
-# stage 2 (`1e-38 * 0.5` -> `0`), as does `add.Tensor` (`1e-39 + 1e-39` -> `0`).
-# So the choice here is "div behaves like the mul and add the branch already
-# serves" or "div is the only arithmetic op on the device with a different
-# subnormal policy from its siblings", and the first is both the smaller surprise
-# and the one already shipped. The gate does not pretend otherwise --
-# MpsSupportsDivDtype's note records the measurement and test_mps_div.py pins it
-# as intentional beside the `mul` case it shares -- so a future reader meets it
-# as a known property rather than by bisecting a model. Nothing in a
-# transformer's attention or normalization path evaluates a division whose result
-# is subnormal -- the values there are O(1) -- so this is a boundary the branch
-# documents rather than one it meets.
+# from the reference, and it is not a division property either way. Measured on
+# an M5 through this backend: a subnormal *result* comes back as zero --
+# `1e-38 / 2` is `5.0e-39` on the reference and `0` from the graph, while
+# `2.35e-38 / 2` is the normal `1.175494e-38` from both -- and the same through
+# every division spelling (`div.Tensor` with a tensor or a folded constant,
+# `div.Scalar`, and the reciprocal, which returns `inf` for `1 / 1.17e-38` where
+# the reference reaches `8.5e37`). An earlier version of this note recorded that
+# `mul.Tensor` and `add.Tensor` flushed identically; re-measured on the same
+# class of host, they do **not** -- the multiplicative and additive nodes keep
+# the subnormal (`1e-38 * 0.5` -> `5.0e-39`, `1e-39 + 1e-39` -> `2.0e-39`) --
+# and `aten::mul.Scalar`, which folds its constant through `constantWithScalar:`,
+# flushes where `mul.Tensor` over the same values does not. So the policy is a
+# property of the node body rather than of the platform, the two bodies of one
+# selector can disagree, and a test that pins one body's answer onto another's
+# is wrong rather than merely stale: test_mps_div.py now probes each body it
+# asserts. The gate does not pretend otherwise -- MpsSupportsDivDtype's note
+# records the measurement -- so a future reader meets it as a known property
+# rather than by bisecting a model. Nothing in a transformer's attention or
+# normalization path evaluates a division whose result is subnormal -- the
+# values there are O(1) -- so this is a boundary the branch documents rather
+# than one it meets.
 #
 # **The `mode` overloads are a different body, not a keyword.** `div.Tensor_mode`
 # and `div.Scalar_mode` carry a `rounding_mode` whose three values are `floor`,
@@ -4463,6 +5532,152 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 # selectors and contracts -- `atanh`'s domain is `|x| < 1`, which is not this
 # node's domain at all.
 
+# `atan` is one MPSGraph node and is otherwise the shared unary template, but it
+# needs one guard the rest of the trig family does not: measured on an M5,
+# `atanWithTensor:` answers `atan(-0.0)` with `+0.0` where the reference answers
+# `-0.0`. Every other spelling in the family keeps the sign (`asin`, `asinh`,
+# `atanh`, `sinh`), so this is a property of the node rather than of the width or
+# of the platform.
+#
+# The guard is the `tanh` one read in a different place: rather than selecting a
+# replacement value, it negates the result where the operand's sign bit is set
+# and the node's answer is zero. Negating a zero that should stay `+0.0` is
+# harmless -- `-0.0` and `+0.0` have the same value and the ternary selects only
+# where the reference itself wants the sign -- while leaving the wrong sign in
+# place is a wrong answer a value comparison cannot see.
+T_ATAN = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        MPSGraphTensor* atan = [graph {call}args[0] name:nil];
+        if (atan == nil) {{
+          return nil;
+        }}
+        // The node drops the sign of a zero operand: `atan(-0.0)` comes back
+        // `+0.0` where the reference keeps the sign bit, which is the one
+        // deviation of this body from `at::atan`. The node is right about every
+        // other operand, including every negative one, so the guard has to
+        // fire *only* where the operand is a zero carrying the sign -- a
+        // `signbit` alone would negate every negative answer.
+        MPSGraphTensor* negative_sign = [graph signbitWithTensor:args[0] name:nil];
+        MPSGraphTensor* is_zero =
+            [graph equalWithPrimaryTensor:args[0]
+                          secondaryTensor:[graph constantWithScalar:0.0
+                                                           dataType:args[0].dataType]
+                                     name:nil];
+        if (negative_sign == nil || is_zero == nil) {{
+          return nil;
+        }}
+        MPSGraphTensor* signed_zero =
+            [graph logicalANDWithPrimaryTensor:negative_sign
+                               secondaryTensor:is_zero
+                                          name:nil];
+        MPSGraphTensor* negated = [graph negativeWithTensor:atan name:nil];
+        if (signed_zero == nil || negated == nil) {{
+          return nil;
+        }}
+        return [graph selectWithPredicateTensor:signed_zero
+                            truePredicateTensor:negated
+                           falsePredicateTensor:atan
+                                           name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+# The unary predicates answer a bool tensor, so unlike the `unary` template they
+# allocate the result in bool and hand the graph a node whose operand keeps the
+# input's width. `isnan`, `isinf` and `signbit` are one node each.
+#
+# `isneginf` and `isposinf` are not: MPSGraph has `isInfiniteWithTensor:` and
+# `signbitWithTensor:` and nothing that combines them, so those two compose the
+# pair with a logical AND. Measured against the reference over `+-inf`, a finite
+# value and `+-0.0`, the composition is exact -- an infinity has no mantissa to
+# compare and the sign bit is the same bit the reference reads.
+#
+# -0.0 is where a wrong composition would hide: `isneginf(-0.0)` is false on the
+# reference even though the sign bit is set, because the value is not infinite.
+# The AND of the two nodes answers false for exactly that reason, which is why
+# the two-node form is correct rather than merely close.
+T_PREDICATE = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options().dtype(at::kBool));
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        {body}
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
+# `trunc` is the rounding spelling that needs a guard. Measured on an M5,
+# `truncateWithTensor:` over a rank-0 operand does not decline: MPSGraph fails its
+# own MLIR pass (`failed assertion 'Error: MLIR pass manager failed'`) and aborts
+# the process, where `ceilWithTensor:` and `floorWithTensor:` answer the same
+# shape correctly. So a rank-0 operand takes the reference, which is one element
+# on the host, and every other shape uses the node.
+T_TRUNC = """\
+at::Tensor {kernel}(const at::Tensor& self) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  if (self.dim() == 0) {{
+    // The node aborts on a rank-0 operand rather than declining -- see the note
+    // above -- and a one-element answer is free on the host.
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  at::Tensor out = at::empty(self_c.sizes(), self_c.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph {call}args[0] name:nil];
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu()).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_TANH = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
@@ -4735,6 +5950,51 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
+# The product counterpart of T_CUMSUM, and nearly the same body. Two things
+# differ: the selector is `cumulativeProductWithTensor:axis:name:`, which takes no
+# `exclusive:`/`reverse:` pair where the sum node has one (measured), and the
+# round-trip calls `at::cumprod`. Those two are why this is a separate template
+# rather than T_CUMSUM with a parameter.
+T_CUMPROD = """\
+at::Tensor {kernel}(
+    const at::Tensor& self,
+    int64_t dim,
+    std::optional<at::ScalarType> dtype) {{
+  if (!mps::{supports}(self.scalar_type(), dtype)) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  const at::ScalarType result_dtype = dtype.value_or(self.scalar_type());
+  int64_t axis = 0;
+  if (!mps::MpsCumsumAxis(self, dim, &axis)) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  at::Tensor self_c = self.contiguous();
+  if (self_c.numel() == 0) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  if (result_dtype != self_c.scalar_type()) {{
+    self_c = self_c.to(result_dtype);
+  }}
+  at::Tensor out = at::empty(
+      self_c.sizes(), self_c.options().dtype(result_dtype));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{self_c}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+        return [graph cumulativeProductWithTensor:args[0]
+                                               axis:axis
+                                               name:nil];
+      }});
+  if (!ran) {{
+    return at::cumprod(self.cpu(), dim, dtype).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 # Softplus is `x / beta` when `beta * x > threshold`, and
 # `log1p(exp(beta * x)) / beta` otherwise. MPSGraph's `softPlusWithTensor:` uses
 # its own fixed parameters, so the body represents ATen's two scalar arguments
@@ -4945,6 +6205,46 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
+# The activation family takes no host value for `relu` and one `float` for the
+# other two. Each body is one node:
+#
+# * `relu` has no selector of its own. It is the clamp node at a zero lower bound
+#   with no upper bound -- the same node `T_CLAMP` builds -- so it reuses that
+#   shape rather than inventing one.
+# * `leaky_relu` and `elu` take their `negative_slope` / `alpha` as a plain
+#   `float`, not a tensor, so the value is a C++ parameter of the body and has to
+#   be folded into the plan key: two slopes describe two graphs.
+#
+# The signed zero is the edge this family shares with `clamp`. `relu(-0.0)` is
+# `-0.0` on the reference, and a body that answered `+0.0` would pass an equality
+# check; the cases pin the sign bit instead.
+T_ACTIVATION = """\
+at::Tensor {kernel}(
+    const at::Tensor& self{params}) {{
+  if (!mps::{supports}(self.scalar_type())) {{
+    return at::{at_op}(self.cpu(){args}).to(self.device());
+  }}
+  at::Tensor input = self.contiguous();
+  at::Tensor out = at::empty(input.sizes(), input.options());
+  if (out.numel() == 0) {{
+    return out;
+  }}
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("{op}"{key_parts}),
+      {{input}},
+      out,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
+{body}
+      }});
+  if (!ran) {{
+    return at::{at_op}(self.cpu(){args}).to(self.device());
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
+"""
+
 T_CLAMP = """\\
 at::Tensor {kernel}(
     const at::Tensor& self,
@@ -4964,7 +6264,7 @@ at::Tensor {kernel}(
     return host.to(self.device());
   }}
   const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("{op}"),
+      mps::MpsGraphKey("{op}"{key_parts}),
       {{input}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
@@ -4975,8 +6275,15 @@ at::Tensor {kernel}(
           if (lower == nil) {{
             return nil;
           }}
+          // Broadcast to the operand's own shape, not to its element count.
+          // Measured: broadcasting a 0-d constant to `numel()` and then asking
+          // `mps.maximum` to combine it with an N-D operand aborts the graph
+          // (`mps.maximum op requires the same element type ... (tensor<2x2xsi64>,
+          // tensor<4xsi64>)`), and on an integral operand it takes the process
+          // with it. The float path hid this because its element type matched
+          // anyway; the shape did not.
           lower = [graph broadcastTensor:lower
-                                 toShape:mps::MpsFlatShape(input.numel())
+                                 toShape:args[0].shape
                                     name:nil];
           value = [graph maximumWithPrimaryTensor:value
                                  secondaryTensor:lower
@@ -4989,11 +6296,31 @@ at::Tensor {kernel}(
             return nil;
           }}
           upper = [graph broadcastTensor:upper
-                                 toShape:mps::MpsFlatShape(input.numel())
+                                 toShape:args[0].shape
                                     name:nil];
           value = [graph minimumWithPrimaryTensor:value
                                  secondaryTensor:upper
                                             name:nil];
+        }}
+        // A NaN operand comes back as a bound, where the reference propagates
+        // it -- measured, `clamp([nan, -3, 3], -1, 1)` answers [-1.0, -1.0, 1.0]
+        // without a guard. The one-sided `clamp_min`/`clamp_max` paths are
+        // separate kernels and already propagate, which is why this only shows
+        // through the two-bound form.
+        //
+        // The guard is floating-point only: `isNaNWithTensor:` over an integral
+        // operand does not decline, it raises `object cannot be nil (key:
+        // isNaN_i8)` from inside MPSGraph and aborts the process. An integral
+        // operand has no NaN to propagate, so there is nothing to guard.
+        if (!c10::isIntegralType(self.scalar_type(), /*includeBool=*/false)) {{
+          MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+          if (nan == nil) {{
+            return nil;
+          }}
+          value = [graph selectWithPredicateTensor:nan
+                               truePredicateTensor:args[0]
+                              falsePredicateTensor:value
+                                              name:nil];
         }}
         return value;
       }});
@@ -5098,26 +6425,41 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 CATEGORIES = {
+    # The rounding spellings share the unary body: dtype-preserving, one node.
+    "rounding": T_UNARY,
+    # trunc alone needs the rank-0 guard: see T_TRUNC.
+    "trunc": T_TRUNC,
+    # The predicates answer bool and isneginf/isposinf compose two nodes.
+    "predicate": T_PREDICATE,
+    "atan": T_ATAN,
     "unary": T_UNARY,
     "trig": T_UNARY,
     "binary": T_BINARY,
+    "nan_propagating": T_NAN_PROPAGATING,
     "rsub_scalar": T_RSUB_SCALAR,
     "binary_scalar": T_SCALAR,
     "reduce": T_REDUCE,
+    "reduce_intlist": T_REDUCE_INTLIST,
+    "reduce_dim": T_REDUCE_DIM,
     "all": T_ALL,
     "all_dim": T_ALL_DIM,
     "all_dims": T_ALL_DIMS,
     "triu": T_TRIU,
+    "tril": T_TRIL,
     "argmax": T_ARGMAX,
     "SOLVE_TRIANGULAR": T_SOLVE_TRIANGULAR,
     "index": T_INDEX,
     "cumsum": T_CUMSUM,
+    "cumprod": T_CUMPROD,
     "softplus": T_SOFTPLUS,
     "gemm": T_GEMM,
+    "addmm": T_ADDMM,
     "softmax": T_SOFTMAX_BODY,
     "pow_scalar": T_POW,
     "conv": T_CONV,
+    "conv_backward": T_CONV_BACKWARD,
     "silu": T_SILU,
+    "activation": T_ACTIVATION,
     "silu_backward": T_SILU_BACKWARD,
     "sigmoid": T_SIGMOID,
     "exp": T_EXP,
@@ -5321,6 +6663,12 @@ def render():
                 supports=SUPPORTS[category],
                 call=CALLS[op],
                 rank=RANK.get(op, 0),
+                body=(
+                    PREDICATE_BODIES.get(op)
+                    or ACTIVATION_BODIES.get(op, {}).get("body", "")
+                ),
+                params=ACTIVATION_BODIES.get(op, {}).get("params", ""),
+                args=ACTIVATION_BODIES.get(op, {}).get("args", ""),
                 alpha_param=alpha_param,
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,

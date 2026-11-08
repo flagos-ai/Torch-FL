@@ -17,6 +17,20 @@ import pytest
 pytest_plugins = ("profiler_support", "amp_support")
 
 
+def _require_flagos_device(is_available, init):
+    """Check and initialize the runtime behind the device these cases use."""
+    if not is_available():
+        raise pytest.UsageError("flagos device is not available for flagos:0.")
+    init()
+
+
+def _initialize_flagos_device():
+    """Prepare flagos:0 without letting its default device pick the outcome."""
+    import torch_fl
+
+    _require_flagos_device(torch_fl.flagos.is_available, torch_fl.flagos.init)
+
+
 # Backend config selection moved fully into torch_fl._select_backend_config(),
 # which reads the build record (the recorded accelerator + the lib/flagos_platform
 # marker) and picks backends_<platform>.conf. conftest no longer pre-empts it: a MetaX
@@ -67,6 +81,10 @@ def pytest_configure(config):
     # (test_comm_native_bridge.py) needs it registered here as well: ops/conftest
     # is loaded only when something under ops/ is collected.
     config.addinivalue_line("markers", "dcu: requires Hygon DCU hardware")
+    config.addinivalue_line(
+        "markers",
+        "flaggems_python: requires the FlagGems Python wrapper backend",
+    )
     # The multi-device contract files sit at the top level of tests/integration/,
     # where nothing sweeps by default: every manifest names what it runs, so a
     # file added there is picked up by no CI job (issue #391). They are selected
@@ -116,10 +134,13 @@ def pytest_configure(config):
         "markers", "amp_grad_scaler: requires the GradScaler unscale/update routes"
     )
 
-    import torch_fl
-
-    if not torch_fl.flagos.is_available():
-        pytest.exit("flagos device is not available.")
-
-    # Initialize flagos device to ensure ACL runtime is properly set up
-    torch_fl.flagos.init()
+    # Collection runs before this hook, so this check cannot change the node-id
+    # set. A failed setup is an explicit collection error; it is never a skip.
+    try:
+        _initialize_flagos_device()
+    except pytest.UsageError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- pytest reports setup failure
+        raise pytest.UsageError(
+            f"flagos integration setup failed for flagos:0: {type(exc).__name__}: {exc}"
+        ) from exc

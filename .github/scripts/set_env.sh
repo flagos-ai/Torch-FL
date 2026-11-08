@@ -79,14 +79,16 @@ export PIP_RETRY_NO_CACHE=0
 # shellcheck source=.github/version-pins.env
 source "${REPO_ROOT}/.github/version-pins.env"
 
+# Reaching a host around the runner's HTTP proxy (prefer_direct_route). Shared
+# with the release upload step, which hits the same Nexus host from the same pod.
+# Sourced before set_env_common.sh because install_flagtree/install_flag_gems
+# call prefer_direct_route on every platform's FlagTree and FlagGems index.
+# shellcheck source=.github/scripts/lib/proxy_route.sh
+source "${REPO_ROOT}/.github/scripts/lib/proxy_route.sh"
+
 # Shared helpers and provisioning phases.
 # shellcheck source=.github/scripts/lib/set_env_common.sh
 source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
-
-# Reaching a host around the runner's HTTP proxy (prefer_direct_route). Shared
-# with the release upload step, which hits the same Nexus host from the same pod.
-# shellcheck source=.github/scripts/lib/proxy_route.sh
-source "${REPO_ROOT}/.github/scripts/lib/proxy_route.sh"
 
 # pip constraints for the provisioning venvs: the transitive pulls the pin table
 # cannot reach. Exported so every pip install in the platform hook honours it.

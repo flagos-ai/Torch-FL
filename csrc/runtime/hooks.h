@@ -13,7 +13,8 @@
 #include <c10/core/Device.h>
 
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_MPS)
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_MPS) && \
+    !defined(USE_CAMBRICON)
 #include <cuda_runtime.h>
 #endif
 #if defined(USE_MUSA)
@@ -96,7 +97,7 @@ struct HooksInterface : public at::PrivateUse1HooksInterface {
       musaGetLastError();
     }
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_BPU) && !defined(USE_MPS)
+    !defined(USE_BPU) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
     // Fallback: check if it's CUDA pinned memory
     // This is needed because when CUDA is present, PyTorch's pinned memory
     // allocator defaults to CUDA's cudaMallocHost, which won't be in flagos's

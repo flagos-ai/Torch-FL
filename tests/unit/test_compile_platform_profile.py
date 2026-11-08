@@ -26,6 +26,7 @@ tests/integration/test_compile.py.
 
 import functools
 
+import types
 import pytest
 
 import torch
@@ -152,6 +153,24 @@ def as_tsingmicro(monkeypatch):
             raising=False,
         )
     monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "tsingmicro")
+    # Triton's driver resolution reaches a real device on whichever accelerator
+    # this suite happens to run on, and on Cambricon that loads the mlu driver --
+    # which recompiles and reloads bang_utils and kills the process, so an
+    # exception cannot be caught. The profile is forced here, so stand in a
+    # driver that matches it: a fake target is what a forced profile implies, and
+    # it keeps the test independent of the hardware it runs on.
+    import triton.runtime as triton_runtime
+
+    fake_driver = types.SimpleNamespace(
+        get_current_target=lambda: types.SimpleNamespace(
+            backend="txda", arch=1, warp_size=16
+        )
+    )
+    # Replace the exported driver object instead of accessing lazy properties
+    # or depending on a vendor build's private DriverConfig fields.
+    monkeypatch.setattr(
+        triton_runtime, "driver", types.SimpleNamespace(active=fake_driver)
+    )
     return pp._TSINGMICRO_PROFILE
 
 
@@ -170,6 +189,7 @@ def as_tsingmicro(monkeypatch):
         ("kunlunxin", pp._KUNLUNXIN_PROFILE),
         ("iluvatar", pp._ILUVATAR_PROFILE),
         ("tsingmicro", pp._TSINGMICRO_PROFILE),
+        ("cambricon", pp._CAMBRICON_PROFILE),
         ("cuda", pp._CUDA_PROFILE),
         ("ppu", pp._CUDA_PROFILE),
         ("", pp._CUDA_PROFILE),
@@ -205,8 +225,30 @@ def test_only_ascend_is_not_cuda_like():
     assert pp._DCU_PROFILE.is_cuda_like
     # The vendors with no CUDA runtime at all. Asserted together so adding one
     # to _PROFILES without a profile that says so fails here.
-    for name in ("musa", "gcu", "kunlunxin", "tsingmicro"):
+    for name in ("musa", "gcu", "kunlunxin", "tsingmicro", "cambricon"):
         assert not getattr(pp, f"_{name.upper()}_PROFILE").is_cuda_like, name
+
+
+@pytest.mark.anyplatform
+def test_cambricon_target_and_package_key_are_the_same_name():
+    """MLU's Triton wheel registers one backend, under the name "mlu".
+
+    Measured on an MLU590 with the lane's ``triton 3.4.0+mlu2.0.3``:
+    ``driver.active.get_current_target()`` reports
+    ``GPUTarget(backend='mlu', arch=592, warp_size=0)`` and
+    ``triton.backends.backends`` has the single key ``['mlu']``. Unlike Ascend
+    and TsingMicro the two names therefore coincide -- asserted rather than
+    assumed, because a lane that starts spelling them differently would break
+    the toolchain probe without breaking anything visible.
+
+    The build links the CPU torch wheel, so ``is_cuda_like`` is false: there is
+    no ``torch._C._cuda_getCurrentRawStream`` to read a stream from.
+    """
+    profile = pp._CAMBRICON_PROFILE
+    assert profile.triton_device_type == "mlu"
+    assert profile.triton_backend_key == "mlu"
+    assert profile.vendor == "cambricon"
+    assert profile.is_cuda_like is False
 
 
 @pytest.mark.anyplatform
@@ -649,6 +691,7 @@ def _capture_registrations(di, monkeypatch):
         "_repair_stock_cuda_interface",
         "_patch_joint_graph_pattern_init",
         "_patch_benchmarker",
+        "_patch_triton_warp_size",
         "_prime_has_triton",
     ):
         monkeypatch.setattr(di, name, lambda: None, raising=False)
@@ -1215,23 +1258,13 @@ def test_triton_warp_size_patch_uses_the_driver_on_tsingmicro(
     ``warp_size=32`` while ``driver.active.get_current_target()`` reported 16 --
     wrong-but-running, so it mis-shapes the kernel instead of failing.
     """
-    import types
-
     from torch._inductor.runtime import triton_heuristics
-    from triton.runtime import driver as triton_driver
     from torch_fl.compile import device_interface as di
 
-    # `driver.active` is a read-only property over `_active`, so seed the slot it
-    # reads; monkeypatch restores whatever was there.
-    monkeypatch.setattr(
-        triton_driver,
-        "_active",
-        types.SimpleNamespace(
-            get_current_target=lambda: types.SimpleNamespace(
-                backend="txda", arch=1, warp_size=16
-            )
-        ),
-    )
+    # as_tsingmicro already supplies a fake public driver.active. Do not patch
+    # a private _active slot: vendor Triton builds need not expose that slot.
+    # Register restoration of the heuristic that production code replaces.
+    monkeypatch.setattr(triton_heuristics, "cc_warp_size", lambda cc: 32)
 
     di._patch_triton_warp_size()
 
@@ -1506,10 +1539,13 @@ def _run_threads_pin(monkeypatch, *, backend, env=None, threads=32):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: backend
     )
-    monkeypatch.setattr(inductor_config, "compile_threads", threads)
-
-    applied = inductor_backend.pin_compile_threads()
-    return applied, inductor_config.compile_threads
+    # ConfigModule values are dynamic, not module __dict__ entries. pytest 9.2
+    # snapshots non-descriptor attributes from __dict__, so teardown would
+    # delete this setting and poison subsequent tests. Use config.patch, which
+    # restores the config's actual prior state even if the pin mutates it.
+    with inductor_config.patch(compile_threads=threads):
+        applied = inductor_backend.pin_compile_threads()
+        return applied, inductor_config.compile_threads
 
 
 @pytest.mark.anyplatform

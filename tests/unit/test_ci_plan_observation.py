@@ -167,6 +167,7 @@ def test_observation_preserves_the_router_matrix(
         "lint",
         "agnostic-checks",
         "codegen-checks",
+        "case-gap-issues",
         "discover-platforms",
     ]
 

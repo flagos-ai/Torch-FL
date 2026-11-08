@@ -284,6 +284,15 @@ def _load_loaded_libtorch_fl(lib_path):
     return ctypes.CDLL(lib_path)
 
 
+@pytest.mark.skipif(
+    torch_fl._build_accelerator()
+    not in ("", "cuda", "metax", "dcu", "musa", "ascend", "gcu"),
+    reason="the op<->kernel correlation bridge is driven by a device tracer, and "
+    "this accelerator compiles the unavailable one (csrc/profiler/, see "
+    "tests/unit/test_device_tracer_selection.py): with no activity API to hook, "
+    "pushCorrelationId has nothing to call it and a zero count is the documented "
+    "behavior rather than a regression",
+)
 def test_stage_b_correlation_or_degrade():
     """Stage B correlation test: verify pushCorrelationId/popCorrelationId are
     called when profiling PrivateUse1 activities.

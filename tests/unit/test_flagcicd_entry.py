@@ -1116,6 +1116,7 @@ def test_real_execution_through_both_workflow_gates(tmp_path, entry, scenario):
             "lint",
             "agnostic-checks",
             "codegen-checks",
+            "case-gap-issues",
             "discover-platforms",
         ]
         results = {

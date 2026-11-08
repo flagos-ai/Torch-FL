@@ -17,6 +17,7 @@ import functools
 import os
 import re
 import sys
+import types
 
 # Single access point for every FLAGOS_* variable (see torch_fl/_env.py). Imported
 # for its side effect as well: it scans the environment once and warns about a
@@ -26,6 +27,23 @@ import sys
 from torch_fl import _env  # noqa: F401
 from torch_fl import _platform
 from torch_fl import _vendor
+
+
+# The answer is fixed for the life of the process: a different wheel is a
+# different process, and nothing in this one can swap _build_config.py out from
+# under it. Reading it is not cheap, though -- find_spec, a Path.resolve (a
+# realpath syscall) and an exec_module -- and _remap asks for it on every call
+# that carries a device argument, which is every factory call in a model.
+# Measured on an MLU590 with no cache: torch.device("flagos:0") took 197us and
+# torch.empty(4, device=...) 207.5us, against 2us and 6.8us with it.
+#
+# The memo lives here rather than in _platform.build_accelerator() on purpose.
+# The integration test trees load _platform.py by path -- under their own module
+# names, and not through sys.modules -- to stand in for "a process running a
+# different wheel", and a memo inside _platform would follow them across the
+# swap and answer with the previous test's platform. Here, only the alias the
+# runtime itself calls is memoised and those callers keep reading through.
+_ACCELERATOR = (None, "")
 
 
 def _build_accelerator() -> str:
@@ -39,8 +57,22 @@ def _build_accelerator() -> str:
     own. A stale FLAGOS_ACCELERATOR from another build must not select a conf the
     wheel was not built for; to route through a different conf on purpose,
     FLAGOS_BACKEND_CONFIG names the file directly.
+
+    Memoised after the first call; see _ACCELERATOR.
     """
-    return _platform.build_accelerator()
+    global _ACCELERATOR
+    # Keyed on the delegate's identity, not on nothing. In a real process
+    # _platform.build_accelerator is the same function object for the life of the
+    # runtime and this is a hit every time. A test that pins a different record
+    # replaces that attribute on the module (tests/unit/test_ascend_platform_marker.py
+    # does exactly this), which makes the identity differ and re-reads -- so the
+    # memo cannot shadow a monkeypatched source.
+    source = _platform.build_accelerator
+    if _ACCELERATOR[0] is source:
+        return _ACCELERATOR[1]
+    value = source()
+    _ACCELERATOR = (source, value)
+    return value
 
 
 def _is_ppu_build() -> bool:
@@ -804,8 +836,27 @@ def _install_tsingmicro_flaggems_compat() -> None:
 _registered_ops = []
 
 
+def _is_philox_binding(func) -> bool:
+    """Is ``func`` the bridge's patched seed function, from any torch_fl copy?"""
+    handle = getattr(func, "__self__", None)
+    return isinstance(handle, types.SimpleNamespace) and hasattr(handle, "philox")
+
+
+def _philox_rebind(mod, patched, orig) -> None:
+    """Point one module's import-time copy at `patched`; never raise."""
+    try:
+        namespace = vars(mod)
+        if namespace.get("philox_backend_seed_offset") is orig:
+            namespace["philox_backend_seed_offset"] = patched
+    except Exception:
+        pass
+
+
+_PHILOX_REBIND = None
+
+
 def _patch_flaggems_philox():
-    """Route MUSA FlagGems RNG reservations through the flagos generator.
+    """Route MUSA/Cambricon FlagGems RNG reservations through the flagos generator.
 
     Native muRAND/mudnn kernels and this bridge both consume one 64-bit seed per
     stochastic operation from the selected PrivateUse1 generator. FlagGems then
@@ -814,10 +865,18 @@ def _patch_flaggems_philox():
     deterministic without maintaining a second CUDA-style generator state.
     """
     if (
-        _build_accelerator() not in ("mthreads", "tsingmicro")
+        _build_accelerator() not in ("mthreads", "tsingmicro", "cambricon")
         or not _conf_routes_to_flaggems()
     ):
         return
+
+    # The bridge as installed in this interpreter, whichever `torch_fl` copy
+    # installed it: the handle below, which carries the patched seed function
+    # and the sweep that binds it. Reset here so a previous call cannot be
+    # adopted by this one.
+    global _PHILOX_BINDING, _PHILOX_REBIND
+    _PHILOX_BINDING = None
+    _PHILOX_REBIND = None
 
     try:
         # Import the *package* first, then the submodule. ``flag_gems.utils.
@@ -842,6 +901,8 @@ def _patch_flaggems_philox():
         from flag_gems.utils import random_utils
 
         _orig = random_utils.philox_backend_seed_offset
+
+        _rebind = _philox_rebind
 
         def _patched(increment, generator=None):
             if generator is None:
@@ -870,7 +931,24 @@ def _patch_flaggems_philox():
         # module it fails to reach still falls back to this one through
         # `random_utils`, so the bridge must never be skipped because the sweep
         # was interrupted.
-        random_utils.philox_backend_seed_offset = _patched
+        #
+        # Another copy of torch_fl in this interpreter (the installed package
+        # beside a tree on PYTHONPATH — `tests/unit/conftest.py` restores the
+        # backend config path for the same split) has already bound the bridge
+        # here. Adopt its function rather than bind this copy's: it closes over
+        # that copy's `_reserve_rng_seed`, and binding it costs the first copy
+        # its sweep targets. Either way the module must end up bound to the
+        # bridge, since a previous test may have put its fake back.
+        handle = None
+        current = random_utils.philox_backend_seed_offset
+        if current is not _orig:
+            if not _is_philox_binding(current):
+                return
+            handle = current.__self__
+        elif handle is None:
+            handle = types.SimpleNamespace(philox=_patched, rebind=_rebind)
+            _PHILOX_BINDING = handle
+        random_utils.philox_backend_seed_offset = handle.philox
 
         # RNG modules bind this function with ``from ... import`` at import time,
         # so update every already-loaded copy as well as the canonical module.
@@ -896,14 +974,18 @@ def _patch_flaggems_philox():
         # completes, while a pytest process that imported transformers first does
         # and the sweep used to die at the first of them, leaving every
         # ``randn``/``rand``/``randperm`` on the failure path above.
+        #
+        #
+        # FlagGems re-imports op modules under the dispatcher's name during
+        # `_register_flaggems_operators()`, after this runs: `_mthreads.ops.
+        # randn` and `flag_gems.runtime.backend._mthreads.ops.randn` are two
+        # module objects with their own `from ... import`. Those are swept by
+        # `_sweep_philox_after_imports()` at the end of that phase.
         for mod in list(sys.modules.values()):
-            try:
-                namespace = vars(mod)
-                if namespace.get("philox_backend_seed_offset") is not _orig:
-                    continue
-                namespace["philox_backend_seed_offset"] = _patched
-            except Exception:
-                continue
+            _rebind(mod, handle.philox, _orig)
+        # Read back by `_sweep_philox_after_imports`, once registration has
+        # imported the dispatcher's copies of the op modules.
+        _PHILOX_REBIND = (handle.philox, _orig)
     except Exception:
         # FlagGems remains optional; native MUSA kernels stay available.
         pass
@@ -1234,6 +1316,26 @@ def _patch_flaggems_codegen_config():
         patch_diffusers_qwenimage_rope()
         return
 
+    # --- Cambricon MLU branch (vendor-native, FlagGems through a shim) ---
+    # Keyed on the build accelerator like MUSA/Kunlunxin. The wheel runs on the
+    # stock torch+cpu; torch_mlu is deliberately not installed, so nothing in the
+    # process publishes torch.mlu for FlagGems' cambricon backend or for the
+    # Triton mlu driver underneath it. install_cambricon_compat() synthesizes
+    # that surface from torch_fl.flagos -- the TsingMicro shim's pattern applied
+    # to a vendor whose plugin cannot be loaded at all.
+    #
+    # Returning here also keeps the generic NVIDIA branch below from claiming the
+    # platform: flagos tensors live in cnrt memory, so the CUDA shim would
+    # install CUDA-backed generators for them.
+    if _build_accelerator() == "cambricon":
+        from torch_fl.accelerator.cambricon._cambricon_compat import (
+            install_cambricon_compat,
+        )
+
+        install_cambricon_compat()
+        _env.set_foreign("GEMS_VENDOR", "cambricon")
+        return
+
     # --- Iluvatar branch ---
     # Keyed on the build accelerator for the same reason as DCU: the vendor torch
     # is a real CUDA build over corex's CUDA-shaped runtime, so
@@ -1556,9 +1658,21 @@ _cuda_alias_active = False
 #              hint manager, so leaving "txda" out does not merely mistype a
 #              tensor: `import flag_gems` raises and every flaggems-routed op
 #              on TsingMicro is unreachable.
+#   cambricon  Triton's mlu driver builds its autotune scratch as
+#              torch.empty(..., device='mlu') and reports the device interface
+#              as torch.device("mlu", torch.mlu.current_device())
+#              (triton/backends/mlu/driver.py). torch_mlu would have registered
+#              the name; this build does not install torch_mlu, so the alias is
+#              what keeps the benchmark step of every autotuned FlagGems kernel
+#              from dying with "Expected one of cpu, cuda, ... device type at
+#              start of device string: mlu". Deliberately NOT "cuda": MLU has no
+#              CUDA runtime, and a flagos tensor here is cnrt memory, so
+#              reinterpreting a device string as CUDA would be wrong rather than
+#              merely unhelpful.
 _VENDOR_DEVICE_ALIASES = {
     "mthreads": ("cuda", "musa"),
     "tsingmicro": ("cuda", "txda"),
+    "cambricon": ("mlu",),
 }
 
 # The CUDA probe as it stands when the alias decision is made: torch's own
@@ -1882,9 +1996,82 @@ def is_flaggems_enabled():
     return len(_registered_ops) > 0
 
 
+def fused_kernels_available(device=None) -> bool:
+    """Whether a fused Triton kernel can be compiled for this device.
+
+    The predicate dispatch code should gate on instead of ``tensor.is_cuda``.
+    ``is_cuda`` is False on flagos, so a caller choosing between
+    ``torch.compile(flex_attention)`` and eager ``flex_attention`` by hand takes
+    the eager branch and silently materializes the full scores matrix -- correct,
+    and several times slower (issue #515).
+
+    This asks the question the caller means: can inductor generate a Triton
+    kernel for a tensor on this device, here, now. It is deliberately *not*
+    ``optional_integration_status()["compile"] == "active"``: that state records
+    only that the backend-registration imports succeeded, and nothing on that
+    path probes Triton, so it reports ``active`` on a build whose vendor Triton
+    backend is missing. ``raise_if_triton_unavailable`` is the honest check --
+    it applies the CUDA compute-capability floor where one applies and otherwise
+    lets the vendor backend decide -- so that is what runs here, with its
+    exception turned into the boolean a branch needs.
+
+    A False answer is a statement about this build and device, not about the
+    operator: the eager path still computes the right result.
+    """
+    if _optional_integration_state.get("compile") != "active":
+        return False
+    try:
+        from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+        if not FlagOSDeviceInterface.is_available():
+            return False
+        FlagOSDeviceInterface.raise_if_triton_unavailable(device)
+    except Exception:  # noqa: BLE001 - any failure to prove it means "no"
+        return False
+    return True
+
+
+def device_capabilities(device=None) -> dict:
+    """Capability flags for this build, for code that cannot import torch_fl APIs.
+
+    One dict so a downstream framework can read every gate it needs in a single
+    call, rather than discovering one predicate at a time. Keys are stable; new
+    ones may be added, so read by key and do not unpack.
+    """
+    return {
+        "compile": _optional_integration_state.get("compile") == "active",
+        "fused_kernels": fused_kernels_available(device),
+        "fused_attention": (
+            fused_kernels_available(device)
+            and _optional_integration_state.get("flex_attention") == "active"
+        ),
+        "flaggems": is_flaggems_enabled(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Distributed: register "flagos" ProcessGroup backend for privateuseone
 # ---------------------------------------------------------------------------
+
+
+def _sweep_philox_after_imports() -> None:
+    """Re-bind the RNG seed function in modules registration imported late.
+
+    `_patch_flaggems_philox` replaces `philox_backend_seed_offset` in every
+    module loaded at that point. `_register_flaggems_operators` then imports
+    each vendor op module under the dispatcher's dotted name, which creates
+    modules that bind the original function through their own `from ...
+    import` -- on MUSA, `flag_gems.runtime.backend._mthreads.ops.randn` beside
+    the `_mthreads.ops.randn` FlagGems had loaded. An unpatched binding dies
+    unpacking the flagos generator's MT19937 state (`ValueError: too many
+    values to unpack`), so every such module is swept once more here.
+    """
+    if _PHILOX_REBIND is None:
+        return
+    patched, orig = _PHILOX_REBIND
+    rebind = _PHILOX_BINDING.rebind if _PHILOX_BINDING else _philox_rebind
+    for mod in list(sys.modules.values()):
+        rebind(mod, patched, orig)
 
 
 def _register_distributed_backend():
@@ -2613,6 +2800,9 @@ def _phase_ecosystem() -> None:
 
     # Auto-register FlagGems operators on import
     _register_flaggems_operators()
+    # Registration imported each vendor op module again, under the dispatcher's
+    # name, with its own copy of the seed function the bridge replaced above.
+    _sweep_philox_after_imports()
 
     from . import quantization  # noqa: E402, F401
 
@@ -2669,6 +2859,8 @@ __all__ = [
     "distributed",
     "get_registered_ops",
     "is_flaggems_enabled",
+    "fused_kernels_available",
+    "device_capabilities",
     "activate_optional_integrations",
     "optional_integration_status",
     "quantization",
