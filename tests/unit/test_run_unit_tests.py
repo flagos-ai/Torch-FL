@@ -17,6 +17,7 @@
 import importlib.util
 import signal
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -287,3 +288,55 @@ def test_exited_process_group_during_timeout_is_still_a_timeout(monkeypatch):
 
     monkeypatch.setattr(_RUNNER.os, "killpg", gone)
     assert _RUNNER.run_file(sys.executable, "test_example.py", 1) == (124, _CLEAN, True)
+
+
+def test_jobs_defaults_to_one_and_rejects_zero(monkeypatch, tmp_path):
+    """Parallelism is opt-in: most files touch an accelerator.
+
+    64 of the 117 files in tests/unit reference a device, and concurrent
+    interpreters compete for its memory rather than for CPU. A default above 1
+    would make that contention the normal case for every caller, so the flag
+    starts at 1 and a lane opts in with a device count in mind.
+    """
+    monkeypatch.setattr(sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path)])
+    assert _RUNNER.parse_args().jobs == 1
+
+    monkeypatch.setattr(
+        sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path), "--jobs", "0"]
+    )
+    with pytest.raises(SystemExit):
+        _RUNNER.parse_args()
+
+
+def test_the_summary_keeps_file_order_under_parallelism(monkeypatch, tmp_path, capsys):
+    """Lanes compare this summary across runs; completion order must not leak in.
+
+    Under --jobs the files finish in whatever order the pool happens to schedule
+    them, so the results are sorted back into the order ``sorted(glob())``
+    produced before the summary is printed.
+    """
+    names = ["test_a.py", "test_b.py", "test_c.py"]
+    for name in names:
+        (tmp_path / name).write_text("")
+
+    # Files finish in reverse order of their names, so a summary built from
+    # completion order would print c, b, a. Three workers are needed for that
+    # to be observable: with fewer, submission order serialises them again.
+    def slow(python, test_file, timeout):
+        time.sleep(
+            {"test_a.py": 0.30, "test_b.py": 0.15, "test_c.py": 0.0}[
+                Path(test_file).name
+            ]
+        )
+        return 0, _CLEAN, False
+
+    monkeypatch.setattr(_RUNNER, "run_file", slow)
+    monkeypatch.setattr(
+        sys, "argv", ["run_unit_tests.py", "--test-dir", str(tmp_path), "--jobs", "3"]
+    )
+    assert _RUNNER.main() == 0
+
+    summary = capsys.readouterr().out.split("===== unit test summary =====")[1]
+    assert [line.split()[-1] for line in summary.strip().splitlines()[:-1]] == sorted(
+        str(tmp_path / name) for name in names
+    )

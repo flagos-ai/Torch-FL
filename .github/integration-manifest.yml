@@ -733,12 +733,21 @@ steps:
   # the same reading INTEGRATION_ALLOW_TEARDOWN_CRASH asks for above.
   # Shared CPU workflows own their full-file checks. These two files also
   # contain installed-wheel checks, so retain their hardware variants here.
+  #
+  # --jobs 4 because the remaining files are startup-bound, not compute-bound:
+  # each interpreter imports torch and torch_fl and then runs sub-second tests,
+  # so serial execution spent 18.7 of hygon's 58 test minutes (run 42417017937)
+  # paying that import once per file. Four at a time keeps it off the critical
+  # path while staying well inside the runner's device count; the per-file
+  # process isolation the script exists for is unchanged. Raise it only with the
+  # lane's device count in mind -- see the script's docstring.
   - id: unit_tests_per_file
     name: Run unit tests (per file)
     platforms: [hygon]
     command: >-
       cd "$GITHUB_WORKSPACE" && UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1
-      python .github/scripts/run_unit_tests.py --timeout 300 --exclude-shared-cpu
+      python .github/scripts/run_unit_tests.py --timeout 300 --jobs 4
+      --exclude-shared-cpu
       --retain tests/unit/test_startup_subprocess.py
       --retain tests/unit/test_vendor_libtorch_overlay.py
 
