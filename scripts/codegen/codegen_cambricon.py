@@ -84,6 +84,10 @@ FILE_HEADER = """\
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // CloneVendorFn, and the weak CloneVendorHook the clone kernel below overrides.
@@ -264,6 +268,8 @@ OPS = {
     "cat": "cat",
     "pow.Tensor_Scalar": "pow",
     "new_ones": "new_ones",
+    "_unsafe_view": "metadata",
+    "transpose.int": "metadata",
     "mm": "matmul",
     "bmm": "bmm",
     "sum.dim_IntList": "sum_dim",
@@ -429,6 +435,32 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 # operand descriptor.
 # The CNNL entry point each `unary_op` member calls. These take (input, output)
 # and nothing else, which is what lets one body serve them all.
+METADATA_OPS = {
+    # (parameter list, body). Both are expressed in terms of an op this backend
+    # does not claim, so they reach aten's own metadata path rather than a
+    # FlagGems wrapper: `view` and `permute` are both routed to `none` here.
+    "_unsafe_view": (
+        "const at::Tensor& self, at::IntArrayRef size",
+        "return self.view(size);",
+    ),
+    "transpose.int": (
+        "const at::Tensor& self, int64_t dim0, int64_t dim1",
+        """const int64_t rank = self.dim();
+  const int64_t d0 = dim0 < 0 ? dim0 + rank : dim0;
+  const int64_t d1 = dim1 < 0 ? dim1 + rank : dim1;
+  TORCH_CHECK(
+      d0 >= 0 && d0 < rank && d1 >= 0 && d1 < rank,
+      "flagos cambricon: transpose got dims ", dim0, " and ", dim1);
+  std::vector<int64_t> perm(static_cast<size_t>(rank));
+  for (int64_t i = 0; i < rank; ++i) {
+    perm[static_cast<size_t>(i)] = i;
+  }
+  std::swap(perm[static_cast<size_t>(d0)], perm[static_cast<size_t>(d1)]);
+  return self.permute(perm);""",
+    ),
+}
+
+
 HOST_BUILT_OPS = {
     "scalar_tensor": (
         "const at::Scalar& s, std::optional<at::ScalarType> dtype_opt,\n    std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,\n    std::optional<bool> pin_memory_opt",
@@ -970,6 +1002,19 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 """
 
+T_METADATA = """\
+at::Tensor {kernel}({params}) {{
+  // A metadata-only op. FlagGems serves these with a Python wrapper, which
+  // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
+  // wrapper is the entire cost, because there is no kernel to run. Paid 42 times
+  // a forward for _unsafe_view alone.
+  {body}
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_ONES_LIKE = """\
 at::Tensor {kernel}(
     const at::Tensor& self, std::optional<at::ScalarType> dtype_opt,
@@ -1304,25 +1349,67 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& mat2) {{
           b_transposed ? CNNL_MATMUL_OP_T : CNNL_MATMUL_OP_N,
           /*use_beta=*/false, CNNL_MATMUL_EPI_NONE),
       "cnnlSetMatMulExDescAttrBase ({op})");
+  // The heuristic costs about 24 us and its answer depends only on the problem
+  // shape, the compute dtype, the transpose state and the device -- never on the
+  // data. That was measured as the whole gap against torch_mlu on this op
+  // (70.1 us against 46.2 us, 29 calls a forward). Cached on that key; the
+  // algorithm handle is kept for the life of the process because
+  // cnnlMatMulEx_v2 only reads it.
+  std::string algo_key;
+  algo_key.reserve(96);
+  algo_key += std::to_string(static_cast<int64_t>(self.device().index()));
+  algo_key += '|';
+  for (const auto dim : aw.sizes()) {{
+    algo_key += std::to_string(dim);
+    algo_key += ',';
+  }}
+  algo_key += '|';
+  for (const auto dim : bw.sizes()) {{
+    algo_key += std::to_string(dim);
+    algo_key += ',';
+  }}
+  algo_key += '|';
+  algo_key += std::to_string(static_cast<int64_t>(compute));
+  algo_key += a_transposed ? 'T' : 'N';
+  algo_key += b_transposed ? 'T' : 'N';
+
+  static std::mutex algo_cache_mutex;
+  static std::unordered_map<std::string, std::pair<cnnlMatMulExAlgo_t, size_t>>
+      algo_cache;
+
   cnnlMatMulExAlgo_t algo = nullptr;
-  CheckCnnl(cnnlCreateMatMulExAlgo(&algo), "cnnlCreateMatMulExAlgo");
-  cnnlMatMulExHeuristicResult_t result_algo = nullptr;
-  CheckCnnl(
-      cnnlCreateMatMulExHeuristicResult(&result_algo),
-      "cnnlCreateMatMulExHeuristicResult");
-  cnnlMatMulExPrefer_t prefer{{}};
-  int returned = 0;
-  CheckCnnl(
-      cnnlGetMatMulExAlgoHeuristic(
-          handle, desc, ad.get(), bd.get(), cd.get(), cd.get(), prefer,
-          /*requested_algo_count=*/1, &result_algo, &returned),
-      "cnnlGetMatMulExAlgoHeuristic ({op})");
-  TORCH_CHECK(
-      returned > 0, "flagos cambricon: no matmul algorithm for ", "{{op");
   size_t workspace_size = 0;
-  CheckCnnl(
-      cnnlGetMatMulExHeuristicResult(result_algo, algo, &workspace_size),
-      "cnnlGetMatMulExHeuristicResult");
+  bool algo_cached = false;
+  {{
+    const std::lock_guard<std::mutex> lock(algo_cache_mutex);
+    const auto found = algo_cache.find(algo_key);
+    if (found != algo_cache.end()) {{
+      algo = found->second.first;
+      workspace_size = found->second.second;
+      algo_cached = true;
+    }}
+  }}
+  if (!algo_cached) {{
+    CheckCnnl(cnnlCreateMatMulExAlgo(&algo), "cnnlCreateMatMulExAlgo");
+    cnnlMatMulExHeuristicResult_t result_algo = nullptr;
+    CheckCnnl(
+        cnnlCreateMatMulExHeuristicResult(&result_algo),
+        "cnnlCreateMatMulExHeuristicResult");
+    cnnlMatMulExPrefer_t prefer{{}};
+    int returned = 0;
+    CheckCnnl(
+        cnnlGetMatMulExAlgoHeuristic(
+            handle, desc, ad.get(), bd.get(), cd.get(), cd.get(), prefer,
+            /*requested_algo_count=*/1, &result_algo, &returned),
+        "cnnlGetMatMulExAlgoHeuristic ({op})");
+    TORCH_CHECK(
+        returned > 0, "flagos cambricon: no matmul algorithm for ", "{op}");
+    CheckCnnl(
+        cnnlGetMatMulExHeuristicResult(result_algo, algo, &workspace_size),
+        "cnnlGetMatMulExHeuristicResult");
+    const std::lock_guard<std::mutex> lock(algo_cache_mutex);
+    algo_cache.emplace(algo_key, std::make_pair(algo, workspace_size));
+  }}
   at::Tensor workspace;
   if (workspace_size > 0) {{
     workspace = at::empty(
@@ -2087,6 +2174,15 @@ def render():
             body = T_EMBEDDING.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "cumsum":
             body = T_CUMSUM.format(kernel=kernel, fn=fn, disp=disp, op=op)
+        elif category == "metadata":
+            params, body = METADATA_OPS[op]
+            # Deliberately not .format()ed: these bodies are plain C++ and their
+            # braces are code, not fields. Formatting them raised
+            # KeyError('\\n    perm') on the transpose body's for-loop brace.
+            body = "\n".join(("  " + ln) if ln else ln for ln in body.split("\n"))
+            body = T_METADATA.format(
+                kernel=kernel, fn=fn, disp=disp, op=op, params=params, body=body
+            )
         elif category == "new_ones":
             body = T_NEW_ONES.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "pow":
