@@ -171,9 +171,34 @@ jobs:
             exit 1
           fi
 
-          sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          # yq is a fixed 5 MB release asset on github.com, and a self-hosted runner
+          # does not always reach it. Run 42465366556 is what a plain download
+          # costs: 11 of the 14 lanes died on this line with wget's exit 4 after
+          # ~160 s each, before any of their own work started, and the whole
+          # pipeline reported as failed for a reader that never moved.
+          #
+          # So: reuse an install that already works, and otherwise retry. The
+          # download lands in a temporary file and is installed only once it is
+          # complete -- writing straight to /usr/local/bin would leave a
+          # truncated binary behind on a failed attempt, which the next lane
+          # would then treat as "yq is present".
+          YQ_URL=https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
+          if ! yq --version >/dev/null 2>&1; then
+            for attempt in 1 2 3 4 5; do
+              if sudo wget --timeout=60 --tries=1 -qO /tmp/yq.download "$YQ_URL"; then
+                sudo install -m 0755 /tmp/yq.download /usr/local/bin/yq
+                rm -f /tmp/yq.download
+                break
+              fi
+              rm -f /tmp/yq.download
+              echo "::warning::yq download failed (attempt ${attempt}/5); retrying"
+              sleep $((attempt * 15))
+            done
+          fi
+          if ! yq --version >/dev/null 2>&1; then
+            echo "::error::yq is unavailable and the platform configuration is YAML; cannot continue"
+            exit 1
+          fi
 
           # The manifest and the config reach the composer as JSON, and `yq`
           # is the YAML reader here for the reason the header states: this is
