@@ -98,8 +98,36 @@ def shared_cpu_files(root):
         workflow = yaml.safe_load((root / ".github/workflows" / name).read_text())
         for job in workflow["jobs"].values():
             for step in job.get("steps", []):
-                for line in step.get("run", "").replace("\\\n", " ").splitlines():
+                run = step.get("run", "")
+                arrays = {}
+                current_array = None
+                for raw_line in run.splitlines():
+                    line = raw_line.strip()
+                    if current_array is not None:
+                        if line == ")":
+                            current_array = None
+                        else:
+                            arrays[current_array].extend(
+                                shlex.split(line, comments=True)
+                            )
+                        continue
+                    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=\(", line)
+                    if match:
+                        current_array = match.group(1)
+                        arrays[current_array] = []
+
+                for line in run.replace("\\\n", " ").splitlines():
                     args = shlex.split(line, comments=True)
+                    expanded = []
+                    for arg in args:
+                        match = re.fullmatch(
+                            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}", arg
+                        )
+                        if match and match.group(1) in arrays:
+                            expanded.extend(arrays[match.group(1)])
+                        else:
+                            expanded.append(arg)
+                    args = expanded
                     if args[:3] not in (
                         ["python", "-m", "pytest"],
                         ["python3", "-m", "pytest"],

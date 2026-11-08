@@ -179,6 +179,30 @@ def test_only_complete_pytest_files_have_a_shared_cpu_owner(tmp_path, command, o
     ) is owned
 
 
+def test_array_based_pytest_command_has_a_shared_cpu_owner(tmp_path):
+    import yaml
+
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    command = """set -euo pipefail
+tests=(
+  tests/unit/test_cpu.py
+  tests/unit/test_runtime.py
+)
+python -m pytest "${tests[@]}" -v --tb=short -p no:cacheprovider
+"""
+    for name in ("agnostic-checks.yml", "codegen-checks.yml"):
+        (workflows / name).write_text(
+            yaml.safe_dump({"jobs": {"cpu": {"steps": [{"run": command}]}}})
+        )
+
+    owned = _RUNNER.shared_cpu_files(tmp_path)
+    assert {
+        (tmp_path / "tests/unit/test_cpu.py").resolve(),
+        (tmp_path / "tests/unit/test_runtime.py").resolve(),
+    } <= owned
+
+
 def test_hardware_runner_leaves_cpu_checks_to_their_owner_and_retains_runtime(
     tmp_path, monkeypatch
 ):
