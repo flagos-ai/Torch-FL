@@ -548,7 +548,11 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     it ships, so it is a generated full-coverage conf too.
     drobotics joins them for the same reason: backends/bpu/generated/
     bpu_register.inc claims only the ops with a kernel behind them, so a `none`
-    route there falls back instead of raising.
+    route there falls back instead of raising. cambricon joins them for the
+    iluvatar reason rather than the mps one: it has no native .inc at all yet
+    (its VENDORS row names the empty slot), and register.cc includes only its
+    FlagGems .inc, so registration skips every op FlagGems does not cover and
+    `none` does fall back to cpu_fallback.
     """
     assert set(g.VENDORS) == {
         "mthreads",
@@ -558,6 +562,7 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
         "iluvatar",
         "apple",
         "drobotics",
+        "cambricon",
     }
     assert "metax" not in g.VENDORS
     assert "tsingmicro" not in g.VENDORS
@@ -644,8 +649,10 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     """The op families the Iluvatar CI lane fails on (issue #570) are not
     routed to FlagGems, and the fix is a gap rather than a route change.
 
-    `mean`/`mean.dim` return wrong values through the generic FlagGems kernel,
-    so neither spelling may stay on `flaggems`. `mm` and `mm.out` both leave:
+    `mean.dim` returns wrong values through the generic FlagGems kernel on a
+    non-inner dimension (NaN), so it may not stay on `flaggems`; `mean` (the
+    whole-tensor reduction) was re-measured clean on u180 and has left the gap.
+    `mm` and `mm.out` both leave:
     the float64 failure is the `_iluvatar` tuning perf model raising "dtype not
     supported" during config pruning, and the first landing of this fix left
     `mm` routed, which only moved the failure from `matmul_prob` to `matmul` on
@@ -711,7 +718,6 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "bmm.dtype_out",
         "bmm.out",
         "div_.Tensor",
-        "mean",
         "mean.dim",
         "mm",
         "mm.out",

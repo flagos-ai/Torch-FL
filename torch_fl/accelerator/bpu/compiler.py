@@ -113,15 +113,28 @@ def _mlir_libs_dir() -> str | None:
 def x86_env() -> dict[str, str]:
     """Environment for running the x86_64 hbdk4 under an emulator."""
     env = dict(os.environ)
+    # box64 resolves the guest's libraries through its own search path, not the
+    # host loader's, so RUNPATH=$ORIGIN inside _hbdk.so is not enough.
+    #
+    # numpy's C extensions need the x86 runtime too. The arm64 host has no
+    # libgcc_s.so.1 for them, and box64's emulated ld.so does not fall back to
+    # the host's, so without an x86 libgcc_s on this path numpy fails with
+    # "cannot dlopen _multiarray_umath" and takes hbdk4's import down with it.
+    paths = []
     libs = _mlir_libs_dir()
     if libs:
-        # box64 resolves the guest's libraries through its own search path, not
-        # the host loader's, so RUNPATH=$ORIGIN inside _hbdk.so is not enough.
-        env["BOX64_LD_LIBRARY_PATH"] = (
-            f"{libs}:{env['BOX64_LD_LIBRARY_PATH']}"
-            if env.get("BOX64_LD_LIBRARY_PATH")
-            else libs
-        )
+        paths.append(str(libs))
+        # numpy.libs holds the OpenBLAS and libgfortran the guest python links.
+        numpy_libs = Path(libs).parent.parent / "numpy.libs"
+        if numpy_libs.is_dir():
+            paths.append(str(numpy_libs))
+    runtime = _x86_runtime_dir()
+    if runtime:
+        paths.append(runtime)
+    if paths:
+        existing = env.get("BOX64_LD_LIBRARY_PATH", "")
+        joined = ":".join(paths)
+        env["BOX64_LD_LIBRARY_PATH"] = f"{joined}:{existing}" if existing else joined
     stubs = _stub_dir()
     if stubs:
         # Appended, not prepended: a real numba/torch in the guest's
@@ -130,6 +143,24 @@ def x86_env() -> dict[str, str]:
             f"{env['PYTHONPATH']}:{stubs}" if env.get("PYTHONPATH") else stubs
         )
     return env
+
+
+def _x86_runtime_dir() -> str | None:
+    """Directory holding x86_64 libgcc_s/libstdc++ for the guest, if any.
+
+    FLAGOS_BPU_X86_RUNTIME points at one explicitly. Otherwise the two places
+    this board's setup keeps them are tried, in order.
+    """
+    explicit = _env.value("FLAGOS_BPU_X86_RUNTIME", "")
+    if explicit and Path(explicit).is_dir():
+        return explicit
+    for candidate in (
+        Path.home() / "x86vm/x86lib/usr/lib/x86_64-linux-gnu",
+        Path.home() / "box64-src/x64lib",
+    ):
+        if (candidate / "libgcc_s.so.1").is_file():
+            return str(candidate)
+    return None
 
 
 def x86_emulator(refresh: bool = False) -> tuple[str, ...] | None:

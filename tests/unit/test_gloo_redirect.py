@@ -263,6 +263,152 @@ def test_redirect_marks_both_entry_points_and_the_defining_module(
 
 
 # ---------------------------------------------------------------------------
+# new_host_group -- the per-group escape hatch from the redirect above
+# ---------------------------------------------------------------------------
+#
+# The redirect answers an explicit `backend="gloo"` with flagos, which is right
+# for the collectives the model runs and wrong for `torch.distributed
+# .checkpoint`'s metadata collectives: they carry only CPU tensors, and on a
+# redirected group DCP's save never writes `.metadata`, leaving every shard on
+# disk and the checkpoint unloadable (issue #562).
+#
+# `FLAGOS_DIST_REDIRECT_GLOO=0` turns the redirect off process-wide, so a job
+# that wants one host group *and* flagos groups for its model cannot express
+# that; `new_host_group` is the per-group form.
+
+
+@pytest.fixture
+def original_new_group(monkeypatch):
+    """Clear the module's saved original, so each test states its own.
+
+    `_ORIGINAL_NEW_GROUP` is written by `redirect_gloo_requests` at import and
+    is module state for the life of the process.
+    """
+    monkeypatch.setattr(pg, "_ORIGINAL_NEW_GROUP", None, raising=False)
+
+
+def test_the_host_group_bypasses_the_redirect(
+    monkeypatch, restore_dist, original_new_group
+):
+    """The point: it must reach the original, not the wrapper above it."""
+    _fake_accelerator(monkeypatch, "flagos")
+    log = _record(monkeypatch)
+    pg.redirect_gloo_requests()
+
+    # Through the redirect, an explicit gloo request becomes flagos ...
+    dist.new_group(backend="gloo")
+    assert log == [("new", (), {"backend": "flagos"})]
+
+    # ... and through this it stays gloo.
+    log.clear()
+    pg.new_host_group()
+    assert log == [("new", (), {"backend": "gloo"})]
+
+
+def test_the_saved_original_is_what_it_calls(
+    monkeypatch, restore_dist, original_new_group
+):
+    """Not `__wrapped__`: the issue is right that depending on it is incidental.
+
+    The module keeps its own reference, so this asserts the saved one is called
+    even when `dist.new_group` has been replaced since.
+    """
+    _fake_accelerator(monkeypatch, "flagos")
+    # `import torch_fl` installs the redirect, but not everywhere it is expected
+    # to: `register_flagos_backend` returns early when "flagos" is already in
+    # `Backend.backend_list`, and a host that set `FLAGOS_DIST_REDIRECT_GLOO=0`
+    # keeps the wrappers off. Neither is this test's subject, so clear both
+    # pieces of process state and install the redirect here rather than read
+    # what import happened to leave behind.
+    monkeypatch.delenv("FLAGOS_DIST_REDIRECT_GLOO", raising=False)
+    init_process_group = dist.init_process_group
+    monkeypatch.delattr(init_process_group, pg._REDIRECT_MARKER, raising=False)
+    pg.redirect_gloo_requests()
+    assert pg._ORIGINAL_NEW_GROUP is not None
+
+    called = []
+    monkeypatch.setattr(
+        pg, "_ORIGINAL_NEW_GROUP", lambda *a, **k: called.append((a, k)) or "saved"
+    )
+    monkeypatch.setattr(dist, "new_group", lambda *a, **k: "something-else-entirely")
+
+    assert pg.new_host_group() == "saved"
+    assert called == [((), {"backend": "gloo"})]
+
+
+@pytest.mark.parametrize(
+    "args, kwargs",
+    [
+        ((), {}),
+        ((), {"backend": None}),
+        # Spelling gloo out is a restatement of the intent, not a conflict.
+        ((), {"backend": "gloo"}),
+        ((), {"backend": dist.Backend.GLOO}),
+        (([0, 1], None, "gloo"), {}),
+    ],
+)
+def test_every_accepted_spelling_asks_for_gloo(
+    monkeypatch, restore_dist, original_new_group, args, kwargs
+):
+    called = []
+    monkeypatch.setattr(
+        pg, "_ORIGINAL_NEW_GROUP", lambda *a, **k: called.append((a, k)) or "group"
+    )
+    assert pg.new_host_group(*args, **kwargs) == "group"
+    assert called[0][1]["backend"] == dist.Backend.GLOO
+
+
+def test_the_other_arguments_are_forwarded(
+    monkeypatch, restore_dist, original_new_group
+):
+    called = []
+    monkeypatch.setattr(
+        pg, "_ORIGINAL_NEW_GROUP", lambda *a, **k: called.append((a, k)) or "group"
+    )
+    pg.new_host_group([0, 1], group_desc="dcp_metadata")
+    assert called == [
+        (([0, 1],), {"backend": dist.Backend.GLOO, "group_desc": "dcp_metadata"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "args, kwargs",
+    [
+        ((), {"backend": "nccl"}),
+        # flagos is refused too: asking this for a flagos group reads as a host
+        # group and would not be one.
+        ((), {"backend": "flagos"}),
+        (([0, 1], None, "nccl"), {}),
+    ],
+)
+def test_a_backend_that_is_not_host_side_is_refused(
+    monkeypatch, restore_dist, original_new_group, args, kwargs
+):
+    """Refused rather than silently served, so the caller is not misled."""
+    monkeypatch.setattr(pg, "_ORIGINAL_NEW_GROUP", lambda *a, **k: "group")
+    with pytest.raises(TypeError, match="host group"):
+        pg.new_host_group(*args, **kwargs)
+
+
+def test_it_works_before_the_redirect_has_run(
+    monkeypatch, restore_dist, original_new_group
+):
+    """With no saved original, `dist.new_group` *is* the original."""
+    log = _record(monkeypatch)
+    assert pg._ORIGINAL_NEW_GROUP is None
+    pg.new_host_group()
+    assert log == [("new", (), {"backend": "gloo"})]
+
+
+def test_it_is_exported_from_the_comm_package():
+    """A documented name is the whole point; `__wrapped__` was the alternative."""
+    import torch_fl.comm as comm
+
+    assert comm.new_host_group is pg.new_host_group
+    assert "new_host_group" in comm.__all__
+
+
+# ---------------------------------------------------------------------------
 # _try_build_staged_gloo
 # ---------------------------------------------------------------------------
 

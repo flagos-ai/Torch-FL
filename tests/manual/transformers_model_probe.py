@@ -223,6 +223,7 @@ def run_model(model: str, args: argparse.Namespace, layers: list[str]) -> dict:
         "max_params": args.max_params,
         "seed": args.seed,
         "max_new_tokens": args.max_new_tokens,
+        "model_classes": list(MODEL_CLASSES),
     }
     child = Path(tempfile.gettempdir()) / f"transformers_probe_child_{os.getpid()}.py"
     child.write_text(CHILD)
@@ -334,6 +335,20 @@ def verdict(result: dict, layers: list[str]) -> str:
     return "PARTIAL"
 
 
+# The auto-model classes the child tries for a config, in order: generation
+# first (the generate layer needs a causal-LM head), then the task heads an
+# encoder is normally measured through, then the bare body, which every
+# architecture in CONFIG_MAPPING has. Issue #254 is what a causal-LM-only list
+# costs: every encoder and encoder-decoder model reported UNSUPPORTED_TASK
+# without a single layer having run. Module level rather than a literal inside
+# CHILD so the unit tests read the order without spawning a child.
+MODEL_CLASSES = (
+    "AutoModelForCausalLM",
+    "AutoModelForMaskedLM",
+    "AutoModelForSequenceClassification",
+    "AutoModel",
+)
+
 CHILD = r'''
 import copy
 import json
@@ -354,6 +369,7 @@ TOL = request["tolerance"]
 MAX_PARAMS = request["max_params"]
 SEED = request["seed"]
 MAX_NEW_TOKENS = request["max_new_tokens"]
+MODEL_CLASSES = request["model_classes"]
 
 # Only lines starting with this marker are events. Vendor runtimes write
 # unstructured diagnostics to stdout, and parsing those as results would
@@ -466,18 +482,38 @@ def build_config():
 
 
 def build_model(cfg):
-    from transformers import AutoModelForCausalLM
+    """Instantiate ``cfg`` through the first auto-model class in ``MODEL_CLASSES``.
+
+    Issue #254: only ``AutoModelForCausalLM`` was tried, so every encoder and
+    encoder-decoder architecture (``mpnet``, ``bert``, ``roberta``, ...) failed
+    here and was reported ``UNSUPPORTED_TASK`` without a single layer having
+    run. A config that maps to several classes is built through the first that
+    instantiates it; the class that produced the model is emitted with the
+    config event, because it decides whether ``generate`` applies.
+    """
+    import transformers
+
     torch.manual_seed(SEED)
-    try:
-        model = AutoModelForCausalLM.from_config(cfg)
-    except Exception as exc:  # noqa: BLE001
-        fail("config", "UNSUPPORTED_TASK", exc,
-             detail="no causal-LM mapping, or the config cannot instantiate one")
-    params = sum(p.numel() for p in model.parameters())
-    if params > MAX_PARAMS:
-        fail("config", "CONFIG_TOO_LARGE", params=params, max_params=MAX_PARAMS,
-             detail="config ignored the tiny overrides; refusing to allocate")
-    return model.to(DTYPE).eval(), params
+    tried = []
+    for name in MODEL_CLASSES:
+        cls = getattr(transformers, name, None)
+        if cls is None:
+            continue
+        try:
+            model = cls.from_config(cfg)
+        except Exception as exc:  # noqa: BLE001 - the next class may map it
+            tried.append(f"{name}: {type(exc).__name__}: {exc}".splitlines()[0][:200])
+            continue
+        params = sum(p.numel() for p in model.parameters())
+        if params > MAX_PARAMS:
+            fail("config", "CONFIG_TOO_LARGE", params=params, max_params=MAX_PARAMS,
+                 detail="config ignored the tiny overrides; refusing to allocate")
+        model_class = name
+        break
+    else:
+        fail("config", "UNSUPPORTED_TASK", None, detail="; ".join(tried) or "no auto class",
+             tried=tried)
+    return model.to(DTYPE).eval(), params, model_class
 
 
 # --- comparison ---------------------------------------------------------------
@@ -679,7 +715,7 @@ def run_layer(layer, cpu_model, dev_model, cpu_inputs, dev_inputs):
 # Load and run after definitions so config errors are reported in the protocol.
 try:
     cfg = build_config()
-    model, params = build_model(cfg)
+    model, params, MODEL_CLASS = build_model(cfg)
     # Module.to() mutates in place and returns self, so the CPU baseline must
     # be a distinct object. Sharing one would compare the device against
     # itself and report every layer as passing.
@@ -689,7 +725,7 @@ try:
     dev_model.probe_optimizer = torch.optim.SGD(dev_model.parameters(), lr=1e-3)
     cpu_inputs = make_inputs(cfg)
     dev_inputs = tensors_on(cpu_inputs, DEV)
-    emit("config", "PASS", params=params)
+    emit("config", "PASS", params=params, model_class=MODEL_CLASS)
 except SystemExit:
     raise
 except Exception as exc:  # noqa: BLE001
@@ -711,6 +747,10 @@ def summarize(result: dict, layers: list[str]) -> str:
     config = result["layers"].get("config", {})
     if config.get("params"):
         lines.append(f"params     {config['params']:,}")
+    if config.get("model_class"):
+        # Which head measured the model decides what the layers compared, so a
+        # PASS on an encoder is read against the class that produced it.
+        lines.append(f"class      {config['model_class']}")
     if result.get("context_poison"):
         lines.append("WARNING    device context was poisoned; later layers are void")
     lines.append("")

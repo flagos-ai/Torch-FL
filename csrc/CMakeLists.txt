@@ -218,6 +218,11 @@ endif()
 # The off arm excludes them all at once, and the alternation is built here:
 # inside a quoted regex a `;`-joined list is three literal semicolons after the
 # first name, which matches nothing, so it dropped no tree at all.
+#
+# Cambricon is native too, but its CNNL kernel tree holds only the generated
+# FlagGems register -- there is no vendor operator tree to keep or drop yet -- so
+# it needs no arm here and builds with FlagGems only until aten/backends/
+# cambricon/ gains the CNNL kernels.
 if(NOT FLAGOS_BUILD_VENDOR)
   string(REPLACE ";" "|" _flagos_vendor_dirs "${FLAGOS_ATEN_VENDOR_DIRS}")
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/(${_flagos_vendor_dirs})/.*")
@@ -674,6 +679,33 @@ elseif(_flagos_is_bpu)
   # libhbucp.so with dlopen rather than linking them: the board ships the
   # libraries without headers, and a build host without them still links.
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs} ${CMAKE_DL_LIBS})
+elseif(_flagos_is_cambricon)
+  # Cambricon MLU is native and FlagGems-primary, with CNNL as the vendor slot:
+  # aten/backends/cambricon/ will wrap CNNL directly over the cnrt runtime, so no
+  # tensor reaches the CUDA dispatch key and the generated boxing kernels are not
+  # built. The runtime dependency is libcnrt (via ${CUDA_RUNTIME_LIB} in
+  # ${_torch_fl_link_libs}).
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
+  if(FLAGOS_BUILD_VENDOR)
+    # FLAGOS_CAMBRICON_KERNEL gates the native m.impl subset in register.cc,
+    # mirroring FLAGOS_KUNLUNXIN_KERNEL and FLAGOS_ILUVATAR_KERNEL. It is what
+    # makes csrc/aten/backends/cambricon/generated/cambricon_register.inc
+    # compiled in; without it the FlagGems half is still registered and the ops
+    # in that file fall through to the conf's `none` route.
+    #
+    # The op list behind it is short (codegen_cambricon.py) because this backend
+    # is FlagGems-primary: a vendor kernel appears there only where FlagGems
+    # cannot serve the op.
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_CAMBRICON_KERNEL=1)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${CNNL_LIB})
+    # libcnnl_extra carries the fused transformer ops. It is optional, and the
+    # attention kernel is gated on having it: without the macro the kernel is
+    # not compiled, so nothing references a symbol the toolkit lacks.
+    if(CNNL_EXTRA_LIB)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_CAMBRICON_CNNL_EXTRA=1)
+      target_link_libraries(${LIBRARY_NAME} PRIVATE ${CNNL_EXTRA_LIB})
+    endif()
+  endif()
   find_path(HOBOT_UCP_INCLUDE_DIR hb_ucp_sys.h
       PATHS ${HOBOT_INCLUDE_DIR} /usr/include/hobot)
   if(HOBOT_UCP_INCLUDE_DIR)

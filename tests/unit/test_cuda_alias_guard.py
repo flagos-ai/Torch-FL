@@ -123,9 +123,21 @@ def test_vendor_device_aliases_cover_every_native_vendor():
     # ids (musa, ...) are what setup.py normalises into these keys.
     assert torch_fl._VENDOR_DEVICE_ALIASES["mthreads"] == ("cuda", "musa")
     assert torch_fl._VENDOR_DEVICE_ALIASES["tsingmicro"] == ("cuda", "txda")
+    # Cambricon is the one row without "cuda": MLU has no CUDA runtime, and a
+    # flagos tensor there is cnrt memory, so reinterpreting a device string as
+    # CUDA would be a correctness break rather than a convenience. Its row exists
+    # for Triton's mlu driver, which builds autotune scratch as
+    # torch.empty(..., device='mlu') -- the name torch_mlu would have registered.
+    assert torch_fl._VENDOR_DEVICE_ALIASES["cambricon"] == ("mlu",)
     # Every accelerator with a vendor-private device name is listed; the rest
     # (nvidia/ascend/...) only ever see "cuda" or a name torch already knows.
+    # A row that does not start with "cuda" is a platform with no CUDA runtime
+    # at all, and must be named here rather than appear by accident.
+    no_cuda_runtime = {"cambricon"}
     for accelerator, aliases in torch_fl._VENDOR_DEVICE_ALIASES.items():
+        if accelerator in no_cuda_runtime:
+            assert "cuda" not in aliases, accelerator
+            continue
         assert aliases[0] == "cuda", accelerator
 
 
@@ -168,7 +180,7 @@ _CHILD = textwrap.dedent(
         # rather than read from _VENDOR_DEVICE_ALIASES: the test has to state
         # what "txda" *should* resolve to, not ask the code under test.
         "vendor_device": device_type(
-            {"mthreads": "musa", "tsingmicro": "txda"}.get(
+            {"mthreads": "musa", "tsingmicro": "txda", "cambricon": "mlu"}.get(
                 torch_fl._build_accelerator(), "cuda"
             )
         ),
@@ -246,12 +258,13 @@ def test_the_vendor_device_name_is_aliased_on_a_native_vendor_build(alias_env):
     CUDA-probe redirect the test above gates on.
 
     Asserted from the alias table rather than from a fixed name because this
-    suite runs on every platform: only a build with a vendor-private device
-    name (musa, tsingmicro) has an alias to check, and on any other build the
-    probe is the only alias and this passes trivially.
+    suite runs on every platform: a build with no vendor-private device name has
+    nothing to check and passes trivially.
     """
     state = _child_state(alias_env)
-    if not state["alias_active"]:
+    aliases = torch_fl._VENDOR_DEVICE_ALIASES.get(torch_fl._build_accelerator(), ())
+    no_cuda_runtime = bool(aliases) and "cuda" not in aliases
+    if not state["alias_active"] and not no_cuda_runtime:
         # Genuine CUDA, or the alias is opted out: nothing is remapped, so the
         # vendor name is either real or invalid and not this test's business.
         # `alias_active` and not the post-import `real_cuda`: the guard decides
@@ -259,7 +272,14 @@ def test_the_vendor_device_name_is_aliased_on_a_native_vendor_build(alias_env):
         # flagos device count later in the same import, so reading it here
         # answers a question the guard never asked.
         pytest.skip("alias not installed on this host")
-    assert state["device_cuda"] == "flagos", state
+    if no_cuda_runtime:
+        # Cambricon: the row carries the vendor's own name only. "cuda" is
+        # deliberately left unremapped -- a flagos tensor there is cnrt memory,
+        # so answering "cuda" for it would be wrong rather than convenient --
+        # and the alias that has to work is the vendor's name below.
+        assert state["device_cuda"] != "flagos", state
+    else:
+        assert state["device_cuda"] == "flagos", state
     if state["vendor_device"] == "cuda":
         pytest.skip("build has no vendor-private device name to alias")
     assert state["vendor_device"] == "flagos", state

@@ -186,6 +186,23 @@ VENDORS = {
         "backends/iluvatar/generated/iluvatar_register.inc",
         ("backends/iluvatar/generated/iluvatar_flaggems_register.inc",),
     ),
+    # Cambricon MLU is FlagGems-primary with no native half yet: the CNNL
+    # kernels under aten/backends/cambricon/ do not exist, so the native slot is
+    # the empty string -- the explicit "no native kernels" declaration, not a
+    # file that should exist. Every op FlagGems does not cover therefore routes
+    # to `none` (cpu_fallback) rather than to a vendor kernel. The FlagGems .inc
+    # comes from codegen_cambricon_flaggems.py; when a cnnl_register.inc lands,
+    # name it in this slot and that generator subtracts its ops automatically,
+    # keeping the two disjoint inside the one PrivateUse1 TORCH_LIBRARY_IMPL
+    # body.
+    # Cambricon is FlagGems-primary with a small CNNL vendor half. The native
+    # slot names the CNNL register file, emitted by codegen_cambricon.py; the
+    # extra slot is the FlagGems ceiling. An op in neither stays `none` and
+    # reaches cpu_fallback, which is where most of this backend sits today.
+    "cambricon": (
+        "backends/cambricon/generated/cambricon_register.inc",
+        ("backends/cambricon/generated/cambricon_flaggems_register.inc",),
+    ),
 }
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
@@ -1135,6 +1152,7 @@ FLAGGEMS_PYTHON_PLATFORMS = {
     "mthreads",
     "thead",
     "iluvatar",
+    "cambricon",
 }
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's
@@ -2404,7 +2422,15 @@ NATIVE_TRITON_GAPS = {
         "special_chebyshev_polynomial_v",
         "special_hermite_polynomial_h",
         "special_shifted_chebyshev_polynomial_u",
-        "mean",
+        # `mean` and `mean.dim` were gapped on 2026-10-20 for the keepdim mean
+        # returning wrong values (issue #570). Re-measured on u180 (BI-V150,
+        # FlagGems 5.4.0), `flag_gems.mean_dim` matches CPU on fp32, bf16 and
+        # fp16 over dim 0, -1 and [0, -1], keepdim on and off -- 63 cases, 0
+        # failures, rel ~1.5e-07. The #570 note is still real for the one shape
+        # it did describe: an empty reduction -- `empty(0).mean()` -- raises
+        # ZeroDivisionError where ATen returns NaN (the same defect MetaX's note
+        # records as FlagGems issue #6333). The conf is per-op and cannot gate
+        # on shape, so both spellings stay gapped until that is fixed upstream.
         "mean.dim",
         # `_conj`, for the contract test_math_bits_contract.py pins: ATen's conj
         # is a lazy view (Conjugate bit set, storage untouched) and FlagGems'
@@ -2595,7 +2621,17 @@ NATIVE_TRITON_GAPS = {
 # from -- and drops the gap entry from NATIVE_TRITON_GAPS["iluvatar"] as
 # redundant. FlagGems coverage is unaffected (the .inc is generated from the
 # FlagGems set, and only `none`/`iluvatar` ops are in it).
-NATIVE_KERNEL_PREFERRED = {"iluvatar"}
+#
+# Cambricon joins for the same kind of reason, one step stronger: its native
+# set is a list of ops FlagGems actively cannot serve, so preferring FlagGems
+# there is not a risk to weigh but a known defect to route around.
+# `mul.Tensor` is the case that forced it -- FlagGems' cambricon `mul` compares
+# the tensor device name against "mlu", torch_fl registers "flagos", and the op
+# redispatches into itself until the stack dies (flagos-ai/FlagGems#8448). The
+# native set holds exactly the ops codegen_cambricon.py emits, so this prefers
+# `cambricon` for those and leaves every other op on the FlagGems path it
+# already had.
+NATIVE_KERNEL_PREFERRED = {"iluvatar", "cambricon"}
 
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
@@ -3006,22 +3042,40 @@ def flaggems_python_ops(conf_dir: Path = None) -> set:
     return set(FLAGGEMS_PYTHON_OPS)
 
 
+# Platforms whose conf may claim every op the current FlagGems has a kernel for,
+# rather than only the pre-2026-10-22 subset. Each name here stands for a survey
+# that was actually run on that hardware; add one when you have the result, not
+# when you want the ops.
+_CEILING_GRADUATED = frozenset({"nvidia", "cambricon", "iluvatar"})
+
+
 def flaggems_python_ops_for(platform: str) -> set:
     """The FlagGems ceiling one platform's conf may be built from.
 
-    cuda reads the measured package contents. Every other platform reads the
-    frozen pre-2026-10-22 set, because the 458 ops FlagGems gained since then have
-    never been measured on that hardware: routing them there would move ops onto
-    the Python path, and the differential survey that clears an op is per
-    platform (see ``boxing_triton_gaps`` and ``BOXING_TRITON_GAPS`` for the shape
-    that evidence takes).
+    cuda reads the measured package contents. The rest read the frozen
+    pre-2026-10-22 set, which keeps an unrelated cuda fix from re-routing six
+    vendors: routing an op onto the Python path needs the differential survey for
+    *that* platform (see ``boxing_triton_gaps`` and ``BOXING_TRITON_GAPS`` for the
+    shape that evidence takes).
 
-    A platform graduates by having the survey run on it and its result landed;
-    until then the frozen ceiling is what keeps an unrelated cuda fix from
-    re-routing six vendors. See ``FLAGGEMS_PYTHON_OPS_FROZEN`` in
-    backend_coverage.py.
+    A platform graduates by having the survey run on it and its result landed. A
+    frozen ceiling stops being useful once the two sets differ by almost nothing
+    -- ``FLAGGEMS_PYTHON_OPS - FLAGGEMS_PYTHON_OPS_FROZEN`` is now a single name,
+    ``mul.Tensor``, so the withholding costs that one op and nothing else. It is
+    a large cost to pay for one name: ``mul`` is in the SwiGLU gate, the residual
+    add and the softmax backward, and on a Qwen3 training step it fell back 330
+    times out of 333 total fallbacks (measured, 4-layer model on MLU590).
+
+    cambricon graduates here because ``mul.Tensor`` was measured on it: see
+    ``docs/vendors/cambricon/operator-survey.md`` for the run and its result.
+    iluvatar graduates on the same single name: measured on u180 (BI-V150,
+    FlagGems 5.4.0), ``mul.Tensor`` served by FlagGems matches the CPU
+    reference on fp32, bf16, fp16, int64 and bool, contiguous and transposed
+    operands, at 0.12-0.15 ms against 0.43 ms for the cpu_fallback route it
+    replaces (issue #667). Every other platform stays frozen until it does the
+    same.
     """
-    if platform == "nvidia":
+    if platform in _CEILING_GRADUATED:
         return set(FLAGGEMS_PYTHON_OPS)
     return set(FLAGGEMS_PYTHON_OPS_FROZEN)
 

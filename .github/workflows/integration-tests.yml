@@ -134,10 +134,25 @@ jobs:
       # uses. The dedicated per-platform pipelines this replaced hashed their own
       # workflow file; the single pipeline hashes itself instead.
       #
-      # The restore-keys keep a display-name fallback because that is the lane the
-      # shared common workflow used before every platform had its own pipeline
-      # (GCU was the last one on it), so a warm cache from that era is still
-      # found on the first run instead of being re-downloaded.
+      # The restore-key is the base platform's prefix, which is the only shape
+      # this workflow has ever written. Three display-name fallbacks
+      # (CUDA-pip-..., CUDA-build-pip-..., and the same per vendor) used to sit
+      # here for caches left by the split per-platform pipelines that #519
+      # collapsed. They never matched: every one of the 14 cache key prefixes in
+      # this repository is a platform name, and a display-name entry would have
+      # expired 7 days after #519 last wrote one. On a boxing lane they were also
+      # wrong rather than merely idle -- display_name appends " (CUDA boxing)",
+      # so the prefix was the literal "CUDA (CUDA boxing)-pip-Linux-", which no
+      # cache key can begin with.
+      #
+      # The key names the base platform, not the lane, so a platform's two lanes
+      # share one entry. `needs.configuration.outputs.platform` is the config
+      # basename with the -boxing suffix already stripped, and boxing only
+      # changes which kernels the wheel compiles -- the pip cache holds the same
+      # packages either way (measured: thead and thead-boxing install a
+      # byte-identical package set, and their 619 MB entries were duplicates of
+      # each other). Keying on the lane cost one redundant entry per boxing
+      # platform, about 2 GB of the 4.3 GB main held.
       - name: Look up pip downloads
         id: pip-cache-lookup
         uses: actions/cache/restore@v4
@@ -145,23 +160,29 @@ jobs:
         timeout-minutes: 1
         with:
           path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ inputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.platform), format('.github/configs/{0}.yml', inputs.platform), '.github/workflows/integration-tests.yml') }}
+          key: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), '.github/workflows/integration-tests.yml') }}
           lookup-only: true
           restore-keys: |
-            ${{ inputs.platform }}-pip-${{ runner.os }}-
-            ${{ needs.configuration.outputs.display_name }}-pip-${{ runner.os }}-
-            ${{ needs.configuration.outputs.display_name }}-build-pip-${{ runner.os }}-
-            ${{ needs.configuration.outputs.display_name }}-integration-pip-${{ runner.os }}-
+            ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-
 
       # Cache downloads only; installation and tests always run.
+      #
+      # continue-on-error makes a failed transfer a cold miss, so the deadline
+      # below has to be long enough that a slow-but-working transfer is never
+      # turned into one. At 3 minutes the Ascend cache (which holds the FlagTree
+      # wheel) timed out on every run of PRs #707/#712 and was then re-fetched
+      # from the index -- paying the download twice and, on those pods, failing
+      # the index fetch instead. The cache warms up, not down, so the deadline
+      # scales with it: 10 minutes and a 5-minute stall detector let a large
+      # cache land while still bounding a genuinely wedged transfer.
       - name: Restore pip downloads
         id: pip-cache
         if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
         uses: actions/cache/restore@v4
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 10
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
         with:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
@@ -230,7 +251,17 @@ jobs:
           --output "$FLAGCICD_REPORT_DIR/hardware-${{ inputs.platform }}.json"
 
       - name: Install pytest JSON reporting
-        run: python -m pip install pytest-json-report==1.5.0 coverage==7.10.7
+        run: |
+          # These are reporting tools: a 403 from the image's pip mirror must not
+          # fail a lane whose tests have not run yet. install_with_pypi_fallback
+          # retries on the runner's index and then on the pinned one, which is
+          # what PR #714's MUSA lane needed (TUNA listed pytest-json-report and
+          # then answered 403 for its wheel).
+          source .github/version-pins.env
+          source .github/scripts/lib/set_env_common.sh
+          VENV_PYTHON="$(command -v python)" PIP_RETRY_NO_CACHE=0 \
+            PIP_RETRY_TIMEOUT=60 \
+            install_with_pypi_fallback pytest-json-report==1.5.0 coverage==7.10.7
 
       - name: Prepare Python line coverage
         id: coverage-setup
@@ -414,8 +445,22 @@ jobs:
       # !cancelled() intentionally permits saving after failure (no success()).
       # Skip exact hits, failed lookups/transfers and cancelled jobs.
       # Cache errors must not change the build/test result.
+      #
+      # Only a push run writes the cache. GitHub scopes a cache to the ref that
+      # saved it, so a pull request's run saves into its own
+      # refs/pull/<n>/merge scope and can never be read by the branch -- while
+      # still counting against the repository's single 10 GB budget. With five
+      # to seven pull requests open, the same per-platform entries existed once
+      # per ref: measured at 19 entries / 9.7 GB for 9 distinct keys, of which
+      # main's own share was 3.65 GB. That pressure is what evicted entries
+      # mid-flight and made the other lanes miss their own restore-key prefix.
+      #
+      # A pull request still restores -- its lookup and restore steps are
+      # unchanged -- and the key is built from the dependency files, not from
+      # the code under test, so the entry main saved is the one a pull request
+      # wants. Only the write is dropped, and main saves it on merge.
       - name: Save pip downloads
-        if: ${{ !cancelled() && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
         uses: actions/cache/save@v4
         continue-on-error: true
         timeout-minutes: 3

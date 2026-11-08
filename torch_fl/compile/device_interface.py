@@ -240,6 +240,13 @@ def _raw_stream(device_idx: int) -> int:
         from torch_fl.compile.flagtree_shim import get_iluvatar_current_raw_stream
 
         return get_iluvatar_current_raw_stream(device_idx)
+    if profile.vendor == "cambricon":
+        # Handle 0 rather than a fallback: MLU has one default queue per device
+        # and the eager CNNL kernels already submit to it, so compiled and eager
+        # work are ordered against each other without an explicit synchronize.
+        from torch_fl.compile.flagtree_shim import get_cambricon_current_raw_stream
+
+        return get_cambricon_current_raw_stream(device_idx)
     if profile.vendor == "tsingmicro":
         # Unlike Ascend, handle 0 is the *right* answer here rather than a
         # fallback: the TX runtime has one default queue per device and the eager
@@ -461,6 +468,11 @@ class FlagOSDeviceInterface(DeviceInterface):
             # major/minor pair, and the number that reaches Triton as
             # GPUTarget.arch is the one its own driver reports.
             return _tsingmicro_arch()
+        if profile.vendor == "cambricon":
+            # Same reasoning again: MLU reports no compute-capability pair, and
+            # its driver states the number that reaches Triton as GPUTarget.arch
+            # (592 on an MLU590).
+            return _cambricon_arch()
         # Ascend: `cc` reaches Triton as GPUTarget.arch, and the Ascend backend
         # expects a SoC name there (e.g. "Ascend910_9382"), not a number. That is
         # what its own driver reports, so read it from the same place.
@@ -532,6 +544,20 @@ def _kunlunxin_arch(_cache: list = []) -> int:
     drift from what ``driver.active.get_current_target()`` would report. The XPU
     device reports no compute-capability pair to derive it from, so the driver is
     the only authority.
+    """
+    if not _cache:
+        from triton.runtime import driver
+
+        _cache.append(int(driver.active.get_current_target().arch))
+    return _cache[0]
+
+
+def _cambricon_arch(_cache: list = []) -> int:
+    """Arch the MLU Triton backend compiles for, as ``GPUTarget.arch``.
+
+    Same shape as ``_kunlunxin_arch`` and read from the same authority: the MLU
+    driver answers ``driver.active.get_current_target()`` with, for an MLU590,
+    ``GPUTarget(backend='mlu', arch=592, warp_size=0)``.
     """
     if not _cache:
         from triton.runtime import driver

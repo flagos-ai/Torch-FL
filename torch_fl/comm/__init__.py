@@ -24,8 +24,17 @@ After ``import torch_fl``:
     - ``torch.distributed.init_process_group("flagos")``  — explicit
     - ``torch.distributed.init_process_group(            ``  — auto-detect
           device_id=torch.device("privateuseone:0"))
+
+An explicit ``backend="gloo"`` request is answered with the flagos backend, so
+that a group built for flagos tensors does not land on collectives that reject
+them. ``new_host_group()`` is the way to get a real host group for CPU-tensor
+collectives -- what ``torch.distributed.checkpoint``'s metadata path needs.
 """
 
-from torch_fl.comm.process_group import ProcessGroupFlagOS, register_flagos_backend
+from torch_fl.comm.process_group import (
+    ProcessGroupFlagOS,
+    new_host_group,
+    register_flagos_backend,
+)
 
-__all__ = ["ProcessGroupFlagOS", "register_flagos_backend"]
+__all__ = ["ProcessGroupFlagOS", "new_host_group", "register_flagos_backend"]

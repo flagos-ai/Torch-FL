@@ -215,7 +215,7 @@ using ToSparseSparseDimFn = Tensor (*)(const Tensor&, int64_t);
 // sdp_choice_stub.cc makes the same split for the same build switch.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS) && \
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON) && \
     defined(FLAGOS_BOXING_BUILD)
 
 namespace {
@@ -337,7 +337,7 @@ TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
   // _to_sparse_csr first anyway.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS) && \
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON) && \
     defined(FLAGOS_BOXING_BUILD)
   m.impl("mm", at::native::_sparse_csr_mm);
   m.impl("mm.out", at::native::_sparse_csr_mm_out);

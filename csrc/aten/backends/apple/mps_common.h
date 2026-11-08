@@ -139,6 +139,29 @@ bool MpsSupportsSoftplusDtype(
 // so both take the CPU reference.
 bool MpsSupportsTrigDtype(at::ScalarType dtype);
 
+// Whether a rounding op (`ceil`, `floor`, `round`, `trunc`) computes on the
+// MPSGraph path. All four are dtype-preserving: the reference returns the
+// operand's own width, and an integral operand comes back unchanged because it
+// is already an integer. So the only question is whether the graph can carry the
+// element type -- bool included would be wrong, since the reference raises for a
+// bool operand, and float64 has no MPSGraph element type. Both decline to the
+// round-trip, where the reference answers or raises in its own words.
+bool MpsSupportsRoundingDtype(at::ScalarType dtype);
+
+// Whether a unary predicate (`isnan`, `isinf`, `isneginf`, `isposinf`,
+// `signbit`) computes on the MPSGraph path.
+//
+// These answer a **bool** tensor whatever the operand's width, and the graph
+// selects that width from the node rather than from the result, so the predicate
+// is about the operand. Integral operands are served: `isnan`/`isinf` are false
+// for them and `signbit` is a real question the graph can answer. float64 has no
+// MPSGraph element type and takes the round-trip.
+//
+// `isinf`/`isneginf`/`isposinf` are not single nodes -- MPSGraph has
+// `isInfiniteWithTensor:` and `signbitWithTensor:` and nothing that combines
+// them -- so those bodies compose the two. See T_ISINF.
+bool MpsSupportsPredicateDtype(at::ScalarType dtype);
+
 // Gather source values at dense row-major int32 addresses and reshape the
 // flat graph result to the aten result. False means MPSGraph declined the
 // graph, so the caller can use its checked reference.
@@ -265,6 +288,11 @@ constexpr int64_t kMpsTriangularSolveMaxRows = 64;
 bool MpsSupportsReduceDtype(
     at::ScalarType dtype,
     const std::optional<at::ScalarType>& out_dtype);
+
+// The `int[1]`-dimension reductions (`amax`, `amin`, `prod`) take no `dtype`
+// argument at all, so there is no out_dtype to check -- the same question with
+// nothing to compare against.
+bool MpsSupportsReduceDtype(at::ScalarType dtype);
 
 // Whether an aten `_softmax` over a tensor of `self_dtype` computes exactly on
 // the MPSGraph path, and the dtype the result comes back in.
@@ -840,17 +868,22 @@ bool MpsSupportsTakeDtype(
 // reciprocal overflows from the same boundary: `1 / 1.17e-38` is `8.5e37` on the
 // reference and `inf` from the graph.
 //
-// This is not a division property, and the measurement says so plainly:
-// `mul.Tensor` flushes the identical way and has been routed to this backend
-// since stage 2 (`1e-38 * 0.5` -> `0`), as does `add.Tensor` (`1e-39 + 1e-39`
-// -> `0`). So the choice here is "div behaves like the mul and add this branch
-// already serves" or "div is the only arithmetic op on the device with a
-// different subnormal policy from its three siblings", and the first is both the
-// smaller surprise and the one already shipped. Nothing in an attention or
-// normalization path evaluates a division whose result is subnormal -- those are
-// O(1) by construction -- so this is a boundary the branch documents rather than
-// one it meets. test_mps_div.py pins it as intentional beside the ``mul`` case
-// it shares.
+// This is not a division property either way, and re-measuring it showed the
+// earlier reading was too wide. The first version of this note recorded that
+// `mul.Tensor` flushed identically (`1e-38 * 0.5` -> `0`) and that `add.Tensor`
+// did too (`1e-39 + 1e-39` -> `0`). On the M5 the suite was then re-run on,
+// both keep the subnormal: `multiplicationWithPrimaryTensor:` over two runtime
+// operands returns `5.0e-39` and `additionWithPrimaryTensor:` returns `2.0e-39`,
+// while every division spelling still returns `0`. So the flush belongs to the
+// node body, not to the platform: the division and reciprocal nodes flush and
+// the additive and multiplicative ones do not, on one and the same host. The
+// constant body is a third reading even under one selector -- `aten::mul.Scalar`
+// reaches `MpsConstant`'s folded `constantWithScalar:` and flushes there while
+// `aten::mul.Tensor` over the same values keeps them -- which is why each body
+// is probed rather than inheriting a sibling's answer. Nothing in an attention
+// or normalization path evaluates a division whose result is subnormal -- those
+// are O(1) by construction -- so this is a boundary the branch documents rather
+// than one it meets. test_mps_div.py pins each body against its own probe.
 //
 // The other case that separates the plausible readings -- `a / b` against
 // `a * reciprocal(b)` -- does **not** show up here: measured against `at::div`

@@ -319,7 +319,10 @@ def test_a_large_fill_is_served_for_every_call():
             """
 import torch, torch_fl
 x = torch.randn(256, 1024, device='flagos:0')
-m = torch.rand(256, 1024, device='flagos:0') > 0.5
+# Built on the host: the device logs a dispatch line for every served op, and
+# this case counts them. A `>` on the device adds one now that the comparison
+# family is served.
+m = (torch.rand(256, 1024) > 0.5).to('flagos:0')
 x.masked_fill(m, 1.0)
 torch_fl._C._synchronize()
 for _ in range(4):

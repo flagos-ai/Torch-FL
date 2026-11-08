@@ -663,7 +663,11 @@ class TestWhereCost:
         served = dispatched_to_mps(
             """
 import torch, torch_fl
-condition = torch.rand(1024, 4096, device='flagos:0') > 0.5
+# The mask is built on the host: every op that runs on the device logs a
+# dispatch line too, and this case counts all of them. A `>` on the device
+# would add one once the comparison family is served, which says nothing
+# about whether `where` was.
+condition = (torch.rand(1024, 4096) > 0.5).to('flagos:0')
 a = torch.randn(1024, 4096, device='flagos:0')
 b = torch.randn(1024, 4096, device='flagos:0')
 torch.where(condition, a, b)

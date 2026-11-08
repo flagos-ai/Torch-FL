@@ -14,9 +14,14 @@
 
 import importlib.machinery
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
+
+_INTEGRATION_DIR = str(Path(__file__).resolve().parents[1])
+if _INTEGRATION_DIR not in sys.path:
+    sys.path.insert(0, _INTEGRATION_DIR)
 
 
 def _platform_path() -> Path:
@@ -86,17 +91,11 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
     # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
     # boxing kernels nor any other vendor's kernels, and FlagGems/Triton has no
-    # Metal line, so every other backend's marked tests are skipped here.
-    "mps": (
-        "cuda",
-        "metax",
-        "ascend",
-        "musa",
-        "dcu",
-        "gcu",
-        "ppu",
-        "flaggems_python",
-    ),
+    # Metal line, so every other backend's marked tests are skipped here. The
+    # FlagGems Python mark is a wheel capability question, not a platform
+    # exclusion: a migrated case checks inside its body whether this build can
+    # serve the override, then records the gap when it cannot.
+    "mps": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "ppu"),
     # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
     # vendor op library, so `-> boxing` and every other backend's dispatch
     # assertions cannot hold. Without this row the platform fell through to the
