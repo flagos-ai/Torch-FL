@@ -189,6 +189,7 @@ def as_tsingmicro(monkeypatch):
         ("kunlunxin", pp._KUNLUNXIN_PROFILE),
         ("iluvatar", pp._ILUVATAR_PROFILE),
         ("tsingmicro", pp._TSINGMICRO_PROFILE),
+        ("cambricon", pp._CAMBRICON_PROFILE),
         ("cuda", pp._CUDA_PROFILE),
         ("ppu", pp._CUDA_PROFILE),
         ("", pp._CUDA_PROFILE),
@@ -224,8 +225,30 @@ def test_only_ascend_is_not_cuda_like():
     assert pp._DCU_PROFILE.is_cuda_like
     # The vendors with no CUDA runtime at all. Asserted together so adding one
     # to _PROFILES without a profile that says so fails here.
-    for name in ("musa", "gcu", "kunlunxin", "tsingmicro"):
+    for name in ("musa", "gcu", "kunlunxin", "tsingmicro", "cambricon"):
         assert not getattr(pp, f"_{name.upper()}_PROFILE").is_cuda_like, name
+
+
+@pytest.mark.anyplatform
+def test_cambricon_target_and_package_key_are_the_same_name():
+    """MLU's Triton wheel registers one backend, under the name "mlu".
+
+    Measured on an MLU590 with the lane's ``triton 3.4.0+mlu2.0.3``:
+    ``driver.active.get_current_target()`` reports
+    ``GPUTarget(backend='mlu', arch=592, warp_size=0)`` and
+    ``triton.backends.backends`` has the single key ``['mlu']``. Unlike Ascend
+    and TsingMicro the two names therefore coincide -- asserted rather than
+    assumed, because a lane that starts spelling them differently would break
+    the toolchain probe without breaking anything visible.
+
+    The build links the CPU torch wheel, so ``is_cuda_like`` is false: there is
+    no ``torch._C._cuda_getCurrentRawStream`` to read a stream from.
+    """
+    profile = pp._CAMBRICON_PROFILE
+    assert profile.triton_device_type == "mlu"
+    assert profile.triton_backend_key == "mlu"
+    assert profile.vendor == "cambricon"
+    assert profile.is_cuda_like is False
 
 
 @pytest.mark.anyplatform
