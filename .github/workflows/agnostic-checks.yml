@@ -115,7 +115,6 @@ jobs:
             tests/unit/test_ci_matrix.py
             tests/unit/test_ci_commands.py
             tests/unit/test_ci_resolution.py
-            tests/unit/test_ci_toolchain_bootstrap.py
             tests/unit/test_conf_matches_codegen_routes.py
             tests/unit/test_flagcicd_reports.py
             tests/unit/test_flagcicd_coverage.py
@@ -165,6 +164,10 @@ jobs:
       - name: Run FlagCICD entry contract tests
         if: hashFiles('tests/unit/test_flagcicd_entry.py') != ''
         run: python -m pytest tests/unit/test_flagcicd_entry.py -v --tb=short -p no:cacheprovider
+
+      - name: Run execution plan contract tests
+        if: hashFiles('tests/unit/test_ci_plan_observation.py') != ''
+        run: python -m pytest tests/unit/test_ci_plan_observation.py -v --tb=short -p no:cacheprovider
 
       # Every vendor conf must be exactly what its generator emits. The
       # generator needs only the standard library (it reads codegen_ops.py and

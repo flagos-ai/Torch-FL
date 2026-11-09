@@ -744,13 +744,8 @@ def test_a_manifest_that_leaves_a_platform_with_no_steps_is_refused():
         )
 
 
-def test_the_loader_invocation_composes_the_same_groups(tmp_path, capsys):
-    """Exercise the loader's own invocation, not just the functions.
-
-    `load-platform-config.yml` runs this script with `yq`-produced JSON and
-    takes the stdout as the pipeline's groups; a test that only called
-    `compose()` would not notice a broken CLI.
-    """
+def test_the_composer_json_cli_composes_the_same_groups(tmp_path, capsys):
+    """Keep the standalone JSON inspection CLI consistent with compose()."""
     manifest_json = tmp_path / "manifest.json"
     config_json = tmp_path / "cuda.json"
     manifest_json.write_text(json.dumps(manifest()))

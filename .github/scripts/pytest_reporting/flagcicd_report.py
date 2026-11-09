@@ -36,6 +36,7 @@ def pytest_configure(config):
         return
     group = os.environ.pop("FLAGCICD_TEST_GROUP", "")
     group_id = os.environ.pop("FLAGCICD_GROUP_ID", group)
+    context = json.loads(os.environ.pop("CI_PLAN_CONTEXT", "") or "{}")
     plugins = os.environ.get("PYTEST_PLUGINS", "").split(",")
     plugins = [name for name in plugins if name.strip() not in ("", "flagcicd_report")]
     if plugins:
@@ -53,6 +54,9 @@ def pytest_configure(config):
             {
                 "group": group,
                 "group_id": group_id,
+                "context": context,
+                "platform": os.environ.get("REPORT_PLATFORM", ""),
+                "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
                 "args": config.invocation_params.args,
             }
         ),

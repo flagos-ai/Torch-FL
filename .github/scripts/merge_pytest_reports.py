@@ -20,6 +20,13 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from run_integration_tests import (
+    requires_pytest,
+    signal_number,
+    teardown_crash_allowed,
+    _FATAL_SIGNALS,
+)
+
 
 def validate_pytest_result(report, *, require_success=False, require_passed=False):
     """Check structured pytest evidence, independently of the outer shell status."""
@@ -61,6 +68,143 @@ def validate_pytest_session(session):
         counts.get(k, 0) for k in ("passed", "skipped", "xfailed", "xpassed")
     ) != len(observed):
         raise ValueError("pytest outcome counts differ from the executed inventory")
+
+
+def summarize_groups(execution, sessions):
+    """Retain failed and unstarted groups as well as their session counts."""
+    results = []
+    for group in execution["groups"]:
+        group_id = group.get("group_id", group.get("name"))
+        matched = [
+            session
+            for session in sessions
+            if session.get("group_id", session.get("group")) == group_id
+        ]
+        counts = Counter()
+        for session in matched:
+            counts.update(session.get("summary", {}))
+        results.append(
+            {
+                "group_id": group_id,
+                "name": group["name"],
+                "status": group["status"],
+                "summary": dict(counts),
+                "sessions": [session["report"] for session in matched],
+            }
+        )
+    return results
+
+
+def validate_execution(
+    expected_groups, execution, sessions, *, identity=None, platform=None, attempt=None
+):
+    """Compare execution and sessions with independently supplied planned groups."""
+    if not isinstance(execution, dict) or not isinstance(execution.get("groups"), list):
+        raise ValueError("integration execution record is missing or invalid")
+    groups = execution["groups"]
+    if (
+        not isinstance(expected_groups, list)
+        or not isinstance(sessions, list)
+        or not all(
+            isinstance(item, dict) for item in [*expected_groups, *groups, *sessions]
+        )
+    ):
+        raise ValueError("group/session evidence must contain objects")
+    planned = identity is not None
+    expected_ids = [
+        g.get("group_id", g.get("manifest_id", g["name"])) for g in expected_groups
+    ]
+    observed_ids = [g.get("group_id", g.get("name")) for g in groups]
+    if not expected_ids or len(expected_ids) != len(set(expected_ids)):
+        raise ValueError("planned group identities are empty or duplicated")
+    if observed_ids != expected_ids or len(observed_ids) != len(set(observed_ids)):
+        raise ValueError(
+            "executed group IDs/order differ from the plan (missing, duplicate or extra group)"
+        )
+    if execution.get("expected") != [g["name"] for g in expected_groups]:
+        raise ValueError("execution group inventory differs from the plan")
+    if planned:
+        if not isinstance(execution.get("context"), dict) or any(
+            execution["context"].get(k) != v for k, v in identity.items()
+        ):
+            raise ValueError("execution identity differs from the plan")
+        if execution.get("platform") != platform:
+            raise ValueError("execution belongs to another platform/lane")
+        execution_attempt = execution.get("run_attempt")
+        if type(execution_attempt) is not int or not 1 <= execution_attempt <= attempt:
+            raise ValueError("invalid execution attempt")
+    seen = set()
+    for session in sessions:
+        report = session.get("report")
+        if not isinstance(report, str) or not report or report in seen:
+            raise ValueError("duplicate or invalid pytest session identity")
+        seen.add(report)
+        session_id = session.get("group_id", session.get("group"))
+        if session_id not in expected_ids:
+            raise ValueError("pytest session belongs to an unexpected group")
+        if planned:
+            if not isinstance(session.get("group_id"), str) or not session["group_id"]:
+                raise ValueError("pytest session stable group ID is missing")
+            if not isinstance(session.get("context"), dict) or any(
+                session["context"].get(k) != v for k, v in identity.items()
+            ):
+                raise ValueError("pytest session identity differs from the plan")
+            if (
+                session.get("platform") != platform
+                or type(session.get("run_attempt")) is not int
+                or session.get("run_attempt") != execution_attempt
+            ):
+                raise ValueError("pytest session belongs to another lane or attempt")
+        validate_pytest_session(session)
+    for expected, group, group_id in zip(expected_groups, groups, expected_ids):
+        for key, default in (
+            ("name", None),
+            ("command", None),
+            ("environment", {}),
+            ("min_passed", 0),
+        ):
+            if group.get(key, default) != expected.get(key, default):
+                raise ValueError(f"group {group_id}: {key} differs from the plan")
+        if planned and group.get("group_id") != group_id:
+            raise ValueError(f"group {group_id}: stable ID is missing")
+        if group.get("status") != "passed":
+            raise ValueError(f"group {group_id} did not complete successfully")
+        code = group.get("returncode")
+        if type(code) is not int or (
+            code != 0
+            and not (
+                group.get("teardown_tolerated") is True
+                and teardown_crash_allowed(
+                    {
+                        **execution.get("environment", {}),
+                        **expected.get("environment", {}),
+                    }
+                )
+                and signal_number(code) in _FATAL_SIGNALS
+            )
+        ):
+            raise ValueError(f"group {group_id}: unsuccessful command result")
+        pytest_required = requires_pytest(expected["command"])
+        if group.get("requires_pytest") is not pytest_required:
+            raise ValueError(
+                f"group {group_id}: pytest requirement differs from the plan"
+            )
+        matched = [s for s in sessions if s.get("group_id", s.get("group")) == group_id]
+        if pytest_required and not matched:
+            raise ValueError("missing pytest session: " + expected["name"])
+        if not pytest_required and matched:
+            raise ValueError("unexpected pytest session: " + expected["name"])
+        counts = Counter()
+        for session in matched:
+            if session.get("group") != expected["name"]:
+                raise ValueError(
+                    f"group {group_id}: session name differs from the plan"
+                )
+            counts.update(session["summary"])
+        validate_group_minimum(expected, counts)
+    if not any(session["summary"].get("passed", 0) for session in sessions):
+        raise ValueError("no functional tests passed")
+    return summarize_groups(execution, sessions)
 
 
 def validate_group_minimum(group, counts):
@@ -149,6 +293,7 @@ def merge_reports(
         for test in report["tests"]:
             test.setdefault("metadata", {}).update(
                 flagcicd_group=session.get("group", ""),
+                flagcicd_group_id=session.get("group_id", session.get("group", "")),
                 flagcicd_session=session["report"],
             )
             tests.append(test)
@@ -162,45 +307,22 @@ def merge_reports(
     execution_path = Path(directory) / "groups.json"
     if execution_path.is_file():
         execution = json.loads(execution_path.read_text())
-        groups = execution.get("groups", [])
-        if (
-            not groups
-            or execution.get("expected") != [g.get("name") for g in groups]
-            or any(g.get("status") != "passed" for g in groups)
-        ):
-            execution_errors.append(
-                "integration groups did not all complete successfully"
-            )
-        for group in groups:
-            group_id = group.get("group_id", group.get("manifest_id", group["name"]))
-            matched = [
-                session
-                for session in sessions
-                if session.get("group_id", session.get("group")) == group_id
-            ]
-            if group.get("requires_pytest") and not matched:
-                execution_errors.append("missing pytest session: " + group["name"])
-            counts = Counter()
-            for session in matched:
-                counts.update(session.get("summary", {}))
+        try:
+            validate_execution(execution.get("groups", []), execution, sessions)
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            execution_errors.append(str(error))
+    else:
+        for session in sessions:
+            if "summary" not in session:
+                continue
             try:
-                validate_group_minimum(group, counts)
+                validate_pytest_result(session, require_success=outcome == "success")
             except ValueError as error:
-                execution_errors.append(str(error))
-    elif require_execution:
-        execution_errors.append("integration execution record is missing")
+                execution_errors.append(f"{session['report']}: {error}")
+        if require_execution:
+            execution_errors.append("integration execution record is missing")
     if not summary.get("passed", 0):
         execution_errors.append("no tests passed")
-    for session in sessions:
-        if "summary" not in session:
-            continue
-        try:
-            if outcome == "success" and session.get("group"):
-                validate_pytest_session(session)
-            else:
-                validate_pytest_result(session, require_success=outcome == "success")
-        except (ValueError, TypeError, KeyError) as error:
-            execution_errors.append(f"{session['report']}: {error}")
     complete = not incomplete and not execution_errors
     # The integration runner owns the verdict, including its existing explicit
     # teardown-crash policy and failures in non-pytest environment checks.

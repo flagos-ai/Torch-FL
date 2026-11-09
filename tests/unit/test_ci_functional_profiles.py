@@ -32,7 +32,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / ".github/scripts"
 sys.path.insert(0, str(SCRIPTS))
-from flagcicd_plan import build_plan  # noqa: E402
+from flagcicd_plan import build_ci_plan, build_plan  # noqa: E402
 from merge_pytest_reports import merge_reports  # noqa: E402
 from ci.generate_matrix import (  # noqa: E402
     _load_platforms,
@@ -193,6 +193,8 @@ def test_profile_policy_is_shared_by_composer_plan_and_resolver(monkeypatch):
     with pytest.raises(ValueError, match="supported profiles are pr"):
         build_plan(request("nightly"), CONTRACT, ROOT, ["setup.py"])
     with pytest.raises(ValueError, match="supported profiles are pr"):
+        build_ci_plan(request("nightly"), CONTRACT, ROOT, ["setup.py"], "schedule")
+    with pytest.raises(ValueError, match="supported profiles are pr"):
         resolver.resolve(
             {"inputs": {"profile": "nightly"}},
             "workflow_dispatch",
@@ -306,7 +308,8 @@ def test_profile_is_threaded_through_both_workflow_entries():
         "${{ inputs.test_profile || 'pr' }}"
     )
     loader = (workflows / "load-platform-config.yml").read_text()
-    assert '--profile "${{ inputs.test_profile }}"' in loader
+    assert '--profile "$TEST_PROFILE"' in loader
+    assert "TEST_PROFILE: ${{ inputs.test_profile || 'pr' }}" in loader
 
 
 def test_serial_failure_records_unstarted_groups(tmp_path):
@@ -365,7 +368,15 @@ def test_incomplete_or_empty_evidence_cannot_pass(tmp_path, missing):
     (tmp_path / "session.json").write_text(json.dumps(report))
     groups = {
         "expected": ["smoke"],
-        "groups": [{"name": "smoke", "status": "passed", "requires_pytest": True}],
+        "groups": [
+            {
+                "name": "smoke",
+                "command": "python -m pytest demo.py",
+                "status": "passed",
+                "returncode": 0,
+                "requires_pytest": True,
+            }
+        ],
     }
     (tmp_path / "groups.json").write_text(json.dumps(groups))
     assert merge_reports(tmp_path, "mthreads", "success", "repo", "sha", True)[
@@ -479,9 +490,9 @@ def test_cancellation_kills_the_active_command_group(tmp_path, escape, launcher_
     [
         ("pr", "", 0),
         ("nightly", "", 0),
-        ("weekly", "", 2),
-        ("unknown", "", 2),
-        ("nightly", "nvidia", 2),
+        ("weekly", "", 1),
+        ("unknown", "", 1),
+        ("nightly", "nvidia", 1),
     ],
 )
 def test_automatic_workflow_profile_selection_before_hardware(
@@ -505,9 +516,24 @@ def test_automatic_workflow_profile_selection_before_hardware(
         "BASE_SHA": "",
         "HEAD_SHA": "HEAD",
         "GITHUB_OUTPUT": str(output),
+        "SOURCE_REPOSITORY": "owner/repo",
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "1",
     }
+    command = (
+        step["run"]
+        .replace(
+            "control/.github/scripts/flagcicd_plan.py",
+            shlex.quote(str(ROOT / ".github/scripts/flagcicd_plan.py")),
+        )
+        .replace("--source source", "--source " + shlex.quote(str(ROOT)))
+        .replace(
+            "--output flagcicd-plan.json",
+            "--output " + shlex.quote(str(tmp_path / "plan.json")),
+        )
+    )
     done = subprocess.run(
-        ["bash", "-e", "-c", step["run"]],
+        ["bash", "-e", "-c", command],
         env=env,
         cwd=ROOT,
         capture_output=True,
@@ -516,13 +542,15 @@ def test_automatic_workflow_profile_selection_before_hardware(
     assert done.returncode == expected_code, done.stdout + done.stderr
     if expected_code == 0:
         known = _load_platforms(CONFIGS)
-        assert json.loads(output.read_text().split("=", 1)[1]) == _schedule(
-            known, boxing_platforms(CONFIGS, known)
-        )
+        assert json.loads(
+            dict(line.split("=", 1) for line in output.read_text().splitlines())[
+                "platforms"
+            ]
+        ) == _schedule(known, boxing_platforms(CONFIGS, known))
     else:
         assert (
             "nightly requires platforms=all" if dispatch else "weekly is reserved"
-        ) in done.stdout
+        ) in done.stderr
         assert not output.exists()
 
 

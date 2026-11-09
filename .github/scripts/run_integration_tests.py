@@ -70,6 +70,11 @@ def load_configuration(allow_empty):
     except json.JSONDecodeError as error:
         raise SystemExit(f"Invalid integration configuration JSON: {error}") from error
 
+    return validate_configuration(tests, environment, allow_empty)
+
+
+def validate_configuration(tests, environment, allow_empty=False):
+    """Validate the same command contract in planning and execution."""
     if not isinstance(tests, list):
         raise SystemExit("integration_tests must be an array")
     if not allow_empty and not tests:
@@ -397,6 +402,13 @@ def run_command(command, test_environment, workdir):
     return (124 if timed_out else returncode), "".join(chunks)
 
 
+def requires_pytest(command):
+    return any(
+        Path(word).name in ("pytest", "run_unit_tests.py")
+        for word in shlex.split(command)
+    )
+
+
 def main():
     args = parse_args()
     if getattr(args, "supervise_command", None) is not None:
@@ -417,22 +429,48 @@ def main():
             "command": test["command"],
             "status": "not_run",
             "group_id": test.get("group_id", test.get("manifest_id", test["name"])),
-            "requires_pytest": any(
-                Path(word).name in ("pytest", "run_unit_tests.py")
-                for word in shlex.split(test["command"])
-            ),
+            "environment": test.get("environment", {}),
+            "requires_pytest": requires_pytest(test["command"]),
             "min_passed": test.get("min_passed", 0),
         }
         for test in tests
     ]
     report_dir = command_environment.get("FLAGCICD_REPORT_DIR")
+    context = json.loads(os.environ.get("CI_PLAN_CONTEXT") or "{}")
+    if context:
+        source = Path(__file__).resolve().parents[2]
+        # Vendor containers can run as a different user from the checkout owner.
+        # Trust only this checkout for this read, without persisting Git config.
+        sha = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                f"safe.directory={source}",
+                "-C",
+                str(source),
+                "rev-parse",
+                "HEAD",
+            ],
+            text=True,
+        ).strip()
+        if sha != context["source_sha"] or context["run_id"] != os.environ.get(
+            "GITHUB_RUN_ID"
+        ):
+            raise SystemExit("execution source or run differs from the plan")
 
     def save_execution():
         if report_dir:
             Path(report_dir).mkdir(parents=True, exist_ok=True)
             Path(report_dir, "groups.json").write_text(
                 json.dumps(
-                    {"expected": [r["name"] for r in records], "groups": records}
+                    {
+                        "expected": [r["name"] for r in records],
+                        "groups": records,
+                        "context": context,
+                        "environment": environment,
+                        "platform": os.environ.get("REPORT_PLATFORM", ""),
+                        "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+                    }
                 )
             )
 
@@ -496,6 +534,7 @@ def main():
         record.update(
             status="passed" if ok else "failed",
             returncode=returncode,
+            teardown_tolerated=bool(tolerated and ok),
             finished_at=time.time(),
         )
         save_execution()
@@ -510,15 +549,12 @@ def main():
             )
             continue
         if not ok:
-            print(
-                f"Integration test '{test['name']}' "
-                + (
-                    f"evidence check failed: {evidence_error}"
-                    if evidence_error
-                    else f"failed with exit code {returncode}"
-                ),
-                flush=True,
+            reason = (
+                "evidence check failed: " + evidence_error
+                if evidence_error
+                else f"failed with exit code {returncode}"
             )
+            print(f"Integration test '{test['name']}' {reason}", flush=True)
             raise SystemExit(returncode or 1)
     return 0
 

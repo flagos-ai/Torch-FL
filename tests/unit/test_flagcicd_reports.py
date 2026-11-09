@@ -127,9 +127,11 @@ def test_final_minimum_matches_stable_id_instead_of_display_name(
     group = {
         "name": "current",
         "group_id": "current",
+        "command": "python -m pytest test_ok.py",
         "min_passed": 1,
         "requires_pytest": True,
         "status": "passed",
+        "returncode": 0,
     }
     (tmp_path / "groups.json").write_text(
         json.dumps({"expected": ["current"], "groups": [group]})

@@ -27,11 +27,9 @@ one platform ran look like a step every platform ran; here the deviation is a
 `platforms:` key in one file, and how much is still per-platform is a number
 the loader prints on every run.
 
-Input is JSON, not YAML: this runs in the loader job on ubuntu-latest, where
-`yq` is already the YAML reader, and the vendor images are not required to
-carry a Python YAML module. The parsing side of the seam is `yq -o=json`; this
-side is the standard library alone, so it can also be imported by the unit
-tests that hold the manifest's invariants.
+The composer uses only the standard library. The shared platform parser calls
+it with decoded YAML data on a CPU runner; the JSON CLI remains useful for
+local inspection and boundary tests. Vendor images need no YAML dependency.
 """
 
 import argparse

@@ -313,6 +313,13 @@ def test_real_failures_override_network_noise(log):
 
 def test_one_network_failure_retries_failed_jobs_and_dependents():
     github = FakeGitHub()
+    github.jobs.append(
+        {
+            "id": 13,
+            "name": "Platform pipeline (hygon) / FlagCICD outcome (hygon)",
+            "conclusion": "success",
+        }
+    )
     assert "Retry requested" in FLAKY.retry(RUN_EVENT, github)
     assert len(github.reruns()) == 1
     assert github.reruns()[0][1] == (
@@ -324,6 +331,28 @@ def test_one_network_failure_retries_failed_jobs_and_dependents():
         "--failed",
     )
     assert all("--repo" in call[1] for call in github.calls if call[0] == "command")
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "validated plan is unavailable: plan_hash does not match plan content",
+        "FlagCICD platform: report_error",
+        "Error: Unable to upload artifact: storage quota exceeded",
+    ],
+)
+def test_real_platform_reporting_failure_blocks_a_network_retry(log):
+    github = FakeGitHub()
+    github.jobs.append(
+        {
+            "id": 13,
+            "name": "Platform pipeline (hygon) / FlagCICD outcome (hygon)",
+            "conclusion": "failure",
+        }
+    )
+    github.logs["13"] = log
+    assert "No retry" in FLAKY.retry(RUN_EVENT, github)
+    assert not github.reruns()
 
 
 @pytest.mark.parametrize(
