@@ -29,6 +29,7 @@
 #include <ATen/ops/_convolution.h>
 #include <ATen/ops/_native_batch_norm_legit.h>
 #include <ATen/ops/_native_batch_norm_legit_no_training.h>
+#include <ATen/ops/add.h>
 #include <ATen/ops/addmm.h>
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/convolution.h>
@@ -1144,6 +1145,126 @@ at::Tensor AddmmKernelIluvatar(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(AddmmFn, addmm_dispatcher, Backend::kIluvatar, AddmmKernelIluvatar)
+
+at::Tensor AddTensorKernelIluvatar(
+    const at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar& alpha) {
+  iluvatar::IluvatarDeviceGuard guard(self);
+  // a python number arrives as a 0-dim tensor (`t + 1.0`); the broadcast
+  // scalar call below serves it, and it has no operand dtype of its own.
+  const bool is_scalar = other.dim() == 0;
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add.Tensor has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  // add promotes a mixed-type pair, so a float16 addend beside a float32
+  // result (a python float with a float16 tensor) arrives in its own type and
+  // has to be widened with the result; ixblasAxpyEx reads the addend at the
+  // output's width. A same-type pair needs no cast. The widen is a no-op when
+  // `self` keeps the addend's layout: `add_` on a transposed `self` arrives
+  // with the addend sharing that layout, and only a dtype change (or a
+  // non-contiguous `self`) materialises it.
+  const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(
+            self.options(), self.is_contiguous(), false,
+            self.suggest_memory_format());
+  const bool x_served =
+      is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
+  TORCH_CHECK(
+      x_served,
+      "iluvatar: add.Tensor has no vendor kernel for an addend of ",
+      other.scalar_type(), " beside ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+
+  // The axpy writes its output in full, so only the scalar path seeds its
+  // output from `self`.
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  if (is_scalar) {
+    out.copy_(self.is_contiguous() ? self : self.contiguous());
+    iluvatar::IluvatarAxpyScalar(out, other.item(), alpha);
+  } else {
+    iluvatar::IluvatarAxpy(out, x, alpha);
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kIluvatar, AddTensorKernelIluvatar)
+
+at::Tensor AddScalarKernelIluvatar(
+    const at::Tensor& self,
+    const at::Scalar& other,
+    const at::Scalar& alpha) {
+  iluvatar::IluvatarDeviceGuard guard(self);
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add.Scalar has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self.is_contiguous() ? self : self.contiguous());
+  iluvatar::IluvatarAxpyScalar(out, other, alpha);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kIluvatar, AddScalarKernelIluvatar)
+
+at::Tensor& AddInplaceTensorKernelIluvatar(
+    at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar& alpha) {
+  iluvatar::IluvatarDeviceGuard guard(self);
+  // a python number arrives as a 0-dim tensor (`t + 1.0`); the broadcast
+  // scalar call below serves it, and it has no operand dtype of its own.
+  const bool is_scalar = other.dim() == 0;
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add_.Tensor has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  // add promotes a mixed-type pair, so a float16 addend beside a float32
+  // result (a python float with a float16 tensor) arrives in its own type and
+  // has to be widened with the result; ixblasAxpyEx reads the addend at the
+  // output's width. A same-type pair needs no cast. The widen is a no-op when
+  // `self` keeps the addend's layout: `add_` on a transposed `self` arrives
+  // with the addend sharing that layout, and only a dtype change (or a
+  // non-contiguous `self`) materialises it.
+  const at::Tensor x = is_scalar || other.scalar_type() == self.scalar_type()
+      ? other
+      : other.to(
+            self.options(), self.is_contiguous(), false,
+            self.suggest_memory_format());
+  const bool x_served =
+      is_scalar || iluvatar::IluvatarSupportsAxpyDtype(x.scalar_type());
+  TORCH_CHECK(
+      x_served,
+      "iluvatar: add_.Tensor has no vendor kernel for an addend of ",
+      other.scalar_type(), " beside ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+
+  if (is_scalar) {
+    iluvatar::IluvatarAxpyScalar(self, other.item(), alpha);
+    return self;
+  }
+  iluvatar::IluvatarAxpy(self, x, alpha);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kIluvatar, AddInplaceTensorKernelIluvatar)
+
+at::Tensor& AddInplaceScalarKernelIluvatar(
+    at::Tensor& self,
+    const at::Scalar& other,
+    const at::Scalar& alpha) {
+  TORCH_CHECK(
+      iluvatar::IluvatarSupportsAxpyDtype(self.scalar_type()),
+      "iluvatar: add_.Scalar has no vendor kernel for ", self.scalar_type(),
+      " (ixblasAxpyEx serves float32/float16)");
+  iluvatar::IluvatarDeviceGuard guard(self);
+  iluvatar::IluvatarAxpyScalar(self, other, alpha);
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceScalarFn, add_inplace_scalar_dispatcher, Backend::kIluvatar, AddInplaceScalarKernelIluvatar)
 
 } // namespace iluvatar
 } // namespace at::native::flagos

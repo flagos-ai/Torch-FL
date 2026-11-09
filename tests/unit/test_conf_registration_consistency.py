@@ -52,8 +52,6 @@ EXTRA_NATIVE = {
     "iluvatar": {
         "_conj",
         "view_as_real",
-        "add_.Tensor",
-        "add_.Scalar",
         "div_.Tensor",
     },
     # The conv pair is claimed straight from register.cc's ``#else`` arm on
