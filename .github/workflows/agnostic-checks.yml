@@ -115,6 +115,7 @@ jobs:
             tests/unit/test_ci_matrix.py
             tests/unit/test_ci_commands.py
             tests/unit/test_ci_resolution.py
+            tests/unit/test_ci_toolchain_bootstrap.py
             tests/unit/test_conf_matches_codegen_routes.py
             tests/unit/test_flagcicd_reports.py
             tests/unit/test_flagcicd_coverage.py
