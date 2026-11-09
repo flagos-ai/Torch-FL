@@ -163,13 +163,18 @@ else:
             except Exception:
                 pass
 
-        def capture_begin(self) -> None:
+        def capture_begin(self, capture_error_mode: str = "global") -> None:
             stream = self._stream
             self._route_stream(stream)
             self._set_capturing(stream)
-            rc = self._hip.hipStreamBeginCapture(
-                stream, 0
-            )  # hipStreamCaptureModeGlobal
+            # HIP capture modes, mirroring torch.cuda.graph's capture_error_mode:
+            #   global (default) / thread_local / relaxed
+            mode = {
+                "global": 0,       # hipStreamCaptureModeGlobal
+                "thread_local": 1,  # hipStreamCaptureModeThreadLocal
+                "relaxed": 2,       # hipStreamCaptureModeRelaxed
+            }[capture_error_mode]
+            rc = self._hip.hipStreamBeginCapture(stream, mode)
             if rc != 0:
                 self._set_capturing(None)
                 raise RuntimeError(f"hipStreamBeginCapture failed: {rc}")
@@ -218,11 +223,12 @@ else:
     class graph:
         """Context manager capturing into a :class:`CUDAGraph`, like torch.cuda.graph."""
 
-        def __init__(self, cuda_graph: CUDAGraph) -> None:
+        def __init__(self, cuda_graph: CUDAGraph, capture_error_mode: str = "global") -> None:
             self._graph = cuda_graph
+            self._capture_error_mode = capture_error_mode
 
         def __enter__(self) -> CUDAGraph:
-            self._graph.capture_begin()
+            self._graph.capture_begin(self._capture_error_mode)
             return self._graph
 
         def __exit__(self, exc_type, exc_val, exc_tb) -> None:
