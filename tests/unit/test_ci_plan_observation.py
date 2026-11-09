@@ -218,17 +218,19 @@ def test_modified_audit_fields_are_rejected_by_plan_verification(
     assert field not in context
 
 
-def test_routing_labels_cannot_remove_shared_changes_from_the_execution_plan():
-    changed = [".github/workflows/ci.yml"]
+@pytest.mark.parametrize("changed", [None, [".github/workflows/ci.yml"]])
+def test_execution_plan_retains_upstream_label_precedence(changed):
     baseline = PLANNER.build_ci_plan(request(), CONTRACT, ROOT, changed, "pull_request")
     labeled = PLANNER.build_ci_plan(
         request(), CONTRACT, ROOT, changed, "pull_request", ["platform:nvidia"]
     )
-    assert labeled["expected_platforms"] == baseline["expected_platforms"]
-    assert [lane["name"] for lane in labeled["execution_plan"]] == baseline[
+    assert labeled["expected_platforms"] == ["nvidia", "nvidia-boxing"]
+    assert [lane["name"] for lane in labeled["execution_plan"]] == labeled[
         "expected_platforms"
     ]
     assert labeled["expected_shared_checks"] == baseline["expected_shared_checks"]
+    assert labeled["changed_files"] == changed
+    assert labeled["selection_reasons"][-1]["policy"] == "label_priority"
 
 
 @pytest.mark.parametrize(
@@ -781,6 +783,8 @@ def test_both_entries_forward_one_plan_to_the_shared_configuration_consumer():
         s for s in loader["steps"] if s.get("name") == "Install configuration parser"
     )
     assert install["if"] == "inputs.execution_plan_artifact == ''"
+    assert install["run"] == 'python -m pip install "PyYAML==6.0.2"'
+    assert "wget" not in script
 
 
 def test_null_optional_configuration_fields_keep_the_loader_defaults(tmp_path):

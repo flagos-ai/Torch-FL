@@ -9,20 +9,19 @@ test groups come from the shared integration manifest.
 | Event | Hardware selection |
 | --- | --- |
 | PR with `platform:all` | Every configured platform |
-| PR with one or more `platform:<name>` labels | File-required platforms plus the platforms named by labels |
+| PR with one or more `platform:<name>` labels | The union of the labeled platforms |
 | PR with an unknown routing label | Every platform, conservatively |
 | PR without routing labels | Platforms affected by the changed files |
 | Documentation-only PR without routing labels | No hardware jobs; shared checks still run |
 | Push or daily schedule | Every platform |
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
-Routing labels can expand the file-based matrix; they cannot remove a required
-platform. Shared CI changes and unavailable diffs therefore still select every
-lane even with a single-platform label. For example, a shared workflow change
-with `platform:nvidia` keeps the full matrix, while an MUSA-only change with that
-label runs both MUSA and NVIDIA (including NVIDIA boxing). The plan records the
-file selection and the label's `expand_only` policy. Use the manual dispatch
-route below for targeted diagnostics; it does not replace the PR merge gate.
+Routing labels take precedence over changed-file filtering, following upstream
+policy. For example, a shared workflow change with `platform:nvidia` selects
+NVIDIA and its boxing lane. Without routing labels, shared code or unavailable
+diffs select every platform. The plan records the diff audit fields and the
+label's `label_priority` selection policy. The gate validates every lane in
+that selected matrix; it does not imply a full-platform run.
 Adding or removing labels reruns PR CI. Supported platform names are `apple`,
 `ascend`, `enflame`, `hygon`, `iluvatar`, `kunlunxin`, `metax`, `mthreads`,
 `nvidia` and `thead`.

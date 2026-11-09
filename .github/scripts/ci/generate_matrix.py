@@ -19,11 +19,12 @@ CI platform matrix generator with changed-file filtering and label routing.
 For schedule / push: returns all configured platforms.
 For workflow_dispatch: uses ``--dispatch-platforms`` (``all`` by default).
 For pull_request:
-  1. If a PR label matches ``platform:<name>``   → run only that platform.
-  2. If a PR label matches ``platform:all``       → run all platforms.
-  3. Otherwise match every changed file against per-platform watch paths.
-     Shared or unrecognized code runs all platforms; documentation alone
-     runs the platform-agnostic checks without hardware jobs.
+  1. Routing labels take precedence over changed-file selection.
+     ``platform:<name>`` selects its platform; ``platform:all`` and unknown
+     platform labels require every platform.
+  2. Without routing labels, match changed files against watch paths.
+     Shared or unrecognized code and unavailable diffs require every platform;
+     documentation alone runs no hardware.
 
 Usage (called from a GitHub Actions step):
     python .github/scripts/ci/generate_matrix.py \\
@@ -297,7 +298,7 @@ def select_platforms(
     *,
     platform_configs=None,
 ):
-    """Preserve file-required PR coverage while allowing labels to expand it."""
+    """Retain upstream label precedence and record the selection policy."""
     known = (
         sorted(platform_configs)
         if platform_configs is not None
@@ -314,20 +315,20 @@ def select_platforms(
         selected = _schedule(known, boxing)
         reasons.append({"kind": "full_event", "event_name": event_name})
     else:
-        selected = _platforms_from_files(
-            changed, known, configs_dir, boxing, reasons, platform_configs
-        )
         label_platforms = _platforms_from_labels(labels, known)
-        if label_platforms is not None:
+        if label_platforms is None:
+            selected = _platforms_from_files(
+                changed, known, configs_dir, boxing, reasons, platform_configs
+            )
+        else:
             label_lanes = _schedule(label_platforms, boxing)
-            required = set(selected) | set(label_lanes)
-            selected = [lane for lane in _schedule(known, boxing) if lane in required]
+            selected = label_lanes
             routing = sorted(label for label in labels if label.startswith("platform:"))
             reasons.append(
                 {
                     "kind": "labels",
                     "labels": routing,
-                    "policy": "expand_only",
+                    "policy": "label_priority",
                     "requested_lanes": label_lanes,
                 }
             )
