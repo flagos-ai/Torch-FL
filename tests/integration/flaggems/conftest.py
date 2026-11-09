@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.skip_policy import add_platform_skip
+
 # The package carries __init__.py, so pytest imports these modules as
 # ``flaggems.<name>`` while the test modules do a bare ``from flaggems_caps
 # import ...``. Put this directory on sys.path up front so both resolve.
@@ -114,13 +116,14 @@ def pytest_collection_modifyitems(
         if kernels is None:
             kernels = _build_kernels()
         if "flaggems" not in kernels:
-            item.add_marker(
-                pytest.mark.skip(
-                    reason=(
-                        "the FlagGems kernel set is not compiled into this wheel "
-                        "(build record)"
-                    )
-                )
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="flaggems kernel set is absent from the build record",
+                reason=(
+                    "the FlagGems kernel set is not compiled into this wheel "
+                    "(build record)"
+                ),
             )
 
 

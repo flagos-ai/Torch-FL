@@ -14,6 +14,8 @@
 
 import pytest
 
+from tests.integration.skip_policy import register_skip_policy_markers
+
 pytest_plugins = ("profiler_support", "amp_support")
 
 
@@ -59,6 +61,7 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    register_skip_policy_markers(config)
     # `main_ops` is CI's selection hook (`-m main_ops`). It was registered only in
     # tests/integration/ops/conftest.py, so tests using it directly under
     # tests/integration/ raised PytestUnknownMarkWarning -- and would hard-error

@@ -118,7 +118,7 @@ def _workflow(name):
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
-def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
+def test_case_gate_runs_the_trusted_controller_against_submitted_data():
     workflow = _workflow("case-gap-issues.yml")
     assert set(workflow[True]) == {
         "workflow_call",
@@ -131,9 +131,9 @@ def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
     ]
     assert [step["with"]["path"] for step in checkouts] == ["registry", "trusted"]
     registry, trusted = (step["with"] for step in checkouts)
-    assert trusted["ref"] == "${{ inputs.registry_ref || github.sha }}"
+    assert trusted["ref"] == "${{ inputs.checkout_ref || github.sha }}"
     assert trusted["repository"] == (
-        "${{ inputs.registry_repository || github.repository }}"
+        "${{ inputs.checkout_repository || github.repository }}"
     )
     assert registry["ref"] == (
         "${{ inputs.registry_ref || inputs.checkout_ref || github.sha }}"
@@ -152,7 +152,10 @@ def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
     assert registry["sparse-checkout"] == (
         ".github/scripts/ci/check_case_gap_issues.py\n"
         "tests/integration/case_gap_issues.py\n"
-        "tests/integration/ops/test_all_dispatch.py\n"
+        "tests/integration/skip_policy.py\n"
+        "tests/integration/skip_policy_baseline.json\n"
+        "tests/integration/flaggems/\n"
+        "tests/integration/ops/\n"
         "tests/unit/test_integration_source_contract.py\n"
     )
     assert all(step["persist-credentials"] is False for step in (trusted, registry))
@@ -162,8 +165,15 @@ def test_case_gate_treats_submitted_controller_and_data_as_untrusted_inputs():
     assert query["working-directory"] == "trusted"
     assert "--script-root" in query["run"]
     assert "--registry" in query["run"]
+    assert 'controller="$GITHUB_WORKSPACE/trusted/' in query["run"]
+    assert "python \"$controller\" --help | grep -q -- '--baseline'" in query["run"]
+    assert "--baseline" in query["run"]
     assert (
         "GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py" in query["run"]
+    )
+    assert (
+        "GITHUB_WORKSPACE/registry/tests/integration/skip_policy_baseline.json"
+        in query["run"]
     )
 
 

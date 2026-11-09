@@ -1,0 +1,346 @@
+{
+  "files": {
+    "tests/integration/flaggems/test_flaggems_exclusions.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/flaggems/test_flaggems_execution.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/flaggems/test_flaggems_route_table.py": {
+      "pytest.skip": 3
+    },
+    "tests/integration/flaggems/test_flaggems_routing.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_abs_dispatch.py": {
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_acos_dispatch.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_add_dispatch.py": {
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_ascend_device_context.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_ascend_memory_info.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_ascend_rng_checkpoint.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_ascend_stream_c_api.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_bitwise_and_dispatch.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_bmm_dispatch.py": {
+      "pytest.skip": 5
+    },
+    "tests/integration/ops/test_cambricon_native_ops.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_cat_dispatch.py": {
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_constant_pad_nd_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_cos_dispatch.py": {
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_dcu_complex.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_dcu_flaggems_sdpa.py": {
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_div_scalar_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_dtype_cast_copy.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_dtype_cast_performance.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_dtype_route_fallback.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_embedding_dense_backward_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_embedding_dispatch.py": {
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_flaggems_conf_consistency.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_flaggems_device_name.py": {
+      "pytest.importorskip": 1,
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_flaggems_mul_route.py": {
+      "pytest.importorskip": 1,
+      "pytest.mark.skipif": 1,
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_gcu_device_gate.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_gcu_sdpa_mask.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_le_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_mean_dispatch.py": {
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_metax_complex_fill.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_metax_sdpa_route.py": {
+      "pytest.mark.skip": 1,
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_mm_dispatch.py": {
+      "pytest.skip": 5
+    },
+    "tests/integration/ops/test_mps_activations.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_addmm.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_all.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_argmax.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_argmax_nan.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_batch_norm.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_binary.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_binary_compare.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_cat.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_clamp_integral.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_contiguous.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_conv.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_conv_backward.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_cumprod.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_cumsum.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_differential_sweep.py": {
+      "pytest.mark.skipif": 1,
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_mps_div.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_embedding.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_erf.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_exp.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_exp_log_bases.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_extrema_product.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_gather.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_gemm.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_index.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_index_select.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_inverse_trig.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_layer_norm.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_log.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_masked_fill.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_not_tan.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_pow.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_qwen35.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_reduce.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_rotary_and_compare.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_rounding_predicates.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_rsqrt.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_sigmoid.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_silu.py": {
+      "pytest.mark.skipif": 1,
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_mps_softmax.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_softplus.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_sqrt.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_take.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_tanh.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_tril.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_triu.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_unary.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_views.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_vision_interpolation.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mps_where.py": {
+      "pytest.mark.skipif": 1
+    },
+    "tests/integration/ops/test_mul_dispatch.py": {
+      "pytest.skip": 5
+    },
+    "tests/integration/ops/test_mul_scalar_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_musa_dispatch.py": {
+      "pytest.importorskip": 1,
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_musa_flaggems.py": {
+      "pytest.skip": 4
+    },
+    "tests/integration/ops/test_musa_flaggems_device.py": {
+      "pytest.skip": 5
+    },
+    "tests/integration/ops/test_neg_dispatch.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_new_ones_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_nll_loss_dispatch.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_pow_dispatch.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_rng_dispatch.py": {
+      "pytest.mark.skipif": 2,
+      "pytest.mark.xfail": 2,
+      "pytest.skip": 7
+    },
+    "tests/integration/ops/test_rsqrt_dispatch.py": {
+      "pytest.skip": 2
+    },
+    "tests/integration/ops/test_scalar_tensor_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_silu_backward_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_silu_dispatch.py": {
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_sin_dispatch.py": {
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_slice_backward_dispatch.py": {
+      "pytest.mark.xfail": 3,
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_softmax_dispatch.py": {
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_sparse_csr_dispatch.py": {
+      "pytest.mark.skipif": 1,
+      "pytest.mark.xfail": 1
+    },
+    "tests/integration/ops/test_sum_dispatch.py": {
+      "pytest.skip": 3
+    },
+    "tests/integration/ops/test_tileops_generated.py": {
+      "pytest.mark.skipif": 1,
+      "pytest.skip": 1
+    },
+    "tests/integration/ops/test_where_dispatch.py": {
+      "pytest.skip": 3
+    }
+  },
+  "kinds": {
+    "pytest.importorskip": 3,
+    "pytest.mark.skip": 1,
+    "pytest.mark.skipif": 58,
+    "pytest.mark.xfail": 6,
+    "pytest.skip": 126
+  },
+  "roots": [
+    "tests/integration/flaggems/",
+    "tests/integration/ops/"
+  ],
+  "version": 1
+}

@@ -79,6 +79,13 @@ def _merge(reports, outcome="success"):
     )
 
 
+def _skip_policy_session(nodeid, *, outcome="skipped", policies=None):
+    return {
+        "tests_details": [{"nodeid": nodeid, "outcome": outcome}],
+        "skip_policy": {} if policies is None else policies,
+    }
+
+
 def _minimum_session(directory, *, group="current", group_id="current"):
     marker = directory / "b-current.pending"
     marker.write_text(
@@ -431,6 +438,258 @@ def test_optional_skipped_session_does_not_invalidate_passing_evidence(tmp_path)
     report = _merge(reports)
     assert report["flagcicd"]["complete"] is True
     assert report["exitcode"] == 0
+
+
+def test_migrated_skip_requires_a_policy_classification():
+    nodeid = (
+        "tests/integration/ops/test_all_dispatch.py"
+        "::TestAllCorrectness::test_all_empty_tensor"
+    )
+    errors = MERGER.validate_skip_policy(
+        _skip_policy_session(nodeid),
+        frozenset({"tests/integration/ops/test_all_dispatch.py"}),
+    )
+    assert errors == [f"{nodeid}: skipped in a migrated file has no skip-policy marker"]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"category": "tracked_gap", "issue": "#710"},
+        {
+            "category": "platform_gate",
+            "gate": "device_count",
+            "detail": "requires two devices",
+        },
+    ],
+)
+def test_valid_skip_policy_classifications_pass(policy):
+    nodeid = "tests/integration/flaggems/test_contract.py::test_case"
+    errors = MERGER.validate_skip_policy(
+        _skip_policy_session(nodeid, policies={nodeid: policy}),
+        frozenset({"tests/integration/flaggems/test_contract.py"}),
+    )
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    "policy,message",
+    [
+        ({"category": "other"}, "unknown skip-policy category"),
+        ({"category": "tracked_gap"}, "unexpected fields"),
+        ({"category": "tracked_gap", "issue": "710"}, "needs a numbered issue"),
+        (
+            {"category": "tracked_gap", "issue": "#710", "detail": "extra"},
+            "unexpected fields",
+        ),
+        (
+            {"category": "platform_gate", "detail": "missing gate"},
+            "unexpected fields",
+        ),
+        (
+            {
+                "category": "platform_gate",
+                "gate": "unsupported",
+                "detail": "invalid gate",
+            },
+            "unknown platform gate",
+        ),
+        (
+            {
+                "category": "platform_gate",
+                "gate": "build_record",
+                "detail": "",
+            },
+            "non-empty single line",
+        ),
+        (
+            {
+                "category": "platform_gate",
+                "gate": "build_record",
+                "detail": "valid",
+                "issue": "#710",
+            },
+            "unexpected fields",
+        ),
+        ({"category": "invalid", "reason": "conflicting markers"}, "conflicting"),
+    ],
+)
+def test_invalid_skip_policy_classifications_fail(policy, message):
+    nodeid = "tests/integration/ops/test_contract.py::test_case"
+    errors = MERGER.validate_skip_policy(
+        _skip_policy_session(nodeid, policies={nodeid: policy}),
+        frozenset({"tests/integration/ops/test_contract.py"}),
+    )
+    assert len(errors) == 1
+    assert errors[0].startswith(f"{nodeid}: invalid skip policy: ")
+    assert message in errors[0]
+
+
+def test_skip_policy_classification_outside_governed_roots_fails():
+    nodeid = "tests/integration/test_contract.py::test_case"
+    errors = MERGER.validate_skip_policy(
+        _skip_policy_session(
+            nodeid,
+            policies={nodeid: {"category": "tracked_gap", "issue": "#710"}},
+        ),
+        frozenset(),
+    )
+    assert errors == [f"{nodeid}: skip policy recorded outside a governed file"]
+
+
+def test_legacy_skip_in_unmigrated_governed_file_remains_allowed():
+    nodeid = "tests/integration/ops/test_legacy.py::test_case"
+    errors = MERGER.validate_skip_policy(
+        _skip_policy_session(nodeid),
+        frozenset({"tests/integration/ops/test_all_dispatch.py"}),
+    )
+    assert errors == []
+
+
+def test_malformed_skip_policy_fails_merge_without_crashing(tmp_path):
+    _minimum_session(tmp_path)
+    marker = tmp_path / "b-current.pending"
+    session = json.loads(marker.read_text())
+    session["skip_policy"] = []
+    marker.write_text(json.dumps(session))
+
+    merged = _merge(tmp_path)
+
+    assert merged["flagcicd"]["complete"] is False
+    assert merged["exitcode"] == 1
+    assert (
+        "b-current.json: skip_policy must be an object"
+        in merged["flagcicd"]["execution_errors"]
+    )
+
+
+def test_runtime_reports_policy_markers_and_merge_copies_the_classification(
+    tmp_path,
+):
+    workdir = tmp_path / "wheel-only"
+    test_file = workdir / "tests/integration/ops/test_policy.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "import pytest\n"
+        "def test_pass(): pass\n"
+        "@pytest.mark.flagos_tracked_gap(issue='#710')\n"
+        "@pytest.mark.skip(reason='tracked gap')\n"
+        "def test_tracked(): pass\n"
+        "@pytest.mark.flagos_platform_gate(\n"
+        "    gate='device_count', detail='requires two devices'\n"
+        ")\n"
+        "@pytest.mark.skip(reason='platform gate')\n"
+        "def test_gated(): pass\n"
+    )
+    process, reports = _integration(
+        tmp_path,
+        [
+            {
+                "name": "policy",
+                "command": (
+                    f"{PYTHON} -m pytest tests/integration/ops/test_policy.py -q"
+                ),
+            }
+        ],
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
+    pending_paths = list(reports.glob("*.pending"))
+    assert len(pending_paths) == 1
+    pending = json.loads(pending_paths[0].read_text())
+    assert pending["skip_policy"] == {
+        "tests/integration/ops/test_policy.py::test_tracked": {
+            "category": "tracked_gap",
+            "issue": "#710",
+        },
+        "tests/integration/ops/test_policy.py::test_gated": {
+            "category": "platform_gate",
+            "gate": "device_count",
+            "detail": "requires two devices",
+        },
+    }
+    report = _merge(reports)
+    assert report["flagcicd"]["complete"] is True
+    by_nodeid = {test["nodeid"]: test for test in report["tests"]}
+    assert (
+        by_nodeid["tests/integration/ops/test_policy.py::test_tracked"]["metadata"][
+            "skip_policy"
+        ]
+        == pending["skip_policy"]["tests/integration/ops/test_policy.py::test_tracked"]
+    )
+    assert (
+        by_nodeid["tests/integration/ops/test_policy.py::test_gated"]["metadata"][
+            "skip_policy"
+        ]
+        == pending["skip_policy"]["tests/integration/ops/test_policy.py::test_gated"]
+    )
+
+
+def test_platform_gate_replaces_a_tracked_gap_for_an_inapplicable_case(tmp_path):
+    """A platform gate is the sole classification when it supersedes a gap.
+
+    MUSA cannot serve ``flaggems_python`` at all. A test carrying both a
+    tracked gap and that backend marker must therefore report a platform gate,
+    rather than fail the report as having two classifications.
+    """
+    workdir = tmp_path / "wheel-only"
+    test_dir = workdir / "tests/integration/ops"
+    test_dir.mkdir(parents=True)
+    policy_path = ROOT / "tests/integration/skip_policy.py"
+    (test_dir / "conftest.py").write_text(
+        "import importlib.util\n"
+        "from pathlib import Path\n"
+        "import pytest\n"
+        f"policy_path = Path({str(policy_path)!r})\n"
+        "spec = importlib.util.spec_from_file_location('skip_policy', policy_path)\n"
+        "skip_policy = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(skip_policy)\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    for item in items:\n"
+        "        if item.get_closest_marker('requires_missing_backend'):\n"
+        "            skip_policy.add_platform_skip(\n"
+        "                item,\n"
+        "                gate='backend_marker',\n"
+        "                detail='runtime is musa; case requires @flaggems_python',\n"
+        "                reason='Skipped on musa runtime: requires @flaggems_python',\n"
+        "            )\n"
+    )
+    (test_dir / "test_policy.py").write_text(
+        "import pytest\n"
+        "def test_pass(): pass\n"
+        "@pytest.mark.requires_missing_backend\n"
+        "@pytest.mark.flagos_tracked_gap(issue='#710')\n"
+        "@pytest.mark.skipif(False, reason='tracked gap')\n"
+        "def test_gated(): pass\n"
+    )
+    process, reports = _integration(
+        tmp_path,
+        [
+            {
+                "name": "platform gate",
+                "command": (
+                    f"{PYTHON} -m pytest tests/integration/ops/test_policy.py -q"
+                ),
+            }
+        ],
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
+    pending_paths = list(reports.glob("*.pending"))
+    assert len(pending_paths) == 1
+    pending = json.loads(pending_paths[0].read_text())
+    nodeid = "tests/integration/ops/test_policy.py::test_gated"
+    assert pending["skip_policy"] == {
+        nodeid: {
+            "category": "platform_gate",
+            "gate": "backend_marker",
+            "detail": "runtime is musa; case requires @flaggems_python",
+        }
+    }
+    report = _merge(reports)
+    assert report["flagcicd"]["complete"] is True
+    by_nodeid = {test["nodeid"]: test for test in report["tests"]}
+    assert (
+        by_nodeid[nodeid]["metadata"]["skip_policy"] == pending["skip_policy"][nodeid]
+    )
 
 
 def test_workflow_transfers_optional_token_and_uploads_the_generated_report():

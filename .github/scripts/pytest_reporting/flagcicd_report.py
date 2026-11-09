@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from skip_policy_contract import describe_policy_markers, is_governed_nodeid
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
@@ -74,4 +76,16 @@ def pytest_collection_finish(session):
     if marker:
         data = json.loads(marker.read_text())
         data["selected_nodeids"] = [item.nodeid for item in session.items]
+        data["skip_policy"] = {
+            item.nodeid: policy
+            for item in session.items
+            if is_governed_nodeid(item.nodeid)
+            and (
+                policy := describe_policy_markers(
+                    (marker.name, marker.args, marker.kwargs)
+                    for marker in item.iter_markers()
+                )
+            )
+            is not None
+        }
         marker.write_text(json.dumps(data), encoding="utf-8")

@@ -63,19 +63,20 @@ jobs:
           sparse-checkout: |
             .github/scripts/ci/check_case_gap_issues.py
             tests/integration/case_gap_issues.py
-            tests/integration/ops/test_all_dispatch.py
+            tests/integration/skip_policy.py
+            tests/integration/skip_policy_baseline.json
+            tests/integration/flaggems/
+            tests/integration/ops/
             tests/unit/test_integration_source_contract.py
           sparse-checkout-cone-mode: false
 
-      # The base selected its controller above. On the first pull request run,
-      # the base cannot contain this workflow because the merge revision had to
-      # supply it. Read the controller from the submitted tree so the source
-      # contract travels with the workflow definition that is running.
-      - name: Check out selected issue query
+      # Run the controller from the trusted base so a pull request cannot
+      # rewrite the gate that judges its own submitted data.
+      - name: Check out trusted issue query
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.registry_repository || github.repository }}
-          ref: ${{ inputs.registry_ref || github.sha }}
+          repository: ${{ inputs.checkout_repository || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.sha }}
           path: trusted
           persist-credentials: false
           sparse-checkout: |
@@ -94,7 +95,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          python .github/scripts/ci/check_case_gap_issues.py \
-            --script-root "$GITHUB_WORKSPACE/trusted/.github/scripts/ci" \
-            --registry "$GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py" \
+          controller="$GITHUB_WORKSPACE/trusted/.github/scripts/ci/check_case_gap_issues.py"
+          args=(
+            --script-root "$GITHUB_WORKSPACE/trusted/.github/scripts/ci"
+            --registry "$GITHUB_WORKSPACE/registry/tests/integration/case_gap_issues.py"
             --source-contract "$GITHUB_WORKSPACE/registry/tests/unit/test_integration_source_contract.py"
+          )
+          if python "$controller" --help | grep -q -- '--baseline'; then
+            args+=(
+              --baseline "$GITHUB_WORKSPACE/registry/tests/integration/skip_policy_baseline.json"
+            )
+          else
+            echo "::notice::The base controller predates the skip baseline; CPU contract tests validate the new ratchet until this workflow lands."
+          fi
+          python "$controller" "${args[@]}"
