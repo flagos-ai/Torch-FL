@@ -51,11 +51,11 @@ ARTIFACT_PREFIX = "wheel-"
 
 
 def lanes() -> dict:
-    """{platform: lane} for every platform that publishes somewhere."""
+    """{vendor/config name: publishing lane}, matching wheel artifact names."""
     table = json.loads(PLATFORM_TABLE.read_text(encoding="utf-8"))
     return {
-        name: row["pypi_lane"]
-        for name, row in table["accelerators"].items()
+        row["vendor"]: row["pypi_lane"]
+        for row in table["accelerators"].values()
         if row.get("pypi_lane")
     }
 
@@ -63,17 +63,31 @@ def lanes() -> dict:
 def collect(wheels: Path) -> list:
     """[(platform, wheel_path)] from the downloaded artifact tree."""
     search = lanes()
+    # Recover artifacts produced before config/artifact names used the vendor.
+    # Both spellings come from the build table, never a second alias registry.
+    aliases = {
+        name: row["vendor"]
+        for name, row in json.loads(PLATFORM_TABLE.read_text())["accelerators"].items()
+    }
     found = []
+    seen = set()
     for directory in sorted(p for p in wheels.iterdir() if p.is_dir()):
         if not directory.name.startswith(ARTIFACT_PREFIX):
             continue
         platform = directory.name[len(ARTIFACT_PREFIX) :]
+        platform = aliases.get(platform, platform)
         if platform not in search:
             raise SystemExit(
                 f"artifact directory {directory.name!r} does not name a platform "
                 f"that publishes a wheel; known: {sorted(search)}"
             )
         for wheel in sorted(directory.glob("*.whl")):
+            identity = (platform, wheel.name)
+            if identity in seen:
+                raise SystemExit(
+                    f"duplicate wheel artifact for {platform}: {wheel.name}"
+                )
+            seen.add(identity)
             found.append((platform, wheel))
     if not found:
         raise SystemExit(f"no wheels under {wheels}; nothing to publish")

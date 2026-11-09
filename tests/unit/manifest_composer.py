@@ -82,6 +82,7 @@ def composed_steps(platform: str, boxing_lane: bool = False) -> list[dict]:
         boxing_lane=boxing_lane,
         environment_check=(config["boxing_environment_check"] if boxing_lane else None),
         boxing=boxing_platforms(),
+        profile="nightly",
     )
 
 
@@ -105,6 +106,7 @@ def step_ids(platform: str, boxing_lane: bool = False) -> list[str]:
         boxing_lane=boxing_lane,
         environment_check=config["boxing_environment_check"] if boxing_lane else None,
         boxing=boxing,
+        profile="nightly",
     )
     selection = {}
     for entry in steps:

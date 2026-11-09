@@ -33,8 +33,11 @@ Run: pytest tests/unit/test_profiler_capabilities.py -v
 """
 
 import importlib.util
+import ast
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -62,6 +65,145 @@ def _load_profiler_support():
 
 
 profiler_support = _load_profiler_support()
+
+
+def _copy_event(name="Memcpy"):
+    return {
+        "cat": "gpu_memcpy",
+        "ph": "X",
+        "name": name,
+        "dur": 1,
+        "args": {"bytes": 64},
+    }
+
+
+def _fake_transfer_profiler(monkeypatch, traces):
+    captures, syncs, transfers = [], [], []
+    traces = iter(traces)
+
+    class Capture:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def export_chrome_trace(self, path):
+            Path(path).write_text(json.dumps({"traceEvents": next(traces)}))
+
+    def profile(*, activities):
+        captures.append(activities)
+        return Capture()
+
+    class Host:
+        def to(self, device):
+            transfers.append(device)
+            return self
+
+        def cpu(self):
+            transfers.append("cpu")
+            return self
+
+    torch = SimpleNamespace(
+        profiler=SimpleNamespace(
+            profile=profile,
+            ProfilerActivity=SimpleNamespace(CPU="CPU", PrivateUse1="PrivateUse1"),
+        ),
+        flagos=SimpleNamespace(synchronize=lambda: syncs.append(True)),
+        randn=lambda *args: Host(),
+    )
+    monkeypatch.setattr(profiler_support, "_torch_module", lambda: torch)
+    return captures, syncs, transfers
+
+
+@pytest.mark.parametrize("name", ["Memcpy", "Memcpy HtoD", "a renamed copy"])
+def test_transfer_detector_counts_activity_category_not_direction_names(
+    monkeypatch, name
+):
+    captures, syncs, _ = _fake_transfer_profiler(monkeypatch, [[_copy_event(name)]])
+    runs = []
+    assert profiler_support.device_memcpy_count(lambda: runs.append(True)) == 1
+    assert captures == [["CPU", "PrivateUse1"]]
+    assert len(syncs) == 2 and len(runs) == 2
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [],
+        [{"cat": "cpu_op", "ph": "X", "name": "aten::mul"}],
+        [{"cat": "privateuse1_runtime", "ph": "X"}],
+    ],
+)
+def test_missing_device_trace_cannot_prove_zero_transfers(monkeypatch, events):
+    _fake_transfer_profiler(monkeypatch, [events])
+    with pytest.raises(AssertionError, match="no device activities"):
+        profiler_support.device_memcpy_count(lambda: None)
+
+
+def test_zero_transfer_result_requires_a_working_host_transfer_control(monkeypatch):
+    kernel = {"cat": "kernel", "ph": "X", "name": "mul_kernel", "dur": 1}
+    _, _, transfers = _fake_transfer_profiler(
+        monkeypatch, [[_copy_event(), _copy_event()], [kernel]]
+    )
+    measure = profiler_support.device_copy_profiler.__wrapped__()
+    assert transfers == ["flagos:0", "cpu", "flagos:0", "cpu"]
+    assert measure(lambda: None) == 0
+
+
+@pytest.mark.parametrize(
+    "events", [[], [_copy_event()], [{"cat": "kernel", "ph": "X", "name": "kernel"}]]
+)
+def test_invisible_or_partial_positive_control_rejects_measurement(monkeypatch, events):
+    _fake_transfer_profiler(monkeypatch, [events])
+    with pytest.raises(AssertionError):
+        profiler_support.device_copy_profiler.__wrapped__()
+
+
+@pytest.mark.parametrize(
+    "boxing,cuda_torch", [(False, False), (True, False), (False, True)]
+)
+def test_native_copy_gate_uses_the_wheel_build_not_only_the_torch_package(
+    monkeypatch, tmp_path, boxing, cuda_torch
+):
+    tree = ast.parse(
+        (_INTEGRATION_DIR / "ops/test_dtype_cast_performance.py").read_text()
+    )
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "native_cuda_copy"
+    )
+    function.decorator_list = []
+    namespace = {
+        "Path": Path,
+        "torch": SimpleNamespace(__file__=str(tmp_path / "torch/__init__.py")),
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_fl",
+        SimpleNamespace(
+            _env=SimpleNamespace(
+                build_kernels=lambda: ["boxing"] if boxing else ["flaggems"]
+            )
+        ),
+    )
+    if cuda_torch:
+        lib = tmp_path / "torch/lib/libtorch_cuda.so"
+        lib.parent.mkdir(parents=True)
+        lib.touch()
+    exec(
+        compile(
+            ast.Module(body=[function], type_ignores=[]), "native copy gate", "exec"
+        ),
+        namespace,
+    )
+    if boxing or cuda_torch:
+        namespace["native_cuda_copy"]()
+    else:
+        with pytest.raises(AssertionError, match="require a boxing wheel"):
+            namespace["native_cuda_copy"]()
+
 
 # Platforms the row may claim, and platforms it must never claim. Kept as two
 # lists rather than one parametrization so a new platform has to be placed

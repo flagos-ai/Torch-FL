@@ -26,7 +26,11 @@ environments), but the pin wiring is fully visible in their source.
 """
 
 import json
+import os
 import re
+import subprocess
+import sys
+from email.parser import Parser
 from functools import lru_cache
 from pathlib import Path
 
@@ -196,9 +200,13 @@ def _setup_globals() -> dict:
     return namespace["_flagos_sibling_requires"].__globals__
 
 
+def _table_vendor(platform: str) -> str:
+    return json.loads(PLATFORM_TABLE.read_text())["accelerators"][platform]["vendor"]
+
+
 def _declared(platform: str) -> list:
     globals_ = _setup_globals()
-    globals_["FLAGOS_ACCELERATOR"] = platform
+    globals_["FLAGOS_ACCELERATOR"] = globals_["_normalize_accelerator"](platform)
     return globals_["_flagos_sibling_requires"]()
 
 
@@ -218,15 +226,95 @@ def test_flag_gems_is_declared_everywhere_at_the_pinned_version():
         assert f"flag_gems=={version}" in _declared(platform), platform
 
 
-def test_flagcx_is_declared_exactly_where_the_pin_file_has_a_version():
+def test_flagcx_is_required_on_pinned_vendors_except_cuda():
     pins = _pins()
     for platform in _platforms_in_the_table():
         declared = [r for r in _declared(platform) if r.startswith("flagcx")]
         version = pins.get(f"FLAGCX_VERSION_{platform}")
-        if version:
+        if version and platform != "cuda":
             assert declared == [f"flagcx=={version}"], platform
         else:
             assert declared == [], platform
+
+
+def test_cuda_communication_extra_uses_the_pinned_flagcx():
+    text = (REPO_ROOT / "pyproject.toml").read_text()
+    extra = re.search(r'^cuda-comm = \["([^"]+)"\]', text, re.M)
+    assert extra is not None
+    assert extra.group(1) == f"flagcx=={_pins()['FLAGCX_VERSION_cuda']}"
+
+
+@pytest.mark.parametrize("accelerator", ["cuda", "nvidia"])
+def test_cuda_package_metadata_makes_flagcx_an_explicit_extra(tmp_path, accelerator):
+    """Verify generated package metadata without simulating an installation."""
+    from packaging.requirements import Requirement
+
+    output = tmp_path / "metadata"
+    output.mkdir()
+    done = subprocess.run(
+        [sys.executable, "setup.py", "egg_info", "--egg-base", str(output)],
+        cwd=REPO_ROOT,
+        env={**os.environ, "FLAGOS_ACCELERATOR": accelerator},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    metadata_path = next(output.glob("*.egg-info/PKG-INFO"))
+    metadata_text = metadata_path.read_text()
+    metadata = Parser().parsestr(metadata_text)
+    requirements = [Requirement(raw) for raw in metadata.get_all("Requires-Dist", [])]
+    flagcx = [req for req in requirements if req.name == "flagcx"]
+    assert len(flagcx) == 1
+    assert not flagcx[0].marker.evaluate({"extra": ""})
+    assert flagcx[0].marker.evaluate({"extra": "cuda-comm"})
+    assert str(flagcx[0].specifier) == f"=={_pins()['FLAGCX_VERSION_cuda']}"
+    assert "cuda-comm" in metadata.get_all("Provides-Extra", [])
+
+
+@pytest.mark.parametrize(
+    ("enabled", "cuda_version", "expected_code"),
+    [("0", "13.0.88", 0), ("0", "13.3.0", 0), ("1", "13.3.0", 0), ("1", "13.0.88", 1)],
+)
+def test_cuda_flagcx_provisioning_requires_explicit_compatible_opt_in(
+    enabled, cuda_version, expected_code, tmp_path
+):
+    hook = (HOOKS_DIR / "set_env_nvidia.sh").read_text()
+    branch = hook.split("# CUDA functional CI", 1)[1].split(
+        "# Install the published FlagGems wheel", 1
+    )[0]
+    branch = "# CUDA functional CI" + branch
+    script = (
+        'set -euo pipefail\nsource "$1"\npip_retry() { printf "INSTALL %s\\n" "$*"; }\n'
+        + branch
+        + "\nexport_ci_env FLAGCX_TORCH_BACKEND\n"
+        + '\nprintf "AUTOLOAD=%s TLE=%s\\n" "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" "${USE_TLE_DIST:-}"\n'
+    )
+    result = subprocess.run(
+        ["bash", "-c", script, "cuda-test", str(SCRIPTS_DIR / "lib/set_env_common.sh")],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled,
+            "CUDA_VERSION": cuda_version,
+            "VENV_PYTHON": sys.executable,
+            "FLAGGEMS_INDEX_URL": "https://example.invalid/simple",
+            "FLAGCX_VERSION": _pins()["FLAGCX_VERSION_cuda"],
+            "GITHUB_ENV": str(tmp_path / "github-env"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected_code, result.stdout + result.stderr
+    if enabled == "0":
+        assert "INSTALL" not in result.stdout
+        assert "FlagCX communication is not validated" in result.stdout
+        assert "TLE=0" in result.stdout
+        assert (tmp_path / "github-env").read_text() == "FLAGCX_TORCH_BACKEND=vendor\n"
+    elif expected_code == 0:
+        assert f"flagcx==={_pins()['FLAGCX_VERSION_cuda']}" in result.stdout
+        assert "AUTOLOAD=0" in result.stdout
+    else:
+        assert "INSTALL" not in result.stdout
+        assert "CUDA 13.3" in result.stderr
 
 
 def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():
@@ -236,7 +324,9 @@ def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():
             continue
         declared = _declared(platform)
         flagtree = any(r.startswith("flagtree==") for r in declared)
-        assert flagtree == bool(pins.get(f"FLAGTREE_VERSION_{platform}")), platform
+        assert flagtree == bool(
+            pins.get(f"FLAGTREE_VERSION_{_table_vendor(platform)}")
+        ), platform
         assert flagtree != any(r.startswith("triton") for r in declared), (
             platform,
             TRITON_AND_FLAGTREE,
@@ -280,7 +370,7 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
     globals_ = _setup_globals()
     for platform in _platforms_in_the_table():
         pinned = pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-        globals_["FLAGOS_ACCELERATOR"] = platform
+        globals_["FLAGOS_ACCELERATOR"] = globals_["_normalize_accelerator"](platform)
         # Read it back off the kwargs setup() is called with, not off the helper:
         # a helper that computes the right string while setup() still hard-codes
         # `>=3.8` is exactly the regression this is here for.
@@ -314,7 +404,7 @@ def test_setup_kwargs_survive_a_boxing_lane_walking_the_table(monkeypatch):
     globals_ = _setup_globals()
     monkeypatch.setenv("FLAGOS_BUILD_BOXING", "1")
     for platform in _platforms_in_the_table():
-        globals_["FLAGOS_ACCELERATOR"] = platform
+        globals_["FLAGOS_ACCELERATOR"] = globals_["_normalize_accelerator"](platform)
         assert globals_["_get_setup_kwargs"]()["python_requires"], platform
 
 

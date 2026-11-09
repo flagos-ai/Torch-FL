@@ -212,6 +212,18 @@ def test_routing_labels_override_file_filters_without_duplicates(labels, expecte
 
 
 @pytest.mark.parametrize(
+    "files",
+    [
+        ".github/workflows/ci.yml",
+        "unknown/runtime.cc",
+        ".github/configs/mthreads.yml",
+    ],
+)
+def test_routing_labels_take_precedence_over_changed_files(files):
+    assert _run(files=files, labels="platform:ascend")[1] == lanes("ascend")
+
+
+@pytest.mark.parametrize(
     "requested, expected",
     [
         ("", LANES),
