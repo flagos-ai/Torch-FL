@@ -854,3 +854,8 @@ __all__ = [
 # first kernel -- so it has to happen here, not inside a kernel path.
 _triton_compat.preload_kunlunxin_runtime(_platform())
 _triton_compat.bind_kunlunxin_stream(_platform(), sys.modules[__name__])
+
+# CUDA/HIP graph capture for the flagos device (Hygon DCU). The CPU torch
+# wheel's torch.cuda.CUDAGraph is a dummy, so expose a ctypes-driven graph
+# object mirroring torch.cuda.graph. See cuda_graph.py.
+from .cuda_graph import CUDAGraph, graph  # noqa: E402,F401
