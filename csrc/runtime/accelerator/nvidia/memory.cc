@@ -233,6 +233,14 @@ Error_t Memcpy(
     const void* src,
     size_t count,
     MemcpyKind kind) {
+  // A synchronous device-to-device copy invalidates HIP stream capture (there is
+  // no per-stream synchronize on DCU). While capturing, route it to the async
+  // form on the capture stream instead; the capture stream's ordering preserves
+  // the copy's position in the graph.
+  Stream_t capture = GetStreamCapturing();
+  if (capture != nullptr && kind == MemcpyDeviceToDevice) {
+    return MemoryManager::getInstance().memcpyAsync(dst, src, count, kind, capture);
+  }
   return MemoryManager::getInstance().memcpy(dst, src, count, kind);
 }
 

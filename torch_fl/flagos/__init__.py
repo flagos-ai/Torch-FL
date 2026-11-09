@@ -3364,3 +3364,8 @@ def _loaded_shared_objects():
 # first kernel -- so it has to happen here, not inside a kernel path.
 _preload_xcudart_for_kunlunxin()
 _bind_kunlunxin_triton_stream()
+
+# CUDA/HIP graph capture for the flagos device (Hygon DCU). The CPU torch
+# wheel's torch.cuda.CUDAGraph is a dummy, so expose a ctypes-driven graph
+# object mirroring torch.cuda.graph. See cuda_graph.py.
+from .cuda_graph import CUDAGraph, graph  # noqa: E402,F401
