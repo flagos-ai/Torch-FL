@@ -44,7 +44,7 @@ paths_watch:
   - csrc/runtime/accelerator/ascend/
   - csrc/runtime/allocator/backends/ascend_memory.h
   - .github/scripts/hooks/set_env_ascend.sh
-  - .github/scripts/seed_ascend_runtime.py
+  - .github/scripts/seed_runtime.py
   - .github/requirements-ascend.txt
   - .github/scripts/set_env_ascend.sh
   - scripts/vendor/patch_triton_ascend.py

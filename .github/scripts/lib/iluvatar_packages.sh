@@ -9,8 +9,10 @@ import importlib.metadata
 import sys
 
 try:
+    import triton.backends
     assert importlib.metadata.version("flagtree") == sys.argv[1]
-except (AssertionError, importlib.metadata.PackageNotFoundError):
+    assert "iluvatar" in triton.backends.backends
+except (AssertionError, ImportError, importlib.metadata.PackageNotFoundError):
     raise SystemExit(1)
 PY
   then

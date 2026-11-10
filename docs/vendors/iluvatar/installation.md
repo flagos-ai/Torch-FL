@@ -22,23 +22,34 @@ it does not turn CPU torch into a CUDA build. Iluvatar remains FlagGems-primary
 with native vendor kernels, boxing disabled, and no FlagGems C++ or TileOps.
 This CI adaptation changes no operator routes or expected numeric results.
 
-The isolated `/opt/torch-fl-iluvatar-venv` disables system and user site packages.
-The image preinstalls FlagTree `0.6.2a3+iluvatar3.6` (with Triton 3.6), FlagGems
-`5.4.0` and build/test dependencies. The checkout pins FlagTree
-`0.7.0+iluvatar3.6`, so the hook replaces the image's copy on every run until a
-later image bakes it in. The hook clears inherited PYTHONPATH, checks requested
-versions against checkout pins/overrides, and replaces only mismatched
-components in the job container. A FlagTree change replaces its
-Triton provider as a pair. `pip check` validates the resulting dependencies;
-the checkout's constraints protect CPU torch. Stable dependency updates can be
-baked into a later image. SDK, Python or CPU torch changes require a rebuild.
+The hook creates a fresh job-local Python 3.12 venv under
+`${RUNNER_TEMP}/torch-fl-iluvatar-${CI_STAGE}` (or `TORCH_FL_VENV_ROOT`). System
+and user site packages are disabled. The official runtime's `/flagos` contains
+vendor Torch `2.10.0+corex.4.5.0.20260804`; it stays outside CI, which installs
+the official `2.10.0+cpu` wheel instead. No vendor libtorch is copied or loaded.
 
-The published image still contains the old, separately staged vendor libtorch
-assets. The hook clears `FLAGOS_VENDOR_TORCH_LIB` and vendor version metadata,
-including in subsequent workflow steps. Those assets are neither selected nor
-bundled. The old Iluvatar facade helper, bundler and setup.py ABI overrides have
-been removed in favor of the upstream CPU-core implementation. A new image push
-is not required to use the existing digest with this hook. The checkout
+Before installing packages, the shared `seed_runtime.py` copies compatible
+distributions from the runtime by their RECORD entries. Each copy is independent;
+the runtime's complete site-packages and compiler side directories are never
+added to the CI import path. This can reuse FlagGems 5.4.0, NumPy 1.26.4 and
+matching tools. The image's FlagTree `0.7.1a1+iluvatar3.6` is a prerelease;
+CI retains the checkout's stable `0.7.0+iluvatar3.6` pin unless explicitly
+overridden. A replacement removes the complete old Triton provider. FlagCX is
+not copied merely because the runtime includes it; this lane has no FlagCX pin.
+
+`.github/requirements-iluvatar.txt` defines Python build/test tools and FlagGems
+dependencies. A local version/dependency check skips pip entirely for satisfied
+requirements; pip fills gaps under the checkout's CPU-Torch constraints.
+System gcc/g++, make and readelf remain available from the image. CMake's Python
+distribution is needed by the build frontend, with a compatible 3.x version
+rather than the old development image's exact patch pin. `pip check` validates
+the resulting environment, and setup logs report copy/preparation time.
+
+After the image initializes its SDK environment, the hook persists
+`BASH_ENV=/dev/null` so later Bash steps cannot select `/flagos` again.
+It clears inherited PYTHONPATH and vendor Torch library/header/CMake paths,
+preserves CoreX paths, and exports the venv and SDK settings to subsequent steps.
+`FLAGOS_VENDOR_TORCH_LIB` and vendor version metadata remain empty. The checkout
 [verification script](../../../.github/scripts/verify_iluvatar.py) checks the
 isolated CPU environment and installed runtime used by CI.
 
@@ -52,26 +63,35 @@ memlock and 16 GiB shared memory. Computation stays reserved to physical cards
 
 Read-only mounts from `/usr/local/corex-4.5.0` provide:
 
-- `lib64/libcuda.so.1` and `lib64/libixml.so` at matching CoreX paths;
+- `lib64/libcuda.so.1` and `lib64/libixml.so` at the runtime's
+  `/usr/local/corex/lib/` paths;
 - `bin/ixsmi` at `/usr/local/corex/bin/ixsmi`.
 
 Omitting `/dev/itrctl` caused initialization error 1001 even with compute nodes
-mapped. The base's zero-byte ixsmi placeholder caused Triton's matmul clock
-query to fail; the real host tool is required. These mounts remain necessary
+mapped. The old development base's zero-byte ixsmi placeholder caused Triton's matmul clock
+query to fail; the real host tool is required. The new runtime ships driver
+user-space libraries under `lib`, so mounts target that directory to prevent
+the image's copies from preceding the host's matching driver. These mounts remain necessary
 with the independent runtime. The SDK header probe uses native
 `ixblasDataType_t` and `IX_R_16BF`, matching upstream's corrected type handling.
 
 ## CI image and runtime acceptance
 
-The operator published the baseline on 2026-10-17:
+CI uses the official COREX 4.5.0 runtime 2.3.0, pinned to the registry manifest
+inspected on 2026-11-10:
 
 ```text
-harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:bc1b3c0beb22b301ec501896ea1c77903879526fb7303358669321d609458023
+harbor.baai.ac.cn/flagos-runtime/flagos-runtime-iluvatar-corex4.5.0:2.3.0@sha256:41e27e638326bfe97adc45e35dcb8cfacd27487a15d3ce395f005be84f62e08d
 ```
 
-CI consumes this published image; image build recipes are maintained outside
-this repository. When adopting a validated replacement, update `ci_image` to
-its registry manifest digest.
+Its [official package list](https://github.com/flagos-ai/build-infra/blob/main/docs/content/zh-cn/runtime/iluvatar-corex4.5.0.md)
+and [base build recipe](https://github.com/flagos-ai/build-infra/blob/main/base/iluvatar-corex4.5.0)
+describe Python 3.12, the SDK, compiler and driver layout. CI uses the image
+directly; no derived image or Dockerfile is needed. The historical results below
+used the former development image and do not validate the new runtime. Native
+build, driver loading, cold Triton compilation and complete integration results
+must be confirmed by its first CI run. There is no Iluvatar boxing lane;
+the build and environment assertions keep boxing disabled.
 
 The previous vendor-core lane reached the runner, built a wheel and passed
 startup and multi-device groups. Its last completed run

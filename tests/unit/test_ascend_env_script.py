@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HOOK = (ROOT / ".github/scripts/hooks/set_env_ascend.sh").read_text()
 COMMON = ROOT / ".github/scripts/lib/set_env_common.sh"
 SPEC = importlib.util.spec_from_file_location(
-    "seed_ascend_runtime", ROOT / ".github/scripts/seed_ascend_runtime.py"
+    "seed_runtime", ROOT / ".github/scripts/seed_runtime.py"
 )
 SEED = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SEED)
@@ -399,7 +399,7 @@ def test_installed_check_works_with_only_venv_pip(tmp_path):
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
     command = [
         str(venv / "bin/python"),
-        str(ROOT / ".github/scripts/seed_ascend_runtime.py"),
+        str(ROOT / ".github/scripts/seed_runtime.py"),
         "--check-installed",
     ]
     env = {"PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1"}
@@ -411,6 +411,7 @@ def test_installed_check_works_with_only_venv_pip(tmp_path):
     "name,version,python_version,reused",
     [
         ("torch", "2.13.0+cpu", list(sys.version_info[:2]), False),
+        ("torch", "2.10.0+corex.4.5.0.20260804", list(sys.version_info[:2]), False),
         ("torch", "2.10.0+cpu", [3, 9], False),
         ("torch", "2.10.0+cpu", list(sys.version_info[:2]), True),
         ("flagcx", "0.14.0+cann9.0.0", list(sys.version_info[:2]), False),
@@ -436,3 +437,24 @@ def test_seed_requires_matching_versions_and_python(
         binary / "python", "2.10.0", "0.7.0+ascend3.5", "5.4.0", "0.14.0+cann9.0.0.910c"
     )
     assert target.exists() == reused
+
+
+def test_a_lane_without_flagcx_keeps_the_runtime_communication_package_out(
+    tmp_path, monkeypatch
+):
+    dist = runtime_distribution(
+        tmp_path / "runtime", name="flagcx", version="0.14.0+corex4.5.0"
+    )
+    target = tmp_path / "ci/site-packages"
+    binary = tmp_path / "ci/bin"
+    binary.mkdir(parents=True)
+    monkeypatch.setattr(SEED.metadata, "distributions", lambda **kwargs: [dist])
+    monkeypatch.setattr(
+        SEED.subprocess,
+        "check_output",
+        lambda *args, **kwargs: json.dumps(
+            {"site": str(target), "version": list(sys.version_info[:2])}
+        ),
+    )
+    SEED.seed(binary / "python", "2.10.0", "0.7.0+iluvatar3.6", "5.4.0")
+    assert not target.exists()

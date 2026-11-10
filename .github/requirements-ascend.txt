@@ -1,5 +1,5 @@
 # Python tools needed by the isolated Ascend build and test environment.
-# seed_ascend_runtime.py reuses matching runtime distributions first; pip then
+# seed_runtime.py reuses matching runtime distributions first; pip then
 # fills any missing distributions and their dependencies from this same list.
 setuptools>=64
 wheel

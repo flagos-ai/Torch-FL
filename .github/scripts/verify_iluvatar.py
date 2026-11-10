@@ -28,40 +28,57 @@ def read_pins():
     )
 
 
+def isolated_venv_root():
+    root = Path(sys.prefix).resolve()
+    expected = os.environ.get("VIRTUAL_ENV")
+    assert expected and root == Path(expected).resolve(), (root, expected)
+    assert sys.prefix != sys.base_prefix, "CI must use an independent venv"
+    assert not root.is_relative_to("/flagos"), root
+    config = (root / "pyvenv.cfg").read_text().lower()
+    assert "include-system-site-packages = false" in config, config
+    return root
+
+
+def assert_venv_package(root, path):
+    resolved = Path(path).resolve()
+    assert resolved.is_relative_to(root), f"Package outside CI venv: {resolved}"
+
+
 def verify():
     import torch
     import triton
 
     pins = read_pins()
     assert pins["CPU_TORCH_VERSION_DEFAULT"] == "2.10.0", (
-        "Changing CPU torch requires a rebuilt and validated CoreX CI image"
+        "Changing CPU torch requires validation of the independent CoreX runtime"
     )
     assert sys.version_info[:2] == (3, 12), sys.version
     assert torch.__version__ == "2.10.0+cpu", torch.__version__
     assert importlib.metadata.version("torch") == "2.10.0+cpu"
     assert torch.version.cuda is None, torch.version.cuda
     assert torch._C._GLIBCXX_USE_CXX11_ABI, "The untouched CPU core must be active"
-    assert (
-        Path(torch.__file__).resolve().is_relative_to("/opt/torch-fl-iluvatar-venv")
-    ), torch.__file__
+    root = isolated_venv_root()
+    assert_venv_package(root, torch.__file__)
     assert not any(
-        path.startswith("/usr/local/lib/python3.12/site-packages") for path in sys.path
+        path.startswith(("/flagos/", "/opt/flagtree", "/opt/triton"))
+        or ("site-packages" in path and not Path(path).resolve().is_relative_to(root))
+        or ("dist-packages" in path and not Path(path).resolve().is_relative_to(root))
+        for path in sys.path
     ), sys.path
     assert importlib.util.find_spec("vllm") is None, "Base Python packages leaked"
-    config = Path(sys.prefix, "pyvenv.cfg").read_text().lower()
-    assert "include-system-site-packages = false" in config, config
     assert importlib.metadata.version("flagtree") == os.environ.get(
         "FLAGTREE_VERSION", pins["FLAGTREE_VERSION_iluvatar"]
     )
     assert importlib.metadata.version("flag_gems") == os.environ.get(
         "FLAGGEMS_VERSION", pins["FLAGGEMS_VERSION_DEFAULT"]
     )
-    assert (
-        Path(triton.__file__).resolve().is_relative_to("/opt/torch-fl-iluvatar-venv")
-    ), triton.__file__
+    assert_venv_package(root, triton.__file__)
     assert "iluvatar" in triton.backends.backends, sorted(triton.backends.backends)
-    assert importlib.metadata.version("cmake") == "3.31.10"
-    assert Path(shutil.which("cmake")).is_relative_to("/opt/torch-fl-iluvatar-venv")
+    from packaging.version import Version
+
+    cmake_version = Version(importlib.metadata.version("cmake"))
+    assert Version("3.19") <= cmake_version < Version("4"), cmake_version
+    assert_venv_package(root, shutil.which("cmake"))
 
     sdk = Path(os.environ["COREX_PATH"])
     for header in ("cuda_runtime.h", "cudnn.h", "cublas_v2.h"):
@@ -135,8 +152,9 @@ def verify_runtime():
     assert torch.cuda.is_available()
     package = Path(torch_fl.__file__).resolve().parent
     torch_root = Path(torch.__file__).resolve().parent
-    assert package.is_relative_to("/opt/torch-fl-iluvatar-venv"), package
-    assert torch_root.is_relative_to("/opt/torch-fl-iluvatar-venv"), torch_root
+    root = isolated_venv_root()
+    assert_venv_package(root, package)
+    assert_venv_package(root, torch_root)
     assert_cpu_core(torch_root, package, Path("/proc/self/maps").read_text())
     for library in ("libtorch_fl.so", "libtorch_bindings.so"):
         dynamic = subprocess.check_output(

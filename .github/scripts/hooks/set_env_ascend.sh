@@ -221,14 +221,14 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_ascend_runtime.py" \
+  "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
     --target-python "$VENV_PYTHON" \
     --torch-version "$CPU_TORCH_VERSION" \
     --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
     --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
     --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}" \
     --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_ascend_runtime.py" \
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
       --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
     echo "Using prepared CPU torch $CPU_TORCH_VERSION"
   else
@@ -306,7 +306,7 @@ fi
 # list also supplies build/pytest to the combined CI_STAGE=build job.
 while IFS= read -r requirement || [[ -n "$requirement" ]]; do
   [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_ascend_runtime.py" \
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
       --check-installed "$requirement"; then
     echo "Using prepared requirement: $requirement"
   else

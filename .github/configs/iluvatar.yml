@@ -7,8 +7,9 @@ setup_script: .github/scripts/set_env.sh
 setup_platform: iluvatar
 setup_stage: integration
 
-# Operator-published manual-20261016-iluvatar-cpu-dev, confirmed 2026-10-17.
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl@sha256:bc1b3c0beb22b301ec501896ea1c77903879526fb7303358669321d609458023
+# Official COREX 4.5.0 runtime 2.3.0, inspected 2026-11-10. The hook creates
+# an independent CPU-Torch venv; the image's vendor Torch remains outside it.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-iluvatar-corex4.5.0:2.3.0@sha256:41e27e638326bfe97adc45e35dcb8cfacd27487a15d3ce395f005be84f62e08d
 runner_labels:
   - ts-v150-cicd-pytorch
 
@@ -24,11 +25,13 @@ paths_watch:
   - .github/scripts/set_env_iluvatar.sh
   - .github/scripts/lib/iluvatar_packages.sh
   - .github/scripts/verify_iluvatar.py
+  - .github/scripts/seed_runtime.py
+  - .github/requirements-iluvatar.txt
 
 container_volumes:
-  - /usr/local/corex-4.5.0/lib64/libcuda.so.1:/usr/local/corex/lib64/libcuda.so.1:ro
-  - /usr/local/corex-4.5.0/lib64/libixml.so:/usr/local/corex/lib64/libixml.so:ro
-  # The base's ixsmi is an empty placeholder. Triton matmul tuning calls it.
+  - /usr/local/corex-4.5.0/lib64/libcuda.so.1:/usr/local/corex/lib/libcuda.so.1:ro
+  - /usr/local/corex-4.5.0/lib64/libixml.so:/usr/local/corex/lib/libixml.so:ro
+  # Keep the user-space driver and its clock-query tool matched to the host.
   - /usr/local/corex-4.5.0/bin/ixsmi:/usr/local/corex/bin/ixsmi:ro
 
 # These are the manually validated reservations on u121. The runner must keep
@@ -72,7 +75,16 @@ wheel_artifact_name: wheel-iluvatar
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
-  torch_path_prefix: /opt/torch-fl-iluvatar-venv/
+  torch_path_forbidden:
+    - /flagos/
+    - /usr/local/lib/
+  require_build_kernels:
+    - vendor
+    - flaggems
+  forbid_build_kernels:
+    - boxing
+    - flaggems_cpp
+    - tileops
   require_package_files:
     - lib/libtorch_fl.so
     - lib/libtorch_bindings.so

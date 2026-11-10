@@ -1,0 +1,12 @@
+# Python tools for the isolated Iluvatar build and test environment.
+# seed_runtime.py copies compatible distributions before pip fills gaps.
+setuptools>=64
+wheel
+cmake>=3.19,<4
+build
+pytest
+pybind11
+packaging>=26.0
+PyYAML==6.0.1
+sqlalchemy==2.0.48
+numpy<2

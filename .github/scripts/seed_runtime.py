@@ -148,7 +148,7 @@ def seed(
     torch_version,
     flagtree_version,
     flaggems_version,
-    flagcx_version,
+    flagcx_version=None,
     requirements_file=None,
 ):
     target = json.loads(
@@ -171,9 +171,12 @@ def seed(
         "torch": torch_version + "+cpu",
         "flagtree": flagtree_version,
         "flag-gems": flaggems_version,
-        "flagcx": flagcx_version,
         "numpy": None,
     }
+    # A runtime may carry FlagCX for its compiler without the CI lane using
+    # that communication stack. Copy it only when the caller requests a pin.
+    if flagcx_version:
+        expected["flagcx"] = flagcx_version
     tools = tool_requirements(requirements_file)
     target_site = Path(target["site"])
     source_paths = site.getsitepackages() + ["/opt/flagtree"]
@@ -217,7 +220,7 @@ def main():
     parser.add_argument("--torch-version", required=True)
     parser.add_argument("--flagtree-version", required=True)
     parser.add_argument("--flaggems-version", required=True)
-    parser.add_argument("--flagcx-version", required=True)
+    parser.add_argument("--flagcx-version")
     parser.add_argument("--requirements-file", type=Path)
     args = parser.parse_args()
     seed(

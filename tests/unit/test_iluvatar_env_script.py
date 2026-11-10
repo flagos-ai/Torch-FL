@@ -14,66 +14,168 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / ".github/scripts/lib/iluvatar_packages.sh"
 
 
-def test_hook_clears_legacy_vendor_core_for_build_and_later_steps(tmp_path):
-    """Reuse the published image without carrying its vendor-core default."""
-    image = tmp_path / "image"
-    venv = image / "torch-fl-iluvatar-venv"
-    (venv / "bin").mkdir(parents=True)
-    python = venv / "bin/python"
-    python.write_text("#!/bin/bash\nexit 0\n")
-    python.chmod(0o755)
-    (image / "torch-fl-ci").mkdir()
-    (image / "torch-fl-ci/verify.py").touch()
-    repo = tmp_path / "repo"
-    helpers = repo / ".github/scripts/lib"
-    helpers.mkdir(parents=True)
-    (helpers / "iluvatar_packages.sh").write_text(
-        "prepare_iluvatar_packages() { :; }\n"
+def run_hook(tmp_path, *, prepared=True, fail="", boxing=False):
+    """Run the real hook with local package/build boundaries and a fake SDK."""
+    import shlex
+
+    sdk = tmp_path / "corex"
+    (sdk / "bin").mkdir(parents=True)
+    (sdk / "lib").mkdir()
+    (sdk / "lib64").mkdir()
+    (sdk / "include").mkdir()
+    tool = sdk / "bin/ixsmi"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+    image_bin = tmp_path / "image/bin"
+    image_bin.mkdir(parents=True)
+    ci_python = tmp_path / "ci-python"
+    ci_python.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$*" == *--check-installed* ]]; then\n'
+        '  printf "check %s\\n" "$3" >> "$CALL_LOG"\n'
+        '  exit "$PREPARED_STATUS"\n'
+        "fi\n"
+        'printf "python %s\\n" "$*" >> "$CALL_LOG"\n'
+        'if [[ $# == 0 ]]; then printf "ci-python\\n"; fi\n'
     )
-    hook = tmp_path / "hook.sh"
-    hook.write_text(
-        (ROOT / ".github/scripts/hooks/set_env_iluvatar.sh")
-        .read_text()
-        .replace("/opt/torch-fl-", str(image / "torch-fl-"))
+    ci_python.chmod(0o755)
+    vendor = image_bin / "python3.12"
+    vendor.write_text(
+        "#!/bin/bash\nset -e\n"
+        'if [[ "$1 $2" == "-m venv" ]]; then\n'
+        '  mkdir -p "$4/bin"\n'
+        '  cp "$CI_PYTHON" "$4/bin/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$*" == *seed_runtime.py* ]]; then\n'
+        '  printf "seed %s\\n" "$*" >> "$CALL_LOG"\n'
+        'elif [[ "$1 $2" == "-I -" ]]; then\n'
+        '  input="$(cat)"\n'
+        '  if [[ "$input" == *metadata.distribution* ]]; then\n'
+        '    printf "%s\\n" "$IMAGE_TORCH"\n'
+        "  fi\n"
+        "fi\n"
     )
-    github_env = tmp_path / "github-env"
+    vendor.chmod(0o755)
+    startup = tmp_path / "bash-env"
+    startup.write_text(
+        f"export PATH={shlex.quote(str(image_bin))}:/usr/bin:/bin\n"
+        "export PYTHONPATH=/opt/flagtree:/image/site-packages\n"
+        'printf "startup\\n" >> "$CALL_LOG"\n'
+    )
+    calls = tmp_path / "calls"
+    env_file = tmp_path / "github-env"
+    path_file = tmp_path / "github-path"
+    image_torch = "/image/vendor/torch"
+    env = dict(
+        os.environ,
+        PATH=f"{image_bin}:/usr/bin:/bin",
+        BASH_ENV=str(startup),
+        REPO_ROOT=str(ROOT),
+        CI_STAGE="integration",
+        TORCH_FL_VENDOR_PYTHON=str(vendor),
+        TORCH_FL_VENV_ROOT=str(tmp_path / "ci"),
+        COREX_PATH=str(sdk),
+        COREX_ROOT=str(sdk),
+        GITHUB_ENV=str(env_file),
+        GITHUB_PATH=str(path_file),
+        CALL_LOG=str(calls),
+        CI_PYTHON=str(ci_python),
+        IMAGE_TORCH=image_torch,
+        PREPARED_STATUS="0" if prepared else "1",
+        BOXING_LANE="1" if boxing else "",
+        PIP_CONSTRAINT=str(ROOT / ".github/constraints.txt"),
+        FAIL_PHASE=fail,
+        FLAGOS_VENDOR_TORCH_LIB=f"{image_torch}/lib",
+        FLAGOS_VENDOR_TORCH_VERSION="2.10.0+corex",
+        CPATH=f"{image_torch}/include:/system/include",
+        LIBRARY_PATH=f"{image_torch}/lib:/system/lib",
+        LD_LIBRARY_PATH=f"{image_torch}/lib:/host/driver",
+        CMAKE_PREFIX_PATH=f"{image_torch}/share/cmake:/system/cmake",
+    )
     script = r"""
 set -euo pipefail
-source "$1/.github/scripts/lib/set_env_common.sh"
+source "$REPO_ROOT/.github/version-pins.env"
+source "$REPO_ROOT/.github/scripts/lib/set_env_common.sh"
+install_cpu_torch() {
+  echo cpu-torch >> "$CALL_LOG"
+  [[ "$FAIL_PHASE" != cpu ]]
+}
+pip_retry() {
+  printf 'pip %s\n' "$*" >> "$CALL_LOG"
+  [[ "$FAIL_PHASE" != pip ]]
+}
+prepare_iluvatar_packages() { :; }
 build_flagos_inplace() {
   test -z "$FLAGOS_VENDOR_TORCH_LIB"
   test -z "$FLAGOS_VENDOR_TORCH_VERSION"
-  echo CPU-core-build
+  test "$FLAGOS_BUILD_BOXING" = 0
+  echo CPU-core-build >> "$CALL_LOG"
 }
-source "$2"
+source() {
+  if [[ "$1" == */iluvatar_packages.sh ]]; then return 0; fi
+  builtin source "$@"
+}
+source "$REPO_ROOT/.github/scripts/hooks/set_env_iluvatar.sh"
 """
     done = subprocess.run(
-        ["bash", "-c", script, "test", str(ROOT), str(hook)],
-        env=dict(
-            os.environ,
-            REPO_ROOT=str(repo),
-            CI_STAGE="build",
-            GITHUB_ENV=str(github_env),
-            GITHUB_PATH="",
-            FLAGOS_VENDOR_TORCH_LIB="/legacy/vendor/torch/lib",
-            FLAGOS_VENDOR_TORCH_VERSION="vendor-version",
-            FLAGTREE_VERSION_iluvatar="test-tree",
-            FLAGTREE_INDEX_URL_DEFAULT="https://example.invalid/tree",
-            FLAGGEMS_VERSION_DEFAULT="test-gems",
-            FLAGOS_WHEEL_ROOT_DEFAULT="https://example.invalid",
-            PIP_CONSTRAINT="checkout-constraints",
-            LIBRARY_PATH="",
-            LD_LIBRARY_PATH="",
-            CPATH="",
-        ),
+        ["bash", "--noprofile", "--norc", "-c", script],
+        env=env,
         capture_output=True,
         text=True,
     )
+    return done, calls.read_text().splitlines(), env, env_file, path_file
+
+
+def test_hook_reuses_packages_and_persists_cpu_isolation(tmp_path):
+    done, calls, env, env_file, path_file = run_hook(tmp_path)
     assert done.returncode == 0, done.stderr
-    assert "CPU-core-build" in done.stdout
-    rows = github_env.read_text().splitlines()
-    assert "FLAGOS_VENDOR_TORCH_LIB=" in rows
-    assert "FLAGOS_VENDOR_TORCH_VERSION=" in rows
+    assert "CPU-core-build" in calls
+    assert not any(row == "cpu-torch" or row.startswith("pip ") for row in calls)
+    assert any(row.startswith("seed ") for row in calls)
+    assert not any("--flagcx-version" in row for row in calls)
+    rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
+    assert rows["FLAGOS_VENDOR_TORCH_LIB"] == ""
+    assert rows["FLAGOS_VENDOR_TORCH_VERSION"] == ""
+    assert rows["FLAGOS_BUILD_BOXING"] == "0"
+    assert rows["BASH_ENV"] == "/dev/null"
+    assert rows["PYTHONPATH"] == ""
+    for name in ("CPATH", "LIBRARY_PATH", "LD_LIBRARY_PATH", "CMAKE_PREFIX_PATH"):
+        assert env["IMAGE_TORCH"] not in rows[name]
+    next_env = {**env, **rows}
+    next_env["PATH"] = path_file.read_text().replace("\n", os.pathsep) + rows["PATH"]
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", "python"],
+        env=next_env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "ci-python"
+    assert Path(env["CALL_LOG"]).read_text().splitlines().count("startup") == 1
+
+
+def test_missing_runtime_packages_use_cpu_torch_and_pip_fallback(tmp_path):
+    done, calls, *_ = run_hook(tmp_path, prepared=False)
+    assert done.returncode == 0, done.stderr
+    assert "cpu-torch" in calls
+    assert any(row.endswith("numpy<2") and row.startswith("pip ") for row in calls)
+    assert "CPU-core-build" in calls
+
+
+def test_iluvatar_cannot_silently_build_a_boxing_lane(tmp_path):
+    done, calls, *_ = run_hook(tmp_path, boxing=True)
+    assert done.returncode != 0
+    assert "has no boxing lane" in done.stderr
+    assert not any(row.startswith("seed ") for row in calls)
+    assert "CPU-core-build" not in calls
+
+
+@pytest.mark.parametrize("phase", ["cpu", "pip"])
+def test_failed_install_stops_before_native_build(tmp_path, phase):
+    done, calls, *_ = run_hook(tmp_path, prepared=False, fail=phase)
+    assert done.returncode != 0
+    assert "CPU-core-build" not in calls
 
 
 def provision(tmp_path, *, tree_matches=True, gems_matches=True, failure=""):
