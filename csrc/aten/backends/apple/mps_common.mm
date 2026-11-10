@@ -246,10 +246,9 @@ bool MpsSupportsArgmaxDtype(at::ScalarType dtype) {
   return dtype == at::kFloat;
 }
 
-bool MpsPositiveInfinity(
-    MPSGraph* graph,
-    at::ScalarType dtype,
-    MPSGraphTensor** out) {
+namespace {
+bool MpsInfinity(
+    MPSGraph* graph, at::ScalarType dtype, double sign, MPSGraphTensor** out) {
   if (graph == nil || out == nullptr) {
     return false;
   }
@@ -261,11 +260,26 @@ bool MpsPositiveInfinity(
   }
   const double value = c10::isIntegralType(dtype, false)
       ? 0.0
-      : std::numeric_limits<double>::infinity();
+      : sign * std::numeric_limits<double>::infinity();
   *out = [graph constantWithScalar:value
                              shape:MpsFlatShape(1)
                           dataType:mps_dtype];
   return *out != nil;
+}
+}  // namespace
+
+bool MpsPositiveInfinity(
+    MPSGraph* graph,
+    at::ScalarType dtype,
+    MPSGraphTensor** out) {
+  return MpsInfinity(graph, dtype, 1.0, out);
+}
+
+bool MpsNegativeInfinity(
+    MPSGraph* graph,
+    at::ScalarType dtype,
+    MPSGraphTensor** out) {
+  return MpsInfinity(graph, dtype, -1.0, out);
 }
 
 bool MpsSupportsTriuDtype(at::ScalarType dtype) {

@@ -843,7 +843,7 @@ def test_conf_route_counts_are_stable():
         # CompositeImplicitAutograd and never reaches a backend key, and the
         # ``conv`` category under ``convolution_overrideable`` alone for the same
         # reason about ``aten.convolution``; see scripts/codegen/codegen_mps.py.
-        "apple": {"none": 1935, "apple": 107},
+        "apple": {"none": 1932, "apple": 110},
         # Twelve ops that cpu_fallbacked in the Qwen-Image-2.1 census moved to
         # flaggems (all.dim, clamp_min, div.Tensor, gelu, gt.Scalar, gt.Tensor,
         # index_select, isneginf, nonzero, tanh, tril, zero_); 51 -> 63, then

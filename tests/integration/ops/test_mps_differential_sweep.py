@@ -219,7 +219,23 @@ def _cases():
         cases.append(
             (f"argmax-d{dim}", lambda dev, dim=dim: torch.argmax(_seeded(dev), dim))
         )
+        cases.append(
+            (f"argmin-d{dim}", lambda dev, dim=dim: torch.argmin(_seeded(dev), dim))
+        )
     cases.append(("argmax-flat", lambda dev: torch.argmax(_seeded(dev))))
+    cases.append(("argmin-flat", lambda dev: torch.argmin(_seeded(dev))))
+    # The (values, indices) pair, whose two halves are compared separately by the
+    # test below -- a pair whose halves disagree is worse than a wrong value.
+    for name in ("max", "min"):
+        for dim in (1, 2):
+            cases.append(
+                (
+                    f"{name}dim-d{dim}",
+                    lambda dev, name=name, dim=dim: getattr(torch, name)(
+                        _positive(dev, (2, 5, 4)), dim
+                    ),
+                )
+            )
 
     # --- NaN in a reduction ------------------------------------------------
     # Not a shape variant of the cases above: a NaN propagates differently from
@@ -465,6 +481,9 @@ ROUTED_AS = {
     "softmax": "_softmax",
     "log_softmax": "_log_softmax",
     "argmax": "argmax",
+    "argmin": "argmin",
+    "maxdim": "max.dim",
+    "mindim": "min.dim",
     "all": "all.dim",
     "any": "any.dim",
     "clamp": "clamp",
@@ -522,6 +541,26 @@ def test_a_routed_op_matches_the_cpu_reference(label, builder):
     reference = builder(torch.device("cpu"))
     got = builder(DEVICE)
 
+    # `max.dim`/`min.dim` answer a (values, indices) pair; every other case is a
+    # single tensor. Each half is compared with the rule its own dtype calls for,
+    # and the halves are checked against each other as well -- a pair whose
+    # index does not address its own value is worse than a wrong value.
+    if isinstance(reference, tuple):
+        assert isinstance(got, tuple) and len(got) == len(reference), label
+        values, indices = reference
+        got_values, got_indices = got
+        assert got_values.shape == values.shape, (label, got_values.shape)
+        assert got_indices.shape == indices.shape, (label, got_indices.shape)
+        assert got_indices.dtype == indices.dtype, (label, got_indices.dtype)
+        _compare_tensor(label + ".values", got_values, values)
+        assert torch.equal(got_indices.cpu(), indices), (label, "indices")
+        return
+
+    _compare_tensor(label, got, reference)
+
+
+def _compare_tensor(label, got, reference):
+    """One tensor, with the tolerance its dtype calls for."""
     assert got.shape == reference.shape, (label, got.shape, reference.shape)
     assert got.dtype == reference.dtype, (label, got.dtype, reference.dtype)
 
