@@ -20,7 +20,7 @@
 //
 // Do not hand-edit. Regenerate after changing that set:
 //   python3 scripts/codegen/codegen_kunlunxin_flaggems.py
-// Total: 316 ops registered here, 22 further FlagGems ops already claimed by kunlunxin_register.inc.
+// Total: 315 ops registered here, 22 further FlagGems ops already claimed by kunlunxin_register.inc.
 
   m.impl("_euclidean_dist", WrapperPrivEuclideanDist);
   m.impl("_linalg_eigvals", WrapperPrivLinalgEigvals);
@@ -219,7 +219,6 @@
   m.impl("max", WrapperMax);
   m.impl("max.dim", WrapperMaxDim);
   m.impl("mean", WrapperMean);
-  m.impl("mean.dim", WrapperMeanDim);
   m.impl("min", WrapperMin);
   m.impl("min.dim", WrapperMinDim);
   m.impl("mish", WrapperMish);

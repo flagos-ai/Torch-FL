@@ -3190,7 +3190,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "max",
     "max.dim",
     "mean",
-    "mean.dim",
     "min",
     "min.dim",
     "mish",

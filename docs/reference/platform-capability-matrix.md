@@ -142,7 +142,7 @@ build opts into boxing.
   op library) and leaves the rest at `none`, with **no `cuda` boxing route**. Its
   `torch_fl/accelerator/kunlunxin/` module is FlagGems glue only — a device-name
   realignment and a `torch.cuda` shim, no operator kernels. Its FlagGems routes are
-  the 316 ops a P800 survey measured as correct (of a 618-op ceiling), listed in
+  the 315 ops a P800 survey measured as correct (of a 618-op ceiling), listed in
   `KUNLUNXIN_FLAGGEMS_MEASURED`; the platform stays out of
   `FLAGGEMS_PYTHON_PLATFORMS`, because joining that set claims the whole cohort.
   `kunlunxin_flaggems_register.inc` is generated from that same value, so the conf
