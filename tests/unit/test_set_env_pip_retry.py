@@ -473,3 +473,67 @@ def test_index_download_bps_reports_zero_for_a_missing_index(tmp_path):
         server.shutdown()
         server.server_close()
     assert done.stdout.strip() == "0"
+
+
+def test_install_cpu_torch_gives_the_mirror_one_attempt():
+    """A mirror that answers 5xx should not burn pip_retry's five rounds.
+
+    The five exist because a dropped connection on a 190 MB wheel is worth
+    re-sending. An HTTP 5xx from a *cache* of the pin is not: every round costs
+    ~70 s before install_cpu_torch's fallback can start. Measured on the ascend
+    lane (run 42728043989), the mirror answered 504 three times before the
+    install moved.
+
+    pip_retry reads PIP_RETRY_MAX_ATTEMPTS, so the assertion is on what the
+    mirror call is handed -- one attempt -- while the pinned-index call keeps the
+    default.
+    """
+    probe = 'index_download_bps() { case "$1" in *mirror*) echo 9000000;; *) echo 400000;; esac; }\n'
+    done = _run_bash(
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        + probe
+        # Fails for the mirror, succeeds for the pin, and records the cap each
+        # call inherited.
+        + "pip_retry() {\n"
+        '  printf "PIP max=%s %s\\n" "${PIP_RETRY_MAX_ATTEMPTS:-5}" "$*"\n'
+        '  case "$*" in *mirror*) return 1;; esac\n'
+        "  return 0\n"
+        "}\n"
+        "install_cpu_torch\n"
+    )
+    calls = [ln for ln in done.stdout.splitlines() if ln.startswith("PIP ")]
+    assert calls == [
+        "PIP max=1 --index-url https://mirror.example/cpu torch==2.10.0",
+        "PIP max=5 --index-url https://pin.example/whl/cpu torch==2.10.0",
+    ]
+
+
+def test_pip_retry_honours_the_attempt_cap(tmp_path):
+    """PIP_RETRY_MAX_ATTEMPTS bounds the loop, and 1 means a single try.
+
+    install_cpu_torch sets it to 1 for the mirror, where a fallback index makes
+    a second round pointless.
+    """
+    fake, recorder = _fake_interpreter(
+        tmp_path,
+        'echo "ERROR: HTTP error 504 from the mirror"\nexit 1\n',
+    )
+    done = _run_bash(
+        f'export PIP_RETRY_PYTHON="{fake}"\n'
+        "export PIP_RETRY_MAX_ATTEMPTS=1\n"
+        "if pip_retry --index-url http://127.0.0.1:1/simple torch==2.10.0; "
+        "then echo UNEXPECTED-SUCCESS; fi\n"
+    )
+    assert "pip install failed after 1 attempts" in done.stdout
+    assert recorder.read_text(encoding="utf-8").count("-m pip") == 1
+
+    # And the default is still five, so a lane that sets nothing is unchanged.
+    recorder.write_text("", encoding="utf-8")
+    done = _run_bash(
+        f'export PIP_RETRY_PYTHON="{fake}"\n'
+        "if pip_retry --index-url http://127.0.0.1:1/whl/cpu torch==2.10.0; "
+        "then echo UNEXPECTED-SUCCESS; fi\n"
+    )
+    assert "pip install failed after 5 attempts" in done.stdout
