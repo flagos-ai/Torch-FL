@@ -29,6 +29,9 @@
 #if defined(USE_KUNLUNXIN)
 #include "backends/kunlunxin/kunlunxin_copy.h"
 #endif
+#if defined(USE_ILUVATAR)
+#include "backends/iluvatar/dtype_cast.h"
+#endif
 #if defined(USE_MPS)
 #include "backends/apple/mps_copy.h"
 #endif
@@ -927,6 +930,14 @@ at::Tensor _to_copy(
       // declared type is the target -- so DtypeCast allocates the result at
       // `dtype` and hands it over as the output operand.
       result = kunlunxin::DtypeCast(self_contig, dtype);
+#endif
+#ifdef USE_ILUVATAR
+      // Iluvatar casts on-device through the FlagGems `to_copy` kernel. CoreX
+      // links no elementwise library and the vendor torch is old-ABI, so
+      // FlagGems is the only device implementation this platform has; the hook
+      // declines pairs its kernel was measured wrong for, and those keep the
+      // CPU round trip below.
+      result = iluvatar::DtypeCast(self_contig, dtype);
 #endif
       if (!result.defined()) {
         // Fallback: CPU round-trip when no on-device cast is available
