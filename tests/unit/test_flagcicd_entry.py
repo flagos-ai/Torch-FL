@@ -615,7 +615,13 @@ def test_entry_uses_trusted_control_code_and_pins_all_source_consumers():
             inputs["checkout_repository"]
             == "${{ needs.plan.outputs.source_repository }}"
         )
-    assert workflow["jobs"]["complete"]["if"] == "always()"
+    # The gate must still run when a dependency failed -- that is what always()
+    # buys -- but not when the run was cancelled: every input then reads
+    # "cancelled", which the gate counts as a failure, so a superseded run would
+    # leave a red "FlagCICD complete" next to a run the UI shows as Cancelled.
+    complete_if = workflow["jobs"]["complete"]["if"]
+    assert "always()" in complete_if
+    assert "!cancelled()" in complete_if
 
 
 def test_plan_cli_preserves_json_identifiers_and_emits_a_real_plan(tmp_path):

@@ -244,7 +244,14 @@ jobs:
   # Single required-check gate for branch protection.
   ci-complete:
     name: CI complete
-    if: always()
+    # Not on a cancelled run. This job is the gate, so it runs even when its
+    # dependencies failed -- that is the whole point of always(). Cancellation
+    # is different: the run measured nothing, and every input here reads
+    # "cancelled", which the gate counts as a failure. A superseded run (a new
+    # push, or the label events a PR gets on creation) then leaves a failing
+    # "CI complete" check on the pull request next to a run the UI already
+    # shows as Cancelled. Nothing is being reported by failing here.
+    if: always() && !cancelled()
     outputs:
       base_sha: ${{ needs.resolve-checkout.outputs.base_ref }}
     needs:

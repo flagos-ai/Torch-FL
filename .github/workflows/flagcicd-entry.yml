@@ -178,7 +178,9 @@ jobs:
 
   complete:
     name: FlagCICD complete
-    if: always()
+    # Same reasoning as ci.yml's ci-complete: a cancelled run has no verdict to
+    # deliver, and reporting one turns a superseded run into a red check.
+    if: always() && !cancelled()
     needs: [plan, lint, agnostic, codegen, platforms]
     runs-on: ubuntu-latest
     timeout-minutes: 10
