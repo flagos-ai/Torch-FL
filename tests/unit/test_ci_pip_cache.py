@@ -25,12 +25,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = ROOT / ".github/workflows"
-# The two reusable entrypoints that carry a pip download cache: the shared wheel
-# build, and the single parameterized integration pipeline that replaced the
-# per-platform integration-test-<platform>.yml files.
+# The reusable entrypoint that still uses a managed cache entry. The integration
+# pipeline keeps its downloads on the runner instead: its pods cannot reach
+# GitHub's cache blob storage, so a managed entry bought nothing and cost about
+# 110 s per lane. See tests/unit/test_ci_local_pip_cache.py.
 WORKFLOWS = [
     "build-wheel-common.yml",
-    "integration-tests.yml",
 ]
 
 
@@ -293,9 +293,15 @@ def test_cache_failure_budgets_do_not_gate_installation(workflow):
             assert "pip-cache" not in step.get("if", "")
 
 
-def test_every_routed_integration_workflow_is_covered():
-    # ci.yml dispatches one platform pipeline per discovered platform through the
-    # single integration-tests.yml; that file is what must carry the cache.
+def test_the_routed_integration_workflow_carries_no_managed_cache():
+    """ci.yml dispatches every platform through integration-tests.yml.
+
+    That file used to be the second workflow in WORKFLOWS. It is now excluded on
+    purpose: its pods cannot transfer a managed cache entry, so it keeps its
+    downloads on the runner instead. tests/unit/test_ci_local_pip_cache.py holds
+    that side of the arrangement -- this assertion is here so the workflow cannot
+    drift back into WORKFLOWS without someone noticing why it left.
+    """
     document = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     routed = {
         Path(job["uses"]).name
@@ -303,7 +309,9 @@ def test_every_routed_integration_workflow_is_covered():
         if job.get("uses", "").startswith("./.github/workflows/integration-tests")
     }
     assert routed == {"integration-tests.yml"}
-    assert routed <= set(WORKFLOWS)
+    assert routed.isdisjoint(WORKFLOWS)
+    steps = _steps("integration-tests.yml")
+    assert not [s for s in steps if s.get("uses", "").startswith("actions/cache")]
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
@@ -339,49 +347,6 @@ def test_cache_key_tracks_the_effective_dependencies(workflow):
             in key
         )
         assert "${{ inputs.platform }}-pip-" not in key
-
-
-def test_every_restore_key_can_match_a_cache_this_workflow_wrote():
-    """A restore-key that cannot prefix a real key is dead weight.
-
-    This pipeline keys its entries on the base platform name, so that is the
-    only prefix it can fall back to. It used to carry display-name fallbacks for
-    caches from the split per-platform pipelines #519 collapsed; those never
-    matched, because all 14 key prefixes in the repository are platform names
-    and a display-name entry would have expired 7 days after #519 last wrote
-    one. On a boxing lane the fallbacks were also *wrong* rather than idle:
-    display_name appends " (CUDA boxing)", which no key can begin with.
-    """
-    lookup = next(
-        step
-        for step in _steps("integration-tests.yml")
-        if step.get("id") == "pip-cache-lookup"
-    )
-    key = lookup["with"]["key"]
-    prefix = "${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-"
-    assert key.startswith("${{ needs.configuration.outputs.platform }}-pip-")
-
-    restore_keys = [
-        line.strip()
-        for line in lookup["with"]["restore-keys"].splitlines()
-        if line.strip()
-    ]
-    assert restore_keys == [prefix]
-    assert key.startswith(prefix)
-
-    # build-wheel-common.yml keys on the display name, so its fallbacks are the
-    # same shape as its key and stay as they are.
-    common = next(
-        step
-        for step in _steps("build-wheel-common.yml")
-        if step.get("id") == "pip-cache-lookup"
-    )
-    assert common["with"]["key"].startswith("${{ inputs.display_name }}-pip-")
-    assert all(
-        line.strip().startswith("${{ inputs.display_name }}-")
-        for line in common["with"]["restore-keys"].splitlines()
-        if line.strip()
-    )
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
@@ -550,17 +515,15 @@ def test_a_platforms_two_lanes_share_one_cache_entry():
     other. Keying on the lane cost about 2 GB of the 4.3 GB main held across
     nvidia, metax, hygon and thead, which is what kept the 10 GB budget full.
     """
-    lookup = next(
+    step = next(
         step
         for step in _steps("integration-tests.yml")
-        if step.get("id") == "pip-cache-lookup"
+        if step.get("id") == "pip-cache"
     )
-    key = lookup["with"]["key"]
+    key = step["env"]["PIP_CACHE_KEY"]
     # `needs.configuration.outputs.platform` is the config basename with the
-    # -boxing suffix already stripped (load-platform-config.yml documents it).
+    # -boxing suffix already stripped (load-platform-config.yml documents it), so
+    # both lanes of a platform derive the same directory and the same key.
     assert "needs.configuration.outputs.platform" in key
     assert "inputs.platform" not in key
-    for pattern in re.findall(r"format\('([^']+)'", key):
-        assert "{0}" in pattern
-    # The hook and config are still hashed, now through the base platform.
-    assert "format('.github/scripts/hooks/set_env_{0}.sh'" in key
+    assert step["env"]["PLATFORM"] == "${{ needs.configuration.outputs.platform }}"
