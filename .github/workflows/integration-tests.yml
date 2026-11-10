@@ -123,76 +123,63 @@ jobs:
           ref: ${{ inputs.checkout_ref || github.ref }}
           persist-credentials: false
 
-      # Discard host leftovers before restoring the managed pip download cache.
-      - name: Reset pip cache dir
-        shell: bash
-        run: |
-          PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
-          rm -rf "$PIP_CACHE_DIR"
-          mkdir -p "$PIP_CACHE_DIR"
-          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
-
-      # Look up first: a transfer timeout can return success with no matched key.
-      # A cold miss may save later; a failed matched transfer must not upload.
+      # The pip download cache is a directory on the runner, not a managed
+      # cache entry.
       #
-      # hashFiles cannot interpolate inputs.setup_script, but it does evaluate a
-      # format() argument, so the hook and config paths are built from the
-      # platform this job was handed -- the same shape build-wheel-common.yml
-      # uses. The dedicated per-platform pipelines this replaced hashed their own
-      # workflow file; the single pipeline hashes itself instead.
+      # actions/cache transfers through GitHub's blob storage, and these pods do
+      # not reach it. Measured on 2026-11-10: every vendor lane either moved no
+      # bytes at all (hygon: "Received 0 of 25436885 (0.0%)" for the whole 100 s
+      # client timeout) or a fraction of them (ascend: 11.8% at 0.2 MB/s), while
+      # the macOS lane restored 176 MB in 5 s. The failure is silent -- the step
+      # is continue-on-error and reports "Cache not found" -- so it cost about
+      # 110 s per vendor lane and delivered nothing, roughly 24 minutes across a
+      # full matrix.
       #
-      # The restore-key is the base platform's prefix, which is the only shape
-      # this workflow has ever written. Three display-name fallbacks
-      # (CUDA-pip-..., CUDA-build-pip-..., and the same per vendor) used to sit
-      # here for caches left by the split per-platform pipelines that #519
-      # collapsed. They never matched: every one of the 14 cache key prefixes in
-      # this repository is a platform name, and a display-name entry would have
-      # expired 7 days after #519 last wrote one. On a boxing lane they were also
-      # wrong rather than merely idle -- display_name appends " (CUDA boxing)",
-      # so the prefix was the literal "CUDA (CUDA boxing)-pip-Linux-", which no
-      # cache key can begin with.
+      # The transfer is slow because it leaves through the runner's proxy: the
+      # job container is started with NO_PROXY="localhost,127.0.0.1,
+      # mirrors.aliyun.com" (see the docker create line the runner logs), so the
+      # blob host is proxied like any other. proxy_route.sh already bypasses that
+      # proxy for resource.flagos.net for the same reason; the cache path has no
+      # equivalent probe, and it does not need one if it never crosses the
+      # network.
       #
-      # The key names the base platform, not the lane, so a platform's two lanes
-      # share one entry. `needs.configuration.outputs.platform` is the config
-      # basename with the -boxing suffix already stripped, and boxing only
-      # changes which kernels the wheel compiles -- the pip cache holds the same
-      # packages either way (measured: thead and thead-boxing install a
-      # byte-identical package set, and their 619 MB entries were duplicates of
-      # each other). Keying on the lane cost one redundant entry per boxing
-      # platform, about 2 GB of the 4.3 GB main held.
-      - name: Look up pip downloads
-        id: pip-cache-lookup
-        uses: actions/cache/restore@v4
-        continue-on-error: true
-        timeout-minutes: 1
-        with:
-          path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), '.github/workflows/integration-tests.yml') }}
-          lookup-only: true
-          restore-keys: |
-            ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-
-
-      # Cache downloads only; installation and tests always run.
+      # A self-hosted runner keeps its `_work` directory between jobs: it is the
+      # host path mounted at /__w, and it holds _tool and _actions for exactly
+      # that reason. RUNNER_TEMP and GITHUB_WORKSPACE both live underneath it and
+      # are cleared per job; one level above RUNNER_WORKSPACE is the part that
+      # survives. pip's download cache holds immutable, content-addressed wheels,
+      # so a warm directory is warm for any later job on that runner -- including
+      # the platform's other lane, which installs the same packages.
       #
-      # continue-on-error makes a failed transfer a cold miss, so the deadline
-      # below has to be long enough that a slow-but-working transfer is never
-      # turned into one. At 3 minutes the Ascend cache (which holds the FlagTree
-      # wheel) timed out on every run of PRs #707/#712 and was then re-fetched
-      # from the index -- paying the download twice and, on those pods, failing
-      # the index fetch instead. The cache warms up, not down, so the deadline
-      # scales with it: 10 minutes and a 5-minute stall detector let a large
-      # cache land while still bounding a genuinely wedged transfer.
-      - name: Restore pip downloads
+      # The key still decides freshness: when the dependency inputs change the
+      # directory is discarded rather than reused for a different package set.
+      # Dropping the workflow file from that key is deliberate -- a change to this
+      # file alters what runs, not what is downloaded, and hashing it here used to
+      # purge every platform's cache 15 times in 30 days for no gain.
+      - name: Prepare pip download cache
         id: pip-cache
-        if: ${{ steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-matched-key != '' }}
-        uses: actions/cache/restore@v4
-        continue-on-error: true
-        timeout-minutes: 10
+        shell: bash
         env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
-        with:
-          path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
+          PLATFORM: ${{ needs.configuration.outputs.platform }}
+          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform)) }}
+        run: |
+          set -euo pipefail
+          root="$(dirname "${RUNNER_WORKSPACE:-${GITHUB_WORKSPACE}/..}")"
+          cache_root="$root/.pip-cache"
+          PIP_CACHE_DIR="$cache_root/${PLATFORM:?platform is required}"
+          key_file="$cache_root/${PLATFORM}.key"
+          # A different dependency set makes the directory meaningless; a runner
+          # that wiped it looks the same as a first run, which is a cold cache
+          # rather than an error.
+          if [[ -f "$key_file" && "$(cat "$key_file")" != "$PIP_CACHE_KEY" ]]; then
+            echo "pip cache key changed for ${PLATFORM}; discarding the previous downloads"
+            rm -rf "$PIP_CACHE_DIR"
+          fi
+          mkdir -p "$PIP_CACHE_DIR"
+          printf '%s\n' "$PIP_CACHE_KEY" > "$key_file"
+          printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+          size="$(du -sh "$PIP_CACHE_DIR" 2>/dev/null | cut -f1 || true)"
+          echo "pip download cache: $PIP_CACHE_DIR (${size:-empty}, $(find "$PIP_CACHE_DIR" -type f | wc -l) files)"
 
       # The stage is the platform's, not the pipeline's: Ascend and Kunlunxin
       # prebuild the native library in place only at `build`, and this job needs
@@ -450,34 +437,6 @@ jobs:
               output.write('stages=' + json.dumps(stages) + '\n')
               output.write('run_attempt=' + os.environ['GITHUB_RUN_ATTEMPT'] + '\n')
           PY
-
-      # Save outside post-job cleanup so the upload has its own deadline.
-      # Keep downloaded dependencies even if a later build/test step fails:
-      # !cancelled() intentionally permits saving after failure (no success()).
-      # Skip exact hits, failed lookups/transfers and cancelled jobs.
-      # Cache errors must not change the build/test result.
-      #
-      # Only a push run writes the cache. GitHub scopes a cache to the ref that
-      # saved it, so a pull request's run saves into its own
-      # refs/pull/<n>/merge scope and can never be read by the branch -- while
-      # still counting against the repository's single 10 GB budget. With five
-      # to seven pull requests open, the same per-platform entries existed once
-      # per ref: measured at 19 entries / 9.7 GB for 9 distinct keys, of which
-      # main's own share was 3.65 GB. That pressure is what evicted entries
-      # mid-flight and made the other lanes miss their own restore-key prefix.
-      #
-      # A pull request still restores -- its lookup and restore steps are
-      # unchanged -- and the key is built from the dependency files, not from
-      # the code under test, so the entry main saved is the one a pull request
-      # wants. Only the write is dropped, and main saves it on merge.
-      - name: Save pip downloads
-        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.pip-cache-lookup.outcome == 'success' && steps.pip-cache-lookup.outputs.cache-primary-key != '' && steps.pip-cache-lookup.outputs.cache-hit != 'true' && (steps.pip-cache-lookup.outputs.cache-matched-key == '' || (steps.pip-cache.outcome == 'success' && steps.pip-cache.outputs.cache-matched-key != '')) }}
-        uses: actions/cache/save@v4
-        continue-on-error: true
-        timeout-minutes: 3
-        with:
-          path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ steps.pip-cache-lookup.outputs.cache-primary-key }}
 
   flagcicd-report:
     name: FlagCICD outcome (${{ inputs.platform }})
