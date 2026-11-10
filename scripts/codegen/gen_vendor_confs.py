@@ -252,6 +252,11 @@ EXTRA_NATIVE = {
         "add_.Tensor",
         "add_.Scalar",
         "div_.Tensor",
+        # Hand-registered by csrc/aten/sdp_choice_stub.cc's Iluvatar arm, which
+        # calls the fused libixattnbkd kernel; the `.inc` scan cannot see it.
+        # Listed here so `vendor_registered_ops` and the conf agree, and routed
+        # by COMPOSITE_NATIVE rather than by `route()`.
+        "scaled_dot_product_attention",
     },
 }
 
@@ -2825,6 +2830,19 @@ METAX_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 # for what is still unmeasured on the shapes this route does not take.
 DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 
+# The same composite on the one FlagGems-primary platform that has a vendor
+# kernel behind it. Unlike the two sets above, this one names the *vendor* slot:
+# csrc/aten/sdp_choice_stub.cc's Iluvatar arm calls CoreX's fused
+# `libixattnbkd` kernel directly rather than FlagGems (the API, its ABI and the
+# measured cost are recorded in docs/vendors/iluvatar/fused-attention.md).
+#
+# The op is in no `.inc` -- the override is hand-registered, like the two sets
+# above -- so `route()` reads it as unregistered and returns `none`; the set is
+# applied after `route()` for that reason. It is keyed by platform so the
+# measurement cannot leak onto a platform that never took it, which is the same
+# guard `boxing_measured_python_ops` provides for the FlagGems composites.
+COMPOSITE_NATIVE = {"iluvatar": {"scaled_dot_product_attention"}}
+
 
 # Ops a platform routes to FlagGems in its default conf but must keep on the
 # boxing kernel in its day-0 variant, named per platform.
@@ -3658,6 +3676,10 @@ def build_all(conf_dir: Path) -> dict:
             )
             for op in sorted(all_ops)
         }
+        # A hand-registered composite whose vendor kernel the override calls
+        # directly (COMPOSITE_NATIVE): `route()` cannot see it, because the op
+        # is in neither the native nor the FlagGems `.inc`.
+        routes.update({op: vendor for op in COMPOSITE_NATIVE.get(vendor, set())})
         out[vendor] = (
             render(
                 vendor,

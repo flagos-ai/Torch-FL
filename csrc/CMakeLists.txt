@@ -653,6 +653,11 @@ elseif(_flagos_is_iluvatar)
         ${FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR})
     target_link_libraries(${LIBRARY_NAME} PRIVATE
         ${FLAGOS_ILUVATAR_CUDNN_LIB} ${FLAGOS_ILUVATAR_CUBLAS_LIB})
+    # The fused attention entry points are resolved with dlopen at first use
+    # (backends/iluvatar/fused_attention.h): libixattnbkd ships with CoreX 4.5.0
+    # but not with older SDKs, and a wheel that failed to import without it
+    # would trade every op for one. Only the loader is linked here.
+    target_link_libraries(${LIBRARY_NAME} PRIVATE ${CMAKE_DL_LIBS})
   endif()
 elseif(_flagos_is_musa)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
