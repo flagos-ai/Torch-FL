@@ -122,8 +122,15 @@ jobs:
       - name: Run conf/registration consistency tests
         run: |
           set -euo pipefail
+          # test_kunlunxin_flaggems_compat.py sits here rather than in
+          # agnostic-checks.yml, whose file list is explicit: it is a
+          # source-level contract on the FlagGems registration path and the
+          # kunlunxin shim, so it belongs with the other files that pin what
+          # codegen emits. It reads only committed sources -- no torch, no XPU,
+          # no built wheel.
           python3 -m pytest \
             tests/unit/test_conf_registration_consistency.py \
+            tests/unit/test_kunlunxin_flaggems_compat.py \
             -v --tb=short -p no:cacheprovider
 
       - name: Run FlagGems conf/codegen consistency tests
