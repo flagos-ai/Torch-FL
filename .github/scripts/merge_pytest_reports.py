@@ -15,6 +15,7 @@
 """Merge pytest-json-report sessions without turning missing results into passes."""
 
 import argparse
+import importlib.util
 import json
 import time
 from collections import Counter
@@ -26,6 +27,17 @@ from run_integration_tests import (
     teardown_crash_allowed,
     _FATAL_SIGNALS,
 )
+
+
+def _skip_policy_contract():
+    """Load the same stable contract used by the pytest reporting plugin."""
+    path = Path(__file__).resolve().parent / "pytest_reporting/skip_policy_contract.py"
+    spec = importlib.util.spec_from_file_location("flagcicd_skip_policy_contract", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load skip policy contract from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def validate_pytest_result(report, *, require_success=False, require_passed=False):
@@ -250,6 +262,47 @@ def read_pytest_session(marker, session):
     return report
 
 
+def validate_skip_policy(session, migrated_case_files):
+    """Validate recorded classifications and require them for migrated skips."""
+    contract = _skip_policy_contract()
+    classifications = session.get("skip_policy", {})
+    if not isinstance(classifications, dict):
+        return ["skip_policy must be an object"]
+    errors, reported = [], set()
+
+    def report(nodeid, message):
+        error = f"{nodeid}: {message}"
+        if error not in reported:
+            reported.add(error)
+            errors.append(error)
+
+    for test in session.get("tests_details", []):
+        nodeid, outcome = test.get("nodeid"), test.get("outcome")
+        if not isinstance(nodeid, str) or outcome not in contract.SKIP_OUTCOMES:
+            continue
+        path = contract.nodeid_path(nodeid)
+        if path not in migrated_case_files:
+            continue
+        classification = classifications.get(nodeid)
+        if classification is None:
+            report(nodeid, f"{outcome} in a migrated file has no skip-policy marker")
+            continue
+        reason = contract.validate_policy_record(classification)
+        if reason:
+            report(nodeid, f"invalid skip policy: {reason}")
+    for nodeid, classification in sorted(classifications.items()):
+        if not isinstance(nodeid, str):
+            errors.append("skip policy node id must be a string")
+            continue
+        if not contract.is_governed_nodeid(nodeid):
+            report(nodeid, "skip policy recorded outside a governed file")
+            continue
+        reason = contract.validate_policy_record(classification)
+        if reason:
+            report(nodeid, f"invalid skip policy: {reason}")
+    return errors
+
+
 def check_group_minimum(directory, group):
     """Use native sessions for the executor's early minimum check."""
     if not directory:
@@ -271,8 +324,19 @@ def check_group_minimum(directory, group):
 
 
 def merge_reports(
-    directory, platform, outcome, source_repository, source_ref, require_execution=False
+    directory,
+    platform,
+    outcome,
+    source_repository,
+    source_ref,
+    require_execution=False,
+    migrated_case_files=None,
 ):
+    if migrated_case_files is None:
+        registry = (
+            Path(__file__).resolve().parents[2] / "tests/integration/case_gap_issues.py"
+        )
+        migrated_case_files = _skip_policy_contract().read_migrated_case_files(registry)
     summary = Counter(total=0, collected=0)
     tests, collectors, warnings, sessions, incomplete = [], [], [], [], []
     duration = 0.0
@@ -288,14 +352,24 @@ def merge_reports(
         if session.get("collection_error"):
             incomplete.append(session["report"])
         sessions.append(session)
+        session["tests_details"] = report["tests"]
         summary.update(report["summary"])
         duration += report["duration"]
         for test in report["tests"]:
-            test.setdefault("metadata", {}).update(
+            metadata = test.setdefault("metadata", {})
+            metadata.update(
                 flagcicd_group=session.get("group", ""),
                 flagcicd_group_id=session.get("group_id", session.get("group", "")),
                 flagcicd_session=session["report"],
             )
+            classifications = session.get("skip_policy", {})
+            policy = (
+                classifications.get(test.get("nodeid"))
+                if isinstance(classifications, dict)
+                else None
+            )
+            if policy is not None:
+                metadata["skip_policy"] = policy
             tests.append(test)
         collectors.extend(report.get("collectors", []))
         warnings.extend(report.get("warnings", []))
@@ -323,6 +397,16 @@ def merge_reports(
             execution_errors.append("integration execution record is missing")
     if not summary.get("passed", 0):
         execution_errors.append("no tests passed")
+    for session in sessions:
+        if "summary" not in session:
+            continue
+        try:
+            execution_errors.extend(
+                f"{session['report']}: {error}"
+                for error in validate_skip_policy(session, migrated_case_files)
+            )
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            execution_errors.append(f"{session['report']}: {error}")
     complete = not incomplete and not execution_errors
     # The integration runner owns the verdict, including its existing explicit
     # teardown-crash policy and failures in non-pytest environment checks.

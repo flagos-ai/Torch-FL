@@ -31,6 +31,8 @@ from typing import Any
 
 import pytest
 
+from tests.integration.skip_policy import tracked_gap_marker
+
 
 MIGRATED_CASE_FILES = frozenset(
     {
@@ -112,7 +114,14 @@ def open_case_gap(key: str) -> CaseGapIssue:
 
 def tracked_skip(condition: bool, *, issue: str) -> Any:
     """Attach a skip to a registered gap without hiding why it remains."""
-    return pytest.mark.skipif(condition, reason=_skip_reason(issue))
+    entry = open_case_gap(issue)
+    skip = pytest.mark.skipif(condition, reason=_skip_reason(issue))
+    gap = tracked_gap_marker(entry.number)
+
+    def decorate(function: Any) -> Any:
+        return gap(skip(function))
+
+    return decorate
 
 
 def _skip_reason(issue: str) -> str:

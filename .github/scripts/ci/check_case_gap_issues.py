@@ -37,7 +37,44 @@ from typing import Callable
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SCRIPT_ROOT = REPO_ROOT / ".github/scripts/ci"
 DEFAULT_REGISTRY = REPO_ROOT / "tests/integration/case_gap_issues.py"
+DEFAULT_BASELINE = REPO_ROOT / "tests/integration/skip_policy_baseline.json"
 DEFAULT_SOURCE_CONTRACT = REPO_ROOT / "tests/unit/test_integration_source_contract.py"
+POLICY_ROOTS = (
+    "tests/integration/flaggems/",
+    "tests/integration/ops/",
+)
+LEGACY_SKIP_CALLS = frozenset(
+    {
+        "pytest.skip",
+        "pytest.importorskip",
+        "pytest.xfail",
+        "pytest.mark.skip",
+        "pytest.mark.skipif",
+        "pytest.mark.xfail",
+        "pytest.mark.skip_class",
+        "mark.skip",
+        "mark.skipif",
+        "mark.xfail",
+        "skip",
+        "skipif",
+        "skipIf",
+        "skipUnless",
+        "skipTest",
+        "expectedFailure",
+        "importorskip",
+        "xfail",
+        "unittest.skip",
+        "unittest.skipIf",
+        "unittest.skipUnless",
+        "unittest.expectedFailure",
+    }
+)
+DIRECT_POLICY_MARKERS = frozenset(
+    {
+        "flagos_platform_gate",
+        "flagos_tracked_gap",
+    }
+)
 ISSUE_REFERENCE = re.compile(
     r"(?P<repository>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/"
     r"(?P<number>[1-9][0-9]*)"
@@ -52,6 +89,15 @@ class CaseGapContract:
 
     contract_source: str
     sources: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SkipPolicyBaseline:
+    """The exact legacy skip inventory allowed by the source ratchet."""
+
+    roots: tuple[str, ...]
+    files: dict[str, dict[str, int]]
+    kinds: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -209,14 +255,14 @@ def case_gap_contract(
     invalid = [
         source
         for source in sources
-        if re.fullmatch(
-            r"tests/integration/(?!case_gap_issues\.py$)[^/]+(?:/[^/]+)*\.py",
-            source,
-        )
-        is None
+        if not any(source.startswith(root) for root in POLICY_ROOTS)
+        or not source.endswith(".py")
+        or source == "tests/integration/case_gap_issues.py"
     ]
     if invalid:
-        raise ValueError(f"migrated source must be under tests/integration: {invalid}")
+        raise ValueError(
+            f"migrated source must be under a governed integration root: {invalid}"
+        )
     return CaseGapContract(contract_source, sources)
 
 
@@ -234,6 +280,235 @@ def _direct_callee_name(function: ast.AST) -> str:
     if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
         return f"{function.value.id}.{function.attr}"
     return ""
+
+
+def _dotted_name(node: ast.AST | None) -> str:
+    """Return a dotted call target without evaluating the source."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _legacy_skip_kind(node: ast.AST) -> str:
+    """Classify a source AST call that can produce a skip-like outcome."""
+    if not isinstance(node, ast.Call):
+        return ""
+    name = _dotted_name(node.func)
+    if name in LEGACY_SKIP_CALLS:
+        return name
+    if name.endswith(".skipTest"):
+        return "skipTest"
+    return ""
+
+
+def skip_call_counts(source: str, *, filename: str) -> dict[str, int]:
+    """Count legacy skip forms in one source file without importing it."""
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        raise ValueError(f"{filename}:{exc.lineno}: invalid Python: {exc.msg}") from exc
+    counts = {}
+    for node in ast.walk(tree):
+        kind = _legacy_skip_kind(node)
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def direct_policy_marker_violations(source: str, *, filename: str) -> list[str]:
+    """Reject source that fabricates the markers reserved for shared helpers."""
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        raise ValueError(f"{filename}:{exc.lineno}: invalid Python: {exc.msg}") from exc
+    return [
+        f"{filename}:{node.lineno}: skip-policy markers must come from the "
+        "shared helper"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in DIRECT_POLICY_MARKERS
+    ]
+
+
+def load_skip_policy_baseline(
+    path: Path = DEFAULT_BASELINE,
+    *,
+    roots: tuple[str, ...] = POLICY_ROOTS,
+) -> SkipPolicyBaseline:
+    """Read and validate the exact legacy skip ratchet baseline."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read skip policy baseline {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("skip policy baseline must be an object")
+    if payload.get("version") != 1:
+        raise ValueError("skip policy baseline version must be 1")
+    declared_roots = payload.get("roots")
+    if declared_roots != list(roots):
+        raise ValueError(f"skip policy baseline roots must be {list(roots)}")
+    files = payload.get("files")
+    kinds = payload.get("kinds")
+    if not isinstance(files, dict) or not isinstance(kinds, dict):
+        raise ValueError("skip policy baseline needs files and kinds objects")
+
+    normalized_files = {}
+    aggregate = {}
+    for relative, row in files.items():
+        if not isinstance(relative, str):
+            raise ValueError("skip policy baseline file names must be strings")
+        if (
+            relative.startswith("/")
+            or "\\" in relative
+            or ".." in relative.split("/")
+            or not relative.endswith(".py")
+            or not any(relative.startswith(root) for root in roots)
+        ):
+            raise ValueError(f"invalid skip policy baseline file: {relative}")
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"skip policy baseline entry must be an object: {relative}"
+            )
+        normalized_row = {}
+        for kind, count in row.items():
+            if kind not in LEGACY_SKIP_CALLS and kind != "skipTest":
+                raise ValueError(f"unknown legacy skip kind: {kind}")
+            if type(count) is not int or count <= 0:
+                raise ValueError(
+                    f"legacy skip count must be a positive integer: {relative}:{kind}"
+                )
+            normalized_row[kind] = count
+            aggregate[kind] = aggregate.get(kind, 0) + count
+        if normalized_row:
+            normalized_files[relative] = normalized_row
+
+    if kinds != aggregate:
+        raise ValueError("skip policy baseline kinds do not match its file rows")
+    return SkipPolicyBaseline(
+        roots=tuple(roots),
+        files=dict(sorted(normalized_files.items())),
+        kinds=dict(sorted(aggregate.items())),
+    )
+
+
+def build_skip_policy_baseline(
+    files: dict[str, dict[str, int]],
+    *,
+    roots: tuple[str, ...] = POLICY_ROOTS,
+) -> dict:
+    """Build the canonical JSON object for a generated baseline."""
+    normalized_files = {}
+    kinds = {}
+    for relative in sorted(files):
+        row = {kind: count for kind, count in sorted(files[relative].items()) if count}
+        if row:
+            normalized_files[relative] = row
+            for kind, count in row.items():
+                kinds[kind] = kinds.get(kind, 0) + count
+    return {
+        "version": 1,
+        "roots": list(roots),
+        "files": normalized_files,
+        "kinds": dict(sorted(kinds.items())),
+    }
+
+
+def read_policy_sources(
+    root: Path,
+    *,
+    roots: tuple[str, ...] = POLICY_ROOTS,
+) -> dict[str, str]:
+    """Read every submitted Python file under the governed integration roots."""
+    root = root.resolve()
+    sources = {}
+    for relative_root in roots:
+        directory = (root / relative_root).resolve()
+        try:
+            directory.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"policy root leaves its checkout: {relative_root}"
+            ) from exc
+        if not directory.is_dir():
+            raise ValueError(f"policy root is missing: {relative_root}")
+        for path in sorted(directory.rglob("*.py")):
+            resolved = path.resolve()
+            try:
+                relative = resolved.relative_to(root).as_posix()
+            except ValueError as exc:
+                raise ValueError(f"policy source leaves its checkout: {path}") from exc
+            sources[relative] = resolved.read_text(encoding="utf-8")
+    return sources
+
+
+def skip_policy_violations(
+    sources: dict[str, str],
+    baseline: SkipPolicyBaseline,
+    *,
+    migrated: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Check that legacy skips are frozen by file and call kind.
+
+    A decrease is an error too: otherwise the baseline can hide a temporary
+    skip long after it was removed. A newly added file never inherits an
+    allowance from another file.
+    """
+    current = {}
+    errors = []
+    for relative in sorted(sources):
+        try:
+            counts = skip_call_counts(sources[relative], filename=relative)
+            errors.extend(
+                direct_policy_marker_violations(sources[relative], filename=relative)
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if counts:
+            current[relative] = counts
+        if relative in migrated and counts:
+            errors.append(
+                f"{relative}: migrated cross-chip files may not contain legacy "
+                "skip calls; use tracked_skip or a platform gate"
+            )
+
+    for relative, counts in current.items():
+        expected = baseline.files.get(relative)
+        if expected is None:
+            errors.append(
+                f"{relative}: new legacy skip calls are forbidden; migrate them "
+                "to tracked_skip or a platform gate"
+            )
+            continue
+        for kind, count in sorted(counts.items()):
+            allowed = expected.get(kind, 0)
+            if count > allowed:
+                errors.append(
+                    f"{relative}:{kind}: {count} legacy skip calls, baseline "
+                    f"allows {allowed}"
+                )
+            elif count < allowed:
+                errors.append(
+                    f"{relative}:{kind}: {count} legacy skip calls, baseline "
+                    f"allows {allowed}; shrink skip_policy_baseline.json in the "
+                    "same change"
+                )
+
+    for relative, expected in baseline.files.items():
+        observed = current.get(relative, {})
+        if not observed:
+            errors.append(
+                f"{relative}: baseline file has no legacy skip calls anymore; "
+                "remove its baseline row"
+            )
+        for kind, count in sorted(expected.items()):
+            if observed.get(kind, 0) == 0:
+                errors.append(f"{relative}:{kind}: baseline entry is stale; remove it")
+    return errors
 
 
 def _is_tracked_skip(node: ast.AST) -> bool:
@@ -279,6 +554,8 @@ def _source_violations(
     source: str,
     gaps: tuple[RegisteredGap, ...],
     migrated: frozenset[str],
+    *,
+    enforce_legacy: bool = True,
 ) -> tuple[list[str], dict[str, int]]:
     """Check one source before any test module is imported."""
     try:
@@ -337,27 +614,28 @@ def _source_violations(
         errors.append(
             f"{relative}: tracked skip must be imported from the shared registry"
         )
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign):
-            targets = statement.targets
-        elif isinstance(statement, ast.AnnAssign):
-            targets = [statement.target]
-        else:
-            continue
-        if any(
-            isinstance(node, ast.Name) and node.id == "pytestmark"
-            for target in targets
-            for node in _walk_complete(target)
-        ):
-            for node in _walk_complete(statement.value):
-                if isinstance(node, ast.Call) and _callee_name(node.func) in {
-                    "skip",
-                    "skipif",
-                    "xfail",
-                }:
-                    errors.append(
-                        f"{relative}:{node.lineno}: module-wide skips are forbidden"
-                    )
+    if enforce_legacy:
+        for statement in tree.body:
+            if isinstance(statement, ast.Assign):
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                targets = [statement.target]
+            else:
+                continue
+            if any(
+                isinstance(node, ast.Name) and node.id == "pytestmark"
+                for target in targets
+                for node in _walk_complete(target)
+            ):
+                for node in _walk_complete(statement.value):
+                    if isinstance(node, ast.Call) and _callee_name(node.func) in {
+                        "skip",
+                        "skipif",
+                        "xfail",
+                    }:
+                        errors.append(
+                            f"{relative}:{node.lineno}: module-wide skips are forbidden"
+                        )
     for node in _walk_complete(tree):
         if isinstance(node, ast.Assign):
             assignments = node.targets
@@ -376,7 +654,7 @@ def _source_violations(
                 errors.append(
                     f"{relative}:{node.lineno}: local tracked_skip definitions are forbidden"
                 )
-            if node.name.startswith("test_"):
+            if enforce_legacy and node.name.startswith("test_"):
                 for decorator in _walk_complete(node):
                     if isinstance(decorator, ast.Call) and _callee_name(
                         decorator.func
@@ -395,34 +673,45 @@ def _source_violations(
                         errors.append(
                             f"{relative}:{node.lineno}: tracked_skip may only decorate tests"
                         )
-                elif id(node) in function_ids and _callee_name(callee) in {
-                    "skip",
-                    "skipif",
-                    "xfail",
-                }:
+                elif (
+                    enforce_legacy
+                    and id(node) in function_ids
+                    and _callee_name(callee)
+                    in {
+                        "skip",
+                        "skipif",
+                        "xfail",
+                    }
+                ):
                     errors.append(
                         f"{relative}:{node.lineno}: test skips must use the tracked_skip decorator"
                     )
         if not isinstance(node, ast.Call):
             continue
         callee = _direct_callee_name(node.func)
-        if callee in {
-            "pytest.skip",
-            "pytest.skipif",
-            "pytest.xfail",
-            "pytest.importorskip",
-            "unittest.skip",
-            "unittest.skipIf",
-            "unittest.skipUnless",
-        } and id(node) not in {
-            id(decorator)
-            for function in functions
-            for decorator in function.decorator_list
-        }:
+        if (
+            enforce_legacy
+            and callee
+            in {
+                "pytest.skip",
+                "pytest.skipif",
+                "pytest.xfail",
+                "pytest.importorskip",
+                "unittest.skip",
+                "unittest.skipIf",
+                "unittest.skipUnless",
+            }
+            and id(node)
+            not in {
+                id(decorator)
+                for function in functions
+                for decorator in function.decorator_list
+            }
+        ):
             errors.append(
                 f"{relative}:{node.lineno}: test skips must use the tracked_skip decorator"
             )
-        if callee in {"pytest.importorskip", "importorskip"}:
+        if enforce_legacy and callee in {"pytest.importorskip", "importorskip"}:
             errors.append(
                 f"{relative}:{node.lineno}: test skipping must use the tracked_skip decorator"
             )
@@ -504,7 +793,13 @@ def source_violations(
     errors = [f"registered case source is missing: {source}" for source in missing]
     skipped = {}
     for relative in sorted(sources):
-        found, owned = _source_violations(relative, sources[relative], gaps, migrated)
+        found, owned = _source_violations(
+            relative,
+            sources[relative],
+            gaps,
+            migrated,
+            enforce_legacy=relative in migrated,
+        )
         errors.extend(found)
         skipped.update(owned)
     errors.extend(
@@ -599,6 +894,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--script-root", type=Path, default=DEFAULT_SCRIPT_ROOT)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     parser.add_argument("--source-contract", type=Path, default=DEFAULT_SOURCE_CONTRACT)
     args = parser.parse_args()
     trusted_script = args.script_root / "check_case_gap_issues.py"
@@ -609,17 +905,28 @@ def main() -> int:
         )
         return 1
     try:
+        repository_root = args.registry.parents[2].resolve()
         gaps = registered_gaps(args.registry)
         contract = case_gap_contract(
             args.registry.read_text(encoding="utf-8"),
             args.source_contract.read_text(encoding="utf-8"),
         )
-        sources = _read_contract_sources(args.registry.parents[2].resolve(), contract)
+        baseline = load_skip_policy_baseline(args.baseline)
+        policy_sources = read_policy_sources(repository_root)
     except (OSError, ValueError, SyntaxError) as exc:
         print(f"::error::invalid case-gap contract: {exc}")
         return 1
-    errors = validate_gaps(
-        gaps, sources=sources, migrated_case_files=frozenset(contract.sources)
+    errors = skip_policy_violations(
+        policy_sources,
+        baseline,
+        migrated=frozenset(contract.sources),
+    )
+    errors.extend(
+        validate_gaps(
+            gaps,
+            sources=policy_sources,
+            migrated_case_files=frozenset(contract.sources),
+        )
     )
     failed_numbers = {error.split(":", 1)[0] for error in errors}
     for gap in gaps:

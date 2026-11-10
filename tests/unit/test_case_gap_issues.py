@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The issue gate reads live state and fails closed when verification is lost."""
+"""The issue gate and legacy skip ratchet fail closed."""
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github" / "scripts" / "ci" / "check_case_gap_issues.py"
 REGISTRY = ROOT / "tests/integration" / "case_gap_issues.py"
+BASELINE = ROOT / "tests/integration" / "skip_policy_baseline.json"
 
 
 def _checker():
@@ -42,6 +44,8 @@ def _script_arguments(module):
         str(module.DEFAULT_SCRIPT_ROOT),
         "--registry",
         str(REGISTRY),
+        "--baseline",
+        str(BASELINE),
     ]
 
 
@@ -251,6 +255,72 @@ def test_main_checks_skip_forms_in_every_migrated_source(tmp_path):
     )
 
 
+def test_main_rejects_tracked_skip_in_an_unregistered_unmigrated_case(
+    tmp_path, monkeypatch, capsys
+):
+    module = _checker()
+    repository = tmp_path.resolve()
+    (repository / "tests/integration/ops").mkdir(parents=True)
+    (repository / "tests/integration/flaggems").mkdir()
+
+    migrated = "tests/integration/ops/test_registered.py"
+    unmigrated = "tests/integration/ops/test_legacy.py"
+    registry = repository / "tests/integration/case_gap_issues.py"
+    registry.write_text(
+        f"MIGRATED_CASE_FILES = frozenset({{{migrated!r}}})\n"
+        "_ISSUES = ("
+        "CaseGapIssue("
+        "number='#710', "
+        f"cases=({migrated + '::test_registered'!r},), "
+        "routes=(), "
+        "upstream='flagos-ai/FlagGems/issues/8411'"
+        "),"
+        ")\n",
+        encoding="utf-8",
+    )
+    (repository / migrated).write_text(
+        "from tests.integration.case_gap_issues import tracked_skip\n"
+        "@tracked_skip(condition=True, issue='#710')\n"
+        "def test_registered():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    (repository / unmigrated).write_text(
+        "from tests.integration.case_gap_issues import tracked_skip\n"
+        "@tracked_skip(condition=True, issue='#710')\n"
+        "def test_unregistered():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    baseline = repository / "tests/integration/skip_policy_baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "roots": [
+                    "tests/integration/flaggems/",
+                    "tests/integration/ops/",
+                ],
+                "files": {},
+                "kinds": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    arguments = _script_arguments(module)
+    arguments[arguments.index("--registry") + 1] = str(registry)
+    arguments[arguments.index("--baseline") + 1] = str(baseline)
+    monkeypatch.setattr(sys, "argv", arguments)
+    monkeypatch.setattr(module, "_api_issue", lambda *_: "open")
+
+    assert module.main() == 1
+    assert (
+        f"{unmigrated}:2: #710 has no cases owned by {unmigrated}::test_unregistered"
+        in capsys.readouterr().out
+    )
+
+
 _GAP = """CaseGapIssue(number="#710", cases=("tests/integration/ops/test_x.py::test_x",), routes=(), upstream="flagos-ai/FlagGems/issues/8411")
 """
 _CONTRACT = "MIGRATED_CASE_FILES = frozenset({'tests/integration/ops/test_x.py'})\n"
@@ -349,3 +419,237 @@ def test_migrated_source_without_a_skip_has_nothing_to_import():
 )
 def test_source_contract_rejects_unregistered_skip_forms(source, message):
     assert any(message in error for error in _source_errors(source))
+
+
+def _baseline(module, files):
+    return module.SkipPolicyBaseline(
+        roots=module.POLICY_ROOTS,
+        files=files,
+        kinds={},
+    )
+
+
+def test_checked_in_skip_baseline_matches_the_exact_source_inventory():
+    module = _checker()
+    sources = module.read_policy_sources(ROOT)
+    observed = {
+        relative: counts
+        for relative, source in sources.items()
+        if (counts := module.skip_call_counts(source, filename=relative))
+    }
+    generated = module.build_skip_policy_baseline(observed)
+    stored = json.loads(BASELINE.read_text(encoding="utf-8"))
+    assert stored == generated
+
+    baseline = module.load_skip_policy_baseline(BASELINE)
+    contract = module.case_gap_contract(
+        REGISTRY.read_text(encoding="utf-8"),
+        (ROOT / "tests/unit/test_integration_source_contract.py").read_text(
+            encoding="utf-8"
+        ),
+    )
+    assert (
+        module.skip_policy_violations(
+            sources, baseline, migrated=frozenset(contract.sources)
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "source, kind",
+    [
+        ("import pytest\npytest.skip('new')\n", "pytest.skip"),
+        (
+            "import pytest\n@pytest.mark.skipif(True, reason='new')\n"
+            "def test_x(): pass\n",
+            "pytest.mark.skipif",
+        ),
+    ],
+)
+def test_existing_file_cannot_gain_a_legacy_skip(source, kind):
+    module = _checker()
+    relative = "tests/integration/ops/test_existing.py"
+    baseline = _baseline(module, {relative: {kind: 1}})
+    errors = module.skip_policy_violations({relative: source}, baseline)
+    assert errors == []
+
+    errors = module.skip_policy_violations({relative: source + source}, baseline)
+    assert any(
+        f"{relative}:{kind}: 2 legacy skip calls, baseline allows 1" in error
+        for error in errors
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import pytest\npytest.skip('new')\n",
+        (
+            "import pytest\n@pytest.mark.skipif(True, reason='new')\n"
+            "def test_x(): pass\n"
+        ),
+    ],
+)
+def test_new_file_cannot_inherit_a_legacy_skip_allowance(source):
+    module = _checker()
+    baseline = _baseline(
+        module,
+        {"tests/integration/ops/test_existing.py": {"pytest.skip": 1}},
+    )
+    relative = "tests/integration/ops/test_new.py"
+    errors = module.skip_policy_violations({relative: source}, baseline)
+    assert any(
+        error.startswith(f"{relative}:") and "new legacy skip calls" in error
+        for error in errors
+    )
+
+
+def test_removing_a_bare_skip_requires_shrinking_the_baseline():
+    module = _checker()
+    relative = "tests/integration/ops/test_one.py"
+    baseline = _baseline(module, {relative: {"pytest.mark.skipif": 2}})
+    source = (
+        "import pytest\n@pytest.mark.skipif(True, reason='one')\ndef test_one(): pass\n"
+    )
+    errors = module.skip_policy_violations({relative: source}, baseline)
+    assert any("1 legacy skip calls, baseline allows 2" in error for error in errors)
+
+
+def test_stale_baseline_file_and_kind_rows_are_rejected():
+    module = _checker()
+    present = "tests/integration/ops/test_present.py"
+    gone = "tests/integration/ops/test_gone.py"
+    source = "import pytest\npytest.skip('one')\n"
+    baseline = _baseline(
+        module,
+        {
+            present: {"pytest.skip": 1, "pytest.mark.xfail": 1},
+            gone: {"pytest.skip": 1},
+        },
+    )
+    errors = module.skip_policy_violations({present: source}, baseline)
+    assert any(f"{present}:pytest.mark.xfail" in error for error in errors)
+    assert any(f"{gone}: baseline file has no" in error for error in errors)
+
+
+def test_migrated_file_rejects_any_legacy_skip_even_in_a_baseline():
+    module = _checker()
+    relative = "tests/integration/ops/test_migrated.py"
+    source = "import pytest\npytest.skip('gap')\n"
+    baseline = _baseline(module, {relative: {"pytest.skip": 1}})
+    errors = module.skip_policy_violations(
+        {relative: source}, baseline, migrated=frozenset({relative})
+    )
+    assert any("migrated cross-chip files may not contain" in error for error in errors)
+
+
+def test_direct_policy_markers_are_reserved_for_the_shared_helpers():
+    module = _checker()
+    source = (
+        "import pytest\n"
+        "@pytest.mark.flagos_tracked_gap(issue='#710')\n"
+        "@pytest.mark.flagos_platform_gate(gate='device_count', detail='two')\n"
+        "def test_x(): pass\n"
+    )
+    relative = "tests/integration/ops/test_markers.py"
+    errors = module.skip_policy_violations({relative: source}, _baseline(module, {}))
+    assert (
+        len(
+            [
+                error
+                for error in errors
+                if "markers must come from the shared helper" in error
+            ]
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize(
+    "files, kinds, message",
+    [
+        ("not-a-mapping", {}, "files and kinds objects"),
+        ({"tests/integration/ops/test_x.py": {"pytest.skip": 0}}, {}, "positive"),
+        ({"tests/integration/unit/test_x.py": {"pytest.skip": 1}}, {}, "invalid"),
+        (
+            {"tests/integration/ops/test_x.py": {"pytest.skip": 1}},
+            {"pytest.skip": 2},
+            "do not match",
+        ),
+    ],
+)
+def test_skip_baseline_loader_rejects_invalid_rows(tmp_path, files, kinds, message):
+    module = _checker()
+    path = tmp_path / "baseline.json"
+    payload = {
+        "version": 1,
+        "roots": [
+            "tests/integration/flaggems/",
+            "tests/integration/ops/",
+        ],
+        "files": files,
+        "kinds": kinds,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        module.load_skip_policy_baseline(path)
+
+
+def test_skip_baseline_loader_rejects_noncanonical_roots(tmp_path):
+    module = _checker()
+    path = tmp_path / "baseline.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "roots": ["tests/integration/"],
+                "files": {},
+                "kinds": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="roots must be"):
+        module.load_skip_policy_baseline(path)
+
+
+def test_case_gap_contract_rejects_a_file_outside_the_policy_roots(tmp_path):
+    module = _checker()
+    registry = tmp_path / "case_gap_issues.py"
+    registry.write_text(
+        "MIGRATED_CASE_FILES = frozenset({'tests/integration/test_other.py'})\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="governed integration root"):
+        module.case_gap_contract(
+            registry.read_text(encoding="utf-8"), "tests/unit/test_source.py"
+        )
+
+
+def test_main_rejects_an_unreadable_skip_baseline(tmp_path, monkeypatch, capsys):
+    module = _checker()
+    arguments = _script_arguments(module)
+    arguments[arguments.index("--baseline") + 1] = str(tmp_path / "missing.json")
+    monkeypatch.setattr(sys, "argv", arguments)
+    assert module.main() == 1
+    assert "invalid case-gap contract" in capsys.readouterr().out
+
+
+def test_skip_policy_contract_is_identical_in_the_runtime_and_report_paths():
+    runtime = importlib.import_module("tests.integration.skip_policy")
+    checker = _checker()
+    spec = importlib.util.spec_from_file_location(
+        "skip_policy_contract_test",
+        ROOT / ".github/scripts/pytest_reporting/skip_policy_contract.py",
+    )
+    stable = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stable)
+    assert runtime.TRACKED_GAP_MARKER == stable.TRACKED_GAP_MARKER
+    assert runtime.PLATFORM_GATE_MARKER == stable.PLATFORM_GATE_MARKER
+    assert runtime.TRACKED_GAP_CATEGORY == stable.TRACKED_GAP_CATEGORY
+    assert runtime.PLATFORM_GATE_CATEGORY == stable.PLATFORM_GATE_CATEGORY
+    assert runtime.PLATFORM_GATES == stable.PLATFORM_GATES
+    assert runtime.SKIP_OUTCOMES == stable.SKIP_OUTCOMES
+    assert runtime.POLICY_ROOTS == stable.POLICY_ROOTS
+    assert runtime.POLICY_ROOTS == checker.POLICY_ROOTS

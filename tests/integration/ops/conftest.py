@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.skip_policy import add_platform_skip
+
 _INTEGRATION_DIR = str(Path(__file__).resolve().parents[1])
 if _INTEGRATION_DIR not in sys.path:
     sys.path.insert(0, _INTEGRATION_DIR)
@@ -169,22 +171,24 @@ def pytest_collection_modifyitems(
         markers_to_skip.append("cuda")
     for item in items:
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
-            item.add_marker(
-                pytest.mark.skip(
-                    reason="software low-precision matrix path requires DCU or MetaX"
-                )
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="software lowp matrix path requires DCU or MetaX",
+                reason="software low-precision matrix path requires DCU or MetaX",
             )
             continue
         # The FlagGems C++ path requires a wheel built with the flaggems_cpp
         # kernel set linked in (liboperators.so).
         if item.get_closest_marker("flaggems_cpp") and not flaggems_cpp_on:
-            item.add_marker(
-                pytest.mark.skip(
-                    reason=(
-                        "FlagGems C++ kernels are not compiled into this wheel "
-                        "(rebuild with FLAGOS_BUILD_FLAGGEMS_CPP=ON)"
-                    )
-                )
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="flaggems_cpp kernel set is absent from the build record",
+                reason=(
+                    "FlagGems C++ kernels are not compiled into this wheel "
+                    "(rebuild with FLAGOS_BUILD_FLAGGEMS_CPP=ON)"
+                ),
             )
             continue
         # NOTE: there is deliberately no gate on the plain `flaggems` mark.
@@ -196,13 +200,14 @@ def pytest_collection_modifyitems(
         # flaggems"` on the vendor side.
         for marker_name in markers_to_skip:
             if item.get_closest_marker(marker_name):
-                item.add_marker(
-                    pytest.mark.skip(
-                        reason=(
-                            f"Skipped on {platform} runtime: "
-                            f"requires @{marker_name} backend"
-                        )
-                    )
+                add_platform_skip(
+                    item,
+                    gate="backend_marker",
+                    detail=f"runtime is {platform}; case requires @{marker_name}",
+                    reason=(
+                        f"Skipped on {platform} runtime: "
+                        f"requires @{marker_name} backend"
+                    ),
                 )
                 break
 
