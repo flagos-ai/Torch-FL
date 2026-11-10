@@ -93,6 +93,9 @@
     "tests/integration/ops/test_gcu_sdpa_mask.py": {
       "pytest.skip": 1
     },
+    "tests/integration/ops/test_iluvatar_sdpa_route.py": {
+      "pytest.skip": 1
+    },
     "tests/integration/ops/test_le_dispatch.py": {
       "pytest.skip": 1
     },
@@ -336,7 +339,7 @@
     "pytest.mark.skip": 1,
     "pytest.mark.skipif": 58,
     "pytest.mark.xfail": 6,
-    "pytest.skip": 126
+    "pytest.skip": 127
   },
   "roots": [
     "tests/integration/flaggems/",
