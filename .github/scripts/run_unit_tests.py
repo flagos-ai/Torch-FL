@@ -36,9 +36,21 @@ tests themselves were fine.
 
 Usage:
     python .github/scripts/run_unit_tests.py [--test-dir tests/unit] [--timeout 300]
+                                             [--jobs N]
+
+``--jobs`` runs N files concurrently. It defaults to 1 because the files are not
+uniformly pure Python: 64 of the 117 in ``tests/unit`` reference an accelerator,
+and several concurrent interpreters that each initialize the same device compete
+for its memory rather than for CPU. One process per file still holds under
+parallelism -- the blast-radius argument above is about a file taking its own
+interpreter down, which concurrency does not change -- so what the flag trades
+is throughput against device pressure. Raise it only with a lane's device count
+in mind; a failure introduced this way shows up as an out-of-memory or a driver
+fault in an unrelated file, not as a clean error.
 """
 
 import argparse
+import concurrent.futures
 import os
 import re
 import shlex
@@ -74,6 +86,7 @@ def parse_args():
     parser.add_argument("--test-dir", default="tests/unit")
     parser.add_argument("--pattern", default="test_*.py")
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument(
         "--exclude-shared-cpu",
@@ -86,7 +99,10 @@ def parse_args():
         default=[],
         help="Retain a CPU-owned file that also contains installed-wheel checks",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    return args
 
 
 def shared_cpu_files(root):
@@ -212,6 +228,54 @@ def run_file(python, test_file, timeout):
         return 124, output, True
 
 
+def report(test_file, returncode, output, timed_out, timeout):
+    """Emit one file's log block and return its result tuple.
+
+    The block is rendered into a single string and printed once, because under
+    ``--jobs`` N blocks are interleaved from N threads and a ``::group::`` that
+    lands between another file's lines makes the CI log unreadable. The result
+    carries the file's position so the summary can be put back in file order.
+    """
+    status, tolerated = classify(returncode, output)
+    body = output if output.endswith("\n") else output + "\n"
+    lines = [f"::group::{test_file}", body.rstrip("\n")]
+    if timed_out:
+        lines.append(f"::error::{test_file} did not finish within {timeout}s")
+    elif tolerated:
+        lines.append(
+            f"::warning::{test_file} passed, then the interpreter died with "
+            f"signal {-returncode} during teardown (see this script's docstring)"
+        )
+    elif status != "PASS":
+        lines.append(f"::error::{test_file} failed ({status}, exit {returncode})")
+    lines.append("::endgroup::")
+    print("\n".join(lines), flush=True)
+    return (test_file, status, returncode, tolerated)
+
+
+def run_all(files, python, timeout, jobs):
+    """Run every file, at most ``jobs`` at a time; return results in file order."""
+    if jobs == 1:
+        results = [
+            report(test_file, *run_file(python, test_file, timeout), timeout)
+            for test_file in files
+        ]
+    else:
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = {
+                pool.submit(run_file, python, test_file, timeout): test_file
+                for test_file in files
+            }
+            for future in concurrent.futures.as_completed(futures):
+                test_file = futures[future]
+                results.append(report(test_file, *future.result(), timeout))
+        # Files finish out of order; the summary must not depend on which did.
+        order = {test_file: index for index, test_file in enumerate(files)}
+        results.sort(key=lambda result: order[result[0]])
+    return results
+
+
 def main():
     args = parse_args()
     test_dir = Path(args.test_dir)
@@ -234,23 +298,7 @@ def main():
         if not files:
             raise SystemExit("no hardware unit test files remain after CPU ownership")
 
-    results = []
-    for test_file in files:
-        print(f"::group::{test_file}", flush=True)
-        returncode, output, timed_out = run_file(args.python, test_file, args.timeout)
-        print(output, end="" if output.endswith("\n") else "\n", flush=True)
-        status, tolerated = classify(returncode, output)
-        if timed_out:
-            print(f"::error::{test_file} did not finish within {args.timeout}s")
-        elif tolerated:
-            print(
-                f"::warning::{test_file} passed, then the interpreter died with "
-                f"signal {-returncode} during teardown (see this script's docstring)"
-            )
-        elif status != "PASS":
-            print(f"::error::{test_file} failed ({status}, exit {returncode})")
-        print("::endgroup::", flush=True)
-        results.append((test_file, status, returncode, tolerated))
+    results = run_all(files, args.python, args.timeout, args.jobs)
 
     # A tolerated teardown crash counted as a pass above, so it must not count as
     # a failure here either -- otherwise `UNIT_TESTS_ALLOW_TEARDOWN_CRASH=1`
