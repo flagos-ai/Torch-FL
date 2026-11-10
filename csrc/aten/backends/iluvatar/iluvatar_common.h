@@ -51,6 +51,8 @@
 
 #include <ATen/ATen.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/ones.h>
+#include <ATen/ops/scalar_tensor.h>
 #include <c10/core/Scalar.h>
 
 #include <cublas_v2.h>
@@ -58,9 +60,13 @@
 #include <cuda_runtime.h>
 #include "runtime/accelerator/iluvatar/iluvatar_context.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 
 namespace at::native::flagos::iluvatar {
@@ -369,19 +375,12 @@ inline bool IluvatarStatusOk(ixblasStatus_t status) {
 // The vendor's own error string, plus the numeric code so an unnamed status is
 // still reportable. ixdnnGetErrorString is a real function; ixblas' is the
 // ixblasGetStatusString the mapping header aliases cublasGetStatusString to.
+// Both overloads have to precede ILUVATAR_EXEC, which calls them.
 inline std::string IluvatarStatusName(ixdnnStatus_t status) {
   const char* name = ixdnnGetErrorString(status);
   return std::string(name != nullptr ? name : "IXDNN_STATUS_UNKNOWN") + " (" +
       std::to_string(static_cast<int>(status)) + ")";
 }
-
-inline std::string IluvatarStatusName(ixblasStatus_t status) {
-  const char* name = ixblasGetStatusString(status);
-  return std::string(name != nullptr ? name : "IXBLAS_STATUS_UNKNOWN") + " (" +
-      std::to_string(static_cast<int>(status)) + ")";
-}
-
-} // namespace at::native::flagos::iluvatar
 
 // Issues one vendor call and raises on failure with the status enum's name.
 //
@@ -398,14 +397,354 @@ inline std::string IluvatarStatusName(ixblasStatus_t status) {
 // kernels open it first and call this only for the call itself. Draining is done
 // by the kernel after its last vendor call, not here, so a kernel that issues
 // several calls (query algo, query workspace size, forward) pays one sync.
+//
+// Defined here rather than at the end of the header: the axpy helpers below use
+// it, and a macro must be declared before its first use.
 #define ILUVATAR_EXEC(status, opname)                                          \
   do {                                                                         \
     const auto _iluvatar_status = (status);                                    \
     TORCH_CHECK(                                                               \
-        ::at::native::flagos::iluvatar::IluvatarStatusOk(_iluvatar_status),    \
+        IluvatarStatusOk(_iluvatar_status),    \
         (opname),                                                              \
         " failed on the Iluvatar (corex) backend: ",                           \
-        ::at::native::flagos::iluvatar::IluvatarStatusName(_iluvatar_status)); \
+        IluvatarStatusName(_iluvatar_status)); \
   } while (0)
+
+inline std::string IluvatarStatusName(ixblasStatus_t status) {
+  const char* name = ixblasGetStatusString(status);
+  return std::string(name != nullptr ? name : "IXBLAS_STATUS_UNKNOWN") + " (" +
+      std::to_string(static_cast<int>(status)) + ")";
+}
+
+// The dtypes ixblasAxpyEx serves. Measured on BI-V150 (corex 4.5.0): the call
+// accepts xType/yType IX_R_32F and IX_R_16F and returns
+// IXBLAS_STATUS_NOT_SUPPORTED (15) for float64, bfloat16, complex and the
+// integer types, for every execution type it has.
+inline bool IluvatarSupportsAxpyDtype(at::ScalarType type) {
+  return type == at::kFloat || type == at::kHalf;
+}
+
+// d += alpha * x on the device, for float32/float16 operands: one
+// ixblasAxpyEx, the in-place term of an elementwise add. The other term is the
+// destination's own value, which IluvatarAdd makes sure already holds what it
+// should before this call -- there is no vendor call for `d = alpha*x + beta*y`
+// itself.
+//
+// ixblasAxpyEx defers to the handle's stream, which is the flagos current
+// stream (GetCublasHandle rebinds it on every call), so the caller's next op is
+// ordered behind it without a device-wide drain.
+//
+// alpha is float32 for both operand types: measured on u180 (corex 4.5.0), the
+// vendor accepts IX_R_16F x/y with IX_R_32F alpha (status 0, exact) and returns
+// status 15 for a float16 alpha under every execution type, and
+// `executionType` accepts only 0 (its 16F/32F/64F/32I values all return
+// NOT_SUPPORTED). Strides are in elements; 1 is the only stride a multi-element
+// contiguous tensor can have.
+//
+// `d` may alias `x` (the in-place add passes it as both) -- the vendor kernel
+// reads element by element, so the read of x precedes the write to it.
+//
+// `groups` is 1 for the elementwise case and more when the operand is a
+// broadcast vector (see IluvatarAdd): the destination is then the operand
+// repeated `groups` times along its last dimension, and each repetition is one
+// more call over the same operand bytes.
+inline void IluvatarAxpy(
+    at::Tensor& d,
+    const at::Tensor& x,
+    double alpha,
+    int64_t groups = 1) {
+  const int64_t n = d.numel();
+  if (n == 0) {
+    return;
+  }
+  const int device = IluvatarDeviceIndex(d);
+  cublasHandle_t handle = GetCublasHandle(device);
+  const float alpha_f = static_cast<float>(alpha);
+  const auto type = ToBlasDataType(d.scalar_type());
+  if (groups == 1) {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(n),
+            &alpha_f,
+            IX_R_32F,
+            x.const_data_ptr(),
+            type,
+            1,
+            d.data_ptr(),
+            type,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+    return;
+  }
+  const int64_t m = n / groups;
+  TORCH_CHECK(
+      m * groups == n,
+      "iluvatar: ", n, " elements do not split into ", groups, " groups");
+  char* base = static_cast<char*>(d.data_ptr());
+  const int64_t bytes = m * d.element_size();
+  for (int64_t g = 0; g < groups; ++g) {
+    ILUVATAR_EXEC(
+        ixblasAxpyEx(
+            handle,
+            static_cast<int>(m),
+            &alpha_f,
+            IX_R_32F,
+            x.const_data_ptr(),
+            type,
+            1,
+            base + g * bytes,
+            type,
+            1,
+            static_cast<ixblasDataType_t>(0)),
+        "ixblasAxpyEx");
+  }
+}
+
+// The elementwise add the conf routes to `iluvatar`, in all three spellings
+// (add.Tensor, add_.Tensor, add_.Scalar): one entry point, because they differ
+// only in where the result goes and what the second addend is.
+//
+// These are the only kernels register.cc names by hand rather than taking from
+// an `.inc`. They live here, not in iluvatar_kernels.cc, because register.cc
+// includes that file inside its TORCH_LIBRARY_IMPL body (a function body),
+// where torch and corex headers cannot be pulled in; this header is included at
+// file scope instead.
+//
+// The conf routes this op to `iluvatar` for every dtype, so this is the one
+// answer for all of them: float32/float16 contiguous operands go through the
+// vendor kernel (IluvatarAxpy, one per operand-sized group), and every other
+// dtype -- and the layouts the vendor call cannot express -- fall to
+// at::add_out, the same registration register.cc used before this change.
+// Neither arm is a CPU fallback.
+//
+// Why FlagGems is not the route: its add is a Python kernel that allocates and
+// writes a full-size temporary, and on a 48 MB bf16 activation measured ~7 ms
+// on u180 against ~0.5 ms of bandwidth. The elementwise add is called hundreds
+// of times per training step, so the temporary is the whole cost.
+inline at::Tensor& IluvatarAdd(
+    at::Tensor& out,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Scalar& alpha) {
+  iluvatar::IluvatarDeviceGuard guard(out);
+  const int64_t n = out.numel();
+  const int64_t m = b.numel();
+  // The vendor call is a contiguous linear add: the destination and the a
+  // operand must be contiguous and the same length, and the b operand either
+  // the same length (elementwise) or an evenly repeated vector (broadcast --
+  // a bias or a per-channel scale, the other common shape of an add).
+  const bool vectorised = iluvatar::IluvatarSupportsAxpyDtype(out.scalar_type()) &&
+      a.scalar_type() == out.scalar_type() &&
+      b.scalar_type() == out.scalar_type() && a.numel() == n &&
+      a.is_contiguous() && out.is_contiguous() && m > 0 &&
+      n % m == 0 && b.is_contiguous() &&
+      (b.sizes().equals(out.sizes()) || out.sizes().back() == m);
+  if (!vectorised) {
+    return at::add_out(out, a, b, alpha);
+  }
+  const double s = alpha.to<double>();
+  const bool a_aliases_out = out.storage().is_alias_of(a.storage());
+  const bool b_aliases_out = out.storage().is_alias_of(b.storage());
+  // IluvatarAxpy adds into the destination (d += alpha * x), so `out`'s value
+  // at the call has to be one of the result's terms already. The steady
+  // state -- every add in a model -- is b_aliases_out with alpha 1, and that
+  // is the single vendor call with nothing to prepare.
+  const int64_t groups = n / m;
+  if (b_aliases_out && s == 1.0) {
+    IluvatarAxpy(out, a, 1.0, groups);
+    return out;
+  }
+  if (a_aliases_out) {
+    // Nothing may be written to `out` before `a` (which is `out`) is read.
+    return at::add_out(out, a, b, alpha);
+  }
+  // Make `out` hold b (scaled when alpha is not 1), then add alpha * a. The
+  // copy and the scale are elementwise kernels; at::add_out would be the same
+  // two passes, so this is never slower than the registration it replaces.
+  if (n == m) {
+    out.copy_(b);
+    if (s != 1.0) {
+      out.mul_(s);
+    }
+  } else {
+    // A broadcast operand is a view of the same bytes, so one-call copy and
+    // scale are both broadcasts; only the fill itself repeats.
+    if (s == 1.0) {
+      out.view({groups, m}).copy_(b);
+    } else {
+      out.view({groups, m}).copy_(b).mul_(s);
+    }
+  }
+  IluvatarAxpy(out, a, s, groups);
+  return out;
+}
+
+// add_.Scalar / add.Scalar / add.Scalar_out: `b` is a host number. ATen's
+// composite for these spellings boxes it into a 0-dim device tensor and calls
+// the tensor form above, so there is one implementation and one result -- a
+// number that does not fit the dtype's precision by more than one rounding step
+// would need a variant that reads b as a float instead.
+inline at::Tensor& IluvatarAddScalar(
+    at::Tensor& out, const at::Scalar& b, const at::Scalar& alpha) {
+  return IluvatarAdd(
+      out, out, at::scalar_tensor(b, out.options()), alpha);
+}
+
+// add.Scalar_out, the out= spelling. Its schema names an out parameter, and
+// registering a by-reference kernel under it aborts the library at load with
+// "Mismatch in kernel C++ signatures" (measured on u180), so it is registered
+// through the boxed kernel below, the same way add.out is.
+inline at::Tensor& IluvatarAddScalarOutImpl(
+    const at::Tensor& self, const at::Scalar& b, const at::Scalar& alpha,
+    at::Tensor& out) {
+  if (!out.sizes().equals(self.sizes())) {
+    out.resize_(self.sizes());
+  }
+  out.copy_(self);
+  return IluvatarAddScalar(out, b, alpha);
+}
+
+inline void IluvatarAddScalarOut(
+    const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  const auto& schema = op.schema();
+  const size_t base = stack->size() - schema.arguments().size();
+  const at::Tensor self = stack->at(base).toTensor();
+  const at::Scalar& b = stack->at(base + 1).toScalar();
+  const at::Scalar& alpha = stack->at(base + 2).toScalar();
+  at::Tensor& out =
+      stack->at(base + static_cast<size_t>(*schema.argumentIndexWithName("out")))
+          .toTensor();
+  IluvatarAddScalarOutImpl(self, b, alpha, out);
+  stack->resize(base + 1);
+  stack->at(base) = out;
+}
+
+// add.Tensor, the out-of-place tensor add. Nothing in ATen's own path names it
+// -- `a + b` and `a.add(b)` reach add.out -- so this is the kernel for a call
+// that comes straight to the op, and it also answers a plain `a + b`: measured
+// on u180, remove the add.Tensor registration and `a + b` segfaults, because
+// ATen's composite add.Tensor lowers to `add_(empty_like(self) + 0, ..)` and
+// the empty destination it starts from is garbage, which segfaults inside
+// copy_ before the add. IluvatarAdd reads its destination as one of the
+// result's terms, so this entry point writes both of them first.
+inline at::Tensor IluvatarAddTensor(
+    const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  const int64_t m = other.numel();
+  iluvatar::IluvatarDeviceGuard guard(out);
+  const bool vectorised =
+      iluvatar::IluvatarSupportsAxpyDtype(out.scalar_type()) &&
+      self.scalar_type() == out.scalar_type() &&
+      other.scalar_type() == out.scalar_type() &&
+      self.numel() == out.numel() && self.is_contiguous() && m > 0 &&
+      out.numel() % m == 0 && other.is_contiguous() &&
+      (other.sizes().equals(out.sizes()) || out.sizes().back() == m);
+  if (!vectorised) {
+    return IluvatarAdd(out, self, other, alpha);
+  }
+  const double s = alpha.to<double>();
+  const int64_t groups = out.numel() / m;
+  out.view({groups, m}).copy_(other);
+  if (s != 1.0) {
+    out.mul_(s);
+  }
+  IluvatarAxpy(out, self, s, groups);
+  return out;
+}
+
+// add.out, and therefore add_.Tensor. Its schema is
+// `(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)`,
+// and add_.Tensor is a structured delegate to it (`structured_delegate:
+// add.out` in native_functions.yaml), so both spellings reach this kernel and a
+// typed registration must carry the four-argument signature. It is a callable
+// object rather than a plain function because torch::Library::impl takes the
+// out argument by value, which a `Tensor&` parameter does not bind to; the
+// library accepts functors, and calls theirs with the schema's arguments.
+//
+// `out` arrives empty in the `out=` spelling, so it must be written, not read:
+// measured on u180, a kernel that read it answered garbage plus self. The
+// in-place spelling reaches the same kernel with `out` aliasing `self`, which
+// IluvatarAdd serves with one vendor call. Sizes that do not all match are the
+// same split IluvatarAdd makes -- ATen resizes `out` to the broadcast shape,
+// then the kernel runs at that shape.
+//
+// torch::Library::impl wraps the functor for every dispatch key the schema
+// lists, and only the PrivateUse1 one has an out parameter to take by value;
+// add.out's (catch all) registration is dispatched on operands alone. Measured
+// on u180, a functor here aborted the whole library with "Mismatch in kernel
+// C++ signatures" at registerKernel, so add.out goes in through the boxed
+// kernel below, and this struct is the body that kernel calls.
+struct IluvatarAddOut {
+  at::Tensor& operator()(
+      const at::Tensor& self,
+      const at::Tensor& other,
+      const at::Scalar& alpha,
+      at::Tensor& out) const {
+    const bool same_shape =
+        other.sizes().equals(self.sizes()) && out.sizes().equals(self.sizes());
+    if (!same_shape || out.device() != self.device()) {
+      const auto shape = at::infer_size(self.sizes(), other.sizes());
+      out.resize_(shape);
+    }
+    const double s = alpha.to<double>();
+    // Only the same-shape, contiguous case goes to the vendor axpy. Frame plus
+    // bias is (M, 1) plus (1, N), and a stride-0 expanded view of self is what
+    // would make that one call -- measured on u180, running the axpy on a
+    // resize alone segfaulted. Everything else is answered here with the
+    // elementwise kernels instead of through at::add_out: that call
+    // redispatches to whatever add.out resolves to for these operands, which on
+    // this backend is the very registration that is running.
+    if (out.is_contiguous() && self.sizes().equals(out.sizes()) &&
+        other.sizes().equals(out.sizes())) {
+      return IluvatarAdd(out, self, other, alpha);
+    }
+    // The broadcasting side is not one contiguous run of the destination, so
+    // it is two elementwise passes: out = self (scaled), then out += other
+    // (scaled). Both are broadcast copies, which is the only way a stride-0
+    // operand is written down here.
+    const auto scale = [&](const at::Tensor& t) {
+      return s == 1.0 ? t : t.mul(s);
+    };
+    out.copy_(scale(self));
+    out.add_(scale(other));
+    return out;
+  }
+};
+
+// add.out as a boxed kernel. The stack holds the op's own arguments, alpha and
+// out among them, and the return is the Tensor the operator passes in as
+// `out`, so self and other are the first two arguments the schema lists and
+// the destination is the one named `out`.
+inline void IluvatarAddOutBoxed(
+    const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  const auto& schema = op.schema();
+  const size_t base = stack->size() - schema.arguments().size();
+  at::Tensor self = stack->at(base).toTensor();
+  at::Tensor other = stack->at(base + 1).toTensor();
+  at::Tensor& out =
+      stack->at(base + static_cast<size_t>(*schema.argumentIndexWithName("out")))
+          .toTensor();
+  const size_t alpha_at =
+      base + static_cast<size_t>(*schema.argumentIndexWithName("alpha"));
+  const double alpha = stack->at(alpha_at).toScalar().toDouble();
+  IluvatarAddOut{}(self, other, at::Scalar(alpha), out);
+  stack->resize(base + 1);
+  stack->at(base) = out;
+}
+
+// add.Scalar, the out-of-place spelling `a + 1` / `a.add(1)`. Its schema has
+// no out parameter, so it keeps the three-argument shape; the destination is a
+// fresh tensor, and IluvatarAdd reads `out` as a term of the result, so it is
+// written from `self` before the vendor call.
+inline at::Tensor IluvatarAddScalarTensor(
+    const at::Tensor& self, const at::Scalar& b, const at::Scalar& alpha) {
+  at::Tensor out = at::empty(self.sizes(), self.options());
+  out.copy_(self);
+  return IluvatarAddScalar(out, b, alpha);
+}
+
+} // namespace at::native::flagos::iluvatar
 
 #endif // USE_ILUVATAR

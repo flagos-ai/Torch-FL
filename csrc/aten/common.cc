@@ -713,6 +713,25 @@ bool FlagGemsRejectsOpDtype(const char* op_name, at::ScalarType dtype) {
     }
   }
   return false;
+#elif defined(USE_ILUVATAR)
+  // The in-place `add` family is a native ixblasAxpyEx kernel on this platform
+  // (csrc/aten/backends/iluvatar/iluvatar_common.h), and the vendor
+  // call serves float32 and float16 only: every other dtype returns
+  // IXBLAS_STATUS_NOT_SUPPORTED (measured on BI-V150, corex 4.5.0). Those
+  // dtypes have no vendor kernel, so they are kept on FlagGems -- the other
+  // registered route for this op, not a CPU fallback.
+  //
+  // ONLY the unsupported dtypes come back here: the supported ones stay on the
+  // native kernel. The conf prefers the native kernel for this family
+  // (NATIVE_KERNEL_PREFERRED), see the note above it in gen_vendor_confs.py for
+  // why FlagGems is the wrong route there.
+  if (dtype != at::kFloat && dtype != at::kHalf &&
+      (std::strcmp(op_name, "add_.Tensor") == 0 ||
+       std::strcmp(op_name, "add_.Scalar") == 0)) {
+    return true;
+  }
+  (void)op_name;
+  return false;
 #else
   // No vendor route is known to have a gap that is specific to one op and
   // dtype in this way. See the dtype-wide case above for what MUSA records

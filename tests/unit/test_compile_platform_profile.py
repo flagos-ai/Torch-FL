@@ -122,10 +122,10 @@ def _cuda_platform_without_cuda_torch(monkeypatch) -> None:
 def as_iluvatar(monkeypatch):
     """Force every profile consumer onto the Iluvatar profile.
 
-    Same shape as Kunlunxin -- not CUDA-like, yet the reported Triton device type
-    is "cuda" because corex's runtime really is CUDA-shaped -- but for the
-    opposite reason: iluvatar's *runtime* is CUDA, and what it lacks is a CUDA
-    torch. It links the CPU wheel and answers streams from its own registry.
+    iluvatar's *runtime* is CUDA but the torch it links is the CPU wheel, so
+    streams come from its own registry rather than torch.cuda -- and its
+    FlagTree reports the Triton target as "corex" (measured on a BI-V150),
+    which the profile now names as both the device type and the backend key.
     """
     for module in ("platform_profile", "device_interface", "inductor_codegen"):
         monkeypatch.setattr(
@@ -348,13 +348,31 @@ def test_raw_stream_comes_from_acl_registry_on_ascend(as_ascend, monkeypatch):
     assert seen == [3]
 
 
+def test_iluvatar_triton_target_names_its_own_backend(monkeypatch):
+    """The Iluvatar target must be the name its FlagTree driver reports.
+
+    Measured on a BI-V150 (flagtree 0.6.2a3+iluvatar3.6):
+    ``driver.active.get_current_target()`` returns
+    ``GPUTarget(backend='corex', arch=71, warp_size=64)``. Naming the target
+    "cuda" makes ``DeviceProperties.type`` -- which inductor forwards as
+    ``GPUTarget.backend`` -- select Triton's NVIDIA backend on a machine where
+    every Trition kernel comes from the "corex" one, so a compiled graph is
+    built for the wrong backend. Both names are pinned because the profile
+    feeds both boundaries.
+    """
+    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "iluvatar")
+    profile = pp.platform_profile()
+    assert profile.triton_device_type == "corex"
+    assert profile.triton_backend_key == "corex"
+
+
 @pytest.mark.anyplatform
 def test_raw_stream_comes_from_the_platform_registry_on_iluvatar(as_iluvatar):
     """Iluvatar must not fall back to the CUDA binding, which the CPU wheel lacks.
 
-    The profile looks CUDA-ish -- corex's runtime is CUDA-shaped and the Triton
-    target name really is "cuda" -- but ``torch._C._cuda_getCurrentRawStream``
-    does not exist on a CPU torch wheel. The handle has to come from the
+    corex's runtime is CUDA-shaped, but ``torch._C._cuda_getCurrentRawStream``
+    does not exist on a CPU torch wheel, and the installed Triton names the
+    target "corex" rather than "cuda". The handle has to come from the
     platform's own registry, which is the stream eager kernels submit to.
     """
     from torch_fl.compile import device_interface as di
