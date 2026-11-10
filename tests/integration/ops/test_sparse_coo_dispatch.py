@@ -42,16 +42,12 @@ DEVICE = "flagos:0"
 # `bmm` is the one op in this file that needs a vendor value kernel rather than
 # an ATen symbol shared across backends, so it is registered only on a
 # CUDA-boxing build (see the `#if ... && defined(FLAGOS_BOXING_BUILD)` guard in
-# csrc/aten/sparse_ops.cc).  Read the switch from the build record rather than
-# from the accelerator name, exactly as tests/integration/ops/
-# test_sparse_csr_dispatch.py does: a FlagGems-primary wheel compiles the block
-# no more than a non-CUDA-ABI platform does.
-HAS_CUDA_BOXING = "boxing" in torch_fl._env.build_kernels()
-
-requires_cuda_boxing = pytest.mark.skipif(
-    not HAS_CUDA_BOXING,
-    reason="csrc/aten/sparse_ops.cc compiles sparse bmm for CUDA-boxing only",
-)
+# csrc/aten/sparse_ops.cc).  That is expressed as the `cuda` mark rather than a
+# local `skipif`: the marker is what ops/conftest.py reads, and its build-record
+# gate skips a `cuda`-marked case on any wheel built without the boxing kernels
+# -- the same rule tests/integration/ops/test_sparse_csr_dispatch.py encodes by
+# hand, and one this file cannot restate locally because a new legacy skip call
+# in tests/integration/ops/ is refused by skip_policy_baseline.json.
 
 
 def _invariants_for(x, layout=torch.sparse_coo):
@@ -277,7 +273,7 @@ class TestBufferMovement:
 
 @pytest.mark.anyplatform
 @pytest.mark.dcu
-@requires_cuda_boxing
+@pytest.mark.cuda
 class TestSparseBmm:
     """Sparse COO left operand x dense right operand (issue #793).
 
@@ -289,15 +285,16 @@ class TestSparseBmm:
     unchanged (the boxed call must not leak its retag), and the forms upstream
     itself rejects are still rejected rather than answered differently here.
 
-    The ``dcu`` mark is what gets these cases collected at all on the lane that
-    can run them: the Hygon entry in .github/integration-manifest.yml selects
+    Two marks carry the applicability. ``cuda`` is the build-record gate: the
+    boxed call needs kernels behind the CUDA dispatch key, and ops/conftest.py
+    skips a ``cuda``-marked case on a wheel built without them (the default,
+    FlagGems-primary wheel every CUDA-ABI vendor lane builds). ``dcu`` is what
+    gets these cases collected at all on the lane that can run them -- the Hygon
+    entry in .github/integration-manifest.yml selects
     ``-m "(dcu or main_ops) ..."``, which does not select a case carrying only
-    ``anyplatform``. The rest of this file is in that position -- every case
-    above is ``anyplatform``-only -- so the COO structure surface is not
-    exercised on DCU hardware by CI either; this class does not repeat that.
-    The fix itself is compiled for every CUDA-ABI boxing build, and on another
-    platform's lane the backend-marker gate skips the ``dcu`` mark, so nothing
-    is claimed there.
+    ``anyplatform``. The rest of this file is in that position (every case above
+    is ``anyplatform``-only), so the COO structure surface is not exercised on
+    DCU hardware by CI either; this class does not repeat that.
     """
 
     @pytest.mark.anyplatform
