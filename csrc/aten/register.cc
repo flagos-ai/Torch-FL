@@ -692,6 +692,19 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     #if defined(FLAGOS_KUNLUNXIN_KERNEL)
     #include "backends/kunlunxin/generated/kunlunxin_register.inc"
     #endif
+    // Registered whenever the FlagGems Python path is compiled in, not only
+    // under FLAGOS_KUNLUNXIN_KERNEL. The file is empty today -- no route in
+    // backends_kunlunxin.conf names `flaggems`, because the P800 FlagGems survey
+    // has not run -- but the arm has to exist before the first measured op
+    // lands, for the reason every other FlagGems-primary native vendor states at
+    // its own include: without it a `flaggems` route reaches the dispatcher with
+    // an empty kFlagGems slot and raises "backend not registered" instead of
+    // running a kernel. Same contract as MUSA, GCU, Iluvatar and Cambricon, and
+    // the file is generated from the same value the conf generator reads
+    // (KUNLUNXIN_FLAGGEMS_MEASURED), so the two cannot drift.
+    #if defined(FLAGOS_FLAGGEMS_PYTHON)
+    #include "backends/kunlunxin/generated/kunlunxin_flaggems_register.inc"
+    #endif
     // The vendor SDK exposes no conv operator, so the *_overrideable ops cannot
     // be generated (see the wrapper block above) -- they are the one pair of
     // ops claimed here without an xdnn kernel, and they take the CPU route.

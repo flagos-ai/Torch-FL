@@ -355,6 +355,47 @@ def test_boxing_cpp_ops_recovers_measured_subset(tmp_path):
     assert g.boxing_cpp_ops(tmp_path, "backends_other.conf", fg_cpp) == set()
 
 
+def test_native_measured_python_ops_is_not_gated_on_the_platform_set(monkeypatch):
+    """A measured op routes even for a vendor outside FLAGGEMS_PYTHON_PLATFORMS.
+
+    The regression this pins: the row used to intersect against ``fg_py_here``,
+    which ``build_all`` leaves empty for a vendor that is not in
+    FLAGGEMS_PYTHON_PLATFORMS. Kunlunxin is exactly that vendor -- it has a
+    measured escape hatch (NATIVE_FLAGGEMS_MEASURED) but no platform-set
+    membership -- so every op added to KUNLUNXIN_FLAGGEMS_MEASURED was ANDed away
+    and the documented extension point silently did nothing. Asserting on the
+    helper rather than on a generated conf keeps the check independent of that
+    set being empty in the shipped tree.
+    """
+    assert "kunlunxin" not in g.FLAGGEMS_PYTHON_PLATFORMS
+    # An op from inside the ceiling, and the vendor's native set, so both halves
+    # of the real intersection are exercised.
+    measured = {"neg", "where.self"}
+    assert measured <= g.flaggems_python_ops_for("kunlunxin")
+    monkeypatch.setitem(g.NATIVE_FLAGGEMS_MEASURED, "kunlunxin", measured)
+    assert g.native_measured_python_ops("kunlunxin") == measured
+
+
+def test_native_measured_python_ops_is_bounded_by_the_ceiling(monkeypatch):
+    """An op dropped from FLAGGEMS_PYTHON_OPS cannot linger on a measured route.
+
+    That is the guard the row already stated ("an op dropped from the FlagGems
+    set cannot linger here"); fixing the platform gate must not lose it.
+    """
+    monkeypatch.setitem(
+        g.NATIVE_FLAGGEMS_MEASURED, "kunlunxin", {"neg", "not_a_flaggems_op"}
+    )
+    assert "not_a_flaggems_op" not in g.FLAGGEMS_PYTHON_OPS
+    assert g.native_measured_python_ops("kunlunxin") == {"neg"}
+
+
+def test_native_measured_python_ops_is_empty_where_unmeasured():
+    """Nothing is claimed for a vendor with no measurement, and for an unknown one."""
+    assert g.NATIVE_FLAGGEMS_MEASURED["kunlunxin"] == set()
+    assert g.native_measured_python_ops("kunlunxin") == set()
+    assert g.native_measured_python_ops("not_a_vendor") == set()
+
+
 # ---------------------------------------------------------------------------
 # The shipped confs
 # ---------------------------------------------------------------------------

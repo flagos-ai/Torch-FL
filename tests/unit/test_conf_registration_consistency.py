@@ -92,7 +92,16 @@ PLATFORM_REGISTRATION = {
     # own generated registration, which claims exactly the ops it routes to the
     # vendor XPU SDK operator library.  It no longer falls through to
     # generated/register.inc.
-    "kunlunxin": ["backends/kunlunxin/generated/kunlunxin_register.inc"],
+    #
+    # The second file is the FlagGems half. It is empty until the P800 survey
+    # lands (KUNLUNXIN_FLAGGEMS_MEASURED), so it claims nothing today, but it is
+    # named here because VENDORS in gen_vendor_confs.py names it: an op promoted
+    # to a `flaggems` route goes into that file, and this replica has to describe
+    # the same registration surface the generator reads.
+    "kunlunxin": [
+        "backends/kunlunxin/generated/kunlunxin_register.inc",
+        "backends/kunlunxin/generated/kunlunxin_flaggems_register.inc",
+    ],
     # Iluvatar is FlagGems-primary with a native, non-boxing vendor slot
     # alongside it: the FlagGems dispatcher list is the default path, and a
     # separate native .inc (the corex ixdnn/ixblas kernels) claims exactly the

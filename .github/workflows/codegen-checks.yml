@@ -98,6 +98,13 @@ jobs:
           # the CPU torch installed above.
           echo "=== codegen_kunlunxin.py --check ==="
           python3 scripts/codegen/codegen_kunlunxin.py --check
+          # The FlagGems half of Kunlunxin's PrivateUse1 surface. Registers the
+          # ops in KUNLUNXIN_FLAGGEMS_MEASURED (empty until the P800 survey
+          # lands), so --check normally just proves the header is current. Reads
+          # only committed sources plus the shared generated/register.inc, so it
+          # needs no vendor toolkit -- only the torchgen from the CPU torch above.
+          echo "=== codegen_kunlunxin_flaggems.py --check ==="
+          python3 scripts/codegen/codegen_kunlunxin_flaggems.py --check
           # Same contract as kunlunxin: reads the shared generated/register.inc
           # plus the committed iluvatar_flaggems_register.inc and its own op
           # table, writes iluvatar_kernels.cc / iluvatar_register.inc. No vendor
