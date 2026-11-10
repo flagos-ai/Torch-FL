@@ -352,8 +352,9 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
     "FLAGOS_BUILD_TILEOPS": (
         SCOPE_BUILD,
         "ON on cuda, OFF elsewhere",
-        "Compile the TileOps kernel wrappers, which are TileLang on SM90 "
-        "NVIDIA parts only",
+        "Compile the TileOps kernel wrappers. The wrappers select a provider "
+        "and device adapter at runtime; kernel architecture support is the "
+        "installed provider's responsibility",
     ),
     "FLAGOS_BUILD_JOBS": (
         SCOPE_BUILD,
@@ -427,8 +428,8 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "on stderr and left on its configured backend; an op it does implement "
         "but this wheel did not compile raises rather than falling back. The "
         "tileops mode repins the ops the conf annotates `# tileops` and "
-        "additionally needs the tileops package, an SM90 device and a "
-        "FLAGOS_BUILD_TILEOPS=ON build",
+        "additionally needs the tileops package, a provider target for the actual "
+        "device and a FLAGOS_BUILD_TILEOPS=ON build",
     ),
     "FLAGOS_DISABLE_FLAGGEMS_PY": (
         SCOPE_RUNTIME,
@@ -597,6 +598,16 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         SCOPE_RUNTIME,
         "0 (off)",
         "Fall back to eager mode when torch.compile encounters unsupported operations",
+    ),
+    "FLAGOS_TILEOPS_PROVIDER": (
+        SCOPE_RUNTIME,
+        "tileops",
+        "Python package TileOPs loads as the provider",
+    ),
+    "FLAGOS_TILEOPS_DEBUG": (
+        SCOPE_RUNTIME,
+        "0 (off)",
+        "warn when a TileOPs route declines after dispatch selected it",
     ),
     "FLAGOS_TILEOPS_USE_L2": (
         SCOPE_RUNTIME,

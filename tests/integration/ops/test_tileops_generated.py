@@ -32,7 +32,7 @@ pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(
         not tileops_runtime.is_tileops_available(),
-        reason="TileOPs unavailable or host is not SM90",
+        reason="TileOPs unavailable or no provider serves this device",
     ),
 ]
 

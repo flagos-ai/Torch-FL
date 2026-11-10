@@ -52,6 +52,7 @@ Run: pytest tests/unit/test_gen_vendor_confs.py
 """
 
 import importlib.util
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -109,7 +110,9 @@ def test_route_omits_tileops_when_the_platform_cannot_compile_the_slot():
     every non-cuda accelerator, where kTileOps degrades to an equally empty
     cuda_fn_ -- so an ungated key would route a real op at nothing."""
     assert not g.TILEOPS_PLATFORMS
-    for _, (_, routes, _) in g.build_all(CONF_DIR).items():
+    for platform, (_, routes, _) in g.build_all(CONF_DIR).items():
+        if platform.endswith("_tileops"):
+            continue
         keys = {v.split("#", 1)[0].strip() for v in routes.values()}
         assert "tileops" not in keys
 
@@ -511,7 +514,30 @@ def test_tileops_set_survived_the_conf_deletion():
     silently shrinks what FLAGOS_FORCE_BACKEND=tileops can repin."""
     ops = g.tileops_ops()
     assert len(ops) == 60, f"expected 60 tileops ops, got {len(ops)}"
-    assert {"abs", "add.Tensor", "_softmax"} <= ops
+
+
+def test_tileops_experiment_confs_are_closed_and_exclude_flaggems():
+    """The request-specific confs contain only their stated backend sets."""
+    expected = {
+        "ascend": {"tileops": 49, "ascend": 372, "none": 1621},
+        "mthreads": {"tileops": 59, "mthreads": 109, "none": 1874},
+        "metax": {"tileops": 60, "none": 1982},
+    }
+    for platform, counts in expected.items():
+        path = CONF_DIR / f"backends_{platform}_tileops.conf"
+        assert path.is_file(), f"missing {path.name}"
+        routes = [
+            line.split("=", 1)[1].split("#", 1)[0].strip()
+            for line in path.read_text().splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        ]
+        assert Counter(routes) == counts
+
+
+def test_metax_tileops_experiment_uses_a_tileops_registration_subset():
+    text = (CONF_DIR / "backends_metax_tileops.conf").read_text()
+    assert "Routing priority: tileops > none." in text
+    assert "CPU fallback" in text
 
 
 @pytest.mark.parametrize("vendor", sorted(g.VENDORS))

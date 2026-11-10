@@ -127,17 +127,20 @@ aten::relu(flagos tensor)
               └─► CallPythonOp_Generic      csrc/aten/backends/flagos/python_op_caller.cc
                   └─► _shim_relu            torch_fl/tileops/generated/shims.py
                       └─► resolve_impl      torch_fl/tileops/runtime.py
-                            ├─ SM90 + dependency gate (falls back to aten if missing)
-                            ├─ instance cache (op_cls, ctor_key)
-                            ├─ boxing: _flagos_to_cuda_view / _cuda_to_flagos_view
+                            ├─ provider + target + device adapter gate
+                            ├─ instance cache (target, op_cls, ctor_key)
+                            ├─ zero-copy CUDA view or native MUSA storage
                             └─► ReluFwdOp / its compiled kernel
 ```
 
-There is no TileOPs conf file. The routes live in the platform's own
-`backends_<platform>.conf`, annotated `# tileops` on the op's line, and
-`FLAGOS_FORCE_BACKEND=tileops` repins exactly those ops at load time. Python
-performs no registration: the kernels are bound by static constructors when
-`libtorch_fl.so` loads, before Python runs.
+The default routes live in the platform's own `backends_<platform>.conf`,
+annotated `# tileops` on the op's line, and `FLAGOS_FORCE_BACKEND=tileops`
+repins exactly those ops at load time. The opt-in vendor experiment additionally
+ships closed `backends_<vendor>_tileops.conf` files that contain only TileOPs,
+the vendor kernel and CPU fallback. They are selected explicitly through
+`FLAGOS_BACKEND_CONFIG`; neither is chosen by a normal wheel. Python performs no
+registration: the kernels are bound by static constructors when `libtorch_fl.so`
+loads, before Python runs.
 
 Everything Python-side lives under one package, mirroring how the C++ side keeps
 each vendor in its own `csrc/aten/backends/<vendor>/`:
@@ -195,8 +198,8 @@ Reuse the existing machinery, adding `Backend::kTileOps`:
 The C++ kernels are generated into
 `csrc/aten/generated/tileops_python_kernels.cc` (section 3.4a), so a repinned
 route lands in a real `tileops_fn_` slot. An empty slot
-still means fallback, which is what a build with `FLAGOS_BUILD_TILEOPS=OFF` (every
-non-CUDA accelerator, since TileOPs is SM90 NVIDIA-only) produces.
+still means fallback, which is what a build with `FLAGOS_BUILD_TILEOPS=OFF`
+produces.
 
 Because the decision is made in `dispatcher.h` rather than in Python,
 `FLAGOS_LOG=dispatch` and `FLAGOS_OP_<op>=cuda` work for TileOPs with no extra
@@ -284,7 +287,8 @@ classify -> call a generator per category -> write files and conf):
 4. dtype guards: prefer `op_cls.kernel_cls.SUPPORTED_DTYPES`, falling back to
    parsing the manifest's `signature.inputs[].dtype` (tokenizing
    `"float16 | bfloat16 | float32"`).
-5. Apply `EXCLUDE`, render per recipe, write the five artifacts.
+5. Apply `EXCLUDE`, render per recipe, write the generated routes, shims, C++
+   stubs, MetaX non-boxing registration subset and coverage block.
 6. **Self-check**: assert that each generated entry's aten schema argument count
    matches what the recipe expects, failing outright rather than emitting broken
    code. Additionally assert that every route has a `DECLARE_DISPATCHER` typedef
@@ -609,24 +613,63 @@ def _unary(op_cls, dtypes, aten_fn):
 
 ### 3.6 Gates
 
-`is_tileops_available()` is consulted per route by `resolve_impl()`, which
-**falls back to aten** if any condition is unmet (consistent with how torch_fl
-treats any missing optional backend, leaving `import torch_fl` unaffected):
+`resolve_target()` is consulted per route by `resolve_impl()`, which falls back
+to aten if no installed provider claims the actual device. There is no fixed
+compute-capability check: an NVIDIA provider may support Hopper while a MUSA,
+MACA, or Ascend provider supports its own architecture. Kernel architecture
+support belongs to the provider Op that is constructed.
 
-1. `import tileops` succeeds;
-2. `torch.cuda.get_device_capability() == (9, 0)` (TileOPs is SM_90 only; on
-   non-Hopper, warn and skip);
-3. Dependency versions match the pins in section 4.
+The runtime keeps four independent facts:
 
-The gate is checked in Python rather than in the C++ stub because it depends on
-importing TileOPs, which the `.so` cannot do at static-constructor time. A route
-that is conf'd to `tileops` on a box without TileOPs therefore still enters the
-stub and crosses into Python before falling back -- correct, and the extra ~1 us
-only affects a misconfigured host.
+1. the provider package (default `tileops`, overridable with
+   `FLAGOS_TILEOPS_PROVIDER`);
+2. the provider target selected by its detector, or by Torch-FL's explicit MUSA
+   build mapping when no detector is present;
+3. the device and current stream TileLang launches on;
+4. torch_fl storage and its result ownership.
 
-Build-side gating is separate: `FLAGOS_BUILD_TILEOPS` (CMake) defaults ON for CUDA and
-OFF for every other accelerator in `setup.py`, since TileOPs is SM90 NVIDIA-only.
-With it OFF, `tileops_fn_` is never populated and the dispatcher falls through.
+The runtime has a device-adapter contract for zero-copy storage conversion,
+device and stream lookup. MetaX is served by its CUDA-ABI adapter. The current
+MUSA and Ascend providers do not publish a conversion for `flagos` to their
+native `musa` or `npu` device type, so those targets need an upstream adapter
+before their provider kernels can receive torch-fl tensors. Op instances are
+cached per `(target, Op, constructor arguments)` so a shape compiled for one
+vendor cannot be reused by another.
+
+A provider failure during construction or execution returns the original flagos
+tensors to the CPU fallback. A successful MetaX call enters through the CUDA-ABI
+metadata view and returns through its inverse. Native vendors must supply a
+zero-copy adapter that does not copy through the host.
+
+Provider construction precedes the first real tensor. A target-selecting Op is
+given a neutral device during construction, resolved to zero-element tensors on
+the build target, and allowed its normal in-tree fallback after that probe. Only
+the first real tensor proves the target that serves a call. If a target-aware Op
+declined it, the target is pinned and its in-tree fallback is used. Every target
+has its own Op cache, so a shape compiled for one vendor cannot serve another.
+
+ChipMind MUSA's native plugin currently names its device `musa`, while a
+torch_fl tensor names it `flagos`. The device adapter can carry MUSA raw storage
+and use Torch-FL's current raw stream, but the pinned plugin and TileLang-MUSA
+wrappers independently check for `musa`; those checks reject the native storage.
+Production enablement needs a provider revision or published adapter from those
+projects that implements its `TensorSpec` device and kernel checks for the
+internal `flagos` type. Torch-FL also needs that plugin's brand-checked hardware
+probe and raw-stream path. ChipMind MUSA restricts kernels to the S5000
+qualification boundary, with fresh validation still pending in its own source.
+Torch-FL does not patch the external Op.
+
+Import failures are contained. A missing provider makes every route use aten and
+does not break `import torch_fl`. A provider that is installed but fails to load
+is reported by the runtime as unavailable; this boundary does not claim support
+from a broken package.
+
+Build-side gating is separate: `FLAGOS_BUILD_TILEOPS` (CMake) compiles the 60
+Python shims into the dispatcher. Only CUDA builds it by default; the three
+vendor experiments opt in explicitly. A normal vendor conf does not route an op
+through `kTileOps`, while each `backends_<vendor>_tileops.conf` does. A tested,
+versioned provider is still required: importing the shim or selecting a conf does
+not make an unresolved native device boundary supported.
 
 ---
 
@@ -804,9 +847,11 @@ ahead of torch.)
 
 **(b) The fallback cannot call `torch.ops.aten.<op>` directly.** Our
 implementation is registered on PrivateUse1, so calling aten directly on a flagos
-tensor **recurses infinitely** (measured: `RecursionError`). Changed to
-`_make_fallback()`: box to a CUDA view with zero copy, run aten on CUDA (which is
-what `backends_nvidia.conf` does by default anyway), then unbox.
+tensor **recurses infinitely** (measured: `RecursionError`). `_make_fallback()`
+therefore mirrors the boxed CPU fallback: it recursively moves tensor arguments
+to CPU, runs the CPU kernel, then moves result tensors back to the originating
+flagos device. This keeps a dedicated `tileops + none` experiment on the CPU
+fallback it names without reintroducing CUDA boxing through a side door.
 
 **(c) `TILELANG_DISABLE_CACHE=1` must be set before importing tileops.** TileLang
 reads the variable at import time; setting it later has no effect, and the

@@ -17,8 +17,8 @@
 """TileOPs -> aten routing table generated from the TileOPs manifest.
 
 Modules are named as strings so importing this file never pulls in TileOPs;
-torch_fl.tileops.runtime imports them lazily once the SM90/dependency gate
-passes.
+torch_fl.tileops.runtime imports them lazily once a device provider claims
+the actual device.
 """
 
 from torch_fl.tileops.spec import BINARY, REDUCE, SOFTMAX, UNARY
@@ -37,8 +37,7 @@ _DT1 = (
 )
 _DT2 = ("bool", "uint8", "int8", "int16", "int32", "int64")
 _DT3 = ("float16", "bfloat16", "float32", "bool", "int32", "int64")
-_DT4 = ("float16", "bfloat16")
-_DT5 = ("uint8", "int8", "int16", "int32", "int64", "float16", "bfloat16", "float32")
+_DT4 = ("uint8", "int8", "int16", "int32", "int64", "float16", "bfloat16", "float32")
 
 #: (aten_overload, recipe, module, op_class, dtype_names, extra)
 ROUTES = [
@@ -128,7 +127,7 @@ ROUTES = [
         BINARY,
         "tileops.ops.elementwise.arithmetic",
         "SubFwdOp",
-        _DT5,
+        _DT4,
         {"alpha": True},
     ),
     (
@@ -176,7 +175,7 @@ ROUTES = [
         REDUCE,
         "tileops.ops.reduction.softmax",
         "LogSumExpFwdOp",
-        _DT4,
+        _DT0,
         {"keepdim": True},
     ),
     (

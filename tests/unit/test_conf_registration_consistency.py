@@ -517,6 +517,43 @@ def test_registered_ops_are_never_left_at_none(platform):
     )
 
 
+@pytest.mark.anyplatform
+@pytest.mark.parametrize("platform", ["ascend", "mthreads"])
+def test_tileops_experiment_routes_are_registered(platform):
+    """The opt-in configs route only accelerator ops that the wheel registers."""
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}_tileops.conf")
+    registered = _platform_registered(platform)
+    accelerated = {
+        op for op, value in routes.items() if value.split("#", 1)[0].strip() != "none"
+    }
+    assert not accelerated - registered
+
+
+def test_metax_tileops_experiment_registration_matches_its_conf():
+    """The non-boxing MetaX include claims exactly the TileOPs-routed ops."""
+    routes = _parse_conf(CONF_DIR / "backends_metax_tileops.conf")
+    tileops = {
+        op
+        for op, value in routes.items()
+        if value.split("#", 1)[0].strip() == "tileops"
+    }
+    include = (REPO_ROOT / "csrc/aten/generated/register_tileops_metax.inc").read_text()
+    registered = set(re.findall(r'm\.impl\("(.*?)"', include))
+    assert registered == tileops
+    assert {op for op, value in routes.items() if value == "none"}.isdisjoint(
+        registered
+    )
+
+
+def test_metax_tileops_subset_requires_the_non_boxing_experiment_define():
+    """The subset include must never compile into a normal boxing wheel."""
+    register = (REPO_ROOT / "csrc/aten/register.cc").read_text()
+    assert "#if defined(FLAGOS_TILEOPS_METAX_NO_BOXING)" in register
+    assert register.index("FLAGOS_TILEOPS_METAX_NO_BOXING") < register.index(
+        "#elif defined(FLAGOS_BOXING_BUILD)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Conf shape invariants
 # ---------------------------------------------------------------------------
