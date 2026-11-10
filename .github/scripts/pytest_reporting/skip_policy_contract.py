@@ -30,6 +30,7 @@ PLATFORM_GATES = frozenset(
         "backend_marker",
         "build_record",
         "device_count",
+        "lane_config",
         "platform_support",
     }
 )

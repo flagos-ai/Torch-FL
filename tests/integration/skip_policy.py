@@ -42,6 +42,7 @@ PLATFORM_GATES = frozenset(
         "backend_marker",
         "build_record",
         "device_count",
+        "lane_config",
         "platform_support",
     }
 )
@@ -58,7 +59,7 @@ def register_skip_policy_markers(config: pytest.Config) -> None:
         "markers",
         f"{PLATFORM_GATE_MARKER}(gate, detail): a case is inapplicable to this "
         "platform/lane/build; gates are backend_marker, build_record, "
-        "device_count, and platform_support",
+        "device_count, lane_config, and platform_support",
     )
 
 

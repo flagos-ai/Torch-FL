@@ -34,23 +34,17 @@ import sys
 
 import pytest
 import torch
-import torch_fl
 
 
-pytestmark = pytest.mark.main_ops
-
-
-def _require_dcu() -> None:
-    if not torch_fl.backend_config_path().endswith("backends_hygon.conf"):
-        pytest.skip("requires the DCU boxing runtime")
-    if torch_fl.flagos.device_count() < 1:
-        pytest.skip("DCU device is unavailable")
+pytestmark = [
+    pytest.mark.main_ops,
+    pytest.mark.platform_owner("dcu"),
+]
 
 
 @pytest.mark.parametrize("dtype", (torch.complex64, torch.complex128))
 def test_zeros_keeps_complex_dtype(dtype):
     """The reported defect: an explicit complex dtype used to become float32."""
-    _require_dcu()
     tensor = torch.zeros(4, dtype=dtype, device="flagos:0")
     assert tensor.dtype == dtype
     assert tensor.device.type == "flagos"
@@ -60,7 +54,6 @@ def test_zeros_keeps_complex_dtype(dtype):
 @pytest.mark.parametrize("dtype", (torch.complex64, torch.complex128))
 def test_randn_keeps_complex_dtype(dtype):
     """Not named in the issue, but the same converter path."""
-    _require_dcu()
     tensor = torch.randn(4, dtype=dtype, device="flagos:0")
     assert tensor.dtype == dtype
     assert tensor.device.type == "flagos"
@@ -72,7 +65,6 @@ def test_randn_keeps_complex_dtype(dtype):
 )
 def test_abs_of_complex_is_real_and_correct(dtype, real_dtype):
     """abs() of a complex tensor is the matching-precision real dtype."""
-    _require_dcu()
     host = torch.tensor([3 + 4j, -1 - 1j, 0 + 2j], dtype=dtype)
     result = torch.abs(host.to("flagos:0"))
     assert result.dtype == real_dtype
@@ -83,7 +75,6 @@ def test_abs_of_complex_is_real_and_correct(dtype, real_dtype):
 @pytest.mark.parametrize("dtype", (torch.complex64, torch.complex128))
 def test_ones_and_fill_keep_complex_dtype(dtype):
     """`ones` composes through `fill_`; both divert through the same escape."""
-    _require_dcu()
     tensor = torch.ones(4, dtype=dtype, device="flagos:0")
     assert tensor.dtype == dtype
     assert tensor.device.type == "flagos"
@@ -96,7 +87,6 @@ def test_ones_and_fill_keep_complex_dtype(dtype):
 
 def test_complex_escape_leaves_the_float_route_alone():
     """The runtime dtype escape must be dtype-scoped, not route-wide."""
-    _require_dcu()
     code = """
 import torch_fl
 import torch

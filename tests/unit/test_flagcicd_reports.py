@@ -461,6 +461,11 @@ def test_migrated_skip_requires_a_policy_classification():
             "gate": "device_count",
             "detail": "requires two devices",
         },
+        {
+            "category": "platform_gate",
+            "gate": "lane_config",
+            "detail": "requires the shipped default conf",
+        },
     ],
 )
 def test_valid_skip_policy_classifications_pass(policy):

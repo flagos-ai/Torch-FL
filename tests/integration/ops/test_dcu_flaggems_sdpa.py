@@ -96,7 +96,12 @@ DEVICE = "flagos:0"
 # operator. `dcu` stays so the boxing lane still collects the module and skips it
 # on the conf check, which is the honest outcome there -- that lane loads
 # backends_hygon_boxing.conf, where the route this file asserts is not stated.
-pytestmark = [pytest.mark.dcu, pytest.mark.flaggems, pytest.mark.main_ops]
+pytestmark = [
+    pytest.mark.dcu,
+    pytest.mark.flaggems,
+    pytest.mark.main_ops,
+    pytest.mark.platform_owner("dcu"),
+]
 
 # The FlagGems SDPA route is the one conf entry the dispatcher does not select
 # for itself. `csrc/aten/sdp_choice_stub.cc` registers one PrivateUse1 kernel for

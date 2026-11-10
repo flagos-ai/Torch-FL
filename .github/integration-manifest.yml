@@ -353,13 +353,16 @@ steps:
       -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
-  # Ascend runs the suites authored for the pure ACLNN backend (marked
-  # `ascend`), which carry no `main_ops` marker; the RNG dispatch suite has its
-  # own step below.
+  # Ascend runs both its ACLNN cases and the shared `main_ops` cohort. The
+  # latter carries portable correctness that has no backend-specific marker;
+  # the RNG dispatch suite still has its own step below.
   - id: vendor_ops
     name: Run operator tests (vendor backend, main ops)
     platforms: [ascend]
-    command: python -m pytest tests/integration/ops/ -m "ascend" -v -s --tb=short
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "(ascend or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
+      -v -s --tb=short
 
   # Both builds. The vendor build's selection is the one that can answer its
   # own conf; the boxing build's op set is a different conf
@@ -769,18 +772,22 @@ steps:
   # every group above that names no platform -- environment, the shared
   # contracts and the flaggems pair included -- and adds two of its own.
   #
-  # The first addition is the backend operator suite, the only place the native
+  # The first addition is the operator suite, the only place the native
   # PrivateUse1 MPS kernels are executed at all. It is a new id rather than a
   # `vendor_ops` variant because the vendor groups are file lists composed from
   # a platform's operator cohort and MPS has none; the whole directory is
-  # selected by marker instead. `-m mps` is that marker; the tests self-skip
-  # when detect_platform() is not "mps", so a lane that provisioned the wrong
-  # accelerator would report skips rather than a false pass, which is why the
-  # environment check asserts the device count.
+  # selected by marker instead. `mps` selects the Apple-specific assertions and
+  # `main_ops` selects the shared cross-chip cohort, so a newly migrated case
+  # reaches this lane without an Apple-only file. Platform-inapplicable cases
+  # are skipped by the shared marker gate, and the environment check asserts the
+  # device count.
   - id: backend_ops
     name: Run {{display_name}} backend operator tests
     platforms: [apple]
-    command: python -m pytest tests/integration/ops -m mps -v --tb=short
+    command: >-
+      python -m pytest tests/integration/ops/
+      -m "(mps or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
+      -v -s --tb=short
 
   # The second addition is the MPS runtime contract: device and stream lookup,
   # strided copies, events, and the documented limits of backward under the

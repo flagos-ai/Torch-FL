@@ -32,19 +32,26 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from backend_conf import override_is_logged, route_is_served
+from backend_conf import (
+    dispatched_to_mps,
+    override_is_logged,
+    routed_backend_or_none,
+    route_is_served,
+)
 
 from tests.integration.case_gap_issues import tracked_skip
 
 
 DEVICE = "flagos:0"
 
-# This file's correctness group is part of the shared case cohort. The standard
-# CI sweep selects `main_ops` on each platform's vendor and FlagGems lanes, so
-# leaving only `anyplatform` here made every one of the eleven cases invisible
-# to CI on the five lanes that accept only standard marks. Keep the backend
-# dispatch cases below outside this sweep: they assert one named route.
+# This file is part of the shared case cohort. Every operator lane selects
+# `main_ops`, including Apple's backend lane and Ascend's vendor lane.
 pytestmark = pytest.mark.main_ops
+
+
+def _flag_gems_route_serves(op: str) -> bool:
+    """Whether this wheel serves ``op`` through the FlagGems Python path."""
+    return routed_backend_or_none(op) == "flagos_python" and route_is_served(op)
 
 
 def _run_all_subprocess(
@@ -89,38 +96,35 @@ class TestAllCorrectness:
         assert out.item() is False
 
     @tracked_skip(
-        condition=True,
+        condition=_flag_gems_route_serves("all"),
         issue="#710",
     )
     @pytest.mark.anyplatform
     def test_all_empty_tensor(self):
         """Empty tensor: all() is vacuously true.
 
-        The historical skip ("FlagGems all() kernel cannot handle empty
-        tensors") is not what breaks. Full reduction is fine on every empty
-        shape measured (1-D `[]`, `(0,0)`, `(3,0)`, `(0,3)`, bool and float);
-        it is the dimension reduction that fails, and it is covered separately
-        below. Issue #710 tracked the missing evidence for this case.
+        This global overload has its own conf route, so the tracked gap is
+        attached only when that route is FlagGems. Other backends run it.
         """
         a = torch.tensor([], device=DEVICE, dtype=torch.bool)
         out = torch.all(a)
         assert out.item() is True
 
-    @tracked_skip(
-        condition=True,
-        issue="#710",
-    )
     @pytest.mark.anyplatform
     @pytest.mark.parametrize(
-        "shape, dim",
+        "shape",
         [
-            ((0, 3), 0),
-            ((2, 0, 3), 1),
-            ((0, 2), -1),
-            ((0, 3), (0, 1)),
+            (0, 3),
+            (2, 0, 3),
+            (0, 2),
         ],
     )
-    def test_all_empty_dimensions(self, shape, dim):
+    @pytest.mark.parametrize("dim", [0, 1, -1])
+    @tracked_skip(
+        condition=_flag_gems_route_serves("all.dim"),
+        issue="#710",
+    )
+    def test_all_empty_dimensions_dim(self, shape, dim):
         """Reductions along empty dimensions keep the aten result and shape."""
         host = torch.empty(shape, dtype=torch.float32)
         expected = torch.all(host, dim=dim)
@@ -130,7 +134,28 @@ class TestAllCorrectness:
         assert torch.equal(actual.cpu(), expected)
 
     @tracked_skip(
-        condition=True,
+        condition=_flag_gems_route_serves("all.dims"),
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize(
+        "shape, dims",
+        [
+            ((0, 3), (0, 1)),
+            ((2, 0, 3), (0, 2)),
+        ],
+    )
+    def test_all_empty_dimensions_dims(self, shape, dims):
+        """The tuple-of-dimensions overload preserves aten's empty result."""
+        host = torch.empty(shape, dtype=torch.float32)
+        expected = torch.all(host, dim=dims)
+        actual = torch.all(host.to(DEVICE), dim=dims)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
+    @tracked_skip(
+        condition=_flag_gems_route_serves("all.dim"),
         issue="#710",
     )
     @pytest.mark.anyplatform
@@ -145,7 +170,7 @@ class TestAllCorrectness:
         assert torch.equal(actual.cpu(), expected)
 
     @tracked_skip(
-        condition=True,
+        condition=_flag_gems_route_serves("all"),
         issue="#710",
     )
     @pytest.mark.anyplatform
@@ -164,7 +189,7 @@ class TestAllCorrectness:
             assert torch.all(a).item() is True
 
     @tracked_skip(
-        condition=True,
+        condition=_flag_gems_route_serves("all.dim"),
         issue="#710",
     )
     @pytest.mark.anyplatform
@@ -195,20 +220,45 @@ class TestAllCorrectness:
         assert out.item() == torch.all(host).item()
 
     @tracked_skip(
-        condition=True,
+        condition=_flag_gems_route_serves("all"),
         issue="#710",
     )
-    @pytest.mark.parametrize("dim", [0, 1, -1, (0, 1), (1, 2), None])
     @pytest.mark.anyplatform
-    def test_all_empty_results_keep_their_shape(self, dim):
-        """Non-empty reductions that produce empty results retain their shape."""
+    def test_all_empty_results_keep_their_shape_global(self):
+        """The global reduction on a tensor with an empty dimension is True."""
         host = torch.ones((2, 0, 3), dtype=torch.float32)
-        if dim is None:
-            actual = torch.all(host.to(DEVICE))
-            expected = torch.all(host)
-        else:
-            actual = torch.all(host.to(DEVICE), dim=dim)
-            expected = torch.all(host, dim=dim)
+        actual = torch.all(host.to(DEVICE))
+        expected = torch.all(host)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
+    @tracked_skip(
+        condition=_flag_gems_route_serves("all.dim"),
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("dim", [0, 1, -1])
+    def test_all_empty_results_keep_their_shape_dim(self, dim):
+        """The integer-dimension overload retains an empty result's shape."""
+        host = torch.ones((2, 0, 3), dtype=torch.float32)
+        actual = torch.all(host.to(DEVICE), dim=dim)
+        expected = torch.all(host, dim=dim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
+
+    @tracked_skip(
+        condition=_flag_gems_route_serves("all.dims"),
+        issue="#710",
+    )
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("dims", [(0, 1), (1, 2)])
+    def test_all_empty_results_keep_their_shape_dims(self, dims):
+        """The tuple-dimension overload retains an empty result's shape."""
+        host = torch.ones((2, 0, 3), dtype=torch.float32)
+        actual = torch.all(host.to(DEVICE), dim=dims)
+        expected = torch.all(host, dim=dims)
         assert actual.shape == expected.shape
         assert actual.dtype == torch.bool
         assert torch.equal(actual.cpu(), expected)
@@ -224,6 +274,25 @@ class TestAllCorrectness:
             a = torch.randint(1, 10, (16, 16), device=DEVICE, dtype=dtype)
         out = torch.all(a)
         assert out.dtype == torch.bool
+
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_float_widths_follow_aten(self, dtype):
+        host = torch.tensor([[1, 3], [4, 5]], dtype=dtype)
+        actual = torch.all(host.to(DEVICE))
+        assert actual.item() is torch.all(host).item()
+        assert torch.all((host > 0).to(DEVICE)).item() is True
+
+    @pytest.mark.anyplatform
+    @pytest.mark.parametrize("dim", [0, -1, (0, 1)])
+    @pytest.mark.parametrize("keepdim", [False, True])
+    def test_dim_and_keepdim_follow_aten(self, dim, keepdim):
+        host = torch.tensor([[1, 3], [4, 5]], dtype=torch.float32)
+        actual = torch.all(host.to(DEVICE), dim=dim, keepdim=keepdim)
+        expected = torch.all(host, dim=dim, keepdim=keepdim)
+        assert actual.shape == expected.shape
+        assert actual.dtype == torch.bool
+        assert torch.equal(actual.cpu(), expected)
 
 
 class TestAllDispatch:
@@ -255,6 +324,20 @@ class TestAllDispatch:
         )
         assert result.returncode == 0
         assert "[flagos dispatch] all -> boxing" in result.stderr
+
+    @pytest.mark.mps
+    def test_each_spelling_uses_mps(self):
+        """Every public ``all`` spelling reaches Apple's MPS kernels."""
+        source = """
+import torch, torch_fl
+x = torch.tensor([[1, 0], [3, 4]], dtype=torch.int32, device='flagos:0')
+x = x.to(torch.float32)
+torch.all(x)
+torch.all(x, dim=0)
+torch.all(x, dim=(0, 1), keepdim=True)
+torch_fl._C._synchronize()
+"""
+        assert dispatched_to_mps(source) == 3
 
 
 class TestAllAscendDispatch:

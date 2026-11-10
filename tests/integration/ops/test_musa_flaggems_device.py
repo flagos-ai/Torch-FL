@@ -18,7 +18,12 @@ import torch
 import torch_fl
 
 
-pytestmark = [pytest.mark.musa, pytest.mark.flaggems, pytest.mark.main_ops]
+pytestmark = [
+    pytest.mark.musa,
+    pytest.mark.flaggems,
+    pytest.mark.main_ops,
+    pytest.mark.platform_owner("musa"),
+]
 DEVICE = torch.device("flagos:0")
 
 

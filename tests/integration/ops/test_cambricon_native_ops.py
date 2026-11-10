@@ -17,6 +17,7 @@ import torch_fl  # noqa: F401
 pytestmark = [
     pytest.mark.anyplatform,
     pytest.mark.main_ops,
+    pytest.mark.platform_owner("cambricon"),
     pytest.mark.skipif(
         os.environ.get("FLAGOS_ACCELERATOR") != "cambricon",
         reason="Requires the Cambricon native kernel",
