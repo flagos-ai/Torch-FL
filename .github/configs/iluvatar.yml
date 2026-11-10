@@ -106,5 +106,5 @@ environment_check:
   require_torch_backends_hook: true
   flagtree:
     version_env: FLAGTREE_VERSION
-    version_default: 0.7.0+iluvatar3.6
+    version_default: 0.7.1a1+iluvatar3.6
     triton_prefix: "3.6."

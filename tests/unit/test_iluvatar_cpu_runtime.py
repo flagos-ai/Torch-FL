@@ -6,6 +6,8 @@
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -17,6 +19,45 @@ spec = importlib.util.spec_from_file_location(
 )
 verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
+
+
+def test_corex_headers_precede_profiler_cuda_headers(tmp_path):
+    """Compile the actual Iluvatar target setup beside a shadow CUDA SDK."""
+    if not shutil.which("cmake") or not shutil.which("c++"):
+        pytest.skip("CMake and a host C++ compiler are required")
+    sdk = tmp_path / "corex"
+    cuda = tmp_path / "cuda"
+    sdk.mkdir()
+    cuda.mkdir()
+    (sdk / "cublas_v2.h").write_text("typedef int ixblasDataType_t;\n")
+    (cuda / "cublas_v2.h").write_text("typedef int cublasDataType_t;\n")
+    (tmp_path / "probe.cc").write_text(
+        "#include <cublas_v2.h>\nixblasDataType_t value = 0;\n"
+    )
+    branch = (
+        (ROOT / "csrc/CMakeLists.txt")
+        .read_text()
+        .split("elseif(_flagos_is_iluvatar)\n", 1)[1]
+        .split("elseif(_flagos_is_musa)", 1)[0]
+    )
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.19)\nproject(probe LANGUAGES CXX)\n"
+        "set(LIBRARY_NAME probe)\nadd_library(probe STATIC probe.cc)\n"
+        f'target_include_directories(probe PRIVATE "{cuda}")\n'
+        "set(FLAGOS_BUILD_VENDOR ON)\n"
+        f'set(FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR "{sdk}")\n' + branch
+    )
+    build = tmp_path / "build"
+    subprocess.run(
+        ["cmake", "-S", str(tmp_path), "-B", str(build)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    done = subprocess.run(
+        ["cmake", "--build", str(build)], capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 def cpu_mappings(root):
@@ -171,9 +212,9 @@ def test_setup_verifier_keeps_cpu_core_and_compiler_contract(
     )
     versions = {
         "torch": "2.10.0+cpu",
-        "flagtree": "0.7.1a1+iluvatar3.6"
+        "flagtree": "0.7.0+iluvatar3.6"
         if problem == "wrong-tree"
-        else "0.7.0+iluvatar3.6",
+        else "0.7.1a1+iluvatar3.6",
         "flag_gems": "5.4.0",
         "cmake": "4.0" if problem == "cmake4" else "3.31.8",
     }

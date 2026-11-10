@@ -458,3 +458,42 @@ def test_a_lane_without_flagcx_keeps_the_runtime_communication_package_out(
     )
     SEED.seed(binary / "python", "2.10.0", "0.7.0+iluvatar3.6", "5.4.0")
     assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "name,version,reused",
+    [
+        ("flagtree", "0.7.1a1+iluvatar3.6", True),
+        ("flagtree", "0.7.0+iluvatar3.6", False),
+        ("sqlalchemy", "2.0.55", True),
+        ("sqlalchemy", "2.1.0", False),
+    ],
+)
+def test_iluvatar_reuses_image_versions_with_checkout_requirements(
+    tmp_path, monkeypatch, name, version, reused
+):
+    dist = runtime_distribution(tmp_path / "runtime", name=name, version=version)
+    target = tmp_path / "ci/site-packages"
+    binary = tmp_path / "ci/bin"
+    binary.mkdir(parents=True)
+    pins = dict(
+        line.split("=", 1)
+        for line in (ROOT / ".github/version-pins.env").read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+    monkeypatch.setattr(SEED.metadata, "distributions", lambda **kwargs: [dist])
+    monkeypatch.setattr(
+        SEED.subprocess,
+        "check_output",
+        lambda *args, **kwargs: json.dumps(
+            {"site": str(target), "version": list(sys.version_info[:2])}
+        ),
+    )
+    SEED.seed(
+        binary / "python",
+        pins["CPU_TORCH_VERSION_DEFAULT"],
+        pins["FLAGTREE_VERSION_iluvatar"],
+        pins["FLAGGEMS_VERSION_DEFAULT"],
+        requirements_file=ROOT / ".github/requirements-iluvatar.txt",
+    )
+    assert target.exists() == reused

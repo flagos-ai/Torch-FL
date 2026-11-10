@@ -8,5 +8,6 @@ pytest
 pybind11
 packaging>=26.0
 PyYAML==6.0.1
-sqlalchemy==2.0.48
+# FlagGems 5.4.0's declared range accepts the runtime's SQLAlchemy 2.0.55.
+sqlalchemy>=1.4.31,<2.1
 numpy<2

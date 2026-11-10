@@ -32,18 +32,28 @@ Before installing packages, the shared `seed_runtime.py` copies compatible
 distributions from the runtime by their RECORD entries. Each copy is independent;
 the runtime's complete site-packages and compiler side directories are never
 added to the CI import path. This can reuse FlagGems 5.4.0, NumPy 1.26.4 and
-matching tools. The image's FlagTree `0.7.1a1+iluvatar3.6` is a prerelease;
-CI retains the checkout's stable `0.7.0+iluvatar3.6` pin unless explicitly
-overridden. A replacement removes the complete old Triton provider. FlagCX is
+matching tools. CI's FlagTree pin matches the image's `0.7.1a1+iluvatar3.6`,
+so its compiler can be copied instead of downloading the older release. A
+replacement removes the complete old Triton provider. FlagCX is
 not copied merely because the runtime includes it; this lane has no FlagCX pin.
 
 `.github/requirements-iluvatar.txt` defines Python build/test tools and FlagGems
-dependencies. A local version/dependency check skips pip entirely for satisfied
+dependencies. SQLAlchemy follows FlagGems 5.4.0's `>=1.4.31,<2.1` requirement,
+which accepts the image's 2.0.55 instead of forcing a downgrade to 2.0.48.
+A local version/dependency check skips pip entirely for satisfied
 requirements; pip fills gaps under the checkout's CPU-Torch constraints.
 System gcc/g++, make and readelf remain available from the image. CMake's Python
 distribution is needed by the build frontend, with a compatible 3.x version
 rather than the old development image's exact patch pin. `pip check` validates
 the resulting environment, and setup logs report copy/preparation time.
+
+The runtime also contains NVIDIA compatibility headers under
+`/usr/local/cuda/include`, which the profiler's occupancy probe may add to the
+build. The Iluvatar target places the CoreX include directory first: otherwise
+`cublas_v2.h` resolves to the NVIDIA header and compilation loses CoreX's
+`ixblasDataType_t` and `ixblasStatus_t`, even though the isolated SDK probe passes.
+The first new-runtime run reproduced this header precedence failure after its
+dependency checks succeeded; a host-only CMake regression covers the conflict.
 
 After the image initializes its SDK environment, the hook persists
 `BASH_ENV=/dev/null` so later Bash steps cannot select `/flagos` again.
