@@ -241,6 +241,7 @@ pip_permanent_error_reason() {
 pip_retry() {
   local python_exe="${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}"
   local timeout="${PIP_RETRY_TIMEOUT:-300}"
+  local max_attempts="${PIP_RETRY_MAX_ATTEMPTS:-5}"
   local -a extra=()
   if [[ "${PIP_RETRY_NO_CACHE:-1}" == "1" ]]; then
     extra+=(--no-cache-dir)
@@ -279,7 +280,7 @@ pip_retry() {
       rm -f "$log_file"
       return 1
     fi
-    if (( attempt >= 5 )); then
+    if (( attempt >= max_attempts )); then
       echo "::error::pip install failed after $attempt attempts: $*"
       rm -f "$log_file"
       return 1
@@ -457,20 +458,30 @@ faster_cpu_torch_index() {
 # the pin, so when it does not serve the wheel the pin still can -- and the
 # alternative is a red lane for a file the pinned index has.
 #
-# Measured on the thead lane: mirror.sjtu.edu.cn does not hold the blobs it
-# indexes, it 302s to mirrors.tuna.tsinghua.edu.cn, and that redirect target
-# answers 403 for filelock-4.2.4 from the runner pods often enough to fail 6 of
-# 14 consecutive runs -- alternating between the thead and thead-boxing lanes,
-# because each pod probes independently. That is what makes one install print
-# two mirror hostnames with no --extra-index-url anywhere in the path. The same
-# wheel is listed at the pin, so the retry below is the whole fix.
+# The mirror itself has moved twice for this reason. mirror.sjtu.edu.cn does not
+# hold the blobs it indexes: it redirects to s3.jcloud.sjtu.edu.cn, which answers
+# 504 often enough that the ascend lane saw three inside one install, and it was
+# the older redirect target (mirrors.tuna.tsinghua.edu.cn) that answered 403 for
+# filelock and failed 6 of 14 consecutive thead runs. The default is now
+# mirror.nju.edu.cn, which serves the wheel directly; see version-pins.env for
+# the side-by-side measurement.
 install_cpu_torch() {
   local mirror="${TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL-${CPU_TORCH_MIRROR_INDEX_URL_DEFAULT:-}}"
   local index="$CPU_TORCH_INDEX_URL"
   if [[ -n "$mirror" && "$mirror" != "$CPU_TORCH_INDEX_URL" ]]; then
     index="$(faster_cpu_torch_index "$CPU_TORCH_INDEX_URL" "$mirror")"
   fi
-  if pip_retry --index-url "$index" "$@" "torch==${CPU_TORCH_VERSION}"; then
+  if [[ "$index" != "$CPU_TORCH_INDEX_URL" ]]; then
+    # A mirror gets one attempt, not pip_retry's five. The five exist because a
+    # dropped connection on a 190 MB wheel is worth re-sending; a mirror that
+    # answers an HTTP 5xx is not, and every round costs ~70 s before the retry
+    # below can even start. Measured on the ascend lane (run 42728043989): the
+    # mirror answered 504 three times, 00:27:14 / 00:28:25 / 00:29:35, and the
+    # install only moved once pip fell through to the pin. The pin is
+    # authoritative, so one mirror attempt plus the fallback is the faster path.
+    PIP_RETRY_MAX_ATTEMPTS=1 pip_retry --index-url "$index" "$@" \
+      "torch==${CPU_TORCH_VERSION}" && return 0
+  elif pip_retry --index-url "$index" "$@" "torch==${CPU_TORCH_VERSION}"; then
     return 0
   fi
   # Nothing to fall back to when the pin is what just failed: the probe picked
