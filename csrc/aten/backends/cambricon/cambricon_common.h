@@ -243,6 +243,42 @@ class OpTensorDesc {
   cnnlOpTensorDescriptor_t desc_ = nullptr;
 };
 
+// An activation descriptor, used for the modes CNNL exposes through
+// cnnlActivationForward / cnnlActivationBackward rather than as their own entry
+// point -- silu is one: there is no cnnlSilu, but the mode CNNL_ACTIVATION_SILU
+// is supported.
+//
+// HIGH_PRECISION is what the vendor sets for every mode but floor-div:
+// torch_mlu/csrc/aten/operators/cnnl/internal/activation_inertnal.cpp builds all
+// its descriptors with CNNL_ACTIVATION_HIGH_PRECISION, and sets no other
+// attribute for the modes that take no scalars (sigmoid, tanh, silu, swish).
+class ActivationDesc {
+ public:
+  explicit ActivationDesc(cnnlActivationMode_t mode) {
+    CheckCnnl(
+        cnnlCreateActivationDescriptor(&desc_),
+        "cnnlCreateActivationDescriptor");
+    auto prefer = CNNL_ACTIVATION_HIGH_PRECISION;
+    CheckCnnl(
+        cnnlSetActivationDescAttr(
+            desc_, CNNL_ACTIVATION_PREFERENCE, &prefer, sizeof(prefer)),
+        "cnnlSetActivationDescAttr (preference)");
+    CheckCnnl(
+        cnnlSetActivationDescAttr(
+            desc_, CNNL_ACTIVATION_MODE, &mode, sizeof(mode)),
+        "cnnlSetActivationDescAttr (mode)");
+  }
+  ~ActivationDesc() { cnnlDestroyActivationDescriptor(desc_); }
+
+  ActivationDesc(const ActivationDesc&) = delete;
+  ActivationDesc& operator=(const ActivationDesc&) = delete;
+
+  cnnlActivationDescriptor_t get() const { return desc_; }
+
+ private:
+  cnnlActivationDescriptor_t desc_ = nullptr;
+};
+
 } // namespace at::native::flagos::cambricon
 
 #endif // USE_CAMBRICON
