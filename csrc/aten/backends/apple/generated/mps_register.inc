@@ -30,6 +30,7 @@
   m.impl("arange.start", WrapperArangeStart);
   m.impl("arange.start_step", WrapperArangeStartStep);
   m.impl("argmax", WrapperArgmax);
+  m.impl("argmin", WrapperArgmin);
   m.impl("asin", WrapperAsin);
   m.impl("asinh", WrapperAsinh);
   m.impl("atan", WrapperAtan);
@@ -79,8 +80,10 @@
   m.impl("lt.Tensor", WrapperLtTensor);
   m.impl("masked_fill.Scalar", WrapperMaskedFillScalar);
   m.impl("masked_fill.Tensor", WrapperMaskedFillTensor);
+  m.impl("max.dim", WrapperMaxDim);
   m.impl("maximum", WrapperMaximum);
   m.impl("mean.dim", WrapperMeanDim);
+  m.impl("min.dim", WrapperMinDim);
   m.impl("minimum", WrapperMinimum);
   m.impl("mm", WrapperMm);
   m.impl("mul.Scalar", WrapperMulScalar);

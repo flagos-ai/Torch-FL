@@ -1209,9 +1209,6 @@ at::Tensor ArgmaxKernelMps(
       {self_c},
       selected,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
-        // MPSGraph gives the coordinates an int32 element type. A NaN-aware
-        // maximum has int32 coordinates too, so the select and minimum below
-        // need no inconsistent scalar width.
         MPSGraphTensor* positions =
             [graph coordinateAlongAxis:axis
                             withShape:mps::MpsShapeOf(self_c.sizes())
@@ -1220,6 +1217,8 @@ at::Tensor ArgmaxKernelMps(
         if (positions == nil || nan == nil) {
           return nil;
         }
+        // MPSGraph gives the coordinates an int32 element type, and the NaN
+        // positions below stay in that width; only the final index is widened.
         MPSGraphTensor* positions_float =
             [graph castTensor:positions toType:MPSDataTypeFloat32 name:nil];
         MPSGraphTensor* minus_one =
@@ -1227,27 +1226,21 @@ at::Tensor ArgmaxKernelMps(
         if (positions_float == nil || minus_one == nil) {
           return nil;
         }
-        // float32 exactly represents every coordinate of a realistic axis. A
-        // finite identity keeps the maximum NaN-unaware, and the NaN positions
-        // are reduced separately. That preserves a NaN's stable replacement of
-        // every earlier maximum.
-        MPSGraphTensor* no_nan =
-            [graph notWithTensor:nan name:nil];
-        MPSGraphTensor* infinity = nil;
+        // NaN is replaced by the identity that loses the reduction, so it cannot
+        // become the extremum; the positions of the NaNs are reduced apart.
+        MPSGraphTensor* no_nan = [graph notWithTensor:nan name:nil];
+        MPSGraphTensor* extreme_value = nil;
         if (no_nan == nil ||
-            !mps::MpsPositiveInfinity(
-                graph, self_c.scalar_type(), &infinity)) {
+            !mps::MpsPositiveInfinity(graph, self_c.scalar_type(), &extreme_value)) {
           return nil;
         }
         MPSGraphTensor* finite_values =
             [graph selectWithPredicateTensor:nan
-                        truePredicateTensor:infinity
+                        truePredicateTensor:extreme_value
                        falsePredicateTensor:args[0]
                                        name:nil];
-        MPSGraphTensor* maximum =
-            [graph reductionMaximumWithTensor:finite_values
-                                         axis:axis
-                                         name:nil];
+        MPSGraphTensor* reduced =
+            [graph reductionMaximumWithTensor:finite_values axis:axis name:nil];
         MPSGraphTensor* nan_positions =
             [graph selectWithPredicateTensor:nan
                         truePredicateTensor:positions_float
@@ -1255,24 +1248,16 @@ at::Tensor ArgmaxKernelMps(
                                        name:nil];
         // The *first* NaN, because that is the index the reference names.
         MPSGraphTensor* has_nan =
-            [graph reductionMinimumWithTensor:nan_positions
-                                         axis:axis
-                                         name:nil];
+            [graph reductionMinimumWithTensor:nan_positions axis:axis name:nil];
         MPSGraphTensor* equals =
-            [graph equalWithPrimaryTensor:args[0]
-                          secondaryTensor:maximum
-                                     name:nil];
+            [graph equalWithPrimaryTensor:args[0] secondaryTensor:reduced name:nil];
         MPSGraphTensor* finite = equals == nil
             ? nil
             : [graph logicalANDWithPrimaryTensor:no_nan
                                  secondaryTensor:equals
                                             name:nil];
-        // `has_nan` is the *first* NaN's coordinate, and `>=` makes that
-        // coordinate a candidate. Both halves are needed: with a strict `>` against
-        // the last NaN, a slice whose only NaN sat at position 0 produced no
-        // candidate at all and the reduction answered `no_match`. The
-        // `reductionMinimum` below then takes the first candidate, which is the
-        // index the reference names.
+        // `>=`, not `>`: `has_nan` is itself a candidate, and with `>` a slice
+        // whose only NaN sat at position 0 produced no candidate at all.
         MPSGraphTensor* selected_nan =
             [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
                                         secondaryTensor:has_nan
@@ -1282,12 +1267,11 @@ at::Tensor ArgmaxKernelMps(
                         truePredicateTensor:selected_nan
                        falsePredicateTensor:finite
                                        name:nil];
-        // The value a non-matching position contributes. It is outside the range
-        // of a real index, so the `reductionMinimum` above ignores it while every
-        // position is considered, and the host-side check after the run turns any
-        // slice that is *all* marker into a reference call rather than an answer.
-        MPSGraphTensor* no_match = mps::MpsConstant(
-            graph, self_c.size(axis), at::ScalarType::Int);
+        // A value outside the range of a real index: it loses the `minimum` below
+        // whenever any position did match, and the host-side check after the run
+        // turns a slice that is *all* marker into an error rather than an answer.
+        MPSGraphTensor* no_match =
+            mps::MpsConstant(graph, self_c.size(axis), at::ScalarType::Int);
         if (matches == nil || no_match == nil) {
           return nil;
         }
@@ -1303,19 +1287,17 @@ at::Tensor ArgmaxKernelMps(
         if (result == nil) {
           return nil;
         }
-        return [graph castTensor:result
-                          toType:MPSDataTypeInt64
-                            name:nil];
+        return [graph castTensor:result toType:MPSDataTypeInt64 name:nil];
       });
   if (!ran) {
     return at::argmax(self.cpu(), dim, keepdim).to(self.device());
   }
   // `size(axis)` is the graph's internal "no position matched" marker, not an
-  // answer the reference ever produces: a real index is in `[0, size(axis))`.
-  // If it reaches the output, the candidate set was wrong -- which is exactly
-  // what `argmax([nan, 1, 2])` used to return, as `3`. That value is a valid
-  // index on a longer slice, so returning it looks like an answer; a CPU round
-  // trip would hide the defect as a slow call. Raising names it instead.
+  // answer the reference ever produces: a real index is in `[0, size(axis))`. If
+  // it reaches the output the candidate set was wrong -- which is what
+  // `argmax([nan, 1, 2])` used to return, as `3`, a value that reads as a valid
+  // index on a longer slice. A CPU round trip would hide the defect as a slow
+  // call; raising names it.
   TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
               "argmax: the MPS graph produced no matching position along dim ",
               axis, " for at least one element. This is a defect in the graph, "
@@ -1324,6 +1306,416 @@ at::Tensor ArgmaxKernelMps(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kApple, ArgmaxKernelMps)
+
+
+at::Tensor ArgminKernelMps(
+    const at::Tensor& self,
+    std::optional<int64_t> dim,
+    bool keepdim) {
+  if (!dim.has_value()) {
+    return at::argmin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  if (!mps::MpsSupportsArgmaxDtype(self.scalar_type())) {
+    return at::argmin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  const int64_t rank = self.dim();
+  const int64_t axis = *dim < 0 ? *dim + rank : *dim;
+  if (rank == 0 || axis < 0 || axis >= rank) {
+    // The reference answers a scalar and raises for an empty axis. Both stay
+    // on the reference so its own shape and error rules are preserved.
+    return at::argmin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  if (self.numel() == 0 || self.size(axis) == 0) {
+    return at::argmin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> out_shape = self_c.sizes().vec();
+  out_shape[axis] = 1;
+  if (!keepdim) {
+    out_shape.erase(out_shape.begin() + axis);
+  }
+  at::Tensor selected =
+      at::empty(out_shape, self_c.options().dtype(at::kLong));
+  const bool ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("argmin", axis, keepdim),
+      {self_c},
+      selected,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* positions =
+            [graph coordinateAlongAxis:axis
+                            withShape:mps::MpsShapeOf(self_c.sizes())
+                                  name:nil];
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (positions == nil || nan == nil) {
+          return nil;
+        }
+        // MPSGraph gives the coordinates an int32 element type, and the NaN
+        // positions below stay in that width; only the final index is widened.
+        MPSGraphTensor* positions_float =
+            [graph castTensor:positions toType:MPSDataTypeFloat32 name:nil];
+        MPSGraphTensor* minus_one =
+            mps::MpsConstant(graph, -1, at::ScalarType::Float);
+        if (positions_float == nil || minus_one == nil) {
+          return nil;
+        }
+        // NaN is replaced by the identity that loses the reduction, so it cannot
+        // become the extremum; the positions of the NaNs are reduced apart.
+        MPSGraphTensor* no_nan = [graph notWithTensor:nan name:nil];
+        MPSGraphTensor* extreme_value = nil;
+        if (no_nan == nil ||
+            !mps::MpsNegativeInfinity(graph, self_c.scalar_type(), &extreme_value)) {
+          return nil;
+        }
+        MPSGraphTensor* finite_values =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:extreme_value
+                       falsePredicateTensor:args[0]
+                                       name:nil];
+        MPSGraphTensor* reduced =
+            [graph reductionMinimumWithTensor:finite_values axis:axis name:nil];
+        MPSGraphTensor* nan_positions =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:positions_float
+                       falsePredicateTensor:minus_one
+                                       name:nil];
+        // The *first* NaN, because that is the index the reference names.
+        MPSGraphTensor* has_nan =
+            [graph reductionMinimumWithTensor:nan_positions axis:axis name:nil];
+        MPSGraphTensor* equals =
+            [graph equalWithPrimaryTensor:args[0] secondaryTensor:reduced name:nil];
+        MPSGraphTensor* finite = equals == nil
+            ? nil
+            : [graph logicalANDWithPrimaryTensor:no_nan
+                                 secondaryTensor:equals
+                                            name:nil];
+        // `>=`, not `>`: `has_nan` is itself a candidate, and with `>` a slice
+        // whose only NaN sat at position 0 produced no candidate at all.
+        MPSGraphTensor* selected_nan =
+            [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
+                                        secondaryTensor:has_nan
+                                                   name:nil];
+        MPSGraphTensor* matches =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:selected_nan
+                       falsePredicateTensor:finite
+                                       name:nil];
+        // A value outside the range of a real index: it loses the `minimum` below
+        // whenever any position did match, and the host-side check after the run
+        // turns a slice that is *all* marker into an error rather than an answer.
+        MPSGraphTensor* no_match =
+            mps::MpsConstant(graph, self_c.size(axis), at::ScalarType::Int);
+        if (matches == nil || no_match == nil) {
+          return nil;
+        }
+        MPSGraphTensor* candidates =
+            [graph selectWithPredicateTensor:matches
+                        truePredicateTensor:positions
+                       falsePredicateTensor:no_match
+                                       name:nil];
+        MPSGraphTensor* result =
+            [graph reductionMinimumWithTensor:candidates
+                                         axis:axis
+                                         name:nil];
+        if (result == nil) {
+          return nil;
+        }
+        return [graph castTensor:result toType:MPSDataTypeInt64 name:nil];
+      });
+  if (!ran) {
+    return at::argmin(self.cpu(), dim, keepdim).to(self.device());
+  }
+  // `size(axis)` is the graph's internal "no position matched" marker, not an
+  // answer the reference ever produces: a real index is in `[0, size(axis))`. If
+  // it reaches the output the candidate set was wrong -- which is what
+  // `argmax([nan, 1, 2])` used to return, as `3`, a value that reads as a valid
+  // index on a longer slice. A CPU round trip would hide the defect as a slow
+  // call; raising names it.
+  TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
+              "argmin: the MPS graph produced no matching position along dim ",
+              axis, " for at least one element. This is a defect in the graph, "
+              "not in the input; please report it.");
+  return selected;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kApple, ArgminKernelMps)
+
+
+::std::tuple<at::Tensor, at::Tensor> MaxDimKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    bool keepdim) {
+  const auto fallback = [&]() {
+    auto host = at::max(self.cpu(), dim, keepdim);
+    return ::std::tuple<at::Tensor, at::Tensor>(
+        std::get<0>(host).to(self.device()),
+        std::get<1>(host).to(self.device()));
+  };
+  if (!mps::MpsSupportsArgmaxDtype(self.scalar_type())) {
+    return fallback();
+  }
+  const int64_t rank = self.dim();
+  const int64_t axis = dim < 0 ? dim + rank : dim;
+  if (rank == 0 || axis < 0 || axis >= rank) {
+    return fallback();
+  }
+  if (self.numel() == 0 || self.size(axis) == 0) {
+    return fallback();
+  }
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> kept_shape = self_c.sizes().vec();
+  kept_shape[axis] = 1;
+  std::vector<int64_t> pair_shape = kept_shape;
+  if (!keepdim) {
+    pair_shape.erase(pair_shape.begin() + axis);
+  }
+  at::Tensor values = at::empty(pair_shape, self_c.options());
+  const bool values_ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("max.dim.values", axis, keepdim),
+      {self_c},
+      values,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionMaximumPropagateNaNWithTensor:args[0] axis:axis name:nil];
+      });
+  if (!values_ran) {
+    return fallback();
+  }
+  at::Tensor selected =
+      at::empty(pair_shape, self_c.options().dtype(at::kLong));
+  const bool indices_ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("max.dim.indices", axis, keepdim),
+      {self_c},
+      selected,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* positions =
+            [graph coordinateAlongAxis:axis
+                            withShape:mps::MpsShapeOf(self_c.sizes())
+                                  name:nil];
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (positions == nil || nan == nil) {
+          return nil;
+        }
+        // MPSGraph gives the coordinates an int32 element type, and the NaN
+        // positions below stay in that width; only the final index is widened.
+        MPSGraphTensor* positions_float =
+            [graph castTensor:positions toType:MPSDataTypeFloat32 name:nil];
+        MPSGraphTensor* minus_one =
+            mps::MpsConstant(graph, -1, at::ScalarType::Float);
+        if (positions_float == nil || minus_one == nil) {
+          return nil;
+        }
+        // NaN is replaced by the identity that loses the reduction, so it cannot
+        // become the extremum; the positions of the NaNs are reduced apart.
+        MPSGraphTensor* no_nan = [graph notWithTensor:nan name:nil];
+        MPSGraphTensor* extreme_value = nil;
+        if (no_nan == nil ||
+            !mps::MpsPositiveInfinity(graph, self_c.scalar_type(), &extreme_value)) {
+          return nil;
+        }
+        MPSGraphTensor* finite_values =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:extreme_value
+                       falsePredicateTensor:args[0]
+                                       name:nil];
+        MPSGraphTensor* reduced =
+            [graph reductionMaximumWithTensor:finite_values axis:axis name:nil];
+        MPSGraphTensor* nan_positions =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:positions_float
+                       falsePredicateTensor:minus_one
+                                       name:nil];
+        // The *first* NaN, because that is the index the reference names.
+        MPSGraphTensor* has_nan =
+            [graph reductionMinimumWithTensor:nan_positions axis:axis name:nil];
+        MPSGraphTensor* equals =
+            [graph equalWithPrimaryTensor:args[0] secondaryTensor:reduced name:nil];
+        MPSGraphTensor* finite = equals == nil
+            ? nil
+            : [graph logicalANDWithPrimaryTensor:no_nan
+                                 secondaryTensor:equals
+                                            name:nil];
+        // `>=`, not `>`: `has_nan` is itself a candidate, and with `>` a slice
+        // whose only NaN sat at position 0 produced no candidate at all.
+        MPSGraphTensor* selected_nan =
+            [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
+                                        secondaryTensor:has_nan
+                                                   name:nil];
+        MPSGraphTensor* matches =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:selected_nan
+                       falsePredicateTensor:finite
+                                       name:nil];
+        // A value outside the range of a real index: it loses the `minimum` below
+        // whenever any position did match, and the host-side check after the run
+        // turns a slice that is *all* marker into an error rather than an answer.
+        MPSGraphTensor* no_match =
+            mps::MpsConstant(graph, self_c.size(axis), at::ScalarType::Int);
+        if (matches == nil || no_match == nil) {
+          return nil;
+        }
+        MPSGraphTensor* candidates =
+            [graph selectWithPredicateTensor:matches
+                        truePredicateTensor:positions
+                       falsePredicateTensor:no_match
+                                       name:nil];
+        MPSGraphTensor* result =
+            [graph reductionMinimumWithTensor:candidates
+                                         axis:axis
+                                         name:nil];
+        if (result == nil) {
+          return nil;
+        }
+        return [graph castTensor:result toType:MPSDataTypeInt64 name:nil];
+      });
+  if (!indices_ran) {
+    return fallback();
+  }
+  TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
+              "max.dim: the MPS graph produced no matching position along dim ",
+              axis, " for at least one element. This is a defect in the graph, "
+              "not in the input; please report it.");
+  return ::std::tuple<at::Tensor, at::Tensor>(values, selected);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kApple, MaxDimKernelMps)
+
+
+::std::tuple<at::Tensor, at::Tensor> MinDimKernelMps(
+    const at::Tensor& self,
+    int64_t dim,
+    bool keepdim) {
+  const auto fallback = [&]() {
+    auto host = at::min(self.cpu(), dim, keepdim);
+    return ::std::tuple<at::Tensor, at::Tensor>(
+        std::get<0>(host).to(self.device()),
+        std::get<1>(host).to(self.device()));
+  };
+  if (!mps::MpsSupportsArgmaxDtype(self.scalar_type())) {
+    return fallback();
+  }
+  const int64_t rank = self.dim();
+  const int64_t axis = dim < 0 ? dim + rank : dim;
+  if (rank == 0 || axis < 0 || axis >= rank) {
+    return fallback();
+  }
+  if (self.numel() == 0 || self.size(axis) == 0) {
+    return fallback();
+  }
+  at::Tensor self_c = self.contiguous();
+  std::vector<int64_t> kept_shape = self_c.sizes().vec();
+  kept_shape[axis] = 1;
+  std::vector<int64_t> pair_shape = kept_shape;
+  if (!keepdim) {
+    pair_shape.erase(pair_shape.begin() + axis);
+  }
+  at::Tensor values = at::empty(pair_shape, self_c.options());
+  const bool values_ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("min.dim.values", axis, keepdim),
+      {self_c},
+      values,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        return [graph reductionMinimumPropagateNaNWithTensor:args[0] axis:axis name:nil];
+      });
+  if (!values_ran) {
+    return fallback();
+  }
+  at::Tensor selected =
+      at::empty(pair_shape, self_c.options().dtype(at::kLong));
+  const bool indices_ran = mps::MpsRunGraph(
+      mps::MpsGraphKey("min.dim.indices", axis, keepdim),
+      {self_c},
+      selected,
+      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {
+        MPSGraphTensor* positions =
+            [graph coordinateAlongAxis:axis
+                            withShape:mps::MpsShapeOf(self_c.sizes())
+                                  name:nil];
+        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
+        if (positions == nil || nan == nil) {
+          return nil;
+        }
+        // MPSGraph gives the coordinates an int32 element type, and the NaN
+        // positions below stay in that width; only the final index is widened.
+        MPSGraphTensor* positions_float =
+            [graph castTensor:positions toType:MPSDataTypeFloat32 name:nil];
+        MPSGraphTensor* minus_one =
+            mps::MpsConstant(graph, -1, at::ScalarType::Float);
+        if (positions_float == nil || minus_one == nil) {
+          return nil;
+        }
+        // NaN is replaced by the identity that loses the reduction, so it cannot
+        // become the extremum; the positions of the NaNs are reduced apart.
+        MPSGraphTensor* no_nan = [graph notWithTensor:nan name:nil];
+        MPSGraphTensor* extreme_value = nil;
+        if (no_nan == nil ||
+            !mps::MpsNegativeInfinity(graph, self_c.scalar_type(), &extreme_value)) {
+          return nil;
+        }
+        MPSGraphTensor* finite_values =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:extreme_value
+                       falsePredicateTensor:args[0]
+                                       name:nil];
+        MPSGraphTensor* reduced =
+            [graph reductionMinimumWithTensor:finite_values axis:axis name:nil];
+        MPSGraphTensor* nan_positions =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:positions_float
+                       falsePredicateTensor:minus_one
+                                       name:nil];
+        // The *first* NaN, because that is the index the reference names.
+        MPSGraphTensor* has_nan =
+            [graph reductionMinimumWithTensor:nan_positions axis:axis name:nil];
+        MPSGraphTensor* equals =
+            [graph equalWithPrimaryTensor:args[0] secondaryTensor:reduced name:nil];
+        MPSGraphTensor* finite = equals == nil
+            ? nil
+            : [graph logicalANDWithPrimaryTensor:no_nan
+                                 secondaryTensor:equals
+                                            name:nil];
+        // `>=`, not `>`: `has_nan` is itself a candidate, and with `>` a slice
+        // whose only NaN sat at position 0 produced no candidate at all.
+        MPSGraphTensor* selected_nan =
+            [graph greaterThanOrEqualToWithPrimaryTensor:positions_float
+                                        secondaryTensor:has_nan
+                                                   name:nil];
+        MPSGraphTensor* matches =
+            [graph selectWithPredicateTensor:nan
+                        truePredicateTensor:selected_nan
+                       falsePredicateTensor:finite
+                                       name:nil];
+        // A value outside the range of a real index: it loses the `minimum` below
+        // whenever any position did match, and the host-side check after the run
+        // turns a slice that is *all* marker into an error rather than an answer.
+        MPSGraphTensor* no_match =
+            mps::MpsConstant(graph, self_c.size(axis), at::ScalarType::Int);
+        if (matches == nil || no_match == nil) {
+          return nil;
+        }
+        MPSGraphTensor* candidates =
+            [graph selectWithPredicateTensor:matches
+                        truePredicateTensor:positions
+                       falsePredicateTensor:no_match
+                                       name:nil];
+        MPSGraphTensor* result =
+            [graph reductionMinimumWithTensor:candidates
+                                         axis:axis
+                                         name:nil];
+        if (result == nil) {
+          return nil;
+        }
+        return [graph castTensor:result toType:MPSDataTypeInt64 name:nil];
+      });
+  if (!indices_ran) {
+    return fallback();
+  }
+  TORCH_CHECK(!selected.eq(self_c.size(axis)).any().item<bool>(),
+              "min.dim: the MPS graph produced no matching position along dim ",
+              axis, " for at least one element. This is a defect in the graph, "
+              "not in the input; please report it.");
+  return ::std::tuple<at::Tensor, at::Tensor>(values, selected);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MinDimFn, min_dim_dispatcher, Backend::kApple, MinDimKernelMps)
 
 
 at::Tensor LinalgSolveTriangularKernelMps(

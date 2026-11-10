@@ -37,6 +37,7 @@ from tests.integration.skip_policy import tracked_gap_marker
 MIGRATED_CASE_FILES = frozenset(
     {
         "tests/integration/ops/test_all_dispatch.py",
+        "tests/integration/ops/test_mps_argmin_arpextreme.py",
     }
 )
 
