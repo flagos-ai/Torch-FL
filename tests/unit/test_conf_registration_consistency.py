@@ -809,15 +809,16 @@ def test_conf_route_counts_are_stable():
         # scripts/codegen/codegen_kunlunxin.py).  Without that route the RNG ops
         # fell through to cpu_fallback, which the flagos PrivateUse1 generator
         # cannot steer -- the two failures the CI lane reported.
-        # The ``flaggems`` count is the P800 route survey's STRICT set: ops that
-        # matched a CPU reference on the device.  It is 315 of the 618-op
-        # ceiling; the rest of the surveyed cohort either raised, computed a
-        # silently wrong result, or poisoned the device, and none of those may
-        # be routed.  One op that did pass the screen, `mean.dim`, is held back
-        # too: the XPU backend cannot compile that kernel's axis-0 reduction for
-        # 2D+ shapes, which this lane's test_mean_dim_keepdim caught.  See
-        # KUNLUNXIN_FLAGGEMS_MEASURED.
-        "kunlunxin": {"none": 1670, "kunlunxin": 57, "flaggems": 315},
+        # The ``flaggems`` count is the ops that survived two screens on the
+        # P800: the whole 618-op cohort at one profile with the survey's default
+        # tolerance, then every survivor over ten profiles (the seven the survey
+        # ships plus three odd shapes) at atol=rtol=1e-4 -- the tolerance this
+        # lane's own tests assert with.  256 of 618 remain; the rest raised,
+        # computed a silently wrong result, poisoned the device, or were caught
+        # only by the second screen.  `acos`, `_log_softmax` and `mean.dim` are
+        # the three this lane itself rejected on the first attempt, and they are
+        # why the screen was tightened.  See KUNLUNXIN_FLAGGEMS_MEASURED.
+        "kunlunxin": {"none": 1729, "kunlunxin": 57, "flaggems": 256},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         # 8 ops moved flaggems -> boxing (594 -> 586 / 1433 -> 1441) because
         # route_boxing now consults codegen_ops.py's FlagGems holds. These were

@@ -2983,27 +2983,39 @@ SOFT_LOWP_CLAIMED_OPS = {
 #   TIMEOUT   5   did not finish
 #   UNTESTED 171   no CPU-valid synthesized case (internal ops)
 #
-# Only the 316 STRICT ones are listed below. A sample of 12 was re-run
-# independently on a different device with a cold Triton cache and reproduced
-# 12/12, so these are not one-off passes.
+# Only the 256 that survived both screens are listed below.
 #
-# Scope of the evidence: 2d-f32 is the screening profile the survey documents for
-# large route sets, not the full seven-profile matrix. An op here is known good
-# at float32 contiguous 2-D shapes; a full-matrix run is the follow-up if a
-# dtype- or layout-specific defect ("STRICT" in the survey's stricter sense) has
-# to be ruled out before relying on one of these.
+# Stage 1: the whole 618-op cohort at one profile (2d-f32) with the survey's own
+# default tolerance, which yielded 316 STRICT. Three of those were rejected
+# afterwards, each for a different reason:
+#
+#   acos      -- off by 3.0e-3, i.e. 30x the integration tests' 1e-4 budget. It
+#                passed stage 1 only because the survey's default tolerance is
+#                2e-2. Caught by test_acos_*.
+#   _log_softmax -- right at (32, 32), wrong by 1.9 at (16, 5) and by 3.3 at
+#                (8, 10), and raises UnboundLocalError for a 4-D dim-0
+#                reduction. Caught by test_nll_loss_backward_matches_cpu, which
+#                reaches it through `log_softmax` in its forward chain.
+#   mean.dim  -- FlagGems reduces axis 0 for 2D+ shapes and the XPU backend will
+#                not compile that (OutOfResources: uni_sram, "axis must not be 0
+#                for 2D+ shapes"). Caught by test_mean_dim_keepdim.
+#
+# Stage 2 re-ran every survivor over ten profiles -- the seven the survey ships
+# plus 13x7, 3x5x7 and 64x3, because every built-in profile is square or
+# 2x3x16x16 and a reduction kernel can be right there and wrong for a prime
+# extent -- comparing with atol=rtol=1e-4, the tolerance this repository's
+# integration tests assert with. 270 reached stage 2, 14 came back WRONG, and
+# 256 remain.
+#
+# The route set is therefore smaller than "the ops FlagGems covers", because the
+# screen had to be tightened twice before the chip stopped finding defects it had
+# passed. Promoting an op means running it through stage 2, not stage 1.
 KUNLUNXIN_FLAGGEMS_MEASURED = {
-    "_euclidean_dist",
     "_linalg_eigvals",
-    "_log_softmax",
-    "_pdist_forward",
     "_prelu_kernel",
     "_unsafe_view",
     "abs",
     "abs_",
-    "acos",
-    "acosh",
-    "acosh_",
     "add_.Tensor",
     "addcdiv",
     "addcdiv_",
@@ -3023,18 +3035,12 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "arange",
     "arange.start",
     "arange.start_step",
-    "argmax",
-    "argmin",
-    "asin",
-    "asin_",
     "asinh",
     "asinh.out",
     "asinh_",
     "atan",
-    "atan2",
     "atan2.out",
     "atan_",
-    "atanh",
     "atanh_",
     "ceil",
     "ceil.out",
@@ -3050,7 +3056,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "copysign_.Tensor",
     "cos",
     "cos_",
-    "cosh",
     "cosh.out",
     "cosh_",
     "count_nonzero",
@@ -3061,7 +3066,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "deg2rad",
     "deg2rad.out",
     "deg2rad_",
-    "digamma_",
     "div.Scalar",
     "div.Scalar_mode",
     "div.Tensor",
@@ -3075,16 +3079,12 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "eq.Tensor",
     "eq_.Scalar",
     "eq_.Tensor",
-    "erf",
     "erf_",
-    "erfinv",
     "erfinv_",
-    "exp",
     "exp.out",
     "exp2",
     "exp2_",
     "exp_",
-    "expm1",
     "expm1.out",
     "expm1_",
     "eye",
@@ -3092,14 +3092,9 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "fill.Scalar",
     "fill.Scalar_out",
     "fill_.Scalar",
-    "flip",
     "floor",
     "floor.out",
     "floor_",
-    "floor_divide",
-    "floor_divide.Scalar",
-    "floor_divide_.Scalar",
-    "floor_divide_.Tensor",
     "fmin",
     "fmin.out",
     "fmod.Scalar",
@@ -3109,7 +3104,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "frac",
     "frac_",
     "full",
-    "full_like",
     "ge.Scalar",
     "ge.Tensor",
     "gelu",
@@ -3125,8 +3119,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "hardsigmoid.out",
     "hardswish_",
     "heaviside_",
-    "huber_loss",
-    "huber_loss.out",
     "hypot",
     "hypot_",
     "i0",
@@ -3153,11 +3145,9 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "linalg_ldl_factor_ex",
     "linalg_vector_norm",
     "linspace",
-    "log",
     "log10",
     "log10.out",
     "log10_",
-    "log1p",
     "log1p.out",
     "log1p_",
     "log_sigmoid_forward",
@@ -3173,37 +3163,27 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "logical_or_",
     "logical_xor",
     "logical_xor_",
-    "logit",
-    "logit_",
     "logspace",
     "logsumexp",
     "lt.Scalar",
     "lt.Tensor",
     "lt_.Scalar",
     "lt_.Tensor",
-    "lu_unpack",
     "masked_fill.Scalar",
     "masked_fill_.Scalar",
     "masked_scatter",
     "masked_scatter_",
-    "masked_select",
     "max",
     "max.dim",
     "mean",
     "min",
-    "min.dim",
     "mish",
     "mish_",
     "mse_loss",
-    "nan_to_num",
-    "nanmedian",
-    "nanmedian.dim",
     "ne.Scalar",
     "ne.Tensor",
     "neg_",
     "new_ones",
-    "nonzero",
-    "nonzero_static",
     "ones",
     "ones_like",
     "pow.Scalar",
@@ -3211,8 +3191,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "pow.Tensor_Tensor",
     "pow_.Scalar",
     "pow_.Tensor",
-    "prod",
-    "prod.dim_int",
     "rad2deg",
     "rad2deg_",
     "reciprocal",
@@ -3224,7 +3202,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "remainder.Tensor",
     "remainder_.Scalar",
     "remainder_.Tensor",
-    "renorm",
     "repeat_interleave.Tensor",
     "round",
     "round.out",
@@ -3239,7 +3216,6 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "sgn_",
     "sigmoid",
     "sigmoid_",
-    "sigmoid_backward",
     "sign",
     "sign.out",
     "signbit",
@@ -3250,28 +3226,15 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "sin_",
     "sinc",
     "sinc_",
-    "sinh",
     "sinh_",
-    "soft_margin_loss",
-    "soft_margin_loss_backward",
     "softplus",
     "softplus_backward",
     "softshrink",
     "softshrink.out",
-    "special_airy_ai",
     "special_airy_ai.out",
-    "special_chebyshev_polynomial_u.n_scalar",
-    "special_hermite_polynomial_h.n_scalar",
-    "special_i0e",
     "special_i0e.out",
-    "special_i1",
-    "special_i1e",
-    "special_modified_bessel_k1",
-    "special_modified_bessel_k1.out",
     "special_scaled_modified_bessel_k1",
     "special_scaled_modified_bessel_k1.out",
-    "special_shifted_chebyshev_polynomial_v",
-    "special_xlog1py",
     "sqrt",
     "sqrt_",
     "std.correction",
@@ -3299,12 +3262,8 @@ KUNLUNXIN_FLAGGEMS_MEASURED = {
     "trunc_",
     "var.correction",
     "var_mean.correction",
-    "xlogy.OutScalar_Other",
     "xlogy.OutScalar_Self",
-    "xlogy.OutTensor",
-    "xlogy.Scalar_Other",
     "xlogy.Scalar_Self",
-    "xlogy.Tensor",
     "zero_",
     "zeros",
     "zeros_like",

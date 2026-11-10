@@ -142,12 +142,13 @@ build opts into boxing.
   op library) and leaves the rest at `none`, with **no `cuda` boxing route**. Its
   `torch_fl/accelerator/kunlunxin/` module is FlagGems glue only — a device-name
   realignment and a `torch.cuda` shim, no operator kernels. Its FlagGems routes are
-  the 315 ops a P800 survey measured as correct (of a 618-op ceiling), listed in
+  the 256 ops two P800 screens left standing (of a 618-op ceiling), listed in
   `KUNLUNXIN_FLAGGEMS_MEASURED`; the platform stays out of
   `FLAGGEMS_PYTHON_PLATFORMS`, because joining that set claims the whole cohort.
   `kunlunxin_flaggems_register.inc` is generated from that same value, so the conf
   and the `m.impl()` line move together. The measurement is the gate, and it is
-  what kept 22 silently-wrong and 9 device-poisoning operators off the conf.
+  what kept 22 silently-wrong and 9 device-poisoning operators off the conf, and
+  what rejected three more that a single-profile screen had passed.
 - **Iluvatar** (BI-V150 / Tianshu, corex 4.5.0) is FlagGems-primary with a
   native, non-boxing vendor slot alongside it. Boxing with the CUDA kernels was
   explicitly ruled out; instead the ops FlagGems does not cover route to
