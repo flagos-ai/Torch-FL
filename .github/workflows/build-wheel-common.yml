@@ -130,7 +130,7 @@ jobs:
         timeout-minutes: 1
         with:
           path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
+          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), format('.github/requirements-{0}.txt', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
           lookup-only: true
           restore-keys: |
             ${{ inputs.display_name }}-pip-${{ runner.os }}-

@@ -1,0 +1,13 @@
+# Python tools needed by the isolated Ascend build and test environment.
+# seed_ascend_runtime.py reuses matching runtime distributions first; pip then
+# fills any missing distributions and their dependencies from this same list.
+setuptools>=64
+wheel
+cmake>=3.19
+build
+pytest
+pybind11
+packaging>=26.0
+PyYAML==6.0.1
+sqlalchemy==2.0.48
+numpy<2

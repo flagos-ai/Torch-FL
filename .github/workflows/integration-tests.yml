@@ -161,7 +161,7 @@ jobs:
         shell: bash
         env:
           PLATFORM: ${{ needs.configuration.outputs.platform }}
-          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform)) }}
+          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), format('.github/requirements-{0}.txt', needs.configuration.outputs.platform)) }}
         run: |
           set -euo pipefail
           root="$(dirname "${RUNNER_WORKSPACE:-${GITHUB_WORKSPACE}/..}")"

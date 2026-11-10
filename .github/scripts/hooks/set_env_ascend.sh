@@ -26,8 +26,8 @@
 # those calls stopped matching on 3.2.2 and silently no-opped, which broke 11
 # operator tests in run 34786387238. FlagTree's ascend3.5 wheel is the Triton
 # 3.5 build for this backend, and torch_fl carries a torch_npu-free backend
-# policy for it (torch_fl/compile/flagtree_ascend_policy.py), so no torch_npu
-# appears anywhere in this environment. See docs/vendors/ascend/installation.md.
+# policy for it (torch_fl/compile/flagtree_ascend_policy.py), so the real
+# torch_npu stays outside the CI venv. See docs/vendors/ascend/installation.md.
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # Default PyPI index for build deps (pip/setuptools/wheel/cmake/build/pytest).
@@ -37,6 +37,15 @@ export PIP_DEFAULT_TIMEOUT="${TORCH_FL_PIP_DEFAULT_TIMEOUT:-300}"
 export PIP_RETRIES="${TORCH_FL_PIP_RETRIES:-20}"
 # FlagTree and FlagGems both come from the FlagOS index.
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
+
+# --- Python isolation -------------------------------------------------------
+# The runtime's BASH_ENV has already initialized the SDK in this shell. Do not
+# replay it in child shells or later workflow steps: vendor.sh overwrites PATH
+# and PYTHONPATH, and the runtime then selects /flagos instead of our CI venv.
+ASCEND_PREPARE_STARTED=$SECONDS
+export BASH_ENV=/dev/null
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
 
 # --- CANN toolkit root -------------------------------------------------------
 # CANN images ship several layouts; pick the first candidate that actually has
@@ -165,11 +174,9 @@ else
 fi
 
 # --- Build Python / CPU torch ------------------------------------------------
-# The CANN image's system Python is used only to bootstrap a venv; it does NOT
-# need torch pre-installed. CPU torch (2.10.0+cpu) is installed into the venv
-# below: ascend needs no accelerator-linked torch, only the CPU dispatcher plus
-# the ACLNN runtime libraries exported above. (The cuda script requires the
-# build python to import a vendor torch; that contract does not apply here.)
+# Keep a separate venv, but seed matching large wheels from the runtime before
+# asking pip to fill any gaps. Only wheel-owned files are copied; torch_npu and
+# the runtime's site-packages directory are never added to the CI import path.
 #
 # 3.11 specifically: the FlagTree Ascend 3.5 wheel is published for cp311 only
 # (see the FlagTree user manual's install table), so a 3.12 venv would simply
@@ -214,70 +221,98 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  # `build` is explicit rather than assumed: the job runs `python -m build
-  # --wheel --no-isolation`, and the FlagTree image does not ship it. A missing
-  # `build` does not fail cleanly -- the repo's own CMake `build/` directory is
-  # found first as a namespace package and the step dies with the misleading
-  # "No module named build.__main__; 'build' is a package and cannot be directly
-  # executed".
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade \
-    pip setuptools wheel cmake build
-  install_cpu_torch
-  # Unconditional, unlike the other vendors: Ascend's job builds the wheel and
-  # runs the tests under one CI_STAGE=build invocation, so gating pytest on
-  # CI_STAGE=integration installs it in no job at all. The previous CI image hid
-  # this by shipping a prebuilt /opt/torch-fl-ascend-venv that already had it;
-  # the FlagTree image does not, and the flagtree wheel is cp311-only anyway, so
-  # that Python 3.12 venv could not have been reused here.
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
+  "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_ascend_runtime.py" \
+    --target-python "$VENV_PYTHON" \
+    --torch-version "$CPU_TORCH_VERSION" \
+    --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
+    --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
+    --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}" \
+    --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_ascend_runtime.py" \
+      --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
+    echo "Using prepared CPU torch $CPU_TORCH_VERSION"
+  else
+    install_cpu_torch
+  fi
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
-export PYTHONNOUSERSITE=1
-export PYTHONPATH=""
 
-# Both the build and integration jobs execute this setup script in the same
-# combined platform job. Install FlagGems before either stage builds or tests
-# the wheel; restricting this block to CI_STAGE=integration leaves the build
-# job's prebuilt venv without flag_gems, and the resulting wheel fails as soon
-# as the FlagGems-first Ascend conf dispatches an operator.
+# Install FlagGems during setup for either stage. The combined platform job
+# calls setup once before building and later tests the installed wheel;
+# restricting this to CI_STAGE=integration would omit its operator package.
 #
 # Use --no-deps for the source packages so pip cannot replace the pinned CPU
 # torch.
-# FlagTree installs the module named `triton`, so any stock or vendor Triton
-# already present would be shadowed rather than replaced, and the user manual
-# asks for it to be removed first. The venv is fresh and has none, but the
-# prebuilt-venv path may, and `pip uninstall triton` is a no-op when it does not.
-for _ in 1 2 3; do
-  "$VENV_PYTHON" -m pip uninstall -y triton >/dev/null 2>&1 || true
-done
-
 # FlagTree, the Triton build carrying the Ascend backend. Pinned, not tracking a
 # moving tag: the FlagGems release below is paired with this backend wheel,
 # and the Triton minor (3.5) has to match the backend the wheel was built for.
 # From the FlagTree user manual ("ascend", Triton 3.5 row).
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}"
-install_flagtree
+if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+from importlib import metadata, util
+from pathlib import Path
+import sys
+
+try:
+    dist = metadata.distribution("flagtree")
+    spec = util.find_spec("triton")
+    root = Path(dist.locate_file("triton")).resolve()
+    assert dist.version == sys.argv[1]
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).resolve().parent == root
+    assert (root / "backends/ascend").is_dir()
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
+else
+  # Remove a conflicting Triton before installing the pinned compiler.
+  for _ in 1 2 3; do
+    "$VENV_PYTHON" -m pip uninstall -y triton >/dev/null 2>&1 || true
+  done
+  install_flagtree
+fi
 
 # Install the published Python wheel; avoid a GitHub checkout on the runner.
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple}"
 install_flag_gems
 
-# The isolated venv cannot see FlagCX installed in the image's system Python.
-# Install it in both stages; the candidate wheel is later installed --no-deps.
+# Reuse the matching FlagCX copied from the runtime, or install the exact pin.
+# Keep the backend selection identical on both paths.
 FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}"
-install_flagcx
+if "$VENV_PYTHON" - "$FLAGCX_VERSION" <<'PY'
+from importlib import metadata, util
+import sys
 
-# FlagGems' own runtime deps, installed one at a time to avoid IncompleteRead
-# failing the whole batch. numpy stays <2: 2.x breaks the stock +cpu torch C
-# extensions at import, and the Ascend test groups import both.
-pip_retry --index-url "$PIP_INDEX_URL" pybind11
-pip_retry --index-url "$PIP_INDEX_URL" 'packaging>=26.0'
-pip_retry --index-url "$PIP_INDEX_URL" 'PyYAML==6.0.1'
-pip_retry --index-url "$PIP_INDEX_URL" 'sqlalchemy==2.0.48'
-pip_retry --index-url "$PIP_INDEX_URL" 'numpy<2'
+try:
+    assert metadata.version("flagcx") == sys.argv[1]
+    assert util.find_spec("flagcx") is not None
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using runtime-seeded FlagCX $FLAGCX_VERSION"
+  export FLAGCX_TORCH_BACKEND=flagos
+else
+  install_flagcx
+fi
+
+# Matching runtime tools were copied already. Pip accepts satisfied packages
+# and installs only gaps, one requirement at a time for bounded retries. This
+# list also supplies build/pytest to the combined CI_STAGE=build job.
+while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+  [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_ascend_runtime.py" \
+      --check-installed "$requirement"; then
+    echo "Using prepared requirement: $requirement"
+  else
+    pip_retry --index-url "$PIP_INDEX_URL" "$requirement"
+  fi
+done < "$REPO_ROOT/.github/requirements-ascend.txt"
 
 # --- Verify the isolation held ----------------------------------------------
 # torch_fl does not depend on torch_npu -- that is a hard requirement of this
@@ -286,11 +321,16 @@ pip_retry --index-url "$PIP_INDEX_URL" 'numpy<2'
 # because importing torch_fl installs a stub under that name for FlagGems' sake.
 "$VENV_PYTHON" - <<'PY'
 import importlib.util
+import os
 from pathlib import Path
+import sys
 
 import torch
 
 torch_path = Path(torch.__file__).resolve()
+venv_root = Path(os.environ["VIRTUAL_ENV"]).resolve()
+assert Path(sys.prefix).resolve() == venv_root, sys.prefix
+assert torch_path.is_relative_to(venv_root), torch_path
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
@@ -302,8 +342,9 @@ print(f"CPU torch path: {torch_path}")
 PY
 
 # --- Verify the FlagTree + FlagGems stack imports ----------------------------
-# Integration only: torch_fl._C does not exist until the wheel has been built,
-# and the import order below needs it. CI calls this script before building.
+# Check an extension that is already present, such as during local integration
+# setup. A fresh build is checked after wheel installation by the shared
+# environment step, including its triton_backend and flaggems_vendor checks.
 #
 # torch_fl must be imported before flag_gems. FlagTree's Ascend backend picks
 # its host-side implementation by importing torch_npu at discovery time (and
@@ -332,15 +373,25 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGCX_TORCH_BACKEND TORCH_DEVICE_BACKEND_AUTOLOAD TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
+  export_ci_env PATH VIRTUAL_ENV BASH_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGCX_TORCH_BACKEND TORCH_DEVICE_BACKEND_AUTOLOAD TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
+  # Later steps do not replay vendor.sh once BASH_ENV is disabled. Preserve
+  # the SDK settings it supplied as well as the paths prepared above.
+  while IFS='=' read -r sdk_name _; do
+    case "$sdk_name" in
+      ASCEND_*|CANN_*|ATB_*|LCCL_*|TOOLCHAIN_HOME|CMAKE_PREFIX_PATH|atb_path|cxx_abi)
+        export_ci_env "$sdk_name"
+        ;;
+    esac
+  done < <(env)
 fi
 
+echo "Ascend dependency preparation completed in $((SECONDS - ASCEND_PREPARE_STARTED))s"
 cd "$REPO_ROOT"
 
 if [[ "$CI_STAGE" == "build" ]]; then
   # Prebuild so package_data sees libtorch_fl.so before the common workflow
   # invokes python -m build. The following wheel build is incremental. The
-  # integration job downloads this artifact and must not rebuild from source.
+  # combined job then installs and tests that wheel instead of the checkout.
   build_flagos_inplace
 
   # Build-stage availability check. Integration repeats this after installing

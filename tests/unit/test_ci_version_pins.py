@@ -446,12 +446,14 @@ def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
             ), platform
 
 
-def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
+def test_the_wheel_segment_matches_the_flagcx_sdk_where_flagcx_exists():
     """One SDK spelling, not two.
 
     The segment names the SDK the wheel was built against, and for every
-    platform that has a FlagCX build that is the same token FlagCX is published
-    under (`+cuda13.3`, `+dtk2604`). Ascend was aligned to CANN for this reason.
+    platform that has a FlagCX build that is the same SDK token FlagCX is
+    published under (`+cuda13.3`, `+dtk2604`). Ascend's official FlagCX package
+    additionally names the 910C build variant; that suffix is not a CANN version
+    and must not put a chip name into torch_fl's platform-wide wheel filename.
     PPU has no FlagCX build yet, so it has no counterpart to check against.
     """
     pins = _pins()
@@ -461,6 +463,8 @@ def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
             continue
         _, _, sdk = flagcx.partition("+")
         assert sdk, (platform, flagcx)
+        if platform == "ascend":
+            sdk = sdk.removesuffix(".910c")
         assert _wheel_local(platform) == sdk, (platform, _wheel_local(platform), sdk)
 
 

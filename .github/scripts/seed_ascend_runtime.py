@@ -1,0 +1,234 @@
+# Copyright 2026 FlagOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Copy matching runtime wheels into a separate venv, without accelerator imports."""
+
+import argparse
+import importlib.metadata as metadata
+import json
+from pathlib import Path
+import shutil
+import site
+import subprocess
+import sys
+import time
+
+
+def copy_distribution(distribution, target_site, target_bin, target_python):
+    """Copy RECORD-owned files, never expose a source site-packages directory."""
+    root = Path(distribution.locate_file("")).resolve()
+    files = distribution.files
+    if not files:
+        return False
+    console_scripts = {
+        entry.name
+        for entry in distribution.entry_points
+        if entry.group == "console_scripts"
+    }
+    planned = []
+    for entry in files:
+        relative = Path(str(entry))
+        # Console scripts live outside site-packages; regenerate their shebangs
+        # for the target interpreter instead of copying the runtime's launchers.
+        if relative.is_absolute():
+            return False
+        if ".." in relative.parts:
+            if relative.parent.name == "bin" and relative.name in console_scripts:
+                continue
+            # Other external files may be essential headers or data. A partial
+            # copy would fool pip through its metadata, so let pip install it.
+            return False
+        if relative.suffix == ".pth" or relative.parts[0].startswith(
+            ("torch_npu", "sitecustomize", "usercustomize")
+        ):
+            return False
+        source = Path(distribution.locate_file(entry))
+        if not source.resolve().is_relative_to(root) or not source.is_file():
+            return False
+        destination = target_site / relative
+        if destination.exists() or destination.is_symlink():
+            return False
+        planned.append((source, destination))
+    if not planned:
+        return False
+    # Install metadata last, so pip cannot mistake a partial copy for an
+    # installed wheel. Each file is a new copy; later pip operations cannot
+    # modify the runtime's packages through symlinks or hardlinks.
+    planned.sort(key=lambda pair: ".dist-info" in str(pair[1].relative_to(target_site)))
+    for source, destination in planned:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    for entry in distribution.entry_points:
+        if (
+            entry.group != "console_scripts"
+            or entry.name in {".", ".."}
+            or Path(entry.name).name != entry.name
+        ):
+            continue
+        launcher = target_bin / entry.name
+        launcher.write_text(
+            f"#!{target_python}\n"
+            "import sys\nfrom importlib.metadata import distribution\n"
+            f"entry = next(e for e in distribution({distribution.metadata['Name']!r})"
+            f".entry_points if e.group == 'console_scripts' and e.name == {entry.name!r})\n"
+            "sys.exit(entry.load()())\n"
+        )
+        launcher.chmod(0o755)
+    return True
+
+
+def requirement_type():
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        from pip._vendor.packaging.requirements import Requirement
+    return Requirement
+
+
+def requirement_satisfied(value):
+    """Check the installed version and dependency closure without a network probe."""
+    Requirement = requirement_type()
+    seen = set()
+
+    def check(requirement):
+        if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
+            return True
+        distribution = metadata.distribution(requirement.name)
+        if not requirement.specifier.contains(distribution.version, prereleases=True):
+            return False
+        key = (
+            requirement.name.lower().replace("_", "-"),
+            tuple(sorted(requirement.extras)),
+        )
+        if key in seen:
+            return True
+        seen.add(key)
+        for text in distribution.requires or []:
+            child = Requirement(text)
+            if child.marker and not any(
+                child.marker.evaluate({"extra": extra})
+                for extra in {"", *requirement.extras}
+            ):
+                continue
+            child.marker = None
+            if not check(child):
+                return False
+        return True
+
+    try:
+        return check(Requirement(value))
+    except (metadata.PackageNotFoundError, ValueError):
+        return False
+
+
+def tool_requirements(path):
+    if path is None:
+        return {}
+    try:
+        Requirement = requirement_type()
+    except ImportError:
+        # A plain SDK image may not have packaging. Keep the original pip path
+        # available there; runtime images have it through FlagGems.
+        print("Tool reuse skipped: source interpreter has no packaging module")
+        return {}
+    result = {}
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        requirement = Requirement(line)
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        result[requirement.name.lower().replace("_", "-")] = requirement.specifier
+    return result
+
+
+def seed(
+    target_python,
+    torch_version,
+    flagtree_version,
+    flaggems_version,
+    flagcx_version,
+    requirements_file=None,
+):
+    target = json.loads(
+        subprocess.check_output(
+            [
+                str(target_python),
+                "-I",
+                "-c",
+                "import json, sys, sysconfig; "
+                "print(json.dumps({'site': sysconfig.get_paths()['purelib'], "
+                "'version': list(sys.version_info[:2])}))",
+            ],
+            text=True,
+        )
+    )
+    if target["version"] != list(sys.version_info[:2]):
+        print("Runtime reuse skipped: source and target Python versions differ")
+        return
+    expected = {
+        "torch": torch_version + "+cpu",
+        "flagtree": flagtree_version,
+        "flag-gems": flaggems_version,
+        "flagcx": flagcx_version,
+        "numpy": None,
+    }
+    tools = tool_requirements(requirements_file)
+    target_site = Path(target["site"])
+    source_paths = site.getsitepackages() + ["/opt/flagtree"]
+    started = time.monotonic()
+    reused = set()
+    for distribution in metadata.distributions(path=source_paths):
+        name = distribution.metadata.get("Name", "").lower().replace("_", "-")
+        if (name not in expected and name not in tools) or name in reused:
+            continue
+        if name in expected:
+            required = expected[name]
+            matches = (
+                distribution.version.startswith("1.")
+                if name == "numpy"
+                else distribution.version == required
+            )
+        else:
+            required = str(tools[name]) or "any installed version"
+            matches = tools[name].contains(distribution.version)
+        if not matches:
+            print(f"Runtime reuse skipped: {name} {distribution.version} != {required}")
+            continue
+        if copy_distribution(
+            distribution, target_site, target_python.parent, target_python
+        ):
+            reused.add(name)
+            print(f"Reused runtime wheel: {name}=={distribution.version}")
+        else:
+            print(f"Runtime reuse skipped: {name} has incomplete or conflicting files")
+    print(f"Runtime reuse: {len(reused)} wheels in {time.monotonic() - started:.1f}s")
+
+
+def main():
+    if "--check-installed" in sys.argv[1:]:
+        parser = argparse.ArgumentParser(description="Check an installed requirement")
+        parser.add_argument("--check-installed", required=True)
+        args = parser.parse_args()
+        raise SystemExit(0 if requirement_satisfied(args.check_installed) else 1)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target-python", required=True, type=Path)
+    parser.add_argument("--torch-version", required=True)
+    parser.add_argument("--flagtree-version", required=True)
+    parser.add_argument("--flaggems-version", required=True)
+    parser.add_argument("--flagcx-version", required=True)
+    parser.add_argument("--requirements-file", type=Path)
+    args = parser.parse_args()
+    seed(
+        args.target_python,
+        args.torch_version,
+        args.flagtree_version,
+        args.flaggems_version,
+        args.flagcx_version,
+        args.requirements_file,
+    )
+
+
+if __name__ == "__main__":
+    main()
