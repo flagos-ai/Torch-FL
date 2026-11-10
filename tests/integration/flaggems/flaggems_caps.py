@@ -210,7 +210,14 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # u180 after the #570 gap. `mean.dim` stays on `none` -- its FlagGems
     # kernel returns NaN for a non-inner dimension ((8, 12), dim=0).
     "iluvatar": 582,
-    "kunlunxin": 0,
+    # 316: the P800 route survey. Every op on the route matched a CPU reference
+    # on the device at --profiles 2d-f32. The other 302 ops of the 618-op
+    # ceiling are deliberately unrouted -- 95 raised, 22 computed a silently
+    # wrong result, 9 poisoned the device, 5 timed out and 171 had no
+    # CPU-valid synthesized case -- so this number is a measurement, not the
+    # cohort size. KUNLUNXIN_FLAGGEMS_MEASURED in scripts/codegen/
+    # gen_vendor_confs.py is where it comes from.
+    "kunlunxin": 316,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow. The day-0 variant
     # below is unchanged -- it keeps `mm` on the boxing kernel.

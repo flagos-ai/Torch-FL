@@ -392,11 +392,32 @@ def test_native_measured_python_ops_is_bounded_by_the_ceiling(monkeypatch):
     assert g.native_measured_python_ops("kunlunxin") == {"neg"}
 
 
-def test_native_measured_python_ops_is_empty_where_unmeasured():
-    """Nothing is claimed for a vendor with no measurement, and for an unknown one."""
-    assert g.NATIVE_FLAGGEMS_MEASURED["kunlunxin"] == set()
-    assert g.native_measured_python_ops("kunlunxin") == set()
+def test_native_measured_python_ops_is_empty_for_an_unknown_vendor():
+    """An unknown vendor claims nothing.
+
+    Kunlunxin used to be the example here because it had no measurement; it now
+    has one (the P800 route survey), so the empty case is spelled on a name that
+    does not exist rather than on a vendor whose state can legitimately change.
+    """
     assert g.native_measured_python_ops("not_a_vendor") == set()
+
+
+def test_kunlunxin_measured_set_is_a_measured_subset_of_the_ceiling():
+    """The shipped Kunlunxin routes are ones a survey vouched for, and no others.
+
+    Three properties, in the order they can go wrong: every entry is inside the
+    shared FlagGems ceiling (an op dropped from it cannot linger on a route), no
+    entry is claimed by the vendor-native half (both .inc files land in one
+    TORCH_LIBRARY_IMPL body, so an op in both is a duplicate m.impl that will not
+    compile), and the platform stays out of FLAGGEMS_PYTHON_PLATFORMS -- joining
+    that set is the "whole cohort measured" claim, which this is not.
+    """
+    measured = g.NATIVE_FLAGGEMS_MEASURED["kunlunxin"]
+    assert measured, "the Kunlunxin routes are gone; did the survey get reverted?"
+    assert measured <= g.flaggems_python_ops_for("kunlunxin")
+    assert not measured & g.vendor_native_ops("kunlunxin")
+    assert "kunlunxin" not in g.FLAGGEMS_PYTHON_PLATFORMS
+    assert g.native_measured_python_ops("kunlunxin") == measured
 
 
 # ---------------------------------------------------------------------------

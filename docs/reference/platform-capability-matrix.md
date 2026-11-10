@@ -141,16 +141,13 @@ build opts into boxing.
   `backends_kunlunxin.conf` routes ops to the `kunlunxin` key (the vendor xdnn
   op library) and leaves the rest at `none`, with **no `cuda` boxing route**. Its
   `torch_fl/accelerator/kunlunxin/` module is FlagGems glue only — a device-name
-  realignment and a `torch.cuda` shim, no operator kernels. Its FlagGems cohort has
-  not been revalidated on the P800, so no `flaggems` route is enabled yet and the
-  platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`. The registration path
-  exists and is empty — `kunlunxin_flaggems_register.inc`, generated from
-  `KUNLUNXIN_FLAGGEMS_MEASURED` — so promoting an op is one value plus two
-  generator runs, and it moves the conf and the `m.impl()` line together. The
-  runtime half lives in `torch_fl/accelerator/kunlunxin/_klx_compat.py`: the
-  device-name realignment plus the `torch.cuda` shim a CPU-torch FlagGems build
-  needs (verified on a P800 — 22 of 22 elementwise and reduction ops matched a CPU
-  reference). The measurement itself is still the gate: no P800 survey has run.
+  realignment and a `torch.cuda` shim, no operator kernels. Its FlagGems routes are
+  the 316 ops a P800 survey measured as correct (of a 618-op ceiling), listed in
+  `KUNLUNXIN_FLAGGEMS_MEASURED`; the platform stays out of
+  `FLAGGEMS_PYTHON_PLATFORMS`, because joining that set claims the whole cohort.
+  `kunlunxin_flaggems_register.inc` is generated from that same value, so the conf
+  and the `m.impl()` line move together. The measurement is the gate, and it is
+  what kept 22 silently-wrong and 9 device-poisoning operators off the conf.
 - **Iluvatar** (BI-V150 / Tianshu, corex 4.5.0) is FlagGems-primary with a
   native, non-boxing vendor slot alongside it. Boxing with the CUDA kernels was
   explicitly ruled out; instead the ops FlagGems does not cover route to
