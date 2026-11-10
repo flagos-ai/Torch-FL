@@ -147,13 +147,27 @@ VENDORS = {
         ("backends/enflame/generated/gcu_flaggems_register.inc",),
     ),
     "ascend": ("backends/ascend/generated/ascend_register.inc", ()),
-    # Kunlunxin has no FlagGems .inc to fold in yet: the vendor torch shim on
-    # this SDK hardcodes the FlagGems runtime device name to "nvidia" while the
-    # tensors dispatch on PrivateUse1, so flag_gems' own gate always falls
-    # through and every FlagGems Python route dies at its first op. Until that
-    # is fixed (or the SDK ships a PrivateUse1-named runtime), kunlunxin has a
-    # single native .inc and no extra registration file.
-    "kunlunxin": ("backends/kunlunxin/generated/kunlunxin_register.inc", ()),
+    # Kunlunxin is a native backend with a second registration file for the
+    # FlagGems Python path. Unlike the other native vendors that file is not
+    # generated from the shared FlagGems ceiling: kunlunxin is absent from
+    # FLAGGEMS_PYTHON_PLATFORMS, so only an op a P800 survey has vouched for may
+    # appear in it (KUNLUNXIN_FLAGGEMS_MEASURED, read by
+    # codegen_kunlunxin_flaggems.py). It is empty today, which is why
+    # backends_kunlunxin.conf routes nothing to `flaggems` and why this entry
+    # changes no route -- the file exists so the follow-up that measures an op
+    # has one value to edit instead of a registration path to invent.
+    #
+    # The blocker the earlier version of this comment recorded -- the SDK's torch
+    # shim naming the FlagGems runtime device something other than torch_fl's
+    # "flagos", so every guarded kernel falls through -- is a real defect and is
+    # still unremediated for this vendor: patch_flaggems_device_name's
+    # _ALIGNED_VENDORS (torch_fl/accelerator/nvidia/_cuda_compat.py) lists nvidia
+    # and hygon only. Naming the device right is a prerequisite of the first
+    # measured op, not of this file.
+    "kunlunxin": (
+        "backends/kunlunxin/generated/kunlunxin_register.inc",
+        ("backends/kunlunxin/generated/kunlunxin_flaggems_register.inc",),
+    ),
     # Apple Silicon (Metal). Like kunlunxin this is a native backend with a
     # single registration .inc and no FlagGems file to fold in: no Metal
     # FlagTree/Triton line exists, so backends_apple.conf routes the ops
@@ -2636,7 +2650,21 @@ NATIVE_TRITON_GAPS = {
 # native set holds exactly the ops codegen_cambricon.py emits, so this prefers
 # `cambricon` for those and leaves every other op on the FlagGems path it
 # already had.
-NATIVE_KERNEL_PREFERRED = {"iluvatar", "cambricon"}
+#
+# Kunlunxin joins for the opposite reason to the other two: not because FlagGems
+# is known to fail there, but because nothing about it has been measured yet. Its
+# 57 native ops are the xdnn_pytorch kernels this platform already routes and its
+# CI lane already exercises, so they are the one cohort on the chip with evidence
+# behind it; FlagGems' coverage of those same ops is untested on the P800. Without
+# this entry, adding kunlunxin to FLAGGEMS_PYTHON_PLATFORMS would hand 22 of those
+# working ops to an unmeasured FlagGems kernel in one silent step (measured by
+# running the generator with the gate opened: neg, where.self, mm, bmm, cat,
+# embedding, _softmax, sum.dim_IntList, add.Tensor and the RNG family). With it,
+# the native route keeps them and only an op a survey actually vouches for moves
+# over, through NATIVE_FLAGGEMS_MEASURED -- which outranks this entry by
+# construction. A no-op while that set is empty, which is the point: the plumbing
+# lands ahead of the measurement instead of pre-empting it.
+NATIVE_KERNEL_PREFERRED = {"iluvatar", "cambricon", "kunlunxin"}
 
 # Platforms whose build can compile the TileOPs slot (Backend::kTileOps). The
 # shims are Triton kernels needing an SM90 device plus the `tileops` package, and
@@ -2900,23 +2928,40 @@ SOFT_LOWP_CLAIMED_OPS = {
 # discharge -- for a platform whose routes are read from VENDORS rather than
 # BOXING_PLATFORMS.
 #
-# Kunlunxin is empty, and stays empty until a FlagGems build exists for this
-# SDK at all. The reason is not "not measured yet" but "not measurable today":
-# the vendor torch shim on this SDK answers torch.cuda for flag_gems' runtime
-# device probe while the tensors dispatch on PrivateUse1, so every FlagGems
-# Python route dies at its first op regardless of what a conf claims, and no
-# FlagGems liboperators.so exists for the XPU SDK either (see
-# FLAGGEMS_CPP_PLATFORMS). Both are stated on the vendor side of the fleet
-# already -- see torch_fl/accelerator/nvidia/_cuda_compat.py's _ALIGNED_VENDORS
-# and the platform table's FLAGOS_BUILD_FLAGGEMS_CPP pin.
+# Kunlunxin is empty because its 640-op FlagGems cohort has not been surveyed on
+# the P800 yet. The stack to run it exists and is what the lane installs:
+# FlagTree 0.7.0+xpu3.6 carries the `xpu` Triton backend
+# (.github/scripts/hooks/set_env_kunlunxin.sh asserts `"xpu" in
+# triton.backends.backends`), FlagGems 5.4.0 comes from the
+# flagos-pypi-kunlunxin lane, and the build already defines
+# FLAGOS_FLAGGEMS_PYTHON for this platform. So this is a measurement gap, not the
+# "not measurable today" the previous version of this comment recorded.
 #
-# Spelled out rather than left implicit so the extension point is obvious when
-# that changes: adding an op here routes it to `flaggems` in
-# backends_kunlunxin.conf even though kunlunxin is not in
-# FLAGGEMS_PYTHON_PLATFORMS, which is exactly the "route on measured evidence,
-# not on the shared ceiling" contract the other measured sets follow. The op
-# must also gain an m.impl() line in kunlunxin_register.inc (regenerate with
-# scripts/codegen/codegen_kunlunxin.py), or the route names an empty slot.
+# Two hardware facts still gate the first entry, and both need the chip:
+#
+#   * the device name. patch_flaggems_device_name's _ALIGNED_VENDORS
+#     (torch_fl/accelerator/nvidia/_cuda_compat.py) realigns nvidia and hygon
+#     only, and FlagGems decides per op by comparing the operand's device type
+#     against its own backend's device string. If the XPU descriptor's name is
+#     not torch_fl's "flagos", every guarded module falls through and a route
+#     here buys nothing. Which name it is has to be read off the installed
+#     flag_gems on the box, not assumed;
+#   * the survey. tests/manual/flaggems_overload_survey.py over
+#     backends_kunlunxin.conf, per docs/vendors/kunlunxin/installation.md.
+#
+# Adding an op here is the whole promotion, and it is deliberately the only edit:
+# it routes the op to `flaggems` in backends_kunlunxin.conf (through the
+# intersection in build_all, which reads flaggems_python_ops_for rather than the
+# platform-gated set) AND puts the m.impl() line in
+# kunlunxin_flaggems_register.inc (codegen_kunlunxin_flaggems.py reads this same
+# value), so the conf and the registration cannot drift. The op must also be in
+# the shared FlagGems ceiling -- an op dropped from it cannot linger here.
+#
+# NOTE: this set did nothing at all before 2026-11, for exactly one vendor: the
+# build_all intersection ran against fg_py_here, which is empty for a vendor
+# outside FLAGGEMS_PYTHON_PLATFORMS, so every measured op was ANDed away. See the
+# comment there. Kunlunxin was that vendor, so the extension point this comment
+# advertised was a silent no-op.
 KUNLUNXIN_FLAGGEMS_MEASURED = set()
 
 NATIVE_FLAGGEMS_MEASURED = {
@@ -3279,6 +3324,25 @@ def boxing_measured_python_ops(filename: str) -> set:
         platform = _platform_from_conf(filename)
         return DCU_COMPOSITE_FLAGGEMS | SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
     return set()
+
+
+def native_measured_python_ops(vendor: str) -> set:
+    """FlagGems Python ops a native-kernel vendor routes on measured evidence.
+
+    The native twin of ``boxing_measured_python_ops``, and the reason it exists
+    as a function rather than an expression inside ``build_all``: the two halves
+    of that row are easy to get wrong in opposite directions.
+
+    The op must be inside the vendor's own FlagGems ceiling -- an op dropped from
+    ``FLAGGEMS_PYTHON_OPS`` cannot linger on a measured route, the same guard
+    ``boxing_cpp_ops`` applies. It must NOT additionally be gated on
+    ``FLAGGEMS_PYTHON_PLATFORMS``: that set says "this vendor's whole cohort has
+    been measured", and this one says "these ops have". Intersecting against the
+    platform-gated coverage set instead made the row a silent no-op for the one
+    vendor that is outside the platform set but has a measured escape hatch --
+    kunlunxin -- so adding an op there changed nothing and looked like success.
+    """
+    return NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & flaggems_python_ops_for(vendor)
 
 
 def boxing_to_none_notes(notes) -> tuple:
@@ -3659,10 +3723,10 @@ def build_all(conf_dir: Path) -> dict:
             py_here = py_here - natives[vendor]
         # A measured FlagGems route this vendor owns beyond the shared ceiling
         # outranks both holds above -- it is a hardware measurement, and the
-        # holds are heuristics about cohorts. See NATIVE_FLAGGEMS_MEASURED.
-        # Intersected with fg_py so an op dropped from the FlagGems set cannot
-        # linger here, the same guard boxing_cpp_ops() applies.
-        py_here |= NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & fg_py_here
+        # holds are heuristics about cohorts. See NATIVE_FLAGGEMS_MEASURED and
+        # native_measured_python_ops(), which bounds it by the ceiling rather
+        # than by the platform-gated coverage set.
+        py_here |= native_measured_python_ops(vendor)
         tileops_here = tileops if vendor in TILEOPS_PLATFORMS else set()
         routes = {
             op: route(

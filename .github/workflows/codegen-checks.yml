@@ -98,6 +98,13 @@ jobs:
           # the CPU torch installed above.
           echo "=== codegen_kunlunxin.py --check ==="
           python3 scripts/codegen/codegen_kunlunxin.py --check
+          # The FlagGems half of Kunlunxin's PrivateUse1 surface. Registers the
+          # ops in KUNLUNXIN_FLAGGEMS_MEASURED (empty until the P800 survey
+          # lands), so --check normally just proves the header is current. Reads
+          # only committed sources plus the shared generated/register.inc, so it
+          # needs no vendor toolkit -- only the torchgen from the CPU torch above.
+          echo "=== codegen_kunlunxin_flaggems.py --check ==="
+          python3 scripts/codegen/codegen_kunlunxin_flaggems.py --check
           # Same contract as kunlunxin: reads the shared generated/register.inc
           # plus the committed iluvatar_flaggems_register.inc and its own op
           # table, writes iluvatar_kernels.cc / iluvatar_register.inc. No vendor
@@ -115,8 +122,15 @@ jobs:
       - name: Run conf/registration consistency tests
         run: |
           set -euo pipefail
+          # test_kunlunxin_flaggems_compat.py sits here rather than in
+          # agnostic-checks.yml, whose file list is explicit: it is a
+          # source-level contract on the FlagGems registration path and the
+          # kunlunxin shim, so it belongs with the other files that pin what
+          # codegen emits. It reads only committed sources -- no torch, no XPU,
+          # no built wheel.
           python3 -m pytest \
             tests/unit/test_conf_registration_consistency.py \
+            tests/unit/test_kunlunxin_flaggems_compat.py \
             -v --tb=short -p no:cacheprovider
 
       - name: Run FlagGems conf/codegen consistency tests

@@ -18,7 +18,7 @@ when a platform gains or loses one.
 | `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_thead/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2042 | yes |
 | `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2042 | yes |
 | `hygon` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `nvidia` (+ `hygon` DTK-core shim) | — (FlagGems / boxing opt-in) | `hygon` | 2042 | yes |
-| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | — (no dir) | 2042 | yes |
+| `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | `kunlunxin` (FlagGems shim only) | 2042 | yes |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2042 | yes |
 | `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2042 | yes |
 | `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2042 | yes |
@@ -139,11 +139,18 @@ build opts into boxing.
   `lib/flagos_platform` marker (it uses the `lib_thead/` bundle).
 - **Kunlunxin** (Kunlun P800 XPU) is a native vendor backend: its
   `backends_kunlunxin.conf` routes ops to the `kunlunxin` key (the vendor xdnn
-  op library) and leaves the rest at `none`, with **no `cuda` boxing route**. It
-  has no `torch_fl/accelerator/` module. Its FlagGems cohort has
+  op library) and leaves the rest at `none`, with **no `cuda` boxing route**. Its
+  `torch_fl/accelerator/kunlunxin/` module is FlagGems glue only — a device-name
+  realignment and a `torch.cuda` shim, no operator kernels. Its FlagGems cohort has
   not been revalidated on the P800, so no `flaggems` route is enabled yet and the
-  platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`; the allowlist is a
-  follow-up.
+  platform is absent from `FLAGGEMS_PYTHON_PLATFORMS`. The registration path
+  exists and is empty — `kunlunxin_flaggems_register.inc`, generated from
+  `KUNLUNXIN_FLAGGEMS_MEASURED` — so promoting an op is one value plus two
+  generator runs, and it moves the conf and the `m.impl()` line together. The
+  runtime half lives in `torch_fl/accelerator/kunlunxin/_klx_compat.py`: the
+  device-name realignment plus the `torch.cuda` shim a CPU-torch FlagGems build
+  needs (verified on a P800 — 22 of 22 elementwise and reduction ops matched a CPU
+  reference). The measurement itself is still the gate: no P800 survey has run.
 - **Iluvatar** (BI-V150 / Tianshu, corex 4.5.0) is FlagGems-primary with a
   native, non-boxing vendor slot alongside it. Boxing with the CUDA kernels was
   explicitly ruled out; instead the ops FlagGems does not cover route to
@@ -199,4 +206,4 @@ against `os.listdir` by `tests/unit/test_platform_capability_matrix.py`.
 
 - `csrc/runtime/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro
 - `csrc/aten/backends/`: apple, ascend, bpu, cambricon, enflame, flagos, iluvatar, kunlunxin, mthreads, soft_lowp, tsingmicro
-- `torch_fl/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, metax, mthreads, nvidia, thead, tsingmicro
+- `torch_fl/accelerator/`: apple, ascend, bpu, cambricon, enflame, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, thead, tsingmicro

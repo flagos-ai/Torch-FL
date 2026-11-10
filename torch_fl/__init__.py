@@ -1216,6 +1216,29 @@ def _patch_flaggems_codegen_config():
     # only labels the vendor and returns before any shim runs.
     if _build_accelerator() == "kunlunxin":
         _env.set_foreign("GEMS_VENDOR", "kunlunxin")
+        # ... and install the shim this platform's own FlagGems routes need.
+        # See torch_fl/accelerator/kunlunxin/_klx_compat.py for what each piece
+        # removes; both were measured on a P800. This is deliberately NOT the
+        # generic-NVIDIA shim the comment above rejects -- that one installs
+        # CUDA-backed generators, which this CPU wheel cannot construct. This
+        # one forwards the handful of torch.cuda entry points FlagGems calls to
+        # torch.flagos, and leaves the generators alone, so the native
+        # PrivateUse1 RNG stays in place.
+        from torch_fl.accelerator.kunlunxin._klx_compat import (
+            install_klx_cuda_shim,
+            patch_klx_flag_gems_device_name,
+        )
+
+        install_klx_cuda_shim()
+        try:
+            import flag_gems  # noqa: F401
+        except Exception:
+            pass
+        else:
+            try:
+                patch_klx_flag_gems_device_name()
+            except Exception:
+                pass
         return
 
     # --- MetaX branch (boxing + FlagGems) ---
