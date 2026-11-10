@@ -255,9 +255,12 @@ VENDORS = {
 # unchanged. register.cc publishes add_/div_: add_ through ATen's own add_out,
 # div_ through a host round trip (ATen's complex div writes its destination
 # before it reads its sources, so it is wrong when the destination is the
-# operand). `add.Tensor` and `add.Scalar` are in NATIVE_TRITON_GAPS but
-# not here: they take the out-of-place -> in-place lowering to the same kernel,
-# and an out= m.impl cannot be registered under the add.Tensor schema.
+# operand). `add.Tensor` and `add.Scalar` are neither here nor gapped any more:
+# they are routed to `flaggems`, and the complex operand that route cannot take
+# leaves it through the runtime dtype escape, which lands in a kIluvatar slot
+# register.cc fills with an out-of-place host round trip (an out= m.impl cannot
+# be registered under the add.Tensor schema). A slot is not a route, so the
+# generator has nothing to name for them here.
 EXTRA_NATIVE = {
     "ascend": {"matmul", "matmul_backward"},
     "iluvatar": {
@@ -2505,13 +2508,32 @@ NATIVE_TRITON_GAPS = {
         # The conf routes these three to the native slot instead, where
         # register.cc publishes ATen's own add_/div_ (see EXTRA_NATIVE).
         #
-        # Only the in-place spellings are routed. `add.Tensor` and
-        # `add.Scalar` ride the out-of-place -> in-place lowering: with the
-        # in-place op on a PrivateUse1 kernel, ATen's `add` composite
-        # dispatches `z + t`, `z + 0` and `z + 1` to the in-place slot, so
-        # they leave FlagGems without a second registration (and cannot have
-        # one: an out= kernel does not match add.Tensor's C++ signature, and
-        # the register.cc comment records the abort that measured it).
+        # Only the in-place spellings are gapped here. `add.Tensor` was gapped
+        # for a different reason than the complex defect -- the route it took
+        # -- and it left this set on 2026-11-10:
+        #
+        # `add.Tensor` used to ride the out-of-place -> in-place lowering,
+        # which reaches register.cc's add_ and then `at::add_out`, whose own
+        # route is `none`. That is a CPU crossing per call, and it is the
+        # single largest routing cost left in issue #667's model: 545 calls per
+        # forward, measured 2757.9 -> 2369.4 ms (mean of two interleaved
+        # 12-sample runs each, --reps 4, BI-V150, torch 2.10.0+cpu, FlagGems
+        # 5.4.0) when it was served from FlagGems instead. It is therefore
+        # routed to `flaggems` now.
+        #
+        # What made that possible without shipping FlagGems' complex defect is
+        # the runtime dtype escape: FlagGems' complex `add` returns zeros for
+        # complex128, and `FlagGemsRejectsDtype` now has a USE_ILUVATAR arm that
+        # sends a complex operand to the kIluvatar slot, where register.cc
+        # publishes an out-of-place host round trip. The escape is a runtime
+        # predicate, so it does not need the op to be gapped, and the in-place
+        # spellings keep their unconditional native kernel below.
+        #
+        # `add.Scalar` is not listed here: FlagGems 5.4.0 has no kernel for
+        # that overload, so it is uncovered rather than gapped and its route
+        # stays `none` -- the escape never sees it, because the escape only
+        # fires on a `flaggems` route. Wiring it is a FlagGems-side change.
+        #
         # The in-place pair also fixes a defect of its own: a `none` route
         # made `self.add_(other)` a boxed cpu_fallback that wrote to a CPU
         # copy and left `self` unchanged (measured on u180 2026-10-21).
@@ -2520,8 +2542,6 @@ NATIVE_TRITON_GAPS = {
         # before it reads its sources, so `x.div_(y)` -- which hands it the
         # operand itself -- came back as the unchanged operand for complex128
         # and as zeros for complex64 (measured on u180 2026-10-21).
-        "add.Tensor",
-        "add.Scalar",
         "add_.Tensor",
         "add_.Scalar",
         "div_.Tensor",

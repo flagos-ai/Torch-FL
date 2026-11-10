@@ -209,7 +209,12 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # 582 since `mean` joined: the whole-tensor reduction re-measures clean on
     # u180 after the #570 gap. `mean.dim` stays on `none` -- its FlagGems
     # kernel returns NaN for a non-inner dimension ((8, 12), dim=0).
-    "iluvatar": 582,
+    #
+    # 583 since `add.Tensor` joined (PR #808): it was gapped only because
+    # FlagGems' complex `add` is wrong on this chip, which `FlagGemsRejectsDtype`
+    # now expresses at run time instead. `add.Scalar` stays on `none` -- FlagGems
+    # 5.4.0 ships no kernel for that overload.
+    "iluvatar": 583,
     # 256: two screens on a P800. The whole 618-op cohort first, at one profile
     # with the survey's default tolerance; then every survivor over ten profiles
     # (the survey's seven plus 13x7, 3x5x7 and 64x3) compared at atol=rtol=1e-4,

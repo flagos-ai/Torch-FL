@@ -601,6 +601,22 @@ bool FlagGemsRejectsDtype(at::ScalarType dtype) {
   // exists, so an op outside this intersection keeps its own outcome (loud
   // failure) rather than changing route.
   return dtype == at::kComplexFloat || dtype == at::kComplexDouble;
+#elif defined(USE_ILUVATAR)
+  // FlagGems' complex elementwise path is wrong here: `add` returns zeros for
+  // complex128, and `div` raises for complex64 (flag_gems/ops/add.py decomposes
+  // both operands with `view_as_real` and then runs its own kernel). The
+  // in-place spellings are handled by the conf, which routes them straight to
+  // the native kernels; the out-of-place `add.Tensor`/`add.Scalar` are routed
+  // to FlagGems because that is what the platform's callers need -- 545 calls
+  // per forward of issue #667's model, measured 2757.9 -> 2369.4 ms when the
+  // route moved -- so their complex operands have to leave the route at run
+  // time instead.
+  //
+  // ResolveFn returns the FlagGems route unchanged when the dispatcher has no
+  // kIluvatar slot, which today is every op except the add pair: register.cc's
+  // USE_ILUVATAR arm publishes an out-of-place host round trip for exactly
+  // those two. Nothing else changes route.
+  return c10::isComplexType(dtype);
 #elif defined(USE_ASCEND)
   // FlagTree cannot instantiate general complex kernels. The generated
   // native route decomposes supported complex operations into real kernels.
