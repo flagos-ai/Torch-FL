@@ -172,14 +172,20 @@ inline bool FusedAttentionAvailable() {
 //     bfloat16 was measured on a BI-V150, and dtype breadth is the kind of
 //     claim that has to be measured per dtype (see the per-op dtype gates in
 //     the generated kernels).
-//   * head_dim 64 or 128: the dispatcher has branches for 64, 96, 128, 160,
-//     192 and 256, but 64 and 128 are the ones Qwen-family models use and the
-//     ones measured here.
-//   * equal source and target lengths, equal head counts: the API takes them
-//     separately (and the descriptor carries the key/value length), but
-//     cross-attention and grouped-query attention were not measured.
+//   * head_dim 64, 128 or 256: the dispatcher has branches for 64, 96, 128,
+//     160, 192 and 256; 64 and 128 were measured on a BI-V150 first, and 256
+//     was added for the Qwen3.5-VL text decoder and measured the same way.
+//   * equal source and target lengths: the API takes them separately (and the
+//     descriptor carries the key/value length), but cross-attention was not
+//     measured.
+//   * grouped-query attention (an integer query/key head ratio) is supported:
+//     the API takes the two head counts separately, which is what it is for.
 //   * no dropout and no mask: the mask descriptor path exists and is not
 //     measured, so a masked call keeps the composite.
+//
+// Contiguity is not part of the contract: the caller copies if needed. HF's
+// vision tower hands SDPA a transposed view, and an 0.8 ms copy ahead of a
+// 0.06 ms kernel beats the 25 ms math path it would otherwise take.
 inline bool FusedAttentionEligible(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -189,7 +195,7 @@ inline bool FusedAttentionEligible(
     bool /*is_causal*/,
     std::optional<double> /*scale*/,
     bool enable_gqa) {
-  if (dropout_p != 0.0 || attn_mask.has_value() || enable_gqa) {
+  if (dropout_p != 0.0 || attn_mask.has_value()) {
     return false;
   }
   if (!FusedAttentionAvailable()) {
@@ -203,18 +209,25 @@ inline bool FusedAttentionEligible(
       value.scalar_type() != dtype) {
     return false;
   }
-  if (!query.is_contiguous() || !key.is_contiguous() ||
-      !value.is_contiguous()) {
+  const auto head_dim = query.size(3);
+  if (head_dim != 64 && head_dim != 128 && head_dim != 256) {
     return false;
   }
-  const auto head_dim = query.size(3);
-  if (head_dim != 64 && head_dim != 128) {
+  const auto q_heads = query.size(1);
+  const auto kv_heads = key.size(1);
+  if (value.size(1) != kv_heads || kv_heads <= 0) {
+    return false;
+  }
+  // Grouped-query attention, or plain MHA when the counts are equal.
+  if (q_heads % kv_heads != 0) {
+    return false;
+  }
+  if (!enable_gqa && q_heads != kv_heads) {
     return false;
   }
   return query.size(0) == key.size(0) && query.size(0) == value.size(0) &&
       query.size(2) == key.size(2) && query.size(2) == value.size(2) &&
-      key.size(3) == head_dim && value.size(3) == head_dim &&
-      key.size(1) == value.size(1) && query.size(1) == key.size(1);
+      key.size(3) == head_dim && value.size(3) == head_dim;
 }
 
 // Run the vendor's fused forward and return a flagos tensor.
@@ -240,27 +253,35 @@ inline at::Tensor FusedAttention(
   // are the tensor's own: heads live on size(1), the sequence on size(2).
   const int64_t batch = query.size(0);
   const int64_t heads = query.size(1);
+  const int64_t kv_heads = key.size(1);
   const int64_t seq = query.size(2);
   const int64_t head_dim = query.size(3);
+
+  // The kernel reads plain buffers; a transposed view (which is what HF's
+  // vision tower passes) gets one contiguous copy here rather than the
+  // composite's N x N math path.
+  const at::Tensor q = query.is_contiguous() ? query : query.contiguous();
+  const at::Tensor k = key.is_contiguous() ? key : key.contiguous();
+  const at::Tensor v = value.is_contiguous() ? value : value.contiguous();
 
   // Open the guard before allocating: at::empty resolves the device from the
   // current one, and the vendor library resolves pointers against the current
   // corex device.
-  IluvatarDeviceGuard guard(query);
+  IluvatarDeviceGuard guard(q);
   int device = 0;
   if (cudaGetDevice(&device) != cudaSuccess) {
-    device = IluvatarDeviceIndex(query);
+    device = IluvatarDeviceIndex(q);
   }
 
-  at::Tensor out = at::empty_like(query);
+  at::Tensor out = at::empty_like(q);
   at::Tensor lse = at::empty(
-      {batch, heads, seq}, query.options().dtype(at::kFloat));
+      {batch, heads, seq}, q.options().dtype(at::kFloat));
 
   size_t workspace_bytes = 0;
   const auto buff_status = api.buff_size(
       static_cast<uint32_t>(batch),
       static_cast<uint32_t>(heads),
-      static_cast<uint32_t>(heads),
+      static_cast<uint32_t>(kv_heads),
       static_cast<uint32_t>(seq),
       static_cast<uint32_t>(seq),
       static_cast<uint32_t>(head_dim),
@@ -286,9 +307,9 @@ inline at::Tensor FusedAttention(
   mask_desc.n_dims = 0;
   mask_desc.dataType = IXATTNBKD_DATA_BF16;
 
-  const ixAttnBkdTensorDesc q_desc = BshdDesc(query);
-  const ixAttnBkdTensorDesc k_desc = BshdDesc(key);
-  const ixAttnBkdTensorDesc v_desc = BshdDesc(value);
+  const ixAttnBkdTensorDesc q_desc = BshdDesc(q);
+  const ixAttnBkdTensorDesc k_desc = BshdDesc(k);
+  const ixAttnBkdTensorDesc v_desc = BshdDesc(v);
   const ixAttnBkdTensorDesc o_desc = BshdDesc(out);
   const ixAttnBkdTensorDesc lse_desc = MakeDesc(
       {static_cast<size_t>(batch),
@@ -325,9 +346,9 @@ inline at::Tensor FusedAttention(
       mask_desc,
       o_desc,
       lse_desc,
-      query.const_data_ptr(),
-      key.const_data_ptr(),
-      value.const_data_ptr(),
+      q.const_data_ptr(),
+      k.const_data_ptr(),
+      v.const_data_ptr(),
       nullptr, // mask
       nullptr, // loWinIdx
       nullptr, // hiWinIdx
