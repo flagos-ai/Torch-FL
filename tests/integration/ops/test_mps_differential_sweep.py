@@ -462,6 +462,351 @@ def _cases():
         )
     )
 
+    # --- the rest of the routed list ---------------------------------------
+    # These ops are routed but had no case here, so the one layer that compares
+    # every routed spelling against the reference did not reach them. A dedicated
+    # file usually covers what its author thought of; this covers the same op
+    # against the same reference on the same operand, which is what caught the
+    # three silent defects in this backend so far.
+    unary = (
+        "neg",
+        "abs",
+        "sign",
+        "signbit",
+        "reciprocal",
+        "rsqrt",
+        "trunc",
+        "ceil",
+        "floor",
+        "round",
+        "frac",
+        "logical_not",
+        "isnan",
+        "isinf",
+        "isposinf",
+        "isneginf",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "sinh",
+        "cosh",
+        "tanh",
+        "asinh",
+        "acosh",
+        "atanh",
+        "erf",
+        "exp2",
+        "log2",
+        "log10",
+        "expm1",
+        "log1p",
+        "square",
+        "conj",
+        "sgn",
+    )
+    for name in unary:
+        fn = getattr(torch, name, None)
+        if fn is None:
+            continue
+        # `_positive` keeps log/sqrt/rsqrt in their domain; the ops that need
+        # negatives (sign, signbit, abs, neg, trig) are unaffected by the shift.
+        cases.append((f"{name}", lambda dev, fn=fn: fn(_positive(dev, (3, 4)))))
+        cases.append(
+            (
+                f"{name}-neg",
+                lambda dev, fn=fn: fn(_positive(dev, (3, 4), offset=-1.6)),
+            )
+        )
+
+    # Scalar spellings: aten routes these separately from the tensor ones.
+    for name, value in (
+        ("add", 2.5),
+        ("sub", 0.5),
+        ("mul", 1.5),
+        ("div", 2.0),
+        ("rsub", 1.5),
+        ("pow", 2.0),
+        ("remainder", 1.5),
+        ("fmod", 1.5),
+        ("eq", 1.0),
+        ("ne", 1.0),
+        ("lt", 1.0),
+        ("le", 1.0),
+        ("gt", 1.0),
+        ("ge", 1.0),
+    ):
+        fn = getattr(torch, name.replace("rsub", "rsub"), None)
+        if fn is None:
+            continue
+        if name == "rsub":
+            cases.append(("rsub.Scalar", lambda dev: torch.rsub(_seeded(dev), 1.5)))
+            continue
+        cases.append(
+            (
+                f"{name}.Scalar",
+                lambda dev, fn=fn, value=value: fn(_seeded(dev), value),
+            )
+        )
+
+    # Shape-only ops: the answer is the same tensor, but the routing and the
+    # stride bookkeeping are theirs.
+    for name, fn in (
+        ("t", lambda t: t.t()),
+        ("transpose", lambda t: t.transpose(0, 1)),
+        ("squeeze", lambda t: t.unsqueeze(0).squeeze()),
+        ("squeeze.dim", lambda t: t.unsqueeze(0).squeeze(0)),
+        ("unsqueeze", lambda t: t.unsqueeze(1)),
+        ("flatten", lambda t: t.flatten(1)),
+        ("reshape", lambda t: t.reshape(-1)),
+        ("contiguous", lambda t: t.t().contiguous()),
+    ):
+        cases.append((f"{name}-shape", lambda dev, fn=fn: fn(_seeded(dev))))
+
+    # Indexing and gathering.
+    cases.append(("select", lambda dev: _seeded(dev).select(1, 2)))
+    cases.append(("slice", lambda dev: _seeded(dev, (6, 8))[1:5:2, ::3]))
+    cases.append(
+        (
+            "take",
+            lambda dev: torch.take(
+                _seeded(dev), torch.tensor([0, 3, 7, 11], device=dev)
+            ),
+        )
+    )
+    cases.append(
+        (
+            "gather",
+            lambda dev: torch.gather(
+                _seeded(dev, (4, 6)),
+                1,
+                torch.tensor([[0, 1, 2], [3, 4, 5], [0, 0, 0], [5, 4, 3]], device=dev),
+            ),
+        )
+    )
+    cases.append(
+        (
+            "index_select",
+            lambda dev: torch.index_select(
+                _seeded(dev, (6, 4)), 0, torch.tensor([0, 2, 5], device=dev)
+            ),
+        )
+    )
+    cases.append(
+        (
+            "index.Tensor",
+            lambda dev: _seeded(dev, (5, 4))[torch.tensor([1, 3], device=dev)],
+        )
+    )
+    cases.append(
+        (
+            "masked_fill.Tensor",
+            lambda dev: _seeded(dev).masked_fill(
+                _seeded(dev) > 2.5, torch.tensor(9.0, device=dev)
+            ),
+        )
+    )
+
+    # Concat and the normalisations.
+    cases.append(
+        ("cat", lambda dev: torch.cat([_seeded(dev), _seeded(dev, offset=3.0)], 1))
+    )
+    cases.append(
+        (
+            "cat-dim0",
+            lambda dev: torch.cat([_seeded(dev, (2, 3)), _seeded(dev, (4, 3))], 0),
+        )
+    )
+    cases.append(
+        (
+            "embedding",
+            lambda dev: torch.nn.functional.embedding(
+                torch.tensor([[0, 2], [1, 3]], device=dev),
+                _seeded(dev, (5, 7)),
+            ),
+        )
+    )
+    cases.append(
+        (
+            "native_layer_norm",
+            lambda dev: torch.native_layer_norm(
+                _seeded(dev, (3, 4, 8)), (8,), None, None, 1e-5
+            ),
+        )
+    )
+    # `native_batch_norm` without running statistics in evaluation mode is not a
+    # call the reference accepts: on this PyTorch build it segfaults inside the CPU
+    # kernel itself (`F.batch_norm` validates first and raises). The buffers are
+    # supplied so the case exercises the served inference node rather than an
+    # illegal call.
+    cases.append(
+        (
+            "native_batch_norm",
+            lambda dev: torch.native_batch_norm(
+                _seeded(dev, (2, 3, 4, 4)),
+                None,
+                None,
+                torch.zeros(3, device=dev),
+                torch.ones(3, device=dev),
+                False,
+                0.1,
+                1e-5,
+            ),
+        )
+    )
+    cases.append(
+        (
+            "conv2d",
+            lambda dev: torch.nn.functional.conv2d(
+                _seeded(dev, (1, 3, 8, 8)),
+                _seeded(dev, (4, 3, 3, 3), offset=-0.1),
+                padding=1,
+            ),
+        )
+    )
+
+    # The factories and the two remaining reductions the earlier blocks miss.
+    cases.append(("linspace", lambda dev: torch.linspace(0.0, 1.0, 9, device=dev)))
+    cases.append(
+        (
+            "linspace-tensors",
+            lambda dev: torch.linspace(
+                torch.tensor(0.0, device=dev), torch.tensor(1.0, device=dev), 7
+            ),
+        )
+    )
+    cases.append(
+        (
+            "arange",
+            lambda dev: torch.arange(0, 12, dtype=torch.float32, device=dev),
+        )
+    )
+    cases.append(
+        (
+            "arange-step",
+            lambda dev: torch.arange(1.0, 5.0, 0.5, dtype=torch.float32, device=dev),
+        )
+    )
+    cases.append(
+        (
+            "solve_triangular",
+            lambda dev: torch.linalg.solve_triangular(
+                torch.triu(_seeded(dev, (5, 5))) + torch.eye(5, device=dev) * 2.0,
+                _seeded(dev, (5, 3)),
+                upper=True,
+            ),
+        )
+    )
+
+    # The activations with their own selectors, their backward, and the two
+    # convolution spellings -- the last of these is what makes a conv model
+    # trainable, so a silent difference there is worth catching.
+    for name, extra in (("elu", -1.0), ("leaky_relu", 0.1), ("softplus", None)):
+        fn = getattr(torch.nn.functional, name)
+        # `elu`/`leaky_relu` take a slope, `softplus` does not.
+        call = (
+            (lambda t, fn=fn: fn(t))
+            if extra is None
+            else (lambda t, fn=fn, extra=extra: fn(t, extra))
+        )
+        cases.append((f"{name}-act", lambda dev, c=call: c(_positive(dev, (3, 4)))))
+        cases.append(
+            (
+                f"{name}-act-neg",
+                lambda dev, c=call: c(_positive(dev, (3, 4), offset=-1.6)),
+            )
+        )
+
+    cases.append(
+        (
+            "silu_backward",
+            lambda dev: torch.ops.aten.silu_backward(
+                _seeded(dev), _positive(dev, offset=-0.5)
+            ),
+        )
+    )
+
+    # `convolution_overrideable` is the spelling aten routes a conv to, and
+    # `convolution_backward_overrideable` its gradient.
+    cases.append(
+        (
+            "conv1d",
+            lambda dev: torch.nn.functional.conv1d(
+                _seeded(dev, (1, 2, 9)),
+                _seeded(dev, (3, 2, 3), offset=-0.1),
+                padding=1,
+            ),
+        )
+    )
+    for rank in (1, 2):
+        cases.append(
+            (
+                f"conv{rank + 1}d-stride",
+                lambda dev, rank=rank: (
+                    torch.nn.functional.conv2d
+                    if rank == 2
+                    else torch.nn.functional.conv1d
+                )(
+                    _seeded(dev, (1, 2, 8, 8) if rank == 2 else (1, 2, 8)),
+                    _seeded(dev, (3, 2, 3, 3) if rank == 2 else (3, 2, 3), offset=-0.1),
+                    stride=2,
+                    padding=1,
+                ),
+            )
+        )
+    cases.append(
+        (
+            "conv2d-groups",
+            lambda dev: torch.nn.functional.conv2d(
+                _seeded(dev, (1, 4, 6, 6)),
+                _seeded(dev, (2, 2, 3, 3), offset=-0.1),
+                padding=1,
+                groups=2,
+            ),
+        )
+    )
+
+    # The triangles, with the diagonal that shifts them -- the parameter a plan
+    # key once failed to include, which is why more than one diagonal is here.
+    for name in ("triu", "tril"):
+        fn = getattr(torch, name)
+        for diagonal in (-2, -1, 0, 1, 2):
+            cases.append(
+                (
+                    f"{name}-d{diagonal}",
+                    lambda dev, fn=fn, diagonal=diagonal: fn(
+                        _seeded(dev, (5, 6)), diagonal
+                    ),
+                )
+            )
+        cases.append(
+            (
+                f"{name}-rank3",
+                lambda dev, fn=fn: fn(_seeded(dev, (2, 4, 4))),
+            )
+        )
+
+    # The backward of the convolution, which is what makes a conv model trainable.
+    cases.append(
+        (
+            "conv_backward",
+            lambda dev: torch.ops.aten.convolution_backward(
+                _seeded(dev, (1, 3, 6, 6)),
+                _seeded(dev, (1, 2, 6, 6)),
+                _seeded(dev, (2, 3, 3, 3), offset=-0.1),
+                [1, 3, 6, 6],
+                [0, 0],
+                [1, 1],
+                False,
+                [0, 0],
+                1,
+                [True, True, False],
+            ),
+        )
+    )
+
     return cases
 
 
@@ -541,19 +886,17 @@ def test_a_routed_op_matches_the_cpu_reference(label, builder):
     reference = builder(torch.device("cpu"))
     got = builder(DEVICE)
 
-    # `max.dim`/`min.dim` answer a (values, indices) pair; every other case is a
-    # single tensor. Each half is compared with the rule its own dtype calls for,
-    # and the halves are checked against each other as well -- a pair whose
-    # index does not address its own value is worse than a wrong value.
+    # A several-result op -- `max.dim`'s (values, indices) pair, `native_layer_norm`'s
+    # (out, mean, rstd) -- is compared result by result. Everything else is a single
+    # tensor.
     if isinstance(reference, tuple):
-        assert isinstance(got, tuple) and len(got) == len(reference), label
-        values, indices = reference
-        got_values, got_indices = got
-        assert got_values.shape == values.shape, (label, got_values.shape)
-        assert got_indices.shape == indices.shape, (label, got_indices.shape)
-        assert got_indices.dtype == indices.dtype, (label, got_indices.dtype)
-        _compare_tensor(label + ".values", got_values, values)
-        assert torch.equal(got_indices.cpu(), indices), (label, "indices")
+        assert isinstance(got, tuple), (label, type(got))
+        assert len(got) == len(reference), (label, len(got), len(reference))
+        for index, (got_part, want) in enumerate(zip(got, reference)):
+            if want is None:
+                assert got_part is None, (label, index, got_part)
+                continue
+            _compare_tensor(f"{label}[{index}]", got_part, want)
         return
 
     _compare_tensor(label, got, reference)
