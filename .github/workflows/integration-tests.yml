@@ -124,6 +124,39 @@ jobs:
           persist-credentials: false
 
       # Discard host leftovers before restoring the managed pip download cache.
+      # TEMPORARY diagnostic: where the ~26 s per-interpreter import goes.
+      - name: Diagnose interpreter startup cost
+        if: needs.configuration.outputs.platform == 'hygon'
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, os, subprocess, sys, time
+
+          def timed(code):
+              start = time.time()
+              done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+              return round(time.time() - start, 2), done
+
+          print("bare interpreter       :", timed("pass")[0])
+          print("import torch    (1st)  :", timed("import torch")[0])
+          print("import torch    (2nd)  :", timed("import torch")[0])
+          print("import torch_fl (2nd)  :", timed("import torch_fl, torch")[0])
+          import torch
+          root = os.path.dirname(torch.__file__)
+          print("site-packages writable :", os.access(root, os.W_OK))
+          print("torch __pycache__ dirs :", len(glob.glob(os.path.join(root, "__pycache__"))))
+          print("torch .py files        :", len(glob.glob(os.path.join(root, "**", "*.py"), recursive=True)))
+          print("torch .pyc files       :", len(glob.glob(os.path.join(root, "**", "*.pyc"), recursive=True)))
+          print("torch size (MB)        :", round(sum(
+              os.path.getsize(os.path.join(d, f))
+              for d, _, fs in os.walk(root) for f in fs) / 1e6, 1))
+          print("PYTHONPYCACHEPREFIX    :", os.environ.get("PYTHONPYCACHEPREFIX", "<unset>"))
+          print("PYTHONDONTWRITEBYTECODE:", os.environ.get("PYTHONDONTWRITEBYTECODE", "<unset>"))
+          PY
+          echo "===== importtime: torch_fl ====="
+          python -X importtime -c "import torch_fl" 2>&1 | sort -t'|' -k2 -n -r | head -18
+
       - name: Reset pip cache dir
         shell: bash
         run: |
