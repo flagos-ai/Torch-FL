@@ -55,6 +55,11 @@ EXTRA_NATIVE = {
         "add_.Tensor",
         "add_.Scalar",
         "div_.Tensor",
+        # Hand-registered by csrc/aten/sdp_choice_stub.cc, which the
+        # ``m.impl`` scan below cannot see: the composite has to be overridden
+        # whole (see the file header), and on this platform the override calls
+        # CoreX's fused libixattnbkd kernel.
+        "scaled_dot_product_attention",
     },
     # The conv pair is claimed straight from register.cc's ``#else`` arm on
     # every platform there, because ATen's only other kernel for these ops

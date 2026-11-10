@@ -281,10 +281,13 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "ascend": "none",
     "dcu": "flaggems",
     "gcu": "none",
-    # The same `none` the other FlagGems-primary non-boxing platforms record:
-    # the composite reaches the privateuseone kernel on every platform, and on
-    # this conf it has no FlagGems route to branch to.
-    "iluvatar": "none",
+    # Iluvatar is the one FlagGems-primary platform that names its own vendor
+    # slot here: csrc/aten/sdp_choice_stub.cc calls CoreX's fused libixattnbkd
+    # kernel when the conf says `iluvatar`, and the shapes/dtypes it was
+    # measured on are gated in backends/iluvatar/fused_attention.h. Every call
+    # outside that class still falls through to the FlagGems/composite path the
+    # other non-boxing platforms record.
+    "iluvatar": "iluvatar",
     "kunlunxin": "none",
     "metax": "flaggems",
     "apple": "none",

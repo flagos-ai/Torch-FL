@@ -101,14 +101,21 @@
 #include "backends/flagos/python_op_caller.h"
 #endif
 
-// Cambricon is in this list despite being FlagGems-primary: it has a fused
-// attention of its own (cnnlFlashAttentionForward_v2), and without an override
-// on this composite the call would decompose -- the composite decides the leaf
-// kernel from query.device().type(), which sends PrivateUse1 to the CPU flash
-// leaf no matter what the leaf route says.
+#if defined(USE_ILUVATAR) && defined(FLAGOS_ILUVATAR_KERNEL)
+#include "backends/iluvatar/fused_attention.h"
+#endif
+
+// Cambricon and Iluvatar are in the compiled set despite being FlagGems-primary:
+// each has a fused attention of its own (cnnlFlashAttentionForward_v2 on
+// Cambricon, libixattnbkd on Iluvatar), and without an override on this
+// composite the call would decompose -- the composite decides the leaf kernel
+// from query.device().type(), which sends PrivateUse1 to the CPU flash leaf no
+// matter what the leaf route says. On Iluvatar the arm below also requires the
+// conf to name `iluvatar`, so a conf that has not asked for it keeps the
+// pre-existing decomposition.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS)
+    !defined(USE_MPS)
 
 namespace at::flagos {
 namespace {
@@ -503,6 +510,33 @@ at::Tensor WrapperScaledDotProductAttention(
     return at::native::scaled_dot_product_attention(
         query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+#if defined(USE_ILUVATAR) && defined(FLAGOS_ILUVATAR_KERNEL)
+  // The vendor's fused forward (libixattnbkd), when the conf asks for it and
+  // the call is inside the class it was measured on. It is ahead of the
+  // FlagGems arm on purpose: the fused kernel is one launch instead of the
+  // Python/Triton path's several, and on a BI-V150 it measured faster than that
+  // path as well as faster than the decomposition. The conf gate keeps a conf
+  // that does not name this route on the decomposition it had before, and
+  // FusedAttentionEligible() keeps every unmeasured call (mask, dropout, fp16,
+  // GQA, other head dims and layouts) there too -- a vendor route that quietly
+  // widened itself is the failure mode the dtype gates elsewhere exist to
+  // prevent.
+  //
+  // No backward: this is a forward-only kernel, and the grad-mode fall-through
+  // above has already routed a training call to the composite.
+  if (at::native::flagos::HasBackendForOp("scaled_dot_product_attention") &&
+      at::native::flagos::GetBackendForOp("scaled_dot_product_attention") ==
+          at::native::flagos::Backend::kIluvatar &&
+      at::native::flagos::iluvatar::FusedAttentionEligible(
+          query, key, value, attn_mask, dropout_p, is_causal, scale,
+          enable_gqa)) {
+    const double resolved_scale =
+        scale.has_value() ? *scale
+                          : 1.0 / std::sqrt(static_cast<double>(query.size(3)));
+    return at::native::flagos::iluvatar::FusedAttention(
+        query, key, value, resolved_scale, is_causal);
+  }
+#endif
 #ifdef FLAGOS_FLAGGEMS_PYTHON
   // FlagGems route, when the conf asks for it (see the file header). Both halves
   // are load-bearing: HasBackendForOp() keeps a conf that never names this op on

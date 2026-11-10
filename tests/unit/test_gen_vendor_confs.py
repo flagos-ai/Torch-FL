@@ -574,7 +574,7 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     assert " = none" not in text, "tsingmicro registers every op; none would raise"
 
 
-def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
+def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
     """``scaled_dot_product_attention`` is a hand-held measurement, per platform.
 
     The op is a composite whose fused-backend selection runs inside it, so it is
@@ -584,9 +584,15 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
     hand back one set for every platform would route MetaX's measurement on DCU
     and DCU's on MetaX, and routing it on a third platform would claim a kernel
     nobody measured there.
+
+    Iluvatar is the third platform, but it routes to its own vendor slot rather
+    than FlagGems: ``COMPOSITE_NATIVE`` names the fused libixattnbkd kernel the
+    override calls there, and it is keyed by platform for the same
+    no-leak reason.
     """
     assert g.METAX_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
     assert g.DCU_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
+    assert g.COMPOSITE_NATIVE == {"iluvatar": {"scaled_dot_product_attention"}}
     assert g.boxing_measured_python_ops("backends_metax.conf") == (
         g.METAX_FLAGGEMS_MEASURED | g.METAX_COMPOSITE_FLAGGEMS
     )
@@ -602,8 +608,13 @@ def test_sdpa_composite_is_measured_on_exactly_the_two_platforms_that_took_it():
         route = routes["scaled_dot_product_attention"].split("#", 1)[0].strip()
         if platform in ("hygon", "metax"):
             assert route == "flaggems", f"{platform} routes the op to {route}"
+        elif platform == "iluvatar":
+            assert route == "iluvatar", f"{platform} routes the op to {route}"
         else:
             assert route != "flaggems", f"{platform} took a route it never measured"
+            assert route != "iluvatar", (
+                f"{platform} took the iluvatar vendor route it never measured"
+            )
 
 
 def test_metax_routes_mm_to_flaggems_only_in_the_default_conf():
