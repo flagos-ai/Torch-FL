@@ -79,6 +79,7 @@ from torch_fl.tileops.spec import (  # noqa: E402
     BINARY,
     DEFAULT_OFF,
     EXCLUDE,
+    MANUAL_GROUPS,
     RECIPES,
     REDUCE,
     SOFTMAX,
@@ -89,6 +90,7 @@ CONF_CUDA = REPO / "torch_fl" / "configs" / "backends_nvidia.conf"
 OUT_ROUTES = REPO / "torch_fl" / "tileops" / "generated" / "routes.py"
 OUT_SHIMS = REPO / "torch_fl" / "tileops" / "generated" / "shims.py"
 OUT_KERNELS = REPO / "csrc" / "aten" / "generated" / "tileops_python_kernels.cc"
+OUT_METAX_REGISTER = REPO / "csrc" / "aten" / "generated" / "register_tileops_metax.inc"
 # Formerly torch_fl/configs/backends_tileops.conf. The routing decision now
 # lives as a `# tileops` annotation in backends_nvidia.conf, so what this script
 # owns is the op *set*, patched into the shared coverage module the conf
@@ -148,8 +150,10 @@ DISPATCHER_NAME_OVERRIDE = {
     "sum.dim_IntList": "sum_dim_intlist_dispatcher",
 }
 
-# ctor params that are plumbing rather than op semantics
-CTOR_IGNORE = {"self", "kernel_map", "tune"}
+# Constructor params that select a provider or tune a kernel rather than describe
+# the aten operation. Consumer code supplies ``target``; the provider chooses its
+# own strategy and the other entries belong to older kernel-map APIs.
+CTOR_IGNORE = {"self", "kernel_map", "target", "tune", "strategy"}
 
 # dtype token (manifest spelling) -> torch dtype attribute name
 DTYPE_TOKENS = {
@@ -295,11 +299,81 @@ def first_workload(spec: dict) -> Optional[list]:
     return None
 
 
+#: Ops excluded from dispatch by the recipe that serves their aten API. Used
+#: only to infer a recipe for the September API, whose constructors no longer
+#: commit shape and dtype; the exact constructor match in ``RECIPES`` remains
+#: authoritative for the older API.
+_MANUAL_OPS = frozenset(op for ops in MANUAL_GROUPS.values() for op in ops)
+_MANUAL_OPS |= frozenset(
+    {
+        "AdaptiveAvgPool2dFwdOp",
+        "AdaptiveMaxPool2dFwdOp",
+        "AdaptiveMaxPool2dIndicesFwdOp",
+        "GemmFwdOp",
+        "RMSNormFwdOp",
+    }
+)
+_SOFTMAX_ATEN = frozenset({"_log_softmax", "_softmax"})
+_REDUCTION_ATEN = frozenset(
+    {
+        "all",
+        "amax",
+        "amin",
+        "any",
+        "count_nonzero",
+        "logsumexp",
+        "mean",
+        "prod",
+        "std",
+        "sum",
+        "var",
+        "var_mean",
+    }
+)
+
+
+def infer_recipe(op_name: str, base: str, cls: type, ctor: tuple[str, ...]):
+    """Return the recipe for one Op across TileOPs constructor generations.
+
+    Older providers commit shape and dtype in ``__init__``, which makes the
+    exact ``RECIPES`` lookup sufficient. The September API keeps only semantic
+    scalars there and takes tensor shapes on the first forward call, so the
+    receiver signature carries the arity while the aten name distinguishes a
+    reduction from an elementwise unary.
+    """
+    if base == "count_nonzero" and len(forward_params(cls) or ()) == 1:
+        # ``CountNonzeroFwdOp(dim=...)`` has the same new ``("dim",)``
+        # constructor as softmax, but it implements a reduction.
+        return REDUCE
+    exact = RECIPES.get(ctor)
+    # The old softmax API committed ``dim`` in its constructor. The generator
+    # has always classified the remaining old ``("dim",)`` contracts -- most
+    # importantly the reducers -- by their names, so preserve that precedence
+    # while the legacy constructor tuple stays useful for the other recipes.
+    if exact is not None and exact != SOFTMAX:
+        return exact
+    if op_name in _MANUAL_OPS:
+        return None
+    forward = forward_params(cls) or ()
+    if base in _SOFTMAX_ATEN and len(forward) == 1:
+        return SOFTMAX
+    if base in _REDUCTION_ATEN and len(forward) == 1:
+        return REDUCE
+    if len(forward) == 1:
+        return UNARY
+    if len(forward) == 2:
+        return BINARY
+    return None
+
+
 def classify(entries: Dict[str, dict], classes: Dict[str, type]):
     routed = routed_aten_names()
     routes: List[Route] = []
     manual: Dict[Tuple[str, ...], List[str]] = collections.defaultdict(list)
-    skipped: Dict[str, str] = {}
+    # Measured exclusions remain in the generated record even when a provider
+    # revision removes or renames the Op. Otherwise a dependency refresh would
+    # silently erase the reason it must stay out of the routing table.
+    skipped: Dict[str, str] = dict(EXCLUDE)
 
     for op_name, spec in sorted(entries.items()):
         if spec.get("status") != "implemented":
@@ -308,7 +382,6 @@ def classify(entries: Dict[str, dict], classes: Dict[str, type]):
         if not base or base not in routed:
             continue
         if op_name in EXCLUDE:
-            skipped[op_name] = EXCLUDE[op_name]
             continue
 
         cls = classes.get(op_name)
@@ -317,7 +390,7 @@ def classify(entries: Dict[str, dict], classes: Dict[str, type]):
             continue
 
         ctor = ctor_params(cls)
-        recipe = RECIPES.get(ctor)
+        recipe = infer_recipe(op_name, base, cls, ctor)
         if recipe is None:
             manual[ctor or ()].append(op_name)
             continue
@@ -508,8 +581,8 @@ def render_routes(routes: List[Route], skipped: Dict[str, str]) -> str:
     ]
     lines += [
         "Modules are named as strings so importing this file never pulls in TileOPs;",
-        "torch_fl.tileops.runtime imports them lazily once the SM90/dependency gate",
-        "passes.",
+        "torch_fl.tileops.runtime imports them lazily once a device provider claims",
+        "the actual device.",
         '"""',
         "",
         "from torch_fl.tileops.spec import BINARY, REDUCE, SOFTMAX, UNARY",
@@ -677,6 +750,49 @@ def render_cpp_kernels(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
     return "\n".join(lines)
 
 
+def render_metax_register(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
+    """Emit the PrivateUse1 subset for a non-boxing MetaX TileOPs build.
+
+    MetaX has no native operator set in this tree. A CUDA-boxing build claims
+    the full generated wrapper set, which makes a conf entry of ``none`` hit an
+    empty dispatcher slot instead of the boxed CPU fallback. This include is
+    used when TileOPs is built without boxing and claims only ops that can
+    enter ``Backend::kTileOps``. Everything else remains unregistered on
+    PrivateUse1 and reaches ``cpu_fallback``.
+    """
+    inc = SRC_REGISTER_INC.read_text()
+    wrappers = dict(re.findall(r'm\.impl\("([^"]+)",\s*(\w+)\)', inc))
+    missing = [route.overload for route in routes if route.overload not in wrappers]
+    if missing:
+        raise SystemExit(
+            "codegen_tileops: MetaX TileOPs routes have no PrivateUse1 wrapper: "
+            + ", ".join(sorted(missing))
+        )
+
+    lines = [
+        CPP_LICENSE,
+        "",
+        CPP_BANNER,
+        "//",
+        "// PrivateUse1 registrations for a non-boxing MetaX TileOPs build.",
+        "//",
+        "// Included by csrc/aten/register.cc only when USE_MACA, FLAGOS_TILEOPS,",
+        "// and FLAGOS_TILEOPS_METAX_NO_BOXING are all defined. Each entry routes",
+        "// through the torch_fl dispatcher on Backend::kTileOps. Ops absent here",
+        "// remain unclaimed and reach the boxed cpu_fallback, matching",
+        "// backends_metax_tileops.conf: tileops + none.",
+        "//",
+        f"// Total: {len(routes)} TileOPs ops.",
+        "",
+    ]
+    lines.extend(
+        f'  m.impl("{route.overload}", {wrappers[route.overload]});'
+        for route in sorted(routes, key=lambda r: r.overload)
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_shims(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
     """Emit torch_fl/tileops/generated/shims.py.
 
@@ -707,10 +823,17 @@ def render_shims(routes: List[Route], sigs: Dict[str, CppSig]) -> str:
         "",
         "_ROUTES = {r[0]: r for r in ROUTES}",
         "_CACHE = {}",
+        "_PROVIDER = None",
         "",
         "",
         "def _impl(overload):",
         '    """Resolve and cache the callable for one overload."""',
+        "    global _PROVIDER",
+        "    from torch_fl.tileops import runtime",
+        "",
+        "    if runtime._provider is not _PROVIDER:",
+        "        _CACHE.clear()",
+        "        _PROVIDER = runtime._provider",
         "    fn = _CACHE.get(overload)",
         "    if fn is None:",
         "        fn = _CACHE[overload] = resolve_impl(*_ROUTES[overload])",
@@ -779,8 +902,8 @@ def render_coverage(routes: List[Route], current: str) -> str:
     annotation in backends_nvidia.conf, and FLAGOS_FORCE_BACKEND=tileops repins the
     annotated ops in the loaded table (ApplyForcedBackend in csrc/aten/common.cc).
     Default routing is untouched, which is what the annotation buys: TileOPs is
-    SM90-only and an optional dependency, so it must stay opt-in rather than
-    becoming the default for every CUDA build.
+    an optional dependency whose device support belongs to the provider, so it
+    must stay opt-in rather than becoming the default for every CUDA build.
 
     The set is patched into the shared coverage module instead of a private one
     so all three measured ceilings (FlagGems Python, FlagGems C++, TileOPs) stay
@@ -840,14 +963,14 @@ def render_test(routes: List[Route]) -> str:
         "from torch_fl.tileops.generated.shims import SHIM_NAMES",
         "",
         # Issue #409: without a selecting marker the file fell through every
-        # sweep's `-m` expression and no manifest ran it. TileOPs is an SM90
-        # CUDA feature, so `cuda` is the mark that says both what hardware the
-        # file needs and which sweep should collect it.
+        # sweep's `-m` expression and no manifest ran it. This generated test
+        # compares CUDA aten; vendor-specific coverage needs its own hardware
+        # and provider on the target device.
         "pytestmark = [",
         "    pytest.mark.cuda,",
         "    pytest.mark.skipif(",
         "        not tileops_runtime.is_tileops_available(),",
-        '        reason="TileOPs unavailable or host is not SM90",',
+        '        reason="TileOPs unavailable or no provider serves this device",',
         "    ),",
         "]",
         "",
@@ -1049,6 +1172,7 @@ def main() -> int:
         OUT_ROUTES: ruff_format(render_routes(routes, skipped), OUT_ROUTES.name),
         OUT_SHIMS: ruff_format(render_shims(routes, sigs), OUT_SHIMS.name),
         OUT_KERNELS: render_cpp_kernels(routes, sigs),  # C++, ruff would reject it
+        OUT_METAX_REGISTER: render_metax_register(routes, sigs),
         # Patched in place, not rendered: the file also carries the FlagGems
         # sets. Already ruff-clean (the op blocks are `# fmt: skip`), so
         # re-formatting here would only risk reflowing them.

@@ -26,10 +26,17 @@ from torch_fl.tileops.runtime import resolve_impl
 
 _ROUTES = {r[0]: r for r in ROUTES}
 _CACHE = {}
+_PROVIDER = None
 
 
 def _impl(overload):
     """Resolve and cache the callable for one overload."""
+    global _PROVIDER
+    from torch_fl.tileops import runtime
+
+    if runtime._provider is not _PROVIDER:
+        _CACHE.clear()
+        _PROVIDER = runtime._provider
     fn = _CACHE.get(overload)
     if fn is None:
         fn = _CACHE[overload] = resolve_impl(*_ROUTES[overload])

@@ -470,6 +470,10 @@ endif()
 # whether any op actually routes to Backend::kTileOps.
 if(FLAGOS_BUILD_TILEOPS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
+  if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_BOXING)
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE
+      FLAGOS_TILEOPS_METAX_NO_BOXING=1)
+  endif()
 endif()
 
 # The kernel sets this wheel actually contains, as one comma-separated list, so

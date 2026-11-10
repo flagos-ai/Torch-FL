@@ -833,7 +833,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // to a FlagGems backend, from the generated per-platform list; every other op
   // stays unregistered and falls through to cpu_fallback. Boxing remains an
   // explicit opt-in (-DFLAGOS_BUILD_BOXING=ON / FLAGOS_BUILD_BOXING=1).
-  #if defined(FLAGOS_BOXING_BUILD)
+  #if defined(FLAGOS_TILEOPS_METAX_NO_BOXING)
+  // A TileOPs-only MetaX experiment must not claim the full wrapper set: the
+  // conf deliberately leaves every non-TileOPs op at `none`, which reaches
+  // cpu_fallback only while those ops stay unregistered on PrivateUse1.
+  #include "generated/register_tileops_metax.inc"
+  #elif defined(FLAGOS_BOXING_BUILD)
   // One list, and it is the conf's: generated/register_boxing_<platform>.inc
   // names exactly the ops backends_<platform>.conf routes and this wheel has a
   // kernel for. Nothing else is claimed here, because registration and routing

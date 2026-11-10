@@ -404,9 +404,19 @@ def test_kernel_switch_uses_the_shared_truth_table(monkeypatch, clean_kernel_env
         assert _switches(namespace, "nvidia")["FLAGOS_BUILD_VENDOR"] is expected, raw
     # On a set whose default is off the same input stays off, which is what
     # distinguishes "falls back to the default" from the hand-rolled parser's
-    # "anything that is not 0/false/off/no is on".
+    # "anything that is not 0/false/off/no is on". MetaX now admits an explicit
+    # TileOPs experiment, while ppu remains outside it.
     monkeypatch.setenv("FLAGOS_BUILD_TILEOPS", "2")
-    assert namespace["_kernel_switches"]("metax")["FLAGOS_BUILD_TILEOPS"] is False
+    assert namespace["_kernel_switches"]("ppu")["FLAGOS_BUILD_TILEOPS"] is False
+
+
+def test_metax_can_opt_into_the_tileops_experiment(monkeypatch, clean_kernel_env):
+    """MetaX remains off by default but accepts an explicit experiment build."""
+    namespace, _ = _load_setup(monkeypatch)
+    monkeypatch.setenv("FLAGOS_BUILD_TILEOPS", "1")
+    resolved = namespace["_kernel_switches"]("metax")
+    assert resolved["FLAGOS_BUILD_TILEOPS"] is True
+    assert resolved["FLAGOS_BUILD_BOXING"] is False
 
 
 def test_cmake_kernel_set_names_match_the_build_record(monkeypatch):

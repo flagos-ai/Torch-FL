@@ -142,13 +142,14 @@ def _select_backend_config() -> None:
     `# tileops` onto that path, the same op set backends_tileops.conf used to
     carry.
 
-    Every conf states all five keys per op directly
-    (flaggems_cpp > flaggems > tileops > <vendor> > none), and the generated
-    ones are full-coverage: backends_metax.conf routes 10 ops to flaggems_cpp
-    (the 15 in METAX_CPP_MEASURED minus the five that also sit in MetaX's triton
-    gap set, which the dispatcher checks first) and the rest to flaggems or
-    cpu_fallback; a conf whose routes a build cannot serve degrades at dispatch
-    rather than being swapped for another file.
+    Which entry point an op actually takes is then decided by what got compiled
+    in, not by which file was read. flaggems_cpp is Backend::kFlagGemsCpp and needs
+    FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor); tileops
+    needs FLAGOS_BUILD_TILEOPS=ON and a provider for the actual device. Where the
+    slot is empty Dispatcher::GetFn degrades to the boxing kernel rather than
+    raising, so one file stays correct across both builds. Every conf states all
+    five keys per op directly, and a route a build cannot serve degrades at
+    dispatch rather than being swapped for another file.
 
     An explicit FLAGOS_BACKEND_CONFIG always wins (advanced/testing use), and
     the per-op FLAGOS_OP_<name> overrides in common.cc still apply on top. This

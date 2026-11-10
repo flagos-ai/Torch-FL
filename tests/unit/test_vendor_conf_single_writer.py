@@ -136,7 +136,9 @@ def test_the_cuda_conf_is_not_a_generated_vendor_conf():
     """Keep the exemption honest: cuda is not in the generator's platform set."""
     built = g.build_all(CONF_DIR)
     assert "cuda" not in built
-    assert set(built) == set(g.BOXING_PLATFORMS) | set(g.VENDORS)
+    canonical = set(g.BOXING_PLATFORMS) | set(g.VENDORS)
+    experimental = {f"{vendor}_tileops" for vendor in ("ascend", "mthreads", "metax")}
+    assert set(built) == canonical | (experimental & set(built))
 
 
 def test_vendors_and_boxing_platforms_are_disjoint():

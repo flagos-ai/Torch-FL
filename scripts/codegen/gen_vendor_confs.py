@@ -2678,6 +2678,14 @@ NATIVE_KERNEL_PREFERRED = {"iluvatar", "cambricon", "kunlunxin"}
 # through the `# tileops` annotation that FLAGOS_FORCE_BACKEND=tileops reads.
 TILEOPS_PLATFORMS = set()
 
+# Native-kernel platforms that also get an opt-in experimental conf named
+# ``backends_<platform>_tileops.conf``. That file selects TileOPs first, the
+# platform's own kernel second, and CPU fallback for the rest; it never names
+# FlagGems. MetaX is handled separately below because its CUDA-ABI build has no
+# native operator set and its experiment wheel registers only the generated
+# TileOPs subset, leaving every other op unclaimed for cpu_fallback.
+TILEOPS_EXPERIMENT_PLATFORMS = ("ascend", "mthreads")
+
 # The FlagGems C++ ops MetaX routes to the C++ path in the build its CI lane and
 # its shipped wheel actually produce. Fifteen of the 18 in the shared C++ set;
 # `mm` is one deliberate omission and the two `*_softmax`-adjacent drops another,
@@ -3475,6 +3483,48 @@ def route(
     return "none"
 
 
+def route_tileops(
+    op: str,
+    vendor: str,
+    native: set,
+    registered: set,
+    tileops: set,
+) -> str:
+    """Pick a route for the opt-in TileOPs-only experiment config.
+
+    These configs deliberately exclude FlagGems.  A TileOPs-capable op comes
+    first, then the platform's own kernel, and everything else reaches the
+    common CPU fallback.  ``registered`` is the same invariant the default
+    config enforces: an unregistered op must stay ``none`` because a key on a
+    missing PrivateUse1 wrapper cannot be reached.
+    """
+    if op not in registered:
+        return "none"
+    if op in tileops:
+        return f"tileops  # {vendor}" if op in native else "tileops"
+    if op in native:
+        return vendor
+    return "none"
+
+
+def route_metax_tileops(
+    op: str,
+    registered: set,
+    tileops: set,
+) -> str:
+    """Pick a route for MetaX's TileOPs experiment config.
+
+    A dedicated generated PrivateUse1 list claims only the TileOPs routes, so
+    every other op genuinely reaches cpu_fallback. This differs from the normal
+    MetaX boxing conf, which claims the full wrapper set.
+    """
+    if op not in registered:
+        return "none"
+    if op in tileops:
+        return "tileops"
+    return "none"
+
+
 def _variant_routes_flaggems_override(routes: dict) -> bool:
     """Whether a boxing variant carries the RNG override this file records."""
     return any(routes.get(op) == "flaggems" for op in BOXING_VARIANT_FLAGGEMS_OPS)
@@ -3488,6 +3538,7 @@ def render(
     escape: set = frozenset(),
     variant: bool = False,
     cuda_abi: bool = False,
+    tileops_only: bool = False,
 ) -> str:
     """Build the conf text for one platform.
 
@@ -3565,18 +3616,38 @@ def render(
         ]
     lines += [
         "# Values:",
-        "#   flaggems_cpp  FlagGems C++ runtime (liboperators.so)",
-        "#   flaggems      FlagGems Python/Triton path",
-        "#   tileops       TileOPs Triton shims (needs FLAGOS_BUILD_TILEOPS=ON + SM90)",
     ]
-    if has_vendor_slot:
+    if tileops_only:
+        lines.append("#   tileops       TileOPs provider route")
+    else:
+        lines += [
+            "#   flaggems_cpp  FlagGems C++ runtime (liboperators.so)",
+            "#   flaggems      FlagGems Python/Triton path",
+            "#   tileops       TileOPs Triton shims (needs FLAGOS_BUILD_TILEOPS=ON + SM90)",
+        ]
+    if has_vendor_slot and vendor != "none":
         lines.append(f"#   {vendor:<13} {vendor_desc}")
     if cuda_abi and not variant:
         lines += [
             "#   boxing        only in the opt-in backends_"
             f"{platform}_boxing.conf (day-0)",
         ]
-    if boxing:
+    if tileops_only:
+        lines.append(
+            "#   none          no TileOPs or vendor impl -> reaches cpu_fallback"
+            if vendor != "none"
+            else "#   none          no TileOPs impl -> reaches CPU fallback"
+        )
+        priority = (
+            "tileops > none." if vendor == "none" else f"tileops > {vendor} > none."
+        )
+        lines += [
+            "#",
+            f"# Routing priority: {priority}",
+            "# Experimental TileOPs config: FlagGems is deliberately excluded.",
+            "#",
+        ]
+    elif boxing:
         lines += [
             "#",
             f"# Routing priority: flaggems_cpp > flaggems > tileops > {vendor}.",
@@ -3609,7 +3680,10 @@ def render(
         )
     if notes:
         lines += ["#"] + [f"# Note: {line}" for line in notes]
-    for backend in ("flaggems_cpp", "flaggems", "tileops", vendor, "none"):
+    counts_order = dict.fromkeys(
+        ("flaggems_cpp", "flaggems", "tileops", vendor, "none")
+    )
+    for backend in counts_order:
         if backend in counts:
             lines.append(f"#   {backend:<13} {counts[backend]:>5}")
     lines += [
@@ -3755,6 +3829,29 @@ def build_all(conf_dir: Path) -> dict:
             vendor,
         )
 
+        if vendor in TILEOPS_EXPERIMENT_PLATFORMS:
+            experimental = {
+                op: route_tileops(
+                    op,
+                    vendor,
+                    natives[vendor],
+                    registered[vendor],
+                    tileops,
+                )
+                for op in sorted(all_ops)
+            }
+            out[f"{vendor}_tileops"] = (
+                render(
+                    f"{vendor}_tileops",
+                    vendor,
+                    experimental,
+                    escape=ESCAPE_NATIVE.get(vendor, frozenset()),
+                    tileops_only=True,
+                ),
+                experimental,
+                vendor,
+            )
+
     for platform, sparse_conf in BOXING_PLATFORMS.items():
         fg_py_here = flaggems_python_ops_for(platform)
         # The platform's measured triton gaps: ops FlagGems covers that this
@@ -3800,6 +3897,20 @@ def build_all(conf_dir: Path) -> dict:
             routes,
             "",
         )
+        if platform == "metax":
+            experimental = {
+                op: route_metax_tileops(op, all_ops, tileops) for op in sorted(all_ops)
+            }
+            out[f"{platform}_tileops"] = (
+                render(
+                    f"{platform}_tileops",
+                    "none",
+                    experimental,
+                    tileops_only=True,
+                ),
+                experimental,
+                "none",
+            )
 
     # The contract from AGENTS.md ("Day-0 boxing confs"), enforced rather than
     # documented: no default conf may route an op to the boxing kernel. It would
