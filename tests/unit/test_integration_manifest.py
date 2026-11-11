@@ -34,6 +34,7 @@ that edit is where a reviewer sees how much is still per-platform.
 import copy
 import json
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,7 @@ _PLATFORMS = (
 
 _BOUND_KEYS = {"at_least", "more_than", "exactly"}
 _FLAGTREE_KEYS = {"version_env", "version_default", "triton_prefix"}
+_OPERATOR_LANES = {"vendor_ops", "backend_ops"}
 # `{{...}}` in a name or a command. The composer substitutes exactly one.
 _TOKEN_RE = re.compile(r"\{\{[^}]*\}\}")
 
@@ -404,6 +406,35 @@ def test_a_boxing_platform_runs_the_same_groups_on_both_builds(platform):
     assert [i for i in boxing_ids if i not in boxing_only] == [
         i for i in vendor_ids if i not in vendor_only
     ]
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_each_operator_lane_runs_the_shared_case_cohort(platform):
+    """A platform has one operator lane across its builds.
+
+    Boxing platforms divide the operator sweep by build, so the operator lanes
+    are counted across both compositions. A platform that omits ``main_ops``
+    from that sweep silently drops every newly migrated shared case.
+    """
+    builds = (False, True) if platform in _BOXING else (False,)
+    groups = [
+        group
+        for boxing_lane in builds
+        for group in composed_steps(platform, boxing_lane=boxing_lane)
+        if group["manifest_id"].split(".", 1)[0] in _OPERATOR_LANES
+    ]
+    assert len(groups) == 1, [group["manifest_id"] for group in groups]
+
+    command = shlex.split(groups[0]["command"])
+    pytest_index = command.index("pytest")
+    expression = command[command.index("-m", pytest_index + 1) + 1]
+    for term in (
+        "main_ops",
+        "not flaggems",
+        "not flaggems_python",
+        "not flaggems_cpp",
+    ):
+        assert term in expression, (platform, expression)
 
 
 def test_the_only_substitution_is_the_display_name():

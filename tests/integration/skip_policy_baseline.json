@@ -1,4 +1,9 @@
 {
+  "version": 1,
+  "roots": [
+    "tests/integration/flaggems/",
+    "tests/integration/ops/"
+  ],
   "files": {
     "tests/integration/flaggems/test_flaggems_exclusions.py": {
       "pytest.skip": 2
@@ -51,9 +56,6 @@
     "tests/integration/ops/test_cos_dispatch.py": {
       "pytest.skip": 3
     },
-    "tests/integration/ops/test_dcu_complex.py": {
-      "pytest.skip": 2
-    },
     "tests/integration/ops/test_dcu_flaggems_sdpa.py": {
       "pytest.skip": 4
     },
@@ -93,20 +95,10 @@
     "tests/integration/ops/test_gcu_sdpa_mask.py": {
       "pytest.skip": 1
     },
-    "tests/integration/ops/test_iluvatar_sdpa_route.py": {
-      "pytest.skip": 1
-    },
     "tests/integration/ops/test_le_dispatch.py": {
       "pytest.skip": 1
     },
     "tests/integration/ops/test_mean_dispatch.py": {
-      "pytest.skip": 4
-    },
-    "tests/integration/ops/test_metax_complex_fill.py": {
-      "pytest.skip": 2
-    },
-    "tests/integration/ops/test_metax_sdpa_route.py": {
-      "pytest.mark.skip": 1,
       "pytest.skip": 4
     },
     "tests/integration/ops/test_mm_dispatch.py": {
@@ -116,9 +108,6 @@
       "pytest.mark.skipif": 1
     },
     "tests/integration/ops/test_mps_addmm.py": {
-      "pytest.mark.skipif": 1
-    },
-    "tests/integration/ops/test_mps_all.py": {
       "pytest.mark.skipif": 1
     },
     "tests/integration/ops/test_mps_argmax.py": {
@@ -336,14 +325,8 @@
   },
   "kinds": {
     "pytest.importorskip": 3,
-    "pytest.mark.skip": 1,
-    "pytest.mark.skipif": 58,
+    "pytest.mark.skipif": 57,
     "pytest.mark.xfail": 6,
-    "pytest.skip": 127
-  },
-  "roots": [
-    "tests/integration/flaggems/",
-    "tests/integration/ops/"
-  ],
-  "version": 1
+    "pytest.skip": 118
+  }
 }

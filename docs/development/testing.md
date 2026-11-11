@@ -28,12 +28,39 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 | `main_ops` | Representative operator in the CI smoke subset | Applied to frequently-used ops (add, matmul, conv, etc.) for fast feedback |
 | `anyplatform` | Runs on any accelerator backend | Device-agnostic tests (operator registration, dispatch routing) |
 | `cuda` | Requires a CUDA boxing build (`FLAGOS_BUILD_BOXING=1`); the default FlagGems-primary wheel has no `cuda` route, so the CUDA lane skips these | Tests asserting `-> boxing` backend routing |
-| `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped on MetaX (its lane builds the boxing wheel) |
+| `metax` | Asserts a native MetaX (mxcc) route | Tests asserting `-> metax` backend routing; this is a route assertion, not platform ownership |
 | `ascend` | Requires Ascend ACL backend | Tests asserting `-> ascend` backend routing |
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
 | `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |
 | `flaggems_python` | Requires FlagGems Python wrapper backend | Tests checking Python-layer integration (dispatch overhead, GIL behavior) |
 | `flaggems_cpp` | Requires FlagGems C++ runtime (wheel built with `FLAGOS_BUILD_FLAGGEMS_CPP=ON`, which the build record then reports) | Tests asserting `-> kFlagOs` (C++) dispatch |
+
+### Shared Operator Cohort
+
+Every configured accelerator operator lane selects `main_ops` together with
+the platform's own marker. Apple therefore runs `(mps or main_ops)` and Ascend
+runs `(ascend or main_ops)`. A shared case reaches every lane from one file;
+the platform-owner and backend gates decide where it can execute.
+
+`platform_owner("<platform-id>")` declares that a platform-specific file
+belongs to one runtime. It stays separate from route markers such as `metax`
+and `dcu`: ownership answers "may this runtime execute the file?", while a
+route marker answers "which dispatch decision does the assertion cover?" The
+ownership gate runs before lane configuration and build-record probes, so a
+non-owner skips without reading another platform's runtime state.
+
+`default_conf_only` declares that a case asserts a platform's shipped default
+backend table. It skips on a boxing table and on any `FLAGOS_BACKEND_CONFIG`
+override, including one that points back to the shipped file.
+
+A new capability gap in the migrated shared cohort uses
+`@tracked_skip(condition=..., issue="#<number>")`. The decorator records a
+stable case-gap marker, and the issue must remain open: closing the Torch-FL or
+linked upstream issue fails the `Case gap issues` workflow until the case and
+its registry entry are updated. Platform, lane, and build applicability use
+the centralized collection gates instead of a capability skip. The legacy skip
+inventory is frozen by `tests/integration/skip_policy_baseline.json` and may
+only shrink.
 
 ### Cross-backend Contract Markers
 

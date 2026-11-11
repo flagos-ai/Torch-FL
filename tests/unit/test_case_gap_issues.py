@@ -650,6 +650,7 @@ def test_skip_policy_contract_is_identical_in_the_runtime_and_report_paths():
     assert runtime.TRACKED_GAP_CATEGORY == stable.TRACKED_GAP_CATEGORY
     assert runtime.PLATFORM_GATE_CATEGORY == stable.PLATFORM_GATE_CATEGORY
     assert runtime.PLATFORM_GATES == stable.PLATFORM_GATES
+    assert "lane_config" in runtime.PLATFORM_GATES
     assert runtime.SKIP_OUTCOMES == stable.SKIP_OUTCOMES
     assert runtime.POLICY_ROOTS == stable.POLICY_ROOTS
     assert runtime.POLICY_ROOTS == checker.POLICY_ROOTS

@@ -19,23 +19,17 @@ import subprocess
 import sys
 
 import pytest
-import torch_fl
 import torch
 
 
-pytestmark = pytest.mark.main_ops
-
-
-def _require_metax() -> None:
-    if not torch_fl.backend_config_path().endswith("backends_metax.conf"):
-        pytest.skip("requires the MetaX boxing runtime")
-    if torch_fl.flagos.device_count() < 1:
-        pytest.skip("MetaX device is unavailable")
+pytestmark = [
+    pytest.mark.main_ops,
+    pytest.mark.platform_owner("metax"),
+]
 
 
 @pytest.mark.parametrize("dtype", (torch.complex64, torch.complex128))
 def test_complex_zero_and_fill_stay_on_flagos(dtype):
-    _require_metax()
     tensor = torch.empty(8, dtype=dtype, device="flagos:0")
 
     returned = tensor.zero_()
@@ -52,7 +46,6 @@ def test_complex_zero_and_fill_stay_on_flagos(dtype):
 @pytest.mark.parametrize("dtype", (torch.complex64, torch.complex128))
 def test_complex_flip_uses_native_metax_kernel(dtype):
     """A FlagGems kernel cannot lower a complex pointer on MetaX."""
-    _require_metax()
     host = torch.tensor([1 + 2j, 3 + 4j, 5 + 6j], dtype=dtype)
     tensor = host.to("flagos:0")
 
@@ -64,7 +57,6 @@ def test_complex_flip_uses_native_metax_kernel(dtype):
 
 def test_complex_flip_leaves_flaggems_route_only_for_complex_dtype():
     """The runtime dtype escape must not change the configured float route."""
-    _require_metax()
     code = """
 import torch_fl
 import torch

@@ -36,7 +36,11 @@ import torch_fl
 
 DEVICE = "flagos:0"
 
-pytestmark = [pytest.mark.anyplatform]
+pytestmark = [
+    pytest.mark.main_ops,
+    pytest.mark.iluvatar,
+    pytest.mark.platform_owner("iluvatar"),
+]
 
 #: ``(B, H, S, D)`` -- a decode-sized call, a non-power-of-two length (the
 #: vendor gemm has tile-shape defects elsewhere on this chip, so an odd length
@@ -64,10 +68,9 @@ def _conf_route(op: str):
     return route
 
 
-def _route():
-    route = _conf_route("scaled_dot_product_attention")
-    if route != "iluvatar":
-        pytest.skip(f"this conf routes the composite to {route!r}, not 'iluvatar'")
+def test_conf_routes_composite_to_iluvatar():
+    """The vendor route this file exercises is selected by the platform conf."""
+    assert _conf_route("scaled_dot_product_attention") == "iluvatar"
 
 
 def _reference(q, k, v, causal=False, mask=None, gqa=False):
@@ -97,7 +100,6 @@ def _check(tag, q, k, v, causal=False, mask=None, gqa=False):
 
 @pytest.mark.parametrize("B,H,S,D", SHAPES)
 def test_fused_route_matches_cpu(B, H, S, D):
-    _route()
     torch.manual_seed(0)
     q, k, v = (
         torch.randn(B, H, S, D, device=DEVICE, dtype=torch.bfloat16) for _ in range(3)
@@ -106,7 +108,6 @@ def test_fused_route_matches_cpu(B, H, S, D):
 
 
 def test_fused_route_causal_matches_cpu():
-    _route()
     torch.manual_seed(1)
     q, k, v = (
         torch.randn(1, 2, 512, 64, device=DEVICE, dtype=torch.bfloat16)
@@ -117,7 +118,6 @@ def test_fused_route_causal_matches_cpu():
 
 def test_non_contiguous_call_matches_cpu():
     """HF's vision tower hands SDPA a transposed view; the route copies first."""
-    _route()
     torch.manual_seed(5)
     q, k, v = (
         torch.randn(1, 336, 16, 64, device=DEVICE, dtype=torch.bfloat16).transpose(1, 2)
@@ -129,7 +129,6 @@ def test_non_contiguous_call_matches_cpu():
 
 def test_grouped_query_call_matches_cpu():
     """The Qwen3.5 text decoder: 8 query heads over 2 key/value heads."""
-    _route()
     torch.manual_seed(6)
     q = torch.randn(1, 8, 267, 256, device=DEVICE, dtype=torch.bfloat16)
     k, v = (
@@ -141,7 +140,6 @@ def test_grouped_query_call_matches_cpu():
 
 def test_masked_call_keeps_a_correct_path():
     """A mask is outside the fused envelope; it must stay correct, not fast."""
-    _route()
     torch.manual_seed(2)
     q, k, v = (
         torch.randn(1, 2, 128, 64, device=DEVICE, dtype=torch.bfloat16)
@@ -155,7 +153,6 @@ def test_masked_call_keeps_a_correct_path():
 
 
 def test_float16_call_keeps_a_correct_path():
-    _route()
     torch.manual_seed(3)
     q, k, v = (
         torch.randn(1, 2, 128, 64, device=DEVICE, dtype=torch.float16) for _ in range(3)
@@ -164,7 +161,6 @@ def test_float16_call_keeps_a_correct_path():
 
 
 def test_head_dim_outside_the_envelope_keeps_a_correct_path():
-    _route()
     torch.manual_seed(4)
     q, k, v = (
         torch.randn(1, 2, 128, 96, device=DEVICE, dtype=torch.bfloat16)

@@ -38,6 +38,7 @@ from backend_conf import (
     routed_backend,
     routed_backend_or_none,
 )
+from platform_support import detect_platform
 
 
 DEVICE = "flagos:0"
@@ -372,9 +373,15 @@ _SOFT_LOWP_ROUTES = {
 }
 
 
-def _expected_bmm_route() -> tuple:
+def _expected_bmm_route(dtype: torch.dtype) -> tuple:
     expected = routed_backend("bmm")
-    return tuple(sorted(_SOFT_LOWP_ROUTES.get(expected, {expected})))
+    routes = _SOFT_LOWP_ROUTES.get(expected, {expected})
+    if detect_platform() == "ascend" and dtype == torch.float64:
+        # Ascend cannot lower FlagGems' float64 kernels. The dispatcher routes
+        # that dtype to the native kernel before the conf's FlagGems choice is
+        # served; see FlagGemsRejectsDtype in csrc/aten/common.cc.
+        routes = {"ascend"}
+    return tuple(sorted(routes))
 
 
 class TestFloatBmmKeepsItsRoute:
@@ -396,7 +403,7 @@ class TestFloatBmmKeepsItsRoute:
     @pytest.mark.main_ops
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_float_bmm_logs_the_conf_route(self, dtype):
-        expected = _expected_bmm_route()
+        expected = _expected_bmm_route(dtype)
         result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch"}, dtype=dtype)
         logged = [
             route

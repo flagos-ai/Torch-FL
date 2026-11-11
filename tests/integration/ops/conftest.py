@@ -14,6 +14,7 @@
 
 import importlib.machinery
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -64,14 +65,22 @@ _platform = _load_platform()
 
 # Markers to skip per platform (tests for other backends are not compiled/available).
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa", "dcu"),
-    "ascend": ("cuda", "metax", "musa", "dcu"),
+    "metax": ("cuda", "ascend", "musa", "dcu", "iluvatar", "mps"),
+    "ascend": ("cuda", "metax", "musa", "dcu", "iluvatar", "mps"),
     # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
     # `-> boxing` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
+    "musa": (
+        "cuda",
+        "metax",
+        "ascend",
+        "dcu",
+        "iluvatar",
+        "mps",
+        "flaggems_python",
+    ),
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
-    "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
+    "gcu": ("cuda", "metax", "ascend", "musa", "dcu", "iluvatar", "mps"),
     # PPU is a CUDA-ABI platform: when its wheel carries the boxing kernels the
     # CUDA dispatch key serves the vendor kernels and cuda-marked tests run
     # here -- same skip set as cuda, which is where PPU implicitly landed before
@@ -79,25 +88,43 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # instead of correct by accident of the fallback bucket. On a default
     # (FlagGems-primary) wheel the build-record gate below adds `cuda` to this
     # set, because that key has no kernel behind it.
-    "ppu": ("metax", "ascend", "musa", "dcu"),
+    "ppu": ("metax", "ascend", "musa", "dcu", "iluvatar", "mps"),
     # cuda -- and an unidentified wheel, which detect_platform() defaults to --
     # runs the CUDA-marked tests when its wheel carries the boxing kernels, and
     # skips every other backend's. The build-record gate below covers the
     # default FlagGems-primary wheel, where the `cuda` route has no kernels.
-    "cuda": ("metax", "ascend", "musa", "dcu"),
-    "dcu": ("metax", "ascend", "musa", "gcu"),
+    "cuda": ("metax", "ascend", "musa", "dcu", "iluvatar", "mps"),
+    "dcu": ("metax", "ascend", "musa", "gcu", "iluvatar", "mps"),
     # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
     # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
     # `none` (CPU fallback), with no `cuda` route, so a `-> boxing` dispatch assertion
     # cannot hold. Every other backend's marker is skipped for the same reason.
-    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
+    "kunlunxin": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "mps",
+    ),
     # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
     # boxing kernels nor any other vendor's kernels, and FlagGems/Triton has no
     # Metal line, so every other backend's marked tests are skipped here. The
     # FlagGems Python mark is a wheel capability question, not a platform
     # exclusion: a migrated case checks inside its body whether this build can
     # serve the override, then records the gap when it cannot.
-    "mps": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "ppu"),
+    "mps": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "ppu",
+    ),
     # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
     # vendor op library, so `-> boxing` and every other backend's dispatch
     # assertions cannot hold. Without this row the platform fell through to the
@@ -109,10 +136,29 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # allows one process per device, and the tests that spawn a subprocess leave
     # it on the device the parent already holds, so the child blocks until the
     # test's 60 s subprocess timeout. Skipping them would hide that.
-    "tsingmicro": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    "tsingmicro": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "iluvatar",
+        "mps",
+        "ppu",
+    ),
     # CoreX exposes a CUDA-shaped runtime, but Iluvatar uses its native vendor
     # slot rather than CUDA boxing. Keep FlagGems coverage enabled.
-    "iluvatar": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    "iluvatar": (
+        "cuda",
+        "metax",
+        "ascend",
+        "musa",
+        "dcu",
+        "gcu",
+        "mps",
+        "ppu",
+    ),
 }
 
 
@@ -146,6 +192,74 @@ def _boxing_enabled() -> bool:
     return "boxing" in _env.build_kernels()
 
 
+def _uses_shipped_default_conf(platform: str) -> bool:
+    """Whether this process routes through the platform's shipped default conf.
+
+    ``default_conf_only`` separates a case that asserts the default routing
+    table from the same wheel's opt-in day-0 boxing lane. An explicit
+    ``FLAGOS_BACKEND_CONFIG`` is never the default table, even when it points at
+    the same shipped file, so an override cannot make this gate claim evidence
+    about the selection torch_fl would have made on its own.
+    """
+    if os.environ.get("FLAGOS_BACKEND_CONFIG"):
+        return False
+
+    import torch_fl
+
+    selected = torch_fl.backend_config_path()
+    module_file = getattr(torch_fl, "__file__", None)
+    if not selected or not module_file:
+        return False
+    vendor = _platform.vendor_for(platform) or platform
+    expected = (
+        Path(module_file).resolve().parent / "configs" / f"backends_{vendor}.conf"
+    )
+    return Path(selected).resolve() == expected
+
+
+def _platform_owner(item: pytest.Item) -> str | None:
+    """The platform that owns a platform-specific case, if one is declared.
+
+    ``platform_owner`` is separate from the backend route markers. A case can
+    assert a ``dcu`` route while still being part of a generic file, but a case
+    that exists only for one platform's runtime declares that ownership once.
+    The ownership gate runs before every build-record or device probe, so a
+    shared selection cannot make a non-owner read state it does not have.
+    """
+    markers = list(item.iter_markers("platform_owner"))
+    if not markers:
+        return None
+    if len(markers) != 1:
+        raise pytest.UsageError(
+            f"{item.nodeid}: declare at most one platform_owner marker"
+        )
+    marker = markers[0]
+    if (
+        len(marker.args) != 1
+        or marker.kwargs
+        or not isinstance(marker.args[0], str)
+        or marker.args[0] not in _platform.PLATFORM_VENDOR
+    ):
+        raise pytest.UsageError(
+            f"{item.nodeid}: platform_owner takes one known platform name"
+        )
+    return marker.args[0]
+
+
+def _file_platform_owner(path: str) -> str | None:
+    """The platform a platform-prefixed test file belongs to.
+
+    The filename already identifies the runtime a platform-specific case was
+    written for. Checking the marker against it catches a copy-paste error at
+    collection instead of silently running the case on the wrong accelerator.
+    """
+    name = Path(path).name
+    for platform in sorted(_platform.PLATFORM_VENDOR, key=len, reverse=True):
+        if name.startswith(f"test_{platform}_"):
+            return platform
+    return None
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -158,18 +272,37 @@ def pytest_collection_modifyitems(
     # name already says it.
     if platform == "metax":
         markers_to_skip.append("metax")
-    flaggems_cpp_on = _flaggems_cpp_enabled()
-    # The `cuda` mark asserts a `-> boxing` dispatch, and on a CUDA-ABI platform
-    # that route is served by the generated boxing kernels. A FlagGems-primary
-    # wheel (the default since #520, and the only wheel the CUDA-ABI CI lanes
-    # build now) compiles none, so the ops the conf routes to `cuda` are left
-    # unregistered and reach cpu_fallback: the assertion has nothing to hold on
-    # and the case skips rather than failing. Platforms whose conf has no `cuda`
-    # route at all (ascend, gcu, musa, kunlunxin, bpu, mps) already skip the mark
-    # from the table above; appending it again is a no-op for them.
-    if not _boxing_enabled():
-        markers_to_skip.append("cuda")
+    flaggems_cpp_on: bool | None = None
+    boxing_on: bool | None = None
     for item in items:
+        owner = _platform_owner(item)
+        file_owner = _file_platform_owner(item.path)
+        if owner is not None and file_owner is not None and owner != file_owner:
+            raise pytest.UsageError(
+                f"{item.nodeid}: platform_owner {owner!r} contradicts "
+                f"file ownership {file_owner!r}"
+            )
+        if owner is not None and owner != platform:
+            add_platform_skip(
+                item,
+                gate="backend_marker",
+                detail=f"runtime is {platform}; case is owned by {owner}",
+                reason=f"Skipped on {platform} runtime: case is owned by {owner}",
+            )
+            continue
+        if item.get_closest_marker(
+            "default_conf_only"
+        ) and not _uses_shipped_default_conf(platform):
+            add_platform_skip(
+                item,
+                gate="lane_config",
+                detail=f"runtime is {platform}; case requires its shipped default conf",
+                reason=(
+                    f"Skipped on {platform} runtime: case requires the shipped "
+                    "default backend conf"
+                ),
+            )
+            continue
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             add_platform_skip(
                 item,
@@ -180,6 +313,9 @@ def pytest_collection_modifyitems(
             continue
         # The FlagGems C++ path requires a wheel built with the flaggems_cpp
         # kernel set linked in (liboperators.so).
+        if item.get_closest_marker("flaggems_cpp"):
+            if flaggems_cpp_on is None:
+                flaggems_cpp_on = _flaggems_cpp_enabled()
         if item.get_closest_marker("flaggems_cpp") and not flaggems_cpp_on:
             add_platform_skip(
                 item,
@@ -198,6 +334,15 @@ def pytest_collection_modifyitems(
         # retired FLAGOS_USE_FLAGGEMS switch no longer exists to gate it.
         # Manifests keep the vendor/FlagGems group split with `-m "... and not
         # flaggems"` on the vendor side.
+        if item.get_closest_marker("cuda") and "cuda" not in markers_to_skip:
+            # The `cuda` mark asserts a `-> boxing` dispatch, and on a CUDA-ABI
+            # platform that route is served only by generated boxing kernels.
+            # Read the build record after the ownership gate has accepted this
+            # case, so a non-owner never probes another platform's runtime.
+            if boxing_on is None:
+                boxing_on = _boxing_enabled()
+            if not boxing_on:
+                markers_to_skip.append("cuda")
         for marker_name in markers_to_skip:
             if item.get_closest_marker(marker_name):
                 add_platform_skip(
@@ -214,11 +359,22 @@ def pytest_collection_modifyitems(
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
+    config.addinivalue_line(
+        "markers", "platform_owner(name): case belongs to one accelerator platform"
+    )
+    config.addinivalue_line(
+        "markers",
+        "default_conf_only: case asserts the shipped backends_<platform>.conf "
+        "and skips on a boxing or custom conf",
+    )
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
-    config.addinivalue_line("markers", "metax: requires MetaX platform")
+    config.addinivalue_line(
+        "markers", "metax: asserts the native MetaX routing decision"
+    )
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")
     config.addinivalue_line("markers", "dcu: requires Hygon DCU platform")
+    config.addinivalue_line("markers", "iluvatar: requires Iluvatar platform")
     config.addinivalue_line("markers", "mps: requires Apple Silicon (Metal) platform")
     config.addinivalue_line(
         "markers", "soft_lowp: requires the DCU or MetaX software lowp path"

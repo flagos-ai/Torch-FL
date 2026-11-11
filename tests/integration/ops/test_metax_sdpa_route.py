@@ -30,7 +30,9 @@ the dispatch log (there is no route to print; the kernel *is* the route).
 
 The file is collected by the same ``-m "flaggems and main_ops"`` group every
 other platform runs and skips itself off a MetaX boxing build, so the case set
-is identical everywhere rather than stated per platform.
+is identical everywhere rather than stated per platform. The FlagGems kernel
+currently does not compile on the pinned MetaX stack, so each test carries a
+tracked skip for Torch-FL issue #803 until the wheel is updated.
 
 Usage:
     pytest tests/integration/ops/test_metax_sdpa_route.py -v
@@ -45,7 +47,8 @@ import subprocess
 import sys
 
 import pytest
-import torch_fl
+
+from tests.integration.case_gap_issues import tracked_skip
 
 
 DEVICE = "flagos:0"
@@ -53,57 +56,9 @@ DEVICE = "flagos:0"
 pytestmark = [
     pytest.mark.flaggems,
     pytest.mark.main_ops,
-    # MetaX SDPA has no vendor kernel yet, and the FlagGems arm does not compile
-    # its _attn_fwd on this stack: Triton rejects the tl.dot in
-    # flag_gems/ops/attention.py with "Input shapes should have M >= 1, N >= 1
-    # and K >= 16" (run 40256656989).
-    #
-    # That compile failure reaches only the five cases the envelope admits --
-    # `eligible`, `masked`, `head_dim64`, `seq512`, `float16`, every one of them
-    # bf16 or fp16. It is *not* the fp32 case: FlagGemsEligible in
-    # csrc/aten/sdp_choice_stub.cc rejects fp32 before any kernel is reached
-    # (`dtype != kBFloat16 && dtype != kHalf`), and it is the last && operand of
-    # the route test, so `float32` never calls flag_gems at all. Its expected
-    # row is `routed=0` for exactly that reason.
-    #
-    # What skips the whole file is the probe's shape, not the dtype: `run_case`
-    # in _SDPA_ORACLE has no per-case error capture, so the first admitted case
-    # that raises stops the child interpreter, no further RESULT lines are
-    # printed, and _sdpa_report asserts the table is complete. The nine cases
-    # the compile failure does not touch are buried with the five that it does.
-    #
-    # Re-enable when the vendor op lands or the FlagGems kernel compiles here.
-    # Recovering the nine sooner means giving `run_case` per-case capture, which
-    # is a deliberate change to a probe and not a side effect of a route fix.
-    pytest.mark.skip(
-        reason="the FlagGems _attn_fwd does not compile on this MetaX stack, "
-        "and the probe reports all 14 cases or none (see the comment above)"
-    ),
+    pytest.mark.platform_owner("metax"),
+    pytest.mark.default_conf_only,
 ]
-
-
-def _active_conf() -> str:
-    return torch_fl.backend_config_path()
-
-
-def _require_metax_flaggems() -> None:
-    """Skip unless this is a MetaX boxing build with a usable FlagGems runtime."""
-    if not _active_conf().endswith("backends_metax.conf"):
-        pytest.skip(
-            "the MetaX SDPA route is stated in backends_metax.conf; this "
-            f"run selected {_active_conf() or '<no conf>'}"
-        )
-    if torch_fl.flagos.device_count() < 1:
-        pytest.skip("MetaX device is unavailable")
-    try:
-        import triton
-
-        import flag_gems
-    except Exception as exc:  # noqa: BLE001 - any import failure means skip
-        pytest.skip(f"FlagGems MetaX runtime is unavailable: {exc}")
-    if "metax" not in triton.backends.backends:
-        pytest.skip("the installed Triton does not provide the MetaX backend")
-    print(f"FlagGems: {flag_gems.__version__} ({flag_gems.__file__})")
 
 
 # The oracle is the callable the FlagGems arm calls.
@@ -308,7 +263,6 @@ def _sdpa_report(result: subprocess.CompletedProcess):
 @pytest.fixture(scope="module")
 def sdpa_shipped():
     """The shipped ``backends_metax.conf``, with no environment override."""
-    _require_metax_flaggems()
     result = _run_sdpa_cases()
     assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"
     return _sdpa_report(result)
@@ -317,7 +271,6 @@ def sdpa_shipped():
 @pytest.fixture(scope="module")
 def sdpa_switched_off():
     """The same cases with the documented runtime switch set."""
-    _require_metax_flaggems()
     result = _run_sdpa_cases({"FLAGOS_OP_scaled_dot_product_attention": "cuda"})
     assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"
     return _sdpa_report(result)
@@ -335,6 +288,7 @@ class TestMetaXSdpaRoute:
     admits must take the route, and a call it refuses must not.
     """
 
+    @tracked_skip(condition=True, issue="#803")
     @pytest.mark.parametrize("tag", sorted(_SDPA_CASES_EXPECTED))
     def test_route_follows_the_envelope(self, sdpa_shipped, tag):
         report, _ = sdpa_shipped
@@ -352,6 +306,7 @@ class TestMetaXSdpaRoute:
         )
         assert device == DEVICE, f"{tag}: the result is on {device}, not {DEVICE}"
 
+    @tracked_skip(condition=True, issue="#803")
     def test_only_the_admitted_shapes_reach_the_kernel(self, sdpa_shipped):
         """The shapes the FlagGems kernel saw, in order, across all fourteen cases.
 
@@ -379,6 +334,7 @@ class TestMetaXSdpaRoute:
             "admitted cases may reach it, and only with their own q, k, v"
         )
 
+    @tracked_skip(condition=True, issue="#803")
     def test_off_switch_returns_every_call_to_the_boxing_route(self, sdpa_switched_off):
         """``FLAGOS_OP_scaled_dot_product_attention=cuda`` is the whole switch.
 

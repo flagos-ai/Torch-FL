@@ -38,6 +38,10 @@ MIGRATED_CASE_FILES = frozenset(
     {
         "tests/integration/ops/test_all_dispatch.py",
         "tests/integration/ops/test_mps_argmin_arpextreme.py",
+        "tests/integration/ops/test_dcu_complex.py",
+        "tests/integration/ops/test_iluvatar_sdpa_route.py",
+        "tests/integration/ops/test_metax_complex_fill.py",
+        "tests/integration/ops/test_metax_sdpa_route.py",
     }
 )
 
@@ -76,13 +80,19 @@ _ISSUES = (
         number="#710",
         cases=(
             "tests/integration/ops/test_all_dispatch.py"
-            "::TestAllCorrectness::test_all_empty_dimensions",
+            "::TestAllCorrectness::test_all_empty_dimensions_dim",
+            "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_dimensions_dims",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_tensor",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_dim_reduction",
             "tests/integration/ops/test_all_dispatch.py"
-            "::TestAllCorrectness::test_all_empty_results_keep_their_shape",
+            "::TestAllCorrectness::test_all_empty_results_keep_their_shape_global",
+            "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_results_keep_their_shape_dim",
+            "tests/integration/ops/test_all_dispatch.py"
+            "::TestAllCorrectness::test_all_empty_results_keep_their_shape_dims",
             "tests/integration/ops/test_all_dispatch.py"
             "::TestAllCorrectness::test_all_empty_full_reduction",
             "tests/integration/ops/test_all_dispatch.py"
@@ -96,6 +106,44 @@ _ISSUES = (
         number="#710",
         routes=("all", "all:flaggems_python"),
         upstream="flagos-ai/FlagGems/issues/8411",
+    ),
+    CaseGapIssue(
+        number="#803",
+        cases=(
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[causal]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[eligible]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[float16]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[float32]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[head_dim256]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[head_dim64]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[head_dim8]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[mask_4d_bool]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[mask_additive]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[mask_row_f32]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[masked]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[masked_seq512]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[rank2]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_route_follows_the_envelope[seq512]",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_only_the_admitted_shapes_reach_the_kernel",
+            "tests/integration/ops/test_metax_sdpa_route.py"
+            "::TestMetaXSdpaRoute::test_off_switch_returns_every_call_to_the_boxing_route",
+        ),
+        upstream="flagos-ai/FlagGems/issues/6271",
     ),
 )
 

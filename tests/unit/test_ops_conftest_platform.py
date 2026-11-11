@@ -27,8 +27,9 @@ Run: pytest tests/unit/test_ops_conftest_platform.py -v
 
 import importlib.util
 import sys
+import warnings
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -264,3 +265,240 @@ def test_no_platform_skips_the_plain_flaggems_mark():
     are unaffected by this invariant.)"""
     for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
         assert "flaggems" not in markers, platform
+
+
+class _FakeItem:
+    """The marker surface the ops collection gate uses on a pytest item."""
+
+    def __init__(self, *markers, path=None):
+        self.nodeid = "tests/integration/ops/test_owner.py::test_case"
+        self.path = path or _OPS_CONFTEST_PATH.parent / "test_owner.py"
+        self.own_markers = list(markers)
+
+    def iter_markers(self, name):
+        return (marker for marker in self.own_markers if marker.name == name)
+
+    def get_closest_marker(self, name):
+        return next(self.iter_markers(name), None)
+
+    def add_marker(self, marker):
+        self.own_markers.append(getattr(marker, "mark", marker))
+
+
+def _mark(marker_name, *args, **kwargs):
+    return SimpleNamespace(name=marker_name, args=args, kwargs=kwargs)
+
+
+def _policy_markers(item):
+    return {
+        marker.name: marker
+        for marker in item.own_markers
+        if marker.name.startswith("flagos_")
+    }
+
+
+def _collect(monkeypatch, platform, item):
+    monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: platform)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Unknown pytest\.mark\.flagos_platform_gate.*",
+            category=pytest.PytestUnknownMarkWarning,
+        )
+        ops_conftest.pytest_collection_modifyitems(None, [item])
+
+
+def test_platform_owner_keeps_its_case_collectable(monkeypatch):
+    owner = _mark("platform_owner", "metax")
+    item = _FakeItem(owner)
+    monkeypatch.setattr(
+        ops_conftest,
+        "_boxing_enabled",
+        lambda: pytest.fail("an unrelated owner must not probe the build record"),
+    )
+
+    _collect(monkeypatch, "metax", item)
+
+    assert item.own_markers == [owner]
+
+
+def test_default_conf_only_keeps_its_case_on_the_shipped_default(monkeypatch, tmp_path):
+    package = ModuleType("torch_fl")
+    package.__path__ = []
+    package_dir = tmp_path / "torch_fl"
+    conf = package_dir / "configs" / "backends_metax.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("")
+    package.__file__ = str(package_dir / "__init__.py")
+    package.backend_config_path = lambda: str(conf)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
+    owner = _mark("platform_owner", "metax")
+    default_conf = _mark("default_conf_only")
+    item = _FakeItem(owner, default_conf)
+
+    _collect(monkeypatch, "metax", item)
+
+    assert item.own_markers == [owner, default_conf]
+
+
+@pytest.mark.parametrize(
+    "filename,env_override",
+    [
+        ("backends_metax_boxing.conf", None),
+        ("backends_metax.conf", "/opt/testing/custom.conf"),
+    ],
+)
+def test_default_conf_only_skips_a_boxing_or_custom_conf(
+    monkeypatch, tmp_path, filename, env_override
+):
+    package = ModuleType("torch_fl")
+    package.__path__ = []
+    package_dir = tmp_path / "torch_fl"
+    conf = package_dir / "configs" / filename
+    conf.parent.mkdir(parents=True)
+    conf.write_text("")
+    package.__file__ = str(package_dir / "__init__.py")
+    package.backend_config_path = lambda: str(conf)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    if env_override is None:
+        monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
+    else:
+        monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", env_override)
+    owner = _mark("platform_owner", "metax")
+    item = _FakeItem(owner, _mark("default_conf_only"))
+
+    _collect(monkeypatch, "metax", item)
+
+    gate = _policy_markers(item)["flagos_platform_gate"]
+    assert gate.kwargs == {
+        "gate": "lane_config",
+        "detail": "runtime is metax; case requires its shipped default conf",
+    }
+    assert item.get_closest_marker("skip").kwargs == {
+        "reason": (
+            "Skipped on metax runtime: case requires the shipped default backend conf"
+        )
+    }
+
+
+def test_default_conf_gate_runs_before_build_record_probes(monkeypatch, tmp_path):
+    package = ModuleType("torch_fl")
+    package.__path__ = []
+    package_dir = tmp_path / "torch_fl"
+    conf = package_dir / "configs" / "backends_metax_boxing.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("")
+    package.__file__ = str(package_dir / "__init__.py")
+    package.backend_config_path = lambda: str(conf)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
+    item = _FakeItem(
+        _mark("platform_owner", "metax"),
+        _mark("default_conf_only"),
+        _mark("flaggems_cpp"),
+        _mark("cuda"),
+    )
+    monkeypatch.setattr(
+        ops_conftest,
+        "_flaggems_cpp_enabled",
+        lambda: pytest.fail("lane conf must be checked before build kernels"),
+    )
+    monkeypatch.setattr(
+        ops_conftest,
+        "_boxing_enabled",
+        lambda: pytest.fail("lane conf must be checked before boxing kernels"),
+    )
+
+    _collect(monkeypatch, "metax", item)
+
+    assert _policy_markers(item)["flagos_platform_gate"].kwargs["gate"] == (
+        "lane_config"
+    )
+
+
+def test_non_owner_is_skipped_before_any_build_record_probe(monkeypatch):
+    item = _FakeItem(
+        _mark("platform_owner", "metax"),
+        _mark("flaggems_cpp"),
+        _mark("cuda"),
+    )
+    monkeypatch.setattr(
+        ops_conftest,
+        "_flaggems_cpp_enabled",
+        lambda: pytest.fail("ownership must be checked before the FlagGems probe"),
+    )
+    monkeypatch.setattr(
+        ops_conftest,
+        "_boxing_enabled",
+        lambda: pytest.fail("ownership must be checked before the boxing probe"),
+    )
+
+    _collect(monkeypatch, "cuda", item)
+
+    gate = _policy_markers(item)["flagos_platform_gate"]
+    assert gate.kwargs == {
+        "gate": "backend_marker",
+        "detail": "runtime is cuda; case is owned by metax",
+    }
+    assert item.get_closest_marker("skip").kwargs == {
+        "reason": "Skipped on cuda runtime: case is owned by metax"
+    }
+
+
+def test_non_owner_is_skipped_before_reading_the_backend_conf(monkeypatch):
+    item = _FakeItem(
+        _mark("platform_owner", "metax"),
+        _mark("default_conf_only"),
+    )
+    monkeypatch.setattr(
+        ops_conftest,
+        "_uses_shipped_default_conf",
+        lambda platform: pytest.fail("ownership must be checked before lane conf"),
+    )
+
+    _collect(monkeypatch, "cuda", item)
+
+    assert item.get_closest_marker("skip").kwargs == {
+        "reason": "Skipped on cuda runtime: case is owned by metax"
+    }
+
+
+@pytest.mark.parametrize(
+    "markers,message",
+    [
+        (
+            (
+                _mark("platform_owner", "metax"),
+                _mark("platform_owner", "dcu"),
+            ),
+            "declare at most one platform_owner marker",
+        ),
+        ((_mark("platform_owner", "unknown"),), "one known platform name"),
+        ((_mark("platform_owner"),), "one known platform name"),
+        ((_mark("platform_owner", "metax", "dcu"),), "one known platform name"),
+        (
+            (_mark("platform_owner", name="metax"),),
+            "one known platform name",
+        ),
+    ],
+)
+def test_platform_owner_rejects_ambiguous_or_invalid_ownership(
+    monkeypatch, markers, message
+):
+    item = _FakeItem(*markers)
+    monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: "metax")
+
+    with pytest.raises(pytest.UsageError, match=message):
+        ops_conftest.pytest_collection_modifyitems(None, [item])
+
+
+def test_platform_owner_must_match_the_file_owner(monkeypatch):
+    item = _FakeItem(
+        _mark("platform_owner", "dcu"),
+        path=_OPS_CONFTEST_PATH.parent / "test_metax_route.py",
+    )
+    monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: "metax")
+
+    with pytest.raises(pytest.UsageError, match="contradicts file ownership"):
+        ops_conftest.pytest_collection_modifyitems(None, [item])

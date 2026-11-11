@@ -48,12 +48,33 @@ AGNOSTIC_WORKFLOW = REPO_ROOT / ".github/workflows/agnostic-checks.yml"
 MPS_SUITE = REPO_ROOT / "tests/integration/ops"
 CASE_GAP_REGISTRY = REPO_ROOT / "tests/integration/case_gap_issues.py"
 CASE_GAP_CHECKER = REPO_ROOT / ".github/scripts/ci/check_case_gap_issues.py"
+PLATFORM_SOURCE = REPO_ROOT / "torch_fl/_platform.py"
 
 
 def _suite_sources():
     for root in SUITE_ROOTS:
         if root.is_dir():
             yield from sorted(root.glob("*.py"))
+
+
+def _platform_ids():
+    """Platform ids from the detector's source, without importing torch_fl."""
+    tree = ast.parse(PLATFORM_SOURCE.read_text(encoding="utf-8"))
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or not isinstance(
+            statement.value, ast.Dict
+        ):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == "PLATFORM_VENDOR"
+            for target in statement.targets
+        ):
+            return frozenset(
+                key.value
+                for key in statement.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+    raise AssertionError("PLATFORM_VENDOR is missing from torch_fl/_platform.py")
 
 
 def _case_gap_checker():
@@ -146,6 +167,83 @@ def _nested_module_statements(statement):
             yield nested
             if isinstance(nested, (ast.If, ast.Try)):
                 yield from _nested_module_statements(nested)
+
+
+def _marker_name(node):
+    """The marker name for ``pytest.mark.<name>`` or its called form."""
+    if isinstance(node, ast.Call):
+        node = node.func
+    if not isinstance(node, ast.Attribute):
+        return ""
+    mark = node.value
+    if (
+        isinstance(mark, ast.Attribute)
+        and mark.attr == "mark"
+        and isinstance(mark.value, ast.Name)
+        and mark.value.id == "pytest"
+    ):
+        return node.attr
+    return ""
+
+
+def _module_marker_values(tree, marker_name):
+    """Literal arguments passed to a marker on the module-level ``pytestmark``."""
+    values = []
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+            value = statement.value
+        else:
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "pytestmark"
+            for target in targets
+        ):
+            continue
+        markers = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+        for marker in markers:
+            if _marker_name(marker) != marker_name:
+                continue
+            if not isinstance(marker, ast.Call) or len(marker.args) != 1:
+                values.append(None)
+            elif isinstance(marker.args[0], ast.Constant) and isinstance(
+                marker.args[0].value, str
+            ):
+                values.append(marker.args[0].value)
+            else:
+                values.append(None)
+    return tuple(values)
+
+
+def _platform_for_test_file(path, platform_ids):
+    for platform in sorted(platform_ids, key=len, reverse=True):
+        if path.name.startswith(f"test_{platform}_"):
+            return platform
+    return None
+
+
+def _platform_ownership_violations():
+    """Shared-cohort files whose platform ownership is absent or contradictory."""
+    platform_ids = _platform_ids()
+    violations = []
+    for path in _suite_sources():
+        platform = _platform_for_test_file(path, platform_ids)
+        if platform is None:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        has_main_ops = any(_marker_name(node) == "main_ops" for node in ast.walk(tree))
+        if not has_main_ops:
+            continue
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if platform == "mps" and relative in _MIGRATION_EXEMPTIONS:
+            continue
+        owners = _module_marker_values(tree, "platform_owner")
+        if owners != (platform,):
+            violations.append((relative, platform, owners))
+    return violations
 
 
 def _probe_uses(tree):
@@ -300,7 +398,6 @@ _MIGRATION_EXEMPTIONS = frozenset(
             for name in (
                 "activations",
                 "addmm",
-                "all",
                 "argmax",
                 "argmax_nan",
                 "batch_norm",
@@ -467,6 +564,20 @@ def test_every_platform_specific_mps_file_is_migrated_or_listed():
     unhandled -= {path for path, _, _ in _collection_violations()}
     assert not unhandled, (
         f"platform-specific files without a collection violation: {sorted(unhandled)}"
+    )
+
+
+def test_shared_platform_files_declare_their_owner_without_route_aliases():
+    """A platform-specific main_ops file names its owner once at module scope.
+
+    Route assertions such as ``pytest.mark.metax`` describe a dispatch decision;
+    they cannot replace ``platform_owner("metax")``. The collection gate uses the
+    owner to skip the file before reading another platform's build record.
+    """
+    violations = _platform_ownership_violations()
+    assert not violations, (
+        "platform-specific shared files need pytest.mark.platform_owner(<id>) "
+        f"matching their filename: {violations}"
     )
 
 
@@ -778,7 +889,7 @@ def _verify_case_gaps(registry=None):
 
 def test_case_gap_skips_are_tracked_and_owned():
     rows = _verify_case_gaps()
-    assert {number for number, _, _ in rows} == {"#710"}
+    assert {number for number, _, _ in rows} == {"#710", "#803"}
 
 
 @pytest.mark.parametrize(
