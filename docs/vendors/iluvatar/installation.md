@@ -53,7 +53,12 @@ build. The Iluvatar target places the CoreX include directory first: otherwise
 `cublas_v2.h` resolves to the NVIDIA header and compilation loses CoreX's
 `ixblasDataType_t` and `ixblasStatus_t`, even though the isolated SDK probe passes.
 The first new-runtime run reproduced this header precedence failure after its
-dependency checks succeeded; a host-only CMake regression covers the conflict.
+dependency checks succeeded. Merely using `BEFORE` on the consumer was not
+enough: the imported SDK interface classified CoreX as a system include, which
+GCC searches after ordinary `-I` directories. The CoreX facade is now a local
+interface target, preserving ordinary include precedence for every consumer.
+The host-only CMake regression links that actual SDK facade as well as testing
+the direct-include case, and reproduces the failed search order before the fix.
 
 After the image initializes its SDK environment, the hook persists
 `BASH_ENV=/dev/null` so later Bash steps cannot select `/flagos` again.

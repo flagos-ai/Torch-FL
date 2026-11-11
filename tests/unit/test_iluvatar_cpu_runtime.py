@@ -21,7 +21,8 @@ verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
 
 
-def test_corex_headers_precede_profiler_cuda_headers(tmp_path):
+@pytest.mark.parametrize("link_runtime", [False, True])
+def test_corex_headers_precede_profiler_cuda_headers(tmp_path, link_runtime):
     """Compile the actual Iluvatar target setup beside a shadow CUDA SDK."""
     if not shutil.which("cmake") or not shutil.which("c++"):
         pytest.skip("CMake and a host C++ compiler are required")
@@ -40,12 +41,30 @@ def test_corex_headers_precede_profiler_cuda_headers(tmp_path):
         .split("elseif(_flagos_is_iluvatar)\n", 1)[1]
         .split("elseif(_flagos_is_musa)", 1)[0]
     )
+    runtime = ""
+    if link_runtime:
+        # Imported interface SDK headers are system headers by default, even
+        # when the consumer also puts the same path BEFORE its own includes.
+        sdk_setup = (
+            (ROOT / "CMakeLists.txt")
+            .read_text()
+            .split("elseif(_flagos_is_iluvatar)\n", 1)[1]
+            .split("  add_library(cuda_runtime_compat", 1)[1]
+            .split("  set(CUDA_RUNTIME_LIB", 1)[0]
+        )
+        runtime = (
+            f'set(COREX_PATH "{sdk.parent}")\n'
+            f'set(_iluvatar_cudart_dir "{sdk.parent}")\n'
+            "add_library(cuda_runtime_compat"
+            + sdk_setup.replace("${COREX_PATH}/include", str(sdk))
+            + "\nset(_torch_fl_link_libs cuda_runtime_compat)\n"
+        )
     (tmp_path / "CMakeLists.txt").write_text(
         "cmake_minimum_required(VERSION 3.19)\nproject(probe LANGUAGES CXX)\n"
         "set(LIBRARY_NAME probe)\nadd_library(probe STATIC probe.cc)\n"
         f'target_include_directories(probe PRIVATE "{cuda}")\n'
         "set(FLAGOS_BUILD_VENDOR ON)\n"
-        f'set(FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR "{sdk}")\n' + branch
+        f'set(FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR "{sdk}")\n' + runtime + branch
     )
     build = tmp_path / "build"
     subprocess.run(

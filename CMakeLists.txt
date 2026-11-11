@@ -612,7 +612,10 @@ elseif(_flagos_is_iluvatar)
   message(STATUS "Iluvatar corex SDK path: ${COREX_PATH}")
   message(STATUS "Iluvatar CUDA runtime path: ${_iluvatar_cudart_dir}")
 
-  add_library(cuda_runtime_compat INTERFACE IMPORTED)
+  # This is a local SDK facade, not an imported binary. IMPORTED would make
+  # its headers system includes in consumers, so even BEFORE cannot place
+  # CoreX ahead of the profiler's ordinary NVIDIA compatibility includes.
+  add_library(cuda_runtime_compat INTERFACE)
   set_target_properties(cuda_runtime_compat PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${COREX_PATH}/include"
   )
