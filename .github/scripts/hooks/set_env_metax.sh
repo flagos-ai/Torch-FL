@@ -169,8 +169,15 @@ fi
 # used to select a separate backends_flaggems.conf; nothing reads it any more,
 # so setting it here would misdescribe the build -- the FlagGems Python path is
 # on for the 594 ops the conf routes to it either way.
+# The dedicated TileOPs experiment builds no FlagGems slot. Keep the normal
+# MetaX lane unchanged while letting that lane request the closed
+# tileops + none configuration from the same provisioning path.
+if [[ "${FLAGOS_BUILD_TILEOPS:-0}" == "1" ]]; then
+  export FLAGOS_BUILD_FLAGGEMS=0
+else
+  export FLAGOS_BUILD_FLAGGEMS=1
+fi
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
-export FLAGOS_BUILD_FLAGGEMS=1
 
 export LD_LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib:/opt/maca/mxgpu_llvm/lib:/opt/maca/mxshmem/lib:/opt/maca/ompi/lib:/opt/maca/ucx/lib:/opt/mxdriver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
@@ -225,7 +232,7 @@ PY
 # packages the tests import are the ones this script put there. Linking is what
 # let a stale image cohort shadow the pinned revision: the venv resolved
 # whatever the image's editable install pointed at, and the pin below never ran.
-if [[ "$CI_STAGE" == "integration" ]]; then
+if [[ "$CI_STAGE" == "integration" && "${FLAGOS_BUILD_TILEOPS:-0}" != "1" ]]; then
   VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
   # Install FlagGems' runtime dependencies into the venv. flag_gems imports
@@ -385,8 +392,9 @@ bash scripts/vendor/bundle_metax_libtorch.sh
 # built it. The gate mirrors set_env_mthreads.sh's `import torch_fl._C` guard: on a
 # tree without the extension there is nothing to probe, and that is not a
 # FlagGems failure. The probe is skipped with a warning rather than failing the
-# job for a state this script has not reached yet.
-if [[ "$CI_STAGE" == "integration" ]]; then
+# job for a state this script has not reached yet. The TileOPs experiment has no
+# FlagGems or FlagTree dependency, so it skips this cohort check.
+if [[ "$CI_STAGE" == "integration" && "${FLAGOS_BUILD_TILEOPS:-0}" != "1" ]]; then
   if ! python -c "import torch_fl._C" >/dev/null 2>&1; then
     echo "::warning::torch_fl._C is not importable from $REPO_ROOT, so the" \
          "FlagGems cohort cannot be probed here; the installed wheel answers" \

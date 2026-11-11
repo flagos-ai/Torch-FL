@@ -428,7 +428,10 @@ def get_device_adapter(target: str, kind=None, *, raising=True):
             return ("cuda", _box, _unbox, lambda index: index, None)
     elif _cuda_abi(target):
         return ("cuda", _box, _unbox, lambda index: index, None)
-    if target == "musa" and _tileops_platform() == "musa":
+    # A provider may have registered a native adapter before the target is
+    # queried. Do not replace it with torch_fl's default -- and, on a source-only
+    # check without the compiled extension, do not require ``_C`` to exist.
+    if target == "musa" and target not in _ADAPTERS and _tileops_platform() == "musa":
         _register_flagos_device_adapters()
     with _ADAPTERS_LOCK:
         adapter = _ADAPTERS.get(target)
