@@ -1301,22 +1301,42 @@ refcount-driven output pool, `cuLaunchKernel`), the Python capture and replay la
 `enable()` replaces the FlagGems bindings for the operators it can prove and declines the
 rest by name.
 
-Two arms of the gate on H100, `max_err` shown as relative error:
+Three arms of the gate on H100 at the same shapes: the vendor operator on `cuda`, the
+untouched FlagGems route on `flagos`, and the replay. Error is relative to a CPU
+reference. This is a single fresh measurement set and **supersedes the wrapper-only
+numbers quoted earlier in this section**; the ratios in the last three columns are
+computed from the three columns beside them, not carried over from another campaign.
 
-| operator | wrapper | replayed from C++ | speed-up | rel. error |
-|---|---:|---:|---:|---:|
-| `mul` 512x512 | 82.48 us | **15.05 us** | **5.48x** | 0.0 |
-| `softmax` 1024x1024 | 30.11 us | **14.89 us** | **2.02x** | 7.4e-09 |
-| `add` 512x512 | 93.16 us | declined (keyword arguments) | - | 0.0 |
-| `relu` 512x512 | 76.08 us | declined (see below) | - | 0.0 |
-| `sum_dim` 1024x1024 | 10.93 us | declined (keyword arguments) | - | 1.7e-07 |
-| `max.dim` 1024x1024 | 112.24 us | declined (two outputs) | - | 0.0 |
-| `sort` 1024x1024 | 1293 us | declined (21 launches) | - | 0.0 |
+| operator | vendor | wrapper | replay | replay / vendor | wrapper / vendor | wrapper / replay |
+|---|---:|---:|---:|---:|---:|---:|
+| `mul` 512x512 | 7.27 | 82.55 | **14.60** | 2.01x | 11.35x | **5.66x** |
+| `softmax` 1024x1024 | 7.09 | 30.52 | **14.44** | 2.04x | 4.31x | **2.11x** |
+| `add` 512x512 | 7.08 | 90.41 | 91.09 (declined) | 12.87x | 12.77x | 0.99x |
+| `relu` 512x512 | 7.19 | 76.10 | 76.04 (declined) | 10.57x | 10.58x | 1.00x |
+| `sum_dim` 1024x1024 | 8.86 | 10.79 | 10.58 (declined) | 1.19x | 1.22x | 1.02x |
+| `max.dim` 1024x1024 | 10.73 | 112.96 | 111.97 (declined) | 10.43x | 10.52x | 1.01x |
+| `sort` 1024x1024 | 29.81 | 1307.26 | 1312.92 (declined) | 44.04x | 43.85x | 1.00x |
 
-The gate passes on both arms, with `hits` 2038, `fallbacks` 0 and every declined
+The gate passes on all three arms, with `hits` 2038, `fallbacks` 0 and every declined
 operator keeping its untouched cost.
 
-**A verified-operator allowlist is part of the design, not a limitation of it.** `relu`
+**The replay removes the wrapper's per-call cost but does not yet reach the vendor
+operator, and the remaining gap is now located to within a measurement.** `mul` improves
+5.66x over the wrapper yet still costs 2.01x the vendor's 7.27 us. The decomposition of
+the 14.60 us explains it: 4.33 us is the replay itself (measured inside C++), and the
+rest is the path to reach it - a Python frame plus the `pybind11` crossing to the
+extension, measured separately at 10.58 us for the same replay called from Python, plus
+the plugin's dispatch into the FlagGems callable. In other words the mechanism is fast;
+calling it from Python is what costs, and the wrapper being replaced was itself a Python
+callable.
+
+That is exactly what the next step removes: a dispatch that calls the replay directly
+from the plugin's C++ side skips the Python frame and the `pybind11` crossing, which is
+the ~6 us above the in-C++ cost. Projected end to end that puts `mul` at roughly 8-9 us
+against the vendor's 7.27 us, i.e. 1.1-1.2x rather than 2x - close, and the remaining
+part is the plugin's own dispatch, not this mechanism.
+
+**A verified-operator allowlist is part of the design, not a limitation of it.****A verified-operator allowlist is part of the design, not a limitation of it.** `relu`
 captures a seven-parameter layout with three scalars whose replay does not reproduce the
 wrapper's result (relative error 1.36), and the cause is not yet explained. A wrong
 layout does not crash - it returns a plausible wrong answer - so the module refuses any

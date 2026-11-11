@@ -12,21 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hardware gate for the C++ replay.
+"""Hardware gate for the C++ replay, with a vendor arm for every operator.
 
-Two arms run in separate processes, because the plugin resolves a FlagGems callable on
-its first dispatch and caches it for the life of the process: enabling the fast path
-after that first dispatch would leave the cached original in place and measure nothing.
+The three arms run in separate processes. For the wrapper and cpp arms this is required:
+the plugin resolves a FlagGems callable on its first dispatch and caches it for the life
+of the process, so enabling the fast path after that dispatch would leave the cached
+original in place and measure nothing. The vendor arm runs the same operators on the
+vendor device and never imports the plugin.
 
+    python benchmarks/fast_launch_cpp/fast_launch_cpp_gate.py --arm vendor
     python benchmarks/fast_launch_cpp/fast_launch_cpp_gate.py --arm wrapper
     python benchmarks/fast_launch_cpp/fast_launch_cpp_gate.py --arm cpp
 
-The wrapper arm records what the untouched route costs; the cpp arm enables the replay
-at import time, before any dispatch, and reports the same measurement plus the plan
-census and the capture statistics. Both arms check exactness against a CPU reference.
+Every arm measures the same operators at the same shapes and checks its result against a
+CPU reference, and each row is emitted as a single ``RESULT`` line so the three arms can
+be collated into one table without reading prose. The vendor arm is the reference the
+whole design is judged against: it is the operator a user would get without FlagGems.
 """
 
 import argparse
+import json
 import statistics
 import sys
 import time
@@ -38,7 +43,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # take it. The expected-declined entries are the fallback contract under test.
 OPS = (
     # Only the operators in ``fast_launch_cpp.VERIFIED_OPS`` are expected to install a
-    # plan; the rest must decline and keep their untouched cost.
+    # plan; the rest must decline and keep their untouched cost. Every operator is also
+    # measured on the vendor device, so each row can be read against the operator it is
+    # ultimately compared with.
     ("mul", lambda t: t["a"] * t["b"], (512, 512), True),
     ("softmax", lambda t: t["a"].softmax(dim=-1), (1024, 1024), True),
     ("add", lambda t: t["a"] + t["b"], (512, 512), False),
@@ -94,12 +101,16 @@ def errors(name, actual, expected):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--arm", choices=("wrapper", "cpp"), required=True)
-    parser.add_argument("--device", default="flagos:0")
+    parser.add_argument("--arm", choices=("vendor", "wrapper", "cpp"), required=True)
+    parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
     import torch
-    import torch_fl  # noqa: F401 - registers the device
+
+    # The vendor arm must not import the plugin: it measures the operator a user would
+    # get without FlagGems, which is the reference the replay is judged against.
+    if args.arm != "vendor":
+        import torch_fl  # noqa: F401 - registers the device
 
     backend = None
     if args.arm == "cpp":
@@ -108,7 +119,8 @@ def main() -> int:
         # Enable before the first dispatch: see the module docstring.
         backend = fast_launch_cpp.enable([name for name, *_ in OPS])
 
-    device = torch.device(args.device)
+    default_device = "cuda:0" if args.arm == "vendor" else "flagos:0"
+    device = torch.device(args.device or default_device)
     failures = []
     for name, call, shape, replayable in OPS:
         tensors = {
@@ -127,6 +139,19 @@ def main() -> int:
         print(
             f"  {name:10s} {value:8.3f} us  rel_err={shown}"
             f"  replay={'expected' if replayable else 'declined'}"
+        )
+        print(
+            "RESULT "
+            + json.dumps(
+                {
+                    "arm": args.arm,
+                    "op": name,
+                    "device": str(device),
+                    "us": value,
+                    "rel_err": errs,
+                    "expected_replay": replayable,
+                }
+            )
         )
         if any(err is not None and err > RTOL for err in errs):
             failures.append(f"{name}: wrong result")
