@@ -49,6 +49,20 @@ elseif(FLAGOS_ACCELERATOR STREQUAL "kunlunxin")
   target_include_directories(${LIBRARY_NAME} PRIVATE "${XPU_ROOT}/include")
   target_link_directories(${LIBRARY_NAME} PRIVATE "${XPU_LIB_DIR}")
   target_link_libraries(${LIBRARY_NAME} PRIVATE xpurt)
+elseif(FLAGOS_ACCELERATOR STREQUAL "cambricon")
+  # module.cc's _get_cambricon_current_raw_stream is how Triton's mlu driver
+  # learns which cnrt queue to launch on: it reads
+  # torch.mlu.current_stream(idx).mlu_stream, and torch.mlu here is torch_fl's
+  # shim over flagos. Without the define the binding is compiled out, the Python
+  # side falls back to mlu_stream = 0, and Triton's kernels go to a null queue
+  # while the CNNL kernels in csrc/aten/backends/cambricon use the queue
+  # GetCurrentStreamForDevice hands back. Two queues with no ordering between
+  # them is a race: inputs read half-written, which shows up as a wrong value
+  # rather than a crash, and in training as a sporadic NaN.
+  #
+  # Nothing else is needed here: GetCurrentStreamForDevice is declared in
+  # csrc/include/flagos.h and lives in torch_fl, which is linked below.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_CAMBRICON=1)
 elseif(FLAGOS_ACCELERATOR STREQUAL "musa")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE USE_MUSA=1)
   if(NOT MUSA_HOME)

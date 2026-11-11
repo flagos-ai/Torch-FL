@@ -801,15 +801,24 @@ def test_conf_route_counts_are_stable():
         # instead. See NATIVE_TRITON_GAPS["enflame"].
         "enflame": {"none": 1608, "enflame": 183, "flaggems": 251},
         # kunlunxin is a native vendor backend: every op routes to the vendor
-        # XPU SDK (``kunlunxin``) or is left at ``none`` -- there is no ``cuda``
-        # route.  The count is exactly what
+        # XPU SDK (``kunlunxin``), to FlagGems, or is left at ``none`` -- there
+        # is no ``cuda`` route.  The ``kunlunxin`` count is exactly what
         # backends/kunlunxin/generated/kunlunxin_register.inc registers: the ten
         # conformance ops with an xdnn_pytorch kernel, plus the RNG cohort the
         # handwritten rng.cc covers (see HANDWRITTEN_OPS in
         # scripts/codegen/codegen_kunlunxin.py).  Without that route the RNG ops
         # fell through to cpu_fallback, which the flagos PrivateUse1 generator
         # cannot steer -- the two failures the CI lane reported.
-        "kunlunxin": {"none": 1985, "kunlunxin": 57},
+        # The ``flaggems`` count is the ops that survived two screens on the
+        # P800: the whole 618-op cohort at one profile with the survey's default
+        # tolerance, then every survivor over ten profiles (the seven the survey
+        # ships plus three odd shapes) at atol=rtol=1e-4 -- the tolerance this
+        # lane's own tests assert with.  256 of 618 remain; the rest raised,
+        # computed a silently wrong result, poisoned the device, or were caught
+        # only by the second screen.  `acos`, `_log_softmax` and `mean.dim` are
+        # the three this lane itself rejected on the first attempt, and they are
+        # why the screen was tightened.  See KUNLUNXIN_FLAGGEMS_MEASURED.
+        "kunlunxin": {"none": 1729, "kunlunxin": 57, "flaggems": 256},
         # metax: _softmax/embedding moved off flaggems_cpp to flaggems (#501).
         # 8 ops moved flaggems -> boxing (594 -> 586 / 1433 -> 1441) because
         # route_boxing now consults codegen_ops.py's FlagGems holds. These were

@@ -15,12 +15,17 @@
 
 #ifdef USE_CAMBRICON
 
+#include <ATen/Dispatch.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/zeros.h>
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // CloneVendorFn, and the weak CloneVendorHook the clone kernel below overrides.
@@ -371,6 +376,160 @@ at::Tensor PrivSafeSoftmaxKernelCambricon(const at::Tensor& self, int64_t dim, s
 
 REGISTER_IMPL_TO_DISPATCHER(PrivSafeSoftmaxFn, priv_safe_softmax_dispatcher, Backend::kCambricon, PrivSafeSoftmaxKernelCambricon);
 
+at::Tensor PrivSoftmaxKernelCambricon(const at::Tensor& self, int64_t dim, bool half_to_float) {
+  // Same three-dimensional descriptor rule as the backward in
+  // T_SOFTMAX_BACKWARD: cnnlSoftmaxForward reduces over the axis its mode names
+  // and rejects a two-dimensional descriptor with CNNL_STATUS_BAD_PARAM, so the
+  // reduction axis is kept where the mode expects it and everything around it is
+  // merged.
+  //
+  // Worth serving natively because FlagGems' _softmax is a Python wrapper and
+  // measured 1.56 ms on the (32, 512, 512) attention scores this model produces,
+  // against 0.02-0.06 ms for every other op in the forward. The model calls it
+  // once per layer, so the wrapper is 6 ms of a 23 ms forward.
+  const int64_t rank = self.dim();
+  TORCH_CHECK(rank > 0, "flagos cambricon: _softmax does not serve rank zero");
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: _softmax got dim ", dim);
+  const auto dtype = self.scalar_type();
+  TORCH_CHECK(
+      SupportedFloatDtype(dtype),
+      "flagos cambricon: _softmax does not serve ", dtype);
+  // half_to_float is what nn.Softmax sets when autocast wants the result widened;
+  // cnnlSoftmaxForward takes one dtype for input and output, so the widen is done
+  // before and after the call rather than by it.
+  const auto compute = (half_to_float && dtype == at::kHalf) ? at::kFloat : dtype;
+  auto input = self.contiguous().to(compute);
+  if (input.numel() == 0) {
+    return at::empty(self.sizes(), self.options().dtype(compute));
+  }
+  auto sizes = input.sizes();
+  int64_t before = 1, after = 1;
+  for (int64_t i = 0; i < d; ++i) {
+    before *= sizes[static_cast<size_t>(i)];
+  }
+  for (int64_t i = d + 1; i < rank; ++i) {
+    after *= sizes[static_cast<size_t>(i)];
+  }
+  const int64_t axis = sizes[static_cast<size_t>(d)];
+  cnnlSoftmaxMode_t mode;
+  std::vector<int64_t> shape3;
+  if (d == rank - 1) {
+    mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+    shape3 = {before, 1, axis};
+  } else if (d == 0) {
+    mode = CNNL_SOFTMAX_MODE_HIGH_DIMENSION;
+    shape3 = {axis, before * after, 1};
+  } else {
+    mode = CNNL_SOFTMAX_MODE_MEDIUM_DIMENSION;
+    shape3 = {before, axis, after};
+  }
+  auto x = input.view(shape3);
+  CambriconDeviceGuard guard(x);
+  auto result = at::empty_like(x);
+  const auto handle =
+      HandleForDevice(static_cast<int>(x.device().index()));
+  TensorDesc xd, yd;
+  xd.Set(x);
+  yd.Set(result);
+  CheckCnnl(
+      cnnlSoftmaxForward(
+          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, xd.get(),
+          x.const_data_ptr(), nullptr, yd.get(), result.mutable_data_ptr()),
+      "cnnlSoftmaxForward (_softmax)");
+  // Restore the caller's dtype only when this call did not widen on purpose:
+  // half_to_float is the schema saying the result should stay float32, and
+  // converting back to self's dtype here silently undid it.
+  auto out = result.view(self.sizes());
+  if (compute == dtype && out.scalar_type() != dtype) {
+    out = out.to(dtype);
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kCambricon, PrivSoftmaxKernelCambricon);
+
+
+at::Tensor PrivSoftmaxBackwardDataKernelCambricon(
+    const at::Tensor& grad_output, const at::Tensor& output, int64_t dim,
+    at::ScalarType input_dtype) {
+  // cnnlSoftmaxBackward reduces over the axis its mode names, and the vendor
+  // hands it a descriptor of exactly three dimensions: the reduction axis kept
+  // in place, everything before it merged and everything after merged
+  // (torch_mlu/csrc/aten/operators/cnnl/internal/softmax_internal.cpp builds it
+  // with getTensorDescWithKeepDimAndOnlyThreeDims and picks the mode from the
+  // axis). A two-dimensional descriptor is not accepted -- it comes back
+  // CNNL_STATUS_BAD_PARAM.
+  //
+  // The gradient only needs the forward output (the y arm), never the input,
+  // which is exactly what _softmax_backward_data is given.
+  const int64_t rank = output.dim();
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: _softmax_backward_data got dim ", dim);
+  auto sizes = output.sizes();
+  int64_t before = 1, after = 1;
+  for (int64_t i = 0; i < d; ++i) {
+    before *= sizes[static_cast<size_t>(i)];
+  }
+  for (int64_t i = d + 1; i < rank; ++i) {
+    after *= sizes[static_cast<size_t>(i)];
+  }
+  const int64_t axis = sizes[static_cast<size_t>(d)];
+  cnnlSoftmaxMode_t mode;
+  std::vector<int64_t> shape3;
+  if (d == rank - 1) {
+    // LOW_DIMENSION reduces the innermost axis of the descriptor, so the
+    // reduction axis goes last. Building it as (before, axis, 1) instead left the
+    // axis in the middle and the result was wrong by ~1e-01.
+    mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+    shape3 = {before, 1, axis};
+  } else if (d == 0) {
+    mode = CNNL_SOFTMAX_MODE_HIGH_DIMENSION;
+    shape3 = {axis, before * after, 1};
+  } else {
+    mode = CNNL_SOFTMAX_MODE_MEDIUM_DIMENSION;
+    shape3 = {before, axis, after};
+  }
+  auto y = output.contiguous().view(shape3);
+  auto g = grad_output.to(y.scalar_type()).contiguous().view(shape3);
+  CambriconDeviceGuard guard(y);
+  auto result = at::empty_like(y);
+  if (result.numel() == 0) {
+    return result;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(y.device().index()));
+  TensorDesc yd, gd, od;
+  yd.Set(y);
+  gd.Set(g);
+  od.Set(result);
+  CheckCnnl(
+      cnnlSoftmaxBackward(
+          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, yd.get(),
+          y.const_data_ptr(), gd.get(), g.const_data_ptr(), nullptr, od.get(),
+          result.mutable_data_ptr()),
+      "cnnlSoftmaxBackward (_softmax_backward_data)");
+  return result.view(sizes);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kCambricon, PrivSoftmaxBackwardDataKernelCambricon);
+
+
+at::Tensor PrivUnsafeViewKernelCambricon(const at::Tensor& self, at::IntArrayRef size) {
+  // A metadata-only op. FlagGems serves these with a Python wrapper, which
+  // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
+  // wrapper is the entire cost, because there is no kernel to run. Paid 42 times
+  // a forward for _unsafe_view alone.
+    return self.view(size);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivUnsafeViewFn, priv_unsafe_view_dispatcher, Backend::kCambricon, PrivUnsafeViewKernelCambricon);
+
+
 at::Tensor AbsKernelCambricon(const at::Tensor& self) {
   const at::ScalarType dtype = self.scalar_type();
   TORCH_CHECK(
@@ -565,6 +724,279 @@ at::Tensor AddTensorKernelCambricon(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kCambricon, AddTensorKernelCambricon);
+
+at::Tensor& AddInplaceScalarKernelCambricon(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  // Write the result back through the operand's own buffer: cnnlOpTensor reads
+  // one descriptor and writes another and both are pointed at `self`, so this
+  // allocates nothing. The deleting-temporary version of an in-place spelling
+  // measured 82.8 us against FlagGems' 148 us per call and was still three times
+  // slower across a whole optimizer step, because AdamW's parameters include a
+  // 3072x1024 tensor and one pass over 47 of them churned ~564 MB of short-lived
+  // buffers, eleven passes a step. Per-call latency is not the number that
+  // decides; allocation pressure is.
+  //
+  // Non-float32 goes to the host. The native kernels widen to float32 and would
+  // hand a float result into a half destination; integral dtypes are index
+  // arithmetic. Neither raises: an in-place route must not accept less than the
+  // one it replaces.
+  // cnnlOpTensor takes the element type from the descriptor, and this SDK has
+  // float16 and bfloat16 op-tensor, so the half dtypes compute on the device in
+  // their own precision. They used to be copied to the host and back, which cost
+  // 148.8 us against 13.9 us for the same add_ in float32 -- and this model class
+  // trains in half precision, so that was the common case, not the edge one.
+  //
+  // Integral types keep the host path: cnnlOpTensor's descriptor has no int64.
+  // alpha = 1 is the optimizer's only case and needs no scaling at all, and
+  // passing a Scalar alpha straight into an integral CPU add is what previously
+  // made a Long `add_` come back unchanged.
+  if (self.scalar_type() == at::kHalf ||
+      self.scalar_type() == at::kBFloat16) {
+    // Half dtypes stay on the device but take a separate buffer. Pointing the
+    // output descriptor at the input's memory is only sound in float32: in half
+    // precision the op-tensor kernel tiles the work and the first call read
+    // values its own writes had not produced yet, which showed up as a garbage
+    // first result and correct ones afterwards.
+    //
+    // The intermediate is one buffer per call, not one per element, and it keeps
+    // the arithmetic on the device -- the host round trip cost a flat ~60 us.
+    self.copy_(at::add(self, other));
+    return self;
+  }
+  if (self.scalar_type() != at::kFloat) {
+    const auto host = self.to(at::kCPU);
+    if (alpha.toDouble() == 1.0) {{
+      self.copy_(at::add(host, other).to(self.device()));
+    }} else {{
+      self.copy_(at::add(host, other, alpha).to(self.device()));
+    }}
+    return self;
+  }
+  CambriconDeviceGuard guard(self);
+  TORCH_CHECK(
+      self.is_contiguous(),
+      "flagos cambricon: add_.Scalar needs a contiguous destination");
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  // A scalar arrives as one value, and cnnlOpTensor broadcasts from a descriptor
+  // rather than from a host number, so it is materialised as one element.
+  auto operand = at::scalar_tensor(other, self.options()).reshape({1});
+  const auto a_shaped = self.dim() == 0 ? self.reshape({1}) : self;
+  TensorDesc ad, bd, cd;
+  ad.Set(a_shaped);
+  bd.Set(operand);
+  cd.Set(a_shaped);
+  OpTensorDesc op(CNNL_OP_TENSOR_ADD, self.scalar_type());
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  // cnnlOpTensor computes op(scale_a * A, scale_b * B); an add's alpha scales the
+  // operand, so `add_(x, 2, alpha=3)` has to compute x + 6 rather than x + 2.
+  const float scale_b = static_cast<float>(alpha.toDouble());
+  void* self_ptr = self.mutable_data_ptr();
+  CheckCnnl(
+      cnnlOpTensor(
+          handle, op.get(), &one, ad.get(), self_ptr, &scale_b, bd.get(),
+          operand.const_data_ptr(), nullptr, 0, &zero, cd.get(), self_ptr),
+      "cnnlOpTensor in place scalar (add_.Scalar)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceScalarFn, add_inplace_scalar_dispatcher, Backend::kCambricon, AddInplaceScalarKernelCambricon);
+
+
+at::Tensor& AddInplaceTensorKernelCambricon(
+    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  // The in-place spelling of a binary op, written through the operand's own
+  // buffer: cnnlOpTensor reads one descriptor and writes another and both point
+  // at `self`, so no temporary is allocated. The copy-back version of this
+  // measured 82.8 us a call against FlagGems' 148 us and still left the optimizer
+  // step three times slower, because a 3072x1024 parameter makes ~564 MB of
+  // short-lived buffers per pass over 47 of them.
+  //
+  // Half dtypes compute on the device in their own precision; cnnlOpTensor takes
+  // the element type from the descriptor and this SDK supports float16 and
+  // bfloat16 op-tensor. Sending them to the host cost a fixed ~60 us per call
+  // whatever the tensor size.
+  //
+  // Integral types keep the host path: cnnlOpTensor's descriptor has no int64,
+  // and this model subtracts int64 in causal-mask index arithmetic. alpha = 1
+  // needs no scaling; any other alpha is passed through on the host, where the
+  // dtype question does not arise.
+  if (self.scalar_type() != at::kFloat &&
+      self.scalar_type() != at::kHalf &&
+      self.scalar_type() != at::kBFloat16) {
+    const auto host = at::add(self.to(at::kCPU), other.to(at::kCPU), alpha);
+    self.copy_(host.to(self.device()));
+    return self;
+  }
+  CambriconDeviceGuard guard(self);
+  // Writing through the input descriptor is only safe when the answer lands
+  // exactly where the input is: a broadcast that would grow the result has
+  // nowhere to go, and a non-contiguous destination has no write order that
+  // matches its read order.
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  TORCH_CHECK(
+      at::IntArrayRef(shape).equals(self.sizes()),
+      "flagos cambricon: add_.Tensor would have to grow its destination from ",
+      self.sizes(), " to ", shape);
+  if (!self.is_contiguous()) {
+    // A view-shaped destination carries a stride pattern that the op-tensor
+    // kernel cannot write through, so the result is computed out of place and
+    // copied in. copy_ resolves the strides itself.
+    //
+    // This path only became reachable once slice.Tensor started returning a
+    // genuine view instead of a materialised copy: `t[1:3, 2:5].add_(1)` now
+    // hands this kernel a non-contiguous destination, where the copying slice it
+    // replaced always produced a contiguous one.
+    self.copy_(at::add(self, other, alpha));
+    return self;
+  }
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  const auto as_rank_one = [](const at::Tensor& t) {
+    return t.dim() == 0 ? t.reshape({1}) : t;
+  };
+  auto operand = other.to(self.device()).to(self.scalar_type()).contiguous();
+  const auto a_shaped = as_rank_one(self);
+  const auto b_shaped = as_rank_one(operand);
+  TensorDesc ad, bd, cd;
+  ad.Set(a_shaped);
+  bd.Set(b_shaped);
+  cd.Set(a_shaped);
+  OpTensorDesc op(CNNL_OP_TENSOR_ADD, self.scalar_type());
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  // cnnlOpTensor computes op(scale_a * A, scale_b * B); alpha scales the operand,
+  // so `add_(x, y, alpha=3)` has to compute x + 3y rather than x + y.
+  const float scale_b = static_cast<float>(alpha.toDouble());
+  void* self_ptr = self.mutable_data_ptr();
+  CheckCnnl(
+      cnnlOpTensor(
+          handle, op.get(), &one, ad.get(), self_ptr, &scale_b, bd.get(),
+          b_shaped.const_data_ptr(), nullptr, 0, &zero, cd.get(), self_ptr),
+      "cnnlOpTensor in place (add_.Tensor)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddInplaceTensorFn, add_inplace_tensor_dispatcher, Backend::kCambricon, AddInplaceTensorKernelCambricon);
+
+
+at::Tensor& AddcdivInplaceKernelCambricon(
+    at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2,
+    const at::Scalar& value) {
+  CambriconDeviceGuard guard(self);
+  TORCH_CHECK(
+      self.is_contiguous(),
+      "flagos cambricon: addcdiv_ needs a contiguous destination");
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  const float alpha = static_cast<float>(value.toDouble());
+  // cnnlAddcdiv computes a + alpha * b / c, so the operand order is self, then
+  // tensor1, then tensor2 -- the same order the vendor passes
+  // (torch_mlu/csrc/aten/operators/cnnl/internal/addcdiv_internal.cpp sends
+  // self as a, tensor1 as b, tensor2 as c). Passing them in the order the
+  // arguments appear in the aten schema instead computes
+  // tensor1 + alpha * tensor2 / self, which divides by the destination: measured
+  // 4.97e+03 off at alpha=1 and 9.94e+03 at alpha=2 -- linear in alpha, which is
+  // what rules out alpha itself being the problem.
+  TensorDesc ad, bd, cd, od;
+  ad.Set(self);
+  bd.Set(tensor1);
+  cd.Set(tensor2);
+  // Written into self's own buffer, the way the vendor's in-place path does. A
+  // separate buffer plus a copy_ is one extra pass over the whole tensor -- 12 MB
+  // for a 3072x1024 parameter, which is hundreds of microseconds per call.
+  od.Set(self);
+  size_t workspace_size = 0;
+  CheckCnnl(
+      cnnlGetAddcdivWorkspaceSize_v2(
+          handle, ad.get(), bd.get(), cd.get(), od.get(), &workspace_size),
+      "cnnlGetAddcdivWorkspaceSize_v2 (addcdiv_)");
+  at::Tensor workspace;
+  if (workspace_size > 0) {
+    workspace = at::empty(
+        {static_cast<int64_t>(workspace_size)},
+        at::TensorOptions().dtype(at::kByte).device(self.device()));
+  }
+  CheckCnnl(
+      cnnlAddcdiv(
+          handle, ad.get(), self.const_data_ptr(), &alpha, bd.get(),
+          tensor1.const_data_ptr(), cd.get(), tensor2.const_data_ptr(),
+          workspace_size > 0 ? workspace.mutable_data_ptr() : nullptr,
+          workspace_size, od.get(), self.mutable_data_ptr()),
+      "cnnlAddcdiv (addcdiv_)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddcdivInplaceFn, addcdiv_inplace_dispatcher, Backend::kCambricon, AddcdivInplaceKernelCambricon);
+
+
+at::Tensor& AddcmulInplaceKernelCambricon(
+    at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2,
+    const at::Scalar& value) {
+  CambriconDeviceGuard guard(self);
+  TORCH_CHECK(
+      self.is_contiguous(),
+      "flagos cambricon: addcmul_ needs a contiguous destination");
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  const float alpha = static_cast<float>(value.toDouble());
+  // cnnlAddcmul computes a + alpha * b * c, so the operand order is self, then
+  // tensor1, then tensor2 -- the order the vendor passes. Getting this wrong is
+  // what made the first attempt at addcdiv look like a coefficient bug.
+  TensorDesc ad, bd, cd, od;
+  ad.Set(self);
+  bd.Set(tensor1);
+  cd.Set(tensor2);
+  // Written into self's own buffer, the way the vendor's in-place path does. A
+  // separate buffer plus a copy_ is one extra pass over the whole tensor -- 12 MB
+  // for a 3072x1024 parameter, which is hundreds of microseconds per call.
+  od.Set(self);
+  size_t workspace_size = 0;
+  CheckCnnl(
+      cnnlGetAddcmulWorkspaceSize_v2(
+          handle, ad.get(), bd.get(), cd.get(), od.get(), &workspace_size),
+      "cnnlGetAddcmulWorkspaceSize_v2 (addcmul_)");
+  at::Tensor workspace;
+  if (workspace_size > 0) {
+    workspace = at::empty(
+        {static_cast<int64_t>(workspace_size)},
+        at::TensorOptions().dtype(at::kByte).device(self.device()));
+  }
+  CheckCnnl(
+      cnnlAddcmul(
+          handle, ad.get(), self.const_data_ptr(), &alpha, bd.get(),
+          tensor1.const_data_ptr(), cd.get(), tensor2.const_data_ptr(),
+          workspace_size > 0 ? workspace.mutable_data_ptr() : nullptr,
+          workspace_size, od.get(), self.mutable_data_ptr()),
+      "cnnlAddcmul (addcmul_)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AddcmulInplaceFn, addcmul_inplace_dispatcher, Backend::kCambricon, AddcmulInplaceKernelCambricon);
+
+
+at::Tensor AliasKernelCambricon(const at::Tensor& self) {
+  // A metadata-only op. FlagGems serves these with a Python wrapper, which
+  // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
+  // wrapper is the entire cost, because there is no kernel to run. Paid 42 times
+  // a forward for _unsafe_view alone.
+    return at::native::alias(self);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(AliasFn, alias_dispatcher, Backend::kCambricon, AliasKernelCambricon);
+
 
 at::Tensor ArangeKernelCambricon(const at::Scalar& end, std::optional<at::ScalarType> dtype_opt,
     std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,
@@ -1039,6 +1471,39 @@ at::Tensor CumsumKernelCambricon(
 REGISTER_IMPL_TO_DISPATCHER(CumsumFn, cumsum_dispatcher, Backend::kCambricon, CumsumKernelCambricon);
 
 
+at::Tensor DivScalarKernelCambricon(const at::Tensor& self, const at::Scalar& other) {
+  // Divide by a constant is a multiply by its reciprocal, which is what the
+  // reference backend does: on an MLU590 torch_mlu div is bit-identical to
+  // x * (1/s) and not to a true divide, for both 3.7 and 0.1 in float32.
+  // cnnlOpTensor has no divide at all.
+  TORCH_CHECK(
+      other.toDouble() != 0.0,
+      "flagos cambricon: div.Scalar cannot divide by zero");
+  return at::mul(self, 1.0 / other.toDouble());
+}
+
+REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kCambricon, DivScalarKernelCambricon);
+
+
+at::Tensor& DivInplaceScalarKernelCambricon(at::Tensor& self, const at::Scalar& other) {
+  // Dividing by a constant is a multiply by its reciprocal. cnnlOpTensor has no
+  // divide and cnnlDiv_v3 wants a descriptor plus a workspace query per call --
+  // the fixed per-launch cost this backend exists to remove.
+  //
+  // This matches the reference backend rather than approximating it: on an MLU590
+  // torch_mlu's `div_(s)` is bit-identical to `x * (1/s)` and not to a true
+  // divide, for both 3.7 and 0.1 in float32. So the reciprocal is the behaviour
+  // to be consistent with, not a shortcut around it.
+  TORCH_CHECK(
+      other.toDouble() != 0.0,
+      "flagos cambricon: div_.Scalar cannot divide by zero");
+  self.mul_(1.0 / other.toDouble());
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(DivInplaceScalarFn, div_inplace_scalar_dispatcher, Backend::kCambricon, DivInplaceScalarKernelCambricon);
+
+
 at::Tensor EmbeddingKernelCambricon(
     const at::Tensor& weight, const at::Tensor& indices, int64_t padding_idx,
     bool scale_grad_by_freq, bool sparse) {
@@ -1230,11 +1695,6 @@ at::Tensor& FillInplaceScalarKernelCambricon(at::Tensor& self, const at::Scalar&
   // device tensor the fill could read it after the temporary had been recycled,
   // which showed up as one call's value landing in the next one's buffer.
   //
-  // The bytes are produced by a one-element host tensor of the destination
-  // dtype, because the descriptor requires the two dtypes to match and a
-  // bfloat16 bit pattern is not reachable from a plain C++ cast here.
-  auto host_value = at::empty({1}, self.options().dtype(dtype).device(at::kCPU));
-  host_value.fill_(value);
   TensorDesc out_d;
   // cnnlFill_v3 honours a strided descriptor, so a view is written in place
   // rather than through an intermediate buffer.
@@ -1243,14 +1703,84 @@ at::Tensor& FillInplaceScalarKernelCambricon(at::Tensor& self, const at::Scalar&
   } else {
     out_d.SetStrided(self);
   }
-  CheckCnnl(
-      cnnlFill_v3(handle, CNNL_POINTER_MODE_HOST, host_value.const_data_ptr(),
-                  out_d.get(), self.mutable_data_ptr()),
-      "cnnlFill_v3 (fill_.Scalar)");
+  // The value is read by CNNL during the call, so it can live on the stack.
+  // torch_mlu does exactly this: fill_internal.cpp passes
+  // `(void*)&scalar_value` with CNNL_POINTER_MODE_HOST. Producing the bytes
+  // through a heap tensor per call instead is what made this wrong -- `fill_(1)`
+  // returned zero and `fill_(0)` returned the previous call's contents, because
+  // the buffer was released while the queued fill still referred to it.
+  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND3(
+      at::kBool, at::kBFloat16, at::kHalf, dtype, "fill_with_scalar", [&] {
+        const auto fill_value = value.to<scalar_t>();
+        CheckCnnl(
+            cnnlFill_v3(handle, CNNL_POINTER_MODE_HOST, (void*)(&fill_value),
+                        out_d.get(), self.mutable_data_ptr()),
+            "cnnlFill_v3 (fill_.Scalar)");
+      });
   return self;
 }
 
 REGISTER_IMPL_TO_DISPATCHER(FillInplaceScalarFn, fill_inplace_scalar_dispatcher, Backend::kCambricon, FillInplaceScalarKernelCambricon);
+
+
+at::Tensor& LerpInplaceScalarKernelCambricon(
+    at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+  // One cnnlLerp call, the entry point the vendor uses
+  // (torch_mlu/csrc/aten/operators/cnnl/internal/lerp_internal.cpp): self as a,
+  // end as b, weight as w, ARRAY layouts throughout, and the same workspace
+  // query.
+  //
+  // The two-pass spelling this replaces (mul by 1-w, then a scaled add) is
+  // correct and needs no temporary, but it reads and writes the whole tensor
+  // twice where this reads and writes it once. AdamW reaches lerp once per
+  // parameter tensor every step, so for a 3072x1024 parameter that is one extra
+  // 12 MB pass, each way.
+  CambriconDeviceGuard guard(self);
+  TORCH_CHECK(
+      self.is_contiguous(),
+      "flagos cambricon: lerp_.Scalar needs a contiguous destination");
+  TORCH_CHECK(
+      at::IntArrayRef(end.sizes()).equals(self.sizes()) && end.is_contiguous(),
+      "flagos cambricon: lerp_.Scalar needs end to match the destination");
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  // cnnlLerp takes the weight as a tensor, not a host scalar, so the scalar is
+  // materialised once. cnnlSetTensorDescriptor cannot describe rank zero, hence
+  // the one-element reshape.
+  auto weight_tensor =
+      at::scalar_tensor(weight, self.options()).reshape({1});
+  TensorDesc ad, bd, wd, od;
+  ad.Set(self);
+  bd.Set(end);
+  wd.Set(weight_tensor);
+  // Written into self's buffer: for the in-place form the destination is the
+  // first operand, which is what the vendor's wrapper passes too.
+  od.Set(self);
+  size_t workspace_size = 0;
+  CheckCnnl(
+      cnnlGetLerpWorkspaceSize(
+          handle, ad.get(), bd.get(), wd.get(), od.get(), &workspace_size),
+      "cnnlGetLerpWorkspaceSize (lerp_.Scalar)");
+  at::Tensor workspace;
+  if (workspace_size > 0) {
+    workspace = at::empty(
+        {static_cast<int64_t>(workspace_size)},
+        at::TensorOptions().dtype(at::kByte).device(self.device()));
+  }
+  CheckCnnl(
+      cnnlLerp(
+          handle, ad.get(), self.const_data_ptr(), bd.get(),
+          end.const_data_ptr(), wd.get(), weight_tensor.const_data_ptr(),
+          workspace_size > 0 ? workspace.mutable_data_ptr() : nullptr,
+          workspace_size, od.get(), self.mutable_data_ptr()),
+      "cnnlLerp (lerp_.Scalar)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(LerpInplaceScalarFn, lerp_inplace_scalar_dispatcher, Backend::kCambricon, LerpInplaceScalarKernelCambricon);
 
 
 at::Tensor MeanKernelCambricon(
@@ -1494,25 +2024,67 @@ at::Tensor MmKernelCambricon(const at::Tensor& self, const at::Tensor& mat2) {
           b_transposed ? CNNL_MATMUL_OP_T : CNNL_MATMUL_OP_N,
           /*use_beta=*/false, CNNL_MATMUL_EPI_NONE),
       "cnnlSetMatMulExDescAttrBase (mm)");
+  // The heuristic costs about 24 us and its answer depends only on the problem
+  // shape, the compute dtype, the transpose state and the device -- never on the
+  // data. That was measured as the whole gap against torch_mlu on this op
+  // (70.1 us against 46.2 us, 29 calls a forward). Cached on that key; the
+  // algorithm handle is kept for the life of the process because
+  // cnnlMatMulEx_v2 only reads it.
+  std::string algo_key;
+  algo_key.reserve(96);
+  algo_key += std::to_string(static_cast<int64_t>(self.device().index()));
+  algo_key += '|';
+  for (const auto dim : aw.sizes()) {
+    algo_key += std::to_string(dim);
+    algo_key += ',';
+  }
+  algo_key += '|';
+  for (const auto dim : bw.sizes()) {
+    algo_key += std::to_string(dim);
+    algo_key += ',';
+  }
+  algo_key += '|';
+  algo_key += std::to_string(static_cast<int64_t>(compute));
+  algo_key += a_transposed ? 'T' : 'N';
+  algo_key += b_transposed ? 'T' : 'N';
+
+  static std::mutex algo_cache_mutex;
+  static std::unordered_map<std::string, std::pair<cnnlMatMulExAlgo_t, size_t>>
+      algo_cache;
+
   cnnlMatMulExAlgo_t algo = nullptr;
-  CheckCnnl(cnnlCreateMatMulExAlgo(&algo), "cnnlCreateMatMulExAlgo");
-  cnnlMatMulExHeuristicResult_t result_algo = nullptr;
-  CheckCnnl(
-      cnnlCreateMatMulExHeuristicResult(&result_algo),
-      "cnnlCreateMatMulExHeuristicResult");
-  cnnlMatMulExPrefer_t prefer{};
-  int returned = 0;
-  CheckCnnl(
-      cnnlGetMatMulExAlgoHeuristic(
-          handle, desc, ad.get(), bd.get(), cd.get(), cd.get(), prefer,
-          /*requested_algo_count=*/1, &result_algo, &returned),
-      "cnnlGetMatMulExAlgoHeuristic (mm)");
-  TORCH_CHECK(
-      returned > 0, "flagos cambricon: no matmul algorithm for ", "{op");
   size_t workspace_size = 0;
-  CheckCnnl(
-      cnnlGetMatMulExHeuristicResult(result_algo, algo, &workspace_size),
-      "cnnlGetMatMulExHeuristicResult");
+  bool algo_cached = false;
+  {
+    const std::lock_guard<std::mutex> lock(algo_cache_mutex);
+    const auto found = algo_cache.find(algo_key);
+    if (found != algo_cache.end()) {
+      algo = found->second.first;
+      workspace_size = found->second.second;
+      algo_cached = true;
+    }
+  }
+  if (!algo_cached) {
+    CheckCnnl(cnnlCreateMatMulExAlgo(&algo), "cnnlCreateMatMulExAlgo");
+    cnnlMatMulExHeuristicResult_t result_algo = nullptr;
+    CheckCnnl(
+        cnnlCreateMatMulExHeuristicResult(&result_algo),
+        "cnnlCreateMatMulExHeuristicResult");
+    cnnlMatMulExPrefer_t prefer{};
+    int returned = 0;
+    CheckCnnl(
+        cnnlGetMatMulExAlgoHeuristic(
+            handle, desc, ad.get(), bd.get(), cd.get(), cd.get(), prefer,
+            /*requested_algo_count=*/1, &result_algo, &returned),
+        "cnnlGetMatMulExAlgoHeuristic (mm)");
+    TORCH_CHECK(
+        returned > 0, "flagos cambricon: no matmul algorithm for ", "mm");
+    CheckCnnl(
+        cnnlGetMatMulExHeuristicResult(result_algo, algo, &workspace_size),
+        "cnnlGetMatMulExHeuristicResult");
+    const std::lock_guard<std::mutex> lock(algo_cache_mutex);
+    algo_cache.emplace(algo_key, std::make_pair(algo, workspace_size));
+  }
   at::Tensor workspace;
   if (workspace_size > 0) {
     workspace = at::empty(
@@ -1688,6 +2260,49 @@ REGISTER_IMPL_TO_DISPATCHER(MulTensorFn, mul_tensor_dispatcher, Backend::kCambri
 
 at::Tensor& MulOutKernelCambricon(
     const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
+  // The common case is an in-place call that aten spelled as out=: `t.mul_(2.0)`
+  // dispatches `mul.out` with out == self, not `mul_.Scalar`. Writing through
+  // out's own buffer is one pass over the data; the body below is two, and AdamW
+  // makes two rounds of it over 47 parameter tensors every step.
+  // `t.mul_(0.999)` measured 146.3 us on a 12 MB tensor, no better than the
+  // FlagGems route this was meant to replace.
+  //
+  // What the aliased path needs is checked rather than assumed: the result has to
+  // land exactly where the destination is (no broadcast that would grow it), the
+  // destination has to be contiguous (otherwise the write order is not the read
+  // order), and the dtype has to be one cnnlOpTensor describes.
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  const auto dtype = at::result_type(self, other);
+  if (out.is_contiguous() && out.sizes().equals(shape) &&
+      out.scalar_type() == dtype && self.numel() > 0 &&
+      (dtype == at::kFloat || dtype == at::kHalf ||
+       dtype == at::kBFloat16) &&
+      self.device().type() == c10::DeviceType::PrivateUse1) {
+    const auto handle =
+        HandleForDevice(static_cast<int>(self.device().index()));
+    const auto as_rank_one = [](const at::Tensor& t) {
+      return t.dim() == 0 ? t.reshape({1}) : t;
+    };
+    auto a = self.to(dtype).contiguous();
+    auto b = other.to(self.device()).to(dtype).contiguous();
+    const auto a_shaped = as_rank_one(a);
+    const auto b_shaped = as_rank_one(b);
+    TensorDesc ad, bd, cd;
+    ad.Set(a_shaped);
+    bd.Set(b_shaped);
+    cd.Set(a_shaped);
+    OpTensorDesc op(CNNL_OP_TENSOR_MUL, dtype);
+    const float one = 1.0f;
+    const float zero = 0.0f;
+    void* out_ptr = out.mutable_data_ptr();
+    CheckCnnl(
+        cnnlOpTensor(
+            handle, op.get(), &one, ad.get(), a_shaped.const_data_ptr(), &one,
+            bd.get(), b_shaped.const_data_ptr(), nullptr, 0, &zero, cd.get(),
+            out_ptr),
+        "cnnlOpTensor out= (mul.out)");
+    return out;
+  }
   auto result = MulTensorKernelCambricon(self, other);
   if (out.sizes() != result.sizes()) {
     out.resize_(result.sizes());
@@ -1697,6 +2312,83 @@ at::Tensor& MulOutKernelCambricon(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kCambricon, MulOutKernelCambricon);
+
+at::Tensor& MulInplaceScalarKernelCambricon(at::Tensor& self, const at::Scalar& other) {
+  // Write the result back through the operand's own buffer: cnnlOpTensor reads
+  // one descriptor and writes another and both are pointed at `self`, so this
+  // allocates nothing. The deleting-temporary version of an in-place spelling
+  // measured 82.8 us against FlagGems' 148 us per call and was still three times
+  // slower across a whole optimizer step, because AdamW's parameters include a
+  // 3072x1024 tensor and one pass over 47 of them churned ~564 MB of short-lived
+  // buffers, eleven passes a step. Per-call latency is not the number that
+  // decides; allocation pressure is.
+  //
+  // Non-float32 goes to the host. The native kernels widen to float32 and would
+  // hand a float result into a half destination; integral dtypes are index
+  // arithmetic. Neither raises: an in-place route must not accept less than the
+  // one it replaces.
+  // cnnlOpTensor takes the element type from the descriptor, and this SDK has
+  // float16 and bfloat16 op-tensor, so the half dtypes compute on the device in
+  // their own precision. They used to be copied to the host and back, which cost
+  // 148.8 us against 13.9 us for the same add_ in float32 -- and this model class
+  // trains in half precision, so that was the common case, not the edge one.
+  //
+  // Integral types keep the host path: cnnlOpTensor's descriptor has no int64.
+  // alpha = 1 is the optimizer's only case and needs no scaling at all, and
+  // passing a Scalar alpha straight into an integral CPU add is what previously
+  // made a Long `add_` come back unchanged.
+  if (self.scalar_type() == at::kHalf ||
+      self.scalar_type() == at::kBFloat16) {
+    // Half dtypes stay on the device but take a separate buffer. Pointing the
+    // output descriptor at the input's memory is only sound in float32: in half
+    // precision the op-tensor kernel tiles the work and the first call read
+    // values its own writes had not produced yet, which showed up as a garbage
+    // first result and correct ones afterwards.
+    //
+    // The intermediate is one buffer per call, not one per element, and it keeps
+    // the arithmetic on the device -- the host round trip cost a flat ~60 us.
+    self.copy_(at::mul(self, other));
+    return self;
+  }
+  if (self.scalar_type() != at::kFloat) {
+    const auto host = self.to(at::kCPU);
+    self.copy_(at::mul(host, other).to(self.device()));
+    return self;
+  }
+  CambriconDeviceGuard guard(self);
+  TORCH_CHECK(
+      self.is_contiguous(),
+      "flagos cambricon: mul_.Scalar needs a contiguous destination");
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  // A scalar arrives as one value, and cnnlOpTensor broadcasts from a descriptor
+  // rather than from a host number, so it is materialised as one element.
+  auto operand = at::scalar_tensor(other, self.options()).reshape({1});
+  const auto a_shaped = self.dim() == 0 ? self.reshape({1}) : self;
+  TensorDesc ad, bd, cd;
+  ad.Set(a_shaped);
+  bd.Set(operand);
+  cd.Set(a_shaped);
+  OpTensorDesc op(CNNL_OP_TENSOR_MUL, self.scalar_type());
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  // cnnlOpTensor computes op(scale_a * A, scale_b * B); an add's alpha scales the
+  // operand, so `add_(x, 2, alpha=3)` has to compute x + 6 rather than x + 2.
+  const float scale_b = one;
+  void* self_ptr = self.mutable_data_ptr();
+  CheckCnnl(
+      cnnlOpTensor(
+          handle, op.get(), &one, ad.get(), self_ptr, &scale_b, bd.get(),
+          operand.const_data_ptr(), nullptr, 0, &zero, cd.get(), self_ptr),
+      "cnnlOpTensor in place scalar (mul_.Scalar)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(MulInplaceScalarFn, mul_inplace_scalar_dispatcher, Backend::kCambricon, MulInplaceScalarKernelCambricon);
+
 
 at::Tensor NegKernelCambricon(const at::Tensor& self) {
   const at::ScalarType dtype = self.scalar_type();
@@ -2010,6 +2702,291 @@ at::Tensor SiluKernelCambricon(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kCambricon, SiluKernelCambricon);
 
 
+at::Tensor SiluBackwardKernelCambricon(
+    const at::Tensor& grad_output, const at::Tensor& self) {
+  // silu backward through cnnlActivationBackward. The vendor takes the x arm for
+  // every mode except sigmoid and tanh, which are the two that recompute the
+  // activation from y; silu needs the forward input, so x is `self` here and
+  // diff_y is the incoming gradient.
+  CambriconDeviceGuard guard(self);
+  auto input = self.contiguous();
+  auto grad = grad_output.contiguous();
+  auto output = at::empty_like(input);
+  if (output.numel() == 0) {
+    return output;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  TensorDesc xd, gd, yd;
+  xd.Set(input);
+  gd.Set(grad);
+  yd.Set(output);
+  ActivationDesc act(CNNL_ACTIVATION_SILU);
+  CheckCnnl(
+      cnnlActivationBackward(
+          handle, act.get(), nullptr, /*y_desc=*/nullptr, /*y=*/nullptr,
+          gd.get(), grad.const_data_ptr(), xd.get(), input.const_data_ptr(),
+          nullptr, yd.get(), output.mutable_data_ptr()),
+      "cnnlActivationBackward silu (silu_backward)");
+  return output;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kCambricon, SiluBackwardKernelCambricon);
+
+
+at::Tensor SliceTensorKernelCambricon(const at::Tensor& self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
+  // A metadata-only op. FlagGems serves these with a Python wrapper, which
+  // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
+  // wrapper is the entire cost, because there is no kernel to run. Paid 42 times
+  // a forward for _unsafe_view alone.
+    return at::native::slice(self, dim, start, end, step);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SliceTensorFn, slice_tensor_dispatcher, Backend::kCambricon, SliceTensorKernelCambricon);
+
+
+at::Tensor SliceBackwardKernelCambricon(
+    const at::Tensor& grad_output, at::IntArrayRef input_sizes, int64_t dim,
+    int64_t start, int64_t end, int64_t step) {
+  // The scatter half of a slice, as one cnnlStridedSliceBackward call: the window
+  // the forward read is described by begin/end/stride over the full input shape,
+  // and CNNL writes the gradient back into it, zeroing everything outside.
+  //
+  // Composing it as zeros(input_sizes) followed by a copy into the view is
+  // correct but reads and writes the whole tensor twice; measured at 58.7 ms of
+  // backward against 30.0, because the backward pass slices 608 times per step
+  // and most of that tensor is never touched.
+  const int64_t rank = static_cast<int64_t>(input_sizes.size());
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: slice_backward got dim ", dim);
+  // aten's slice clamps start and end into range, and a negative index counts
+  // from the end. slice_backward is handed what the forward resolved, which is
+  // not clamped.
+  const int64_t size = input_sizes[static_cast<size_t>(d)];
+  int64_t lo = start;
+  int64_t hi = end;
+  if (lo < 0) {
+    lo += size;
+  }
+  if (hi < 0) {
+    hi += size;
+  }
+  lo = std::max<int64_t>(0, std::min<int64_t>(lo, size));
+  hi = std::max<int64_t>(0, std::min<int64_t>(hi, size));
+  std::vector<int> begin(static_cast<size_t>(rank), 0);
+  std::vector<int> last(static_cast<size_t>(rank), 0);
+  std::vector<int> strides(static_cast<size_t>(rank), 1);
+  for (int64_t i = 0; i < rank; ++i) {
+    last[static_cast<size_t>(i)] = static_cast<int>(input_sizes[static_cast<size_t>(i)]);
+  }
+  begin[static_cast<size_t>(d)] = static_cast<int>(lo);
+  last[static_cast<size_t>(d)] = static_cast<int>(hi);
+  strides[static_cast<size_t>(d)] = static_cast<int>(step);
+  auto grad = grad_output.contiguous();
+  auto result = at::empty(input_sizes, grad.options());
+  if (result.numel() == 0) {
+    return result;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(grad.device().index()));
+  TensorDesc gd, od;
+  gd.Set(grad);
+  od.Set(result);
+  CheckCnnl(
+      cnnlStridedSliceBackward(
+          handle, begin.data(), last.data(), strides.data(), gd.get(),
+          grad.const_data_ptr(), od.get(), result.mutable_data_ptr()),
+      "cnnlStridedSliceBackward (slice_backward)");
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SliceBackwardFn, slice_backward_dispatcher, Backend::kCambricon, SliceBackwardKernelCambricon);
+
+
+at::Tensor SqrtKernelCambricon(const at::Tensor& self) {
+  // CNNL has no square-root primitive on this SDK -- the unary set covers
+  // cnnlRsqrt, cnnlNegTensor and cnnlAbs, but not sqrt -- so this reaches the
+  // vendor's power kernel through the native pow route rather than through
+  // FlagGems. That matters because `sqrt` is routed to FlagGems, and AdamW calls
+  // it once per parameter tensor: 18 tensors totalling 226 MB measured 25.25 ms
+  // here, a 17.9 GB/s trickle against the 212 GB/s `_foreach_mul_` reaches on the
+  // same volume. Each of those tensors was paying a full FlagGems launch.
+  TORCH_CHECK(
+      SupportedFloatDtype(self.scalar_type()),
+      "flagos cambricon: sqrt does not serve ", self.scalar_type());
+  return at::pow(self, 0.5);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SqrtFn, sqrt_dispatcher, Backend::kCambricon, SqrtKernelCambricon);
+
+
+at::Tensor SubTensorKernelCambricon(
+    const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (!self.is_floating_point() || !other.is_floating_point() ||
+      alpha.toComplexDouble() != 1.0) {
+    return at::sub(self.to(at::kCPU), other.to(at::kCPU), alpha)
+        .to(self.device());
+  }
+  const at::ScalarType dtype = at::result_type(self, other);
+  TORCH_CHECK(
+      SupportedFloatDtype(dtype) || dtype == at::kInt,
+      "flagos cambricon: sub.Tensor does not serve ", dtype);
+  const auto device = self.is_cpu() ? other.device() : self.device();
+  TORCH_CHECK(
+      device.type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: sub.Tensor requires a device operand");
+  for (const auto* tensor : {&self, &other}) {
+    TORCH_CHECK(
+        tensor->device() == device || (tensor->is_cpu() && tensor->dim() == 0),
+        "flagos cambricon: sub.Tensor only accepts CPU tensors as scalars");
+  }
+  CambriconDeviceGuard guard(self.is_cpu() ? other : self);
+  auto a = self.to(device, dtype);
+  auto b = other.to(device, dtype);
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  auto result = at::empty(shape, a.options());
+  if (result.numel() == 0) {
+    return result;
+  }
+  // A CNNL ARRAY descriptor cannot express rank zero.
+  std::vector<int64_t> full(shape.begin(), shape.end());
+  if (full.empty()) {
+    full.push_back(1);
+  }
+  const auto handle = HandleForDevice(static_cast<int>(device.index()));
+  const bool integral = dtype == at::kInt;
+  const bool widen = !integral && ComputesInFloat32(dtype);
+  // cnnlOpTensor broadcasts on its own: given [2,4,8] against [2,4,1] it
+  // produces the [2,4,8] product (verified against a C probe), and it rejects a
+  // reduced-rank or flattened descriptor with status 7. So each operand is
+  // described at its own rank and nothing is expanded.
+  //
+  // Materialising the broadcast was how this was first written, and it copies a
+  // result-sized buffer before the arithmetic starts: `add` of [2,512,1] against
+  // [2,512,1024] measured 5809 us materialised against 24 us for the same add
+  // without a broadcast.
+  a = a.contiguous();
+  b = b.contiguous();
+  // A scalar operand arrives as a rank-0 tensor (`x * 2.0` spells the number
+  // that way), and a CNNL descriptor cannot express rank zero. Describing it as
+  // one element keeps the broadcast meaning: a single value applies to every
+  // element of the other operand.
+  const auto as_rank_one = [](const at::Tensor& t) {
+    return t.dim() == 0 ? t.reshape({1}) : t;
+  };
+  const auto a_shaped = widen ? Widen(as_rank_one(a), handle) : as_rank_one(a);
+  const auto b_shaped = widen ? Widen(as_rank_one(b), handle) : as_rank_one(b);
+  const auto compute = integral ? dtype : at::kFloat;
+  auto wide = at::empty(full, a.options().dtype(compute));
+  TensorDesc ad, bd, cd;
+  ad.Set(a_shaped);
+  bd.Set(b_shaped);
+  cd.Set(wide);
+  OpTensorDesc op(CNNL_OP_TENSOR_SUB, compute);
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  const int32_t int_one = 1;
+  const int32_t int_zero = 0;
+  const void* scale_a = integral ? static_cast<const void*>(&int_one) : &one;
+  const void* scale_b = integral ? static_cast<const void*>(&int_zero) : &zero;
+  CheckCnnl(
+      cnnlOpTensor(
+          handle, op.get(), scale_a, ad.get(), a_shaped.const_data_ptr(),
+          scale_a, bd.get(), b_shaped.const_data_ptr(), nullptr, 0, scale_b,
+          cd.get(), wide.mutable_data_ptr()),
+      "cnnlOpTensor (sub.Tensor)");
+  if (dtype == compute) {
+    return wide.reshape(shape);
+  }
+  auto output = result.reshape(full);
+  Narrow(wide, output, handle);
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SubTensorFn, sub_tensor_dispatcher, Backend::kCambricon, SubTensorKernelCambricon);
+
+at::Tensor& SubInplaceTensorKernelCambricon(
+    at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  // The in-place spelling of a binary op, written through the operand's own
+  // buffer: cnnlOpTensor reads one descriptor and writes another and both point
+  // at `self`, so no temporary is allocated. The copy-back version of this
+  // measured 82.8 us a call against FlagGems' 148 us and still left the optimizer
+  // step three times slower, because a 3072x1024 parameter makes ~564 MB of
+  // short-lived buffers per pass over 47 of them.
+  //
+  // Half dtypes compute on the device in their own precision; cnnlOpTensor takes
+  // the element type from the descriptor and this SDK supports float16 and
+  // bfloat16 op-tensor. Sending them to the host cost a fixed ~60 us per call
+  // whatever the tensor size.
+  //
+  // Integral types keep the host path: cnnlOpTensor's descriptor has no int64,
+  // and this model subtracts int64 in causal-mask index arithmetic. alpha = 1
+  // needs no scaling; any other alpha is passed through on the host, where the
+  // dtype question does not arise.
+  if (self.scalar_type() != at::kFloat &&
+      self.scalar_type() != at::kHalf &&
+      self.scalar_type() != at::kBFloat16) {
+    const auto host = at::sub(self.to(at::kCPU), other.to(at::kCPU), alpha);
+    self.copy_(host.to(self.device()));
+    return self;
+  }
+  CambriconDeviceGuard guard(self);
+  // Writing through the input descriptor is only safe when the answer lands
+  // exactly where the input is: a broadcast that would grow the result has
+  // nowhere to go, and a non-contiguous destination has no write order that
+  // matches its read order.
+  const auto shape = at::infer_size(self.sizes(), other.sizes());
+  TORCH_CHECK(
+      at::IntArrayRef(shape).equals(self.sizes()),
+      "flagos cambricon: sub_.Tensor would have to grow its destination from ",
+      self.sizes(), " to ", shape);
+  if (!self.is_contiguous()) {
+    // A view-shaped destination carries a stride pattern that the op-tensor
+    // kernel cannot write through, so the result is computed out of place and
+    // copied in. copy_ resolves the strides itself.
+    //
+    // This path only became reachable once slice.Tensor started returning a
+    // genuine view instead of a materialised copy: `t[1:3, 2:5].add_(1)` now
+    // hands this kernel a non-contiguous destination, where the copying slice it
+    // replaced always produced a contiguous one.
+    self.copy_(at::sub(self, other, alpha));
+    return self;
+  }
+  if (self.numel() == 0) {
+    return self;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  const auto as_rank_one = [](const at::Tensor& t) {
+    return t.dim() == 0 ? t.reshape({1}) : t;
+  };
+  auto operand = other.to(self.device()).to(self.scalar_type()).contiguous();
+  const auto a_shaped = as_rank_one(self);
+  const auto b_shaped = as_rank_one(operand);
+  TensorDesc ad, bd, cd;
+  ad.Set(a_shaped);
+  bd.Set(b_shaped);
+  cd.Set(a_shaped);
+  OpTensorDesc op(CNNL_OP_TENSOR_SUB, self.scalar_type());
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  // cnnlOpTensor computes op(scale_a * A, scale_b * B); alpha scales the operand,
+  // so `add_(x, y, alpha=3)` has to compute x + 3y rather than x + y.
+  const float scale_b = static_cast<float>(alpha.toDouble());
+  void* self_ptr = self.mutable_data_ptr();
+  CheckCnnl(
+      cnnlOpTensor(
+          handle, op.get(), &one, ad.get(), self_ptr, &scale_b, bd.get(),
+          b_shaped.const_data_ptr(), nullptr, 0, &zero, cd.get(), self_ptr),
+      "cnnlOpTensor in place (sub_.Tensor)");
+  return self;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SubInplaceTensorFn, sub_inplace_tensor_dispatcher, Backend::kCambricon, SubInplaceTensorKernelCambricon);
+
+
 at::Tensor SumKernelCambricon(
     const at::Tensor& self, std::optional<at::ScalarType> dtype_opt) {
   const at::ScalarType dtype = self.scalar_type();
@@ -2190,6 +3167,148 @@ at::Tensor SumDimIntlistKernelCambricon(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(SumDimIntlistFn, sum_dim_intlist_dispatcher, Backend::kCambricon, SumDimIntlistKernelCambricon);
+
+at::Tensor TransposeIntKernelCambricon(const at::Tensor& self, int64_t dim0, int64_t dim1) {
+  // A metadata-only op. FlagGems serves these with a Python wrapper, which
+  // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
+  // wrapper is the entire cost, because there is no kernel to run. Paid 42 times
+  // a forward for _unsafe_view alone.
+    const int64_t rank = self.dim();
+    const int64_t d0 = dim0 < 0 ? dim0 + rank : dim0;
+    const int64_t d1 = dim1 < 0 ? dim1 + rank : dim1;
+    TORCH_CHECK(
+        d0 >= 0 && d0 < rank && d1 >= 0 && d1 < rank,
+        "flagos cambricon: transpose got dims ", dim0, " and ", dim1);
+    std::vector<int64_t> perm(static_cast<size_t>(rank));
+    for (int64_t i = 0; i < rank; ++i) {
+      perm[static_cast<size_t>(i)] = i;
+    }
+    std::swap(perm[static_cast<size_t>(d0)], perm[static_cast<size_t>(d1)]);
+    return self.permute(perm);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(TransposeIntFn, transpose_int_dispatcher, Backend::kCambricon, TransposeIntKernelCambricon);
+
+
+at::Tensor WhereSelfKernelCambricon(
+    const at::Tensor& condition, const at::Tensor& self,
+    const at::Tensor& other) {
+  // cnnlSelect takes the three operands the same way aten's where does -- then,
+  // else, condition -- with the condition as a MLU pointer plus its element
+  // count, and the result written to a fresh buffer.
+  TORCH_CHECK(
+      condition.scalar_type() == at::kBool,
+      "flagos cambricon: where.self needs a bool condition");
+  // where broadcasts, and the shape that matters is the broadcast of all three
+  // operands. Attention calls this with a mask of (B, 1, 1, S) against scores of
+  // (B, H, S, S), so requiring the condition to already match the result rejects
+  // the ordinary case.
+  const auto shape = at::infer_size(
+      at::infer_size(self.sizes(), other.sizes()), condition.sizes());
+  CambriconDeviceGuard guard(self);
+  auto output = at::empty(shape, self.options());
+  if (output.numel() == 0) {
+    return output;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  // cnnlSelect takes the condition as a flat bool array with an explicit element
+  // count, so it has to be materialised at the full result shape; then and else
+  // keep their own shapes, which the descriptors express.
+  auto then_t = self.expand(shape).contiguous();
+  auto else_t =
+      other.to(self.device()).to(self.scalar_type()).expand(shape).contiguous();
+  auto cond_t = condition.expand(shape).contiguous();
+  TensorDesc td, ed, od;
+  td.Set(then_t);
+  ed.Set(else_t);
+  od.Set(output);
+  CheckCnnl(
+      cnnlSelect(
+          handle, td.get(), then_t.const_data_ptr(), ed.get(),
+          else_t.const_data_ptr(), od.get(), output.mutable_data_ptr(),
+          reinterpret_cast<const bool*>(cond_t.const_data_ptr()),
+          static_cast<int>(cond_t.numel())),
+      "cnnlSelect (where.self)");
+  return output;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kCambricon, WhereSelfKernelCambricon);
+
+
+at::Tensor& ZeroInplaceKernelCambricon(at::Tensor& self) {
+  // zero_ is fill_(0) and nothing more, so it goes through the native fill_ the
+  // generator already emits rather than duplicating the cnnlFill_v3 call. One
+  // extra dispatch, still on the vendor path.
+  //
+  // Worth doing because FlagGems' zero_ is a Python wrapper, and it measured
+  // 3.95 ms against 0.35-1.0 ms for every other foreach op the optimizer issues
+  // over the same 226 MB -- 57 GB/s against roughly 650 GB/s. AdamW reaches it
+  // through _foreach_zero_, which decomposes to one zero_ per parameter, so the
+  // wrapper is paid 47 times a step.
+  return self.fill_(at::Scalar(0));
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kCambricon, ZeroInplaceKernelCambricon);
+
+
+at::Tensor ZerosKernelCambricon(
+    at::IntArrayRef size, std::optional<at::ScalarType> dtype_opt,
+    std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,
+    std::optional<bool> pin_memory_opt) {
+  TORCH_CHECK(
+      !layout_opt.has_value() || *layout_opt == at::kStrided,
+      "flagos cambricon: zeros only serves strided layout");
+  TORCH_CHECK(
+      !pin_memory_opt.has_value() || !*pin_memory_opt,
+      "flagos cambricon: zeros does not serve pinned memory");
+  const auto device = c10::device_or_default(device_opt);
+  TORCH_CHECK(
+      device.type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: zeros requires the flagos device");
+  // Same pair `ones` uses: allocate, then fill on the device. FlagGems charges
+  // a full Triton launch for this, and 24 of them run every step.
+  auto result = at::empty(
+      size, at::TensorOptions().dtype(c10::dtype_or_default(dtype_opt))
+                .device(device));
+  if (result.numel() > 0) {
+    result.fill_(0);
+  }
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ZerosFn, zeros_dispatcher, Backend::kCambricon, ZerosKernelCambricon);
+
+
+at::Tensor ZerosLikeKernelCambricon(
+    const at::Tensor& self, std::optional<at::ScalarType> dtype_opt,
+    std::optional<at::Layout> layout_opt, std::optional<at::Device> device_opt,
+    std::optional<bool> pin_memory_opt,
+    std::optional<at::MemoryFormat> memory_format_opt) {
+  TORCH_CHECK(
+      !layout_opt.has_value() || *layout_opt == at::kStrided,
+      "flagos cambricon: zeros_like only serves strided layout");
+  TORCH_CHECK(
+      !device_opt.has_value() ||
+          device_opt->type() == c10::DeviceType::PrivateUse1,
+      "flagos cambricon: zeros_like only serves the flagos device");
+  TORCH_CHECK(
+      !pin_memory_opt.has_value() || !*pin_memory_opt,
+      "flagos cambricon: zeros_like does not serve pinned memory");
+  // The same pair `ones_like` uses, so the options the aten schema asks for are
+  // honoured in one place.
+  auto result = at::empty_like(self);
+  if (dtype_opt.has_value()) {
+    result = result.to(*dtype_opt);
+  }
+  if (result.numel() > 0) {
+    result.fill_(0);
+  }
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kCambricon, ZerosLikeKernelCambricon);
+
 } // namespace at::native::flagos::cambricon
 
 

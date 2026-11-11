@@ -39,6 +39,16 @@ import torch_fl  # noqa: F401
 
 DEVICE = "flagos:0"
 
+# `bmm` is the one op in this file that needs a vendor value kernel rather than
+# an ATen symbol shared across backends, so it is registered only on a
+# CUDA-boxing build (see the `#if ... && defined(FLAGOS_BOXING_BUILD)` guard in
+# csrc/aten/sparse_ops.cc).  That is expressed as the `cuda` mark rather than a
+# local `skipif`: the marker is what ops/conftest.py reads, and its build-record
+# gate skips a `cuda`-marked case on any wheel built without the boxing kernels
+# -- the same rule tests/integration/ops/test_sparse_csr_dispatch.py encodes by
+# hand, and one this file cannot restate locally because a new legacy skip call
+# in tests/integration/ops/ is refused by skip_policy_baseline.json.
+
 
 def _invariants_for(x, layout=torch.sparse_coo):
     """The TensorOptions a COO construction was asked for must survive."""
@@ -259,3 +269,136 @@ class TestBufferMovement:
         cloned = x.clone()
         cloned._values().fill_(0.0)
         torch.testing.assert_close(x._values().cpu(), torch.tensor([1.0, 2.0]))
+
+
+@pytest.mark.anyplatform
+@pytest.mark.dcu
+@pytest.mark.cuda
+class TestSparseBmm:
+    """Sparse COO left operand x dense right operand (issue #793).
+
+    The COO constructor and the structure surface above need no vendor kernel,
+    so they are registered on ATen's own device-agnostic symbols. ``bmm``
+    multiplies values and has no such symbol, so a boxing build serves it by
+    boxing the operands onto the vendor's CUDA kernels. These cases state that
+    contract: the sparse-left form matches CPU, the caller's operands come back
+    unchanged (the boxed call must not leak its retag), and the forms upstream
+    itself rejects are still rejected rather than answered differently here.
+
+    Two marks carry the applicability. ``cuda`` is the build-record gate: the
+    boxed call needs kernels behind the CUDA dispatch key, and ops/conftest.py
+    skips a ``cuda``-marked case on a wheel built without them (the default,
+    FlagGems-primary wheel every CUDA-ABI vendor lane builds). ``dcu`` is what
+    gets these cases collected at all on the lane that can run them -- the Hygon
+    entry in .github/integration-manifest.yml selects
+    ``-m "(dcu or main_ops) ..."``, which does not select a case carrying only
+    ``anyplatform``. The rest of this file is in that position (every case above
+    is ``anyplatform``-only), so the COO structure surface is not exercised on
+    DCU hardware by CI either; this class does not repeat that.
+    """
+
+    @pytest.mark.anyplatform
+    def test_issue_793_reproducer(self):
+        """The exact snippet from the report: it must match the CPU result."""
+        i = torch.tensor([[0, 0, 0], [0, 1, 1], [0, 1, 2]])
+        s = torch.sparse_coo_tensor(i, torch.tensor([1.0, 2.0, 3.0]), (1, 2, 3))
+        d = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+        s, d = s.coalesce(), d
+        expected = torch.bmm(s, d)
+        actual = torch.bmm(s.to(DEVICE), d.to(DEVICE))
+        assert actual.device.type == "flagos"
+        assert tuple(actual.shape) == (1, 2, 2)
+        torch.testing.assert_close(actual.cpu(), expected)
+
+    @pytest.mark.anyplatform
+    def test_matches_cpu_over_multiple_batches(self):
+        """Larger nnz and a batch dim > 1, compared against CPU."""
+        torch.manual_seed(0)
+        n_batches, rows, cols, inner = 3, 4, 5, 6
+        dense = torch.randn(n_batches, inner, cols)
+        sparse_dense = torch.randn(n_batches, rows, inner).masked_fill(
+            torch.rand(n_batches, rows, inner) < 0.5, 0.0
+        )
+        cpu_sparse = sparse_dense.to_sparse().coalesce()
+        expected = torch.bmm(cpu_sparse, dense)
+        actual = torch.bmm(cpu_sparse.to(DEVICE), dense.to(DEVICE))
+        torch.testing.assert_close(actual.cpu(), expected)
+
+    @pytest.mark.anyplatform
+    def test_operands_are_restored_after_the_call(self):
+        """The boxed call must not leave the caller's tensors retagged or moved."""
+        # Coalesced on CPU and then moved: `_coalesce` is deliberately not
+        # registered for SparsePrivateUse1 (it is host code), so coalescing on
+        # the device only works when it short-circuits, and this input does not.
+        s = (
+            torch.sparse_coo_tensor(
+                [[0, 0, 0], [0, 1, 1], [0, 1, 2]],
+                [1.0, 2.0, 3.0],
+                (1, 2, 3),
+            )
+            .coalesce()
+            .to(DEVICE)
+        )
+        d = torch.randn(1, 3, 2, device=DEVICE)
+        before_s, before_d = s.device, d.device
+        torch.bmm(s, d)
+        assert s.device == before_s and s.layout == torch.sparse_coo
+        assert d.device == before_d
+        # Still usable exactly as it was: a second call gives the same answer.
+        again = torch.bmm(s, d)
+        torch.testing.assert_close(again.cpu(), torch.bmm(s.cpu(), d.cpu()))
+
+    @pytest.mark.anyplatform
+    def test_empty_sparse_operand(self):
+        """Zero nnz is a valid COO tensor and must produce a zeros result."""
+        empty = torch.sparse_coo_tensor(
+            torch.zeros(3, 0, dtype=torch.long),
+            torch.zeros(0),
+            (1, 2, 3),
+            device=DEVICE,
+        ).coalesce()
+        dense = torch.randn(1, 3, 2, device=DEVICE)
+        actual = torch.bmm(empty, dense)
+        assert tuple(actual.shape) == (1, 2, 2)
+        torch.testing.assert_close(actual.cpu(), torch.zeros(1, 2, 2), atol=0, rtol=0)
+
+    @pytest.mark.anyplatform
+    def test_dense_left_sparse_right_is_rejected_like_upstream(self):
+        """`bmm(dense, sparse)` is not served: upstream rejects it too.
+
+        Answering it here would invent behaviour the vendor's own CUDA kernels
+        do not have, so it has to keep raising rather than quietly swapping
+        which operand is sparse.
+        """
+        # Built on CPU and moved, for the reason in
+        # test_operands_are_restored_after_the_call: the device key has no
+        # `_coalesce` kernel to run on this input.
+        s = (
+            torch.sparse_coo_tensor(
+                [[0, 0, 0], [0, 1, 1], [0, 1, 2]],
+                [1.0, 2.0, 3.0],
+                (1, 3, 2),
+            )
+            .coalesce()
+            .to(DEVICE)
+        )
+        d = torch.randn(1, 2, 3, device=DEVICE)
+        with pytest.raises(RuntimeError):
+            torch.bmm(d, s)
+
+    @pytest.mark.anyplatform
+    def test_grad_requiring_operand_is_declined(self):
+        """A call that would record a graph must not go through the boxing.
+
+        The boxed CUDA call would build its backward from the CUDA-keyed
+        operands the guard restores, so a caller-visible ``grad_fn`` would point
+        at tensors nobody holds. Declining keeps the pre-fix boundary for that
+        case instead of returning a wrong graph.
+        """
+        s = torch.sparse_coo_tensor(
+            [[0, 0, 0], [0, 1, 1], [0, 1, 2]], [1.0, 2.0, 3.0], (1, 2, 3)
+        ).coalesce()
+        d = torch.randn(1, 3, 2)
+        s, d = s.to(DEVICE), d.to(DEVICE).requires_grad_(True)
+        with pytest.raises(RuntimeError):
+            torch.bmm(s, d)

@@ -210,7 +210,12 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # u180 after the #570 gap. `mean.dim` stays on `none` -- its FlagGems
     # kernel returns NaN for a non-inner dimension ((8, 12), dim=0).
     "iluvatar": 582,
-    "kunlunxin": 0,
+    # 256: two screens on a P800. The whole 618-op cohort first, at one profile
+    # with the survey's default tolerance; then every survivor over ten profiles
+    # (the survey's seven plus 13x7, 3x5x7 and 64x3) compared at atol=rtol=1e-4,
+    # which is the tolerance these tests assert with. The number is a
+    # measurement, not the cohort size -- see KUNLUNXIN_FLAGGEMS_MEASURED.
+    "kunlunxin": 256,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow. The day-0 variant
     # below is unchanged -- it keeps `mm` on the boxing kernel.
