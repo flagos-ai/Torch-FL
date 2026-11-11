@@ -1320,23 +1320,27 @@ computed from the three columns beside them, not carried over from another campa
 The gate passes on all three arms, with `hits` 2038, `fallbacks` 0 and every declined
 operator keeping its untouched cost.
 
-**The replay removes the wrapper's per-call cost but does not yet reach the vendor
-operator, and the remaining gap is now located to within a measurement.** `mul` improves
-5.66x over the wrapper yet still costs 2.01x the vendor's 7.27 us. The decomposition of
-the 14.60 us explains it: 4.33 us is the replay itself (measured inside C++), and the
-rest is the path to reach it - a Python frame plus the `pybind11` crossing to the
-extension, measured separately at 10.58 us for the same replay called from Python, plus
-the plugin's dispatch into the FlagGems callable. In other words the mechanism is fast;
-calling it from Python is what costs, and the wrapper being replaced was itself a Python
-callable.
+**Calling the replay from C++ is what closes the gap.** The table above measures the
+replay driven from Python, which is not where it ends up. With the replay installed inside
+the plugin's caller - so the launch happens before the operator would re-enter the
+interpreter - the same three arms read:
 
-That is exactly what the next step removes: a dispatch that calls the replay directly
-from the plugin's C++ side skips the Python frame and the `pybind11` crossing, which is
-the ~6 us above the in-C++ cost. Projected end to end that puts `mul` at roughly 8-9 us
-against the vendor's 7.27 us, i.e. 1.1-1.2x rather than 2x - close, and the remaining
-part is the plugin's own dispatch, not this mechanism.
+| operator | vendor | wrapper | replay from Python | replay inside the plugin caller |
+|---|---:|---:|---:|---:|
+| `mul` 512x512 | 7.27 | 82.55 | 14.60 | **6.57** (0.90x vendor) |
+| `softmax` 1024x1024 | 7.09 | 30.52 | 14.44 | **6.86** (0.97x vendor) |
 
-**A verified-operator allowlist is part of the design, not a limitation of it.****A verified-operator allowlist is part of the design, not a limitation of it.** `relu`
+`max_err` is 0.0 (or 7.5e-09 for `softmax`) in every arm, and the capture statistics show
+the Python wrapper was not called at all after the plan was installed (`hits` 0,
+`misses` 0): the caller replays and returns before the cached FlagGems callable is
+reached. That is the mechanism this design argued for, measured end to end: **the FlagGems
+Triton kernel at vendor-operator cost**, with `mul` slightly below the vendor's own call
+because it skips ATen's allocation.
+
+The remaining gap to the vendor operator is therefore closed for the operators whose
+layout is proven, and the work that remains is coverage, not speed.
+
+**A verified-operator allowlist is part of the design, not a limitation of it.****A verified-operator allowlist is part of the design, not a limitation of it.****A verified-operator allowlist is part of the design, not a limitation of it.** `relu`
 captures a seven-parameter layout with three scalars whose replay does not reproduce the
 wrapper's result (relative error 1.36), and the cause is not yet explained. A wrong
 layout does not crash - it returns a plausible wrong answer - so the module refuses any

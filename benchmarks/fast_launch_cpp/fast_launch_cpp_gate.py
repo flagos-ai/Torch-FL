@@ -101,7 +101,9 @@ def errors(name, actual, expected):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--arm", choices=("vendor", "wrapper", "cpp"), required=True)
+    parser.add_argument(
+        "--arm", choices=("vendor", "wrapper", "cpp", "plugin"), required=True
+    )
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -113,11 +115,14 @@ def main() -> int:
         import torch_fl  # noqa: F401 - registers the device
 
     backend = None
-    if args.arm == "cpp":
+    if args.arm in ("cpp", "plugin"):
         import fast_launch_cpp
 
-        # Enable before the first dispatch: see the module docstring.
-        backend = fast_launch_cpp.enable([name for name, *_ in OPS])
+        # Enable before the first dispatch: the wrapper performs the capture, and the
+        # plugin's C++ caller replays from then on.
+        backend = fast_launch_cpp.enable(
+            [name for name, *_ in OPS], plugin=args.arm == "plugin"
+        )
 
     default_device = "cuda:0" if args.arm == "vendor" else "flagos:0"
     device = torch.device(args.device or default_device)

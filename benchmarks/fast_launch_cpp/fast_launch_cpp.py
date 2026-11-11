@@ -115,6 +115,20 @@ def parse_ptx_params(ptx):
     return kinds
 
 
+def _scalar_payloads(args):
+    """The call's non-tensor arguments as integers, in call order.
+
+    The plugin compares these against the plan before replaying, so a call that differs in
+    any of them (``softmax``'s ``dim``, for instance) falls back instead of replaying the
+    values the plan was captured with.
+    """
+    return [
+        int(value)
+        for value in args
+        if not _is_tensor_like(value) and isinstance(value, (bool, int))
+    ]
+
+
 def _is_tensor_like(value):
     """Duck-typed tensor test, so a subclass (a fake one in tests) still counts."""
     return hasattr(value, "untyped_storage") and hasattr(value, "is_contiguous")
@@ -207,9 +221,34 @@ def classify_arguments(launch_args, inputs, ptx_kinds):
 class Plan:
     """One installed plan: what to replay and what it produced."""
 
-    __slots__ = ("op", "grid", "threads", "shared", "kinds", "ints", "shape", "dtype")
+    __slots__ = (
+        "op",
+        "grid",
+        "threads",
+        "shared",
+        "kinds",
+        "ints",
+        "shape",
+        "dtype",
+        "operand_shapes",
+        "operand_dtypes",
+        "scalars",
+    )
 
-    def __init__(self, op, grid, threads, shared, kinds, ints, shape, dtype):
+    def __init__(
+        self,
+        op,
+        grid,
+        threads,
+        shared,
+        kinds,
+        ints,
+        shape,
+        dtype,
+        operand_shapes=(),
+        operand_dtypes=(),
+        scalars=(),
+    ):
         self.op = op
         self.grid = grid
         self.threads = threads
@@ -218,6 +257,9 @@ class Plan:
         self.ints = ints
         self.shape = tuple(int(extent) for extent in shape)
         self.dtype = dtype
+        self.operand_shapes = tuple(tuple(int(e) for e in s) for s in operand_shapes)
+        self.operand_dtypes = tuple(operand_dtypes)
+        self.scalars = tuple(int(value) for value in scalars)
 
     def census(self):
         """The slot census, which is the check that the layout is what it claims."""
@@ -245,8 +287,14 @@ class Backend:
     """
 
     def __init__(
-        self, extension, provider, max_launches=MAX_LAUNCHES, pool_size=POOL_SIZE
+        self,
+        extension,
+        provider,
+        max_launches=MAX_LAUNCHES,
+        pool_size=POOL_SIZE,
+        plugin=False,
     ):
+        self.plugin = plugin
         self.extension = extension
         self.provider = provider
         self.max_launches = max_launches
@@ -294,6 +342,7 @@ class Backend:
 
         threads = int(compiled.metadata.num_warps) * 32
         shared = int(compiled.metadata.shared or 0)
+        tensors = tensor_arguments(args)
         plan = Plan(
             op=op,
             grid=grid,
@@ -303,6 +352,9 @@ class Backend:
             ints=ints,
             shape=tuple(result.shape),
             dtype=str(result.dtype),
+            operand_shapes=[tuple(tensor.shape) for tensor in tensors],
+            operand_dtypes=[str(tensor.dtype) for tensor in tensors],
+            scalars=_scalar_payloads(args),
         )
         if plan.dtype not in _AT_DTYPE:
             raise Unsupported(f"unsupported result dtype {plan.dtype}")
@@ -353,6 +405,12 @@ class Backend:
                 state["phase"] = "ready"
                 return result
 
+            if self.plugin:
+                # The caller replays before reaching this callable; if control arrives
+                # here the plan was declined for this call, so stay on the wrapper.
+                self.stats["misses"] += 1
+                return callable_(*args, **kwargs)
+
             plan = self.plans[op]
             inputs = tensor_arguments(args)
             if len(inputs) != plan.kinds.count("in"):
@@ -371,6 +429,10 @@ class Backend:
         return fast
 
     def _install(self, op, plan, compiled):
+        if self.plugin:
+            self._install_in_plugin(op, plan, compiled)
+            self.plans[op] = plan
+            return
         cubin = compiled.asm["cubin"]
         self.extension.register_kernel(
             op,
@@ -386,6 +448,45 @@ class Backend:
             _AT_DTYPE[plan.dtype],
         )
         self.plans[op] = plan
+
+    @staticmethod
+    def plugin_key(op):
+        """The name the plugin's caller passes: the FlagGems callable's dotted name."""
+        return op if "." in op else f"flag_gems.{op}"
+
+    def _install_in_plugin(self, op, plan, compiled):
+        """Register the plan with the plugin's C++ caller, which replays it directly.
+
+        The caller consults the registry before it invokes the cached Python callable, so
+        once this returns the operator never re-enters Python. Everything the caller needs
+        to validate a call is registered with the plan: operand shapes and types and the
+        call's scalar arguments.
+        """
+        import torch  # noqa: PLC0415 - only this path needs it
+
+        registry = getattr(torch.ops, "flagos_fast_plan", None)
+        if registry is None:
+            raise Unsupported(
+                "this wheel has no flagos_fast_plan registry (built without the fast plan)"
+            )
+        cubin = torch.frombuffer(bytearray(compiled.asm["cubin"]), dtype=torch.uint8)
+        registered = registry.register_fast_plan(
+            self.plugin_key(op),
+            compiled.name,
+            cubin,
+            plan.grid,
+            plan.threads,
+            plan.shared,
+            list(plan.kinds),
+            list(plan.ints),
+            [list(shape) for shape in plan.operand_shapes],
+            [_AT_DTYPE[str(dtype)] for dtype in plan.operand_dtypes],
+            list(plan.scalars),
+            list(plan.shape),
+            _AT_DTYPE[plan.dtype],
+        )
+        if not registered:
+            raise Unsupported("the plugin refused the plan (driver, cubin or kernel)")
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -424,14 +525,20 @@ class Backend:
 _state = {"backend": None}
 
 
-def enable(names, package=None):
-    """Turn the C++ replay on for ``names``; returns the backend."""
+def enable(names, package=None, plugin=False):
+    """Turn the C++ replay on for ``names``; returns the backend.
+
+    ``plugin=True`` registers the plan with the plugin's C++ caller instead of replaying
+    through the extension from Python. That is the fast path: the caller replays the
+    kernel before it invokes the cached Python callable, so the operator never re-enters
+    the interpreter, and the Python wrapper below only ever performs the capture.
+    """
     if package is None:
         import flag_gems  # noqa: PLC0415 - optional dependency, imported on demand
 
         package = flag_gems
-    extension = _load_extension()
-    backend = Backend(extension, _TritonProvider())
+    extension = None if plugin else _load_extension()
+    backend = Backend(extension, _TritonProvider(), plugin=plugin)
     backend.enable(names, package)
     _state["backend"] = backend
     return backend
