@@ -3156,9 +3156,7 @@ def render():
                 prologue_extra=BINARY_PROLOGUE_EXTRA.get(op, ""),
             )
         elif category == "softmax_forward":
-            body = T_SOFTMAX_FORWARD.format(
-                kernel=kernel, fn=fn, disp=disp, op=op
-            )
+            body = T_SOFTMAX_FORWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "softmax_backward":
             body = T_SOFTMAX_BACKWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "slice_backward":
@@ -3178,9 +3176,7 @@ def render():
                 entry=UNARY_ENTRY[op],
             )
         elif category == "zero_inplace":
-            body = T_ZERO_INPLACE.format(
-                kernel=kernel, fn=fn, disp=disp, op=op
-            )
+            body = T_ZERO_INPLACE.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "fill":
             body = T_FILL.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "log_softmax":

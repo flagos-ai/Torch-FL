@@ -376,6 +376,149 @@ at::Tensor PrivSafeSoftmaxKernelCambricon(const at::Tensor& self, int64_t dim, s
 
 REGISTER_IMPL_TO_DISPATCHER(PrivSafeSoftmaxFn, priv_safe_softmax_dispatcher, Backend::kCambricon, PrivSafeSoftmaxKernelCambricon);
 
+at::Tensor PrivSoftmaxKernelCambricon(const at::Tensor& self, int64_t dim, bool half_to_float) {
+  // Same three-dimensional descriptor rule as the backward in
+  // T_SOFTMAX_BACKWARD: cnnlSoftmaxForward reduces over the axis its mode names
+  // and rejects a two-dimensional descriptor with CNNL_STATUS_BAD_PARAM, so the
+  // reduction axis is kept where the mode expects it and everything around it is
+  // merged.
+  //
+  // Worth serving natively because FlagGems' _softmax is a Python wrapper and
+  // measured 1.56 ms on the (32, 512, 512) attention scores this model produces,
+  // against 0.02-0.06 ms for every other op in the forward. The model calls it
+  // once per layer, so the wrapper is 6 ms of a 23 ms forward.
+  const int64_t rank = self.dim();
+  TORCH_CHECK(rank > 0, "flagos cambricon: _softmax does not serve rank zero");
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: _softmax got dim ", dim);
+  const auto dtype = self.scalar_type();
+  TORCH_CHECK(
+      SupportedFloatDtype(dtype),
+      "flagos cambricon: _softmax does not serve ", dtype);
+  // half_to_float is what nn.Softmax sets when autocast wants the result widened;
+  // cnnlSoftmaxForward takes one dtype for input and output, so the widen is done
+  // before and after the call rather than by it.
+  const auto compute = (half_to_float && dtype == at::kHalf) ? at::kFloat : dtype;
+  auto input = self.contiguous().to(compute);
+  if (input.numel() == 0) {
+    return at::empty(self.sizes(), self.options().dtype(compute));
+  }
+  auto sizes = input.sizes();
+  int64_t before = 1, after = 1;
+  for (int64_t i = 0; i < d; ++i) {
+    before *= sizes[static_cast<size_t>(i)];
+  }
+  for (int64_t i = d + 1; i < rank; ++i) {
+    after *= sizes[static_cast<size_t>(i)];
+  }
+  const int64_t axis = sizes[static_cast<size_t>(d)];
+  cnnlSoftmaxMode_t mode;
+  std::vector<int64_t> shape3;
+  if (d == rank - 1) {
+    mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+    shape3 = {before, 1, axis};
+  } else if (d == 0) {
+    mode = CNNL_SOFTMAX_MODE_HIGH_DIMENSION;
+    shape3 = {axis, before * after, 1};
+  } else {
+    mode = CNNL_SOFTMAX_MODE_MEDIUM_DIMENSION;
+    shape3 = {before, axis, after};
+  }
+  auto x = input.view(shape3);
+  CambriconDeviceGuard guard(x);
+  auto result = at::empty_like(x);
+  const auto handle =
+      HandleForDevice(static_cast<int>(x.device().index()));
+  TensorDesc xd, yd;
+  xd.Set(x);
+  yd.Set(result);
+  CheckCnnl(
+      cnnlSoftmaxForward(
+          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, xd.get(),
+          x.const_data_ptr(), nullptr, yd.get(), result.mutable_data_ptr()),
+      "cnnlSoftmaxForward (_softmax)");
+  // Restore the caller's dtype only when this call did not widen on purpose:
+  // half_to_float is the schema saying the result should stay float32, and
+  // converting back to self's dtype here silently undid it.
+  auto out = result.view(self.sizes());
+  if (compute == dtype && out.scalar_type() != dtype) {
+    out = out.to(dtype);
+  }
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxFn, priv_softmax_dispatcher, Backend::kCambricon, PrivSoftmaxKernelCambricon);
+
+
+at::Tensor PrivSoftmaxBackwardDataKernelCambricon(
+    const at::Tensor& grad_output, const at::Tensor& output, int64_t dim,
+    at::ScalarType input_dtype) {
+  // cnnlSoftmaxBackward reduces over the axis its mode names, and the vendor
+  // hands it a descriptor of exactly three dimensions: the reduction axis kept
+  // in place, everything before it merged and everything after merged
+  // (torch_mlu/csrc/aten/operators/cnnl/internal/softmax_internal.cpp builds it
+  // with getTensorDescWithKeepDimAndOnlyThreeDims and picks the mode from the
+  // axis). A two-dimensional descriptor is not accepted -- it comes back
+  // CNNL_STATUS_BAD_PARAM.
+  //
+  // The gradient only needs the forward output (the y arm), never the input,
+  // which is exactly what _softmax_backward_data is given.
+  const int64_t rank = output.dim();
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: _softmax_backward_data got dim ", dim);
+  auto sizes = output.sizes();
+  int64_t before = 1, after = 1;
+  for (int64_t i = 0; i < d; ++i) {
+    before *= sizes[static_cast<size_t>(i)];
+  }
+  for (int64_t i = d + 1; i < rank; ++i) {
+    after *= sizes[static_cast<size_t>(i)];
+  }
+  const int64_t axis = sizes[static_cast<size_t>(d)];
+  cnnlSoftmaxMode_t mode;
+  std::vector<int64_t> shape3;
+  if (d == rank - 1) {
+    // LOW_DIMENSION reduces the innermost axis of the descriptor, so the
+    // reduction axis goes last. Building it as (before, axis, 1) instead left the
+    // axis in the middle and the result was wrong by ~1e-01.
+    mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+    shape3 = {before, 1, axis};
+  } else if (d == 0) {
+    mode = CNNL_SOFTMAX_MODE_HIGH_DIMENSION;
+    shape3 = {axis, before * after, 1};
+  } else {
+    mode = CNNL_SOFTMAX_MODE_MEDIUM_DIMENSION;
+    shape3 = {before, axis, after};
+  }
+  auto y = output.contiguous().view(shape3);
+  auto g = grad_output.to(y.scalar_type()).contiguous().view(shape3);
+  CambriconDeviceGuard guard(y);
+  auto result = at::empty_like(y);
+  if (result.numel() == 0) {
+    return result;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(y.device().index()));
+  TensorDesc yd, gd, od;
+  yd.Set(y);
+  gd.Set(g);
+  od.Set(result);
+  CheckCnnl(
+      cnnlSoftmaxBackward(
+          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, yd.get(),
+          y.const_data_ptr(), gd.get(), g.const_data_ptr(), nullptr, od.get(),
+          result.mutable_data_ptr()),
+      "cnnlSoftmaxBackward (_softmax_backward_data)");
+  return result.view(sizes);
+}
+
+REGISTER_IMPL_TO_DISPATCHER(PrivSoftmaxBackwardDataFn, priv_softmax_backward_data_dispatcher, Backend::kCambricon, PrivSoftmaxBackwardDataKernelCambricon);
+
+
 at::Tensor PrivUnsafeViewKernelCambricon(const at::Tensor& self, at::IntArrayRef size) {
   // A metadata-only op. FlagGems serves these with a Python wrapper, which
   // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
@@ -2559,6 +2702,38 @@ at::Tensor SiluKernelCambricon(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SiluFn, silu_dispatcher, Backend::kCambricon, SiluKernelCambricon);
 
 
+at::Tensor SiluBackwardKernelCambricon(
+    const at::Tensor& grad_output, const at::Tensor& self) {
+  // silu backward through cnnlActivationBackward. The vendor takes the x arm for
+  // every mode except sigmoid and tanh, which are the two that recompute the
+  // activation from y; silu needs the forward input, so x is `self` here and
+  // diff_y is the incoming gradient.
+  CambriconDeviceGuard guard(self);
+  auto input = self.contiguous();
+  auto grad = grad_output.contiguous();
+  auto output = at::empty_like(input);
+  if (output.numel() == 0) {
+    return output;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  TensorDesc xd, gd, yd;
+  xd.Set(input);
+  gd.Set(grad);
+  yd.Set(output);
+  ActivationDesc act(CNNL_ACTIVATION_SILU);
+  CheckCnnl(
+      cnnlActivationBackward(
+          handle, act.get(), nullptr, /*y_desc=*/nullptr, /*y=*/nullptr,
+          gd.get(), grad.const_data_ptr(), xd.get(), input.const_data_ptr(),
+          nullptr, yd.get(), output.mutable_data_ptr()),
+      "cnnlActivationBackward silu (silu_backward)");
+  return output;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SiluBackwardFn, silu_backward_dispatcher, Backend::kCambricon, SiluBackwardKernelCambricon);
+
+
 at::Tensor SliceTensorKernelCambricon(const at::Tensor& self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
   // A metadata-only op. FlagGems serves these with a Python wrapper, which
   // measured 13.6 us against the 2.8 us aten's own path costs for `view` -- the
@@ -2568,6 +2743,66 @@ at::Tensor SliceTensorKernelCambricon(const at::Tensor& self, int64_t dim, ::std
 }
 
 REGISTER_IMPL_TO_DISPATCHER(SliceTensorFn, slice_tensor_dispatcher, Backend::kCambricon, SliceTensorKernelCambricon);
+
+
+at::Tensor SliceBackwardKernelCambricon(
+    const at::Tensor& grad_output, at::IntArrayRef input_sizes, int64_t dim,
+    int64_t start, int64_t end, int64_t step) {
+  // The scatter half of a slice, as one cnnlStridedSliceBackward call: the window
+  // the forward read is described by begin/end/stride over the full input shape,
+  // and CNNL writes the gradient back into it, zeroing everything outside.
+  //
+  // Composing it as zeros(input_sizes) followed by a copy into the view is
+  // correct but reads and writes the whole tensor twice; measured at 58.7 ms of
+  // backward against 30.0, because the backward pass slices 608 times per step
+  // and most of that tensor is never touched.
+  const int64_t rank = static_cast<int64_t>(input_sizes.size());
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: slice_backward got dim ", dim);
+  // aten's slice clamps start and end into range, and a negative index counts
+  // from the end. slice_backward is handed what the forward resolved, which is
+  // not clamped.
+  const int64_t size = input_sizes[static_cast<size_t>(d)];
+  int64_t lo = start;
+  int64_t hi = end;
+  if (lo < 0) {
+    lo += size;
+  }
+  if (hi < 0) {
+    hi += size;
+  }
+  lo = std::max<int64_t>(0, std::min<int64_t>(lo, size));
+  hi = std::max<int64_t>(0, std::min<int64_t>(hi, size));
+  std::vector<int> begin(static_cast<size_t>(rank), 0);
+  std::vector<int> last(static_cast<size_t>(rank), 0);
+  std::vector<int> strides(static_cast<size_t>(rank), 1);
+  for (int64_t i = 0; i < rank; ++i) {
+    last[static_cast<size_t>(i)] = static_cast<int>(input_sizes[static_cast<size_t>(i)]);
+  }
+  begin[static_cast<size_t>(d)] = static_cast<int>(lo);
+  last[static_cast<size_t>(d)] = static_cast<int>(hi);
+  strides[static_cast<size_t>(d)] = static_cast<int>(step);
+  auto grad = grad_output.contiguous();
+  auto result = at::empty(input_sizes, grad.options());
+  if (result.numel() == 0) {
+    return result;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(grad.device().index()));
+  TensorDesc gd, od;
+  gd.Set(grad);
+  od.Set(result);
+  CheckCnnl(
+      cnnlStridedSliceBackward(
+          handle, begin.data(), last.data(), strides.data(), gd.get(),
+          grad.const_data_ptr(), od.get(), result.mutable_data_ptr()),
+      "cnnlStridedSliceBackward (slice_backward)");
+  return result;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(SliceBackwardFn, slice_backward_dispatcher, Backend::kCambricon, SliceBackwardKernelCambricon);
 
 
 at::Tensor SqrtKernelCambricon(const at::Tensor& self) {
@@ -2953,6 +3188,68 @@ at::Tensor TransposeIntKernelCambricon(const at::Tensor& self, int64_t dim0, int
 }
 
 REGISTER_IMPL_TO_DISPATCHER(TransposeIntFn, transpose_int_dispatcher, Backend::kCambricon, TransposeIntKernelCambricon);
+
+
+at::Tensor WhereSelfKernelCambricon(
+    const at::Tensor& condition, const at::Tensor& self,
+    const at::Tensor& other) {
+  // cnnlSelect takes the three operands the same way aten's where does -- then,
+  // else, condition -- with the condition as a MLU pointer plus its element
+  // count, and the result written to a fresh buffer.
+  TORCH_CHECK(
+      condition.scalar_type() == at::kBool,
+      "flagos cambricon: where.self needs a bool condition");
+  // where broadcasts, and the shape that matters is the broadcast of all three
+  // operands. Attention calls this with a mask of (B, 1, 1, S) against scores of
+  // (B, H, S, S), so requiring the condition to already match the result rejects
+  // the ordinary case.
+  const auto shape = at::infer_size(
+      at::infer_size(self.sizes(), other.sizes()), condition.sizes());
+  CambriconDeviceGuard guard(self);
+  auto output = at::empty(shape, self.options());
+  if (output.numel() == 0) {
+    return output;
+  }
+  const auto handle =
+      HandleForDevice(static_cast<int>(self.device().index()));
+  // cnnlSelect takes the condition as a flat bool array with an explicit element
+  // count, so it has to be materialised at the full result shape; then and else
+  // keep their own shapes, which the descriptors express.
+  auto then_t = self.expand(shape).contiguous();
+  auto else_t =
+      other.to(self.device()).to(self.scalar_type()).expand(shape).contiguous();
+  auto cond_t = condition.expand(shape).contiguous();
+  TensorDesc td, ed, od;
+  td.Set(then_t);
+  ed.Set(else_t);
+  od.Set(output);
+  CheckCnnl(
+      cnnlSelect(
+          handle, td.get(), then_t.const_data_ptr(), ed.get(),
+          else_t.const_data_ptr(), od.get(), output.mutable_data_ptr(),
+          reinterpret_cast<const bool*>(cond_t.const_data_ptr()),
+          static_cast<int>(cond_t.numel())),
+      "cnnlSelect (where.self)");
+  return output;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(WhereSelfFn, where_self_dispatcher, Backend::kCambricon, WhereSelfKernelCambricon);
+
+
+at::Tensor& ZeroInplaceKernelCambricon(at::Tensor& self) {
+  // zero_ is fill_(0) and nothing more, so it goes through the native fill_ the
+  // generator already emits rather than duplicating the cnnlFill_v3 call. One
+  // extra dispatch, still on the vendor path.
+  //
+  // Worth doing because FlagGems' zero_ is a Python wrapper, and it measured
+  // 3.95 ms against 0.35-1.0 ms for every other foreach op the optimizer issues
+  // over the same 226 MB -- 57 GB/s against roughly 650 GB/s. AdamW reaches it
+  // through _foreach_zero_, which decomposes to one zero_ per parameter, so the
+  // wrapper is paid 47 times a step.
+  return self.fill_(at::Scalar(0));
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ZeroInplaceFn, zero_inplace_dispatcher, Backend::kCambricon, ZeroInplaceKernelCambricon);
 
 
 at::Tensor ZerosKernelCambricon(
