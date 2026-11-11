@@ -260,6 +260,7 @@ OPS = {
     "mean": "reduce_all",
     "ones_like": "ones_like",
     "fill_.Scalar": "fill",
+    "zero_": "zero_inplace",
     "ones": "ones",
     "zeros": "zeros",
     "zeros_like": "zeros_like",
@@ -283,6 +284,11 @@ OPS = {
     "add_.Scalar": "inplace_scalar",
     "new_ones": "new_ones",
     "silu": "silu",
+    "silu_backward": "silu_backward",
+    "where.self": "where",
+    "_softmax": "softmax_forward",
+    "_softmax_backward_data": "softmax_backward",
+    "slice_backward": "slice_backward",
     "_unsafe_view": "metadata",
     "transpose.int": "metadata",
     "slice.Tensor": "metadata",
@@ -744,6 +750,24 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 # ones_like is a fill of a freshly allocated result. The 1.3 ms the FlagGems
 # path costs is its Python dispatch, not the fill.
+T_ZERO_INPLACE = """\
+at::Tensor& {kernel}(at::Tensor& self) {{
+  // zero_ is fill_(0) and nothing more, so it goes through the native fill_ the
+  // generator already emits rather than duplicating the cnnlFill_v3 call. One
+  // extra dispatch, still on the vendor path.
+  //
+  // Worth doing because FlagGems' zero_ is a Python wrapper, and it measured
+  // 3.95 ms against 0.35-1.0 ms for every other foreach op the optimizer issues
+  // over the same 226 MB -- 57 GB/s against roughly 650 GB/s. AdamW reaches it
+  // through _foreach_zero_, which decomposes to one zero_ per parameter, so the
+  // wrapper is paid 47 times a step.
+  return self.fill_(at::Scalar(0));
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_FILL = """\
 at::Tensor& {kernel}(at::Tensor& self, const at::Scalar& value) {{
   TORCH_CHECK(
@@ -1688,6 +1712,84 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 """
+T_SOFTMAX_FORWARD = """\
+at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
+  // Same three-dimensional descriptor rule as the backward in
+  // T_SOFTMAX_BACKWARD: cnnlSoftmaxForward reduces over the axis its mode names
+  // and rejects a two-dimensional descriptor with CNNL_STATUS_BAD_PARAM, so the
+  // reduction axis is kept where the mode expects it and everything around it is
+  // merged.
+  //
+  // Worth serving natively because FlagGems' _softmax is a Python wrapper and
+  // measured 1.56 ms on the (32, 512, 512) attention scores this model produces,
+  // against 0.02-0.06 ms for every other op in the forward. The model calls it
+  // once per layer, so the wrapper is 6 ms of a 23 ms forward.
+  const int64_t rank = self.dim();
+  TORCH_CHECK(rank > 0, "flagos cambricon: {op} does not serve rank zero");
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: {op} got dim ", dim);
+  const auto dtype = self.scalar_type();
+  TORCH_CHECK(
+      SupportedFloatDtype(dtype),
+      "flagos cambricon: {op} does not serve ", dtype);
+  // half_to_float is what nn.Softmax sets when autocast wants the result widened;
+  // cnnlSoftmaxForward takes one dtype for input and output, so the widen is done
+  // before and after the call rather than by it.
+  const auto compute = (half_to_float && dtype == at::kHalf) ? at::kFloat : dtype;
+  auto input = self.contiguous().to(compute);
+  if (input.numel() == 0) {{
+    return at::empty(self.sizes(), self.options().dtype(compute));
+  }}
+  auto sizes = input.sizes();
+  int64_t before = 1, after = 1;
+  for (int64_t i = 0; i < d; ++i) {{
+    before *= sizes[static_cast<size_t>(i)];
+  }}
+  for (int64_t i = d + 1; i < rank; ++i) {{
+    after *= sizes[static_cast<size_t>(i)];
+  }}
+  const int64_t axis = sizes[static_cast<size_t>(d)];
+  cnnlSoftmaxMode_t mode;
+  std::vector<int64_t> shape3;
+  if (d == rank - 1) {{
+    mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+    shape3 = {{before, 1, axis}};
+  }} else if (d == 0) {{
+    mode = CNNL_SOFTMAX_MODE_HIGH_DIMENSION;
+    shape3 = {{axis, before * after, 1}};
+  }} else {{
+    mode = CNNL_SOFTMAX_MODE_MEDIUM_DIMENSION;
+    shape3 = {{before, axis, after}};
+  }}
+  auto x = input.view(shape3);
+  CambriconDeviceGuard guard(x);
+  auto result = at::empty_like(x);
+  const auto handle =
+      HandleForDevice(static_cast<int>(x.device().index()));
+  TensorDesc xd, yd;
+  xd.Set(x);
+  yd.Set(result);
+  CheckCnnl(
+      cnnlSoftmaxForward(
+          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, xd.get(),
+          x.const_data_ptr(), nullptr, yd.get(), result.mutable_data_ptr()),
+      "cnnlSoftmaxForward ({op})");
+  // Restore the caller's dtype only when this call did not widen on purpose:
+  // half_to_float is the schema saying the result should stay float32, and
+  // converting back to self's dtype here silently undid it.
+  auto out = result.view(self.sizes());
+  if (compute == dtype && out.scalar_type() != dtype) {{
+    out = out.to(dtype);
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_SOFTMAX_BACKWARD = """\
 at::Tensor {kernel}(
     const at::Tensor& grad_output, const at::Tensor& output, int64_t dim,
@@ -3053,6 +3155,8 @@ def render():
                 signature_extra=BINARY_SIGNATURE_EXTRA.get(op, ""),
                 prologue_extra=BINARY_PROLOGUE_EXTRA.get(op, ""),
             )
+        elif category == "softmax_forward":
+            body = T_SOFTMAX_FORWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "softmax_backward":
             body = T_SOFTMAX_BACKWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "slice_backward":
@@ -3071,6 +3175,8 @@ def render():
                 op=op,
                 entry=UNARY_ENTRY[op],
             )
+        elif category == "zero_inplace":
+            body = T_ZERO_INPLACE.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "fill":
             body = T_FILL.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "log_softmax":
@@ -3079,8 +3185,6 @@ def render():
             body = T_EMBEDDING.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "cumsum":
             body = T_CUMSUM.format(kernel=kernel, fn=fn, disp=disp, op=op)
-        elif category == "silu":
-            body = T_SILU.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "div_out":
             body = T_DIV_OUT.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "div_scalar":

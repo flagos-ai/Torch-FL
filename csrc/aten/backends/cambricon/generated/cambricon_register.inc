@@ -8,6 +8,8 @@
 // csrc/aten/register.cc when FLAGOS_CAMBRICON_KERNEL is defined.
   m.impl("_log_softmax", WrapperPrivLogSoftmax);
   m.impl("_safe_softmax", WrapperPrivSafeSoftmax);
+  m.impl("_softmax", WrapperPrivSoftmax);
+  m.impl("_softmax_backward_data", WrapperPrivSoftmaxBackwardData);
   m.impl("_unsafe_view", WrapperPrivUnsafeView);
   m.impl("abs", WrapperAbs);
   m.impl("add.Scalar", WrapperAddScalar);
@@ -43,12 +45,16 @@
   m.impl("rsqrt", WrapperRsqrt);
   m.impl("scalar_tensor", WrapperScalarTensor);
   m.impl("silu", WrapperSilu);
+  m.impl("silu_backward", WrapperSiluBackward);
   m.impl("slice.Tensor", WrapperSliceTensor);
+  m.impl("slice_backward", WrapperSliceBackward);
   m.impl("sqrt", WrapperSqrt);
   m.impl("sub.Tensor", WrapperSubTensor);
   m.impl("sub_.Tensor", WrapperSubInplaceTensor);
   m.impl("sum", WrapperSum);
   m.impl("sum.dim_IntList", WrapperSumDimIntlist);
   m.impl("transpose.int", WrapperTransposeInt);
+  m.impl("where.self", WrapperWhereSelf);
+  m.impl("zero_", WrapperZeroInplace);
   m.impl("zeros", WrapperZeros);
   m.impl("zeros_like", WrapperZerosLike);
