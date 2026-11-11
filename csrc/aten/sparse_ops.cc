@@ -81,13 +81,23 @@
 //   `aten::_to_dense` as unavailable, and the sparse add family is what has to
 //   land for it.  `x.to("cpu")` and `x.clone()` do not need it: they move the
 //   two buffers through the dense copy kernels.
-// * The sparse arithmetic family (add/mul/div/abs/... , addmm, bmm, softmax,
+// * The sparse arithmetic family (add/mul/div/abs/... , addmm, softmax,
 //   sparse_mask, index_select, sparse-sparse matmul) is out of scope for this
 //   change.  Those are value kernels, several of which have real per-backend
 //   CUDA implementations, and they need their own numerical validation.
 //
+// One member of that family has since been added, in the second block below:
+// `bmm` with a sparse COO left operand (flagos-ai/Torch-FL#793).  It is a value
+// kernel, so it is registered where a value kernel can actually run -- by
+// boxing the operands onto the vendor's CUDA kernels, the same way
+// csrc/aten/sparse_csr_ops.cc serves the compressed-sparse SpMM -- and not on
+// the structure-surface reasoning above.  Nothing else of the family moved.
+//
 // See flagos-ai/Torch-FL#294 for the measured before/after behaviour of every
 // operation in this table.
+
+#include "device_boxing.h"
+#include "fallback.h"
 
 #include <ATen/ops/_coalesced_native.h>
 #include <ATen/ops/_dimI_native.h>
@@ -97,6 +107,7 @@
 #include <ATen/ops/_sparse_coo_tensor_with_dims_and_tensors_native.h>
 #include <ATen/ops/_sparse_coo_tensor_with_dims_native.h>
 #include <ATen/ops/_values_native.h>
+#include <ATen/ops/bmm.h>
 #include <ATen/ops/clone_native.h>
 #include <ATen/ops/copy_native.h>
 #include <ATen/ops/copy_sparse_to_sparse_native.h>
@@ -108,8 +119,78 @@
 #include <torch/library.h>
 
 namespace at::native::flagos {
+
+// Same predicate as csrc/aten/sparse_csr_ops.cc's SpMM block: the CUDA-ABI
+// platforms whose wheel links a libtorch with CUDA kernels, and only when this
+// build is a boxing one.  The excluded platforms never put a sparse tensor on
+// the CUDA key (Ascend, TsingMicro, GCU, MUSA, BPU, Kunlunxin, Iluvatar, MPS,
+// Cambricon), and a FlagGems-primary build has no bmm_sparse_cuda to bind, so
+// registering it there would only move the failure from the dispatch table to
+// the dlopen.
+#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON) && \
+    defined(FLAGOS_BOXING_BUILD)
+
 namespace {
 
+// Serve `aten::bmm(sparse-left, dense-right)` by boxing onto the vendor's CUDA
+// kernels. Called only for the served form; everything else is handed to
+// cpu_fallback.
+void bmm_sparse_flagos(
+    const c10::OperatorHandle& op,
+    torch::jit::Stack* stack) {
+  at::Tensor& self = torch::jit::peek(stack, 0, 2).toTensor();
+  at::Tensor& mat2 = torch::jit::peek(stack, 1, 2).toTensor();
+  // `bmm(sparse, dense)` is the whole contract: upstream's
+  // bmm_sparse_cpu/_cuda begin with "bmm_sparse: Tensor 'mat2' must be dense",
+  // so answering a dense-left/sparse-right call here would invent behaviour
+  // the vendor backend does not have.
+  //
+  // Autograd is declined on `requires_grad`, not on grad mode. The boxed CUDA
+  // call would record its backward against the CUDA-keyed operands the guard
+  // restores, leaving a caller-visible grad_fn pointing at tensors nobody
+  // holds -- so a call that would actually record a graph takes cpu_fallback,
+  // exactly as csrc/aten/sdp_choice_stub.cc keeps its boxed route to
+  // inference. Grad mode alone is not the test: it is on by default, and the
+  // reported case (and most inference under eager) runs with it on and no
+  // operand requiring a gradient, where nothing is recorded and the boxed call
+  // is safe.
+  const bool autograd_needed =
+      self.requires_grad() || mat2.requires_grad();
+  const bool serves = self.is_sparse() && !mat2.is_sparse() &&
+      !mat2.is_sparse_csr() && !autograd_needed;
+  if (!serves) {
+    at::native::flagos::cpu_fallback(op, stack);
+    return;
+  }
+
+  at::Tensor result;
+  {
+    // DeviceBoxingGuard records raw TensorImpl* and must only be handed lvalues
+    // that outlive it, which self/mat2 (the caller's own tensors) are. It
+    // rewrites both operands' impl key sets -- SparsePrivateUse1 becomes
+    // SparseCUDA -- and puts them back on the way out, so the caller's tensors
+    // come back exactly as they went in. The sparse operand has no Storage of
+    // its own, which SetTensorImplDevice already accounts for.
+    at::native::flagos::DeviceBoxingGuard guard(self, mat2);
+    // Inside the guard both operands are CUDA, so this re-enters the
+    // dispatcher on SparseCUDA and reaches bmm_sparse_cuda; it cannot recurse
+    // back here.
+    result = at::bmm(self, mat2);
+  }
+  // The kernel produced a fresh CUDA tensor rather than one of the boxed
+  // operands, so the guard does not unbox it.
+  at::native::flagos::UnboxToFlagos(result);
+  torch::jit::drop(stack, 2);
+  torch::jit::push(stack, result);
+}
+
+} // namespace
+
+#endif // CUDA-boxing builds
+
+namespace {
 // Construction.  These are the ops the composite forms
 // (`_sparse_coo_tensor_with_dims.out`,
 // `_sparse_coo_tensor_with_dims_and_tensors.out`, `sparse_coo_tensor.size`,
@@ -158,7 +239,19 @@ TORCH_LIBRARY_IMPL(aten, SparsePrivateUse1, m) {
   m.impl("clone", at::native::clone_sparse);
   m.impl("copy_", at::native::copy_sparse_wrapper_);
   m.impl("copy_sparse_to_sparse_", at::native::copy_sparse_);
+
+  // Sparse COO bmm (#793). A value kernel, so it is boxed onto the vendor's
+  // CUDA implementation rather than registered on an ATen symbol the way the
+  // structure surface above is; the kernel is defined above this body.
+#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
+    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
+    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON) && \
+    defined(FLAGOS_BOXING_BUILD)
+  m.impl(
+      "bmm", torch::CppFunction::makeFromBoxedFunction<&bmm_sparse_flagos>());
+#endif // CUDA-boxing builds
 }
 
 } // namespace
+
 } // namespace at::native::flagos
