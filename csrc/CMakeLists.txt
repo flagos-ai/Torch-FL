@@ -653,10 +653,7 @@ elseif(_flagos_is_iluvatar)
     # included -- and the native .inc claims only the ops gen_vendor_confs.py
     # routes to "iluvatar" (the FlagGems set minus its coverage).
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_ILUVATAR_KERNEL=1)
-    # The runtime also ships NVIDIA compatibility headers for profiler probes.
-    # CoreX's cublas/cudnn facades must precede that directory or the same
-    # header names resolve to CUDA declarations without the ixblas API.
-    target_include_directories(${LIBRARY_NAME} BEFORE PRIVATE
+    target_include_directories(${LIBRARY_NAME} PRIVATE
         ${FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR})
     target_link_libraries(${LIBRARY_NAME} PRIVATE
         ${FLAGOS_ILUVATAR_CUDNN_LIB} ${FLAGOS_ILUVATAR_CUBLAS_LIB})

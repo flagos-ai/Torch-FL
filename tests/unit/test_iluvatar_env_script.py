@@ -5,6 +5,7 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -14,10 +15,19 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / ".github/scripts/lib/iluvatar_packages.sh"
 
 
-def run_hook(tmp_path, *, prepared=True, fail="", boxing=False):
+def run_hook(tmp_path, *, prepared=True, fail="", boxing=False, cached_occupancy=False):
     """Run the real hook with local package/build boundaries and a fake SDK."""
     import shlex
 
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".github").symlink_to(ROOT / ".github", target_is_directory=True)
+    if cached_occupancy:
+        (repo / "build").mkdir()
+        (repo / "build/CMakeCache.txt").write_text(
+            "CUDA_OCCUPANCY_INCLUDE_DIR:PATH=/image/cuda/include\n"
+            "UNRELATED_SETTING:STRING=retained\n"
+        )
     sdk = tmp_path / "corex"
     (sdk / "bin").mkdir(parents=True)
     (sdk / "lib").mkdir()
@@ -71,7 +81,7 @@ def run_hook(tmp_path, *, prepared=True, fail="", boxing=False):
         os.environ,
         PATH=f"{image_bin}:/usr/bin:/bin",
         BASH_ENV=str(startup),
-        REPO_ROOT=str(ROOT),
+        REPO_ROOT=str(repo),
         CI_STAGE="integration",
         TORCH_FL_VENDOR_PYTHON=str(vendor),
         TORCH_FL_VENV_ROOT=str(tmp_path / "ci"),
@@ -161,6 +171,75 @@ def test_missing_runtime_packages_use_cpu_torch_and_pip_fallback(tmp_path):
     assert "cpu-torch" in calls
     assert any(row.endswith("numpy<2") and row.startswith("pip ") for row in calls)
     assert "CPU-core-build" in calls
+
+
+@pytest.mark.parametrize("cached_occupancy", [False, True])
+def test_new_image_keeps_the_previous_optional_compile_path(tmp_path, cached_occupancy):
+    """A newly discoverable header must not change compiler paths or features."""
+    if not shutil.which("cmake") or not shutil.which("c++"):
+        pytest.skip("CMake and a host C++ compiler are required")
+    done, _, env, *_ = run_hook(tmp_path, cached_occupancy=cached_occupancy)
+    assert done.returncode == 0, done.stderr
+    repo = Path(env["REPO_ROOT"])
+    cuda = tmp_path / "cuda/include"
+    cuda.mkdir(parents=True)
+    (cuda / "cuda_occupancy.h").write_text('#error "new occupancy path enabled"\n')
+    (cuda / "cublas_v2.h").write_text('#error "foreign CUDA header selected"\n')
+    sdk = Path(env["COREX_PATH"]) / "include"
+    (sdk / "cublas_v2.h").write_text("typedef int ixblasDataType_t;\n")
+    (repo / "probe.cc").write_text(
+        "#include <cublas_v2.h>\nixblasDataType_t value = 0;\n"
+    )
+    occupancy = (
+        (ROOT / "csrc/CMakeLists.txt")
+        .read_text()
+        .split("set(CUDA_OCCUPANCY_SEARCH_PATHS", 1)[1]
+        .split("# ROCtracer headers", 1)[0]
+    )
+    (repo / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.19)\nproject(probe LANGUAGES CXX)\n"
+        "set(CMAKE_CXX_STANDARD 17)\nset(CMAKE_EXPORT_COMPILE_COMMANDS ON)\n"
+        "set(LIBRARY_NAME probe)\n"
+        f'add_library(probe OBJECT probe.cc "{ROOT}/csrc/profiler/cupti_device_tracer.cc")\n'
+        "add_library(cuda_runtime_compat INTERFACE IMPORTED)\n"
+        f'set_target_properties(cuda_runtime_compat PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "{sdk}")\n'
+        "target_link_libraries(probe PRIVATE cuda_runtime_compat)\n"
+        f'target_include_directories(probe PRIVATE "{ROOT}/csrc/include")\n'
+        "set(CUDA_OCCUPANCY_SEARCH_PATHS"
+        + occupancy
+        + "\nif(CUDA_OCCUPANCY_INCLUDE_DIR)\n"
+        'message(FATAL_ERROR "Image migration enabled occupancy")\nendif()\n'
+    )
+    # Setup builds in-place, then the wheel step configures the same directory.
+    for _ in range(2):
+        configured = subprocess.run(
+            ["cmake", "-S", str(repo), "-B", str(repo / "build")],
+            env={**os.environ, "CUDA_HOME": str(cuda.parent)},
+            capture_output=True,
+            text=True,
+        )
+        assert configured.returncode == 0, configured.stdout + configured.stderr
+        assert "cuda_occupancy.h NOT found" in configured.stdout
+        built = subprocess.run(
+            ["cmake", "--build", str(repo / "build")], capture_output=True, text=True
+        )
+        assert built.returncode == 0, built.stdout + built.stderr
+    commands = (repo / "build/compile_commands.json").read_text()
+    assert "FLAGOS_HAVE_CUDA_OCCUPANCY" not in commands
+    assert str(cuda) not in commands
+    if cached_occupancy:
+        assert (
+            "UNRELATED_SETTING:STRING=retained"
+            in (repo / "build/CMakeCache.txt").read_text()
+        )
+    unseeded = subprocess.run(
+        ["cmake", "-S", str(repo), "-B", str(repo / "unseeded-build")],
+        env={**os.environ, "CUDA_HOME": str(cuda.parent)},
+        capture_output=True,
+        text=True,
+    )
+    assert unseeded.returncode != 0
+    assert "Image migration enabled occupancy" in unseeded.stderr
 
 
 def test_iluvatar_cannot_silently_build_a_boxing_lane(tmp_path):

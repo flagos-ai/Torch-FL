@@ -6,8 +6,6 @@
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
-import shutil
-import subprocess
 import sys
 
 import pytest
@@ -19,114 +17,6 @@ spec = importlib.util.spec_from_file_location(
 )
 verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
-
-
-@pytest.mark.parametrize("link_runtime", [False, True])
-def test_corex_headers_precede_profiler_cuda_headers(tmp_path, link_runtime):
-    """Compile the actual Iluvatar target setup beside a shadow CUDA SDK."""
-    if not shutil.which("cmake") or not shutil.which("c++"):
-        pytest.skip("CMake and a host C++ compiler are required")
-    sdk = tmp_path / "corex"
-    cuda = tmp_path / "cuda"
-    sdk.mkdir()
-    cuda.mkdir()
-    (sdk / "cublas_v2.h").write_text("typedef int ixblasDataType_t;\n")
-    (cuda / "cublas_v2.h").write_text("typedef int cublasDataType_t;\n")
-    (tmp_path / "probe.cc").write_text(
-        "#include <cublas_v2.h>\nixblasDataType_t value = 0;\n"
-    )
-    branch = (
-        (ROOT / "csrc/CMakeLists.txt")
-        .read_text()
-        .split("elseif(_flagos_is_iluvatar)\n", 1)[1]
-        .split("elseif(_flagos_is_musa)", 1)[0]
-    )
-    runtime = ""
-    if link_runtime:
-        # Imported interface SDK headers are system headers by default, even
-        # when the consumer also puts the same path BEFORE its own includes.
-        sdk_setup = (
-            (ROOT / "CMakeLists.txt")
-            .read_text()
-            .split("elseif(_flagos_is_iluvatar)\n", 1)[1]
-            .split("  add_library(cuda_runtime_compat", 1)[1]
-            .split("  set(CUDA_RUNTIME_LIB", 1)[0]
-        )
-        runtime = (
-            f'set(COREX_PATH "{sdk.parent}")\n'
-            f'set(_iluvatar_cudart_dir "{sdk.parent}")\n'
-            "add_library(cuda_runtime_compat"
-            + sdk_setup.replace("${COREX_PATH}/include", str(sdk))
-            + "\nset(_torch_fl_link_libs cuda_runtime_compat)\n"
-        )
-    (tmp_path / "CMakeLists.txt").write_text(
-        "cmake_minimum_required(VERSION 3.19)\nproject(probe LANGUAGES CXX)\n"
-        "set(LIBRARY_NAME probe)\nadd_library(probe STATIC probe.cc)\n"
-        f'target_include_directories(probe PRIVATE "{cuda}")\n'
-        "set(FLAGOS_BUILD_VENDOR ON)\n"
-        f'set(FLAGOS_ILUVATAR_VENDOR_INCLUDE_DIR "{sdk}")\n' + runtime + branch
-    )
-    build = tmp_path / "build"
-    subprocess.run(
-        ["cmake", "-S", str(tmp_path), "-B", str(build)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    done = subprocess.run(
-        ["cmake", "--build", str(build)], capture_output=True, text=True
-    )
-    assert done.returncode == 0, done.stdout + done.stderr
-
-
-@pytest.mark.parametrize("backend", ["cuda", "corex", "metax", "none"])
-def test_cupti_tracer_compiles_with_vendor_occupancy_headers(tmp_path, backend):
-    """Compile the complete tracer against old CoreX and newer CUDA layouts."""
-    if not shutil.which("c++"):
-        pytest.skip("A host C++ compiler is required")
-    reserved = "" if backend == "corex" else "size_t reservedSharedMemPerBlock;"
-    mapping = "#define CUcontext IXDRVcontext\n" if backend == "corex" else ""
-    (tmp_path / "cuda_occupancy.h").write_text(
-        "#pragma once\n#include <cstddef>\n"
-        + mapping
-        + """
-struct cudaOccDeviceProp {
-  int computeMajor, computeMinor, maxThreadsPerBlock;
-  int maxThreadsPerMultiprocessor, regsPerBlock, regsPerMultiprocessor;
-  int warpSize, numSms;
-  size_t sharedMemPerBlock, sharedMemPerMultiprocessor, sharedMemPerBlockOptin;
-  """
-        + reserved
-        + """
-};
-struct cudaOccFuncAttributes {
-  int maxThreadsPerBlock, numRegs, partitionedGCConfig, shmemLimitConfig;
-  size_t sharedSizeBytes, maxDynamicSharedSizeBytes;
-};
-struct cudaOccDeviceState {};
-struct cudaOccResult { int activeBlocksPerMultiprocessor; };
-enum { PARTITIONED_GC_OFF, FUNC_SHMEM_LIMIT_DEFAULT, CUDA_OCC_SUCCESS };
-inline int cudaOccMaxActiveBlocksPerMultiprocessor(
-    cudaOccResult*, const cudaOccDeviceProp*, const cudaOccFuncAttributes*,
-    const cudaOccDeviceState*, int, size_t) { return CUDA_OCC_SUCCESS; }
-"""
-    )
-    args = [
-        "c++",
-        "-std=c++17",
-        "-fsyntax-only",
-        "-I",
-        str(tmp_path),
-        "-I",
-        str(ROOT / "csrc/include"),
-    ]
-    if backend != "none":
-        args.append("-DFLAGOS_HAVE_CUDA_OCCUPANCY=1")
-    if backend == "metax":
-        args.append("-DFLAGOS_METAX_MCPTI=1")
-    args.append(str(ROOT / "csrc/profiler/cupti_device_tracer.cc"))
-    done = subprocess.run(args, capture_output=True, text=True)
-    assert done.returncode == 0, done.stdout + done.stderr
 
 
 def cpu_mappings(root):

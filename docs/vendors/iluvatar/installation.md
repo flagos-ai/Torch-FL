@@ -47,24 +47,22 @@ distribution is needed by the build frontend, with a compatible 3.x version
 rather than the old development image's exact patch pin. `pip check` validates
 the resulting environment, and setup logs report copy/preparation time.
 
-The runtime also contains NVIDIA compatibility headers under
-`/usr/local/cuda/include`, which the profiler's occupancy probe may add to the
-build. The Iluvatar target places the CoreX include directory first: otherwise
-`cublas_v2.h` resolves to the NVIDIA header and compilation loses CoreX's
-`ixblasDataType_t` and `ixblasStatus_t`, even though the isolated SDK probe passes.
-The first new-runtime run reproduced this header precedence failure after its
-dependency checks succeeded. Merely using `BEFORE` on the consumer was not
-enough: the imported SDK interface classified CoreX as a system include, which
-GCC searches after ordinary `-I` directories. The CoreX facade is now a local
-interface target, preserving ordinary include precedence for every consumer.
-The host-only CMake regression links that actual SDK facade as well as testing
-the direct-include case, and reproduces the failed search order before the fix.
+The image migration preserves the previous optional compilation behavior.
+The old CI image reported `cuda_occupancy.h NOT found`; the new runtime exposes
+that header under `/usr/local/cuda/include`. Allowing the existing probe to find
+it adds a compiler include directory and enables an occupancy branch that the
+old lane did not compile. That first causes CUDA/CoreX header-name conflicts,
+then exposes incompatible CoreX occupancy fields and context macros.
 
-With CoreX headers selected, the CUPTI tracer also needs to tolerate the older
-occupancy structure without `reservedSharedMemPerBlock`. It clears that field
-only when present and captures its opaque callback context type before SDK
-macros can rename `CUcontext`. The complete tracer is syntax-checked against
-CoreX-like, CUDA-like, MetaX and occupancy-disabled configurations.
+The Iluvatar CI hook seeds an empty `CUDA_OCCUPANCY_INCLUDE_DIR` entry in the
+job's generated `build/CMakeCache.txt`, retaining the old absent-header result
+for both the in-place build and the wheel build. It leaves SDK files, source
+code, CMake target definitions and header order unchanged. The profiler still
+compiles; only the same three optional occupancy fields remain omitted as in
+the old image. A host regression makes the new header discoverable, configures
+and builds twice, and checks that neither its include directory nor the
+occupancy definition enters the compiler command. Hardware validation of the
+corrected migration remains pending CI.
 
 After the image initializes its SDK environment, the hook persists
 `BASH_ENV=/dev/null` so later Bash steps cannot select `/flagos` again.

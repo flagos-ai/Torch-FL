@@ -145,5 +145,12 @@ export_ci_env PATH VIRTUAL_ENV BASH_ENV PYTHONPATH PYTHONNOUSERSITE COREX_PATH C
   CMAKE_PREFIX_PATH
 echo "Iluvatar dependency preparation completed in $((SECONDS - ILUVATAR_PREPARE_STARTED))s"
 
+# The previous CI image had no discoverable cuda_occupancy.h. Keep that same
+# optional branch off: the new runtime's CUDA compatibility headers must not
+# add compiler include paths or enable occupancy while only changing images.
+# An empty find_path cache entry survives both the in-place and wheel builds.
+mkdir -p "$REPO_ROOT/build"
+printf '\nCUDA_OCCUPANCY_INCLUDE_DIR:PATH=\n' >> "$REPO_ROOT/build/CMakeCache.txt"
+
 # Build against the active CPU torch headers, CMake config and C++ ABI.
 build_flagos_inplace
