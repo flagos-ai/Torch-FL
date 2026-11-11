@@ -260,6 +260,7 @@ OPS = {
     "mean": "reduce_all",
     "ones_like": "ones_like",
     "fill_.Scalar": "fill",
+    "zero_": "zero_inplace",
     "ones": "ones",
     "zeros": "zeros",
     "zeros_like": "zeros_like",
@@ -748,6 +749,24 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 # ones_like is a fill of a freshly allocated result. The 1.3 ms the FlagGems
 # path costs is its Python dispatch, not the fill.
+T_ZERO_INPLACE = """\
+at::Tensor& {kernel}(at::Tensor& self) {{
+  // zero_ is fill_(0) and nothing more, so it goes through the native fill_ the
+  // generator already emits rather than duplicating the cnnlFill_v3 call. One
+  // extra dispatch, still on the vendor path.
+  //
+  // Worth doing because FlagGems' zero_ is a Python wrapper, and it measured
+  // 3.95 ms against 0.35-1.0 ms for every other foreach op the optimizer issues
+  // over the same 226 MB -- 57 GB/s against roughly 650 GB/s. AdamW reaches it
+  // through _foreach_zero_, which decomposes to one zero_ per parameter, so the
+  // wrapper is paid 47 times a step.
+  return self.fill_(at::Scalar(0));
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_FILL = """\
 at::Tensor& {kernel}(at::Tensor& self, const at::Scalar& value) {{
   TORCH_CHECK(
@@ -3074,6 +3093,10 @@ def render():
                 disp=disp,
                 op=op,
                 entry=UNARY_ENTRY[op],
+            )
+        elif category == "zero_inplace":
+            body = T_ZERO_INPLACE.format(
+                kernel=kernel, fn=fn, disp=disp, op=op
             )
         elif category == "fill":
             body = T_FILL.format(kernel=kernel, fn=fn, disp=disp, op=op)
