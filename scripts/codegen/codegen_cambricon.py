@@ -283,6 +283,10 @@ OPS = {
     "add_.Scalar": "inplace_scalar",
     "new_ones": "new_ones",
     "silu": "silu",
+    "silu_backward": "silu_backward",
+    "where.self": "where",
+    "_softmax_backward_data": "softmax_backward",
+    "slice_backward": "slice_backward",
     "_unsafe_view": "metadata",
     "transpose.int": "metadata",
     "slice.Tensor": "metadata",
@@ -3079,8 +3083,6 @@ def render():
             body = T_EMBEDDING.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "cumsum":
             body = T_CUMSUM.format(kernel=kernel, fn=fn, disp=disp, op=op)
-        elif category == "silu":
-            body = T_SILU.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "div_out":
             body = T_DIV_OUT.format(kernel=kernel, fn=fn, disp=disp, op=op)
         elif category == "div_scalar":
