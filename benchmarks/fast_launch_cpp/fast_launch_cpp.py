@@ -54,9 +54,6 @@ __all__ = [
 #: more launches than this is left alone; see ``Unsupported``.
 MAX_LAUNCHES = 1
 
-#: Slots the pool keeps ready before it starts growing on demand.
-POOL_SIZE = 8
-
 #: Operators whose captured layout has been validated against the wrapper on hardware.
 #: The check that makes a layout trustworthy is that the operator's replay, the pool and
 #: the argument mapping all agree -- and a layout that is wrong does not crash, it
@@ -286,19 +283,10 @@ class Backend:
     launches into the plan.
     """
 
-    def __init__(
-        self,
-        extension,
-        provider,
-        max_launches=MAX_LAUNCHES,
-        pool_size=POOL_SIZE,
-        plugin=False,
-    ):
-        self.plugin = plugin
-        self.extension = extension
+    def __init__(self, provider, max_launches=MAX_LAUNCHES, registrar=None):
+        self.registrar = registrar or _register_with_plugin
         self.provider = provider
         self.max_launches = max_launches
-        self.pool_size = pool_size
         self.plans = {}
         self.stats = {
             "hits": 0,
@@ -396,56 +384,40 @@ class Backend:
             if phase == "warm":
                 try:
                     plan, compiled, result = self._capture(op, callable_, args)
+                    self._install(op, plan, compiled)
                 except Unsupported as error:
+                    # Anything the layout or the registry cannot take keeps this operator
+                    # on the untouched callable, permanently and with a reason.
                     self.reasons[op] = str(error)
                     self.stats["fallbacks"] += 1
                     return passthrough(*args, **kwargs)
-                self._install(op, plan, compiled)
                 self.stats["captures"] += 1
                 state["phase"] = "ready"
                 return result
 
-            if self.plugin:
-                # The caller replays before reaching this callable; if control arrives
-                # here the plan was declined for this call, so stay on the wrapper.
-                self.stats["misses"] += 1
-                return callable_(*args, **kwargs)
-
-            plan = self.plans[op]
-            inputs = tensor_arguments(args)
-            if len(inputs) != plan.kinds.count("in"):
-                self.reasons[op] = f"replay got {len(inputs)} inputs"
-                self.stats["fallbacks"] += 1
-                return passthrough(*args, **kwargs)
-            try:
-                self.stats["hits"] += 1
-                return self.extension.launch(op, inputs)
-            except Exception as error:  # noqa: BLE001 - the fallback is the contract
-                self.stats["hits"] -= 1
-                self.reasons[op] = f"replay failed: {error}"
-                self.stats["fallbacks"] += 1
-                return passthrough(*args, **kwargs)
+            # The plugin's caller replays before this callable would be reached, so a
+            # call arriving here is one the plan declined - another shape, another
+            # scalar argument. Stay on the wrapper and count it.
+            self.stats["misses"] += 1
+            return callable_(*args, **kwargs)
 
         return fast
 
     def _install(self, op, plan, compiled):
-        if self.plugin:
-            self._install_in_plugin(op, plan, compiled)
-            self.plans[op] = plan
-            return
-        cubin = compiled.asm["cubin"]
-        self.extension.register_kernel(
-            op,
-            cubin,
-            compiled.name,
-            plan.grid,
-            plan.threads,
-            plan.shared,
-            plan.kinds,
-            plan.ints,
-            self.pool_size,
-            list(plan.shape),
-            _AT_DTYPE[plan.dtype],
+        self.registrar(
+            key=self.plugin_key(op),
+            kernel=compiled.name,
+            cubin=compiled.asm["cubin"],
+            grid=plan.grid,
+            threads=plan.threads,
+            shared=plan.shared,
+            kinds=list(plan.kinds),
+            ints=list(plan.ints),
+            operand_shapes=[list(shape) for shape in plan.operand_shapes],
+            operand_dtypes=[_AT_DTYPE[str(dtype)] for dtype in plan.operand_dtypes],
+            scalars=list(plan.scalars),
+            out_shape=list(plan.shape),
+            out_dtype=_AT_DTYPE[plan.dtype],
         )
         self.plans[op] = plan
 
@@ -453,40 +425,6 @@ class Backend:
     def plugin_key(op):
         """The name the plugin's caller passes: the FlagGems callable's dotted name."""
         return op if "." in op else f"flag_gems.{op}"
-
-    def _install_in_plugin(self, op, plan, compiled):
-        """Register the plan with the plugin's C++ caller, which replays it directly.
-
-        The caller consults the registry before it invokes the cached Python callable, so
-        once this returns the operator never re-enters Python. Everything the caller needs
-        to validate a call is registered with the plan: operand shapes and types and the
-        call's scalar arguments.
-        """
-        import torch  # noqa: PLC0415 - only this path needs it
-
-        registry = getattr(torch.ops, "flagos_fast_plan", None)
-        if registry is None:
-            raise Unsupported(
-                "this wheel has no flagos_fast_plan registry (built without the fast plan)"
-            )
-        cubin = torch.frombuffer(bytearray(compiled.asm["cubin"]), dtype=torch.uint8)
-        registered = registry.register_fast_plan(
-            self.plugin_key(op),
-            compiled.name,
-            cubin,
-            plan.grid,
-            plan.threads,
-            plan.shared,
-            list(plan.kinds),
-            list(plan.ints),
-            [list(shape) for shape in plan.operand_shapes],
-            [_AT_DTYPE[str(dtype)] for dtype in plan.operand_dtypes],
-            list(plan.scalars),
-            list(plan.shape),
-            _AT_DTYPE[plan.dtype],
-        )
-        if not registered:
-            raise Unsupported("the plugin refused the plan (driver, cubin or kernel)")
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -525,20 +463,66 @@ class Backend:
 _state = {"backend": None}
 
 
-def enable(names, package=None, plugin=False):
-    """Turn the C++ replay on for ``names``; returns the backend.
+def _register_with_plugin(
+    *,
+    key,
+    kernel,
+    cubin,
+    grid,
+    threads,
+    shared,
+    kinds,
+    ints,
+    operand_shapes,
+    operand_dtypes,
+    scalars,
+    out_shape,
+    out_dtype,
+):
+    """Register a plan with the plugin's caller, which replays it without Python.
 
-    ``plugin=True`` registers the plan with the plugin's C++ caller instead of replaying
-    through the extension from Python. That is the fast path: the caller replays the
-    kernel before it invokes the cached Python callable, so the operator never re-enters
-    the interpreter, and the Python wrapper below only ever performs the capture.
+    A custom operator rather than a pybind module: the plugin builds one shared library and
+    registers its entry points through torch, so this needs no new module or build target.
+    """
+    import torch  # noqa: PLC0415 - torch is only needed on this path
+
+    registry = getattr(torch.ops, "flagos_fast_plan", None)
+    if registry is None:
+        raise Unsupported(
+            "this wheel has no flagos_fast_plan registry (built without the fast plan)"
+        )
+    image = torch.frombuffer(bytearray(cubin), dtype=torch.uint8)
+    registered = registry.register_fast_plan(
+        key,
+        kernel,
+        image,
+        grid,
+        threads,
+        shared,
+        kinds,
+        ints,
+        operand_shapes,
+        operand_dtypes,
+        scalars,
+        out_shape,
+        out_dtype,
+    )
+    if not registered:
+        raise Unsupported("the plugin refused the plan (driver, cubin or kernel)")
+
+
+def enable(names, package=None):
+    """Turn the fast path on for ``names``; returns the backend.
+
+    The capture happens in Python, once per operator; the replay happens in the plugin's
+    caller, which runs before the Python wrapper would be reached. Nothing is enabled
+    implicitly, and anything the plan cannot answer for keeps calling the wrapper.
     """
     if package is None:
         import flag_gems  # noqa: PLC0415 - optional dependency, imported on demand
 
         package = flag_gems
-    extension = None if plugin else _load_extension()
-    backend = Backend(extension, _TritonProvider(), plugin=plugin)
+    backend = Backend(_TritonProvider())
     backend.enable(names, package)
     _state["backend"] = backend
     return backend
@@ -561,35 +545,6 @@ def plans():
 def stats():
     backend = _state.get("backend")
     return dict(backend.stats) if backend else {}
-
-
-def _load_extension():
-    """Compile and load the CUDA extension that owns the replay."""
-    from pathlib import Path  # noqa: PLC0415 - keep the module importable without torch
-
-    from torch.utils.cpp_extension import load_inline  # noqa: PLC0415
-
-    declarations = """
-#include <torch/extension.h>
-void register_kernel(std::string key, py::bytes cubin_bytes, std::string kernel_name,
-                     int64_t grid, int64_t threads, int64_t shared,
-                     std::vector<std::string> kinds, std::vector<int64_t> int_args,
-                     int64_t pool_size, std::vector<int64_t> out_shape,
-                     int64_t out_dtype_code);
-at::Tensor launch(std::string key, std::vector<at::Tensor> inputs);
-py::dict bench(std::string key, std::vector<at::Tensor> inputs, int64_t iters);
-"""
-    source = (Path(__file__).resolve().parent / "fast_launch_ext.cu").read_text(
-        encoding="utf-8"
-    )
-    return load_inline(
-        name="flagos_fast_launch_ext",
-        cpp_sources=declarations,
-        cuda_sources=source,
-        functions=["register_kernel", "launch", "bench"],
-        extra_ldflags=["-lcuda"],
-        verbose=False,
-    )
 
 
 class _TritonProvider:

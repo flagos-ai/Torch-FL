@@ -251,18 +251,18 @@ def test_census_reports_the_layout_it_claims():
 # -- replay contract -----------------------------------------------------------
 
 
-class FakeExtension:
-    def __init__(self):
-        self.registered = []
-        self.calls = 0
-        self.result = "pooled-result"
+class FakeRegistrar:
+    """Stands in for the plugin's registry: records what would be registered."""
 
-    def register_kernel(self, *args):
-        self.registered.append(args)
+    def __init__(self, accept=True):
+        self.accepted = accept
+        self.calls = []
 
-    def launch(self, key, inputs):
-        self.calls += 1
-        return self.result
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self.accepted:
+            raise fast_launch_cpp.Unsupported("refused")
+        return True
 
 
 class FakeCompiled:
@@ -305,19 +305,27 @@ class FakePackage:
         setattr(self, attribute, name)
 
 
-def make_backend(captured):
-    return fast_launch_cpp.Backend(FakeExtension(), FakeProvider(captured))
+def make_backend(captured, registrar=None):
+    return fast_launch_cpp.Backend(
+        FakeProvider(captured), registrar=registrar or FakeRegistrar()
+    )
 
 
-def test_replay_returns_the_pooled_result_and_does_not_call_the_original():
-    """The regression that matters: a replay that also calls the original is pure cost."""
+def test_capture_registers_a_plan_the_caller_can_replay():
+    """The capture's whole job is to register a plan the plugin's caller will replay.
+
+    The wrapper is only ever a capture agent: once the plan is registered the caller
+    answers before this callable is reached, which is why the registration payload - the
+    key the caller looks up, the layout and the operands - is what the test pins.
+    """
     a, b, out = Tensor(1), Tensor(2), Tensor(3)
     captured = FakeCaptured(
         launches=[launch_args([a, b, out], [1024], ["float32"])], results=[Tensor(4)]
     )
-    backend = make_backend(captured)
-    calls = []
+    registrar = FakeRegistrar()
+    backend = make_backend(captured, registrar=registrar)
     wrapper_result = Tensor(9)
+    calls = []
 
     def original(*args, **kwargs):
         calls.append(args)
@@ -325,37 +333,38 @@ def test_replay_returns_the_pooled_result_and_does_not_call_the_original():
 
     wrapped = backend.wrap("mul", original)
     assert wrapped(a, b) is wrapper_result  # cold: compiles and autotunes
-    assert wrapped(a, b) is wrapper_result  # warm: captured, still the original
-    assert backend.plans["mul"].kinds == ["in", "in", "out", "i32", "zero", "zero"]
+    assert wrapped(a, b) is wrapper_result  # warm: captured and registered
+    assert backend.stats["captures"] == 1
+    assert "mul" in backend.plans
 
-    assert wrapped(a, b) == "pooled-result"  # ready: replayed from C++
-    assert len(calls) == 2
-    assert backend.extension.calls == 1
-    assert backend.stats["hits"] == 1
+    (registered,) = registrar.calls
+    assert registered["key"] == "flag_gems.mul"  # what the plugin's caller looks up
+    assert registered["kinds"] == ["in", "in", "out", "i32", "zero", "zero"]
+    assert registered["ints"] == [1024]
+    assert registered["operand_shapes"] == [[1024], [1024]]
+    assert registered["out_shape"] == [1024]
+    assert registered["out_dtype"] == fast_launch_cpp._AT_DTYPE["torch.float32"]
 
 
-def test_replay_falls_back_when_the_launch_fails():
+def test_a_refused_plan_keeps_the_operator_on_the_wrapper():
+    """A wheel built without the fast plan must not lose the operator."""
     a, b, out = Tensor(1), Tensor(2), Tensor(3)
     captured = FakeCaptured(
         launches=[launch_args([a, b, out], [1024], ["float32"])], results=[Tensor(4)]
     )
-    backend = make_backend(captured)
-
-    def boom(self, key, inputs):
-        raise RuntimeError("CUDA_ERROR_INVALID_VALUE")
-
-    backend.extension.launch = types.MethodType(boom, backend.extension)
+    registrar = FakeRegistrar(accept=False)
+    backend = make_backend(captured, registrar=registrar)
     wrapper_result = Tensor(7)
 
     def original(*args, **kwargs):
         return wrapper_result
 
     wrapped = backend.wrap("mul", original)
-    assert wrapped(a, b) is wrapper_result
-    assert wrapped(a, b) is wrapper_result
+    wrapped(a, b)
     assert wrapped(a, b) is wrapper_result  # falls back instead of raising
+    assert "mul" not in backend.plans
+    assert "refused" in backend.reasons["mul"]
     assert backend.stats["fallbacks"] == 1
-    assert "replay failed" in backend.reasons["mul"]
 
 
 def test_multi_launch_operator_is_declined():
