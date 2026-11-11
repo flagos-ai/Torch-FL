@@ -129,6 +129,9 @@ fi
 source "$REPO_ROOT/.github/scripts/lib/iluvatar_packages.sh"
 prepare_iluvatar_packages
 
+echo "Prepared Iluvatar CI environment (runtime reuse and pip installs above):"
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
+
 # Use the checkout's verifier and pins, not the older copy baked into Harbor.
 TORCH_FL_VERSION_PINS="$REPO_ROOT/.github/version-pins.env" \
   "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/verify_iluvatar.py"

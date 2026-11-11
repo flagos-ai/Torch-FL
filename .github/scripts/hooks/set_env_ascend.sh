@@ -314,6 +314,11 @@ while IFS= read -r requirement || [[ -n "$requirement" ]]; do
   fi
 done < "$REPO_ROOT/.github/requirements-ascend.txt"
 
+# Validate the complete environment after copying and filling dependencies.
+"$VENV_PYTHON" -m pip check
+echo "Prepared Ascend CI environment (runtime reuse and pip installs above):"
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
+
 # --- Verify the isolation held ----------------------------------------------
 # torch_fl does not depend on torch_npu -- that is a hard requirement of this
 # backend, not a preference: the real extension claims PrivateUse1 on import and

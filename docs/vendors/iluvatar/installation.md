@@ -46,6 +46,20 @@ System gcc/g++, make and readelf remain available from the image. CMake's Python
 distribution is needed by the build frontend, with a compatible 3.x version
 rather than the old development image's exact patch pin. `pip check` validates
 the resulting environment, and setup logs report copy/preparation time.
+The prepared venv is then logged as a JSON inventory of Python identity,
+installed distribution versions/locations and system/build tool paths and
+versions. Existing reuse and pip logs identify how packages were supplied.
+Regenerated console commands have target-relative paths, hashes and sizes in
+their distribution's rebuilt `RECORD`, including commands absent from the
+source record, so pip can uninstall the independent copies completely.
+
+Runtime-compatible updates are intentional: the new lane uses Python 3.12.13
+instead of 3.12.11, FlagTree 0.7.1a1+iluvatar3.6 instead of 0.7.0+iluvatar3.6,
+and accepts SQLAlchemy 2.0.55 within FlagGems' dependency range. The FlagTree
+prerelease is pinned explicitly and requires hardware validation; it is not
+selected merely because its version sorts higher. CPU Torch 2.10.0, Triton 3.6
+and FlagGems 5.4.0 retain their existing baseline. Tool requirements may accept
+newer compatible versions, and the environment inventory records each result.
 
 The image migration preserves the previous optional compilation behavior.
 The old CI image reported `cuda_occupancy.h NOT found`; the new runtime exposes
@@ -61,8 +75,9 @@ code, CMake target definitions and header order unchanged. The profiler still
 compiles; only the same three optional occupancy fields remain omitted as in
 the old image. A host regression makes the new header discoverable, configures
 and builds twice, and checks that neither its include directory nor the
-occupancy definition enters the compiler command. Hardware validation of the
-corrected migration remains pending CI.
+occupancy definition enters the compiler command. Revision `90aa16f` passed
+the complete native [build and integration job](https://github.com/flagos-ai/Torch-FL/actions/runs/42977901429/job/130383610980)
+with this policy. Later provisioning changes require their own CI validation.
 
 After the image initializes its SDK environment, the hook persists
 `BASH_ENV=/dev/null` so later Bash steps cannot select `/flagos` again.
@@ -106,10 +121,10 @@ harbor.baai.ac.cn/flagos-runtime/flagos-runtime-iluvatar-corex4.5.0:2.3.0@sha256
 Its [official package list](https://github.com/flagos-ai/build-infra/blob/main/docs/content/zh-cn/runtime/iluvatar-corex4.5.0.md)
 and [base build recipe](https://github.com/flagos-ai/build-infra/blob/main/base/iluvatar-corex4.5.0)
 describe Python 3.12, the SDK, compiler and driver layout. CI uses the image
-directly; no derived image or Dockerfile is needed. The historical results below
-used the former development image and do not validate the new runtime. Native
-build, driver loading, cold Triton compilation and complete integration results
-must be confirmed by its first CI run. There is no Iluvatar boxing lane;
+directly; no derived image or Dockerfile is needed. Revision `90aa16f` passed
+the full new-runtime lane, including native build, wheel validation/installation
+and integration tests. The older results below document the bring-up history.
+There is no Iluvatar boxing lane;
 the build and environment assertions keep boxing disabled.
 
 The previous vendor-core lane reached the runner, built a wheel and passed

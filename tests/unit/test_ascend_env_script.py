@@ -15,7 +15,9 @@
 """Keep runtime shell initialization from replacing the isolated CI Python."""
 
 import os
+import base64
 import csv
+import hashlib
 import importlib.metadata as metadata
 import importlib.util
 import json
@@ -23,6 +25,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -237,6 +240,172 @@ def test_runtime_copy_regenerates_recorded_console_scripts(tmp_path):
         dist, tmp_path / "ci/site-packages", binary, binary / "python"
     )
     assert (binary / "torchrun").is_file()
+
+
+@pytest.mark.parametrize(
+    "recorded_script", [None, "../../../bin/torchrun", "../../bin/torchrun"]
+)
+def test_copied_record_tracks_rewritten_scripts_and_pip_uninstall(
+    tmp_path, recorded_script
+):
+    source = tmp_path / "runtime/lib/python3.10/site-packages"
+    dist = runtime_distribution(source)
+    (source / "torch/__init__.py").write_text("def main():\n    print('copied tool')\n")
+    record = dist._path / "RECORD"
+    rows = list(csv.reader(record.open()))
+    if recorded_script:
+        script = source / recorded_script
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("#!/old/python\nfrom torch import main\nmain()\n")
+        rows.append([recorded_script, "", ""])
+    for row in rows:
+        if row[0].endswith(".dist-info/RECORD"):
+            continue
+        content = (source / row[0]).read_bytes()
+        row[1] = "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(content).digest()
+        ).decode().rstrip("=")
+        row[2] = str(len(content))
+    with record.open("w", newline="") as output:
+        csv.writer(output).writerows(rows)
+    original = {
+        (source / row[0]).resolve(): (source / row[0]).read_bytes() for row in rows
+    }
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    target = next((venv / "lib").glob("python*/site-packages"))
+    python = venv / "bin/python"
+    assert SEED.copy_distribution(dist, target, venv / "bin", python)
+    installed_record = target / dist._path.name / "RECORD"
+    installed_rows = list(csv.reader(installed_record.open()))
+    for name, digest, size in installed_rows:
+        path = target / name
+        assert path.is_file(), name
+        content = path.read_bytes()
+        if digest:
+            algorithm, value = digest.split("=", 1)
+            actual = (
+                base64.urlsafe_b64encode(hashlib.new(algorithm, content).digest())
+                .decode()
+                .rstrip("=")
+            )
+            assert actual == value, name
+        if size:
+            assert int(size) == len(content), name
+    launcher = venv / "bin/torchrun"
+    relative_launcher = os.path.relpath(launcher, target)
+    assert sum(row[0] == relative_launcher for row in installed_rows) == 1
+    assert [str(installed_record.relative_to(target)), "", ""] in installed_rows
+    executed = subprocess.run(
+        [str(launcher)], capture_output=True, text=True, check=True
+    )
+    assert executed.stdout.strip() == "copied tool"
+    removed = subprocess.run(
+        [str(python), "-I", "-m", "pip", "uninstall", "-y", "torch"],
+        capture_output=True,
+        text=True,
+    )
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert not launcher.exists()
+    assert not (target / "torch").exists()
+    assert not installed_record.parent.exists()
+    assert all(path.read_bytes() == content for path, content in original.items())
+
+
+def test_runtime_copy_does_not_overwrite_an_existing_console_command(tmp_path):
+    dist = runtime_distribution(tmp_path / "runtime")
+    binary = tmp_path / "venv/bin"
+    binary.mkdir(parents=True)
+    launcher = binary / "torchrun"
+    launcher.write_text("existing command\n")
+    target = tmp_path / "venv/site-packages"
+    assert not SEED.copy_distribution(dist, target, binary, binary / "python")
+    assert launcher.read_text() == "existing command\n"
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("broken_dependencies", [False, True])
+def test_ascend_final_dependency_check_precedes_report_and_build(
+    tmp_path, broken_dependencies
+):
+    script = HOOK.split(
+        "# Validate the complete environment after copying and filling dependencies.\n",
+        1,
+    )[1]
+    script = script.split("# --- Verify the isolation held", 1)[0]
+    calls = tmp_path / "calls"
+    python = tmp_path / "python"
+    python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n'
+        'if [ "$*" = "-m pip check" ]; then exit "$CHECK_STATUS"; fi\n'
+    )
+    python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + script + '\necho build >> "$CALL_LOG"'],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "VENV_PYTHON": str(python),
+            "REPO_ROOT": str(ROOT),
+            "CALL_LOG": str(calls),
+            "CHECK_STATUS": "47" if broken_dependencies else "0",
+        },
+        capture_output=True,
+        text=True,
+    )
+    rows = calls.read_text().splitlines()
+    assert rows[0] == "-m pip check"
+    assert (result.returncode != 0) == broken_dependencies
+    assert any("--report-environment" in row for row in rows) == (
+        not broken_dependencies
+    )
+    assert ("build" in rows) == (not broken_dependencies)
+
+
+def test_environment_report_uses_metadata_without_importing_packages(
+    tmp_path, monkeypatch
+):
+    dist = runtime_distribution(
+        tmp_path / "runtime", name="vendor_demo", version="1.2.3"
+    )
+    monkeypatch.setattr(SEED.metadata, "distributions", lambda: [dist])
+    monkeypatch.setattr(
+        SEED.shutil, "which", lambda name: "/tools/cmake" if name == "cmake" else None
+    )
+    monkeypatch.setattr(
+        SEED.subprocess,
+        "run",
+        lambda *a, **kw: SimpleNamespace(
+            stdout="cmake version 3.31.10\n", stderr="", returncode=0
+        ),
+    )
+    report = SEED.environment_report()
+    assert report["python"]["executable"] == sys.executable
+    assert report["packages"] == [
+        {
+            "name": "vendor_demo",
+            "version": "1.2.3",
+            "location": str(dist.locate_file("").resolve()),
+        }
+    ]
+    assert report["tools"]["cmake"] == {
+        "path": "/tools/cmake",
+        "version": "cmake version 3.31.10",
+        "exit_code": 0,
+    }
+    assert report["tools"]["gcc"] == {"path": None}
+
+
+def test_environment_report_bounds_tool_probes(tmp_path, monkeypatch):
+    monkeypatch.setattr(SEED.metadata, "distributions", lambda: [])
+    monkeypatch.setattr(SEED.shutil, "which", lambda name: "/tools/" + name)
+
+    def timeout(command, **kwargs):
+        assert kwargs["timeout"] == 5
+        raise subprocess.TimeoutExpired(command, 5)
+
+    monkeypatch.setattr(SEED.subprocess, "run", timeout)
+    report = SEED.environment_report()
+    assert all(tool["error"] == "TimeoutExpired" for tool in report["tools"].values())
 
 
 @pytest.mark.parametrize(

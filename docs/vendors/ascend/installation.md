@@ -10,7 +10,7 @@ Ascend NPU uses native CANN ACLNN operator kernels, not CUDA boxing. The platfor
 - **Operating System**: Linux (aarch64 verified in CI; x86_64 on real hardware)
 - **Device node**: `/dev/davinci_manager` and `/dev/davinci*` devices must be accessible
 
-CI uses `harbor.baai.ac.cn/flagos-runtime/flagos-runtime-ascend-cann9.0.0-910c:2.3.0`
+CI uses `harbor.baai.ac.cn/flagos-runtime/flagos-runtime-ascend-cann9.0.0-910c:2.3.0@sha256:274909c4a51f99d7aef06349555cd8481e068f40b3213c3facc2d1c90cf155e4`
 directly. The Ascend setup hook creates an isolated venv and copies the runtime's
 CPU PyTorch, FlagTree, FlagGems, FlagCX and NumPy wheels when their versions match the
 CI requirements. Copies are limited to each distribution's recorded files;
@@ -44,6 +44,23 @@ suffix identifies this FlagCX build variant; torch_fl's SDK segment stays
 `cann9.0.0`, without a chip suffix. The workflow also installs
 `pytest-json-report==1.5.0` and `coverage==7.10.7` for reporting. No Ascend extras
 of FlagGems are installed: those would pull the real `torch_npu` back in.
+
+The migration accepts runtime-compatible dependency updates within the declared
+requirements; it does not require every tool version to match the old image.
+The validated runtime uses FlagCX's 910C variant and pybind11 3.0.3, while the
+old-image run installed the generic CANN FlagCX variant and pybind11 3.1.0.
+CPU Torch 2.10.0, FlagTree 0.7.0+ascend3.5 and FlagGems 5.4.0 remain the CI pins.
+The image digest fixes the SDK and system toolchain used by each run; later
+image upgrades need a new digest and validation.
+
+After all dependency preparation, `pip check` must pass before compilation.
+The hook then logs a JSON environment inventory with Python identity, every
+installed distribution's version/location and the system/build tool paths and
+versions. Earlier log entries identify copied packages and pip fallbacks. These
+records describe the actual prepared environment, rather than promising that
+unbounded tool requirements always resolve to the same version. Recreated
+console commands are registered in the copied distribution's `RECORD` with
+their target paths, hashes and sizes so normal pip uninstallation removes them.
 
 ## Installation
 

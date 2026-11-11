@@ -4,9 +4,14 @@
 """Copy matching runtime wheels into a separate venv, without accelerator imports."""
 
 import argparse
+import base64
+import csv
+import hashlib
 import importlib.metadata as metadata
 import json
+import os
 from pathlib import Path
+import platform
 import shutil
 import site
 import subprocess
@@ -21,11 +26,18 @@ def copy_distribution(distribution, target_site, target_bin, target_python):
     if not files:
         return False
     console_scripts = {
-        entry.name
+        entry.name: entry
         for entry in distribution.entry_points
         if entry.group == "console_scripts"
+        and entry.name not in {".", ".."}
+        and Path(entry.name).name == entry.name
     }
+    for name in console_scripts:
+        launcher = target_bin / name
+        if launcher.exists() or launcher.is_symlink():
+            return False
     planned = []
+    record = None
     for entry in files:
         relative = Path(str(entry))
         # Console scripts live outside site-packages; regenerate their shebangs
@@ -48,23 +60,24 @@ def copy_distribution(distribution, target_site, target_bin, target_python):
         destination = target_site / relative
         if destination.exists() or destination.is_symlink():
             return False
-        planned.append((source, destination))
-    if not planned:
+        if relative.name == "RECORD" and relative.parent.name.endswith(".dist-info"):
+            record = destination
+        else:
+            planned.append((source, destination, entry))
+    if not planned or record is None:
         return False
     # Install metadata last, so pip cannot mistake a partial copy for an
     # installed wheel. Each file is a new copy; later pip operations cannot
     # modify the runtime's packages through symlinks or hardlinks.
     planned.sort(key=lambda pair: ".dist-info" in str(pair[1].relative_to(target_site)))
-    for source, destination in planned:
+    records = []
+    for source, destination, entry in planned:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-    for entry in distribution.entry_points:
-        if (
-            entry.group != "console_scripts"
-            or entry.name in {".", ".."}
-            or Path(entry.name).name != entry.name
-        ):
-            continue
+        digest = f"{entry.hash.mode}={entry.hash.value}" if entry.hash else ""
+        size = entry.size if entry.size is not None else ""
+        records.append((str(entry), digest, size))
+    for entry in console_scripts.values():
         launcher = target_bin / entry.name
         launcher.write_text(
             f"#!{target_python}\n"
@@ -74,6 +87,18 @@ def copy_distribution(distribution, target_site, target_bin, target_python):
             "sys.exit(entry.load()())\n"
         )
         launcher.chmod(0o755)
+        content = launcher.read_bytes()
+        digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest())
+        records.append(
+            (
+                os.path.relpath(launcher, target_site),
+                "sha256=" + digest.decode().rstrip("="),
+                len(content),
+            )
+        )
+    records.append((str(record.relative_to(target_site)), "", ""))
+    with record.open("w", newline="") as stream:
+        csv.writer(stream).writerows(records)
     return True
 
 
@@ -209,7 +234,55 @@ def seed(
     print(f"Runtime reuse: {len(reused)} wheels in {time.monotonic() - started:.1f}s")
 
 
+def environment_report():
+    """Describe the prepared venv without importing any accelerator packages."""
+    tools = {}
+    for name in ("gcc", "g++", "make", "cmake"):
+        path = shutil.which(name)
+        tool = {"path": path}
+        if path:
+            try:
+                result = subprocess.run(
+                    [path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                lines = (result.stdout or result.stderr).splitlines()
+                tool.update(
+                    version=lines[0] if lines else "", exit_code=result.returncode
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                tool["error"] = type(error).__name__
+        tools[name] = tool
+    return {
+        "schema_version": "torch-fl.ci-environment/v1",
+        "python": {
+            "version": platform.python_version(),
+            "executable": sys.executable,
+            "prefix": sys.prefix,
+            "base_prefix": sys.base_prefix,
+        },
+        "architecture": platform.machine(),
+        "tools": tools,
+        "packages": sorted(
+            (
+                {
+                    "name": dist.metadata["Name"],
+                    "version": dist.version,
+                    "location": str(Path(dist.locate_file("")).resolve()),
+                }
+                for dist in metadata.distributions()
+            ),
+            key=lambda package: (package["name"].lower(), package["location"]),
+        ),
+    }
+
+
 def main():
+    if sys.argv[1:] == ["--report-environment"]:
+        print(json.dumps(environment_report(), indent=2))
+        return
     if "--check-installed" in sys.argv[1:]:
         parser = argparse.ArgumentParser(description="Check an installed requirement")
         parser.add_argument("--check-installed", required=True)

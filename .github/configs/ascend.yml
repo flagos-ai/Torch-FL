@@ -28,7 +28,7 @@ setup_stage: build
 # an isolated venv, including the pinned FlagCX, then installs missing dependencies.
 # The runtime also ships torch_npu, which must stay outside that venv so it
 # cannot claim the PrivateUse1 device key needed by torch_fl.
-ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-ascend-cann9.0.0-910c:2.3.0
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-ascend-cann9.0.0-910c:2.3.0@sha256:274909c4a51f99d7aef06349555cd8481e068f40b3213c3facc2d1c90cf155e4
 
 # Self-hosted Huawei (Ascend) runner registered by the teacher. The job is
 # dispatched only to a runner carrying this label.
