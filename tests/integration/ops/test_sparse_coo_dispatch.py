@@ -327,12 +327,18 @@ class TestSparseBmm:
     @pytest.mark.anyplatform
     def test_operands_are_restored_after_the_call(self):
         """The boxed call must not leave the caller's tensors retagged or moved."""
-        s = torch.sparse_coo_tensor(
-            [[0, 0, 0], [0, 1, 1], [0, 1, 2]],
-            [1.0, 2.0, 3.0],
-            (1, 2, 3),
-            device=DEVICE,
-        ).coalesce()
+        # Coalesced on CPU and then moved: `_coalesce` is deliberately not
+        # registered for SparsePrivateUse1 (it is host code), so coalescing on
+        # the device only works when it short-circuits, and this input does not.
+        s = (
+            torch.sparse_coo_tensor(
+                [[0, 0, 0], [0, 1, 1], [0, 1, 2]],
+                [1.0, 2.0, 3.0],
+                (1, 2, 3),
+            )
+            .coalesce()
+            .to(DEVICE)
+        )
         d = torch.randn(1, 3, 2, device=DEVICE)
         before_s, before_d = s.device, d.device
         torch.bmm(s, d)
@@ -364,12 +370,18 @@ class TestSparseBmm:
         do not have, so it has to keep raising rather than quietly swapping
         which operand is sparse.
         """
-        s = torch.sparse_coo_tensor(
-            [[0, 0, 0], [0, 1, 1], [0, 1, 2]],
-            [1.0, 2.0, 3.0],
-            (1, 3, 2),
-            device=DEVICE,
-        ).coalesce()
+        # Built on CPU and moved, for the reason in
+        # test_operands_are_restored_after_the_call: the device key has no
+        # `_coalesce` kernel to run on this input.
+        s = (
+            torch.sparse_coo_tensor(
+                [[0, 0, 0], [0, 1, 1], [0, 1, 2]],
+                [1.0, 2.0, 3.0],
+                (1, 3, 2),
+            )
+            .coalesce()
+            .to(DEVICE)
+        )
         d = torch.randn(1, 2, 3, device=DEVICE)
         with pytest.raises(RuntimeError):
             torch.bmm(d, s)
