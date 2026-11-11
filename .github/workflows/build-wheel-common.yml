@@ -115,8 +115,18 @@ jobs:
       # Discard host leftovers before restoring the managed pip download cache.
       - name: Reset pip cache dir
         shell: bash
+        env:
+          CACHE_PLATFORM: ${{ inputs.setup_platform }}
         run: |
           PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
+          case "${CACHE_PLATFORM:-}" in
+            ascend|iluvatar|kunlunxin|mthreads)
+              source .github/scripts/lib/pip_cache.sh
+              export PIP_CACHE_DIR
+              prepare_pip_cache "$CACHE_PLATFORM"
+              exit 0
+              ;;
+          esac
           rm -rf "$PIP_CACHE_DIR"
           mkdir -p "$PIP_CACHE_DIR"
           printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
@@ -130,7 +140,7 @@ jobs:
         timeout-minutes: 1
         with:
           path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), format('.github/requirements-{0}.txt', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
+          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', '.github/scripts/lib/pip_cache.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), format('.github/requirements-{0}.txt', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
           lookup-only: true
           restore-keys: |
             ${{ inputs.display_name }}-pip-${{ runner.os }}-

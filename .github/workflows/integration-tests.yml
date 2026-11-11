@@ -161,16 +161,20 @@ jobs:
         shell: bash
         env:
           PLATFORM: ${{ needs.configuration.outputs.platform }}
-          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), format('.github/requirements-{0}.txt', needs.configuration.outputs.platform)) }}
+          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', '.github/scripts/lib/pip_cache.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), format('.github/requirements-{0}.txt', needs.configuration.outputs.platform)) }}
         run: |
           set -euo pipefail
           root="$(dirname "${RUNNER_WORKSPACE:-${GITHUB_WORKSPACE}/..}")"
           cache_root="$root/.pip-cache"
           PIP_CACHE_DIR="$cache_root/${PLATFORM:?platform is required}"
+          case "$PLATFORM" in
+            ascend|iluvatar|kunlunxin|mthreads)
+              source .github/scripts/lib/pip_cache.sh
+              prepare_pip_cache "$PLATFORM" "$PIP_CACHE_KEY"
+              exit 0
+              ;;
+          esac
           key_file="$cache_root/${PLATFORM}.key"
-          # A different dependency set makes the directory meaningless; a runner
-          # that wiped it looks the same as a first run, which is a cold cache
-          # rather than an error.
           if [[ -f "$key_file" && "$(cat "$key_file")" != "$PIP_CACHE_KEY" ]]; then
             echo "pip cache key changed for ${PLATFORM}; discarding the previous downloads"
             rm -rf "$PIP_CACHE_DIR"

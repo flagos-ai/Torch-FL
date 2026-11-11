@@ -96,22 +96,7 @@ export LD_LIBRARY_PATH="$MUSA_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # Backend autoload is disabled only for probes, not for the integration tests.
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
-# The shared retry helper already supports caching; opt in only for MUSA.
-PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"
-
-musa_prepare_pip_cache() {
-  [[ "${PIP_RETRY_NO_CACHE:-0}" == "1" ]] && return 0
-  # GitHub containers may inherit a HOME whose pip cache is owned by another
-  # user. Use the writable job workspace instead; honour explicit overrides.
-  local cache_dir="${PIP_CACHE_DIR:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache/musa}"
-  if ! mkdir -p "$cache_dir" || [[ ! -O "$cache_dir" || ! -w "$cache_dir" ]]; then
-    echo "::error::MUSA pip cache must be owned and writable by the current user: $cache_dir" >&2
-    return 1
-  fi
-  cache_dir="$(cd "$cache_dir" && pwd -P)"
-  export PIP_CACHE_DIR="$cache_dir"
-  echo "MUSA pip cache: $PIP_CACHE_DIR"
-}
+# The common set_env entrypoint selects and exports the pip download cache.
 
 musa_validate_build_tools() {
   # setup.py imports editable_wheel even for a non-editable native build.
@@ -238,7 +223,6 @@ fi
 
 # Reconcile build dependencies even in a prebuilt venv (older images lack
 # pypa/build). No --upgrade: satisfied requirements need no download.
-musa_prepare_pip_cache
 # editable_wheel was added in setuptools 64. The distro's 59.6.0 satisfies
 # the older >=45 metadata floor but cannot import the current setup.py.
 pip_retry --index-url "$PIP_INDEX_URL_ARG" \

@@ -115,56 +115,11 @@ def test_build_tools_require_real_imports(
         assert "ModuleNotFoundError" in result.stderr
 
 
-@pytest.mark.parametrize(
-    "mode",
-    [
-        "default",
-        "override",
-        "relative_override",
-        "repo_fallback",
-        "disabled",
-        "blocked",
-    ],
-)
-def test_pip_cache_is_created_in_a_writable_location(tmp_path, mode):
-    custom = tmp_path / "custom cache"
-    if mode == "blocked":
-        custom.touch()
-    result = run_shell(
-        'cd "$CACHE_BASE"\n'
-        + shell_function("musa_prepare_pip_cache")
-        + '\nmusa_prepare_pip_cache\necho "CACHE=${PIP_CACHE_DIR:-}"',
-        CACHE_BASE=str(tmp_path),
-        RUNNER_TEMP="" if mode == "repo_fallback" else str(tmp_path / "job"),
-        REPO_ROOT=str(tmp_path / "repo"),
-        PIP_CACHE_DIR=(
-            "custom cache"
-            if mode == "relative_override"
-            else str(custom)
-            if mode in ("override", "blocked")
-            else ""
-        ),
-        PIP_RETRY_NO_CACHE="1" if mode == "disabled" else "0",
-    )
-    if mode == "blocked":
-        assert result.returncode != 0
-        assert "MUSA pip cache must be owned and writable" in result.stderr
-        return
-    assert result.returncode == 0, result.stderr
-    if mode == "disabled":
-        assert "CACHE=\n" in result.stdout
-        assert not (tmp_path / "job").exists()
-        return
-    expected = {
-        "default": tmp_path / "job/pip-cache/musa",
-        "override": custom,
-        "relative_override": custom,
-        "repo_fallback": tmp_path / "repo/.ci/pip-cache/musa",
-    }[mode]
-    assert f"CACHE={expected}" in result.stdout
-    assert expected.is_dir()
-    assert expected.stat().st_uid == os.geteuid()
-    assert os.access(expected, os.W_OK)
+def test_musa_uses_the_entrypoint_cache_policy():
+    assert "musa_prepare_pip_cache" not in SCRIPT
+    runner = (REPO_ROOT / ".github/scripts/set_env.sh").read_text()
+    assert 'prepare_pip_cache "$PLATFORM"' in runner
+    assert "ascend|iluvatar|kunlunxin|mthreads)" in runner
 
 
 def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
@@ -463,6 +418,8 @@ def test_isolated_setup_reconciles_existing_and_fresh_environments(
     prebuilt = scenario.endswith("prebuilt")
     result = run_shell(
         f'source "{COMMON_PATH}"\n'
+        f'source "{REPO_ROOT}/.github/scripts/lib/pip_cache.sh"\n'
+        "prepare_pip_cache mthreads\n"
         "pip_retry() {\n"
         '  printf "PIP %s\\n" "$*"\n'
         '  if [[ "$*" == *"setuptools>="* ]]; then\n'
@@ -507,7 +464,7 @@ def test_isolated_setup_reconciles_existing_and_fresh_environments(
     assert "ninja build" in result.stdout
     assert "setuptools>=64" in result.stdout
     assert "editable_wheel available" in result.stdout
-    assert f"MUSA pip cache: {tmp_path / 'job/pip-cache/musa'}" in result.stdout
+    assert f"pip download cache: {tmp_path / 'job/pip-cache/mthreads'}" in result.stdout
     assert ("transformers>=4.51,<5" in result.stdout) == (stage == "integration")
     assert ("CPU_TORCH_INSTALL" in result.stdout) == (
         scenario in ("fresh", "invalid_local", "stale_prebuilt", "noncpu_prebuilt")

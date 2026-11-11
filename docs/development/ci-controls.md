@@ -4,6 +4,44 @@ CI schedules configured hardware platforms through the shared integration
 workflow. Runner labels, images and device access come from each platform config;
 test groups come from the shared integration manifest.
 
+## Download caching for the runtime-migration lanes
+
+Ascend, Iluvatar, Kunlunxin and MUSA use the same cache-selection helper,
+`.github/scripts/lib/pip_cache.sh`, before their platform environment hooks run.
+The integration workflow prefers the existing runner-local
+`/__w/.pip-cache/<platform>` directory. It checks ownership, directory access
+and an actual temporary-file write, because an existing directory can still be
+unusable by pip in a container with a different UID.
+
+If that directory cannot be used, the helper tries a persistent sibling with a
+`-uid-<uid>` suffix, then a platform directory under `RUNNER_TEMP`, and finally
+an owned temporary directory. It leaves the old cache and its owner/permissions
+untouched. A selected directory is exported through `GITHUB_ENV` so subsequent
+shells and ordinary pip commands use the same cache. MUSA no longer treats its
+own extra cache-owner check as a fatal build requirement. If every directory
+fails, CI emits a warning and explicitly disables caching for that job instead
+of skipping the build or tests.
+
+A matching dependency key retains downloads across jobs on the same runner.
+When the key changes, the selected cache's contents are discarded before the new
+key is written; the original sibling key files remain readable for migration
+from the older layout. An unowned or unwritable old cache is not purged. The key
+includes platform requirements, hooks and the shared helper, so these changes
+can cause a one-time cold cache. Other platform lanes retain their existing
+cache-selection behavior.
+
+The manual/release wheel workflow still transports downloads through its
+existing Actions cache restore/save steps; these four lanes use the same helper
+to select a usable directory before that transport and recheck it at setup.
+Normal PR integration jobs keep using runner-local storage.
+
+`PIP_RETRY_NO_CACHE=1` explicitly disables caching, and the exported
+`PIP_NO_CACHE_DIR` makes that choice apply to plain pip commands too. When
+caching is enabled, `PIP_NO_CACHE_DIR` is empty: pip also treats `0` and `false`
+as disabling values. FlagTree's existing per-install cache opt-out is unchanged.
+These are download caches, not reusable build environments: interpreter and
+package isolation, native builds, wheel validation and test execution still run.
+
 ## Automatic platform selection
 
 | Event | Hardware selection |

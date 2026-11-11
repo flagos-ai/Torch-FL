@@ -171,3 +171,274 @@ def test_each_platform_gets_its_own_directory(tmp_path, platform):
     )
     assert done.returncode == 0, done.stderr
     assert f"/.pip-cache/{platform}" in genv.read_text()
+
+
+CACHE_HELPER = ROOT / ".github/scripts/lib/pip_cache.sh"
+RUNTIME_PLATFORMS = ["ascend", "iluvatar", "kunlunxin", "mthreads"]
+
+
+def _run_shared_cache(
+    tmp_path, platform, *, cache=None, key="", before="", **overrides
+):
+    env_file = tmp_path / "shared-github-env"
+    env_file.write_text("")
+    env = {
+        **os.environ,
+        "REPO_ROOT": str(ROOT),
+        "RUNNER_TEMP": str(tmp_path / "job"),
+        "PIP_CACHE_DIR": str(cache or tmp_path / "persistent" / platform),
+        "PIP_RETRY_NO_CACHE": "0",
+        "PIP_NO_CACHE_DIR": "",
+        "GITHUB_ENV": str(env_file),
+        **overrides,
+    }
+    import shlex
+
+    script = (
+        "set -euo pipefail\n"
+        + f"source {shlex.quote(str(CACHE_HELPER))}\n"
+        + before
+        + f"\nprepare_pip_cache {shlex.quote(platform)} {shlex.quote(key)}\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30
+    )
+    rows = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
+    return result, rows, env
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_all_four_lanes_keep_warm_downloads_and_reset_on_key_change(tmp_path, platform):
+    result, rows, _ = _run_shared_cache(tmp_path, platform, key="first")
+    assert result.returncode == 0, result.stderr
+    cache = Path(rows["PIP_CACHE_DIR"])
+    wheel = cache / "wheel-payload"
+    wheel.write_text("cached wheel")
+    result, rows, _ = _run_shared_cache(tmp_path, platform, key="first")
+    assert result.returncode == 0, result.stderr
+    assert wheel.read_text() == "cached wheel"
+    assert rows["PIP_RETRY_NO_CACHE"] == "0"
+    assert rows["PIP_NO_CACHE_DIR"] == ""
+    result, rows, _ = _run_shared_cache(tmp_path, platform, key="second")
+    assert result.returncode == 0, result.stderr
+    assert Path(rows["PIP_CACHE_DIR"]) == cache
+    assert not wheel.exists()
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_a_blocked_cache_uses_a_persistent_uid_directory(tmp_path, platform):
+    original = tmp_path / "blocked cache"
+    original.write_text("do not remove")
+    result, rows, _ = _run_shared_cache(tmp_path, platform, cache=original)
+    assert result.returncode == 0, result.stderr
+    assert rows["PIP_CACHE_DIR"] == str(original) + f"-uid-{os.geteuid()}"
+    assert original.read_text() == "do not remove"
+    assert "::warning::" in result.stderr
+    assert rows["PIP_RETRY_NO_CACHE"] == "0"
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_foreign_owned_cache_is_preserved_instead_of_failing(tmp_path, platform):
+    if os.geteuid() == 0:
+        cache = tmp_path / "foreign"
+        cache.mkdir()
+        os.chown(cache, 65534, 65534)
+    else:
+        cache = Path("/usr/share")
+        assert cache.stat().st_uid != os.geteuid()
+    original_owner = cache.stat().st_uid
+    result, rows, _ = _run_shared_cache(tmp_path, platform, cache=cache)
+    assert result.returncode == 0, result.stderr
+    assert Path(rows["PIP_CACHE_DIR"]) != cache
+    assert cache.stat().st_uid == original_owner
+    assert Path(rows["PIP_CACHE_DIR"]).stat().st_uid == os.geteuid()
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_readonly_mount_probe_failure_falls_back(tmp_path, platform):
+    result, rows, env = _run_shared_cache(
+        tmp_path,
+        platform,
+        before="""
+mktemp() {
+  case "$*" in
+    *persistent*) return 1 ;;
+    *) command mktemp "$@" ;;
+  esac
+}
+""",
+    )
+    assert result.returncode == 0, result.stderr
+    assert rows["PIP_CACHE_DIR"] == str(
+        Path(env["RUNNER_TEMP"]) / "pip-cache" / platform
+    )
+    assert rows["PIP_RETRY_NO_CACHE"] == "0"
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_all_unusable_cache_paths_warn_and_disable_without_stopping_build(
+    tmp_path, platform
+):
+    result, rows, _ = _run_shared_cache(
+        tmp_path, platform, before="mktemp() { return 1; }\n"
+    )
+    assert result.returncode == 0, result.stderr
+    assert rows["PIP_CACHE_DIR"] == ""
+    assert rows["PIP_RETRY_NO_CACHE"] == "1"
+    assert rows["PIP_NO_CACHE_DIR"] == "1"
+    assert "continuing without download caching" in result.stderr
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+@pytest.mark.parametrize(
+    "override", [{"PIP_RETRY_NO_CACHE": "1"}, {"PIP_NO_CACHE_DIR": "false"}]
+)
+def test_explicit_no_cache_is_honored_and_persisted(tmp_path, platform, override):
+    result, rows, env = _run_shared_cache(tmp_path, platform, **override)
+    assert result.returncode == 0, result.stderr
+    assert rows["PIP_RETRY_NO_CACHE"] == "1"
+    assert rows["PIP_NO_CACHE_DIR"] == "1"
+    assert not Path(env["PIP_CACHE_DIR"]).exists()
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_selected_fallback_survives_the_next_workflow_shell(tmp_path, platform):
+    blocked = tmp_path / "blocked"
+    blocked.touch()
+    result, rows, env = _run_shared_cache(tmp_path, platform, cache=blocked)
+    assert result.returncode == 0, result.stderr
+    selected = Path(rows["PIP_CACHE_DIR"])
+    (selected / "download").write_text("warm")
+    result, next_rows, _ = _run_shared_cache(tmp_path, platform, **{**env, **rows})
+    assert result.returncode == 0, result.stderr
+    assert next_rows == rows
+    assert (selected / "download").read_text() == "warm"
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_real_workflow_uses_shared_cache_selection(tmp_path, platform):
+    work = tmp_path / "_work"
+    work.mkdir()
+    blocked = work / ".pip-cache"
+    blocked.write_text("unavailable persistent mount")
+    env_file = tmp_path / "env"
+    result = subprocess.run(
+        ["bash", "-c", _step()["run"]],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "REPO_ROOT": str(ROOT),
+            "RUNNER_WORKSPACE": str(work / "repo"),
+            "RUNNER_TEMP": str(tmp_path / "job"),
+            "GITHUB_ENV": str(env_file),
+            "PLATFORM": platform,
+            "PIP_CACHE_KEY": "test-key",
+            "PIP_NO_CACHE_DIR": "",
+            "PIP_RETRY_NO_CACHE": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
+    assert rows["PIP_CACHE_DIR"] == str(tmp_path / "job/pip-cache" / platform)
+    assert blocked.read_text() == "unavailable persistent mount"
+
+
+def test_key_and_entrypoint_include_the_shared_helper():
+    assert ".github/scripts/lib/pip_cache.sh" in _step()["env"]["PIP_CACHE_KEY"]
+    runner = (ROOT / ".github/scripts/set_env.sh").read_text()
+    assert "ascend|iluvatar|kunlunxin|mthreads)" in runner
+    assert 'prepare_pip_cache "$PLATFORM"' in runner
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_manual_wheel_workflow_uses_the_same_cache_helper(tmp_path, platform):
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/build-wheel-common.yml").read_text()
+    )
+    steps = next(job["steps"] for job in workflow["jobs"].values() if "steps" in job)
+    step = next(s for s in steps if s.get("name") == "Reset pip cache dir")
+    assert step["env"]["CACHE_PLATFORM"] == "${{ inputs.setup_platform }}"
+    temp = tmp_path / "job"
+    temp.mkdir()
+    (temp / "pip-cache").write_text("old blocker")
+    env_file = tmp_path / "env"
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "CACHE_PLATFORM": platform,
+            "RUNNER_TEMP": str(temp),
+            "GITHUB_ENV": str(env_file),
+            "PIP_NO_CACHE_DIR": "",
+            "PIP_RETRY_NO_CACHE": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
+    assert rows["PIP_CACHE_DIR"] == str(temp / "pip-cache") + f"-uid-{os.geteuid()}"
+    assert (temp / "pip-cache").read_text() == "old blocker"
+
+
+@pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
+def test_real_entrypoint_selects_cache_before_loading_any_of_the_four_hooks(
+    tmp_path, platform
+):
+    repo = tmp_path / "repo"
+    scripts = repo / ".github/scripts"
+    (scripts / "hooks").mkdir(parents=True)
+    (scripts / "set_env.sh").write_text(
+        (ROOT / ".github/scripts/set_env.sh").read_text()
+    )
+    (scripts / "lib").symlink_to(ROOT / ".github/scripts/lib", target_is_directory=True)
+    (repo / ".github/version-pins.env").write_text(
+        (ROOT / ".github/version-pins.env").read_text()
+    )
+    (scripts / f"hooks/set_env_{platform}.sh").write_text(
+        'test -d "$PIP_CACHE_DIR"\n'
+        'test "$PIP_RETRY_NO_CACHE" = 0\n'
+        'test -z "$PIP_NO_CACHE_DIR"\n'
+        'echo "hook-cache=$PIP_CACHE_DIR"\n'
+    )
+    blocked = tmp_path / "blocked"
+    blocked.touch()
+    env_file = tmp_path / "env"
+    result = subprocess.run(
+        ["bash", str(scripts / "set_env.sh"), "--platform", platform],
+        env={
+            **os.environ,
+            "CI_STAGE": "build",
+            "RUNNER_TEMP": str(tmp_path / "job"),
+            "PIP_CACHE_DIR": str(blocked),
+            "PIP_RETRY_NO_CACHE": "0",
+            "PIP_NO_CACHE_DIR": "",
+            "GITHUB_ENV": str(env_file),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
+    assert f"hook-cache={rows['PIP_CACHE_DIR']}" in result.stdout
+    assert rows["PIP_CACHE_DIR"] == str(blocked) + f"-uid-{os.geteuid()}"
+
+
+@pytest.mark.parametrize("old_key,preserved", [("same-key", True), ("old-key", False)])
+def test_legacy_runner_key_files_are_honored(tmp_path, old_key, preserved):
+    cache = tmp_path / "persistent/ascend"
+    cache.mkdir(parents=True)
+    payload = cache / "warm-wheel"
+    payload.write_text("download")
+    Path(str(cache) + ".key").write_text(old_key + "\n")
+    result, rows, _ = _run_shared_cache(tmp_path, "ascend", key="same-key")
+    assert result.returncode == 0, result.stderr
+    assert rows["PIP_CACHE_DIR"] == str(cache)
+    assert payload.exists() == preserved
+    assert (cache / ".torch-fl-ci-cache-key").read_text() == "same-key\n"
