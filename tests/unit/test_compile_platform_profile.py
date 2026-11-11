@@ -25,6 +25,10 @@ tests/integration/test_compile.py.
 """
 
 import functools
+import os
+import subprocess
+import sys
+import textwrap
 
 import types
 import pytest
@@ -1376,6 +1380,65 @@ def test_register_codegen_is_idempotent(as_ascend):
 
     assert get_scheduling_for_device(ic.DEVICE_TYPE) is scheduling
     assert device_op_overrides_dict[ic.DEVICE_TYPE] is overrides
+
+
+@pytest.mark.anyplatform
+def test_flagos_registration_does_not_strand_the_builtin_overrides():
+    """Registering flagos first must not cost CPU its device-op overrides (#792).
+
+    ``get_device_op_overrides`` imports the built-in override modules -- the
+    imports that register ``cpu``, ``cuda``, ``mps``, ``mtia`` and ``xpu`` --
+    only while ``device_op_overrides_dict`` is empty. A process that registers
+    flagos first therefore leaves ``cpu`` unregistered, and every later CPU
+    ``torch.compile`` dies with ``KeyError: 'cpu'``.
+
+    This runs in a fresh interpreter on purpose. The bug is about modules that
+    were never imported: once any test in this process has imported them, the
+    side effect cannot be replayed (``import`` is a no-op for a cached module)
+    and a same-process assertion would pass no matter what the registration
+    code did. The issue's own evidence is three separate fresh processes for
+    the same reason.
+
+    Inductor's caches are disabled for the same reason: a graph served from the
+    on-disk FxGraph cache never reaches ``get_device_op_overrides`` at all, so a
+    cached run would report success even against the broken registration.
+    """
+    script = textwrap.dedent(
+        """
+        import torch
+        from torch._inductor.codegen.common import get_device_op_overrides
+
+        # Importing this module is what registers the CUDA overrides, and it is
+        # the first thing that makes `device_op_overrides_dict` non-empty.
+        from torch_fl.compile import inductor_codegen as ic
+
+        # What torch_fl does at import time, before anything is compiled.
+        ic.register_flagos_codegen()
+
+        # The lookup the issue's traceback ends at.
+        print("OVERRIDE=" + type(get_device_op_overrides("cpu")).__name__)
+
+        # And the call the issue reports as failing.
+        out = torch.compile(lambda t: t.sin() + 1)(torch.tensor([0.0, 1.0, 2.0]))
+        print("RESULT=" + ",".join(f"{v:.4f}" for v in out))
+        """
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TORCHINDUCTOR_FORCE_DISABLE_CACHES": "1"},
+    )
+    assert process.returncode == 0, process.stderr
+    # Sentinels rather than line positions: inductor and the vendor runtimes are
+    # free to print whatever they like to stdout.
+    reported = {}
+    for line in process.stdout.splitlines():
+        for key in ("OVERRIDE=", "RESULT="):
+            if line.startswith(key):
+                reported[key] = line[len(key) :]
+    assert reported["OVERRIDE="] == "CpuDeviceOpOverrides"
+    assert reported["RESULT="] == "1.0000,1.8415,1.9093"
 
 
 @pytest.mark.anyplatform

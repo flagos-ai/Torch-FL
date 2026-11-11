@@ -184,6 +184,47 @@ def _device_op_overrides() -> DeviceOpOverrides:
     return FlagOSDeviceOpOverrides()
 
 
+def _init_builtin_device_op_overrides() -> None:
+    """Register torch's built-in device-op overrides before flagos.
+
+    ``get_device_op_overrides`` (``torch/_inductor/codegen/common.py``) imports
+    the built-in override modules inside an ``if not device_op_overrides_dict``
+    guard, and those imports are what populate the ``cpu``, ``cuda``, ``mps``,
+    ``mtia`` and ``xpu`` entries. Registering flagos first makes the dictionary
+    non-empty, so the guard never runs again and every later lookup of a device
+    this process has not touched -- ``cpu`` above all -- raises
+    ``KeyError: 'cpu'``. ``init_backend_registration()`` does not help: it
+    fills the *codegen* table, not this one.
+
+    Importing the modules here is what matters; the guard in
+    ``get_device_op_overrides`` cannot be made to run once the dictionary is
+    non-empty, which is why this imports the registration modules directly
+    instead of calling that function as a side effect.
+
+    ``cpu`` is imported unguarded because it is the device the issue is about
+    and the one every inductor build has.  The others are guarded: this has to
+    keep working on an older or vendor-patched torch whose codegen tree has a
+    different set of accelerator modules, and losing one of them would only
+    matter to a process that then compiles for that device.
+    """
+    import importlib
+
+    from torch._inductor.codegen import (  # noqa: F401
+        cpu_device_op_overrides,
+        mps_device_op_overrides,
+    )
+
+    for module in (
+        "torch._inductor.codegen.cuda.device_op_overrides",
+        "torch._inductor.codegen.mtia.device_op_overrides",
+        "torch._inductor.codegen.xpu.device_op_overrides",
+    ):
+        try:
+            importlib.import_module(module)
+        except ImportError:  # pragma: no cover - torch without that device
+            continue
+
+
 def register_flagos_codegen() -> None:
     """Register flagos scheduling/wrapper codegen + device op overrides.
 
@@ -197,6 +238,7 @@ def register_flagos_codegen() -> None:
     # Populate the built-in registrations first, so our checks below see the
     # real state and so the CUDA overrides module is imported.
     init_backend_registration()
+    _init_builtin_device_op_overrides()
 
     if DEVICE_TYPE not in device_op_overrides_dict:
         register_device_op_overrides(DEVICE_TYPE, _device_op_overrides())
