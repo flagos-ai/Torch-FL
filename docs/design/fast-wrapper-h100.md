@@ -1194,8 +1194,7 @@ allocates per call).
 
 ### 10.4 Prototype status: the pooled C++ replay works
 
-A companion prototype (submitted as a follow-up PR, not part of this change)
-implements it end to end for one Triton kernel (`mul`, 1M fp32): Python registers a
+`benchmarks/fast_launch_cpp/` implements it end to end for one Triton kernel (`mul`, 1M fp32): Python registers a
 plan once (cubin, kernel name, grid/block/shared,
 argument kinds, pool size); C++ then owns a `CUfunction`, a prebuilt argument array and
 a pool of output buffers. The per-call path is pointer stores plus `cuLaunchKernel` -
@@ -1261,8 +1260,8 @@ is ~2× cheaper, before the PrivateUse1 hop.
 
 ### 10.7 A real FlagGems operator, end to end
 
-The companion prototype's FlagGems driver captures `torch.mul[1M fp32]` on the flagos
-device through the FlagGems route, exports the compiled kernel to C++, and replays it.
+The same code captures `torch.mul[1M fp32]` on the flagos device through the FlagGems
+route, exports the compiled kernel to C++, and replays it.
 Capture prints the whole mapping, which is also the check that the argument list is right:
 
 ```
@@ -1293,25 +1292,50 @@ remaining constexprs, and zero-fill the scratch pointers. Getting this wrong is 
 crash but a plausible-looking wrong answer, which is why the capture prints both lists
 side by side.
 
-### 10.8 What remains before this replaces the `flaggems` route
+### 10.8 What shipped, and what is left
 
-* **Register the plan lazily per signature.** Today the capture is explicit; production
-  should do it on the first call of a signature (where libtuner also runs) and route the
-  rest through the replay, with `flaggems` untouched as the fallback.
-* **Cover the argument shapes the mapping cannot yet express**: strided/`StridedBuffer`
-  operands, multi-output ops (each output needs its own pooled slot in the same launch),
-  and in-place variants.
-* **Wire it behind a route name.** The mechanism now has the numbers; the remaining work
-  is the dispatch plumbing (`flaggems_fast` backend key or an internal fast path of
-  `flaggems`) and its fallback contract.
-* **Wire it as `flaggems_fast`.** The plan registration belongs on the first call of a
-  signature (where libtuner also runs); the C++ replay then sits behind a new backend
-  key, with `flaggems` untouched as the fallback.
-* **The graph variant is optional.** `cuGraphExecKernelNodeSetParams` is rejected on this
-  stack even with byte-identical parameters, so a graph cannot yet be repointed at each
-  call's inputs. Graphs would take the mechanism from 4.2 µs to the measured 4.39 µs
-  replay floor - no gain over the pooled launch, which is why the pooled path is the one
-  to productise.
+`benchmarks/fast_launch_cpp/` contains the mechanism described above: the CUDA extension
+(`fast_launch_ext.cu`, a `CUfunction` per plan, a prebuilt argument array, a
+refcount-driven output pool, `cuLaunchKernel`), the Python capture and replay layer
+(`fast_launch_cpp.py`), and the hardware gate (`fast_launch_cpp_gate.py`). It is opt-in:
+`enable()` replaces the FlagGems bindings for the operators it can prove and declines the
+rest by name.
+
+Two arms of the gate on H100, `max_err` shown as relative error:
+
+| operator | wrapper | replayed from C++ | speed-up | rel. error |
+|---|---:|---:|---:|---:|
+| `mul` 512x512 | 82.48 us | **15.05 us** | **5.48x** | 0.0 |
+| `softmax` 1024x1024 | 30.11 us | **14.89 us** | **2.02x** | 7.4e-09 |
+| `add` 512x512 | 93.16 us | declined (keyword arguments) | - | 0.0 |
+| `relu` 512x512 | 76.08 us | declined (see below) | - | 0.0 |
+| `sum_dim` 1024x1024 | 10.93 us | declined (keyword arguments) | - | 1.7e-07 |
+| `max.dim` 1024x1024 | 112.24 us | declined (two outputs) | - | 0.0 |
+| `sort` 1024x1024 | 1293 us | declined (21 launches) | - | 0.0 |
+
+The gate passes on both arms, with `hits` 2038, `fallbacks` 0 and every declined
+operator keeping its untouched cost.
+
+**A verified-operator allowlist is part of the design, not a limitation of it.** `relu`
+captures a seven-parameter layout with three scalars whose replay does not reproduce the
+wrapper's result (relative error 1.36), and the cause is not yet explained. A wrong
+layout does not crash - it returns a plausible wrong answer - so the module refuses any
+operator outside `VERIFIED_OPS` instead of trusting the mapping, and adding a name
+requires a gate run that proves exactness. The remaining work is therefore precise:
+
+* **Explain `relu`'s three-scalar layout.** Its PTX has more scalar parameters than the
+  pointwise operators do, and the mapping that works for `mul` does not reproduce its
+  results. Until that is understood, `relu` stays out of `VERIFIED_OPS`.
+* **Key plans on keyword arguments** so `add` (`alpha`) and `sum_dim` (`dtype`) can be
+  captured; today a call carrying keywords is passed through, which is why both are
+  declined.
+* **Multi-output and multi-launch plans.** `max.dim` needs two pooled slots in one
+  launch; full-reduce `sum` needs two launches in one plan; `sort` is out of scope
+  (kernel-bound, 21 launches).
+* **Wire it behind a route name.** The mechanism has the numbers now; the remaining work
+  is the dispatch plumbing (`flaggems_fast` key or an internal fast path of `flaggems`),
+  which also decides packaging: today the extension is built at first use through
+  `torch.utils.cpp_extension`, and a shipped route should build it with the wheel.
 
 ## Appendix A — how the measurements were produced
 
