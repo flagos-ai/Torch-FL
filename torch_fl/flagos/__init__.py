@@ -3372,20 +3372,23 @@ from .cuda_graph import CUDAGraph, graph  # noqa: E402,F401
 
 
 def _alias_torch_cuda_graph() -> None:
-    """让 ``torch.cuda.CUDAGraph`` / ``torch.cuda.graph`` 指向 flagos 的实现。
+    """Point ``torch.cuda.CUDAGraph`` / ``torch.cuda.graph`` at the flagos implementation.
 
-    本机 flagos 后端跑在 CPU torch 轮子上，``torch.cuda.CUDAGraph`` 是 dummy 基类
-    （实例化抛 "Tried to instantiate dummy base class CUDAGraph"）。这里把这两个名字
-    改指向 ctypes 驱动的 flagos 图实现，上层代码就能统一写 ``torch.cuda.CUDAGraph``。
+    The local flagos backend runs on the CPU torch wheel, where
+    ``torch.cuda.CUDAGraph`` is a dummy base class (instantiating it raises "Tried
+    to instantiate dummy base class CUDAGraph"). Here both names are rebound to
+    the ctypes-driven flagos graph implementation, so upper-layer code can write
+    ``torch.cuda.CUDAGraph`` uniformly.
 
-    只在 dummy 时覆盖：真 CUDA / DTK 官方 torch 里 ``torch.cuda.CUDAGraph`` 是真货，
-    保持原生不动（此时 ``torch._C._CUDAGraph`` 是 torch 自己的类）。
+    Override only when it is the dummy: on a real CUDA / DTK official torch,
+    ``torch.cuda.CUDAGraph`` is the genuine class, so leave it untouched (in that
+    case ``torch._C._CUDAGraph`` is torch's own class).
     """
-    import torch.cuda.graphs  # noqa: F401  触发 torch._C._CUDAGraph 定义
+    import torch.cuda.graphs  # noqa: F401  -- triggers torch._C._CUDAGraph definition
 
     graph_cls = getattr(torch._C, "_CUDAGraph", None)
     if graph_cls is not None and graph_cls.__module__ == "torch._C":
-        return  # 真货，不覆盖
+        return  # genuine class, do not override
     torch.cuda.CUDAGraph = CUDAGraph
     torch.cuda.graph = graph
 
