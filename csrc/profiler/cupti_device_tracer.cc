@@ -18,6 +18,9 @@
 
 #include "device_tracer.h"
 #include "cupti_shim.h"
+// Preserve the shim's opaque callback ABI before vendor occupancy headers
+// introduce a CUcontext macro (CoreX maps it to an SDK-only driver type).
+using CuptiContextHandle = CUcontext;
 #include <flagos_env.h>
 
 #include <cxxabi.h>
@@ -393,6 +396,19 @@ enum : int {
   kAttrMaxRegistersPerMultiprocessor = 82,
 };
 
+#if defined(FLAGOS_HAVE_CUDA_OCCUPANCY)
+// Newer CUDA headers expose this field; CoreX 4.5.0's calculator does not.
+// Clear it where available without depending on a vendor version macro.
+template <typename Properties>
+auto clearReservedSharedMemory(Properties& props, int)
+    -> decltype(props.reservedSharedMemPerBlock = 0, void()) {
+  props.reservedSharedMemPerBlock = 0;
+}
+
+template <typename Properties>
+void clearReservedSharedMemory(Properties&, long) {}
+#endif
+
 DeviceOccupancyProps queryDeviceOccupancyProps(int device) {
   DeviceOccupancyProps props;
 #if defined(FLAGOS_HAVE_CUDA_OCCUPANCY)
@@ -435,7 +451,7 @@ DeviceOccupancyProps queryDeviceOccupancyProps(int device) {
   // registers, static/dynamic shared memory) combinations in which varying both
   // changed nothing.
   props.occ_prop.sharedMemPerBlockOptin = 0;
-  props.occ_prop.reservedSharedMemPerBlock = 0;
+  clearReservedSharedMemory(props.occ_prop, 0);
 
   props.sm_count = sm_count;
   props.warp_size = warp_size;
@@ -625,7 +641,7 @@ class CuptiDeviceTracer;
 namespace {
 void bufferRequested(uint8_t** buffer, size_t* size, size_t* maxNumRecords);
 void bufferCompleted(
-    CUcontext context,
+    CuptiContextHandle context,
     uint32_t streamId,
     uint8_t* buffer,
     size_t size,
@@ -1266,7 +1282,7 @@ void bufferRequested(uint8_t** buffer, size_t* size, size_t* maxNumRecords) {
 }
 
 void bufferCompleted(
-    CUcontext context,
+    CuptiContextHandle context,
     uint32_t streamId,
     uint8_t* buffer,
     size_t size,

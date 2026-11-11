@@ -60,6 +60,12 @@ interface target, preserving ordinary include precedence for every consumer.
 The host-only CMake regression links that actual SDK facade as well as testing
 the direct-include case, and reproduces the failed search order before the fix.
 
+With CoreX headers selected, the CUPTI tracer also needs to tolerate the older
+occupancy structure without `reservedSharedMemPerBlock`. It clears that field
+only when present and captures its opaque callback context type before SDK
+macros can rename `CUcontext`. The complete tracer is syntax-checked against
+CoreX-like, CUDA-like, MetaX and occupancy-disabled configurations.
+
 After the image initializes its SDK environment, the hook persists
 `BASH_ENV=/dev/null` so later Bash steps cannot select `/flagos` again.
 It clears inherited PYTHONPATH and vendor Torch library/header/CMake paths,

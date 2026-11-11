@@ -79,6 +79,56 @@ def test_corex_headers_precede_profiler_cuda_headers(tmp_path, link_runtime):
     assert done.returncode == 0, done.stdout + done.stderr
 
 
+@pytest.mark.parametrize("backend", ["cuda", "corex", "metax", "none"])
+def test_cupti_tracer_compiles_with_vendor_occupancy_headers(tmp_path, backend):
+    """Compile the complete tracer against old CoreX and newer CUDA layouts."""
+    if not shutil.which("c++"):
+        pytest.skip("A host C++ compiler is required")
+    reserved = "" if backend == "corex" else "size_t reservedSharedMemPerBlock;"
+    mapping = "#define CUcontext IXDRVcontext\n" if backend == "corex" else ""
+    (tmp_path / "cuda_occupancy.h").write_text(
+        "#pragma once\n#include <cstddef>\n"
+        + mapping
+        + """
+struct cudaOccDeviceProp {
+  int computeMajor, computeMinor, maxThreadsPerBlock;
+  int maxThreadsPerMultiprocessor, regsPerBlock, regsPerMultiprocessor;
+  int warpSize, numSms;
+  size_t sharedMemPerBlock, sharedMemPerMultiprocessor, sharedMemPerBlockOptin;
+  """
+        + reserved
+        + """
+};
+struct cudaOccFuncAttributes {
+  int maxThreadsPerBlock, numRegs, partitionedGCConfig, shmemLimitConfig;
+  size_t sharedSizeBytes, maxDynamicSharedSizeBytes;
+};
+struct cudaOccDeviceState {};
+struct cudaOccResult { int activeBlocksPerMultiprocessor; };
+enum { PARTITIONED_GC_OFF, FUNC_SHMEM_LIMIT_DEFAULT, CUDA_OCC_SUCCESS };
+inline int cudaOccMaxActiveBlocksPerMultiprocessor(
+    cudaOccResult*, const cudaOccDeviceProp*, const cudaOccFuncAttributes*,
+    const cudaOccDeviceState*, int, size_t) { return CUDA_OCC_SUCCESS; }
+"""
+    )
+    args = [
+        "c++",
+        "-std=c++17",
+        "-fsyntax-only",
+        "-I",
+        str(tmp_path),
+        "-I",
+        str(ROOT / "csrc/include"),
+    ]
+    if backend != "none":
+        args.append("-DFLAGOS_HAVE_CUDA_OCCUPANCY=1")
+    if backend == "metax":
+        args.append("-DFLAGOS_METAX_MCPTI=1")
+    args.append(str(ROOT / "csrc/profiler/cupti_device_tracer.cc"))
+    done = subprocess.run(args, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
 def cpu_mappings(root):
     return "\n".join(
         f"1000-2000 r-xp 00000000 08:01 123 {root}/lib/{name}"
