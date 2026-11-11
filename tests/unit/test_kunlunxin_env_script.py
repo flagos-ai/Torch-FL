@@ -16,7 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / ".github/scripts/hooks/set_env_kunlunxin.sh"
 
 
-def run_hook(tmp_path, *, prepared=True, fail="", stage="build", target="ci"):
+def run_hook(
+    tmp_path, *, prepared=True, pip_ready=True, fail="", stage="build", target="ci"
+):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".github").symlink_to(ROOT / ".github", target_is_directory=True)
@@ -36,7 +38,12 @@ def run_hook(tmp_path, *, prepared=True, fail="", stage="build", target="ci"):
     ci_python.write_text(
         r"""#!/bin/bash
 printf 'python %s\n' "$*" >> "$CALL_LOG"
-if [[ "$*" == *--check-installed* ]]; then exit "$PREPARED_STATUS"; fi
+if [[ "$*" == *--check-installed* ]]; then
+  if [[ "$3" == 'pip>=23.2' ]]; then
+    [[ "$PIP_READY" == 1 || -f "$PIP_BOOTSTRAPPED" ]]; exit $?
+  fi
+  exit "$PREPARED_STATUS"
+fi
 if [[ "$1 $2" == '-m pip' ]]; then
   [[ "$3" != check || "$FAIL_PHASE" != check ]]
   exit $?
@@ -114,6 +121,9 @@ exit 2
         CALL_LOG=str(calls),
         CI_PYTHON=str(ci_python),
         PREPARED_STATUS="0" if prepared else "1",
+        PIP_READY="1" if pip_ready else "0",
+        PIP_BOOTSTRAPPED=str(tmp_path / "pip-bootstrapped"),
+        PIP_CACHE_DIR=str(tmp_path / "runner-pip-cache"),
         BOXING_LANE="1" if fail == "boxing" else "",
         FAIL_PHASE=fail,
         LD_LIBRARY_PATH="/host/driver",
@@ -130,7 +140,14 @@ source "$REPO_ROOT/.github/scripts/lib/set_env_common.sh"
 install_cpu_torch() { echo cpu-torch >> "$CALL_LOG"; [[ "$FAIL_PHASE" != cpu ]]; }
 install_flagtree() { echo flagtree >> "$CALL_LOG"; [[ "$FAIL_PHASE" != flagtree ]]; }
 install_flag_gems() { echo flag-gems >> "$CALL_LOG"; [[ "$FAIL_PHASE" != gems ]]; }
-pip_retry() { printf 'pip %s\n' "$*" >> "$CALL_LOG"; [[ "$FAIL_PHASE" != pip ]]; }
+pip_retry() {
+  printf 'pip %s\n' "$*" >> "$CALL_LOG"
+  [[ "$FAIL_PHASE" != pip ]] || return 1
+  if [[ "$*" == *'pip>=23.2'* ]]; then
+    [[ "$FAIL_PHASE" != bootstrap ]] || return 1
+    [[ "$FAIL_PHASE" == stale-pip ]] || touch "$PIP_BOOTSTRAPPED"
+  fi
+}
 build_flagos_inplace() {
   test "$FLAGOS_BUILD_BOXING" = 0
   test "$FLAGOS_BUILD_FLAGGEMS_CPP" = 0
@@ -181,6 +198,30 @@ def test_missing_packages_install_wheels_but_reuse_system_cmake(tmp_path):
     assert any(row.startswith("pip ") and row.endswith("numpy<2") for row in calls)
     assert not any(row.startswith("pip ") and "cmake" in row for row in calls)
     assert "native-build" in calls
+
+
+def test_old_pip_is_bootstrapped_and_rechecked_before_torch_resolution(tmp_path):
+    done, calls, *_ = run_hook(tmp_path, prepared=False, pip_ready=False)
+    assert done.returncode == 0, done.stderr
+    bootstrap = next(
+        i
+        for i, row in enumerate(calls)
+        if row.startswith("pip ") and "pip>=23.2" in row
+    )
+    checks = [i for i, row in enumerate(calls) if "--check-installed pip>=23.2" in row]
+    assert checks[0] < bootstrap < checks[1] < calls.index("cpu-torch")
+    assert "--only-binary=:all:" in calls[bootstrap]
+    assert "--no-cache-dir" not in calls[bootstrap]
+    assert "download.pytorch.org" not in calls[bootstrap]
+    assert any(row == "python -m pip --version" for row in calls)
+
+
+@pytest.mark.parametrize("fail", ["bootstrap", "stale-pip"])
+def test_failed_or_ineffective_pip_bootstrap_stops_before_torch(tmp_path, fail):
+    done, calls, *_ = run_hook(tmp_path, prepared=False, pip_ready=False, fail=fail)
+    assert done.returncode != 0
+    assert "cpu-torch" not in calls
+    assert "native-build" not in calls
 
 
 def test_missing_system_cmake_uses_python_package_fallback(tmp_path):

@@ -221,6 +221,17 @@ fi
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 
+# Python 3.10 can seed an older pip that rejects equivalent distribution
+# names in PEP 658 metadata. Bootstrap before resolving Torch dependencies;
+# the later tools loop is too late. Retain the runner's pip download cache.
+if ! "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed 'pip>=23.2'; then
+  pip_retry --only-binary=:all: --index-url "$PIP_INDEX_URL_ARG" 'pip>=23.2'
+fi
+"$VENV_PYTHON" -m pip --version
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+  --check-installed 'pip>=23.2'
+
 if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
     --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
   echo "Using prepared CPU torch $CPU_TORCH_VERSION"

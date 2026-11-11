@@ -83,6 +83,14 @@ installed with pip. A compatible system CMake (3.19 through 3.x) is retained;
 otherwise the same Python-package reuse/install path supplies it. The tool list
 is `.github/requirements-kunlunxin.txt`.
 
+Before installing CPU Torch, the hook verifies pip is at least 23.2 and installs
+a compatible binary release from the ordinary Python index only when needed.
+This bootstrap precedes Torch dependency resolution: older pip versions reject
+equivalent names in PEP 658 metadata (for example, `typing-extensions` versus
+`typing_extensions`) and can fall back to an unnecessary source build. The hook
+logs and rechecks the selected pip version. Ordinary downloads still use the
+runner-local `PIP_CACHE_DIR`; rebuilding a job venv does not remove that cache.
+
 The prior development image added a `.pth` exposing `/opt/flagtree` plus a
 Triton metadata bridge to its vendor venv. CI does not copy either workaround:
 FlagTree's own files and metadata must live in the independent venv, and the
