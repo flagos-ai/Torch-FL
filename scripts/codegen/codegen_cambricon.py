@@ -286,6 +286,7 @@ OPS = {
     "silu": "silu",
     "silu_backward": "silu_backward",
     "where.self": "where",
+    "_softmax": "softmax_forward",
     "_softmax_backward_data": "softmax_backward",
     "slice_backward": "slice_backward",
     "_unsafe_view": "metadata",
@@ -1711,6 +1712,84 @@ at::Tensor {kernel}(
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
 
 """
+T_SOFTMAX_FORWARD = """\
+at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
+  // Same three-dimensional descriptor rule as the backward in
+  // T_SOFTMAX_BACKWARD: cnnlSoftmaxForward reduces over the axis its mode names
+  // and rejects a two-dimensional descriptor with CNNL_STATUS_BAD_PARAM, so the
+  // reduction axis is kept where the mode expects it and everything around it is
+  // merged.
+  //
+  // Worth serving natively because FlagGems' _softmax is a Python wrapper and
+  // measured 1.56 ms on the (32, 512, 512) attention scores this model produces,
+  // against 0.02-0.06 ms for every other op in the forward. The model calls it
+  // once per layer, so the wrapper is 6 ms of a 23 ms forward.
+  const int64_t rank = self.dim();
+  TORCH_CHECK(rank > 0, "flagos cambricon: {op} does not serve rank zero");
+  const int64_t d = dim < 0 ? dim + rank : dim;
+  TORCH_CHECK(
+      d >= 0 && d < rank,
+      "flagos cambricon: {op} got dim ", dim);
+  const auto dtype = self.scalar_type();
+  TORCH_CHECK(
+      SupportedFloatDtype(dtype),
+      "flagos cambricon: {op} does not serve ", dtype);
+  // half_to_float is what nn.Softmax sets when autocast wants the result widened;
+  // cnnlSoftmaxForward takes one dtype for input and output, so the widen is done
+  // before and after the call rather than by it.
+  const auto compute = (half_to_float && dtype == at::kHalf) ? at::kFloat : dtype;
+  auto input = self.contiguous().to(compute);
+  if (input.numel() == 0) {{
+    return at::empty(self.sizes(), self.options().dtype(compute));
+  }}
+  auto sizes = input.sizes();
+  int64_t before = 1, after = 1;
+  for (int64_t i = 0; i < d; ++i) {{
+    before *= sizes[static_cast<size_t>(i)];
+  }}
+  for (int64_t i = d + 1; i < rank; ++i) {{
+    after *= sizes[static_cast<size_t>(i)];
+  }}
+  const int64_t axis = sizes[static_cast<size_t>(d)];
+  cnnlSoftmaxMode_t mode;
+  std::vector<int64_t> shape3;
+  if (d == rank - 1) {{
+    mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+    shape3 = {{before, 1, axis}};
+  }} else if (d == 0) {{
+    mode = CNNL_SOFTMAX_MODE_HIGH_DIMENSION;
+    shape3 = {{axis, before * after, 1}};
+  }} else {{
+    mode = CNNL_SOFTMAX_MODE_MEDIUM_DIMENSION;
+    shape3 = {{before, axis, after}};
+  }}
+  auto x = input.view(shape3);
+  CambriconDeviceGuard guard(x);
+  auto result = at::empty_like(x);
+  const auto handle =
+      HandleForDevice(static_cast<int>(x.device().index()));
+  TensorDesc xd, yd;
+  xd.Set(x);
+  yd.Set(result);
+  CheckCnnl(
+      cnnlSoftmaxForward(
+          handle, CNNL_SOFTMAX_ACCURATE, mode, nullptr, xd.get(),
+          x.const_data_ptr(), nullptr, yd.get(), result.mutable_data_ptr()),
+      "cnnlSoftmaxForward ({op})");
+  // Restore the caller's dtype only when this call did not widen on purpose:
+  // half_to_float is the schema saying the result should stay float32, and
+  // converting back to self's dtype here silently undid it.
+  auto out = result.view(self.sizes());
+  if (compute == dtype && out.scalar_type() != dtype) {{
+    out = out.to(dtype);
+  }}
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kCambricon, {kernel});
+
+"""
+
 T_SOFTMAX_BACKWARD = """\
 at::Tensor {kernel}(
     const at::Tensor& grad_output, const at::Tensor& output, int64_t dim,
@@ -3075,6 +3154,10 @@ def render():
                 cnnl_op=cnnl_op,
                 signature_extra=BINARY_SIGNATURE_EXTRA.get(op, ""),
                 prologue_extra=BINARY_PROLOGUE_EXTRA.get(op, ""),
+            )
+        elif category == "softmax_forward":
+            body = T_SOFTMAX_FORWARD.format(
+                kernel=kernel, fn=fn, disp=disp, op=op
             )
         elif category == "softmax_backward":
             body = T_SOFTMAX_BACKWARD.format(kernel=kernel, fn=fn, disp=disp, op=op)
