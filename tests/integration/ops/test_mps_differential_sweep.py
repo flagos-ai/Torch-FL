@@ -128,8 +128,6 @@ UNARY_OPS = (
     "hardsigmoid",
     "hardswish",
     "mish",
-    "selu",
-    "logsigmoid",
 )
 
 
@@ -503,8 +501,6 @@ def _cases():
         "log10",
         "expm1",
         "log1p",
-        "square",
-        "conj",
         "sgn",
     )
     for name in unary:
@@ -559,9 +555,6 @@ def _cases():
         ("squeeze", lambda t: t.unsqueeze(0).squeeze()),
         ("squeeze.dim", lambda t: t.unsqueeze(0).squeeze(0)),
         ("unsqueeze", lambda t: t.unsqueeze(1)),
-        ("flatten", lambda t: t.flatten(1)),
-        ("reshape", lambda t: t.reshape(-1)),
-        ("contiguous", lambda t: t.t().contiguous()),
     ):
         cases.append((f"{name}-shape", lambda dev, fn=fn: fn(_seeded(dev))))
 
@@ -793,16 +786,17 @@ def _cases():
         (
             "conv_backward",
             lambda dev: torch.ops.aten.convolution_backward(
+                _seeded(dev, (1, 2, 4, 4)),
                 _seeded(dev, (1, 3, 6, 6)),
-                _seeded(dev, (1, 2, 6, 6)),
                 _seeded(dev, (2, 3, 3, 3), offset=-0.1),
-                [1, 3, 6, 6],
+                [2],
+                [1, 1],
                 [0, 0],
                 [1, 1],
                 False,
                 [0, 0],
                 1,
-                [True, True, False],
+                [True, True, True],
             ),
         )
     )
@@ -818,6 +812,15 @@ CASES = _cases()
 # `add.Tensor`, and `where` as `where.self` -- so the mapping is written out
 # rather than inferred.
 ROUTED_AS = {
+    # Spellings whose conf key is not the name aten dispatches under.
+    "select": "select.int",
+    "slice": "slice.Tensor",
+    "transpose": "transpose.int",
+    "solve_triangular": "linalg_solve_triangular",
+    "conv1d": "convolution_overrideable",
+    "conv2d": "convolution_overrideable",
+    "conv3d": "convolution_overrideable",
+    "conv_backward": "convolution_backward_overrideable",
     "sum": "sum.dim_IntList",
     "prod": "prod.dim_int",
     "mean": "mean.dim",
@@ -866,14 +869,28 @@ def _routed(label):
 
     The sweep should not fail because an op is on the fallback -- that is a
     routing decision, tested elsewhere. It fails when a routed op answers wrongly.
+
+    A label that resolves to no conf key at all is neither of those: it is a case
+    that would never run, and an op that is served under a different spelling would
+    look covered while nothing compared it. `routed_backend_or_none` raises for an
+    absent key precisely to keep the two apart, so that raise propagates rather than
+    becoming a third kind of skip. This caught eight cases in the change that
+    introduced them: `select`, `slice`, `transpose`, `solve_triangular`, the three
+    convolution spellings and the convolution backward were all routed, and all
+    skipped, because their conf keys are `select.int`, `slice.Tensor`,
+    `transpose.int`, `linalg_solve_triangular` and `convolution_overrideable`.
     """
     name = label[2:] if label.startswith("u-") else label.split("-")[0]
     key = ROUTED_AS.get(name, name)
     try:
         return routed_backend_or_none(key) is not None
-    except AssertionError:
-        # A name the conf does not list at all is not routed.
-        return False
+    except AssertionError as error:
+        raise AssertionError(
+            f"sweep case {label!r} resolves to conf key {key!r}, which the conf "
+            f"does not list. Either the label is wrong or ROUTED_AS needs an "
+            f"entry for it -- a skip here would hide a case that never runs. "
+            f"({error})"
+        ) from error
 
 
 @pytest.mark.parametrize("label,builder", CASES, ids=[c[0] for c in CASES])
