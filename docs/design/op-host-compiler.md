@@ -781,6 +781,49 @@ Two limits on this finding, stated so it is not overclaimed: the probes ran on t
 not CPU-torch + PrivateUse1, and nobody has yet written the `CppWrapperCodegen` to see whether the
 rest of AOTI's assumptions hold once one exists. The estimate for that is not in this document.
 
+
+#### Route A, end to end: it works, and its entry is the remaining cost
+
+The device glue was written and AOTI's C++ wrapper **now compiles, links, loads and returns correct
+results for `torch.mul` on `flagos`**. The complete list of what it took:
+
+| requirement | size |
+| --- | --- |
+| `DEVICE_TO_ATEN["flagos"] = "at::kPrivateUse1"` | one line |
+| `torch/csrc/inductor/cpp_wrapper/flagos.h` | 8 lines, mirroring `cpu.h` |
+| `.../cpp_wrapper/device_internal/flagos.h` | ~20 lines: driver includes, the plugin's stream accessor named the way the generated code asks for it, and a device-guard class |
+| `<cuda.h>` on the compile include path | `CPATH=/usr/local/cuda/include` |
+| `libcuda.so.1` and the plugin library resolvable at load | `RTLD_GLOBAL` preload of both |
+
+No PyTorch change, no fork. The generated code's device-specific surface is exactly two symbols -
+`aoti_torch_get_current_cuda_stream` and `AOTICudaGuard` - plus the standard driver API, and its
+allocation already goes through the generic shim with the private-use-1 device type.
+
+So the premise of route A holds: **AOTI can generate a working native wrapper for this device from
+existing infrastructure.**
+
+What it costs per call is the part that matters:
+
+| arm | CPU submission |
+| --- | ---: |
+| AOTI C++ wrapper, called through its Python binding | **26.26 us** |
+| eager `torch.mul` on `flagos` (Python route) | 61.00 us |
+| direct `flag_gems.mul` call | 57.10 us |
+
+Correct in all three, same tensors, 1024x1024 float32. The wrapper is 2.3x faster than the Python
+route - and **still three times slower than the 8.24 us the Phase 0 host program reaches**.
+
+The reason is the entry, not the artifact. The compiled callable is invoked from Python: pybind
+argument parsing, `AtenTensorHandle` conversion and the GIL dance happen per call before the
+generated code runs. The Phase 0 host program is entered from the plugin's own caller, before the GIL
+is taken, which is why it is at 8.24 us.
+
+That is the three-layer model asserting itself in a measurement: route A supplies layer 2 (scheduling
+and code generation) and its artifact is sound, but the artifact still has to be **entered** from the
+plugin's C++ caller to reach the cost the design targets - which is layer 3, the part this repository
+already has and measured. Neither route is complete on its own, and the combination is what the
+numbers point to.
+
 **Route B. The C++ pointwise path is not in the wheel we consume.**
 
 The pinned FlagGems 5.4.0 installs as a **Python-only** package: the tree contains `ops`, `runtime`,
