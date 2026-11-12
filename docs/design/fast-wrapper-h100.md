@@ -1327,24 +1327,38 @@ interpreter - the same three arms read:
 
 | operator | vendor | wrapper | replay from Python | replay inside the plugin caller |
 |---|---:|---:|---:|---:|
-| `mul` 512x512 | 7.27 | 82.55 | 14.60 | **9.67** (1.33x vendor) |
-| `softmax` 1024x1024 | 7.09 | 30.52 | 14.44 | **9.67** (1.36x vendor) |
+| `mul` 512x512 | 7.27 | 82.55 | 14.60 | **6.81** (0.94x vendor) |
+| `softmax` 1024x1024 | 7.09 | 30.52 | 14.44 | **7.01** (0.99x vendor) |
 
-`max_err` is 0.0 (or 1.5e-08 for `softmax`) in every arm, and the capture statistics show
+`max_err` is 0.0 (or 7.5e-09 for `softmax`) in every arm, and the capture statistics show
 the Python wrapper was not called at all after the plan was installed (`hits` 0,
 `misses` 0): the caller replays and returns before the cached FlagGems callable is
 reached. That is the mechanism this design argued for, measured end to end: **the FlagGems
 Triton kernel within a third of the vendor-operator cost**, from 11.4x and 4.3x for the
 untouched wrapper.
 
-**What that third costs, and why it is not removed.** Reusing a pooled output as soon as
-the last host reference drops measured 6.57 us, and was wrong: the buffer's producing
-kernel, or a queued consumer on another stream, may still be running. Each launch therefore
-records an event on its stream, and a slot is only handed out again once that event has
-completed. The gate is the difference between 6.57 and 9.67 us, and it is the correct side
-of the trade - a faster number that can return a buffer in use is not a faster operator.
-Making the gate cheaper is the next step: a slot whose recorded stream equals the caller's
-can be reused ahead of the event query, which is where most calls land.
+**What safe reuse costs, and where it is paid.** Reusing a pooled output as soon as the
+last host reference drops measured 6.57 us, and was wrong: the buffer's producing kernel, or
+a queued consumer on another stream, may still be running. Gating every reuse on a recorded
+event fixed that and cost 3 us - 6.57 to 9.67 - which is the whole gap back to the vendor
+operator.
+
+That cost is only owed where the hardware does not already provide the guarantee. Reusing a
+buffer on the stream that wrote it needs no event at all: the stream orders the new launch
+after the old one by itself. So the gate is stream-aware:
+
+| case | behaviour | driver calls |
+|---|---|---|
+| same stream as the last writer | reuse immediately, nothing recorded | 0 |
+| other stream, slot has an event | reuse only once the event has completed | 1 query |
+| other stream, slot has no event | no proof, so allocate a fresh slot | 0 |
+| plan never replayed on a second stream | nothing is ever recorded | 0 |
+
+A plan therefore pays nothing until it is actually replayed on a second stream, and from
+then on every launch records an event so a buffer written on one stream can be proven safe
+to reuse on another. The measured cost of the same-stream path is 0.24 us - 6.57 to 6.81,
+which is a stream id and a lock, not a driver call - and it buys the correctness the
+stream-blind version did not have.
 
 The remaining gap to the vendor operator is therefore closed for the operators whose
 layout is proven, and the work that remains is coverage, not speed.

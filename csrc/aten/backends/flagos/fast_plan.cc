@@ -89,15 +89,20 @@ const DriverApi& Driver() {
 // A pooled result buffer.
 //
 // Reuse is gated twice, because two different things keep a buffer alive: a host tensor
-// that still references it (`busy`), and the GPU work that produced or consumes it. The
-// second is why dropping the last host reference is not enough - the producing kernel may
-// still be queued - so each launch records an event on its stream and a buffer is only
-// handed out again once that event has completed.
+// that still references it (`busy`), and the GPU work that produced or consumes it.
+//
+// The second gate is where the cost lives, so it is only paid where the hardware does not
+// already provide it. Reusing a buffer on the stream that wrote it needs no event: the
+// stream orders the new launch after the old one by itself. Reuse across streams does need
+// proof, so a slot written on another stream is only reused once an event recorded at that
+// launch has completed - and until such an event exists it is not reused at all.
 struct Slot {
   at::Tensor buffer;
   bool busy = false;
-  at::cuda::CUDAEvent done;  // recorded on the producing stream after each launch
+  int64_t stream_id = -1;    // the stream that last wrote it
+  at::cuda::CUDAEvent done;  // recorded only once a plan has been replayed on a second stream
   bool has_event = false;
+  bool queried_free = false;  // last query said the event had completed
 };
 
 struct Pool {
@@ -108,7 +113,7 @@ struct Pool {
   at::Device device = at::Device(at::kCPU);
   bool has_device = false;
 
-  size_t Acquire(const at::Device& wanted) {
+  size_t Acquire(const at::Device& wanted, int64_t stream_id) {
     std::lock_guard<std::mutex> guard(mutex);
     if (!has_device) {
       device = wanted;
@@ -119,15 +124,27 @@ struct Pool {
       if (slot.busy) {
         continue;  // a live tensor references it
       }
-      if (slot.has_event && !slot.done.query()) {
-        continue;  // the GPU may still be reading or writing it
+      if (slot.stream_id == stream_id) {
+        // Same stream: the stream itself orders this launch after whatever wrote it, so
+        // no event is needed and none is recorded on this path.
+        slot.busy = true;
+        slot.has_event = false;
+        return index;
       }
-      slot.busy = true;
-      return index;
+      // Another stream wrote it. Only reuse it with proof that the work drained; without
+      // an event there is no proof, so the caller gets a new buffer instead.
+      if (slot.has_event && slot.done.query()) {
+        slot.busy = true;
+        slot.stream_id = stream_id;
+        slot.has_event = false;
+        return index;
+      }
+      continue;
     }
     Slot fresh;
     fresh.buffer = at::empty({numel}, at::TensorOptions().dtype(dtype).device(device));
     fresh.busy = true;
+    fresh.stream_id = stream_id;
     slots.push_back(std::move(fresh));
     return slots.size() - 1;
   }
@@ -137,11 +154,16 @@ struct Pool {
     slots[index].busy = false;
   }
 
-  void RecordLaunch(size_t index, const c10::cuda::CUDAStream& stream) {
+  // Records an event only for plans that have been replayed on more than one stream. A
+  // plan that stays on one stream never pays for the gate at all.
+  void RecordLaunch(size_t index, const c10::cuda::CUDAStream& stream, bool need_event) {
     std::lock_guard<std::mutex> guard(mutex);
     Slot& slot = slots[index];
-    slot.done.record(stream);
-    slot.has_event = true;
+    slot.stream_id = static_cast<int64_t>(stream.id());
+    if (need_event) {
+      slot.done.record(stream);
+      slot.has_event = true;
+    }
   }
 
   void* DataPtr(size_t index) const { return slots[index].buffer.data_ptr(); }
@@ -175,6 +197,10 @@ struct Plan {
   c10::ScalarType out_dtype = c10::ScalarType::Float;
   std::shared_ptr<Pool> pool;
   std::atomic<int64_t> replays{0};
+  // The first stream the plan ran on, and whether a second one has been seen. Until it
+  // has, no event is recorded: a single-stream plan is ordered by its stream alone.
+  std::atomic<int64_t> first_stream{-1};
+  std::atomic<bool> multi_stream{false};
 };
 
 at::Tensor WrapSlot(const std::shared_ptr<Pool>& pool, size_t slot,
@@ -386,7 +412,22 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
   // named, and the pointer the plan replays with belongs to whatever device they sit on.
   const at::Device device = operands[0].device();
   const std::shared_ptr<Pool> pool = plan->pool;
-  const size_t slot = pool->Acquire(device);
+
+  // The replay runs before the caller's device guard, and both the CUfunction and the
+  // stream belong to a device, so select it here. A generic guard, not a CUDA one: the
+  // operands live on the plugin's own device type, which the CUDA guard rejects.
+  const c10::OptionalDeviceGuard guard(device);
+  const c10::cuda::CUDAStream stream = c10::cuda::getCurrentCUDAStream(device.index());
+  const int64_t stream_id = static_cast<int64_t>(stream.id());
+  // Observe the stream before acquiring: once a plan has run on two streams every launch
+  // records an event, so a buffer written on one can be proven safe to reuse on another.
+  int64_t expected = -1;
+  if (plan->first_stream.compare_exchange_strong(expected, stream_id)) {
+    // First stream seen; nothing to compare against yet.
+  } else if (expected != stream_id) {
+    plan->multi_stream.store(true, std::memory_order_relaxed);
+  }
+  const size_t slot = pool->Acquire(device, stream_id);
 
   // The arguments are assembled per call from the plan's template, so a replay never
   // writes to the plan and concurrent calls cannot overwrite each other's pointers.
@@ -406,16 +447,11 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
     kernel_params[index] = &values[index];
   }
 
-  // The replay runs before the caller's device guard, and both the CUfunction and the
-  // stream belong to a device, so select it here. A generic guard, not a CUDA one: the
-  // operands live on the plugin's own device type, which the CUDA guard rejects.
-  const c10::OptionalDeviceGuard guard(device);
-  const c10::cuda::CUDAStream stream = c10::cuda::getCurrentCUDAStream(device.index());
   if (Launch(*plan, stream.stream(), kernel_params.data()) != CUDA_SUCCESS) {
     pool->Release(slot);
     return at::Tensor();
   }
-  pool->RecordLaunch(slot, stream);
+  pool->RecordLaunch(slot, stream, plan->multi_stream.load(std::memory_order_relaxed));
   plan->replays.fetch_add(1, std::memory_order_relaxed);
   return WrapSlot(pool, slot, plan->out_shape, plan->out_dtype, operands[0].key_set(),
                   device);
