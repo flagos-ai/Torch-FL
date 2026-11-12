@@ -1,0 +1,15 @@
+# Python tools for the independent Hygon runtime-image CI venv.
+# System compilers and DTK come from the runtime image.
+pip>=23.2
+setuptools>=64
+wheel
+cmake>=3.19,<4
+ninja
+build
+pytest
+patchelf
+pybind11
+packaging>=26.0
+PyYAML==6.0.1
+sqlalchemy==2.0.48
+numpy<2

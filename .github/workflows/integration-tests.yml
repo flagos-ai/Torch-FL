@@ -168,7 +168,7 @@ jobs:
           cache_root="$root/.pip-cache"
           PIP_CACHE_DIR="$cache_root/${PLATFORM:?platform is required}"
           case "$PLATFORM" in
-            ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
+            hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
               source .github/scripts/lib/pip_cache.sh
               prepare_pip_cache "$PLATFORM" "$PIP_CACHE_KEY"
               exit 0

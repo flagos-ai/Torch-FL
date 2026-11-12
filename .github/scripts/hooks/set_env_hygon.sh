@@ -15,6 +15,30 @@
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 
+# The runtime owns /flagos and /opt/flagtree; neither is the CI environment.
+# Capture its interpreter before DTK env.sh changes PATH, and prevent child
+# shells from restoring the image-wide activation after CI selects its venv.
+HYGON_RUNTIME_REUSE=0
+if [[ "${VIRTUAL_ENV:-}" == /flagos || -n "${TORCH_FL_VENDOR_PYTHON:-}" ]]; then
+  HYGON_RUNTIME_REUSE=1
+  TORCH_FL_VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-/flagos/bin/python}"
+  export BASH_ENV=/dev/null
+  export PYTHONNOUSERSITE=1
+  export PYTHONPATH=""
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+fi
+
+hygon_runtime_requirement() {
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+      --check-installed "$1"; then
+    echo "Using prepared requirement: $1"
+  else
+    pip_retry --index-url "$PIP_INDEX_URL_ARG" "$1"
+  fi
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "$1"
+}
+
 # Locate the DTK install root. The image may ship DTK under /opt/dtk,
 # /opt/dtk-26.04, or a versioned directory; honor an explicit ROCM_PATH,
 # then probe common roots, then fall back to a filesystem search.
@@ -23,6 +47,7 @@ discover_dtk_root() {
   local -a candidates=(
     "${ROCM_PATH:-}"
     "/opt/dtk"
+    "/opt/dtk-26.10"
     "/opt/dtk-26.04"
     "/opt/dtk26.04"
     "/opt/dtk-26.04.4"
@@ -55,6 +80,11 @@ set +u
 source "$ROCM_PATH/env.sh"
 set -u
 export ROCM_PATH
+if [[ "$HYGON_RUNTIME_REUSE" == 1 ]]; then
+  export BASH_ENV=/dev/null
+  export PYTHONPATH=""
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+fi
 
 select_vendor_python() {
   local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
@@ -68,25 +98,25 @@ select_vendor_python() {
     echo "::error::Unable to find the vendor Python interpreter" >&2
     exit 1
   fi
-  if ! "$candidate" -c "import torch" >/dev/null 2>&1; then
-    echo "::error::Vendor Python cannot import torch: $candidate (was DTK env.sh sourced?)" >&2
+  if ! "$candidate" -I -c 'from importlib.metadata import distribution; distribution("torch")' >/dev/null 2>&1; then
+    echo "::error::Vendor Python has no torch distribution: $candidate" >&2
     exit 1
   fi
   printf '%s' "$candidate"
 }
 
 VENDOR_PYTHON="$(select_vendor_python)"
-VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
+VENDOR_INFO="$("$VENDOR_PYTHON" -I - <<'PY'
+from importlib import metadata
 import json
 from pathlib import Path
 import sys
 
-import torch
-
+dist = metadata.distribution("torch")
 print(json.dumps({
-    "version": torch.__version__,
-    "base_version": torch.__version__.split("+", 1)[0],
-    "root": str(Path(torch.__file__).resolve().parent),
+    "version": dist.version,
+    "base_version": dist.version.split("+", 1)[0],
+    "root": str(Path(dist.locate_file("torch")).resolve()),
     "python": sys.version.split()[0],
 }, sort_keys=True))
 PY
@@ -120,12 +150,41 @@ if [[ ! -f "$VENDOR_TORCH_LIB/libtorch_hip.so" ]]; then
   exit 1
 fi
 export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
+export FLAGOS_VENDOR_TORCH_VERSION="$VENDOR_TORCH_VERSION"
 
-# CPU torch base version must match the vendor's for ABI compatibility. The
-# DTK wheel version (e.g. 2.10.0+das on the current CI image) may differ across
-# DTK releases and from the CUDA/MetaX images, so derive the target from the
-# vendor wheel instead of hard-coding it.
+# Legacy images select a matching frontend. The runtime trial below explicitly
+# keeps the project's 2.10 frontend while measuring 2.13 device libraries.
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$VENDOR_TORCH_BASE_VERSION}"
+if [[ "$HYGON_RUNTIME_REUSE" == 1 ]]; then
+  CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+  CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}"
+  if [[ "$CPU_TORCH_VERSION" != 2.10.0 || "$VENDOR_TORCH_VERSION" != 2.13.0+dtk2610.* ]]; then
+    echo "::error::The DTK 26.10 trial requires CPU Torch 2.10.0 and DTK Torch 2.13.0" >&2
+    exit 1
+  fi
+  if ! "$VENDOR_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
+    echo "::error::The DTK 26.10 runtime cohort requires Python 3.12" >&2
+    exit 1
+  fi
+  # The existing opt-out allows this explicitly experimental cross-version
+  # combination to reach the original import/computation gates and hardware
+  # suite. Those gates below still assert all four CUDA dispatch registrations;
+  # the bundle's symbol ABI guard remains mandatory and unchanged.
+  export FLAGOS_DCU_SKIP_RUNTIME_CHECK=1
+  # A full vendor-core facade is a different configuration and requires a
+  # matching Python frontend. Do not claim its legacy smoke passed on 2.10.
+  export FLAGOS_DCU_SKIP_LEGACY_SMOKE=1
+  echo "::warning::Experimental CPU Torch 2.10 / DTK Torch 2.13 device-library cohort; version-equality gate bypassed, ABI and hardware checks retained"
+  echo "::warning::Legacy full-vendor-core smoke is excluded from this decoupled-only trial"
+  # Record only a version actually provided by the sourced SDK. A missing
+  # SDK version remains unknown rather than being inferred from the image tag.
+  if [[ "${DTK_VERSION:-}" =~ ^26\.10(\.[0-9]+)*$ ]]; then
+    export FLAGOS_SDK_VERSION="$DTK_VERSION"
+  else
+    unset FLAGOS_SDK_VERSION
+    echo "::warning::DTK env.sh did not provide a verified DTK_VERSION; SDK metadata remains unknown"
+  fi
+fi
 
 # FlagGems C++ package is optional for DCU (FLAGOS_BUILD_FLAGGEMS_CPP=OFF in setup.py);
 # the flaggems runtime path uses the DTK triton hcu backend + Python flag_gems.
@@ -163,6 +222,72 @@ echo "CPU torch target: $CPU_TORCH_VERSION+cpu"
 # not stage libtorch_cuda.so into .libtorch_cuda_assets; the DTK forked libtorch
 # .so are bundled into torch_fl/lib_hygon by bundle_hygon_libtorch.sh below.
 PREBUILT_VENV="${TORCH_FL_PREBUILT_DCU_VENV:-/opt/torch-fl-dcu-venv}"
+if [[ "$HYGON_RUNTIME_REUSE" == 1 ]]; then
+  suffix=""
+  if [[ "${BOXING_LANE:-}" == 1 ]]; then suffix=-boxing; fi
+  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-hygon-${CI_STAGE}${suffix}}"
+  "$VENDOR_PYTHON" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+target, repo = (Path(p).resolve() for p in sys.argv[1:])
+for prefix in (sys.prefix, sys.base_prefix):
+    source = Path(prefix).resolve()
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
+if repo.is_relative_to(target):
+    raise SystemExit("CI venv must not contain the source checkout")
+PY
+  if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
+    if ! command -v uv >/dev/null 2>&1; then
+      echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
+      exit 1
+    fi
+    uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
+  fi
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  "$VENV_PYTHON" -I - "$VENV_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+assert Path(sys.prefix).resolve() == root
+assert sys.prefix != sys.base_prefix
+settings = {}
+for line in (root / "pyvenv.cfg").read_text().splitlines():
+    key, separator, value = line.partition("=")
+    if separator:
+        settings[key.strip().lower()] = value.strip().lower()
+assert settings.get("include-system-site-packages") == "false"
+PY
+  "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --target-python "$VENV_PYTHON" \
+    --torch-version "$CPU_TORCH_VERSION" \
+    --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_hygon}" \
+    --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
+    --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_dcu}" \
+    --requirements-file "$REPO_ROOT/.github/requirements-hygon.txt"
+  export VIRTUAL_ENV="$VENV_ROOT"
+  export PATH="$VENV_ROOT/bin:$PATH"
+  while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+    [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+    hygon_runtime_requirement "$requirement"
+  done < "$REPO_ROOT/.github/requirements-hygon.txt"
+  "$VENV_PYTHON" - <<'PY'
+import build
+import setuptools
+from setuptools.command.editable_wheel import editable_wheel
+
+print(f"Build frontend: {build.__version__}")
+print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
+PY
+  CPU_TORCH_VERSION="$CPU_TORCH_VERSION+cpu"
+  install_cpu_torch
+  CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}"
+  if [[ "$CI_STAGE" == integration ]]; then
+    hygon_runtime_requirement transformers
+  fi
+else
 if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
   VENV_ROOT="$PREBUILT_VENV"
   echo "Using prebuilt DCU venv: $VENV_ROOT"
@@ -194,6 +319,7 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
     # transformers pulls numpy 2.x which breaks torch's C extensions at import.
     "$VENV_PYTHON" -m pip install pytest transformers "numpy<2"
   fi
+fi
 fi
 
 # Install the published DTK-specific FlagCX wheel below. Triton is deliberately
@@ -260,7 +386,7 @@ FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_dcu}"
 # SHA-256 for each wheel, so pip verifies the download before installing it.
 install_flag_gems
 
-# FlagCX is a cp310 wheel built for DTK 26.04, matching the DCU CI image.
+# FlagCX follows the DTK/Python cohort pinned for the current runtime image.
 # Remove any files previously copied from the vendor Python before installing
 # a different version, since those copies are not necessarily pip-managed.
 if "$VENV_PYTHON" - "$FLAGCX_VERSION" <<'PY'
@@ -289,10 +415,15 @@ export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
 # the stock +cpu torch C extensions at import.
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+if [[ "$HYGON_RUNTIME_REUSE" == 1 ]]; then
+  "$VENV_PYTHON" -m pip check
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
+else
+  pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
+  pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
+  pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+  pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+fi
 
 CPU_TORCH_ROOT="$(CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
 import os
@@ -620,6 +751,12 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
+  if [[ "$HYGON_RUNTIME_REUSE" == 1 ]]; then
+    export_ci_env BASH_ENV FLAGOS_VENDOR_TORCH_VERSION FLAGOS_DCU_SKIP_RUNTIME_CHECK FLAGOS_DCU_SKIP_LEGACY_SMOKE
+    if [[ -n "${FLAGOS_SDK_VERSION:-}" ]]; then
+      export_ci_env FLAGOS_SDK_VERSION
+    fi
+  fi
 
   # The boxing lane assigns these; the vendor lane leaves them unset, and
   # export_ci_env reads every name under `set -u`. Assign the empty default here

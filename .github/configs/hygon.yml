@@ -18,10 +18,10 @@ display_name: Hygon DCU
 setup_script: .github/scripts/set_env.sh
 setup_platform: hygon
 
-# Pinned CI image: DTK base plus the /opt/torch-fl-dcu-venv Python environment
-# used by set_env_hygon.sh. The script still falls back to creating a fresh venv
-# when the prebuilt one is absent, but the CI image should avoid network installs.
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
+# Experimental decoupled cohort: CPU Torch 2.10 with DTK 26.10 device libraries
+# from the runtime's Torch 2.13. Both existing hardware lanes validate it;
+# a successful image pull or environment setup does not establish compatibility.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-hygon-dtk26.10:2.3.0@sha256:8b0c171807b0a25358cf1ce8a269728a9de392ea6a0c280f88250807ba4cccf0
 
 runner_labels:
   - hg-8g-cicd-pytorch
@@ -37,6 +37,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/hygon_memory.h
   - .github/scripts/hooks/set_env_hygon.sh
   - .github/scripts/set_env_hygon.sh
+  - .github/requirements-hygon.txt
   - scripts/vendor/bundle_hygon_libtorch.sh
   - scripts/vendor/check_hygon_core_abi.py
 
@@ -111,6 +112,8 @@ environment_check:
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
+    - /flagos/
+    - /opt/flagtree/
   require_package_files:
     - lib/libtorch_fl.so
   flagos_devices:
@@ -124,6 +127,8 @@ boxing_environment_check:
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
+    - /flagos/
+    - /opt/flagtree/
   require_package_files:
     - lib/libtorch_fl.so
   flagos_devices:

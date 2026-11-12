@@ -25,7 +25,7 @@ pip_cache_try_directory() {
       old_key="$(cat "$candidate.key")" || return 1
     fi
     if [[ -n "$old_key" && "$old_key" != "$key" ]]; then
-      echo "pip cache key changed; discarding previous downloads at $candidate"
+      echo "pip cache key changed for $(basename "$candidate"); discarding previous downloads at $candidate"
       # Preserve the directory itself. Do not follow symlinks or change owners.
       # find includes hidden pip metadata as well as wheel/http directories.
       find "$candidate" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
@@ -39,7 +39,7 @@ prepare_pip_cache() {
   local platform="$1" key="${2:-}" requested="" candidate="" uid="" selected=0
   local job_root="${RUNNER_TEMP:-${REPO_ROOT:-$PWD}/.ci}"
   case "$platform" in
-    ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax) ;;
+    hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax) ;;
     *) echo "::error::Unsupported shared pip-cache platform: $platform" >&2; return 1 ;;
   esac
   export PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"
