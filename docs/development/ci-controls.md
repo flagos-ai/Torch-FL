@@ -6,7 +6,7 @@ test groups come from the shared integration manifest.
 
 ## Runtime environment preparation
 
-Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU and MetaX use the same preparation layout:
+Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same preparation layout:
 `.github/configs/<platform>.yml` selects the digest-pinned runtime and device
 access; `.github/scripts/set_env.sh` dispatches to
 `.github/scripts/hooks/set_env_<platform>.sh`; and
@@ -29,11 +29,17 @@ compiler backend and SDK follow each chosen runtime, while CPU Torch and
 published package pins retain their existing lane contracts. PPU also retains
 its two existing lanes: default uses CPU Torch without a vendor bundle; boxing
 bundles vendor libtorch after the existing native build. No additional native
-build, source-built Torch or test exclusions are introduced by this migration.
+build, source-built Torch or hardware test-selection exclusions are introduced
+by this migration. Hygon's [DTK 26.10 trial](../vendors/dcu/installation.md#dtk-2610-runtime-ci-trial)
+explicitly pairs CPU Torch 2.10 with vendor Torch 2.13 device libraries. It
+bypasses the existing version-equality gate, retains ABI/dispatch/computation
+checks and the two existing hardware suites, and excludes the separate
+full-vendor-core legacy smoke. This experimental cohort is not an accepted
+cross-version runtime contract.
 
 ## Download caching for the runtime-migration lanes
 
-Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU and MetaX use the same cache-selection helper,
+Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same cache-selection helper,
 `.github/scripts/lib/pip_cache.sh`, before their platform environment hooks run.
 The integration workflow prefers the existing runner-local
 `/__w/.pip-cache/<platform>` directory. It checks ownership, directory access
