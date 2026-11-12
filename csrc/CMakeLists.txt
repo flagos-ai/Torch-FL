@@ -369,6 +369,17 @@ else()
   message(STATUS "cuda_occupancy.h NOT found; kernel occupancy fields will be omitted")
 endif()
 
+# Fast replay of captured Triton kernels (csrc/aten/backends/flagos/fast_plan.cc).
+# It launches a cubin through the CUDA driver API on the current CUDA stream, so it is
+# compiled only for the CUDA accelerator; every other platform builds the stub that
+# declines to register a plan and keeps the Python route.
+if(_flagos_is_cuda)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_FAST_PLAN=1)
+  message(STATUS "fast plan replay: enabled (CUDA)")
+else()
+  message(STATUS "fast plan replay: stubbed (not a CUDA build)")
+endif()
+
 # ROCtracer headers for DCU profiler support. Similar to CUPTI above, we only
 # need headers at build time; runtime symbols are resolved via dlopen.
 #

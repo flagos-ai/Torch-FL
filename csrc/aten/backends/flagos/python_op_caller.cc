@@ -2,6 +2,8 @@
 
 #include "python_op_caller.h"
 
+#include "fast_plan.h"
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/csrc/autograd/python_variable.h>
@@ -700,6 +702,16 @@ at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weigh
 }
 
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args) {
+  // A registered plan replays the same FlagGems Triton kernel without entering the
+  // interpreter. It answers only for the exact call it was captured from; anything else
+  // - another shape, another scalar argument, no plan at all - falls through to the
+  // Python route below.
+  if (HasFastPlan(func_name)) {
+    at::Tensor replayed = TryFastReplay(func_name, args);
+    if (replayed.defined()) {
+      return replayed;
+    }
+  }
   const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
