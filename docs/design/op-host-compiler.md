@@ -728,18 +728,58 @@ node - Inductor has a path to emit the user's Triton kernel rather than generati
 therefore reuses the codegen and scheduling half, and does **not** avoid the capture half, which is
 the same in every route.
 
-`cpp_wrapper=True` is blocked in two layers. The first is a five-entry table:
+`cpp_wrapper=True` is blocked in layers that were then sized one at a time, and the last of them
+turned out to be an extension point rather than a wall - see "Route A, second layer" below for the
+sequence and for what it implies about the work.
+
+
+#### Route A, second layer: the gap is a device codegen, not an upstream fork
+
+Sizing AOTI's support for `flagos` took four steps and the last one changes the conclusion.
+
+1. **A five-entry device table blocks codegen.** `torch/_inductor/codegen/cpp_utils.py:79`
+   maps only meta, cpu, cuda, xpu and mps to ATen device types, and `cpp_wrapper_cpu.py:1622`
+   asserts on it. Adding `DEVICE_TO_ATEN["flagos"] = "at::kPrivateUse1"` clears the assertion.
+2. **The generated file includes a per-device header that does not exist.** The wrapper opens with
+   `#include <torch/csrc/inductor/cpp_wrapper/flagos.h>`, a name derived from the device type.
+   Torch ships `cpu.h`, `cuda.h`, `mps.h` and `xpu.h`, each about nine lines that pull in a common
+   header plus a device-specific one. Supplying `flagos.h` in the same shape is mechanical.
+3. **What the generated wrapper actually needs is the device's launch glue.** Once both headers
+   exist, compilation proceeds to generated code that declares `loadKernel` returning `CUfunction`
+   and `launchKernel(CUfunction, ..., cudaStream_t)` calling `cuLaunchKernel` - CUDA driver code,
+   emitted for this device. The standalone compile then fails because it is a plain `g++` line with
+   no CUDA toolkit include path, so `<cuda.h>` is not found.
+4. **But Inductor has a supported extension point for exactly this.** It does not require a fork:
 
 ```text
-torch/_inductor/codegen/cpp_utils.py:79
-DEVICE_TO_ATEN = {"meta", "cpu", "cuda", "xpu", "mps"}      # no privateuse1
-torch/_inductor/codegen/cpp_wrapper_cpu.py:1622  assert device.type in DEVICE_TO_ATEN
+torch/_inductor/codegen/common.py:578
+private_backend = torch._C._get_privateuse1_backend_name()
+if private_backend != "privateuseone" and get_scheduling_for_device(private_backend) is None:
+    device_scheduling   = _get_custom_mod_func("Scheduling")
+    wrapper_codegen     = _get_custom_mod_func("PythonWrapperCodegen")
+    cpp_wrapper_codegen = _get_custom_mod_func("CppWrapperCodegen")
+    fx_wrapper_codegen  = _get_custom_mod_func("WrapperFxCodegen")
+    if device_scheduling and wrapper_codegen and cpp_wrapper_codegen:
+        register_backend_for_device(private_backend, ...)
 ```
 
-Injecting `DEVICE_TO_ATEN["flagos"] = "at::kPrivateUse1"` clears that assertion and moves the
-failure to the generated standalone `header.hpp`, which fails to compile (`compilation terminated`,
-i.e. a missing include rather than a logic error). So the second layer is AOTI's standalone header
-support for a private-use-1 device, whose size these probes do not establish.
+`_get_custom_mod_func` resolves those names from the module registered by
+`torch._register_device_module(<privateuse1 name>, module)`. Torch-FL already registers it -
+`torch_fl/__init__.py:2453` calls `rename_privateuse1_backend("flagos")` and then
+`_register_device_module("flagos", flagos)` - so Inductor is already consulting a module this
+repository owns.
+
+**So the gap is: implement a `CppWrapperCodegen` for the `flagos` device module** that emits the
+plugin's own launch sequence (driver submission through the plugin's stream registry, which #820
+already provides) instead of the CUDA driver emission above, and supply the device table entry.
+That is bounded work inside Torch-FL rather than a PyTorch change, and it is the same runtime logic
+the Phase 0 host program contains - which makes route A and the prototype complementary in the way
+"What the host program is" describes: A would provide the scheduling and code generation, the plugin
+provides the device glue.
+
+Two limits on this finding, stated so it is not overclaimed: the probes ran on the CUDA-torch build,
+not CPU-torch + PrivateUse1, and nobody has yet written the `CppWrapperCodegen` to see whether the
+rest of AOTI's assumptions hold once one exists. The estimate for that is not in this document.
 
 **Route B. The C++ pointwise path is not in the wheel we consume.**
 
