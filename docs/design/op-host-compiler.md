@@ -210,6 +210,59 @@ dispatch key set including the autograd branch, version counter, resizable flag,
 format, storage offset, alignment and allocator stream association. These fail silently
 rather than loudly, so the equivalence tests are an entry condition, not a follow-up.
 
+## FAQ: how a host program differs from the replay plan cache
+
+Both are caches, so the distinction is not cache versus no cache. A replay plan memoises
+**values**; a host program memoises **code**. #822 states the same thing as its reason for
+existing: "recording one concrete execution captures values, not necessarily the expressions
+and branch conditions that produced those values".
+
+The captured `softmax` graph makes the difference concrete. What capture produced for
+`(2, 128, 4096)` was:
+
+```text
+empty_like(self, dtype=float32)
+triton_kernel_wrapper_mutation(grid=(256, 1, 1), kernel_idx=1, kwargs={output_ptr, input_ptr})
+```
+
+Read as a replay plan that is: *the grid is `(256, 1, 1)`, the output is pool slot 3, the
+input is the tensor at this address*. It holds for that shape and those addresses only. A
+different shape needs a different plan or a refusal, and because the output came from a
+persistent pool, its lifetime is managed by a reference count rather than by ATen.
+
+Read as a host program it is: *`rows = prod(shape[:-1])`, `grid = (rows, 1, 1)`, allocate an
+output of the input's shape with dtype float32, then launch the kernel with these parameter
+mappings*. The dimensions are inputs to the program, not constants in it, so one artifact
+serves every shape in its specialisation class, and allocation goes through the real
+allocator.
+
+| dimension | replay plan (#820) | host program (#822) |
+| --- | --- | --- |
+| what is stored | values: concrete dimensions, grid, pointers, output slot | code: metadata expressions, guards, allocation, launch mapping |
+| cache key | the concrete call, exact sizes included | the specialisation class (dtype, rank, layout, mode) |
+| a new shape | a new plan, so entries grow with shape churn | the same artifact; only the grid and scalars are recomputed |
+| allocation | persistent output pool, which is where its speed came from | the real allocator on every call |
+| output semantics | pooled buffers, kept distinct by reference counting | ordinary ATen allocation and lifetime |
+| branches | only the path that was observed | guards plus multiple launch sites, chosen per call |
+| analysable | no: it is data | yes: it is a program with structure |
+| failure mode | degrades or refuses on an unobserved shape | handles it, until the specialisation class changes |
+
+The relationship is a continuum rather than two rival designs. Advancing a plan into a host
+program takes three substitutions:
+
+1. replace baked dimensions, grid and scalars with expressions over metadata - parameterise;
+2. add guards that choose the path - specialise;
+3. replace the pooled output with a real allocation - correct semantics.
+
+#822 asks for exactly those three. #820 stops before the first, which is why it is fast and
+why it only covers what it recorded.
+
+This also explains why the 7 us cannot be inherited. Two different savings were being summed:
+skipping Python, which a host program also does, and skipping allocation, which #820 did by
+pooling. Pooling rests on a plan being tied to a fixed output shape, so the moment that tie
+is removed the saving goes with it. That is about 4 us of the 7. A host program has to
+recover it through the allocation fast path instead, which is a separate piece of work.
+
 ## Open questions
 
 - Runtime host compilation: this design assumes a host C++ compiler is available at run
