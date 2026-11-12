@@ -22,8 +22,9 @@ import time
 def copy_distribution(distribution, target_site, target_bin, target_python):
     """Copy RECORD-owned files, never expose a source site-packages directory."""
     root = Path(distribution.locate_file("")).resolve()
+    record_text = distribution.read_text("RECORD")
     files = distribution.files
-    if not files:
+    if not record_text or not files:
         return False
     console_scripts = {
         entry.name: entry
@@ -35,6 +36,22 @@ def copy_distribution(distribution, target_site, target_bin, target_python):
     for name in console_scripts:
         launcher = target_bin / name
         if launcher.exists() or launcher.is_symlink():
+            return False
+    # Python 3.12 metadata filters missing files out of distribution.files.
+    # Check the complete RECORD before accepting that filtered installation.
+    # Missing console launchers are safe because they are regenerated below.
+    listed = {str(entry) for entry in files}
+    for row in csv.reader(record_text.splitlines()):
+        if len(row) != 3:
+            return False
+        if row[0] not in listed:
+            relative = Path(row[0])
+            if (
+                ".." in relative.parts
+                and relative.parent.name == "bin"
+                and relative.name in console_scripts
+            ):
+                continue
             return False
     planned = []
     record = None

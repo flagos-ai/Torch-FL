@@ -207,7 +207,27 @@ def test_runtime_copy_refuses_import_hooks_and_vendor_packages(tmp_path, extra):
     assert not target.exists()
 
 
-def test_runtime_copy_falls_back_when_recorded_files_are_missing(tmp_path):
+@pytest.fixture(params=[False, True], ids=["native-metadata", "filtered-metadata"])
+def metadata_filters_missing(request, monkeypatch):
+    """Exercise the Python 3.12 metadata behavior on older test interpreters too."""
+    if request.param:
+        original = metadata.Distribution.files.fget
+        monkeypatch.setattr(
+            metadata.Distribution,
+            "files",
+            property(
+                lambda dist: [
+                    entry
+                    for entry in original(dist) or []
+                    if dist.locate_file(entry).exists()
+                ]
+            ),
+        )
+
+
+def test_runtime_copy_falls_back_when_recorded_files_are_missing(
+    tmp_path, metadata_filters_missing
+):
     source = tmp_path / "runtime"
     dist = runtime_distribution(source)
     (source / "torch/compiler").unlink()
@@ -218,7 +238,9 @@ def test_runtime_copy_falls_back_when_recorded_files_are_missing(tmp_path):
     assert not target.exists()
 
 
-def test_runtime_copy_refuses_unhandled_external_data_files(tmp_path):
+def test_runtime_copy_refuses_unhandled_external_data_files(
+    tmp_path, metadata_filters_missing
+):
     dist = runtime_distribution(tmp_path / "runtime")
     record = dist._path / "RECORD"
     with record.open("a", newline="") as output:
@@ -230,7 +252,9 @@ def test_runtime_copy_refuses_unhandled_external_data_files(tmp_path):
     assert not target.exists()
 
 
-def test_runtime_copy_regenerates_recorded_console_scripts(tmp_path):
+def test_runtime_copy_regenerates_recorded_console_scripts(
+    tmp_path, metadata_filters_missing
+):
     dist = runtime_distribution(tmp_path / "runtime")
     with (dist._path / "RECORD").open("a", newline="") as output:
         csv.writer(output).writerow(("../../../bin/torchrun", "", ""))
