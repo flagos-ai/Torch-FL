@@ -299,6 +299,56 @@ For `mul` the selection is trivial because its only constexpr is fixed; for `sof
 and that difference - not the operator's arithmetic - is what decides whether one artifact is
 enough.
 
+
+### Multi-artifact selection, implemented and measured
+
+The previous section states the rule; this one implements it. A registered operator now holds a
+list of artifacts, each with the metadata range it is valid for, and the call selects by the
+same value the constexpr was derived from:
+
+```cpp
+struct HostVariant {
+  CUfunction fn;
+  int num_warps;
+  int64_t shared;
+  int64_t min_n;   // the artifact claims [min_n, max_n] of the constexpr's driving value
+  int64_t max_n;
+};
+```
+
+Selection happens *before* the allocation, so a call no artifact covers costs a lookup and
+falls back; it is counted as `no_variant` rather than silently declining. Registering a bare
+program still works and installs one artifact claiming every size - correct for `mul`, whose
+only constexpr is a fixed `BLOCK_SIZE`.
+
+For `softmax` two artifacts were compiled, one per reduction width, and each registered for
+exactly the width it was built for. They are genuinely different specialisations - the 4096
+artifact has 16 warps and 64 bytes of shared memory, the 1024 artifact 4 warps and 16 bytes -
+which is the point: one artifact cannot serve the other.
+
+| shape | host program | Python route | ratio | correct |
+| --- | ---: | ---: | ---: | --- |
+| (4, 4096) | 8.86 us | 30.71 us | 3.5x | yes |
+| (128, 4096) | 9.03 us | 30.37 us | 3.4x | yes |
+| (4, 1024) | 9.00 us | 29.34 us | 3.3x | yes |
+| (128, 1024) | 9.00 us | 30.12 us | 3.4x | yes |
+| (2, 128, 4096) | 9.00 us | 30.39 us | 3.4x | yes |
+
+Every call took its variant and every result matched. The cost is flat at about 9.0 us across
+widths and row counts, which is what a fixed-overhead win looks like.
+
+A width no artifact covers behaves the way the design requires:
+
+| case | took the host program | counter | result |
+| --- | --- | --- | --- |
+| width 512, no artifact | no | `no_variant` + 1 | correct |
+
+So the two ends are both pinned down: a covered shape runs native, an uncovered one declines
+through a counted path and the Python route answers correctly. What remains for real coverage
+is the part a compiler owns rather than a prototype - deciding, before compiling, which
+constexpr classes a shape population will need, and compiling the variants up front instead of
+on the first call that wants one.
+
 ### What this says about the design
 
 The exit branch this lands in is the first one: capture is complete and a native entry point
