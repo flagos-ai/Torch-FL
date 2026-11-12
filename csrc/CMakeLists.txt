@@ -470,7 +470,15 @@ endif()
 # whether any op actually routes to Backend::kTileOps.
 if(FLAGOS_BUILD_TILEOPS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
-  if(FLAGOS_ACCELERATOR STREQUAL "metax" AND NOT FLAGOS_BUILD_BOXING)
+  # `_flagos_is_metax`, not `FLAGOS_ACCELERATOR STREQUAL "metax"`. Every other
+  # per-platform gate in this file already reads the resolver's flags, and
+  # tests/unit/test_cmake_platform_gates.py requires it: a literal comparison
+  # matches one of the two spellings FLAGOS_ACCELERATOR accepts, so it silently
+  # stops matching for a build told the other one. For metax that cannot bite
+  # today -- its id and vendor are both `metax`, so both spellings are the same
+  # string -- but the gate should not depend on that coincidence, and the rule
+  # exists so nobody has to recheck each new gate by hand.
+  if(_flagos_is_metax AND NOT FLAGOS_BUILD_BOXING)
     target_compile_definitions(${LIBRARY_NAME} PRIVATE
       FLAGOS_TILEOPS_METAX_NO_BOXING=1)
   endif()

@@ -30,6 +30,12 @@ strided copy in ``_copy_from`` and the strided gathers in
 on the default PPU and NVIDIA wheels (four cases in ``test_ops.py``'s
 ``TestAutograd`` and ``test_clone_contiguous_format_works``). Each of those arms
 takes the same link-time branch.
+
+The MUSA arm has a different limit: mudnn's ``Unary::CAST`` maps a fixed dtype
+table, and ``MudnnCopy``'s check aborts on a pair outside it -- float to
+uint16/uint32/uint64 are the ones ATen still answers on the host. The arm asks
+``MudnnSupportsCast`` first so those pairs keep the CPU round trip that follows
+it, instead of dying in the check on a request ATen defines.
 """
 
 import re
@@ -41,6 +47,8 @@ REPO = Path(__file__).resolve().parents[2]
 COPY_OPS = REPO / "csrc/aten/copy_ops.cc"
 CONTIGUOUS_OPS = REPO / "csrc/aten/contiguous_ops.cc"
 CSRC_CMAKE = REPO / "csrc/CMakeLists.txt"
+MUDNN_COMMON = REPO / "csrc/aten/backends/mthreads/mudnn_common.h"
+MUDNN_COPY = REPO / "csrc/aten/backends/mthreads/mudnn_copy.cc"
 
 
 def _read(path: Path) -> str:
@@ -176,3 +184,48 @@ def test_contiguous_gather_arms_box_only_when_libtorch_cuda_is_linked():
             "an arm boxes without a host-gather fallback for the wheel whose "
             "torch has no CUDA copy kernel"
         )
+
+
+@pytest.mark.anyplatform
+def test_musa_cast_arm_declines_what_mudnn_cannot_map():
+    """A MUSA cast mudnn cannot map keeps the host round trip.
+
+    ``_to_copy``'s MUSA arm used to hand every dtype pair to ``MudnnCopy``, and
+    its ``TORCH_CHECK`` aborts on a pair outside mudnn's table -- float to
+    uint16/uint32/uint64 among them, which ATen answers on the host. The arm has
+    to ask the predicate first and leave ``result`` undefined so the CPU round
+    trip below it answers the cast.
+    """
+    src = _read(COPY_OPS)
+    branch = src.find("if (src_is_flagos && dst_is_flagos) {")
+    assert branch != -1, "the same-device flagos copy branch is gone"
+    start = src.find("#ifdef FLAGOS_MUSA_KERNEL", branch)
+    assert start != -1, "the MUSA cast arm is gone"
+    end = src.find("#endif", start)
+    arm = src[start:end]
+    assert "MudnnSupportsCast" in arm, (
+        "the MUSA cast arm calls MudnnCopy unconditionally again, so a "
+        "float -> uint16/uint32/uint64 cast aborts in its TORCH_CHECK"
+    )
+    assert "MudnnCopy(self_contig, result)" in arm, (
+        "the arm stopped casting on device, so every .to(dtype) pays the host "
+        "round trip even for the pairs mudnn can serve"
+    )
+    assert src.find("if (!result.defined()) {", end) != -1, (
+        "the host round-trip fallback the declined pairs rely on is gone"
+    )
+
+    # The predicate must state exactly what MudnnCopy aborts on, or the arm and
+    # the check disagree and the abort comes back for a pair the arm allowed.
+    header = _read(MUDNN_COMMON)
+    predicate = header.find("inline bool MudnnSupportsCast(")
+    assert predicate != -1, "the MudnnSupportsCast predicate is gone"
+    body = header[predicate : header.find("}", predicate)]
+    assert "MudnnSupportsDtype(src)" in body
+    assert "MudnnSupportsDtype(dst)" in body
+    copy_impl = _read(MUDNN_COPY)
+    check = copy_impl.find('"MudnnCopy: unsupported dtype ')
+    assert check != -1, "MudnnCopy's dtype check is gone"
+    check_body = copy_impl[max(0, check - 400) : check]
+    assert "MudnnSupportsDtype(src.scalar_type())" in check_body
+    assert "MudnnSupportsDtype(dst.scalar_type())" in check_body
