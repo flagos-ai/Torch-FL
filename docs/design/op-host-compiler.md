@@ -647,6 +647,72 @@ result is known:
   synchronised end to end, and cache pressure - with the budget and the measurement tolerance fixed
   before the experiment, and vendor parity reported as its own line.
 
+
+### First observations on A and B
+
+Both routes were probed against the pinned cohort rather than argued about. The probes ran on the
+CUDA-torch build available here, not on CPU-torch + PrivateUse1, so they are **first observations
+that do not settle the comparison** - they locate the blockers and size them.
+
+**Route A. Inductor can compile on `flagos`, but at the ATen level it replaces the kernel.**
+
+`torch.compile` with the default backend compiles a `torch.mul` on `flagos` tensors and returns
+correct results. What it does not do is call FlagGems: with `flag_gems.mul` instrumented, the
+compiled function calls it **zero** times, on the first call and on warm calls, while the eager
+call calls it once. Inductor lowers `aten::mul` from the ATen level to its own Triton kernel, so the
+original FlagGems kernel is not preserved - the outcome the review identifies as not completing the
+goal.
+
+That is a statement about the *level* at which Inductor is entered, not a dead end. Inductor does
+register a lowering for the node a FlagGems-internal capture produces:
+
+```text
+torch/_inductor/lowering.py:7280:  @register_lowering(triton_kernel_wrapper_mutation)
+```
+
+so if the capture happens inside the wrapper - the gate 2 experiment, which produced exactly that
+node - Inductor has a path to emit the user's Triton kernel rather than generating its own. Route A
+therefore reuses the codegen and scheduling half, and does **not** avoid the capture half, which is
+the same in every route.
+
+`cpp_wrapper=True` is blocked in two layers. The first is a five-entry table:
+
+```text
+torch/_inductor/codegen/cpp_utils.py:79
+DEVICE_TO_ATEN = {"meta", "cpu", "cuda", "xpu", "mps"}      # no privateuse1
+torch/_inductor/codegen/cpp_wrapper_cpu.py:1622  assert device.type in DEVICE_TO_ATEN
+```
+
+Injecting `DEVICE_TO_ATEN["flagos"] = "at::kPrivateUse1"` clears that assertion and moves the
+failure to the generated standalone `header.hpp`, which fails to compile (`compilation terminated`,
+i.e. a missing include rather than a logic error). So the second layer is AOTI's standalone header
+support for a private-use-1 device, whose size these probes do not establish.
+
+**Route B. The C++ pointwise path is not in the wheel we consume.**
+
+The pinned FlagGems 5.4.0 installs as a **Python-only** package: the tree contains `ops`, `runtime`,
+`utils`, `modules` and no `cpp/` directory, no shared objects, and neither `prebuild_kernels.py` nor
+`pointwise_prepare_args.h`. Those exist in FlagGems' source repository - which is what the review
+cites - but not in the artifact this project pins.
+
+So route B cannot be measured against the current cohort without one of: a FlagGems wheel that ships
+the C++ path, building FlagGems from source (which the dependency policy forbids precisely because it
+changes the cohort under measurement), or vendoring those sources into Torch-FL and maintaining the
+copy. None of the three is a code change in this repository, which is why the route needs a decision
+about the dependency before it can be evaluated rather than a prototype.
+
+What route B would contribute is real and worth the decision: `get_kernel_info(rank)`, the schema,
+type promotion and configuration generation already encode part of the host semantics proposed here,
+and a shared native argument-preparation path is the piece a self-built compiler would otherwise
+duplicate. Its CUDA-stream dependency would need to become the plugin's stream registry for a
+CPU-torch build, which is the same substitution #820 already made in the driver path.
+
+**What the probes change about the plan.** Neither route removes the capture work; both are
+integration efforts against existing infrastructure, which is exactly what the review predicted. The
+ordering below is unchanged, but A and B now have concrete entry conditions: A needs AOTI standalone
+support for a private-use-1 device sized, and B needs a decision on how the C++ sources enter the
+cohort.
+
 ### Where that leaves the recommendation
 
 The order should be: **A and B in parallel first, on a common operator set; C only if both are
