@@ -795,6 +795,15 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     but `none` is no answer either -- the boxed fallback mutates a CPU copy, so
     `self.add_(other)` measured unchanged. register.cc publishes ATen's add_/
     div_ for the five overloads, and the conf spells them all on that slot.
+
+    `add.Tensor` left this set on 2026-11-10 and is no longer gapped for that
+    defect: the out-of-place spelling is now routed straight to FlagGems (545
+    calls per forward of issue #667's model, measured 2790.0 -> 2400.7 ms), and
+    the complex operand that route cannot serve leaves it through
+    `FlagGemsRejectsDtype`'s USE_ILUVATAR arm instead, landing on the host round
+    trip register.cc publishes in the kIluvatar slot. `add.Scalar` is not gapped
+    either, and not routed: FlagGems 5.4.0 ships no kernel for that overload, so
+    the route is `none` for lack of coverage rather than for a defect.
     """
     routes = g.build_all(CONF_DIR)["iluvatar"][1]
 
@@ -807,8 +816,6 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         "addmm.dtype_out",
         "addmm.out",
         "addmm_",
-        "add.Scalar",
-        "add.Tensor",
         "add_.Scalar",
         "add_.Tensor",
         "_conj_copy.out",
@@ -847,12 +854,20 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
     ):
         assert op in g.EXTRA_NATIVE["iluvatar"], op
         assert route(op) == "iluvatar", op
-    # The out-of-place spellings reach the same in-place kernel through ATen's
-    # lowering, so they must leave FlagGems without being claimed themselves.
-    for op in ("add.Scalar", "add.Tensor"):
-        assert op in g.NATIVE_TRITON_GAPS["iluvatar"], op
-        assert op not in g.EXTRA_NATIVE["iluvatar"], op
-        assert route(op) not in ("flaggems", "flaggems_cpp"), op
+    # `add.Scalar` is neither gapped nor routed: FlagGems 5.4.0 has no kernel
+    # for that overload, so there is nothing to route it to and the route stays
+    # `none` -- the complex escape never sees it, because the escape only fires
+    # on a `flaggems` route.
+    assert "add.Scalar" not in g.NATIVE_TRITON_GAPS["iluvatar"]
+    assert "add.Scalar" not in g.EXTRA_NATIVE["iluvatar"]
+    assert route("add.Scalar") not in ("flaggems", "flaggems_cpp")
+    # `add.Tensor` is routed to FlagGems, with the complex operands leaving that
+    # route at run time through FlagGemsRejectsDtype's USE_ILUVATAR arm. It is
+    # not claimed here: its m.impl belongs to the FlagGems wrapper, and the
+    # landing is a kIluvatar dispatcher slot rather than a second registration.
+    assert "add.Tensor" not in g.NATIVE_TRITON_GAPS["iluvatar"]
+    assert "add.Tensor" not in g.EXTRA_NATIVE["iluvatar"]
+    assert route("add.Tensor") == "flaggems"
     for op in (
         "_conj_copy.out",
         "addmm.dtype",
