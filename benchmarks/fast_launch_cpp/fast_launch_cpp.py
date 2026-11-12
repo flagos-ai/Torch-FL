@@ -527,30 +527,33 @@ def _register_with_plugin(
     """
     import torch  # noqa: PLC0415 - torch is only needed on this path
 
-    registry = getattr(torch.ops, "flagos_fast_plan", None)
-    if registry is None:
-        raise Unsupported(
-            "this wheel has no flagos_fast_plan registry (built without the fast plan)"
-        )
     image = torch.frombuffer(bytearray(cubin), dtype=torch.uint8)
-    registered = registry.register_fast_plan(
-        key,
-        kernel,
-        image,
-        grid_x,
-        grid_y,
-        grid_z,
-        threads,
-        shared,
-        device,
-        kinds,
-        ints,
-        operand_shapes,
-        operand_dtypes,
-        scalars,
-        out_shape,
-        out_dtype,
-    )
+    # torch.ops creates a namespace on attribute access even when nothing registered under
+    # it, so asking for the namespace proves nothing; the operator itself is the check, and
+    # a missing one is a wheel without the fast plan rather than a broken operator.
+    try:
+        registered = torch.ops.flagos_fast_plan.register_fast_plan(
+            key,
+            kernel,
+            image,
+            grid_x,
+            grid_y,
+            grid_z,
+            threads,
+            shared,
+            device,
+            kinds,
+            ints,
+            operand_shapes,
+            operand_dtypes,
+            scalars,
+            out_shape,
+            out_dtype,
+        )
+    except AttributeError as error:
+        raise Unsupported(
+            "this wheel has no fast-plan registration operator"
+        ) from error
     if not registered:
         raise Unsupported("the plugin refused the plan (driver, cubin or kernel)")
 
@@ -559,12 +562,12 @@ def _unregister_with_plugin(*, key):
     """Withdraw a plan from the plugin's registry."""
     import torch  # noqa: PLC0415 - torch is only needed on this path
 
-    registry = getattr(torch.ops, "flagos_fast_plan", None)
-    if registry is None:
+    try:
+        return torch.ops.flagos_fast_plan.unregister_fast_plan(key)
+    except AttributeError as error:
         raise Unsupported(
-            "this wheel has no flagos_fast_plan registry (built without the fast plan)"
-        )
-    return registry.unregister_fast_plan(key)
+            "this wheel has no fast-plan registration operator"
+        ) from error
 
 
 def enable(names, package=None):

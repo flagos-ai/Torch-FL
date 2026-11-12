@@ -6,6 +6,7 @@
 
 #include <ATen/ATen.h>
 #include <ATen/core/Tensor.h>
+#include <c10/core/DeviceGuard.h>
 #include <c10/core/ScalarType.h>
 #include <c10/core/Storage.h>
 #include <c10/core/TensorImpl.h>
@@ -22,15 +23,25 @@
 
 #if defined(FLAGOS_HAVE_FAST_PLAN)
 
-// The driver entry points are resolved at runtime rather than linked: the plugin links the
-// CUDA runtime, not the driver, and resolving keeps this file compiling on platforms whose
-// toolchain has no driver library. A platform where they do not resolve simply never
-// registers a plan and keeps the Python route.
+// The stream and event plumbing comes from the platform runtime, not from torch. This
+// build links the CPU torch wheel: libtorch_cuda.so and libc10_cuda.so are not shipped, so
+// naming c10::cuda at all would leave symbols the loader cannot resolve - even on a real
+// NVIDIA box, and even when replay is never enabled. `flagos.h` reaches the same stream and
+// event objects through the runtime the plugin already ships.
+#include <flagos.h>
+
+// Decides where "the current stream" comes from. The header defines
+// FLAGOS_GUARD_HAS_CUDA_STREAM and pulls in c10/cuda/CUDAStream.h only for the builds that
+// ship CUDA torch, so a CPU torch wheel never names a c10::cuda symbol - which is what
+// keeps that wheel loadable.
+#include "runtime/guard.h"
+
+// The driver entry points are resolved at runtime rather than linked: this build does not
+// link libcuda either, and resolving keeps the file compiling where the driver library is
+// absent. A platform where they do not resolve never registers a plan and keeps the Python
+// route.
 #include <dlfcn.h>
 
-#include <c10/core/DeviceGuard.h>
-#include <ATen/cuda/CUDAEvent.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 
 namespace at::native::flagos {
@@ -86,95 +97,190 @@ const DriverApi& Driver() {
   return api;
 }
 
-// A pooled result buffer.
+// A runtime event whose completion can be queried later.
+//
+// The runtime reports a counterpart it does not implement as ErrorNotSupported, and that is
+// a completed query: there is nothing outstanding to wait for. A genuinely pending event
+// answers ErrorNotReady.
+// The stream the caller's work is on.
+//
+// Where the build ships CUDA torch that is torch's own stream; where it does not - the CPU
+// torch wheel this plugin must stay loadable under - it is the plugin's per-device registry,
+// which is the only registry that exists there.
+Stream_t CurrentStreamOf(const at::Device& device) {
+#if FLAGOS_GUARD_HAS_CUDA_STREAM
+  return reinterpret_cast<Stream_t>(
+      c10::cuda::getCurrentCUDAStream(device.index()).stream());
+#else
+  return ::GetCurrentStreamForDevice(device.index());
+#endif
+}
+
+bool Complete(Event_t event) {
+  const Error_t status = ::EventQuery(event);
+  return status == Success || status == ErrorNotSupported;
+}
+
+int64_t StreamIdOf(Stream_t stream) { return static_cast<int64_t>(reinterpret_cast<uintptr_t>(stream)); }
+
+// One pooled result buffer.
 //
 // Reuse is gated twice, because two different things keep a buffer alive: a host tensor
-// that still references it (`busy`), and the GPU work that produced or consumes it.
+// that still references it (`busy`), and GPU work that produces or consumes it.
 //
-// The second gate is where the cost lives, so it is only paid where the hardware does not
-// already provide it. Reusing a buffer on the stream that wrote it needs no event: the
-// stream orders the new launch after the old one by itself. Reuse across streams does need
-// proof, so a slot written on another stream is only reused once an event recorded at that
-// launch has completed - and until such an event exists it is not reused at all.
+// The second gate is only paid where the hardware does not already provide it. Reuse on the
+// stream that wrote the buffer needs no event - that stream orders the new launch after the
+// old one - but reuse on another stream needs proof, and a result can be consumed on
+// another stream after the host reference is gone. So: a consumer that drops a result while
+// a different stream is current records an event on that stream, and reuse waits for it.
 struct Slot {
   at::Tensor buffer;
   bool busy = false;
-  int64_t stream_id = -1;    // the stream that last wrote it
-  at::cuda::CUDAEvent done;  // recorded only once a plan has been replayed on a second stream
-  bool has_event = false;
-  bool queried_free = false;  // last query said the event had completed
+  int64_t producer_stream = -1;
+  Event_t producer_event = nullptr;
+  bool has_producer_event = false;
+  Event_t consumer_event = nullptr;
+  bool has_consumer_event = false;
+};
+
+// What a caller needs from a slot, read while the pool is locked so that growing the slot
+// vector can never invalidate a pointer a replay is about to launch with.
+struct Lease {
+  size_t index = 0;
+  void* data = nullptr;
 };
 
 struct Pool {
   std::mutex mutex;
-  std::vector<Slot> slots;
+  // Unique pointers, not values: a push_back must not move a slot whose pointer a concurrent
+  // replay is using. With this, a Slot address is stable for the life of the pool.
+  std::vector<std::unique_ptr<Slot>> slots;
   int64_t numel = 0;
   c10::ScalarType dtype = c10::ScalarType::Float;
   at::Device device = at::Device(at::kCPU);
   bool has_device = false;
+  // Set when the runtime cannot create events at all. Cross-stream reuse is then refused
+  // outright rather than assumed safe.
+  bool events_unavailable = false;
 
-  size_t Acquire(const at::Device& wanted, int64_t stream_id) {
+  ~Pool() {
+    for (auto& slot : slots) {
+      if (slot->producer_event != nullptr) {
+        ::EventDestroy(slot->producer_event);
+      }
+      if (slot->consumer_event != nullptr) {
+        ::EventDestroy(slot->consumer_event);
+      }
+    }
+  }
+
+  bool EnsureEvent(Event_t* event) {
+    if (*event != nullptr) {
+      return true;
+    }
+    if (events_unavailable) {
+      return false;
+    }
+    Event_t created = nullptr;
+    if (::EventCreate(&created) != Success || created == nullptr) {
+      events_unavailable = true;
+      return false;
+    }
+    *event = created;
+    return true;
+  }
+
+  Lease Acquire(const at::Device& wanted, int64_t stream_id) {
     std::lock_guard<std::mutex> guard(mutex);
     if (!has_device) {
       device = wanted;
       has_device = true;
     }
     for (size_t index = 0; index < slots.size(); ++index) {
-      Slot& slot = slots[index];
+      Slot& slot = *slots[index];
       if (slot.busy) {
         continue;  // a live tensor references it
       }
-      if (slot.stream_id == stream_id) {
-        // Same stream: the stream itself orders this launch after whatever wrote it, so
-        // no event is needed and none is recorded on this path.
-        slot.busy = true;
-        slot.has_event = false;
-        return index;
+      // A consumer on another stream must have drained before the buffer is written again,
+      // whichever stream is asking.
+      if (slot.has_consumer_event) {
+        if (!Complete(slot.consumer_event)) {
+          continue;
+        }
+        slot.has_consumer_event = false;
       }
-      // Another stream wrote it. Only reuse it with proof that the work drained; without
-      // an event there is no proof, so the caller gets a new buffer instead.
-      if (slot.has_event && slot.done.query()) {
-        slot.busy = true;
-        slot.stream_id = stream_id;
-        slot.has_event = false;
-        return index;
+      if (slot.producer_stream != stream_id && slot.has_producer_event &&
+          !Complete(slot.producer_event)) {
+        continue;  // the writing kernel may still be running
       }
-      continue;
+      if (slot.producer_stream != stream_id && !slot.has_producer_event) {
+        continue;  // no proof: a buffer written elsewhere is only reused with one
+      }
+      if (slot.producer_stream == stream_id) {
+        slot.has_producer_event = false;
+      }
+      slot.busy = true;
+      return Lease{index, slot.buffer.data_ptr()};
     }
-    Slot fresh;
-    fresh.buffer = at::empty({numel}, at::TensorOptions().dtype(dtype).device(device));
-    fresh.busy = true;
-    fresh.stream_id = stream_id;
-    slots.push_back(std::move(fresh));
-    return slots.size() - 1;
+    return Make(wanted, stream_id);
   }
 
-  void Release(size_t index) {
-    std::lock_guard<std::mutex> guard(mutex);
-    slots[index].busy = false;
+  // Caller holds the mutex.
+  Lease Make(const at::Device& wanted, int64_t stream_id) {
+    auto owned = std::make_unique<Slot>();
+    owned->buffer = at::empty({numel}, at::TensorOptions().dtype(dtype).device(wanted));
+    owned->busy = true;
+    owned->producer_stream = stream_id;
+    slots.push_back(std::move(owned));
+    return Lease{slots.size() - 1, slots.back()->buffer.data_ptr()};
   }
 
-  // Records an event only for plans that have been replayed on more than one stream. A
-  // plan that stays on one stream never pays for the gate at all.
-  void RecordLaunch(size_t index, const c10::cuda::CUDAStream& stream, bool need_event) {
+  void Release(size_t index, const at::Device& on_device) {
     std::lock_guard<std::mutex> guard(mutex);
-    Slot& slot = slots[index];
-    slot.stream_id = static_cast<int64_t>(stream.id());
-    if (need_event) {
-      slot.done.record(stream);
-      slot.has_event = true;
+    if (index >= slots.size()) {
+      return;
+    }
+    Slot& slot = *slots[index];
+    slot.busy = false;
+    // The result is being dropped now. If a stream other than the one that wrote it is
+    // current, that stream may have enqueued work reading this buffer, so record its
+    // position and make the next reuse wait for it.
+    const Stream_t current = CurrentStreamOf(on_device);
+    if (StreamIdOf(current) == slot.producer_stream) {
+      return;  // dropped on the producing stream: that stream already orders reuse
+    }
+    if (!EnsureEvent(&slot.consumer_event)) {
+      return;  // no events: cross-stream reuse is refused in Acquire
+    }
+    if (::EventRecord(slot.consumer_event, current) == Success) {
+      slot.has_consumer_event = true;
     }
   }
 
-  void* DataPtr(size_t index) const { return slots[index].buffer.data_ptr(); }
+  void RecordLaunch(size_t index, Stream_t stream, bool need_event) {
+    std::lock_guard<std::mutex> guard(mutex);
+    if (index >= slots.size()) {
+      return;
+    }
+    Slot& slot = *slots[index];
+    slot.producer_stream = StreamIdOf(stream);
+    if (!need_event) {
+      return;
+    }
+    if (EnsureEvent(&slot.producer_event) &&
+        ::EventRecord(slot.producer_event, stream) == Success) {
+      slot.has_producer_event = true;
+    }
+  }
 };
 
-// Ownership of a pooled slot travels with the result: the deleter releases the slot when
-// the last reference to the tensor drops, and the shared ownership of the pool keeps the
-// buffers alive even if the plan is unregistered or replaced while results are outstanding.
+// Ownership of a pooled slot travels with the result: the deleter returns the slot when the
+// last reference to the tensor drops, and the shared ownership of the pool keeps the buffers
+// alive even if the plan is unregistered or replaced while results are outstanding.
 struct SlotState {
   std::shared_ptr<Pool> pool;
   size_t index = 0;
+  at::Device device = at::Device(at::kCPU);
 };
 
 struct Plan {
@@ -197,25 +303,24 @@ struct Plan {
   c10::ScalarType out_dtype = c10::ScalarType::Float;
   std::shared_ptr<Pool> pool;
   std::atomic<int64_t> replays{0};
-  // The first stream the plan ran on, and whether a second one has been seen. Until it
-  // has, no event is recorded: a single-stream plan is ordered by its stream alone.
+  // The first stream the plan ran on, and whether a second has been seen. Until it has, no
+  // event is recorded: a single-stream plan is ordered by its stream alone.
   std::atomic<int64_t> first_stream{-1};
   std::atomic<bool> multi_stream{false};
 };
 
-at::Tensor WrapSlot(const std::shared_ptr<Pool>& pool, size_t slot,
+at::Tensor WrapSlot(const std::shared_ptr<Pool>& pool, size_t slot, void* data, int64_t bytes,
                     const std::vector<int64_t>& shape, c10::ScalarType dtype,
                     const c10::DispatchKeySet& key_set, const at::Device& device) {
-  auto* state = new SlotState{pool, slot};
-  const int64_t bytes = pool->slots[slot].buffer.nbytes();
-  c10::DataPtr data(pool->DataPtr(slot), state,
-                    [](void* context) {
-                      auto* owned = static_cast<SlotState*>(context);
-                      owned->pool->Release(owned->index);
-                      delete owned;
-                    },
-                    device);
-  c10::Storage storage(c10::Storage::use_byte_size_t(), bytes, std::move(data),
+  auto* state = new SlotState{pool, slot, device};
+  c10::DataPtr owned(data, state,
+                     [](void* context) {
+                       auto* held = static_cast<SlotState*>(context);
+                       held->pool->Release(held->index, held->device);
+                       delete held;
+                     },
+                     device);
+  c10::Storage storage(c10::Storage::use_byte_size_t(), bytes, std::move(owned),
                        /*allocator=*/nullptr, /*resizable=*/false);
   auto tensor = at::detail::make_tensor<c10::TensorImpl>(std::move(storage), key_set,
                                                          c10::scalarTypeToTypeMeta(dtype));
@@ -242,10 +347,10 @@ std::shared_ptr<Plan> Lookup(const char* op) {
   return found == Registry().end() ? nullptr : found->second;
 }
 
-CUresult Launch(Plan& plan, CUstream stream, void** kernel_params) {
+CUresult Launch(Plan& plan, Stream_t stream, void** kernel_params) {
   return Driver().launch_kernel(plan.fn, plan.grid[0], plan.grid[1], plan.grid[2],
-                                plan.threads, 1, 1, plan.shared, stream, kernel_params,
-                                nullptr);
+                                plan.threads, 1, 1, plan.shared,
+                                reinterpret_cast<CUstream>(stream), kernel_params, nullptr);
 }
 
 bool CallMatches(const Plan& plan, const std::vector<at::Tensor>& operands,
@@ -411,14 +516,16 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
   // The device comes from the operands: this file is not where the plugin's device type is
   // named, and the pointer the plan replays with belongs to whatever device they sit on.
   const at::Device device = operands[0].device();
-  const std::shared_ptr<Pool> pool = plan->pool;
 
-  // The replay runs before the caller's device guard, and both the CUfunction and the
-  // stream belong to a device, so select it here. A generic guard, not a CUDA one: the
-  // operands live on the plugin's own device type, which the CUDA guard rejects.
+  // The replay runs before the caller's device guard, and both the CUfunction and the stream
+  // belong to a device, so select it here. A generic guard, not a CUDA one: the operands live
+  // on the plugin's own device type.
   const c10::OptionalDeviceGuard guard(device);
-  const c10::cuda::CUDAStream stream = c10::cuda::getCurrentCUDAStream(device.index());
-  const int64_t stream_id = static_cast<int64_t>(stream.id());
+  // A null handle is the legacy default stream on backends that use one, so it is a valid
+  // stream rather than a failure - refusing it would disable replay on the common path.
+  const Stream_t stream = CurrentStreamOf(device);
+  const int64_t stream_id = static_cast<int64_t>(reinterpret_cast<uintptr_t>(stream));
+
   // Observe the stream before acquiring: once a plan has run on two streams every launch
   // records an event, so a buffer written on one can be proven safe to reuse on another.
   int64_t expected = -1;
@@ -427,10 +534,12 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
   } else if (expected != stream_id) {
     plan->multi_stream.store(true, std::memory_order_relaxed);
   }
-  const size_t slot = pool->Acquire(device, stream_id);
 
-  // The arguments are assembled per call from the plan's template, so a replay never
-  // writes to the plan and concurrent calls cannot overwrite each other's pointers.
+  const std::shared_ptr<Pool> pool = plan->pool;
+  const Lease lease = pool->Acquire(device, stream_id);
+
+  // The arguments are assembled per call from the plan's template, so a replay never writes
+  // to the plan and concurrent calls cannot overwrite each other's pointers.
   std::vector<uint64_t> values = plan->template_values;
   size_t operand_index = 0;
   for (size_t position = 0; position < plan->kinds.size(); ++position) {
@@ -439,7 +548,7 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
       values[position] = reinterpret_cast<uint64_t>(operands[operand_index].data_ptr());
       ++operand_index;
     } else if (kind == "out") {
-      values[position] = reinterpret_cast<uint64_t>(pool->DataPtr(slot));
+      values[position] = reinterpret_cast<uint64_t>(lease.data);
     }
   }
   std::vector<void*> kernel_params(values.size());
@@ -447,22 +556,23 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
     kernel_params[index] = &values[index];
   }
 
-  if (Launch(*plan, stream.stream(), kernel_params.data()) != CUDA_SUCCESS) {
-    pool->Release(slot);
+  if (Launch(*plan, stream, kernel_params.data()) != CUDA_SUCCESS) {
+    pool->Release(lease.index, device);
     return at::Tensor();
   }
-  pool->RecordLaunch(slot, stream, plan->multi_stream.load(std::memory_order_relaxed));
+  pool->RecordLaunch(lease.index, stream,
+                     plan->multi_stream.load(std::memory_order_relaxed));
   plan->replays.fetch_add(1, std::memory_order_relaxed);
-  return WrapSlot(pool, slot, plan->out_shape, plan->out_dtype, operands[0].key_set(),
-                  device);
+  return WrapSlot(pool, lease.index, lease.data,
+                  plan->out_numel * static_cast<int64_t>(c10::elementSize(plan->out_dtype)),
+                  plan->out_shape, plan->out_dtype, operands[0].key_set(), device);
 }
 
 }  // namespace at::native::flagos
 
-// Registration surface for Python, which owns the compiled kernel. A custom operator
-// rather than a pybind module: the plugin builds one shared library and registers its
-// entry points through torch, so this needs no new module, no new build target and no
-// packaging change.
+// Registration surface for Python, which owns the compiled kernel. A custom operator rather
+// than a pybind module: the plugin builds one shared library and registers its entry points
+// through torch, so this needs no new module, no new build target and no packaging change.
 TORCH_LIBRARY(flagos_fast_plan, m) {
   m.def(
       "register_fast_plan(str op, str kernel, Tensor cubin, int grid_x, int grid_y, "
