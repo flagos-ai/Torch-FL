@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -15,6 +16,88 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / ".github/scripts/hooks/set_env_thead.sh"
+
+
+@pytest.mark.parametrize("attention", [False, True], ids=["legacy", "ppu-2.1"])
+def test_boxing_bundle_loads_after_vendor_python_is_removed(tmp_path, attention):
+    compiler, patchelf = shutil.which("cc"), shutil.which("patchelf")
+    if not compiler or not patchelf:
+        pytest.skip("ELF bundle regression requires a C compiler and patchelf")
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts/vendor"
+    scripts.mkdir(parents=True)
+    for name in ("bundle_thead_libtorch.sh", "bundle_common.sh"):
+        shutil.copy2(ROOT / "scripts/vendor" / name, scripts / name)
+    source = tmp_path / "vendor/torch/lib"
+    source.mkdir(parents=True)
+    source.parent.joinpath("version.py").write_text('__version__ = "2.10.0"\n')
+    stub = tmp_path / "stub.c"
+    stub.write_text("int attention_value(void) { return 42; }\n")
+    library = source / "libxformers_ppu.so"
+    subprocess.run(
+        [compiler, "-shared", "-fPIC", str(stub), "-o", str(library)], check=True
+    )
+    original = library.read_bytes()
+    for name in (
+        "libc10.so",
+        "libtorch_cpu.so",
+        "libtorch.so",
+        "libtorch_global_deps.so",
+        "libtorch_python.so",
+    ):
+        shutil.copy2(library, source / name)
+    stub.write_text(
+        "extern int attention_value(void); int probe(void) { return attention_value(); }\n"
+        if attention
+        else "int probe(void) { return 42; }\n"
+    )
+    subprocess.run(
+        [
+            compiler,
+            "-shared",
+            "-fPIC",
+            str(stub),
+            *([f"-L{source}", "-lxformers_ppu"] if attention else []),
+            "-o",
+            str(source / "libtorch_cuda.so"),
+        ],
+        check=True,
+    )
+    if not attention:
+        library.unlink()
+    env = dict(
+        os.environ,
+        FLAGOS_VENDOR_TORCH_LIB=str(source),
+        FLAGOS_PPU_MKL_DIR=str(tmp_path / "mkl"),
+        PPU_SDK=str(tmp_path / "sdk"),
+        LD_LIBRARY_PATH="",
+        LD_PRELOAD="",
+    )
+    for _ in range(2):
+        subprocess.run(
+            ["bash", str(scripts / "bundle_thead_libtorch.sh")],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    bundle = repo / "torch_fl/lib_thead"
+    if attention:
+        assert library.read_bytes() == original
+    shutil.rmtree(source.parent)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); assert lib.probe()==42",
+            str(bundle / "libtorch_cuda.so"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def run_hook(

@@ -60,7 +60,9 @@ bundle_require_patchelf
 
 # Self-consistent set aligned with _ppu_libtorch_link._CORE_SO + _CUDA_SO.
 CORE_SO=(libc10.so libtorch_cpu.so libtorch.so libtorch_global_deps.so libtorch_python.so)
-CUDA_SO=(libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so libshm.so)
+# PPU 2.1 libtorch_cuda.so also needs the vendor attention library beside it.
+# Older runtimes may omit it; bundle_copy_so keeps optional assets compatible.
+CUDA_SO=(libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so libshm.so libxformers_ppu.so)
 MKL_SO=(libmkl_core.so.1 libmkl_gnu_thread.so.1 libmkl_intel_lp64.so.1)
 
 VENDOR_RPATH="${PPU_SDK}/CUDA_SDK/lib64:${PPU_SDK}/lib:${PPU_SDK}/lib64"

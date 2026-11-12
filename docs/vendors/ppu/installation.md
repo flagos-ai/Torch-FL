@@ -44,7 +44,9 @@ sentencepiece, tiktoken and protobuf; SQLAlchemy remains `2.0.48`.
 Both CI lanes keep published `torch==2.10.0+cpu` as the installed Python package.
 The default lane compiles FlagGems routes without boxing or a vendor bundle.
 The boxing lane additionally stages the image's vendor libtorch using the
-existing bundler and keeps CUDA 13.0 after Torch-FL import. Neither lane adds a
+existing bundler and keeps CUDA 13.0 after Torch-FL import. The bundle includes
+the image's prebuilt `libxformers_ppu.so`, a dependency of the PPU 2.1
+`libtorch_cuda.so`; it does not expose the vendor Python directory. Neither lane adds a
 native compilation step, enables C++ FlagGems, changes occupancy selection, or
 changes test scope. The prepared environment records SDK `2.1.0`; only boxing
 records the source vendor Torch version for its bundle. The upstream platform
