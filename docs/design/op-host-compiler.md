@@ -28,6 +28,10 @@ logic of an individual FlagGems operator.** A user script stays byte-for-byte un
   backend, the cache-hit path of preparation, allocation and submission runs without
   Python. It is not a claim about the model, the training loop or the dispatcher.
 
+What a host program is, as distinct from what generates one, is set out in "What the host program is,
+and what produces it". The distinction matters when reading the route comparison: reusing Inductor or
+reusing FlagGems' C++ generator changes the producer, not the artifact.
+
 ## Bounded support and eager semantics
 
 The initial scope is metadata-driven, functional operators with no input gradients. This is
@@ -598,7 +602,56 @@ Ordered by coverage per unit of effort rather than by technical interest:
 4. **Extend guards after step 2.** Broadcast and non-contiguous inputs are common in real eager
    code; while they decline, the optimisation does not apply to those calls at all.
 
-## Reuse before building: three routes, and what would decide between them
+## What the host program is, and what produces it
+
+An earlier revision of this document listed "reuse Inductor", "reuse FlagGems' C++ generator" and
+"build a general host compiler" as four alternatives to the host program. That framing was wrong and
+it is worth correcting explicitly, because it makes the questions look competitive when they are not.
+The host program is the thing that runs; the routes are candidates for the thing that produces it.
+They sit at different layers.
+
+```text
+layer 3   runtime - what executes on the hot path
+          native entry, guard evaluation, parameter and grid derivation from metadata,
+          allocation, submission, variant selection, fallback to the existing route
+
+layer 2   producer - what generates layer 3
+          A: Inductor / AOTI codegen          C: a restricted host IR and small backend
+          B: FlagGems' own C++ pointwise path D: a general host compiler built here
+          and, in the Phase 0 prototype, a hand registration as a stand-in for all four
+
+layer 1   capture - what recovers the FlagGems callable's semantics
+          symbolic expressions, guards, kernel identity, constexprs, parameter mapping
+```
+
+Layers 1 and 3 are **common to every route**. Layer 2 is the only thing the routes differ on. In
+particular, adopting A or B does not remove the host program - it changes what writes it - and it
+does not remove the capture work, which both A and B still need:
+
+| | layer 1, capture | layer 2, producer | layer 3, runtime |
+| --- | --- | --- | --- |
+| the Phase 0 prototype | **not automated** - the handle and geometry were read from Python by hand | **absent** | implemented and measured |
+| **A**, Inductor | at the ATen level it replaces the kernel; preserving the FlagGems kernel needs capture *inside* the wrapper | present (codegen and scheduling) | present in its own output |
+| **B**, FlagGems C++ pointwise | still needed | only the pointwise family | present for that family |
+
+So the prototype's honest position is: **layer 3 exists and is measured, layer 1 was done by hand,
+layer 2 does not exist at all.** That is the gap the review identified when it said the exit branch
+was claimed too early, and it is the same gap this section is meant to prevent from being described
+as "the host program versus Inductor".
+
+Two consequences worth stating before the route comparison:
+
+- **An A-generated artifact overlaps layer 3 rather than complementing it.** AOTI's wrapper allocates
+  and launches on its own, so adopting A would replace the allocation and submission half of the
+  prototype. What stays on the plugin side is the hook, the guard decision, variant selection, the
+  fallback and the "no Python" guarantee.
+- **A's artifact has to be called by the plugin, not by the user.** The transparent-eager constraint
+  in "Positioning" rules out asking users to write `torch.compile`. Using A therefore means the plugin
+  drives Inductor internally as a codegen backend for the captured graph, which is a different
+  integration from running `torch.compile` on the user's function - and the difference is exactly why
+  the measured "Inductor replaces the FlagGems kernel" result below does not condemn route A.
+
+## Reuse before building: four routes, and what would decide between them
 
 Phase 0 proves a native entry point works. It does not prove that building a general host compiler
 is the best way to get one, and this section is the comparison that has to happen before that
