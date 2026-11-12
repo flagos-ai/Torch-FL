@@ -40,8 +40,9 @@ discover_tops_root() {
 
   for candidate in "${candidates[@]}"; do
     [[ -z "$candidate" ]] && continue
-    if [[ -f "$candidate/lib/libtopsrt.so" &&
-          -f "$candidate/include/gcu/topsaten/topsaten.h" ]]; then
+    # TOPS ATen headers may live in /usr/include/gcu independently of the
+    # runtime prefix. Existing CMake discovery validates those headers.
+    if [[ -f "$candidate/lib/libtopsrt.so" ]]; then
       printf '%s' "$candidate"
       return 0
     fi
@@ -51,16 +52,14 @@ discover_tops_root() {
     -print -quit 2>/dev/null || true)"
   if [[ -n "$found" ]]; then
     candidate="$(dirname "$(dirname "$found")")"
-    if [[ -f "$candidate/include/gcu/topsaten/topsaten.h" ]]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
+    printf '%s' "$candidate"
+    return 0
   fi
   return 1
 }
 
 if ! TOPS_HOME="$(discover_tops_root)"; then
-  echo "::error::TopsRider SDK not found; expected lib/libtopsrt.so and include/gcu/topsaten/topsaten.h" >&2
+  echo "::error::TopsRider SDK not found; expected lib/libtopsrt.so under the runtime prefix" >&2
   exit 1
 fi
 export TOPS_HOME

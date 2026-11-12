@@ -100,6 +100,11 @@ Enflame driver (the runtime release lists 1.10.6); replacing a container does no
 replace the host kernel driver. The hook prints `efsmi` when available so the
 hardware run records the driver/device inventory.
 
+The official packages split the SDK across `/opt/tops/lib/libtopsrt.so`,
+`/usr/lib/libtopsaten.so`, and `/usr/include/gcu/topsaten/topsaten.h`. Runtime
+discovery does not require the ATen headers to share its prefix; the existing
+CMake header/library checks validate the independent locations.
+
 The image's Python is 3.12, but its CPU Torch 2.11 and `torch-gcu` extensions
 are not used by this project's Torch 2.10 build. The platform hook creates a
 separate venv, disables the image's `BASH_ENV` reactivation, and uses the shared

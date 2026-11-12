@@ -43,6 +43,24 @@ def make_venv(tmp_path):
     return root, next((root / "lib").glob("python*/site-packages"))
 
 
+@pytest.mark.parametrize("colocated_headers", [True, False])
+def test_sdk_discovery_allows_separate_topsaten_headers(tmp_path, colocated_headers):
+    sdk = tmp_path / "tops"
+    (sdk / "lib").mkdir(parents=True)
+    (sdk / "lib/libtopsrt.so.1.10").touch()
+    (sdk / "lib/libtopsrt.so").symlink_to("libtopsrt.so.1.10")
+    if colocated_headers:
+        header = sdk / "include/gcu/topsaten/topsaten.h"
+        header.parent.mkdir(parents=True)
+        header.touch()
+    result = run_shell(
+        shell_function("discover_tops_root") + "\ndiscover_tops_root",
+        TOPS_HOME=str(sdk),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(sdk)
+
+
 @pytest.mark.parametrize(
     "version,cuda,usable",
     [("2.10.0+cpu", None, True), ("2.11.0+cpu", None, False), ("2.10.0", "13", False)],
