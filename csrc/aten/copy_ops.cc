@@ -899,13 +899,7 @@ at::Tensor _to_copy(
     int device_index = device.index() >= 0 ? device.index() : 0;
     at::Tensor self_contig = self.contiguous();
     if (dtype != self.scalar_type()) {
-#if defined(FLAGOS_MUSA_KERNEL)
-      // MUSA: mudnn's Unary::CAST converts dtype on device, so no CPU
-      // round-trip for a plain `.to(dtype)`.
-      result = at::empty(self_contig.sizes(), self_contig.options()
-          .dtype(dtype).device(c10::Device(c10::kPrivateUse1, device_index)));
-      musa_ops::MudnnCopy(self_contig, result);
-#elif defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
+#if defined(USE_ASCEND) || defined(USE_TSINGMICRO) || defined(USE_GCU) || \
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
       // No CUDA runtime on these backends, so the CUDA TensorIterator cast
@@ -939,11 +933,23 @@ at::Tensor _to_copy(
       // CPU round trip below.
       result = iluvatar::DtypeCast(self_contig, dtype);
 #endif
+#ifdef FLAGOS_MUSA_KERNEL
+      // MUSA casts on-device through mudnn's Unary::CAST. That mode maps a
+      // fixed dtype table (MudnnSupportsDtype), so a pair outside it -- float to
+      // uint16/uint32/uint64 are the ones ATen still answers on the host -- is
+      // declined here and keeps the CPU round trip below, instead of aborting
+      // the cast in MudnnCopy's TORCH_CHECK.
+      if (musa_ops::MudnnSupportsCast(self_contig.scalar_type(), dtype)) {
+        result = at::empty(self_contig.sizes(), self_contig.options()
+            .dtype(dtype).device(c10::Device(c10::kPrivateUse1, device_index)));
+        musa_ops::MudnnCopy(self_contig, result);
+      }
+#endif
       if (!result.defined()) {
         // Fallback: CPU round-trip when no on-device cast is available
-        // (TsingMicro / MUSA / BPU, a GCU dtype pair topsatenToCopy declines,
-        // an Ascend dtype pair aclnnCast rejects, or a Kunlunxin pair its
-        // DtypeCast declines).
+        // (TsingMicro / BPU, a MUSA mudnn CAST dtype pair it does not map, a GCU
+        // dtype pair topsatenToCopy declines, an Ascend dtype pair aclnnCast
+        // rejects, or a Kunlunxin pair its DtypeCast declines).
         size_t nbytes = self_contig.numel() * self_contig.element_size();
         at::Tensor cpu_tensor =
             at::empty(self_contig.sizes(), self_contig.options().device(at::kCPU));
