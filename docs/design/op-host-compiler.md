@@ -864,6 +864,48 @@ That is the most useful form the route A finding can take, and it is also the en
 probes can establish: confirming the 8-10 us estimate would mean implementing the plugin-side entry
 for an AOTI artifact, which is the integration work itself rather than a measurement of it.
 
+
+#### What A generates for a FlagGems operator, asked directly
+
+The question that decides whether route A is usable is not "can A generate a host wrapper" - it can,
+and the probes above show it running on this device - but **what it generates for a FlagGems
+operator**. Measuring it gives an answer that constrains the choice.
+
+Calling `flag_gems.mul` under `torch.compile` and inspecting what Inductor emits:
+
+```text
+generated kernel code contains:  triton_poi_fused_mul_0        <- Inductor's own fused Triton kernel
+FlagGems kernel name (mul_kernel): appears only in the Dynamo fxgraph cache,
+                                   not in the generated kernel code
+```
+
+So **A does not generate anything *for* a FlagGems operator. It generates a replacement for one.**
+The output is Inductor's own Triton kernel plus the C++ host wrapper around it, and the FlagGems
+kernel the plugin would otherwise run is not part of the result. That is consistent with the separate
+instrumented measurement, where `flag_gems.mul` was called zero times on both the first and the warm
+compiled call while the eager call called it once.
+
+There are two ways to change that, and both narrow A's value:
+
+- **Capture inside FlagGems** so the graph node is `triton_kernel_wrapper_mutation` rather than an
+  ATen op. Inductor has a lowering for it and emits a call to the user's kernel, so the FlagGems
+  kernel survives - but it survives as an **opaque extern kernel**. Inductor then contributes
+  allocation planning, launch sequencing and the C++ wrapper, and **cannot fuse across it or
+  regenerate it**. That is the wrapper this repository already has, measured at 8.24 us.
+- **Accept A's own kernels.** Then the result is a different implementation of the operator than the
+  one FlagGems ships, and the plugin's premise - FlagGems is the operator source of truth - no longer
+  holds for the accelerated operators.
+
+So route A as a host-program producer for FlagGems operators is really one of: "re-derive the wrapper
+we already have, with generic infrastructure", or "stop running FlagGems kernels". Neither is what
+"reuse Inductor's codegen for FlagGems operators" sounds like, and the choice should be made with that
+stated rather than discovered later.
+
+What this does **not** say is that A is worthless. For operators this repository has not implemented
+natively at all - where the alternative is `cpu_fallback` or a Python route - an Inductor-generated
+kernel may be strictly better than nothing. That is a different proposal from the host compiler, with
+a different premise: it trades FlagGems' implementation for Inductor's.
+
 **Route B. The C++ pointwise path is not in the wheel we consume.**
 
 The pinned FlagGems 5.4.0 installs as a **Python-only** package: the tree contains `ops`, `runtime`,
