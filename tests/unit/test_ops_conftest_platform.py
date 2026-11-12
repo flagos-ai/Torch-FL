@@ -264,3 +264,19 @@ def test_no_platform_skips_the_plain_flaggems_mark():
     are unaffected by this invariant.)"""
     for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
         assert "flaggems" not in markers, platform
+
+
+def test_every_non_mps_platform_skips_the_mps_mark():
+    """`@pytest.mark.mps` names Apple's Metal runtime; nothing else serves it.
+
+    The migrated Apple files (tests/integration/ops/test_mps_*.py) keep a
+    module-level `mps` mark and mark their portable contract cases
+    `anyplatform`, so every other lane selects them into its shared cohort and
+    depends on this gate to skip them. The MUSA row was missing the entry, and
+    13 argmin/argmax NaN cases from test_mps_argmin_arpextreme.py ran on Moore
+    Threads hardware instead of being skipped.
+    """
+    for platform, markers in ops_conftest._PLATFORM_SKIP_MARKERS.items():
+        if platform == "mps":
+            continue
+        assert "mps" in markers, platform

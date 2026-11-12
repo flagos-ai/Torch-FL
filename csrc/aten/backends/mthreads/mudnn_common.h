@@ -94,6 +94,15 @@ inline bool MudnnSupportsDtype(at::ScalarType type) {
   }
 }
 
+// The dtype pairs a same-device cast can take. `Unary::CAST` maps exactly the
+// table above -- the check MudnnCopy already makes -- so asking it before the
+// call lets `_to_copy` answer a pair outside it (float -> uint16/uint32/uint64
+// at least) through ATen's CPU round trip instead of aborting the cast in
+// MudnnCopy's TORCH_CHECK.
+inline bool MudnnSupportsCast(at::ScalarType src, at::ScalarType dst) {
+  return MudnnSupportsDtype(src) && MudnnSupportsDtype(dst);
+}
+
 // Bool is narrower than the rest: mudnn takes it for the logical and comparison
 // modes and for IDENTITY/CAST, but rejects it for arithmetic
 // ("Unsupported binary mode: MUL, with left data type: BOOL"). PyTorch *does*

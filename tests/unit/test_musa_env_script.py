@@ -148,7 +148,7 @@ def test_pip_cache_is_created_in_a_writable_location(tmp_path, mode):
     )
     if mode == "blocked":
         assert result.returncode != 0
-        assert "MUSA pip cache must be owned and writable" in result.stderr
+        assert "MUSA pip cache must be writable" in result.stderr
         return
     assert result.returncode == 0, result.stderr
     if mode == "disabled":
@@ -165,6 +165,34 @@ def test_pip_cache_is_created_in_a_writable_location(tmp_path, mode):
     assert expected.is_dir()
     assert expected.stat().st_uid == os.geteuid()
     assert os.access(expected, os.W_OK)
+
+
+def test_pip_cache_does_not_require_ownership(tmp_path):
+    """A runner-prepared cache dir may belong to another user (#786).
+
+    Since the pip downloads moved onto the runner instead of a managed cache
+    entry, the directory the workflow hands over at ``/__w/.pip-cache/<platform>``
+    is prepared by the runner and can be owned by a user this job is not. The
+    job only needs to write there, not to own it: requiring ``-O`` failed the
+    MUSA environment step before the build started on every run whose
+    persistent cache was reused.
+    """
+    function = shell_function("musa_prepare_pip_cache")
+    assert '[[ ! -O "$cache_dir"' not in function
+    assert '[[ ! -w "$cache_dir" ]]' in function
+
+    shared = tmp_path / "shared cache"
+    shared.mkdir()
+    result = run_shell(
+        shell_function("musa_prepare_pip_cache")
+        + '\nmusa_prepare_pip_cache\necho "CACHE=${PIP_CACHE_DIR:-}"',
+        RUNNER_TEMP=str(tmp_path / "job"),
+        REPO_ROOT=str(tmp_path / "repo"),
+        PIP_CACHE_DIR=str(shared),
+        PIP_RETRY_NO_CACHE="0",
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"CACHE={shared}" in result.stdout
 
 
 def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):

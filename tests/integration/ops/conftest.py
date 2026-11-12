@@ -63,15 +63,23 @@ _platform = _load_platform()
 
 
 # Markers to skip per platform (tests for other backends are not compiled/available).
+#
+# Every non-MPS row carries `mps`. The migrated Apple files (tests/integration/
+# ops/test_mps_*.py) keep a module-level `pytest.mark.mps` and mark the cases
+# that are portable contract checks `anyplatform`, so a lane that selects the
+# shared cohort collects them and relies on this gate to skip them off Metal.
+# Without the entry the shared selection ran test_mps_argmin_arpextreme.py on
+# MUSA hardware and its 13 NaN-placement cases failed: mudnn's reductions do not
+# name a NaN the way the host reference does, and no Metal kernel is involved.
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa", "dcu"),
-    "ascend": ("cuda", "metax", "musa", "dcu"),
+    "metax": ("cuda", "ascend", "musa", "dcu", "mps"),
+    "ascend": ("cuda", "metax", "musa", "dcu", "mps"),
     # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
     # `-> boxing` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "dcu", "flaggems_python"),
+    "musa": ("cuda", "metax", "ascend", "dcu", "mps", "flaggems_python"),
     # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
     # dispatcher alongside topsaten and selects between them per overload.
-    "gcu": ("cuda", "metax", "ascend", "musa", "dcu"),
+    "gcu": ("cuda", "metax", "ascend", "musa", "dcu", "mps"),
     # PPU is a CUDA-ABI platform: when its wheel carries the boxing kernels the
     # CUDA dispatch key serves the vendor kernels and cuda-marked tests run
     # here -- same skip set as cuda, which is where PPU implicitly landed before
@@ -79,13 +87,13 @@ _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     # instead of correct by accident of the fallback bucket. On a default
     # (FlagGems-primary) wheel the build-record gate below adds `cuda` to this
     # set, because that key has no kernel behind it.
-    "ppu": ("metax", "ascend", "musa", "dcu"),
+    "ppu": ("metax", "ascend", "musa", "dcu", "mps"),
     # cuda -- and an unidentified wheel, which detect_platform() defaults to --
     # runs the CUDA-marked tests when its wheel carries the boxing kernels, and
     # skips every other backend's. The build-record gate below covers the
     # default FlagGems-primary wheel, where the `cuda` route has no kernels.
-    "cuda": ("metax", "ascend", "musa", "dcu"),
-    "dcu": ("metax", "ascend", "musa", "gcu"),
+    "cuda": ("metax", "ascend", "musa", "dcu", "mps"),
+    "dcu": ("metax", "ascend", "musa", "gcu", "mps"),
     # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
     # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
     # `none` (CPU fallback), with no `cuda` route, so a `-> boxing` dispatch assertion

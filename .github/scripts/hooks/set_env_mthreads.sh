@@ -103,9 +103,17 @@ musa_prepare_pip_cache() {
   [[ "${PIP_RETRY_NO_CACHE:-0}" == "1" ]] && return 0
   # GitHub containers may inherit a HOME whose pip cache is owned by another
   # user. Use the writable job workspace instead; honour explicit overrides.
+  #
+  # Ownership is deliberately not part of the contract. Since the pip downloads
+  # moved onto the runner instead of a managed cache entry (#786), the directory
+  # the workflow hands over at /__w/.pip-cache/<platform> is prepared by the
+  # runner and can be owned by a user this job is not -- while still being
+  # writable here. Requiring `-O` turned that into a hard failure in the
+  # environment step, before the build started, on every run whose persistent
+  # cache was reused. pip needs to write into the directory, not to own it.
   local cache_dir="${PIP_CACHE_DIR:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache/musa}"
-  if ! mkdir -p "$cache_dir" || [[ ! -O "$cache_dir" || ! -w "$cache_dir" ]]; then
-    echo "::error::MUSA pip cache must be owned and writable by the current user: $cache_dir" >&2
+  if ! mkdir -p "$cache_dir" || [[ ! -w "$cache_dir" ]]; then
+    echo "::error::MUSA pip cache must be writable by the current user: $cache_dir" >&2
     return 1
   fi
   cache_dir="$(cd "$cache_dir" && pwd -P)"
