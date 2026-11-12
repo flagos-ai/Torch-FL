@@ -128,6 +128,7 @@ jobs:
             tests/unit/test_device_tracer_selection.py
             tests/unit/test_dtype_cast_arm_contract.py
             tests/unit/test_env_registry.py
+            tests/unit/test_enflame_env_script.py
             tests/unit/test_gen_vendor_confs.py
             tests/unit/test_import_phase_order.py
             tests/unit/test_iluvatar_env_script.py

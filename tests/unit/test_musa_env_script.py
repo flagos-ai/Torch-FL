@@ -119,7 +119,7 @@ def test_musa_uses_the_entrypoint_cache_policy():
     assert "musa_prepare_pip_cache" not in SCRIPT
     runner = (REPO_ROOT / ".github/scripts/set_env.sh").read_text()
     assert 'prepare_pip_cache "$PLATFORM"' in runner
-    assert "ascend|iluvatar|kunlunxin|mthreads|thead)" in runner
+    assert "ascend|iluvatar|kunlunxin|mthreads|thead|enflame)" in runner
 
 
 def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):

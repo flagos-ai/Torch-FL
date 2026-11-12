@@ -174,7 +174,7 @@ def test_each_platform_gets_its_own_directory(tmp_path, platform):
 
 
 CACHE_HELPER = ROOT / ".github/scripts/lib/pip_cache.sh"
-RUNTIME_PLATFORMS = ["ascend", "iluvatar", "kunlunxin", "mthreads", "thead"]
+RUNTIME_PLATFORMS = ["ascend", "iluvatar", "kunlunxin", "mthreads", "thead", "enflame"]
 
 
 def _run_shared_cache(
@@ -349,7 +349,7 @@ def test_real_workflow_uses_shared_cache_selection(tmp_path, platform):
 def test_key_and_entrypoint_include_the_shared_helper():
     assert ".github/scripts/lib/pip_cache.sh" in _step()["env"]["PIP_CACHE_KEY"]
     runner = (ROOT / ".github/scripts/set_env.sh").read_text()
-    assert "ascend|iluvatar|kunlunxin|mthreads|thead)" in runner
+    assert "ascend|iluvatar|kunlunxin|mthreads|thead|enflame)" in runner
     assert 'prepare_pip_cache "$PLATFORM"' in runner
 
 

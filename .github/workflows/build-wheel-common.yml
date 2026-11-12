@@ -120,7 +120,7 @@ jobs:
         run: |
           PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
           case "${CACHE_PLATFORM:-}" in
-            ascend|iluvatar|kunlunxin|mthreads|thead)
+            ascend|iluvatar|kunlunxin|mthreads|thead|enflame)
               source .github/scripts/lib/pip_cache.sh
               export PIP_CACHE_DIR
               prepare_pip_cache "$CACHE_PLATFORM"

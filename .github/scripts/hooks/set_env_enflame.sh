@@ -109,6 +109,162 @@ export CPATH="$TOPS_HOME/include/gcu:$TOPS_HOME/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$TOPS_HOME/lib:$TOPSATEN_LIB_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$TOPS_HOME/lib:$TOPSATEN_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+# Official runtime packages are copied individually into a fresh venv, never
+# exposed through the runtime's site-packages or compiler activation scripts.
+gcu_validate_build_tools() {
+  # setup.py imports editable_wheel even for a non-editable native build.
+  # Validate real imports after provisioning, before any large wheel download.
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
+import build
+import setuptools
+from setuptools.command.editable_wheel import editable_wheel
+
+print(f"Build frontend: {build.__version__}")
+print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
+PY
+}
+
+gcu_venv_is_isolated() {
+  venv_is_usable || return 1
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+assert Path(sys.prefix).resolve() == root
+assert sys.prefix != sys.base_prefix
+settings = {}
+for line in (root / "pyvenv.cfg").read_text().splitlines():
+    key, separator, value = line.partition("=")
+    if separator:
+        settings[key.strip().lower()] = value.strip().lower()
+assert settings.get("include-system-site-packages") == "false"
+assert importlib.util.find_spec("torch_gcu") is None
+try:
+    metadata.distribution("torch_gcu")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise SystemExit("vendor torch_gcu metadata is present")
+PY
+}
+
+gcu_cpu_torch_is_usable() {
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PY'
+import sys
+import torch
+
+expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+}
+
+gcu_runtime_requirement() {
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+      --check-installed "$1"; then
+    echo "Using prepared requirement: $1"
+  else
+    pip_retry --index-url "$PIP_INDEX_URL_ARG" "$1"
+  fi
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "$1"
+}
+
+gcu_runtime_flagtree_is_usable() {
+  "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+from importlib import metadata, util
+from pathlib import Path
+import sys
+
+try:
+    dist = metadata.distribution("flagtree")
+    root = Path(dist.locate_file("triton")).resolve()
+    spec = util.find_spec("triton")
+    assert dist.version == sys.argv[1]
+    assert root.is_relative_to(Path(sys.prefix).resolve())
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).resolve().parent == root
+    assert (root / "backends/enflame").is_dir()
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PY
+}
+
+gcu_record_runtime_sdk() {
+  local version=""
+  version="$(dpkg-query -W -f='${Version}' topsruntime)" || return 1
+  version="${version#*:}"
+  version="${version%%-*}"
+  if [[ "$version" != 1.10.6 ]]; then
+    echo "::error::Expected TOPS runtime 1.10.6, found $version" >&2
+    return 1
+  fi
+  export FLAGOS_SDK_VERSION="$version"
+}
+
+prepare_gcu_runtime_environment() {
+  gcu_record_runtime_sdk
+  local vendor_python="${TORCH_FL_VENDOR_PYTHON:-$(command -v python3.12 || true)}"
+  export BASH_ENV=/dev/null
+  export PYTHONPATH=""
+  export PYTHONNOUSERSITE=1
+  if [[ ! -x "$vendor_python" ]] || ! "$vendor_python" -I -c \
+      'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
+    echo "::error::The GCU runtime requires Python 3.12 for its FlagTree wheel" >&2
+    return 1
+  fi
+  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-gcu-${CI_STAGE}}"
+  "$vendor_python" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+target, repo = (Path(p).resolve() for p in sys.argv[1:])
+for prefix in (sys.prefix, sys.base_prefix):
+    source = Path(prefix).resolve()
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
+if repo.is_relative_to(target):
+    raise SystemExit("CI venv must not contain the source checkout")
+PY
+  if ! "$vendor_python" -m venv --clear "$VENV_ROOT"; then
+    if ! command -v uv >/dev/null 2>&1; then
+      echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
+      return 1
+    fi
+    uv venv --clear --seed --python "$vendor_python" "$VENV_ROOT"
+  fi
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  gcu_venv_is_isolated
+  "$vendor_python" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --target-python "$VENV_PYTHON" \
+    --torch-version "${CPU_TORCH_VERSION%+cpu}" \
+    --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_enflame}" \
+    --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
+    --requirements-file "$REPO_ROOT/.github/requirements-enflame.txt"
+  export VIRTUAL_ENV="$VENV_ROOT"
+  export PATH="$VENV_ROOT/bin:$PATH"
+  # A Python CMake distribution is required by pyproject.toml even when the
+  # image supplies /usr/bin/cmake. Bootstrap pip before resolving CPU Torch.
+  local requirement
+  while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+    [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+    gcu_runtime_requirement "$requirement"
+  done < "$REPO_ROOT/.github/requirements-enflame.txt"
+  gcu_validate_build_tools
+  if ! gcu_cpu_torch_is_usable 2>/dev/null; then
+    CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
+    install_cpu_torch
+  fi
+}
+
+GCU_RUNTIME_REUSE=0
+if [[ "${VIRTUAL_ENV:-}" == /flagos || -n "${TORCH_FL_VENDOR_PYTHON:-}" ]]; then
+  GCU_RUNTIME_REUSE=1
+  prepare_gcu_runtime_environment
+else
 VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-}"
 if [[ -z "$VENDOR_PYTHON" || ! -x "$VENDOR_PYTHON" ]]; then
   for candidate in python3.12 python3 python; do
@@ -157,12 +313,14 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   install_cpu_torch
 fi
 
+fi
+
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 
-"$VENV_PYTHON" - <<'PY'
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
 from pathlib import Path
 import importlib.util
 import os
@@ -206,7 +364,14 @@ done
 # import, so the flagtree and FlagGems pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_enflame}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-install_flagtree
+if [[ "$GCU_RUNTIME_REUSE" == 1 ]] && gcu_runtime_flagtree_is_usable; then
+  echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
+else
+  if [[ "$GCU_RUNTIME_REUSE" == 1 ]]; then
+    "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+  fi
+  install_flagtree
+fi
 
 # flagtree may bring torch_gcu as a dependency or bundle it in the wheel.
 # Uninstall it again to keep the isolated venv free of the vendor ABI.
@@ -218,10 +383,10 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-enflame/simple}"
 install_flag_gems
 
-# The GCU host's TopsRider toolkit measures 1.9.10, the version the pinned
-# FlagCX wheel is built for. That wheel's _C extension links torch_gcu, so only
-# the FlagOS vendor-Python tree at /flagos -- which carries it -- can load it.
-if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
+# Preserve the legacy development-image FlagCX branch. Its wheel targets
+# TOPS 1.9.10 and links torch_gcu; it must not be enabled by the new runtime
+# simply providing a /flagos Python tree.
+if [[ "$GCU_RUNTIME_REUSE" == 0 && "${VENDOR_PYTHON:-}" == /flagos/* ]]; then
   FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_gcu}"
   pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
     "flagcx===$FLAGCX_VERSION"
@@ -230,6 +395,12 @@ if [[ "$VENDOR_PYTHON" == /flagos/* ]]; then
   export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 fi
 
+# Runtime images do not opt into FlagCX merely by carrying its wheel. Keep
+# communication selection separate from this native + FlagGems CI migration.
+if [[ "$GCU_RUNTIME_REUSE" == 1 ]]; then
+  "$VENV_PYTHON" -m pip check
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
+else
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy is deliberately not listed: the CPU torch wheel does not
 # pull it in, and nothing on this path imports it -- FlagGems' GCU route and the
@@ -239,6 +410,8 @@ fi
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+
+fi
 
 # --- Verify the Triton stack imports -----------------------------------------
 # flagtree must be the only provider of the `triton` package: a stock wheel left
@@ -265,6 +438,9 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
+  if [[ "$GCU_RUNTIME_REUSE" == 1 ]]; then
+    export_ci_env BASH_ENV FLAGOS_SDK_VERSION
+  fi
   export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS TOPS_HOME TOPSATEN_LIB CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
@@ -272,6 +448,12 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi
+fi
+
+# Print the device/driver inventory without pretending the container upgrades
+# the host kernel driver. The existing hardware checks still determine success.
+if command -v efsmi >/dev/null 2>&1; then
+  efsmi
 fi
 
 cd "$REPO_ROOT"

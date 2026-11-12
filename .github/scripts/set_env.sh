@@ -65,7 +65,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # The runtime-migration lanes share cache selection and failure fallback.
 # Other platform hooks retain their existing cache policy.
 case "$PLATFORM" in
-  ascend|iluvatar|kunlunxin|mthreads|thead)
+  ascend|iluvatar|kunlunxin|mthreads|thead|enflame)
     source "$REPO_ROOT/.github/scripts/lib/pip_cache.sh"
     prepare_pip_cache "$PLATFORM"
     ;;
