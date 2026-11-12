@@ -79,9 +79,12 @@ with the image's uv as a fallback when Python's venv module cannot seed pip.
 It never installs system packages with apt and refuses venv targets that overlap
 the source interpreter or contain the checkout. `seed_runtime.py` copies only
 compatible, RECORD-owned Python packages; missing or unsafe packages are
-installed with pip. A compatible system CMake (3.19 through 3.x) is retained;
-otherwise the same Python-package reuse/install path supplies it. The tool list
-is `.github/requirements-kunlunxin.txt`.
+installed with pip. CMake's Python distribution (3.19 through 3.x) must also be
+present in the venv: the wheel frontend checks the build requirements declared
+in `pyproject.toml`, so a system executable alone is insufficient. It follows
+the same package reuse/install path as the other Python tools. GCC/G++, make
+and the SDK continue to come from the image. The tool list is
+`.github/requirements-kunlunxin.txt`.
 
 Before installing CPU Torch, the hook verifies pip is at least 23.2 and installs
 a compatible binary release from the ordinary Python index only when needed.

@@ -42,6 +42,7 @@ if [[ "$*" == *--check-installed* ]]; then
   if [[ "$3" == 'pip>=23.2' ]]; then
     [[ "$PIP_READY" == 1 || -f "$PIP_BOOTSTRAPPED" ]]; exit $?
   fi
+  if [[ "$3" == cmake* && "$FAIL_PHASE" == cmake-metadata ]]; then exit 1; fi
   exit "$PREPARED_STATUS"
 fi
 if [[ "$1 $2" == '-m pip' ]]; then
@@ -50,9 +51,6 @@ if [[ "$1 $2" == '-m pip' ]]; then
 fi
 if [[ "$1" == '-' ]]; then
   input="$(cat)"
-  if [[ "$input" == *'cmake", "--version'* ]]; then
-    [[ "$FAIL_PHASE" != cmake ]]; exit $?
-  fi
   if [[ "$input" == *'metadata.distribution("flagtree")'* ]]; then
     exit "$PREPARED_STATUS"
   fi
@@ -191,12 +189,14 @@ def test_runtime_reuse_keeps_the_next_shell_in_the_isolated_venv(tmp_path):
     assert Path(env["CALL_LOG"]).read_text().splitlines().count("startup") == 1
 
 
-def test_missing_packages_install_wheels_but_reuse_system_cmake(tmp_path):
+def test_missing_packages_install_declared_python_build_requirements(tmp_path):
     done, calls, *_ = run_hook(tmp_path, prepared=False)
     assert done.returncode == 0, done.stderr
     assert "cpu-torch" in calls and "flagtree" in calls
     assert any(row.startswith("pip ") and row.endswith("numpy<2") for row in calls)
-    assert not any(row.startswith("pip ") and "cmake" in row for row in calls)
+    assert any(
+        row.startswith("pip ") and row.endswith("cmake>=3.19,<4") for row in calls
+    )
     assert "native-build" in calls
 
 
@@ -224,12 +224,15 @@ def test_failed_or_ineffective_pip_bootstrap_stops_before_torch(tmp_path, fail):
     assert "native-build" not in calls
 
 
-def test_missing_system_cmake_uses_python_package_fallback(tmp_path):
-    done, calls, *_ = run_hook(tmp_path, prepared=False, fail="cmake")
+def test_system_cmake_cannot_replace_the_declared_python_distribution(tmp_path):
+    done, calls, *_ = run_hook(tmp_path, fail="cmake-metadata")
     assert done.returncode == 0, done.stderr
-    assert any(
-        row.startswith("pip ") and row.endswith("cmake>=3.19,<4") for row in calls
-    )
+    installs = [row for row in calls if row.startswith("pip ")]
+    assert len(installs) == 1 and installs[0].endswith("cmake>=3.19,<4")
+    assert any("--check-installed cmake>=3.19,<4" in row for row in calls)
+    assert "cpu-torch" not in calls and "flagtree" not in calls
+    assert "forbidden-apt" not in calls
+    assert "native-build" in calls
 
 
 def test_venv_failure_uses_the_runtime_uv_without_apt(tmp_path):

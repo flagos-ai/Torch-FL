@@ -241,23 +241,9 @@ fi
 
 while IFS= read -r requirement || [[ -n "$requirement" ]]; do
   [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-  # Keep a compatible image-provided CMake executable; Python distribution
-  # metadata alone does not describe the system tool.
-  if [[ "$requirement" == cmake* ]] && "$VENV_PYTHON" - <<'PY'
-import re
-import subprocess
-
-try:
-    result = subprocess.run(["cmake", "--version"], check=True,
-                            capture_output=True, text=True, timeout=5)
-    version = re.search(r"cmake version (\d+)\.(\d+)", result.stdout)
-    assert version and (3, 19) <= tuple(map(int, version.groups())) < (4, 0)
-except (OSError, subprocess.SubprocessError, AssertionError):
-    raise SystemExit(1)
-PY
-  then
-    echo "Using image-provided CMake"
-  elif "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+  # The wheel frontend checks Python build requirements, including CMake's
+  # distribution metadata. A system executable alone cannot satisfy that gate.
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
       --check-installed "$requirement"; then
     echo "Using prepared requirement: $requirement"
   else
