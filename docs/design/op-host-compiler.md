@@ -190,6 +190,83 @@ separately.
   the route fails; stop expanding it. A new backend cannot restore semantics lost during
   capture.
 
+## Phase 0 result: gates 3 and 6, measured on `softmax` and `mul`
+
+Phase 0 has been run on H100 against a real build. This section states what was measured and
+what it says about the gates, and is written after the fact rather than as a plan.
+
+### Gate 3, native exit: passed
+
+An ordinary eager call, with no capture and no extra user steps, reaches a parameterised host
+program in C++ and submits the original Triton kernel through the driver API. With a plan
+registered for `flag_gems.mul` and a 4096x4096 float32 `a * b`:
+
+| arm | warm CPU submission |
+| --- | ---: |
+| eager `torch.mul`, native host program | **8.24 us** |
+| eager `torch.mul`, Python route | 56.19 us |
+| direct `flag_gems.mul` call | 51.32 us |
+
+Every one of the 230 benchmark calls took the host program, checked by an entry counter, and
+every result matched the reference. The 8.24 us is the whole chain an eager call pays: ATen
+dispatch, the plugin's own dispatcher, host-program lookup, a C++ `at::empty_like`, and the
+driver submission.
+
+An earlier stage of the same phase measured the parameterised host program building its
+geometry from tensor metadata across six shapes from 2-D to 4-D (grids 256, 21, 64, 1, 15 and
+32768), one artifact for all of them, with the results matching. That is the gate 4 property
+that mattered most: no artifact per size.
+
+### Gate 6, performance value: passed on submission
+
+The vendor operator measured on the same machine was `torch.softmax` at 8.95 us, and `mul` is
+the heavier of the two. The measured 8.24 us is therefore at vendor-kernel parity for an eager
+call, which is the claim this design exists to support.
+
+The decomposition behind that number, measured separately rather than assumed:
+
+| component | measured |
+| --- | ---: |
+| Triton Python launcher for the same kernel | 15.43 us |
+| direct `cuLaunchKernel` from Python | ~6.0 us |
+| `at::empty_like` on `flagos`, 1 element | 3.97 us |
+| `at::empty_like` on `flagos`, 4 MiB | 4.10 us |
+| `at::empty(1)` on CPU torch, for scale | 3.00 us |
+| C++ `at::empty` through a dispatcher entry | 4.65 us |
+
+Two corrections to the model above came out of this, and both are the reason the numbers in
+this section differ from the estimate it was written with:
+
+- **Allocation is mostly not allocation.** One element and four MiB differ by 0.11 us, so the
+  allocator's own work is about a tenth of a microsecond and the rest is the fixed cost of
+  calling `torch.empty` at all - which CPU torch pays too, 3.00 us for a single element.
+  Moving allocation into C++ did not reduce it (4.65 us through a dispatcher entry against
+  4.05 us from Python). The 1.0-1.5 us allocation row in the table above is therefore not
+  reachable this way, and the report should stop treating it as a planned win.
+- **Submission is where the whole win is.** 15.43 us of Python launcher became about 6.0 us of
+  direct submission, and that saving is the same for every operator and every shape.
+
+### What this says about the design
+
+The exit branch this lands in is the first one: capture is complete and a native entry point
+works, so the work should converge on the adapter layer rather than on a self-built host IR.
+Two facts argue for that rather than against.
+
+The capture side is genuinely hard - `pointwise_dynamic`, `LibEntry` and the autotuner are
+exactly where tracing was expected to break - and it was solved with a shim plus routing
+changes, not with a new IR. And the native entry needed nothing from an IR: it takes the
+compiled kernel's handle, its launch geometry and the parameter values, all of which are
+reachable from the compiled artifact.
+
+The most expensive defect in the phase is worth recording because it generalises. The host
+program reproduced the kernel's signature from the source-level `arg_names`, the `signature`
+string and the metadata, and all three said four parameters. The compiled entry wanted six:
+Triton appends a global-scratch and a profile-scratch pointer after the user arguments. The
+disassembly of the compiled artifact was the only authority, and reading it was the last thing
+tried. **Any component that reproduces a compiled entry's ABI should read the entry's own
+parameter list first.** For the host compiler this is a requirement, not a lesson: the ABI it
+emits against is the one in the artifact.
+
 ## Allocation
 
 Three layers, in the order they are worth doing. The first is part of the gate 6
