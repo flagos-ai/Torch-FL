@@ -246,6 +246,59 @@ this section differ from the estimate it was written with:
 - **Submission is where the whole win is.** 15.43 us of Python launcher became about 6.0 us of
   direct submission, and that saving is the same for every operator and every shape.
 
+
+### Generalisation: what one artifact covers
+
+Two operators were taken through the same registry, and they behave differently for a reason
+worth stating in the design rather than discovering in the field.
+
+**`mul`, a pointwise binary operator - one artifact serves every shape measured.** One
+registered artifact, six input shapes including odd sizes and a five-dimensional case:
+
+| shape | host program | Python route | ratio | correct |
+| --- | ---: | ---: | ---: | --- |
+| (1024, 1024) | 8.41 us | 57.42 us | 6.8x | yes |
+| (4096, 4096) | 8.20 us | 56.84 us | 6.9x | yes |
+| (2, 3, 5, 7, 11) | 8.44 us | 56.73 us | 6.7x | yes |
+| (999,) | 8.35 us | 57.14 us | 6.8x | yes |
+| (64, 1000) | 8.58 us | 57.57 us | 6.7x | yes |
+| (7, 13, 101) | 8.42 us | 57.83 us | 6.9x | yes |
+
+The ratio is flat at about 6.8x because both sides are fixed overheads: the host program's cost
+is a lookup, an allocation and a submission, and the Python route's cost is the interpreter, the
+GIL and the launcher - neither scales with the element count in this range. That is the useful
+shape of the result: the win is per call, not per byte.
+
+The cases the guard refuses are refused correctly and, more importantly, silently fall back and
+stay correct:
+
+| case | took the host program | result |
+| --- | --- | --- |
+| broadcasting operands | no | correct |
+| `float16` operands | no | correct |
+| non-contiguous operands | no | correct |
+
+**`softmax`, a reduction - one artifact serves only the shapes its constexprs were compiled
+for.** A single artifact, registered for the shape it was warmed on, gives 8.90 us against
+29.42 us on the Python route (3.3x) and matches the reference. Reusing that same artifact for
+other widths does not degrade gracefully; it corrupts the device and the next CUDA call reports
+a sticky failure.
+
+The mechanism is in the kernel's own signature. `softmax_kernel_inner` takes `TILE_N` and
+`ONE_TILE_PER_CTA` as constexprs chosen from `N` at launch time, so an artifact compiled for
+`N = 4096` is not a valid launch for `N = 1024`. `mul_kernel` has only `BLOCK_SIZE`, which the
+grid can be computed against at any size, so it generalises.
+
+This is the design's gate 4 in concrete form, and it settles how the host compiler must treat
+constexprs: **a constexpr derived from a tensor's metadata is part of the artifact's identity,
+not a launch-time value.** The host program has to either hold the variants it may need and
+select between them on the same predicates capture recorded, or decline and fall back. Holding
+one artifact and assuming it covers a shape class is exactly the failure this measured.
+
+For `mul` the selection is trivial because its only constexpr is fixed; for `softmax` it is not,
+and that difference - not the operator's arithmetic - is what decides whether one artifact is
+enough.
+
 ### What this says about the design
 
 The exit branch this lands in is the first one: capture is complete and a native entry point
