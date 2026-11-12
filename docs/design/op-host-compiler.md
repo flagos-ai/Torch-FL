@@ -67,6 +67,14 @@ of the measurements, not a later optimisation. Second, **vendor parity is a sepa
 this project's acceptance is that the warm CPU submission cost improves by more than
 measurement noise and that the synchronised end-to-end time does not regress.
 
+> **The allocation row of this table did not survive measurement, and the table is left as it was
+> written so the correction is visible.** Phase 0 measured `torch.empty` on `flagos` at 3.97 us for
+> one element and 4.10 us for four MiB - a difference of 0.11 us - and CPU torch at 3.00 us for a
+> single element. Allocation is therefore dominated by fixed cost that exists without this plugin,
+> not by the allocator, and the 1.0-1.5 us row is not reachable by optimising allocation. Moving
+> allocation into C++ did not help either (4.65 us through a dispatcher entry against 4.05 us from
+> Python). The win this project actually has is submission, not allocation; see "Gate 6" below.
+
 ## Architecture
 
 ```text
@@ -219,9 +227,26 @@ that mattered most: no artifact per size.
 
 ### Gate 6, performance value: passed on submission
 
-The vendor operator measured on the same machine was `torch.softmax` at 8.95 us, and `mul` is
-the heavier of the two. The measured 8.24 us is therefore at vendor-kernel parity for an eager
-call, which is the claim this design exists to support.
+Gates 6 requires the comparison to be like for like, so the parity statement is made on
+`softmax` only, the one operator where both arms were measured in the same session:
+
+| `softmax`, same shape and dtype, same session | CPU submission |
+| --- | ---: |
+| native host program | 8.90-9.03 us |
+| vendor `torch.softmax` on `cuda:0` | 8.95 us |
+
+That is parity, within the run-to-run spread, for an eager call.
+
+**For `mul` no same-operator vendor measurement exists**, and an earlier revision of this section
+compared `mul`'s 8.24 us against the vendor's *softmax* to conclude parity. That comparison is
+invalid and is withdrawn; the correct reading is that `mul` was not compared with a vendor `mul`
+here at all. #820 measured the vendor's `torch.mul` at 7.27 us in its own session, which would put
+the host program at 1.13x rather than at parity - but the two sessions are not the same measurement
+run, so that number is a pointer to what to measure next, not a result.
+
+What remains true regardless of the vendor comparison is the within-session result: removing the
+Python launcher takes these calls from 29-57 us to 8-9 us, which is the improvement gate 6 asks
+for.
 
 The decomposition behind that number, measured separately rather than assumed:
 
@@ -351,15 +376,25 @@ on the first call that wants one.
 
 ### What this says about the design
 
-The exit branch this lands in is the first one: capture is complete and a native entry point
-works, so the work should converge on the adapter layer rather than on a self-built host IR.
-Two facts argue for that rather than against.
+**No exit branch is claimed yet, and an earlier revision of this section claimed the first one
+too early.** What Phase 0 demonstrated is narrower than that: a native entry point, driver
+submission and multi-artifact selection work, *given a registered artifact*. What it did not
+demonstrate is the automatic path that would put that artifact there - the capture of a real
+wrapper's parameterisation, the symbolic expressions over shapes, the guards derived from the
+captured branches, or the reuse of ready-made codegen. In the prototype the kernel handle and
+launch geometry were read from the Python side by hand and registered explicitly; the six-shape
+result proves the parameterisation works once an artifact exists, not that a compiler produced it.
 
-The capture side is genuinely hard - `pointwise_dynamic`, `LibEntry` and the autotuner are
-exactly where tracing was expected to break - and it was solved with a shim plus routing
-changes, not with a new IR. And the native entry needed nothing from an IR: it takes the
-compiled kernel's handle, its launch geometry and the parameter values, all of which are
-reachable from the compiled artifact.
+So the honest state against the design's own exit criteria is: **the runtime half of branch one is
+demonstrated, the capture half is not**, and gate 2 (capture complete) has not been passed. Any
+decision between converging on an adapter layer and evaluating a restricted IR needs that missing
+half measured first.
+
+Two things the phase does establish for that decision. The capture side is where the difficulty
+concentrates - `pointwise_dynamic`, `LibEntry` and the autotuner are exactly where tracing was
+expected to break. And the native entry needed nothing from an IR: it takes the compiled kernel's
+handle, its launch geometry and the parameter values, all of which are reachable from the compiled
+artifact once something has decided which artifact to use.
 
 The most expensive defect in the phase is worth recording because it generalises. The host
 program reproduced the kernel's signature from the source-level `arg_names`, the `signature`
@@ -458,19 +493,33 @@ either **measured** on the shipped tree or **estimated**, and each is labelled.
 | `@libentry` hand-written Triton kernels | **786** |
 | kernel definitions in total (3 to 10 parameters, no dominant shape) | **966** |
 | of those, `@triton.autotune` kernels - several configurations each | 143 |
-| routed operators whose base name is defined in a `pointwise_dynamic` module | **200 (36%)** |
+| routed operators whose same-named module uses `pointwise_dynamic` | **161 (29%)**, unverified |
+| `mul` - the operator Phase 0 measured - uses | `libentry` + `libtuner`, **not** the factory |
 
-Those last two rows are the reason this section is short. 200 of 549 routed operators are served
-by the pointwise class that Phase 0 already built and measured, and a pointwise artifact serves
-every shape from 1-D to 5-D without recompiling.
+**The 161 figure is an upper bound read off module names, not verified coverage, and it must not
+be used to estimate delivered work.** It was produced by checking, for each routed operator whose
+name matches an `ops` module, whether that module mentions `pointwise_dynamic`. It does not
+establish that the specific routed callable is the factory-generated one; that needs per-schema
+verification against the real callable, which has not been done.
+
+The `mul` row is why this correction matters. Phase 0's pointwise class was built against
+`mul_kernel`, a `libentry`/`libtuner` kernel with a hand-written Triton body and a flat element
+count - and `mul.py` does not use `pointwise_dynamic` at all. So the class that was implemented
+and measured is the **libentry elementwise shape**, not the factory shape, and the factory family
+is a different class whose ABI has not been examined. An earlier revision of this section claimed
+200 routes (36%) were already implemented; that claim was wrong for exactly this reason and is
+withdrawn.
 
 ### The cost model: classes, not operators
 
 Development cost scales with the number of **kernel-shape classes**, not with the number of
 operators. Three measured facts support that:
 
-1. 265 `pointwise_dynamic` operators share one kernel signature, and one artifact of that class
-   served six shapes from 1-D to 5-D at a flat 6.8x.
+1. Kernels generated by one factory share one signature. The 265 `pointwise_dynamic` sites are
+   one such family; the `libentry` elementwise kernels are another. They are *different*
+   families with different ABIs - `mul_kernel` takes a flat element count, a factory-generated
+   kernel takes shapes and strides - so a class covers one family, and the six-shape result
+   Phase 0 measured belongs to the `libentry` side.
 2. The 786 `libentry` kernels have widely scattered signatures - parameter counts peak at 5, 6,
    7 and 4 with no majority - so they cannot be one class, but they do cluster by computational
    pattern: reduction, normalisation, pooling, convolution, indexing, sort/topk, linear algebra.
@@ -482,7 +531,7 @@ operators. Three measured facts support that:
 
 | piece | status | coverage |
 | --- | --- | --- |
-| pointwise binary class | implemented, measured on six shapes | **200 of 549 routes (36%)** |
+| elementwise kernel class (`libentry` shape, as `mul` uses) | implemented, measured on six shapes | covers operators whose kernel has this shape; **not yet counted per schema** |
 | reduction over the last axis (softmax) | implemented, measured at 3.4x | the softmax family |
 | ABI extraction from the compiled artifact's PTX | **method proven, done by hand** | two kernels so far |
 | constexpr variant selection | implemented, measured across two artifacts | grows with the shape population |
@@ -506,6 +555,11 @@ single platform (CUDA on H100); no change to the FlagGems operator set during th
 
 After the first, second and sixth items exist, the marginal cost of adding an operator is a
 declaration plus an automated check - on the order of an hour, mostly test time.
+
+The estimate deliberately does **not** discount itself by the 161 routes in the factory family. A
+per-schema census is a work item in its own right, and until it exists neither this estimate nor
+any coverage claim should be read as delivered work. The figure above is what remains to be built
+from a prototype that has one class measured.
 
 ### Compared with hand-written native wrappers
 
@@ -536,12 +590,73 @@ Ordered by coverage per unit of effort rather than by technical interest:
 
 1. **Automate ABI extraction.** Without it every later item is hand work and this estimate does
    not hold.
-2. **Write the code generator.** The pointwise class is already implemented and measured, so
-   this lands its 200 operators at once.
+2. **Write the code generator.** The elementwise class is implemented and measured, so the
+   generator can land the operators whose kernels actually have that shape - enumerated by a
+   per-schema census, not by module name.
 3. **Add classes by call frequency** - reduction, then normalisation, then indexing, then
    sort/topk - not alphabetically.
 4. **Extend guards after step 2.** Broadcast and non-contiguous inputs are common in real eager
    code; while they decline, the optimisation does not apply to those calls at all.
+
+## Reuse before building: three routes, and what would decide between them
+
+Phase 0 proves a native entry point works. It does not prove that building a general host compiler
+is the best way to get one, and this section is the comparison that has to happen before that
+commitment. The review of this document is right that the earlier draft skipped it: the question is
+not "can a host program run" - it can - but "what should produce the host program".
+
+Four candidates, in ascending order of our own effort:
+
+| route | what it reuses | what it costs | what has to be proven |
+| --- | --- | --- | --- |
+| **A. Inductor C++ / AOT wrapper** | allocation, scheduling and code generation already exist | integration, not construction | that it captures real FlagGems callables, keeps the original Triton kernels, and reconnects to ordinary eager under CPU-torch + PrivateUse1 |
+| **B. FlagGems' own shared pointwise generator and native runtime** | factory and schema already hold part of the host semantics: `get_kernel_info(rank)`, type promotion, configuration generation, and a shared native argument-preparation path | limited generated coverage today, and a CUDA-stream dependency | that it covers the target shapes and is CPU-torch clean, or can be made so |
+| **C. A restricted host IR with a small native backend** | nothing; expresses metadata computation, guards, allocation and multi-launch | the frontend and ABI work remain | only worth choosing if A and B are both blocked for integration reasons |
+| **D. A general host compiler built here** | nothing; highest coverage potential | frontend, semantic verification and maintenance are all ours | the evidence for this does not exist yet |
+
+**Route B is a real candidate and is not the same as hand-writing a kernel per operator.** FlagGems
+5.4.0 ships a C++ pointwise path whose `prebuild_kernels.py` already reuses `get_kernel_info(rank)`,
+the schema, type promotion and configuration generation as a thin wrapper, and whose
+`pointwise_prepare_args.h` provides a shared native preparation path. That is part of the host
+semantics this document proposes to reconstruct from Python. What it does not yet offer is evidence
+of CPU-torch + PrivateUse1 compatibility - it carries a CUDA-stream dependency - or broad generated
+coverage. Both are cheap to test and neither has been tested here.
+
+### What the comparison must hold fixed
+
+Comparing routes is only meaningful on common ground, so the experiment is specified before the
+result is known:
+
+- **Fixed inputs.** Same pinned dependencies, real callables, CPU-torch + PrivateUse1 build, device
+  and SDK. Compare on the operator set both routes support, and report the unsupported set and its
+  extension cost separately rather than averaging it in.
+- **Comparable measurement.** Same workload, shapes, dtype, layout, original FlagGems kernel,
+  ordinary allocation and timing boundary. Direct-allocation work is measured on its own arm so it
+  does not contaminate the codegen comparison.
+- **Same acceptance for both.** Each route must obtain, from the real callable or schema and without
+  hand editing, the parameterised expressions for the current input, the complete guards, and the
+  kernel parameter mapping, and must be verified across sizes and across constexpr boundaries.
+  A concrete launch snapshot, an opaque Python call, or an Inductor substitution of the device
+  kernel do not count as completing the goal.
+- **Same entry.** One unchanged native eager script reaches the backend with no user registration or
+  warmup step. Capture must not re-run the user's call, submit real GPU work, or recurse into
+  compilation; unsupported cases fall back before submission.
+- **Same evidence for "no Python".** A profiler and entry counters together, plus tests for output
+  lifetime, layout, exception behaviour and the semantics of unsupported fallbacks.
+- **Reported separately.** First call, warm CPU submission including guard, allocation and release,
+  synchronised end to end, and cache pressure - with the budget and the measurement tolerance fixed
+  before the experiment, and vendor parity reported as its own line.
+
+### Where that leaves the recommendation
+
+The order should be: **A and B in parallel first, on a common operator set; C only if both are
+blocked by integration rather than by capability; D only if C is also insufficient.**
+
+What Phase 0 contributes to that decision is bounded and worth stating plainly: the native half -
+entry point, allocation, guards, variant selection, submission, fallback - is the same work under
+every route above, and one instance of it now exists and is measured. The open question is only
+what produces the artifact and the guards, which is exactly the question the review asks, and the
+earlier draft answered it by assumption.
 
 ## Open questions
 
