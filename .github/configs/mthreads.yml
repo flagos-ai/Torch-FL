@@ -18,10 +18,9 @@ display_name: MUSA
 setup_script: .github/scripts/set_env.sh
 setup_platform: mthreads
 
-# Keep the previously running MUSA 5.1 image until the runner driver is
-# upgraded for MUSA 5.2 and that image can be pulled within the job budget.
-# Its torch_musa is isolated from the CPU PyTorch 2.10 build environment.
-ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-musa-dev
+# The official runtime supplies MUSA 5.2 and vendor packages outside the CI
+# venv. Host-driver compatibility and the native suites remain required.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-mthreads-musa5.2.0:2.3.0@sha256:1870e059f98d95465009f55db78d723cf77640b211ff1c5f1378d59b8e200c27
 
 runner_labels:
   - mt-8g-cicd-pytorch

@@ -149,6 +149,15 @@ assert torch.version.cuda is None, torch.version.cuda
 PY
 }
 
+# Official runtime images have an active /flagos venv. Preserve the legacy
+# development-image path for explicit local/prebuilt users; the selected CI
+# image always takes the same selective-reuse path as the other runtime lanes.
+MUSA_RUNTIME_REUSE=0
+if [[ "${VIRTUAL_ENV:-}" == /flagos || -n "${TORCH_FL_VENDOR_PYTHON:-}" ]]; then
+  MUSA_RUNTIME_REUSE=1
+  source "$REPO_ROOT/.github/scripts/lib/mthreads_runtime.sh"
+  prepare_musa_runtime_environment
+else
 BOOTSTRAP_PYTHON="${TORCH_FL_BOOTSTRAP_PYTHON:-}"
 if [[ -z "$BOOTSTRAP_PYTHON" || ! -x "$BOOTSTRAP_PYTHON" ]]; then
   for candidate in python3.10 python3 python; do
@@ -260,6 +269,8 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   fi
 fi
 
+fi
+
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
@@ -310,7 +321,12 @@ fi
 # fails at import, so the two pins move together.
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_mthreads}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-install_flagtree
+if [[ "$MUSA_RUNTIME_REUSE" == 1 ]] && musa_runtime_flagtree_is_usable; then
+  echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
+else
+  "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+  install_flagtree
+fi
 
 # flagtree may bring torch_musa as a dependency or in its wheel. Uninstall it
 # again to ensure isolation.
@@ -321,11 +337,8 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-mthreads/simple}"
 install_flag_gems
 
-# The published FlagCX RC wheel requires MUSA 5.2. Current CI still uses the
-# working MUSA 5.1 image: its runner reported driver 3.3.5-server, while the
-# 5.2 base image requires 5.2.0-server and took over an hour to pull. Keep the
-# wheel path ready for an explicit image/driver upgrade rather than loading a
-# binary against the wrong toolkit in this job.
+# FlagCX communication remains explicit opt-in. The new runtime carrying
+# its Python wheel does not enable another backend or integration test group.
 if [[ "${TORCH_FL_MUSA_FLAGCX_WHEEL:-0}" == "1" ]]; then
   FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_musa}"
   pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
@@ -336,6 +349,10 @@ if [[ "${TORCH_FL_MUSA_FLAGCX_WHEEL:-0}" == "1" ]]; then
   export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 fi
 
+if [[ "$MUSA_RUNTIME_REUSE" == 1 ]]; then
+  "$VENV_PYTHON" -m pip check
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
+else
 # FlagGems' own runtime deps, installed one at a time for the IncompleteRead
 # reason above. numpy stays <2 for the same reason as the test deps: 2.x breaks
 # the stock +cpu torch C extensions at import.
@@ -343,6 +360,8 @@ pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 pip_retry --index-url "$PIP_INDEX_URL_ARG" 'numpy<2'
+
+fi
 
 # --- Verify the isolation held ----------------------------------------------
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 CPU_TORCH_VERSION="$CPU_TORCH_VERSION" "$VENV_PYTHON" - <<'PY'
@@ -407,6 +426,9 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
+  if [[ "$MUSA_RUNTIME_REUSE" == 1 ]]; then
+    export_ci_env BASH_ENV FLAGOS_SDK_VERSION
+  fi
   export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR MUSA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS MTHREADS_VISIBLE_DEVICES CPATH LIBRARY_PATH LD_LIBRARY_PATH
   if [[ -n "${PIP_CACHE_DIR:-}" ]]; then
     export_ci_env PIP_CACHE_DIR

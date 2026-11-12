@@ -138,6 +138,7 @@ def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
     result = run_shell(
         shell_function("export_ci_env", COMMON) + "\n" + SCRIPT[start:end],
         **environment,
+        MUSA_RUNTIME_REUSE="0",
         PIP_CACHE_DIR=str(cache),
         GITHUB_ENV=str(github_env),
     )
@@ -285,7 +286,7 @@ def test_flaggems_rejects_an_unusable_installed_wheel(tmp_path):
 def test_integration_keeps_bert_and_gates_tokenizer_deps(qwen):
     # Execute the dependency block with an offline recording pip helper.
     start = SCRIPT.index('if [[ "$CI_STAGE" == "integration" ]]; then')
-    end = SCRIPT.index("\nexport VIRTUAL_ENV=", start)
+    end = SCRIPT.index("\nfi\n\nfi", start) + 3
     result = run_shell(
         'pip_retry() { printf "%s\\n" "$@"; }\n' + SCRIPT[start:end],
         CI_STAGE="integration",
@@ -472,3 +473,274 @@ def test_isolated_setup_reconciles_existing_and_fresh_environments(
     if "CPU_TORCH_INSTALL" in result.stdout:
         assert "CPU_TORCH_INSTALL 2.10.0+cpu" in result.stdout
     assert "AUTOLOAD=1" in result.stdout
+
+
+RUNTIME_HELPER = REPO_ROOT / ".github/scripts/lib/mthreads_runtime.sh"
+
+
+def run_runtime_hook(
+    tmp_path, *, prepared=True, fail="", stage="integration", target="ci"
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".github").symlink_to(REPO_ROOT / ".github", target_is_directory=True)
+    image = tmp_path / "image"
+    image.mkdir()
+    sdk = tmp_path / "sdk"
+    for asset in (
+        "include/mudnncxx/mudnn.h",
+        "include/murand.h",
+        "lib/libmudnn.so",
+        "lib/libmurand.so",
+    ):
+        path = sdk / asset
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    ci = tmp_path / "ci-python"
+    ci.write_text(r"""#!/bin/bash
+printf 'python %s\n' "$*" >> "$CALL_LOG"
+if [[ "$*" == *--check-installed* ]]; then
+  [[ "$PREPARED" == 1 ]] || grep -Fxq -- "$3" "$INSTALLED" 2>/dev/null
+  exit $?
+fi
+if [[ "$1 $2" == '-m pip' ]]; then
+  [[ "$3" != check || "$FAIL_PHASE" != check ]]; exit $?
+fi
+if [[ "$1" == '-c' ]]; then
+  [[ "$2" != 'import torch_fl._C' ]]; exit $?
+fi
+if [[ "$1" == '-' ]]; then
+  input="$(cat)"
+  if [[ "$input" == *'expected = sys.argv[1]'* ]]; then
+    [[ "$PREPARED" == 1 || -f "$CPU_READY" ]]; exit $?
+  fi
+  if [[ "$input" == *'metadata.distribution("flagtree")'* ]]; then
+    [[ "$PREPARED" == 1 && "$FAIL_PHASE" != backend ]]; exit $?
+  fi
+fi
+if [[ $# == 0 ]]; then echo ci-python; fi
+""")
+    ci.chmod(0o755)
+    vendor = image / "python3.10"
+    vendor.write_text(r"""#!/bin/bash
+set -e
+printf 'vendor %s\n' "$*" >> "$CALL_LOG"
+if [[ "$1 $2" == '-I -c' ]]; then [[ "$FAIL_PHASE" != python ]]; exit $?; fi
+if [[ "$1 $2" == '-I -' ]]; then
+  exec "$REAL_PYTHON" -I -c 'import os,sys; sys.prefix=os.environ["IMAGE_PREFIX"]; sys.base_prefix=sys.prefix; exec(sys.stdin.read())' "$3" "$4"
+fi
+if [[ "$1 $2" == '-m venv' ]]; then
+  [[ "$FAIL_PHASE" != venv && "$FAIL_PHASE" != uv ]] || exit 1
+  mkdir -p "$4/bin"; cp "$CI_PYTHON" "$4/bin/python"; exit 0
+fi
+if [[ "$*" == *seed_runtime.py* ]]; then [[ "$FAIL_PHASE" != seed ]]; exit $?; fi
+exit 2
+""")
+    vendor.chmod(0o755)
+    uv = image / "uv"
+    uv.write_text(r"""#!/bin/bash
+printf 'uv %s\n' "$*" >> "$CALL_LOG"
+[[ "$FAIL_PHASE" != uv ]] || exit 1
+target="${@: -1}"
+mkdir -p "$target/bin"; cp "$CI_PYTHON" "$target/bin/python"
+""")
+    uv.chmod(0o755)
+    apt = image / "apt-get"
+    apt.write_text('#!/bin/sh\necho forbidden-apt >> "$CALL_LOG"\nexit 1\n')
+    apt.chmod(0o755)
+    gmi = image / "mthreads-gmi"
+    gmi.write_text('#!/bin/sh\necho gmi >> "$CALL_LOG"\n')
+    gmi.chmod(0o755)
+    startup = tmp_path / "startup"
+    startup.write_text('echo startup >> "$CALL_LOG"\nexport PYTHONPATH=/opt/flagtree\n')
+    calls = tmp_path / "calls"
+    env_file = tmp_path / "github-env"
+    path_file = tmp_path / "github-path"
+    env = dict(
+        os.environ,
+        PATH=f"{image}:/usr/bin:/bin",
+        BASH_ENV=str(startup),
+        REAL_PYTHON=sys.executable,
+        IMAGE_PREFIX=str(image),
+        TORCH_FL_VENDOR_PYTHON=str(vendor),
+        TORCH_FL_VENV_ROOT=str(tmp_path / target),
+        MUSA_HOME=str(sdk),
+        REPO_ROOT=str(repo),
+        CI_STAGE=stage,
+        GITHUB_ENV=str(env_file),
+        GITHUB_PATH=str(path_file),
+        CALL_LOG=str(calls),
+        CI_PYTHON=str(ci),
+        CPU_READY=str(tmp_path / "cpu-ready"),
+        INSTALLED=str(tmp_path / "installed"),
+        PREPARED="1" if prepared else "0",
+        FAIL_PHASE=fail,
+        PIP_CACHE_DIR=str(tmp_path / "cache"),
+        PIP_RETRY_NO_CACHE="0",
+        PIP_CONSTRAINT=str(REPO_ROOT / ".github/constraints.txt"),
+    )
+    if fail == "sdk":
+        (sdk / "include/mudnncxx/mudnn.h").unlink()
+    script = r"""
+set -euo pipefail
+source "$REPO_ROOT/.github/version-pins.env"
+source "$REPO_ROOT/.github/scripts/lib/set_env_common.sh"
+venv_is_usable() { [[ "$FAIL_PHASE" != isolated ]]; }
+install_cpu_torch() { echo cpu-torch >> "$CALL_LOG"; touch "$CPU_READY"; [[ "$FAIL_PHASE" != cpu ]]; }
+install_flagtree() { echo flagtree >> "$CALL_LOG"; [[ "$FAIL_PHASE" != flagtree ]]; }
+install_flag_gems() { echo flag-gems >> "$CALL_LOG"; [[ "$FAIL_PHASE" != gems ]]; }
+pip_retry() {
+  printf 'pip %s\n' "$*" >> "$CALL_LOG"
+  [[ "$FAIL_PHASE" != pip ]] || return 1
+  [[ "$FAIL_PHASE" == ineffective-pip ]] || printf '%s\n' "${@: -1}" >> "$INSTALLED"
+}
+build_flagos_inplace() { echo native-build >> "$CALL_LOG"; }
+ls() { if [[ "$1" == /dev/mtgpu* ]]; then return 0; fi; command ls "$@"; }
+source "$REPO_ROOT/.github/scripts/hooks/set_env_mthreads.sh"
+"""
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return result, calls.read_text().splitlines(), env_file, path_file, env
+
+
+@pytest.mark.parametrize("stage", ["build", "integration"])
+def test_runtime_image_reuses_packages_and_keeps_next_shell_isolated(tmp_path, stage):
+    done, calls, env_file, path_file, env = run_runtime_hook(tmp_path, stage=stage)
+    assert done.returncode == 0, done.stderr
+    assert calls.count("native-build") == 1
+    assert "flagtree" not in calls and "cpu-torch" not in calls
+    assert not any(row.startswith("pip ") for row in calls)
+    assert "forbidden-apt" not in calls
+    assert not any("--flagcx-version" in row for row in calls)
+    rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
+    assert rows["BASH_ENV"] == "/dev/null"
+    assert rows["PYTHONPATH"] == ""
+    assert rows["FLAGOS_SDK_VERSION"] == "5.2.0"
+    assert rows["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
+    assert any("--report-environment" in row for row in calls)
+    result = subprocess.run(
+        ["bash", "-c", "python"],
+        env={**env, **rows, "PATH": path_file.read_text().strip() + ":" + rows["PATH"]},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "ci-python"
+    assert Path(env["CALL_LOG"]).read_text().splitlines().count("startup") == 1
+
+
+@pytest.mark.parametrize("stage", ["build", "integration"])
+def test_runtime_image_installs_only_missing_python_requirements(tmp_path, stage):
+    done, calls, *_ = run_runtime_hook(tmp_path, prepared=False, stage=stage)
+    assert done.returncode == 0, done.stderr
+    assert "cpu-torch" in calls and "flagtree" in calls
+    assert any(
+        row.endswith("cmake>=3.19,<4") and row.startswith("pip ") for row in calls
+    )
+    assert any(
+        row.endswith("sqlalchemy>=1.4.31,<2.1") and row.startswith("pip ")
+        for row in calls
+    )
+    assert any("transformers>=4.51,<5" in row for row in calls) == (
+        stage == "integration"
+    )
+    assert next(
+        i
+        for i, row in enumerate(calls)
+        if row.startswith("pip ") and row.endswith("pip>=23.2")
+    ) < calls.index("cpu-torch")
+    assert "forbidden-apt" not in calls
+
+
+@pytest.mark.parametrize(
+    "fail",
+    [
+        "sdk",
+        "python",
+        "seed",
+        "isolated",
+        "uv",
+        "pip",
+        "ineffective-pip",
+        "cpu",
+        "gems",
+        "check",
+        "flagtree",
+    ],
+)
+def test_invalid_runtime_or_failed_install_stops_before_native_build(tmp_path, fail):
+    done, calls, *_ = run_runtime_hook(tmp_path, prepared=False, fail=fail)
+    assert done.returncode != 0
+    assert "native-build" not in calls
+    assert "forbidden-apt" not in calls
+
+
+def test_runtime_image_uses_uv_if_the_venv_module_cannot_seed_pip(tmp_path):
+    done, calls, *_ = run_runtime_hook(tmp_path, fail="venv")
+    assert done.returncode == 0, done.stderr
+    assert any(row.startswith("uv venv --clear --seed --python ") for row in calls)
+    assert "forbidden-apt" not in calls
+
+
+@pytest.mark.parametrize("target", ["image", "image/subdir", ".", "repo"])
+def test_runtime_venv_override_cannot_clear_the_image_or_checkout(tmp_path, target):
+    done, calls, *_ = run_runtime_hook(tmp_path, target=target)
+    assert done.returncode != 0
+    assert not any("-m venv" in row for row in calls)
+    assert "native-build" not in calls
+
+
+@pytest.mark.parametrize(
+    "state", ["local", "wrong-version", "shadowed", "no-mthreads", "external"]
+)
+def test_runtime_compiler_reuse_requires_local_matching_provider(tmp_path, state):
+    prefix = tmp_path / "ci"
+    site = prefix / "site-packages"
+    site.mkdir(parents=True)
+    provider = site if state != "external" else tmp_path / "external"
+    compiler = provider / "triton"
+    (compiler / "backends/mthreads").mkdir(parents=True)
+    (compiler / "__init__.py").touch()
+    info = provider / "flagtree-0.7.0.dist-info"
+    info.mkdir()
+    version = "0.6.1+mthreads3.6" if state == "wrong-version" else "0.7.0+mthreads3.6"
+    (info / "METADATA").write_text(f"Name: flagtree\nVersion: {version}\n")
+    if state == "no-mthreads":
+        (compiler / "backends/mthreads").rmdir()
+    paths = [str(provider)]
+    if state == "shadowed":
+        shadow = tmp_path / "shadow"
+        (shadow / "triton").mkdir(parents=True)
+        (shadow / "triton/__init__.py").touch()
+        paths.insert(0, str(shadow))
+    probe = (
+        RUNTIME_HELPER.read_text()
+        .split("musa_runtime_flagtree_is_usable() {", 1)[1]
+        .split("<<'PY'\n", 1)[1]
+        .split("\nPY", 1)[0]
+    )
+    code = f"import sys; sys.prefix={str(prefix)!r}; sys.path[:0]={paths!r}\n" + probe
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code, "0.7.0+mthreads3.6"],
+        capture_output=True,
+        text=True,
+    )
+    assert (done.returncode == 0) == (state == "local"), done.stderr
+
+
+def test_musa_selects_the_verified_runtime_without_changing_the_build_contract():
+    import yaml
+
+    config = yaml.safe_load((REPO_ROOT / ".github/configs/mthreads.yml").read_text())
+    assert config["ci_image"].endswith(
+        ":2.3.0@sha256:1870e059f98d95465009f55db78d723cf77640b211ff1c5f1378d59b8e200c27"
+    )
+    assert config["setup_platform"] == "mthreads"
+    assert config["runner_labels"] == ["mt-8g-cicd-pytorch"]
+    assert SCRIPT.count("\nbuild_flagos_inplace\n") == 1
+    assert "seed_runtime.py" in RUNTIME_HELPER.read_text()
+    assert "apt-get" not in RUNTIME_HELPER.read_text()
