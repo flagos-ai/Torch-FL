@@ -1,233 +1,237 @@
 # Compiling FlagGems' Python host logic into native Torch-FL operators
 
-Status: design proposal for #822. Nothing here is implemented; Phase 0 exists to
-falsify the assumptions this document is built on.
+Status: design proposal for #822, revised against review on #823. Nothing here is
+implemented. Phase 0 is a sequence of gates whose purpose is to fail early and cheaply.
 
 ## Problem
 
-An eager ATen call on `flagos` reaches FlagGems through a generic caller that
-acquires the GIL, builds Python arguments and invokes the resolved Python
-callable. Everything the wrapper does around the kernel — argument
-normalisation, metadata arithmetic, dispatch and specialisation, allocation —
-runs in Python on every call.
+An eager ATen call on `flagos` reaches FlagGems through a generic caller that acquires
+the GIL, constructs Python arguments and invokes the resolved Python callable. Everything
+the wrapper does around the kernel - argument normalisation, metadata arithmetic, dispatch
+and specialisation, allocation - runs in Python on every call.
 
-#820 removed part of that cost by recording one concrete launch and replaying it
-from the caller. Measured there, on H100: `mul` 512x512 went from 82.55 us
-(wrapper) to 6.81 us (replay), against 7.27 us for the vendor operator. But that
-result rests on two things this project may not keep: a persistent per-plan pool
-of output tensors, and a plan that is a snapshot of one observed call with
-concrete dimensions. Both are excluded here — the target is a *parameterised
-host program* that recomputes its shapes, guards its specialisation and
-allocates normally on every call.
+#820 removed part of that cost by recording one concrete launch and replaying it from the
+caller. Measured there on H100: `mul` 512x512 went from 82.55 us (wrapper) to 6.81 us
+(replay), against 7.27 us for the vendor operator. But that result rests on two things this
+project may not keep: a persistent per-plan pool of output tensors, and a plan that is a
+snapshot of one observed call with concrete dimensions.
 
-## Goals
+## Positioning
 
-- Ordinary eager calls keep working; no model rewrite, no user `torch.compile`.
-- After warmup, a supported call completes without entering Python: guard,
-  specialisation selection, shape/scalar arithmetic, allocation and one or more
-  kernel launches are all native.
-- Device kernels stay FlagGems' Triton kernels. What is compiled is the host
-  side.
-- Coverage grows through shared lowering rules, not per-operator C++.
+The feature is: **inside Torch-FL's existing eager dispatch, transparently compile the host
+logic of an individual FlagGems operator.** A user script stays byte-for-byte unchanged.
 
-## Non-goals
+- No `torch.compile`, no decorator, no capture context, no dedicated API, no manual warmup.
+- Users keep running plain Python eager. Nothing is required of them to opt in, and nothing
+  is required of them to keep working.
+- "Removing Python overhead" is scoped precisely: once a supported call has entered the
+  backend, the cache-hit path of preparation, allocation and submission runs without
+  Python. It is not a claim about the model, the training loop or the dispatcher.
 
-- Handwritten C++ per operator, or upstream FlagGems changes to make tracing
-  easier.
-- Per-plan persistent output pools; retaining user inputs, input pointers, prior
-  outputs or a fixed stream to make replay cheap.
-- A promise of zero compilation cost, zero extra memory, or optimal performance
-  on every input.
-- Autograd, RNG, data-dependent output sizes or mutation in the first slice.
-  These must be declined explicitly, not silently treated as constant.
+## Bounded support and eager semantics
+
+The initial scope is metadata-driven, functional operators with no input gradients. This is
+a statement about what is accelerated, not a requirement on the user: **callers are not
+asked to enter `inference_mode()`** or otherwise change how they call the operator.
+
+Sizes and scalars may be symbolic, or explicitly specialised with a guard. What must not
+happen is freezing the first call's values silently.
+
+Autograd, mutation, RNG, complex aliasing and tensor subclasses fall back transparently
+until each is verified. The native path must use the correct allocator, device and current
+stream, and preserve output count, dtype, shape, strides, lifetime and error semantics.
+
+The fallback decision happens before anything is submitted. Once an operator has partially
+executed, the original implementation is never re-run unconditionally: that would replay
+side effects.
 
 ## Performance model
 
-The budget for one warm call, from #820's measurements on H100 (all same host,
-same stack): the kernel launch itself was 4.33 us inside C++, and a plugin
-dispatch entry adds about 1 us.
+A warm call's budget, from #820's measurements on H100, same host and stack: the launch
+itself was 4.33 us inside C++, and a plugin dispatch entry adds about 1 us.
 
-Allocation is the open question, and it is large enough to decide the project.
-`at::empty` on the `flagos` device measured about **4.0 us**, and the vendor's
-7.27 us for `mul` includes an allocation of its own. Comparing our unoptimised
-allocation against the vendor's total is not a like-for-like comparison:
+Allocation is the part that decides the ceiling. `at::empty` on the `flagos` device
+measured about **4.0 us**, and the vendor's 7.27 us for `mul` already includes an
+allocation of its own, so comparing our unoptimised allocation against the vendor's total
+is not like for like:
 
 | composition | cost | ratio to vendor (7.27 us) |
 | --- | ---: | ---: |
 | launch only (#820) | 4.33 us | 0.60x |
 | launch + dispatch entry | ~5.3 us | 0.73x |
-| launch + entry + `at::empty` (4.0 us) | ~10.6 us | **1.45x** |
-| launch + entry + allocation at 1.0-1.5 us | 6.8-7.8 us | **0.94-1.07x** |
+| launch + entry + `at::empty` (4.0 us) | ~10.6 us | 1.45x |
+| launch + entry + allocation at 1.0-1.5 us | 6.8-7.8 us | 0.94-1.07x |
 
-So parity is reachable inside this project's constraints, but only if allocation
-stops costing 4 us. That makes allocation a first-class workstream rather than a
-later optimisation, and it is the reason Phase 0 measures it before anything
-else.
+Two consequences for the acceptance criteria below. First, an allocation prototype is part
+of the measurements, not a later optimisation. Second, **vendor parity is a separate goal**:
+this project's acceptance is that the warm CPU submission cost improves by more than
+measurement noise and that the synchronised end-to-end time does not regress.
 
 ## Architecture
 
 ```text
 ATen eager call on flagos
-  -> native entry (per operator, registered)
-     -> guard: dtype/rank/layout/mode/device of this call
-        -> hit:  host program
-                   compute shapes and scalars from this call's metadata
-                   allocate outputs through the device allocator
-                   launch 1..N kernels
-                   return ATen-compatible results
-        -> miss: capture, compile, register, then run as above
-     -> unsupported: the existing Python route, at the dispatch boundary
+  -> backend caller, before the GIL is taken and Python arguments are built
+     -> lookup a native host program for this operator and this call
+        hit:  native path
+                guard: dtype/rank/layout/offset/alignment/mode/device
+                compute shapes and scalars from this call's metadata
+                select device variant, allocate, submit 1..N launches
+                return ATen-compatible results
+        miss/unsupported: the existing FlagGems Python route
 ```
+
+### Hook point
+
+The lookup happens in `CallPythonOp_Generic`, before the GIL is acquired and before Python
+arguments are constructed - the position #820 established for its replay. It must cover
+positional arguments, keyword arguments, tuple and multi-output returns, and preserve the
+ATen schema, overload and outer dispatcher layering.
+
+### Capture protocol
+
+The first call behaves exactly as it does today. Capture happens around it, and never
+touches the real inputs:
+
+1. The first call executes the existing implementation and its result is kept and returned.
+2. Symbolic capture follows, using metadata and the actual callable, with FakeTensor or
+   symbolic metadata. **No kernel is submitted against real inputs during capture.**
+3. If capture fails, the first call's result is still what the caller receives, and the
+   operator keeps its existing route. The operator is not re-run.
+4. An internal re-entrancy barrier prevents helper ATen operations issued during capture
+   from triggering compilation again.
+5. Autotune trial runs are recorded separately from the operator's real launch sequence; a
+   tuning run is not the operator's launch.
+6. A capture failure leaves neither the current result nor later state modified.
+
+Only host paths confirmed safe to capture are admitted. A callable with non-isolatable
+Python side effects, unreconstructable state, or data-dependent behaviour keeps its
+existing implementation.
+
+### What a host program contains
+
+- Expressions over `shape`, `strides`, `numel`, `storage_offset`, alignment and dtype, and
+  the scalar arguments of the call - evaluated per call, never frozen to the first call's
+  values.
+- Allocation, layout and view construction, and the metadata-dependent branches around
+  them, each with the guard that decides it.
+- The original Triton kernel, its grid, its argument mapping, its constexprs and the
+  compile conditions under which it is valid.
+
+An artifact that is only a concrete launch snapshot, or that contains an opaque Python
+call, does not satisfy this: it is what #820 already did.
 
 ### Frontend
 
-Evaluate TorchDynamo + FX on real FlagGems callables first. FlagGems operators
-are commonly wrapped in decorator machinery (`pointwise_dynamic`, autotuners,
-`libentry`), which is where tracing is expected to break; the support table from
-Phase 0 records where and why. A `TorchDispatchMode` recorder is the fallback
-frontend, because it collects calls at the boundary this project cares about
-without depending on Dynamo internals. Compiling the Python source directly is
-rejected: it degrades into per-operator pattern matching, which is the thing
-this project is meant to stop doing.
+Dynamo with symbolic shapes and FX is the first experimental frontend, applied to the real
+FlagGems callable. Raw Triton calls have to be exposed through `wrap_triton` or an
+equivalent mechanism so they enter the tracing path rather than disappearing as opaque
+calls. `TorchDispatchMode` is used to observe ATen operations, not as the capture mechanism.
 
-### Representing the host program
+FlagGems wraps many operators in `LibEntry`, heuristics and autotuner machinery. The plan is
+a shared adapter per wrapper type, not per operator. **Whether the internal Dynamo/Inductor
+route works at all under CPU-torch + PrivateUse1 is a Phase 0 hypothesis**, not an
+assumption.
 
-A small typed IR, as #822 sketches: read tensor metadata, checked integer
-arithmetic, comparisons and guards, allocation, layout/view construction,
-tuple returns, and kernel invocations with explicit argument mapping and launch
-geometry. Shapes and scalars are *expressions over this call's metadata*, never
-constants from the first call. Control flow is supported only as guarded
-branches: a mismatched guard compiles or selects another variant rather than
-silently taking the observed path.
+Caching a compiled function that still needs Python to execute is not success. Neither is
+having Inductor replace the operator's device kernel: the kernel stays FlagGems' Triton
+kernel.
 
-The IR is then emitted as C++, compiled with the host compiler, and loaded. An
-interpreter over the IR is kept for debugging only — the issue is explicit that
-performance acceptance requires a native host path.
+### Native exit
 
-### Kernel ABI adapter
+Prefer reusing an existing native-wrapper mechanism over writing a new one. If one can be
+reused, the backend hook is connected to the ordinary eager entry and the design collapses
+into a shared adapter layer - which is the cheapest outcome and the one Phase 0 looks for
+first.
 
-Use the compiler's own post-specialisation description — the runtime parameter
-list, types and widths, constants and alignment, grid/block, shared memory,
-scratch and dependency fingerprints — as a versioned adapter (`v1` for the
-pinned Triton/FlagTree). #820's PTX parameter-count inference is demoted to a
-diagnostic and a cross-check; it is not an ABI contract.
+Only if capture succeeds and the ready-made codegen is blocked by integration problems does
+a restricted host IR plus a small native backend become the topic. That IR is not built
+ahead of that finding.
 
-### Allocation
+### Two cache layers
 
-Three layers, in the order they are worth doing:
+| layer | holds | keyed by |
+| --- | --- | --- |
+| host program | expressions, allocation, variant selection | operator + its parameterised class |
+| device variant | concrete constexprs, specialisation, ABI, target, compile options | the variant the host program selects |
 
-1. **Direct allocator in the host program (Phase 1).** `c10::GetAllocator` plus
-   tensor construction, skipping the dispatcher hop while still allocating and
-   freeing through the real allocator every call. Not a pool. Target 1.0-1.5 us.
-2. **Fix the plugin's own allocation path (Phase 0 measurement, may land first).**
-   If allocation on `flagos` is materially slower than on `cuda`, the reason is
-   in the plugin's allocator path, and fixing it benefits every operator
-   independently of this compiler.
-3. **Bounded process-wide reuse (later, only if measurements justify it).** #822
-   permits caching with an explicit per-device byte budget and safe
-   stream/lifetime management; it forbids a per-plan pool. Layer 1 and 2 come
-   first.
+A change of size reuses the host program and may select a different device variant. A new
+variant may take the cold path, but an existing variant's guard and selection must be
+native. Both layers and a failure cache are separately bounded; eviction never affects a
+call in flight, and retired resources stay accounted until nothing references them. No old
+inputs or outputs are retained to make a hit cheap.
 
-Layer 1 has to be indistinguishable from `at::empty` in the properties callers
-observe: dispatch key set including the autograd branch, version counter,
-resizable flag, memory format, storage offset, alignment, and allocator stream
-association. The equivalence tests are an entry condition for Phase 1, not a
-follow-up: a tensor that differs in any of these fails silently rather than
-loudly.
+## Phase 0 gates
 
-### Cache and lifetime
+Phase 0 does not build a general IR. Each gate has an acceptance criterion, and failing one
+stops or redirects the work rather than leading into the next.
 
-Specialisation classes, not concrete sizes, key the artifacts: operator,
-dtype combination, rank, contiguity and alignment class, execution mode. Sizes
-stay inside the host program as arithmetic over metadata, so many shapes share
-one artifact.
+| gate | experiment | acceptance |
+| --- | --- | --- |
+| **0. Freeze the contract** | Pin dependencies, the real callables, device, build, workload and measurement method | Cold-start budget, cache capacity and measurement tolerance are fixed before measuring; no performance conclusion is extrapolated across different workloads |
+| **1. User code unchanged** | One native eager script, run through the real dispatcher; experiment groups switched by internal configuration only | No new user-side steps; the first call is not run twice; a capture failure returns normally; helper operations do not recursively trigger compilation |
+| **2. Capture complete** | Real `mul` first, then `softmax` with size expressions and branches | Expressions, guards, allocation and the original kernel call are captured; symbolic capture submits no real GPU work. A concrete launch snapshot or an opaque Python call fails this gate |
+| **3. Native exit works** | Reuse a native wrapper if possible, then connect to the ordinary eager entry | At least one operator runs end to end under CPU-torch + PrivateUse1; the original kernel is preserved; on a cache hit the backend path does not enter Python, shown by both a profiler and entry counters |
+| **4. Parameterisation and fallback** | Vary sizes, layout, offset, broadcasting, scalars, default arguments and empty inputs; cross constexpr boundaries; keep several live outputs | Results, layout, exceptions and lifetime are correct; the host program does not gain an artifact per size; a variant is selected or the call falls back before submission. Unsupported training, mutation and stream cases still behave correctly |
+| **5. Coverage potential** | Support table for pointwise, inner and non-inner `softmax`, a multi-launch reduction, and a multi-output operator | Each supported case is explained by shared capture rules, and each failure is attributed to expressions, control flow, wrappers, ABI or codegen |
+| **6. Performance value** | Same workload: existing route, full native route and the allocation prototype; the vendor operator reported separately | Warm CPU submission improves by more than the measurement noise; synchronised end to end does not regress beyond the agreed tolerance; cold start and cache growth stay within the budget from gate 0 |
 
-Bounded by per-operator and global entry counts plus a byte budget, with
-admission policy, eviction, compile-rate limiting and deduplication of
-concurrent compilation of the same variant. Eviction is separate from
-destruction: in-flight launches and live results retain their resources, and
-retired-but-live resources stay accounted. Counters for captures, compiles,
-native hits, misses with reasons, variant count, bytes and evictions exist from
-the first slice.
+Performance acceptance includes the guard, variant selection, allocation and release.
+First call, compile time, warm CPU submission and synchronised end to end are reported
+separately.
 
-### Fallback
+### Phase 0 exit
 
-At the dispatch boundary, before any allocation, launch or mutation. No path may
-launch part of an operator, then fall back and re-run it: that would replay
-side effects. Unsupported constructs are declined with a reason that is
-observable.
+- **Capture complete and a native wrapper reusable:** converge on a shared adapter layer and
+  shrink the self-built backend.
+- **Capture complete but ready-made codegen blocked by integration:** only then evaluate a
+  restricted host IR and a small native backend.
+- **Expressions or guards unrecoverable, or the user's eager usage would have to change:**
+  the route fails; stop expanding it. A new backend cannot restore semantics lost during
+  capture.
 
-## Phase plan
+## Allocation
 
-### Phase 0 — falsification and baselines
+Three layers, in the order they are worth doing. The first is part of the gate 6
+measurement; the second is independent of this project; the third is not in scope now.
 
-1. **Allocation.** `at::empty` on `flagos:0` versus `cuda:0`, decomposed into
-   dispatcher, allocator and tensor construction. Prototype of the direct
-   allocator path, to see whether 1.0-1.5 us is real. Decide whether the plugin
-   allocator itself is fixable work worth doing first.
-2. **Frontend spike.** Whether Inductor's `cpp_wrapper` / AOTInductor can emit a
-   host artifact for a one-operator graph on `flagos`. If it can, most of this
-   document is replaced by an adapter, and that is the finding that matters most.
-   Also check whether its generated code introduces `c10::cuda`/`at::cuda`
-   symbols, which the CPU-torch build contract forbids.
-3. **Capture support table.** Four categories on real FlagGems callables:
-   pointwise `mul`, inner and non-inner `softmax`, a reduction verified to use
-   several launches, and a multi-output operator such as `max.dim`. Record the
-   frontend's graph breaks and reasons per operator.
-4. **Kernel ABI.** What the pinned Triton/FlagTree exposes after
-   specialisation, and whether it is enough to generate a launch without
-   inference.
-5. **Baselines, four arms, same process where possible:** wrapper, native launch
-   plus normal allocation, native launch plus layer-1 allocation, and the vendor
-   operator in a separate process as the end-user reference.
+1. **Direct allocator in the native path.** Allocate through `c10::GetAllocator` and
+   construct the tensor directly, skipping the dispatcher hop while still allocating and
+   freeing every call through the real allocator. Not a pool. Target 1.0-1.5 us.
+2. **Fix the plugin's own allocation path.** If allocation on `flagos` is materially slower
+   than on `cuda`, the cause is in the plugin's allocator path, and fixing it benefits every
+   operator independently of this compiler.
+3. **Bounded process-wide reuse.** Only if measurements justify it later. #822 permits
+   caching with an explicit per-device byte budget and safe stream/lifetime management; it
+   forbids a per-plan pool.
 
-### Phase 1 — one vertical slice
-
-One operator end to end: real Python implementation, capture, host artifact,
-registration, ordinary ATen call. Layer-1 allocation with its equivalence
-tests. A size sweep across one specialisation class demonstrating artifact
-reuse rather than one artifact per dimension. Diagnostics, bounded cache and
-disable/invalidate from the start.
-
-The operator is chosen from the Phase 0 support table — the one whose host logic
-is cleanest, not the most familiar. `mul` is a poor candidate precisely because
-its host logic lives inside the `pointwise_dynamic` factory.
-
-### Phase 2 — shared semantic coverage
-
-Shape and layout arithmetic, keyword and default handling, views and tuples,
-multiple launches and temporaries through generic rules. The four categories
-from Phase 0 covered without handwritten operator bodies. Explicit statement of
-what remains unsupported, with fallback verified.
-
-### Phase 3 — hardening
-
-Concurrency, multiple devices, non-default streams, cross-stream consumers,
-live-output stability, eviction with in-flight work, failure cleanup, module
-lifetime. The supported NVIDIA CPU-torch configuration and a safe
-unsupported-platform build. Capability boundary for a second backend, added only
-with execution evidence.
-
-## Risks, in the order they can sink this
-
-1. **Inductor's `cpp_wrapper` works.** This is upside-down as a risk: if it works
-   on `flagos`, building a compiler here would be duplicated work. Phase 0 item 2
-   exists to find this out before any IR is written.
-2. **Tracing yield is low** because of FlagGems' decorator machinery, leaving too
-   few operators for the approach to be general. The support table answers this
-   with numbers.
-3. **Allocation cannot be brought near the vendor's**, leaving the project's
-   ceiling at 1.45x. Phase 0 item 1 answers this, and it is why it is first.
-4. **Generated host code violates the CPU-torch contract** by naming `c10::cuda`.
-   #820 hit exactly this and solved it by taking the stream from the plugin's own
-   registry; the codegen has to keep that property.
+Layer 1 must be indistinguishable from `at::empty` in the properties callers observe:
+dispatch key set including the autograd branch, version counter, resizable flag, memory
+format, storage offset, alignment and allocator stream association. These fail silently
+rather than loudly, so the equivalence tests are an entry condition, not a follow-up.
 
 ## Open questions
 
-- Performance target wording: is "no Python on the warm path" the acceptance
-  criterion, with parity as a separate goal that depends on allocation work?
-- Runtime host compilation: this design assumes a host C++ compiler is available
-  at run time, as `torch.compile` already does. Is that acceptable for the
-  supported deployment, or must the artifact be produced at wheel build time?
-- Should the plugin-allocator work (layer 2) proceed as its own change
+- Runtime host compilation: this design assumes a host C++ compiler is available at run
+  time, as `torch.compile` already requires. Is that acceptable for the supported
+  deployment, or must artifacts be produced at wheel build time?
+- Does the CPU-torch + PrivateUse1 configuration permit the Dynamo/Inductor route at all,
+  and does generated code stay free of `c10::cuda`/`at::cuda` symbols? #820 had to take its
+  stream from the plugin's registry to satisfy that contract; generated code must keep the
+  same property.
+- Should the plugin-allocator work (allocation layer 2) proceed as its own change
   regardless of this project's timeline?
+
+## Risks, in the order they can sink this
+
+1. **Capture yield is too low.** FlagGems' `pointwise_dynamic`, `LibEntry` and autotuner
+   wrappers are exactly where tracing is expected to break. Gate 2 and gate 5 measure this
+   on real callables instead of assuming.
+2. **No native wrapper can be reused**, forcing a self-built IR and backend before any
+   performance evidence exists. Gate 3 and the exit criteria exist to make that decision on
+   evidence.
+3. **Allocation cannot be brought near the vendor's**, leaving the ceiling at 1.45x. That
+   would not fail the acceptance criteria - parity is a separate goal - but it would limit
+   the project's value, which is why the prototype is measured in gate 6.
+4. **Generated code violates the CPU-torch contract** by naming `c10::cuda`, which fails at
+   load time rather than at run time.
