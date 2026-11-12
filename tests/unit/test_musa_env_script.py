@@ -119,7 +119,7 @@ def test_musa_uses_the_entrypoint_cache_policy():
     assert "musa_prepare_pip_cache" not in SCRIPT
     runner = (REPO_ROOT / ".github/scripts/set_env.sh").read_text()
     assert 'prepare_pip_cache "$PLATFORM"' in runner
-    assert "ascend|iluvatar|kunlunxin|mthreads)" in runner
+    assert "ascend|iluvatar|kunlunxin|mthreads|thead)" in runner
 
 
 def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
@@ -475,9 +475,6 @@ def test_isolated_setup_reconciles_existing_and_fresh_environments(
     assert "AUTOLOAD=1" in result.stdout
 
 
-RUNTIME_HELPER = REPO_ROOT / ".github/scripts/lib/mthreads_runtime.sh"
-
-
 def run_runtime_hook(
     tmp_path, *, prepared=True, fail="", stage="integration", target="ci"
 ):
@@ -718,8 +715,7 @@ def test_runtime_compiler_reuse_requires_local_matching_provider(tmp_path, state
         (shadow / "triton/__init__.py").touch()
         paths.insert(0, str(shadow))
     probe = (
-        RUNTIME_HELPER.read_text()
-        .split("musa_runtime_flagtree_is_usable() {", 1)[1]
+        SCRIPT.split("musa_runtime_flagtree_is_usable() {", 1)[1]
         .split("<<'PY'\n", 1)[1]
         .split("\nPY", 1)[0]
     )
@@ -742,8 +738,13 @@ def test_musa_selects_the_verified_runtime_without_changing_the_build_contract()
     assert config["setup_platform"] == "mthreads"
     assert config["runner_labels"] == ["mt-8g-cicd-pytorch"]
     assert SCRIPT.count("\nbuild_flagos_inplace\n") == 1
-    assert "seed_runtime.py" in RUNTIME_HELPER.read_text()
-    assert "apt-get" not in RUNTIME_HELPER.read_text()
+    assert "seed_runtime.py" in SCRIPT
+    assert (
+        "apt-get"
+        not in SCRIPT.split("prepare_musa_runtime_environment() {", 1)[1].split(
+            "musa_runtime_requirement() {", 1
+        )[0]
+    )
 
 
 def test_legacy_compiler_install_does_not_gain_a_runtime_uninstall(tmp_path):

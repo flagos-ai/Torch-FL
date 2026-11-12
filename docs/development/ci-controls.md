@@ -4,9 +4,36 @@ CI schedules configured hardware platforms through the shared integration
 workflow. Runner labels, images and device access come from each platform config;
 test groups come from the shared integration manifest.
 
+## Runtime environment preparation
+
+Ascend, Iluvatar, Kunlunxin, MUSA and PPU use the same preparation layout:
+`.github/configs/<platform>.yml` selects the digest-pinned runtime and device
+access; `.github/scripts/set_env.sh` dispatches to
+`.github/scripts/hooks/set_env_<platform>.sh`; and
+`.github/requirements-<platform>.txt` declares each isolated environment's
+Python tools. Platform-specific preparation functions live in their hook.
+Shared package reuse, installation and cache utilities remain under
+`.github/scripts/seed_runtime.py` and `.github/scripts/lib/`.
+
+Each hook creates a separate venv, selectively copies compatible RECORD-owned
+wheels, checks the declared requirements and installs missing packages through
+pip. The runtime supplies system compilers and its SDK. Child shells retain the
+venv through `GITHUB_ENV`/`GITHUB_PATH`; image startup scripts cannot reactivate
+vendor Python or add `/opt/flagtree` to `PYTHONPATH`. A fresh venv and a download
+cache have separate lifecycles: cached downloads never skip the native build,
+wheel validation or tests. CPU-only provisioning and cache regression tests run
+in the shared platform-agnostic job.
+
+Requirements need not have identical versions across vendors: the interpreter,
+compiler backend and SDK follow each chosen runtime, while CPU Torch and
+published package pins retain their existing lane contracts. PPU also retains
+its two existing lanes: default uses CPU Torch without a vendor bundle; boxing
+bundles vendor libtorch after the existing native build. No additional native
+build, source-built Torch or test exclusions are introduced by this migration.
+
 ## Download caching for the runtime-migration lanes
 
-Ascend, Iluvatar, Kunlunxin and MUSA use the same cache-selection helper,
+Ascend, Iluvatar, Kunlunxin, MUSA and PPU use the same cache-selection helper,
 `.github/scripts/lib/pip_cache.sh`, before their platform environment hooks run.
 The integration workflow prefers the existing runner-local
 `/__w/.pip-cache/<platform>` directory. It checks ownership, directory access
@@ -31,7 +58,7 @@ can cause a one-time cold cache. Other platform lanes retain their existing
 cache-selection behavior.
 
 The manual/release wheel workflow still transports downloads through its
-existing Actions cache restore/save steps; these four lanes use the same helper
+existing Actions cache restore/save steps; these runtime lanes use the same helper
 to select a usable directory before that transport and recheck it at setup.
 Normal PR integration jobs keep using runner-local storage.
 

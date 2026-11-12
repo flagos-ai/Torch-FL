@@ -21,10 +21,9 @@
 # be selected from the PPU build at import time. This script:
 #   1. Validates PPU_SDK and the vendor torch assets.
 #   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
-#   3. Installs the published FlagTree and FlagGems wheels into it.
+#   3. Reuses matching wheels by RECORD; installs missing published wheels.
 #   4. Exports FLAGOS_ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
-#   5. build_ext --inplace, then bundles PPU core/CUDA/MKL .so into
-#      torch_fl/lib_thead/ via bundle_thead_libtorch.sh (setup.py does not call it).
+#   5. Preserves the existing native build; only boxing bundles vendor libtorch.
 #
 # Nothing here reads a host bind mount, so the environment is fully reproducible
 # from the image plus this script's indexes.
@@ -33,6 +32,12 @@
 # lib_thead/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
 # backends_thead.conf. No mode env var is involved.
 
+# SDK startup has already run in the image. Child shells must not restore its
+# vendor Python/compiler paths after CI activates the isolated environment.
+export BASH_ENV=/dev/null
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # Use the official indexes by default: the PPU runner pod's HTTP proxy returns
 # 500 on HTTPS CONNECT to *.tuna.tsinghua.edu.cn, so the Tsinghua PyPI and
@@ -70,15 +75,14 @@ FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-thead/simple}"
 
-# PPU SDK lives under either /usr/local/PPU-SDK (hyphen, host-mounted on the
-# CI runner via container_volumes) or /usr/local/PPU_SDK (underscore, in-image
-# on dev pods). A preset PPU_SDK wins; otherwise scan candidates
+# The runtime SDK lives under /usr/local/PPU_SDK. Keep the legacy hyphenated
+# location as a local-development fallback. A preset PPU_SDK wins; scan candidates
 # and pick the first with CUDA_SDK/lib64/libcudart.so. Mirrors
 # set_env_ascend.sh's CANN toolkit scan so layout changes do not break the env.
 _ppu_candidates=(
   "${PPU_SDK:-}"
-  /usr/local/PPU-SDK
   /usr/local/PPU_SDK
+  /usr/local/PPU-SDK
   /opt/PPU-SDK
 )
 PPU_SDK=""
@@ -107,7 +111,7 @@ select_vendor_python() {
     echo "::error::Unable to find the vendor Python interpreter" >&2
     exit 1
   fi
-  if ! "$candidate" -c "import torch" >/dev/null 2>&1; then
+  if ! "$candidate" -I -c "import torch" >/dev/null 2>&1; then
     echo "::error::Vendor Python cannot import torch: $candidate" >&2
     exit 1
   fi
@@ -115,7 +119,7 @@ select_vendor_python() {
 }
 
 VENDOR_PYTHON="$(select_vendor_python)"
-VENDOR_INFO="$("$VENDOR_PYTHON" - <<'PY'
+VENDOR_INFO="$("$VENDOR_PYTHON" -I - <<'PY'
 import json
 from pathlib import Path
 import site
@@ -230,10 +234,23 @@ if [[ "${BOXING_LANE:-}" == "1" ]]; then
 fi
 
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}${BOXING_LANE:+-boxing}}"
+"$VENDOR_PYTHON" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PYCODE'
+from pathlib import Path
+import sys
+
+target, repo = (Path(p).resolve() for p in sys.argv[1:])
+for prefix in (sys.prefix, sys.base_prefix):
+    source = Path(prefix).resolve()
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
+if repo.is_relative_to(target):
+    raise SystemExit("CI venv must not contain the source checkout")
+assert sys.version_info[:2] == (3, 12), "PPU FlagTree requires Python 3.12"
+PYCODE
 if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
-  echo "::warning::Vendor Python cannot create a venv; trying uv"
   if ! command -v uv >/dev/null 2>&1; then
-    "$VENDOR_PYTHON" -m pip install --upgrade uv
+    echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
+    exit 1
   fi
   uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
 fi
@@ -243,6 +260,21 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
   exit 1
 fi
 
+"$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+assert Path(sys.prefix).resolve() == root
+assert sys.prefix != sys.base_prefix
+settings = {}
+for line in (root / "pyvenv.cfg").read_text().splitlines():
+    key, separator, value = line.partition("=")
+    if separator:
+        settings[key.strip().lower()] = value.strip().lower()
+assert settings.get("include-system-site-packages") == "false"
+PY
+
 # The pod's proxied egress to files.pythonhosted.org has been observed at
 # ~90 kB/s, well below what pip's 15s default read timeout tolerates for a
 # single wheel (e.g. the ~30 MB cmake wheel stalled mid-download and tripped
@@ -251,110 +283,70 @@ fi
 # index-url choice and applies regardless of which index ends up serving it.
 export PIP_DEFAULT_TIMEOUT=120
 
-# --- Reaching a host around the runner's HTTP proxy --------------------------
-# This pod's proxy refuses the CONNECT to resource.flagos.net, which is why the
-# installs below reach it directly. The probe that decides this lives in
-# .github/scripts/lib/proxy_route.sh, shared with the release upload step, which
-# hits the same host from this same pod -- so the pod-specific detail (its
-# NO_PROXY list, why the unproxied route works anyway) is documented there.
-# patchelf is missing by default on PPU nodes (bundle_common.sh notes it is
-# absent on all four vendor nodes). Install it into the venv so bundle_ppu's
-# bundle_require_patchelf check passes; mirrors the DCU line (commit 6568415).
-# Do not --upgrade pip/setuptools: the fresh venv from ensurepip already
-# satisfies them, and that upgrade round-trip is what hit the pod proxy 500.
-# Install only what the venv lacks: cmake, patchelf, build (the dedicated
-# workflow runs `python -m build`, which needs the build package in the venv),
-# and wheel (the setuptools wheel-build backend used by `python -m build
-# --wheel --no-isolation` requires it; ensurepip on this image does not
-# provide it).
-"$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" cmake patchelf build wheel
-install_cpu_torch
-if [[ "$CI_STAGE" == "integration" ]]; then
-  # sentencepiece + tiktoken: the Qwen3 inference/training tests load the model
-  # tokenizer via AutoTokenizer; the bundled model dir has no tokenizer.json, so
-  # transformers converts the slow tokenizer to a fast one, which needs one of
-  # these two. protobuf is what the sentencepiece branch of that conversion uses
-  # to parse the spm model proto. The isolated venv cannot see the vendor image's
-  # copies. These belong here rather than in a workflow step: pip must be given
-  # an explicit --index-url to bypass the image pip.conf internal mirror (503).
-  # transformers is pinned to [4.51, 5): the lower bound is where Qwen3
-  # model_type support landed (older releases raise "Unrecognized model" on
-  # AutoConfig.from_pretrained); the upper bound excludes 5.x, whose
-  # TokenizersBackend rewrite has an unresolved upstream bug where the Qwen3
-  # slow-to-fast tokenizer conversion still raises "Couldn't instantiate the
-  # backend tokenizer" even with sentencepiece/tiktoken installed (see
-  # https://huggingface.co/Qwen/Qwen3-8B/discussions/33). An unpinned install
-  # picks whichever of those two failure modes is currently latest on PyPI, so
-  # both ends must stay pinned. Revisit the upper bound once upstream ships a
-  # fix for the 5.x regression.
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
-    pytest "transformers>=4.51,<5" sentencepiece tiktoken protobuf
-  # FlagGems' pure Python deps. The CI image lacks them (sqlalchemy/PyYAML/
-  # packaging -- not in the image site-packages, verified by import failure).
-  # numpy ships with the stock +cpu torch wheel installed above, so it is not
-  # re-pinned here to avoid a numpy/torch version clash. Versions follow
-  # FlagGems' pyproject.toml dependencies.
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" \
-    "packaging>=26.0" "PyYAML==6.0.1" "sqlalchemy==2.0.48"
+# Selectively copy RECORD-owned wheels. Never expose /flagos or /opt/flagtree
+# on the target import path, and never copy vendor Torch or editable finders.
+"$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+  --target-python "$VENV_PYTHON" \
+  --torch-version "${CPU_TORCH_VERSION%+cpu}" \
+  --flagtree-version "$FLAGTREE_VERSION" \
+  --flaggems-version "$FLAGGEMS_VERSION" \
+  --requirements-file "$REPO_ROOT/.github/requirements-thead.txt"
+
+ppu_runtime_requirement() {
+  if ! "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+      --check-installed "$1"; then
+    pip_retry --index-url "$PIP_INDEX_URL" "$1"
+  fi
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "$1"
+}
+
+while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+  [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+  ppu_runtime_requirement "$requirement"
+done < "$REPO_ROOT/.github/requirements-thead.txt"
+if ! "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PYCODE'
+import sys
+import torch
+
+assert torch.__version__ == sys.argv[1].removesuffix("+cpu") + "+cpu"
+assert torch.version.cuda is None
+PYCODE
+then
+  install_cpu_torch
 fi
 
-# Keep the vendor FlagCX runtime available without copying the vendor torch
-# package; the active torch package remains the CPU wheel installed above.
-# `flag_gems` and `triton` are deliberately NOT in this list: the image's
-# flag_gems is a PEP 660 editable install pointing at /workspace/FlagGems (the
-# mount this script no longer requires), and its triton is the vendor build
-# (3.5.0+v0.2.0.ppu2.1.0, backends ['amd','nvidia']). Copying either would
-# shadow the FlagTree triton and the FlagGems wheel installed below.
-VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-for package in triton_kernels flagcx; do
-  if [[ -d "$VENDOR_SITE/$package" ]]; then
-    cp -a "$VENDOR_SITE/$package" "$VENV_SITE/"
-  fi
-  for metadata in "$VENDOR_SITE"/"$package"-*.dist-info; do
-    [[ -e "$metadata" ]] || continue
-    cp -a "$metadata" "$VENV_SITE/"
-  done
-  # PEP 660 editable installs: copy the .pth (import hook) + finder .py (resolves
-  # the package to its source dir) so venv python can import the package.
-  # dist-info alone does not register the import hook.
-  for pth in "$VENDOR_SITE"/__editable__."$package"*.pth; do
-    [[ -e "$pth" ]] || continue
-    cp -a "$pth" "$VENV_SITE/"
-  done
-  for finder in "$VENDOR_SITE"/__editable___"$package"*_finder.py; do
-    [[ -e "$finder" ]] || continue
-    cp -a "$finder" "$VENV_SITE/"
-  done
-done
+ppu_runtime_flagtree_is_usable() {
+  "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PYCODE'
+from importlib import metadata, util
+from pathlib import Path
+import sys
 
-# Install the FlagGems stack instead of importing it from a host mount.
-#
-# This replaces a probe of /workspace/FlagGems that hard-failed the job when the
-# bind mount was absent, which is what every PPU run did once the runner pod
-# stopped carrying it. Installing removes the dependency on runner-side state
-# entirely.
-#
-# Why --no-deps on both: flag_gems would otherwise pull PyPI's NVIDIA `triton`,
-# replacing the FlagTree build installed one line earlier, and it would also
-# re-resolve `torch`, replacing the pinned CPU wheel this whole setup depends on
-# (the PPU core libs are selected through a private facade at import time).
-# FlagGems' own runtime deps are installed explicitly above.
-#
-# FlagTree first: it owns the `triton` package, and flag_gems' vendor detection
-# reads triton's registry at import time (FlagGems 5.4.0 picks its `thead`
-# backend whenever PPU_SDK is in the environment -- exported near the bottom of
-# this script -- so no GEMS_VENDOR wiring is needed here).
-#
-# Integration stage only: it is the only stage that imports flag_gems (the
-# dedicated PPU workflow runs everything in one job), and the C++ build needs
-# neither triton nor flag_gems -- the FlagGems Python kernels are compiled from
-# the checked-in csrc/aten/generated/flaggems_python_kernels.cc. Add it to the
-# build stage if PPU is ever wired into build-wheel-common.yml.
+try:
+    dist = metadata.distribution("flagtree")
+    root = Path(dist.locate_file("triton")).resolve()
+    spec = util.find_spec("triton")
+    assert dist.version == sys.argv[1]
+    assert root.is_relative_to(Path(sys.prefix).resolve())
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).resolve().parent == root
+    assert (root / "backends/ppu").is_dir()
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PYCODE
+}
+
+# Retain the existing integration-only compiler, operator and model packages.
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # Both wheels live on resource.flagos.net. install_flagtree/install_flag_gems
-  # probe that host for an unproxied route on every platform, so this pod -- the
-  # one whose proxy is known to refuse it -- needs no route call of its own.
-  install_flagtree
+  for requirement in pytest 'transformers>=4.51,<5' sentencepiece tiktoken protobuf; do
+    ppu_runtime_requirement "$requirement"
+  done
+  if ppu_runtime_flagtree_is_usable; then
+    echo "Using prepared FlagTree $FLAGTREE_VERSION"
+  else
+    "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+    install_flagtree
+  fi
   install_flag_gems
 fi
 
@@ -398,12 +390,24 @@ export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
 export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
+export FLAGOS_VENDOR_TORCH_VERSION=""
+if [[ "${BOXING_LANE:-}" == 1 ]]; then
+  export FLAGOS_VENDOR_TORCH_VERSION="$VENDOR_TORCH_VERSION"
+fi
+export FLAGOS_SDK_VERSION="${PPU_VERSION:-}"
+FLAGOS_SDK_VERSION="${FLAGOS_SDK_VERSION#v}"
+if [[ "$FLAGOS_SDK_VERSION" != 2.1.0 ]]; then
+  echo "::error::Expected runtime PPU_VERSION=v2.1.0, got ${PPU_VERSION:-unset}" >&2
+  exit 1
+fi
 # FLAGOS_WHEEL_LOCAL is not set here: the wheel's local segment is the vendor
 # name, taken from the wheel_local column of cmake/flagos_platforms.json
-# ("thead", the Nexus lane PPU publishes to). Setting it here would make the
+# (currently "ppu2.0.0"). The manifest records the actual SDK separately;
+# changing the shared release naming policy is outside this image migration.
+# Setting an override here would make the
 # artifact name depend on the build script instead of the platform table.
-# PPU image ships FlagGems as source only (no built liboperators.so /
-# FlagGemsConfig.cmake), so the C++ kFlagOs dispatch (FLAGOS_BUILD_FLAGGEMS_CPP) must be off.
+# PPU runtime ships the Python FlagGems wheel without liboperators.so /
+# FlagGemsConfig.cmake, so the C++ kFlagOs dispatch (FLAGOS_BUILD_FLAGGEMS_CPP) must be off.
 # setup.py's `ppu` branch already forces it OFF; exporting it here keeps the
 # environment consistent for the pre-build assertions and any manual cmake run.
 # The Python-path kernels (FLAGOS_BUILD_FLAGGEMS) stay at the default ON -- they
@@ -419,6 +423,9 @@ export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${CLEAN_CMAKE_PREFIX_PATH:+
 export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$CUDA_HOME/lib64:$PPU_SDK/lib:$PPU_SDK/lib64${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$PPU_SDK/lib:$PPU_SDK/lib64${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
+
+"$VENV_PYTHON" -m pip check
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
 
 cd "$REPO_ROOT"
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
@@ -442,11 +449,14 @@ if [[ "${BOXING_LANE:-}" == "1" ]]; then
   bash scripts/vendor/bundle_thead_libtorch.sh
 fi
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "::error::nvidia-smi is unavailable"
+if command -v ppu-smi >/dev/null 2>&1; then
+  ppu-smi
+elif command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi
+else
+  echo "::error::Neither ppu-smi nor nvidia-smi is available in the PPU runtime" >&2
   exit 1
 fi
-nvidia-smi
 
 python - <<'PY'
 import os
@@ -543,5 +553,5 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   # so both lanes persist an explicit value.
   : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV BASH_ENV TORCH_DEVICE_BACKEND_AUTOLOAD FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGCX_PATH CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

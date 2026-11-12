@@ -110,7 +110,7 @@ def test_every_script_calls_the_common_phases():
     install_flagcx is defined for the platforms whose hook installs a published
     FlagCX wheel, which is not every one of them, so it is not asserted here.
     FlagTree is absent on MPS, which has no Metal Triton build. Iluvatar keeps
-    CPU torch in its own venv and can replace the compiler cohort through a helper
+    CPU torch in its own venv and can replace the compiler cohort through its hook
     that delegates installation to the common phases. build_flagos_inplace runs
     only at the build stage, however, so only a hook that calls it there can
     avoid compiling an extension during integration.
@@ -135,12 +135,7 @@ def test_every_script_calls_the_common_phases():
                 "install_flagtree",
                 "build_flagos_inplace",
             ):
-                phase_text = (
-                    (SCRIPTS_DIR / "lib/iluvatar_packages.sh").read_text()
-                    if phase == "install_flagtree"
-                    else text
-                )
-                assert re.search(rf"^[ \t]*{phase}\b", phase_text, re.M), (
+                assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
                     f"{script.name}: {phase}"
                 )
         else:

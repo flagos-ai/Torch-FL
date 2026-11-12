@@ -1,0 +1,12 @@
+# Python tools for the isolated PPU build and test environment.
+# System compilers and the PPU SDK come from the runtime image.
+setuptools>=64
+wheel
+cmake>=3.19
+patchelf
+build
+pybind11
+packaging>=26.0
+PyYAML==6.0.1
+sqlalchemy==2.0.48
+numpy<2

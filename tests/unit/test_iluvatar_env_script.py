@@ -12,7 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-HELPER = ROOT / ".github/scripts/lib/iluvatar_packages.sh"
+HOOK = ROOT / ".github/scripts/hooks/set_env_iluvatar.sh"
 
 
 def run_hook(tmp_path, *, prepared=True, fail="", boxing=False, cached_occupancy=False):
@@ -115,16 +115,13 @@ pip_retry() {
   printf 'pip %s\n' "$*" >> "$CALL_LOG"
   [[ "$FAIL_PHASE" != pip ]]
 }
-prepare_iluvatar_packages() { :; }
+install_flagtree() { :; }
+install_flag_gems() { :; }
 build_flagos_inplace() {
   test -z "$FLAGOS_VENDOR_TORCH_LIB"
   test -z "$FLAGOS_VENDOR_TORCH_VERSION"
   test "$FLAGOS_BUILD_BOXING" = 0
   echo CPU-core-build >> "$CALL_LOG"
-}
-source() {
-  if [[ "$1" == */iluvatar_packages.sh ]]; then return 0; fi
-  builtin source "$@"
 }
 source "$REPO_ROOT/.github/scripts/hooks/set_env_iluvatar.sh"
 """
@@ -279,9 +276,12 @@ def provision(tmp_path, *, tree_matches=True, gems_matches=True, failure=""):
         FLAGTREE_INDEX_URL="https://example.invalid/tree",
         FLAGGEMS_INDEX_URL="https://example.invalid/gems",
     )
+    hook = HOOK.read_text()
+    start = hook.index("prepare_iluvatar_packages() {")
+    prepare_function = hook[start : hook.index("\n}\n", start) + 3]
     script = r"""
 set -euo pipefail
-source "$1"
+PREPARE_FUNCTION
 prefer_direct_route() { printf 'route %s\n' "$1" >> "$CALL_LOG"; }
 install_flagtree() { printf 'tree %s\n' "$FLAGTREE_VERSION" >> "$CALL_LOG"; }
 flag_gems_installed() { return "$GEMS_STATUS"; }
@@ -293,7 +293,7 @@ install_flag_gems() {
 prepare_iluvatar_packages
 """
     done = subprocess.run(
-        ["bash", "-c", script, "test", str(HELPER)],
+        ["bash", "-c", script.replace("PREPARE_FUNCTION", prepare_function)],
         env=env,
         text=True,
         capture_output=True,

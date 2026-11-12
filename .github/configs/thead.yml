@@ -17,7 +17,7 @@ display_name: PPU
 setup_script: .github/scripts/set_env.sh
 setup_platform: thead
 
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260811-ppu-dev
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:7837256c2dab931c762f86713a37d3fbecc902792392d67731c982ecda632cef
 
 runner_labels:
   - flagcicd-810e
@@ -33,6 +33,7 @@ paths_watch:
   # the allocator header it actually compiles.
   - csrc/runtime/accelerator/nvidia/
   - csrc/runtime/allocator/backends/nvidia_memory.h
+  - .github/requirements-thead.txt
   - .github/scripts/hooks/set_env_thead.sh
   - .github/scripts/set_env_thead.sh
   - scripts/vendor/bundle_thead_libtorch.sh

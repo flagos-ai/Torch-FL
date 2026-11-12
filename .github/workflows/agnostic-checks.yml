@@ -104,12 +104,14 @@ jobs:
           set -euo pipefail
           tests=(
             tests/unit/test_ai_reviewer.py
+            tests/unit/test_ascend_env_script.py
             tests/unit/test_backend_autoload_contract.py
             tests/unit/test_backend_enum_naming.py
             tests/unit/test_backend_key_vendor_naming.py
             tests/unit/test_case_gap_issues.py
             tests/unit/test_ci_fail_fast.py
             tests/unit/test_ci_functional_profiles.py
+            tests/unit/test_ci_local_pip_cache.py
             tests/unit/test_ci_pip_cache.py
             tests/unit/test_ci_platform_routing.py
             tests/unit/test_ci_matrix.py
@@ -133,6 +135,7 @@ jobs:
             tests/unit/test_integration_manifest.py
             tests/unit/test_integration_source_contract.py
             tests/unit/test_integration_workdir.py
+            tests/unit/test_kunlunxin_env_script.py
             tests/unit/test_mps_collection_without_numpy.py
             tests/unit/test_musa_ci_manifest.py
             tests/unit/test_musa_env_script.py
@@ -142,6 +145,7 @@ jobs:
             tests/unit/test_platform_detect.py
             tests/unit/test_platform_support_detect.py
             tests/unit/test_platform_vendor_naming.py
+            tests/unit/test_ppu_env_script.py
             tests/unit/test_profiler_capabilities.py
             tests/unit/test_run_integration_tests.py
             tests/unit/test_run_unit_tests.py

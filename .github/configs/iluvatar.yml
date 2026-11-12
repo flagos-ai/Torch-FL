@@ -23,7 +23,6 @@ paths_watch:
   - scripts/codegen/codegen_iluvatar_flaggems.py
   - .github/scripts/hooks/set_env_iluvatar.sh
   - .github/scripts/set_env_iluvatar.sh
-  - .github/scripts/lib/iluvatar_packages.sh
   - .github/scripts/verify_iluvatar.py
   - .github/scripts/seed_runtime.py
   - .github/requirements-iluvatar.txt

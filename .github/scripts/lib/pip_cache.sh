@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Shared cache selection for Ascend, Iluvatar, Kunlunxin and MUSA. No package
+# Shared cache selection for Ascend, Iluvatar, Kunlunxin, MUSA and PPU. No package
 # installation or device access belongs here. The optional key is supplied only
 # by the integration workflow for its dedicated runner-cache directories.
 pip_cache_try_directory() {
@@ -39,7 +39,7 @@ prepare_pip_cache() {
   local platform="$1" key="${2:-}" requested="" candidate="" uid="" selected=0
   local job_root="${RUNNER_TEMP:-${REPO_ROOT:-$PWD}/.ci}"
   case "$platform" in
-    ascend|iluvatar|kunlunxin|mthreads) ;;
+    ascend|iluvatar|kunlunxin|mthreads|thead) ;;
     *) echo "::error::Unsupported shared pip-cache platform: $platform" >&2; return 1 ;;
   esac
   export PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"

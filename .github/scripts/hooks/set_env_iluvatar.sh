@@ -125,8 +125,34 @@ fi
 
 # set_env.sh replaces the baked constraints with the checkout's constraints,
 # which protect CPU torch without pinning FlagTree/Gems to the old image.
-# shellcheck source=.github/scripts/lib/iluvatar_packages.sh
-source "$REPO_ROOT/.github/scripts/lib/iluvatar_packages.sh"
+# The job container owns its venv; the image remains an immutable warm baseline.
+# Caller supplies the requested versions, indexes and common install helpers.
+prepare_iluvatar_packages() {
+  if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+import importlib.metadata
+import sys
+
+try:
+    import triton.backends
+    assert importlib.metadata.version("flagtree") == sys.argv[1]
+    assert "iluvatar" in triton.backends.backends
+except (AssertionError, ImportError, importlib.metadata.PackageNotFoundError):
+    raise SystemExit(1)
+PY
+  then
+    echo "Using preinstalled FlagTree $FLAGTREE_VERSION"
+  else
+    # FlagTree owns triton's modules. Remove both metadata owners before
+    # replacing the provider; installing stock Triton separately is invalid.
+    "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+    install_flagtree
+  fi
+
+  install_flag_gems
+  # New releases may require a different dependency cohort. Fail explicitly
+  # instead of letting an incompatible install reach the build or hardware.
+  "$VENV_PYTHON" -m pip check
+}
 prepare_iluvatar_packages
 
 echo "Prepared Iluvatar CI environment (runtime reuse and pip installs above):"

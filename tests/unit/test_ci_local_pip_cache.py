@@ -148,7 +148,7 @@ def test_a_changed_key_discards_the_previous_downloads(tmp_path):
     assert "pip cache key changed for hygon" in output
 
 
-@pytest.mark.parametrize("platform", ["hygon", "thead"])
+@pytest.mark.parametrize("platform", ["hygon", "enflame"])
 def test_each_platform_gets_its_own_directory(tmp_path, platform):
     """A runner that hosts two platforms must not have them purge each other."""
     step = _step()["run"]
@@ -174,7 +174,7 @@ def test_each_platform_gets_its_own_directory(tmp_path, platform):
 
 
 CACHE_HELPER = ROOT / ".github/scripts/lib/pip_cache.sh"
-RUNTIME_PLATFORMS = ["ascend", "iluvatar", "kunlunxin", "mthreads"]
+RUNTIME_PLATFORMS = ["ascend", "iluvatar", "kunlunxin", "mthreads", "thead"]
 
 
 def _run_shared_cache(
@@ -208,7 +208,7 @@ def _run_shared_cache(
 
 
 @pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
-def test_all_four_lanes_keep_warm_downloads_and_reset_on_key_change(tmp_path, platform):
+def test_runtime_lanes_keep_warm_downloads_and_reset_on_key_change(tmp_path, platform):
     result, rows, _ = _run_shared_cache(tmp_path, platform, key="first")
     assert result.returncode == 0, result.stderr
     cache = Path(rows["PIP_CACHE_DIR"])
@@ -349,7 +349,7 @@ def test_real_workflow_uses_shared_cache_selection(tmp_path, platform):
 def test_key_and_entrypoint_include_the_shared_helper():
     assert ".github/scripts/lib/pip_cache.sh" in _step()["env"]["PIP_CACHE_KEY"]
     runner = (ROOT / ".github/scripts/set_env.sh").read_text()
-    assert "ascend|iluvatar|kunlunxin|mthreads)" in runner
+    assert "ascend|iluvatar|kunlunxin|mthreads|thead)" in runner
     assert 'prepare_pip_cache "$PLATFORM"' in runner
 
 
@@ -387,9 +387,7 @@ def test_manual_wheel_workflow_uses_the_same_cache_helper(tmp_path, platform):
 
 
 @pytest.mark.parametrize("platform", RUNTIME_PLATFORMS)
-def test_real_entrypoint_selects_cache_before_loading_any_of_the_four_hooks(
-    tmp_path, platform
-):
+def test_real_entrypoint_selects_cache_before_loading_runtime_hooks(tmp_path, platform):
     repo = tmp_path / "repo"
     scripts = repo / ".github/scripts"
     (scripts / "hooks").mkdir(parents=True)

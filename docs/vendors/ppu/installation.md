@@ -14,6 +14,57 @@ Unless a section says otherwise, the rest of this guide describes the default Fl
 
 **Status:** Experimental. CI covers the build plus the manifest in `.github/configs/thead.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
 
+## CI runtime environment
+
+The CI config pins the official PPU SDK 2.1.0 runtime 2.3.0 by manifest digest:
+
+```text
+harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:7837256c2dab931c762f86713a37d3fbecc902792392d67731c982ecda632cef
+```
+
+The [official runtime inventory](https://flagos-ai.github.io/release-info/zh-cn/runtime/thead-ppu2.1.0/)
+contains Python 3.12, vendor Torch `2.10.0+v0.1.0.ppu2.1.1`, FlagTree
+`0.7.0+ppu3.6`, FlagGems `5.4.0`, and NumPy `1.26.4`. The SDK is under
+`/usr/local/PPU_SDK`; the image build history installs MKL `2021.1.1` into
+`/usr/local/lib`, the existing boxing bundler's default location. No new MKL
+installation or vendor Torch build is performed by CI.
+
+The platform hook creates a separate Python 3.12 venv and calls the same
+`seed_runtime.py` used by the other runtime lanes. It copies only matching,
+RECORD-owned distributions and regenerates console scripts for the target
+interpreter. The image's vendor Torch, editable `.pth` files, and entire
+`/flagos` or `/opt/flagtree` import paths are not copied. Python tools declared
+in `.github/requirements-thead.txt` are checked after copying; pip installs only
+missing or incompatible requirements. System tools and SDK libraries stay in
+the image. FlagTree reuse requires matching metadata, an import origin inside
+the venv and the PPU backend. The vendor's alternate `/opt/triton` compiler is
+never activated. Integration-only model dependencies retain `transformers>=4.51,<5`,
+sentencepiece, tiktoken and protobuf; SQLAlchemy remains `2.0.48`.
+
+Both CI lanes keep published `torch==2.10.0+cpu` as the installed Python package.
+The default lane compiles FlagGems routes without boxing or a vendor bundle.
+The boxing lane additionally stages the image's vendor libtorch using the
+existing bundler and keeps CUDA 13.0 after Torch-FL import. Neither lane adds a
+native compilation step, enables C++ FlagGems, changes occupancy selection, or
+changes test scope. The prepared environment records SDK `2.1.0`; only boxing
+records the source vendor Torch version for its bundle. The upstream platform
+table still names PPU wheels with the `ppu2.0.0` local segment; this CI migration
+leaves that shared release policy unchanged and records the real SDK `2.1.0`
+separately in the compatibility manifest.
+
+`BASH_ENV=/dev/null`, empty `PYTHONPATH`, disabled user sites and disabled vendor
+backend autoload persist into later Actions steps. Both lanes share the same
+PPU pip download cache and its ownership/write-probe fallback; they do not share
+a mutable venv. Existing runner labels, explicit device mounts and shared-memory
+options are retained. No privileged mode or host IPC/network options are added.
+
+The official runtime lists host driver `2.0.0`, while the previous CI device tool
+reported `1.3.2-d7f5a2`. Compatibility must be established by the new-image
+hardware runs; local provisioning tests do not establish device support. The
+hook and integration checks retain real device/runtime validation, and this
+migration does not update host drivers or add test skips. Old-image green runs
+are not acceptance evidence for this new runtime.
+
 ## Prerequisites
 
 - PPU hardware with driver installed
