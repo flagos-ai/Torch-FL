@@ -980,6 +980,52 @@ ships the C++ path, building FlagGems from source (which changes the cohort unde
 vendoring those sources into Torch-FL with the maintenance that implies. That choice is upstream of
 any code in this repository and should be made before B is prototyped.
 
+
+## Scoping to a model: Qwen3 on pure FlagGems, no boxing
+
+The 549-route surface is not the number that matters. A model issues a small, enumerable operator
+set, and that set is the real scope. Measured on the pinned cohort with a Qwen3-VL text configuration
+(two layers, hidden 256, shrunk so that only the operator set is meaningful), tracing every
+`aten` call that dispatches with a `flagos` tensor:
+
+```text
+Qwen3 forward, distinct aten operators = 36
+```
+
+Of those 36, twelve are pure metadata or CPU-side operations that issue no device kernel (`view`,
+`slice`, `expand`, `unsqueeze`, `transpose`, `detach`, `alias`, `select`, `clone`, `_unsafe_view`,
+`_to_copy`, `_local_scalar_dense`). The operators that actually launch a kernel number about twenty.
+
+Routing those 36 through the **non-boxing** configuration - `torch_fl/configs/backends_nvidia.conf` as
+it stands in the tree, 499 `flaggems` and 1475 `none`, no boxing key anywhere:
+
+| route | count | operators |
+| --- | ---: | --- |
+| `flaggems` | **21** | mul.Tensor, add.Tensor, slice.Tensor, mm, pow.Tensor_Scalar, mean.dim, rsqrt, cat, bmm, neg, sub.Tensor, tril, where.self, silu, ne.Scalar, cumsum, eq.Scalar, all, cos, sin, alias |
+| `none` | **11** | `_to_copy`, `_unsafe_view`, `t`, `unsqueeze`, `transpose.int`, `detach`, `select.int`, `clone`, `mul.Scalar`, `_safe_softmax`, `embedding` |
+| absent | 4 | `view`, `expand`, `copy_`, `_local_scalar_dense` |
+
+The eleven `none` routes are the gap, and they are not one kind of gap:
+
+- **Six are already implemented in FlagGems** - `_unsafe_view`, `unsqueeze`, `transpose`, `mul`
+  (scalar form), `_safe_softmax`, `embedding` all resolve in the `flag_gems` namespace - yet the conf
+  routes them to `none`. So the missing piece there is routing and PrivateUse1 registration, not a
+  kernel.
+- **Five are not implemented anywhere**: `t`, `detach`, `select`, `clone`, `_to_copy`. Three of those
+  (`t`, `detach`, `select`) are pure view operations that need a registration and no kernel at all;
+  only `clone` and `_to_copy` need a real copy kernel.
+
+That reframes the work for this model. Getting Qwen3 to issue **no** `cpu_fallback` under a pure
+FlagGems configuration is roughly: wire six existing FlagGems implementations, register three view
+operations, and implement two copy kernels - **before any host-program work at all**. The host program
+then applies to the ~20 kernels that remain, which is a set small enough to enumerate by hand and
+close, unlike 549.
+
+Two limits on this measurement, stated so the numbers are not over-read. The model was shrunk to two
+layers, which does not change the operator set but does change the counts. And `_local_scalar_dense`
+appears once - a CPU synchronisation point - which no routing change removes; on a real decode loop its
+cost depends on where the graph forces a scalar read.
+
 ### Where that leaves the recommendation
 
 **This paragraph is superseded by "Decision: FlagGems is the single source of truth" below, which
