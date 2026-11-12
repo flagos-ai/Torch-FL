@@ -3357,3 +3357,33 @@ def _loaded_shared_objects():
 # first kernel -- so it has to happen here, not inside a kernel path.
 _preload_xcudart_for_kunlunxin()
 _bind_kunlunxin_triton_stream()
+
+# CUDA/HIP graph capture for the flagos device (Hygon DCU). The CPU torch
+# wheel's torch.cuda.CUDAGraph is a dummy, so expose a ctypes-driven graph
+# object mirroring torch.cuda.graph. See cuda_graph.py.
+from .cuda_graph import CUDAGraph, graph  # noqa: E402,F401
+
+
+def _alias_torch_cuda_graph() -> None:
+    """Point ``torch.cuda.CUDAGraph`` / ``torch.cuda.graph`` at the flagos implementation.
+
+    The local flagos backend runs on the CPU torch wheel, where
+    ``torch.cuda.CUDAGraph`` is a dummy base class (instantiating it raises "Tried
+    to instantiate dummy base class CUDAGraph"). Here both names are rebound to
+    the ctypes-driven flagos graph implementation, so upper-layer code can write
+    ``torch.cuda.CUDAGraph`` uniformly.
+
+    Override only when it is the dummy: on a real CUDA / DTK official torch,
+    ``torch.cuda.CUDAGraph`` is the genuine class, so leave it untouched (in that
+    case ``torch._C._CUDAGraph`` is torch's own class).
+    """
+    import torch.cuda.graphs  # noqa: F401  -- triggers torch._C._CUDAGraph definition
+
+    graph_cls = getattr(torch._C, "_CUDAGraph", None)
+    if graph_cls is not None and graph_cls.__module__ == "torch._C":
+        return  # genuine class, do not override
+    torch.cuda.CUDAGraph = CUDAGraph
+    torch.cuda.graph = graph
+
+
+_alias_torch_cuda_graph()
