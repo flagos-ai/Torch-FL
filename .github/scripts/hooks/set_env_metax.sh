@@ -73,19 +73,187 @@ PY
   )
 }
 
-# The published MACA 3.8.1.3 build image carries vendor torch in /flagos,
-# whereas the older CI image carries a prebuilt CPU venv in /opt/venv. Prepare
-# the same isolated layout when the image is upgraded; keep vendor libtorch as
-# a link input and never import its Python package in the build/test venv.
-#
-# MetaX provisions the CPU torch through the shared install_cpu_torch phase like
-# every other platform, so the mirror probe and the index-route check apply here
-# too. VENV_PYTHON names the image's /opt/venv interpreter that the shared
-# helpers use: this script does not create a job-local venv, and the venv is not
-# on PATH yet at this point, so the bare `python` they would otherwise fall back
-# to is the image's own interpreter rather than the one being provisioned.
+# Runtime preparation follows the same isolated package/cache path as the
+# other migrated lanes. Vendor libtorch remains a read-only build input.
+metax_validate_build_tools() {
+  # setup.py imports editable_wheel even for a non-editable native build.
+  # Validate real imports after provisioning, before any large wheel download.
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
+import build
+import setuptools
+from setuptools.command.editable_wheel import editable_wheel
+
+print(f"Build frontend: {build.__version__}")
+print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
+PY
+}
+
+metax_venv_is_isolated() {
+  venv_is_usable || return 1
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+assert Path(sys.prefix).resolve() == root
+assert sys.prefix != sys.base_prefix
+settings = {}
+for line in (root / "pyvenv.cfg").read_text().splitlines():
+    key, separator, value = line.partition("=")
+    if separator:
+        settings[key.strip().lower()] = value.strip().lower()
+assert settings.get("include-system-site-packages") == "false"
+PY
+}
+
+metax_cpu_torch_is_usable() {
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PY'
+import sys
+import torch
+
+expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+}
+
+metax_runtime_requirement() {
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+      --check-installed "$1"; then
+    echo "Using prepared requirement: $1"
+  else
+    pip_retry --index-url "$PIP_INDEX_URL_ARG" "$1"
+  fi
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "$1"
+}
+
+metax_runtime_flagtree_is_usable() {
+  "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+from importlib import metadata, util
+from pathlib import Path
+import sys
+
+try:
+    dist = metadata.distribution("flagtree")
+    root = Path(dist.locate_file("triton")).resolve()
+    spec = util.find_spec("triton")
+    assert dist.version == sys.argv[1]
+    assert root.is_relative_to(Path(sys.prefix).resolve())
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).resolve().parent == root
+    assert (root / "backends/metax").is_dir()
+    assert (root / "_flagtree_spec.py").is_file()
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PY
+}
+
+metax_record_runtime_sdk() {
+  local version=""
+  version="$(cat "${MACA_PATH:-/opt/maca}/Version.txt")" || return 1
+  version="${version%$'\r'}"
+  version="${version#Version:}"
+  if [[ "$version" != 3.8.1.3 ]]; then
+    echo "::error::Expected MACA SDK 3.8.1.3, found $version" >&2
+    return 1
+  fi
+  export FLAGOS_SDK_VERSION="$version"
+}
+
+metax_read_vendor_torch() {
+  local details=""
+  # Read distribution metadata, never import the vendor Python torch/backend.
+  details="$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$1" -I - "$CPU_TORCH_VERSION" <<'PY'
+from importlib import metadata
+from pathlib import Path
+import sys
+
+dist = metadata.distribution("torch")
+version = dist.version
+assert version.split("+", 1)[0] == sys.argv[1].removesuffix("+cpu"), version
+assert "metax" in version, version
+root = Path(dist.locate_file("torch")).resolve()
+assert root.is_relative_to(Path(sys.prefix).resolve()), root
+assert (root / "version.py").is_file(), root
+print(f"{root / 'lib'}\t{version}")
+PY
+)" || return 1
+  IFS=$'\t' read -r FLAGOS_VENDOR_TORCH_LIB FLAGOS_VENDOR_TORCH_VERSION <<< "$details"
+  export FLAGOS_VENDOR_TORCH_LIB FLAGOS_VENDOR_TORCH_VERSION
+  export TORCH_FL_VENDOR_TORCH_VERSION="${FLAGOS_VENDOR_TORCH_VERSION%%+*}"
+}
+
+prepare_metax_runtime_environment() {
+  metax_record_runtime_sdk
+  local vendor_python="${TORCH_FL_VENDOR_PYTHON:-$(command -v python3.12 || true)}"
+  export BASH_ENV=/dev/null
+  export PYTHONPATH=""
+  export PYTHONNOUSERSITE=1
+  if [[ ! -x "$vendor_python" ]] || ! "$vendor_python" -I -c \
+      'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
+    echo "::error::The MetaX runtime requires Python 3.12 for its FlagTree wheel" >&2
+    return 1
+  fi
+  metax_read_vendor_torch "$vendor_python"
+  local suffix=""
+  if [[ "${BOXING_LANE:-}" == 1 ]]; then suffix=-boxing; fi
+  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-metax-${CI_STAGE}${suffix}}"
+  "$vendor_python" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+target, repo = (Path(p).resolve() for p in sys.argv[1:])
+for prefix in (sys.prefix, sys.base_prefix):
+    source = Path(prefix).resolve()
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
+if repo.is_relative_to(target):
+    raise SystemExit("CI venv must not contain the source checkout")
+PY
+  if ! "$vendor_python" -m venv --clear "$VENV_ROOT"; then
+    if ! command -v uv >/dev/null 2>&1; then
+      echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
+      return 1
+    fi
+    uv venv --clear --seed --python "$vendor_python" "$VENV_ROOT"
+  fi
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  metax_venv_is_isolated
+  "$vendor_python" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --target-python "$VENV_PYTHON" \
+    --torch-version "${CPU_TORCH_VERSION%+cpu}" \
+    --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}" \
+    --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
+    --requirements-file "$REPO_ROOT/.github/requirements-metax.txt"
+  export VIRTUAL_ENV="$VENV_ROOT"
+  export PATH="$VENV_ROOT/bin:$PATH"
+  # A Python CMake distribution is required by pyproject.toml even when the
+  # image supplies /usr/bin/cmake. Bootstrap pip before resolving CPU Torch.
+  local requirement
+  while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+    [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+    metax_runtime_requirement "$requirement"
+  done < "$REPO_ROOT/.github/requirements-metax.txt"
+  metax_validate_build_tools
+  if ! metax_cpu_torch_is_usable 2>/dev/null; then
+    CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
+    install_cpu_torch
+  fi
+}
+
+# The runtime path uses a job-owned venv; explicit legacy development-image
+# users retain their prebuilt /opt/venv and library-only input below. Both paths
+# install CPU Torch through the same shared index/mirror helper.
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
+PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
+METAX_RUNTIME_REUSE=0
+if [[ "${VIRTUAL_ENV:-}" == /flagos || -n "${TORCH_FL_VENDOR_PYTHON:-}" ]]; then
+  METAX_RUNTIME_REUSE=1
+  prepare_metax_runtime_environment
+else
+VENV_ROOT=/opt/venv
 VENV_PYTHON=/opt/venv/bin/python
 if [[ ! -x /opt/venv/bin/python && -x /flagos/bin/python ]]; then
   FLAGOS_VENDOR_TORCH_LIB="$(/flagos/bin/python - <<'PY'
@@ -110,16 +278,11 @@ else
   # The image's vendor core is built against the pinned 2.10.0 Python wheel.
   export TORCH_FL_VENDOR_TORCH_VERSION=2.10.0
 fi
-# FLAGOS_WHEEL_LOCAL is deliberately not set here. The wheel's local segment is
-# the vendor name ("metax"), taken from the wheel_local column of
-# cmake/flagos_platforms.json, so the two images above produce the same
-# artifact name and it stays a property of the source rather than of whichever
-# image happens to build it. The distinction these lines used to encode -- MACA
-# 3.8.1.3 against 3.8.0 -- belongs in FLAGOS_SDK_VERSION, which
-# torch_fl/compatibility.json records; nothing sets it today, so the manifest
-# reports the SDK as unknown for both. See docs/reference/environment-variables.md.
-export PATH="/opt/venv/bin:/opt/maca/tools/cu-bridge/bin:/opt/maca/mxgpu_llvm/bin:/opt/maca/bin:$PATH"
-export VIRTUAL_ENV=/opt/venv
+fi
+# The wheel label follows the shared SDK table; record the inspected runtime's
+# actual SDK and vendor Torch independently in the compatibility manifest.
+export PATH="$VENV_ROOT/bin:/opt/maca/tools/cu-bridge/bin:/opt/maca/mxgpu_llvm/bin:/opt/maca/bin:$PATH"
+export VIRTUAL_ENV="$VENV_ROOT"
 export PYTHONNOUSERSITE=1
 
 export FLAGOS_ACCELERATOR=metax
@@ -135,8 +298,8 @@ export MACA_HOME=/opt/maca
 # MetaX runs both builds of the wheel, and BOXING_LANE says which one this job
 # is:
 #
-#   vendor lane  the default build: FlagGems routes only, no boxing kernels, no
-#                cu-bridge shim. What a `pip install` gets.
+#   vendor lane  the default build: FlagGems routes only, no generated boxing
+#                kernels. What a `pip install` gets.
 #
 #   boxing lane  FLAGOS_BUILD_BOXING=1: the generated boxing kernels, the
 #                cu-bridge shim that lets them reach MetaX's MXVM, and the day-0
@@ -152,6 +315,10 @@ export MACA_HOME=/opt/maca
 #                FlagGems where this build has it (594 ops) and boxing for the
 #                other 1442.
 export FLAGOS_BUILD_VENDOR=OFF
+# Both legacy CI lanes inherited these values from the old development image.
+# State them explicitly instead of relying on that image-only environment.
+export FLAGOS_METAX_CUDART_SHIM="${FLAGOS_METAX_CUDART_SHIM:-1}"
+export FLAGOS_DISABLE_CUDA_ASSETS="${FLAGOS_DISABLE_CUDA_ASSETS:-1}"
 if [[ "${BOXING_LANE:-}" == "1" ]]; then
   export FLAGOS_BUILD_BOXING=1
   export FLAGOS_METAX_CUDART_SHIM=1
@@ -177,7 +344,7 @@ export LIBRARY_PATH="/opt/maca/lib:/opt/maca/tools/cu-bridge/lib${LIBRARY_PATH:+
 export CPATH="/opt/maca/tools/cu-bridge/include:/opt/maca/include:/opt/maca/include/mcr${CPATH:+:$CPATH}"
 
 for path in \
-  /opt/venv/bin/python \
+  "$VENV_PYTHON" \
   "$FLAGOS_VENDOR_TORCH_LIB/libc10.so" \
   "$FLAGOS_VENDOR_TORCH_LIB/libtorch_cpu.so" \
   "$FLAGOS_VENDOR_TORCH_LIB/libtorch.so" \
@@ -197,14 +364,15 @@ if [[ ! -c /dev/mxcd ]]; then
   exit 1
 fi
 
-python - <<'PY'
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python - <<'PY'
 from pathlib import Path
+import sys
 
 import torch
 
 torch_path = Path(torch.__file__).resolve()
 assert torch.__version__.startswith("2.10.0+cpu"), torch.__version__
-assert str(torch_path).startswith("/opt/venv/"), torch_path
+assert torch_path.is_relative_to(Path(sys.prefix).resolve()), torch_path
 assert "/opt/conda/" not in str(torch_path), torch_path
 
 print(f"Build Python: {Path(__import__('sys').executable).resolve()}")
@@ -225,7 +393,7 @@ PY
 # packages the tests import are the ones this script put there. Linking is what
 # let a stale image cohort shadow the pinned revision: the venv resolved
 # whatever the image's editable install pointed at, and the pin below never ran.
-if [[ "$CI_STAGE" == "integration" ]]; then
+if [[ "$CI_STAGE" == "integration" || "$METAX_RUNTIME_REUSE" == 1 ]]; then
   VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
   # Install FlagGems' runtime dependencies into the venv. flag_gems imports
@@ -233,7 +401,9 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # Use --no-deps to protect the torch ABI (same rationale as test-dependencies).
   # numpy<2 because numpy 2.x breaks the stock +cpu torch C extensions at import
   # (documented in set_env_mthreads.sh:176-178).
-  python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
+  if [[ "$METAX_RUNTIME_REUSE" == 0 ]]; then
+    python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
+  fi
 
   # --- FlagTree: the Triton build carrying the "metax" backend ----------------
   #
@@ -241,7 +411,14 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   # published binary so CI cannot fall back to a source build.
   FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}"
   FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-  install_flagtree
+  if [[ "$METAX_RUNTIME_REUSE" == 1 ]] && metax_runtime_flagtree_is_usable; then
+    echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
+  else
+    if [[ "$METAX_RUNTIME_REUSE" == 1 ]]; then
+      "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+    fi
+    install_flagtree
+  fi
 
   # flagtree installs itself as the `triton` module, so assert on the resolved
   # module and not on the distribution name: an image triton-metax winning the
@@ -290,9 +467,9 @@ PY
   done
   install_flag_gems
 
-  # The published FlagCX wheel requires MACA 3.8.1.3. The current 3.8.0 CI
-  # image remains in use until the runner driver is confirmed compatible.
-  if [[ "$FLAGOS_VENDOR_TORCH_LIB" == /flagos/* ]]; then
+  # Preserve the legacy FlagCX branch. A new runtime carrying the wheel does
+  # not opt either CI lane into communication.
+  if [[ "$METAX_RUNTIME_REUSE" == 0 && "$FLAGOS_VENDOR_TORCH_LIB" == /flagos/* ]]; then
     FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}"
     pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
       "flagcx===$FLAGCX_VERSION"
@@ -303,9 +480,19 @@ PY
   fi
 fi
 
+if [[ "$METAX_RUNTIME_REUSE" == 1 ]]; then
+  "$VENV_PYTHON" -m pip check
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
+fi
+# Preserve the existing fallback metadata for legacy library-only images.
+: "${TORCH_FL_VENDOR_TORCH_VERSION:=2.10.0}"
+if command -v mx-smi >/dev/null 2>&1; then
+  mx-smi
+fi
+
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' \
-    /opt/venv/bin \
+    "$VENV_ROOT/bin" \
     /opt/maca/tools/cu-bridge/bin \
     /opt/maca/mxgpu_llvm/bin \
     /opt/maca/bin >> "$GITHUB_PATH"
@@ -319,6 +506,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   # so both lanes persist an explicit value.
   : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
+  if [[ "$METAX_RUNTIME_REUSE" == 1 ]]; then
+    export_ci_env BASH_ENV PYTHONPATH FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION
+  fi
   export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR FLAGOS_BACKEND_CONFIG MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"

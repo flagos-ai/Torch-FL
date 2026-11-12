@@ -39,7 +39,7 @@ prepare_pip_cache() {
   local platform="$1" key="${2:-}" requested="" candidate="" uid="" selected=0
   local job_root="${RUNNER_TEMP:-${REPO_ROOT:-$PWD}/.ci}"
   case "$platform" in
-    ascend|iluvatar|kunlunxin|mthreads|thead|enflame) ;;
+    ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax) ;;
     *) echo "::error::Unsupported shared pip-cache platform: $platform" >&2; return 1 ;;
   esac
   export PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"

@@ -6,7 +6,7 @@ test groups come from the shared integration manifest.
 
 ## Runtime environment preparation
 
-Ascend, Iluvatar, Kunlunxin, MUSA, PPU and GCU use the same preparation layout:
+Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU and MetaX use the same preparation layout:
 `.github/configs/<platform>.yml` selects the digest-pinned runtime and device
 access; `.github/scripts/set_env.sh` dispatches to
 `.github/scripts/hooks/set_env_<platform>.sh`; and
@@ -33,7 +33,7 @@ build, source-built Torch or test exclusions are introduced by this migration.
 
 ## Download caching for the runtime-migration lanes
 
-Ascend, Iluvatar, Kunlunxin, MUSA, PPU and GCU use the same cache-selection helper,
+Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU and MetaX use the same cache-selection helper,
 `.github/scripts/lib/pip_cache.sh`, before their platform environment hooks run.
 The integration workflow prefers the existing runner-local
 `/__w/.pip-cache/<platform>` directory. It checks ownership, directory access
