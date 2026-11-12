@@ -324,7 +324,9 @@ FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 if [[ "$MUSA_RUNTIME_REUSE" == 1 ]] && musa_runtime_flagtree_is_usable; then
   echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
 else
-  "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+  if [[ "$MUSA_RUNTIME_REUSE" == 1 ]]; then
+    "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+  fi
   install_flagtree
 fi
 

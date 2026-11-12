@@ -744,3 +744,21 @@ def test_musa_selects_the_verified_runtime_without_changing_the_build_contract()
     assert SCRIPT.count("\nbuild_flagos_inplace\n") == 1
     assert "seed_runtime.py" in RUNTIME_HELPER.read_text()
     assert "apt-get" not in RUNTIME_HELPER.read_text()
+
+
+def test_legacy_compiler_install_does_not_gain_a_runtime_uninstall(tmp_path):
+    start = SCRIPT.index('FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:')
+    end = SCRIPT.index("\n# flagtree may bring torch_musa", start)
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\necho unexpected-python >&2\nexit 1\n")
+    python.chmod(0o755)
+    result = run_shell(
+        "install_flagtree() { echo install-flagtree; }\n" + SCRIPT[start:end],
+        MUSA_RUNTIME_REUSE="0",
+        VENV_PYTHON=str(python),
+        FLAGTREE_VERSION_mthreads="0.7.0+mthreads3.6",
+        FLAGTREE_INDEX_URL_DEFAULT="https://example.invalid/simple",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "install-flagtree"
+    assert "unexpected-python" not in result.stderr
