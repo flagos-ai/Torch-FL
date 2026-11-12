@@ -931,10 +931,61 @@ ordering below is unchanged, but A and B now have concrete entry conditions: A n
 support for a private-use-1 device sized, and B needs a decision on how the C++ sources enter the
 cohort.
 
+
+## Decision: FlagGems is the single source of truth, and what that eliminates
+
+A product constraint settles part of the route comparison, so it is recorded here as a decision
+rather than left as an open question.
+
+**Constraint.** For any operator the plugin accelerates, the kernel that runs must be FlagGems'. An
+Inductor-generated kernel implementing the same operator does not satisfy this, even if it is faster,
+because the project's claim is that FlagGems covers these operators - not that they are fast.
+
+**Consequence for route A.** The measurement in "What A generates for a FlagGems operator" shows A emits
+`triton_poi_fused_mul_0`, its own fused Triton kernel, and does not include the FlagGems kernel in what
+it generates. Under this constraint that output is not usable as the accelerated path.
+
+The one shape of A that remains permissible is capturing inside FlagGems so the kernel becomes an
+opaque `triton_kernel_wrapper_mutation` node, which Inductor launches without regenerating. FlagGems
+stays the source of truth there, but A can then only contribute allocation planning, launch sequencing
+and the host wrapper - it cannot fuse across an opaque kernel or regenerate it. That is the wrapper
+this repository already has, measured at 8.24 us with a floor of roughly 8-10 us that any host wrapper
+pays. **So A costs integration work to reproduce something that already exists, and is not justified.**
+
+A is therefore out as a producer under this constraint. This is not a judgement on A's quality: for an
+operator with no native implementation here at all, where the alternative is `cpu_fallback`, an
+Inductor kernel may be the better answer. That is a separate proposal with a different premise, and it
+should be argued on its own terms rather than folded into this one.
+
+**The ordering that follows.**
+
+| route | status under "FlagGems is the source of truth" |
+| --- | --- |
+| **A**, Inductor / AOTI | **out as a producer** - emits its own kernels; the permissible opaque-kernel variant only reproduces the existing wrapper |
+| **B**, FlagGems' own C++ pointwise path | **the natural candidate** - it is part of FlagGems, runs FlagGems' kernels, and already holds schema, `get_kernel_info(rank)`, type promotion and a shared native argument-preparation path |
+| **C**, a restricted host IR and small backend | the fallback, and now the one to reach for if B's coverage or its CUDA-stream dependency cannot be resolved - it keeps FlagGems' kernels by construction because it only describes their launches |
+| **D**, a general host compiler | the largest form of C; nothing in the measurements argues for starting here |
+
+**What the constraint does not remove.** Layers 1 and 3 from "What the host program is" are still
+needed under every surviving route: something must capture a FlagGems callable's parameterisation and
+guards, and something must enter the native path before the GIL is taken. B reduces layer 1's
+difficulty because FlagGems' C++ side already knows its own kernel semantics instead of reverse
+engineering them from Python, which is exactly the part that cost Phase 0 the most. It does not remove
+layer 3, and layer 3 is what already exists and is measured here.
+
+**The decision B still needs.** The pinned FlagGems 5.4.0 installs as a Python-only package - no `cpp/`
+directory, no shared objects, neither `prebuild_kernels.py` nor `pointwise_prepare_args.h` - so B
+cannot be evaluated against the current cohort until one of these is chosen: a FlagGems wheel that
+ships the C++ path, building FlagGems from source (which changes the cohort under measurement), or
+vendoring those sources into Torch-FL with the maintenance that implies. That choice is upstream of
+any code in this repository and should be made before B is prototyped.
+
 ### Where that leaves the recommendation
 
-The order should be: **A and B in parallel first, on a common operator set; C only if both are
-blocked by integration rather than by capability; D only if C is also insufficient.**
+**This paragraph is superseded by "Decision: FlagGems is the single source of truth" below, which
+removes A from the comparison.** What the paragraphs above still contribute is the experiment design:
+whichever route is compared next should be measured on that basis - fixed inputs, one acceptance
+standard for all routes, the same evidence for "no Python", and the four timings reported separately.**
 
 What Phase 0 contributes to that decision is bounded and worth stating plainly: the native half -
 entry point, allocation, guards, variant selection, submission, fallback - is the same work under
