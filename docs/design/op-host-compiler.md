@@ -443,6 +443,106 @@ pooling. Pooling rests on a plan being tied to a fixed output shape, so the mome
 is removed the saving goes with it. That is about 4 us of the 7. A host program has to
 recover it through the allocation fast path instead, which is a separate piece of work.
 
+## Development cost to cover FlagGems
+
+The question this section answers is not "does one operator work" - Phase 0 answered that - but
+what it costs to cover the FlagGems operator surface with generalisation. Numbers below are
+either **measured** on the shipped tree or **estimated**, and each is labelled.
+
+### The operator surface, measured
+
+| quantity | value |
+| --- | ---: |
+| `aten` operators routed to `flaggems` in `backends_nvidia.conf` | **549** |
+| `@pointwise_dynamic` use sites, across 177 operator modules | **265** |
+| `@libentry` hand-written Triton kernels | **786** |
+| kernel definitions in total (3 to 10 parameters, no dominant shape) | **966** |
+| of those, `@triton.autotune` kernels - several configurations each | 143 |
+| routed operators whose base name is defined in a `pointwise_dynamic` module | **200 (36%)** |
+
+Those last two rows are the reason this section is short. 200 of 549 routed operators are served
+by the pointwise class that Phase 0 already built and measured, and a pointwise artifact serves
+every shape from 1-D to 5-D without recompiling.
+
+### The cost model: classes, not operators
+
+Development cost scales with the number of **kernel-shape classes**, not with the number of
+operators. Three measured facts support that:
+
+1. 265 `pointwise_dynamic` operators share one kernel signature, and one artifact of that class
+   served six shapes from 1-D to 5-D at a flat 6.8x.
+2. The 786 `libentry` kernels have widely scattered signatures - parameter counts peak at 5, 6,
+   7 and 4 with no majority - so they cannot be one class, but they do cluster by computational
+   pattern: reduction, normalisation, pooling, convolution, indexing, sort/topk, linear algebra.
+3. Per operator, the host logic is a declaration of how the parameter values derive from tensor
+   metadata, not a kernel implementation. Once the class and the ABI extraction exist, a new
+   operator is a declaration plus an automated check.
+
+### What is already built and measured
+
+| piece | status | coverage |
+| --- | --- | --- |
+| pointwise binary class | implemented, measured on six shapes | **200 of 549 routes (36%)** |
+| reduction over the last axis (softmax) | implemented, measured at 3.4x | the softmax family |
+| ABI extraction from the compiled artifact's PTX | **method proven, done by hand** | two kernels so far |
+| constexpr variant selection | implemented, measured across two artifacts | grows with the shape population |
+| fallback with per-stage counters | implemented, measured | all declines |
+
+### Estimate
+
+Assumptions, stated because the estimate is worthless without them: one engineer familiar with
+Triton internals and PrivateUse1 dispatch; the Phase 0 ABI method reused rather than re-derived;
+single platform (CUDA on H100); no change to the FlagGems operator set during the work.
+
+| work item | estimate | basis |
+| --- | ---: | --- |
+| **ABI extraction automated** - compiled entry's parameter list to a parameter mapping | **0.5-1 person-month** | the manual version cost half a day for two kernels; 966 kernels cannot be done by hand, so this is the leverage point |
+| **code generator** - ABI table to C++ dispatch entries and guards | **1-1.5 person-month** | generates the registration surface for 549 operators once |
+| **per-class host logic** - 15 to 25 classes | **2-4 person-months** | 3 to 6 days per class; multi-launch sequences and multi-output operators priced separately |
+| **constexpr and variant coverage** | **0.5-1 person-month** | 143 autotune sites multiply variants; needs a bound on how many are compiled |
+| **guard coverage** - dtype, stride, broadcast, non-contiguous | **1-2 person-months** | today these decline; Triton kernels take strides as parameters, so this reaches into the ABI |
+| **test harness and vendor comparison** - 549 operators across the dtype matrix | **1-2 person-months** | automated comparison is the only realistic acceptance path at this count |
+| **total** | **6-11 person-months** | covers roughly 90% of commonly used operators; the long tail of convolution, linear algebra and attention is not in this figure |
+
+After the first, second and sixth items exist, the marginal cost of adding an operator is a
+declaration plus an automated check - on the order of an hour, mostly test time.
+
+### Compared with hand-written native wrappers
+
+| approach | effort for 549 operators | maintenance when FlagGems changes |
+| --- | --- | --- |
+| hand-written C++ wrapper per operator | **3-7 person-years** (2-5 days each) | hand-edited per operator |
+| host program, generated from capture | **6-11 person-months** | regenerate from the ABI |
+
+A factor of five to ten, and the ratio grows with the operator count. This, rather than any
+performance claim, is the argument for the approach: the host program is not faster than the
+replay plan cache, and it is not faster than a hand-written wrapper - it is *at* the
+hand-written wrapper's floor (8.24 us against a floor of roughly 8.2-9.2 us for dispatch plus
+allocation plus launch) while being generated rather than written.
+
+### The risks that would invalidate the estimate
+
+| risk | effect | evidence |
+| --- | --- | --- |
+| **ABI extraction cannot be automated** | cost multiplies roughly tenfold, and repeats on every FlagGems upgrade | this is the pitfall Phase 0 hit: the source signature, `arg_names`, the `signature` string and the metadata all said four parameters, the compiled entry wanted six |
+| **multi-launch sequences** | the host program expresses one launch today; `sort` issues 21 | measured, and it is an architectural gap rather than a class |
+| **143 autotune kernels** | variant count multiplies per kernel | needs a bound: compile only the configurations actually selected |
+| **capture yield below 100%** | operators whose FlagGems call the capture cannot see | the `pointwise_dynamic` factory, `LibEntry` and the autotuner are exactly where tracing is expected to break; gates 2 and 5 exist for this |
+| **FlagGems ABI churn** | regeneration each upgrade | this is the reason to generate rather than hand-write, not a reason against the approach |
+
+### Suggested order
+
+Ordered by coverage per unit of effort rather than by technical interest:
+
+1. **Automate ABI extraction.** Without it every later item is hand work and this estimate does
+   not hold.
+2. **Write the code generator.** The pointwise class is already implemented and measured, so
+   this lands its 200 operators at once.
+3. **Add classes by call frequency** - reduction, then normalisation, then indexing, then
+   sort/topk - not alphabetically.
+4. **Extend guards after step 2.** Broadcast and non-contiguous inputs are common in real eager
+   code; while they decline, the optimisation does not apply to those calls at all.
+
 ## Open questions
 
 - Runtime host compilation: this design assumes a host C++ compiler is available at run
