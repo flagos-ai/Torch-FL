@@ -824,6 +824,46 @@ plugin's C++ caller to reach the cost the design targets - which is layer 3, the
 already has and measured. Neither route is complete on its own, and the combination is what the
 numbers point to.
 
+
+#### Where route A's 26 us actually goes
+
+The obvious next question is whether entering A's artifact from the plugin's caller - rather than
+through `torch.compile`'s callable - would bring 26.26 us down to the 8.24 us the host program
+reaches. Profiling the warm call answers it without another build.
+
+Per-iteration CPU time by component, 300 iterations, profiler overhead included so the absolute
+numbers are inflated but the shares are not:
+
+| component | self time per iteration | what it is |
+| --- | ---: | --- |
+| `## Call CompiledFxGraph` | 23.37 us | the AOTI wrapper itself |
+| `Torch-Compiled Region: 0/0` | 20.40 us | `torch.compile`'s compiled-region entry |
+| `aten::empty_strided` | **12.69 us** | allocation, inside the wrapper |
+| `TorchDynamo Cache Lookup` | 3.16 us | Dynamo's guard check |
+| `AOTDispatcher Runtime Wrapper Prologue` | 2.10 us | autograd dispatch wrapper |
+| `Pregraph bytecode` | 1.54 us | Dynamo's pregraph |
+
+Two things follow.
+
+**Most of the 26.26 us is `torch.compile`'s entry, not the artifact.** The compiled region, the
+Dynamo cache lookup, the autograd prologue and the pregraph bytecode are all machinery that exists
+because the callable is a `torch.compile` product. None of it would be present if the plugin called
+the generated entry itself.
+
+**What remains inside the artifact is the same floor the host program pays.** Its own body is
+`aten::empty_strided` plus the driver launch. At the ~4 us allocation and ~4.3 us launch measured
+earlier, the artifact is about 8-10 us before any handle conversion - the same order as the host
+program's 8.24 us, and not below it, because both are doing the same two things.
+
+So the answer to the question that motivated this probe is: **entering A's artifact from the plugin
+would buy parity with the host program, not an improvement on it.** A's value is in what it
+generates for operators this repository has not hand-specialised - scheduling, fusion, codegen for
+shapes and dtypes - not in making the entry cheaper than the one that already exists.
+
+That is the most useful form the route A finding can take, and it is also the end of what these
+probes can establish: confirming the 8-10 us estimate would mean implementing the plugin-side entry
+for an AOTI artifact, which is the integration work itself rather than a measurement of it.
+
 **Route B. The C++ pointwise path is not in the wheel we consume.**
 
 The pinned FlagGems 5.4.0 installs as a **Python-only** package: the tree contains `ops`, `runtime`,
