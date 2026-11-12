@@ -77,13 +77,19 @@ PTX_POINTWISE = """
 """
 
 
-class Tensor:
-    """Stand-in for a torch tensor: only storage identity and dtype are needed."""
+class Device:
+    def __init__(self, index=0):
+        self.index = index
 
-    def __init__(self, storage_id, dtype="torch.float32", shape=(1024,)):
+
+class Tensor:
+    """Stand-in for a torch tensor: storage identity, dtype, shape and device."""
+
+    def __init__(self, storage_id, dtype="torch.float32", shape=(1024,), device=0):
         self._storage_id = storage_id
         self.dtype = dtype
         self.shape = shape
+        self.device = Device(device)
 
     def untyped_storage(self):
         return types.SimpleNamespace(data_ptr=lambda: self._storage_id)
@@ -156,7 +162,7 @@ def test_mapping_drops_constexprs_and_fills_scratch_pointers():
         constexprs=["float32", True],  # dtype string and a bool flag
     )
     grid, kinds, ints = fast_launch_cpp.classify_arguments(args, [a, b], ptx_kinds)
-    assert grid == 1024
+    assert grid == (1024, 1, 1)
     assert kinds == ["in", "in", "out", "i32", "zero", "zero"]
     assert ints == [1048576]
 
@@ -170,9 +176,24 @@ def test_mapping_follows_the_kernel_order_not_the_call_order():
         [a],
         ptx_kinds,
     )
-    assert grid == 1024
+    assert grid == (1024, 1, 1)
     assert kinds == ["out", "in", "i32", "zero", "zero"]
     assert ints == [1024]
+
+
+def test_mapping_keeps_all_three_grid_dimensions():
+    """A reduction over a non-final dimension launches a multidimensional grid.
+
+    Replaying such a plan with y/z collapsed to 1 would leave most of the output
+    unwritten, so the capture has to carry every dimension.
+    """
+    a, out = Tensor(1), Tensor(2)
+    ptx_kinds = fast_launch_cpp.parse_ptx_params(PTX_POINTWISE)
+    args = (
+        [4, 128, 2, 0, 0, (4, 1, 0), None, None, None] + [out, a] + [4096] + ["float32"]
+    )
+    grid, kinds, ints = fast_launch_cpp.classify_arguments(tuple(args), [a], ptx_kinds)
+    assert grid == (4, 128, 2)
 
 
 def test_mapping_refuses_a_strided_operand_that_is_not_contiguous():
@@ -207,7 +228,7 @@ def test_mapping_accepts_a_contiguous_strided_operand():
     grid, kinds, ints = fast_launch_cpp.classify_arguments(
         args, [inner, Tensor(2)], ptx_kinds
     )
-    assert grid == 1024
+    assert grid == (1024, 1, 1)
     assert kinds == ["in", "in", "out", "i32", "zero", "zero"]
 
 
@@ -257,11 +278,16 @@ class FakeRegistrar:
     def __init__(self, accept=True):
         self.accepted = accept
         self.calls = []
+        self.unregistered = []
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
         if not self.accepted:
             raise fast_launch_cpp.Unsupported("refused")
+        return True
+
+    def unregister(self, **kwargs):
+        self.unregistered.append(kwargs)
         return True
 
 
@@ -306,8 +332,11 @@ class FakePackage:
 
 
 def make_backend(captured, registrar=None):
+    registrar = registrar or FakeRegistrar()
     return fast_launch_cpp.Backend(
-        FakeProvider(captured), registrar=registrar or FakeRegistrar()
+        FakeProvider(captured),
+        registrar=registrar,
+        unregisterer=registrar.unregister,
     )
 
 
@@ -341,6 +370,12 @@ def test_capture_registers_a_plan_the_caller_can_replay():
     assert registered["key"] == "flag_gems.mul"  # what the plugin's caller looks up
     assert registered["kinds"] == ["in", "in", "out", "i32", "zero", "zero"]
     assert registered["ints"] == [1024]
+    assert (registered["grid_x"], registered["grid_y"], registered["grid_z"]) == (
+        1024,
+        1,
+        1,
+    )
+    assert registered["device"] == 0
     assert registered["operand_shapes"] == [[1024], [1024]]
     assert registered["out_shape"] == [1024]
     assert registered["out_dtype"] == fast_launch_cpp._AT_DTYPE["torch.float32"]
@@ -365,6 +400,49 @@ def test_a_refused_plan_keeps_the_operator_on_the_wrapper():
     assert "mul" not in backend.plans
     assert "refused" in backend.reasons["mul"]
     assert backend.stats["fallbacks"] == 1
+
+
+def test_noncontiguous_operand_is_refused_at_capture():
+    """Strides are baked at capture, so a non-contiguous operand must not be captured.
+
+    If it were, a later contiguous call with the same shape and dtype would pass the
+    replay check and execute the captured strides - a wrong answer, not an error.
+    """
+
+    class NonContiguous(Tensor):
+        def is_contiguous(self):
+            return False
+
+    operand = NonContiguous(1)
+    captured = FakeCaptured(
+        launches=[launch_args([operand, Tensor(2)], [1024], ["float32"])],
+        results=[Tensor(4)],
+    )
+    backend = make_backend(captured)
+
+    def original(*args, **kwargs):
+        return Tensor(9)
+
+    wrapped = backend.wrap("mul", original)
+    wrapped(operand, Tensor(2))
+    wrapped(operand, Tensor(2))
+    assert "non-contiguous operand at capture" in backend.reasons["mul"]
+    assert "mul" not in backend.plans
+
+
+def test_capture_records_the_operand_device():
+    """A CUfunction and its pooled buffers belong to one device and must not cross."""
+    a, b, out = Tensor(1, device=3), Tensor(2, device=3), Tensor(3, device=3)
+    captured = FakeCaptured(
+        launches=[launch_args([a, b, out], [1024], ["float32"])], results=[Tensor(4)]
+    )
+    registrar = FakeRegistrar()
+    backend = make_backend(captured, registrar=registrar)
+    wrapped = backend.wrap("mul", lambda *args, **kwargs: Tensor(9))
+    wrapped(a, b)
+    wrapped(a, b)
+    (registered,) = registrar.calls
+    assert registered["device"] == 3
 
 
 def test_multi_launch_operator_is_declined():
@@ -425,18 +503,25 @@ def test_unverified_operator_is_declined_and_keeps_the_binding():
 def test_disabled_operator_keeps_the_original_binding():
     calls = []
 
+    wrapper_result = Tensor(9)
+
     def original(*args, **kwargs):
         calls.append(args)
-        return "wrapper-result"
+        return wrapper_result
 
     package = FakePackage(original, "mul")
     captured = FakeCaptured(
         launches=[launch_args([Tensor(1), Tensor(2), Tensor(3)], [1024], ["float32"])],
         results=[Tensor(4)],
     )
-    backend = make_backend(captured)
+    registrar = FakeRegistrar()
+    backend = make_backend(captured, registrar=registrar)
     backend.enable(["mul"], package)
     assert package.mul is not original
-    package.mul(Tensor(1), Tensor(2))
+    package.mul(Tensor(1), Tensor(2))  # cold: compiles
+    package.mul(Tensor(1), Tensor(2))  # warm: captures and registers
+    assert "mul" in backend.plans
     backend.disable()
     assert package.mul is original
+    # The caller replays from its own registry, so disabling has to reach it too.
+    assert registrar.unregistered == [{"key": "flag_gems.mul"}]

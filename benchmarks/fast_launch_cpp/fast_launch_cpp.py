@@ -181,7 +181,10 @@ def classify_arguments(launch_args, inputs, ptx_kinds):
     if pointers + ints_expected != len(ptx_kinds):
         raise Unsupported("64-bit scalar parameters are not supported yet")
 
-    grid = int(launch_args[0])
+    # All three grid dimensions: a reduction over a non-final dimension launches a
+    # multidimensional grid, and replaying it with y/z = 1 would leave most of the output
+    # unwritten.
+    grid = (int(launch_args[0]), int(launch_args[1]), int(launch_args[2]))
     user_args = list(launch_args[9:])
 
     input_storages = {
@@ -230,6 +233,7 @@ class Plan:
         "operand_shapes",
         "operand_dtypes",
         "scalars",
+        "device_index",
     )
 
     def __init__(
@@ -245,6 +249,7 @@ class Plan:
         operand_shapes=(),
         operand_dtypes=(),
         scalars=(),
+        device_index=0,
     ):
         self.op = op
         self.grid = grid
@@ -257,6 +262,7 @@ class Plan:
         self.operand_shapes = tuple(tuple(int(e) for e in s) for s in operand_shapes)
         self.operand_dtypes = tuple(operand_dtypes)
         self.scalars = tuple(int(value) for value in scalars)
+        self.device_index = int(device_index)
 
     def census(self):
         """The slot census, which is the check that the layout is what it claims."""
@@ -283,8 +289,15 @@ class Backend:
     launches into the plan.
     """
 
-    def __init__(self, provider, max_launches=MAX_LAUNCHES, registrar=None):
+    def __init__(
+        self,
+        provider,
+        max_launches=MAX_LAUNCHES,
+        registrar=None,
+        unregisterer=None,
+    ):
         self.registrar = registrar or _register_with_plugin
+        self.unregisterer = unregisterer or _unregister_with_plugin
         self.provider = provider
         self.max_launches = max_launches
         self.plans = {}
@@ -321,6 +334,17 @@ class Backend:
         if result.numel() == 0:
             raise Unsupported("zero-element result")
 
+        # Contiguity and device have to hold at capture, not just at replay: the captured
+        # launch bakes the operands' strides into its constexprs, so a plan captured on a
+        # non-contiguous operand would replay those strides against a later contiguous one.
+        tensors = tensor_arguments(args)
+        for tensor in tensors:
+            if not tensor.is_contiguous():
+                raise Unsupported("non-contiguous operand at capture")
+        if not tensors or tensors[0].device.index is None:
+            raise Unsupported("operand without a device index")
+        device_index = tensors[0].device.index
+
         launch_args = captured.launches[0]
         compiled = captured.compiled
         ptx_kinds = parse_ptx_params(compiled.asm["ptx"])
@@ -330,10 +354,10 @@ class Backend:
 
         threads = int(compiled.metadata.num_warps) * 32
         shared = int(compiled.metadata.shared or 0)
-        tensors = tensor_arguments(args)
         plan = Plan(
             op=op,
             grid=grid,
+            device_index=device_index,
             threads=threads,
             shared=shared,
             kinds=kinds,
@@ -408,9 +432,12 @@ class Backend:
             key=self.plugin_key(op),
             kernel=compiled.name,
             cubin=compiled.asm["cubin"],
-            grid=plan.grid,
+            grid_x=plan.grid[0],
+            grid_y=plan.grid[1],
+            grid_z=plan.grid[2],
             threads=plan.threads,
             shared=plan.shared,
+            device=plan.device_index,
             kinds=list(plan.kinds),
             ints=list(plan.ints),
             operand_shapes=[list(shape) for shape in plan.operand_shapes],
@@ -449,6 +476,18 @@ class Backend:
                 setattr(ops, name, wrapped)
 
     def disable(self):
+        """Withdraw every plan, in C++ as well as in this object.
+
+        Restoring the Python bindings is not enough: the caller replays from its own
+        registry, so a plan has to be unregistered there too or the optimization would
+        keep running - and keep holding its buffers - after being turned off.
+        """
+        for op in list(self.plans):
+            try:
+                self.unregisterer(key=self.plugin_key(op))
+            except Unsupported:
+                pass  # a wheel without the registry has nothing to withdraw
+        self.plans.clear()
         self.provider.uninstall()
         for package, name, original in self._originals.values():
             setattr(package, name, original)
@@ -457,7 +496,6 @@ class Backend:
                 if getattr(ops, name, None) is not None:
                     setattr(ops, name, original)
         self._originals.clear()
-        self.plans.clear()
 
 
 _state = {"backend": None}
@@ -468,9 +506,12 @@ def _register_with_plugin(
     key,
     kernel,
     cubin,
-    grid,
+    grid_x,
+    grid_y,
+    grid_z,
     threads,
     shared,
+    device,
     kinds,
     ints,
     operand_shapes,
@@ -496,9 +537,12 @@ def _register_with_plugin(
         key,
         kernel,
         image,
-        grid,
+        grid_x,
+        grid_y,
+        grid_z,
         threads,
         shared,
+        device,
         kinds,
         ints,
         operand_shapes,
@@ -509,6 +553,18 @@ def _register_with_plugin(
     )
     if not registered:
         raise Unsupported("the plugin refused the plan (driver, cubin or kernel)")
+
+
+def _unregister_with_plugin(*, key):
+    """Withdraw a plan from the plugin's registry."""
+    import torch  # noqa: PLC0415 - torch is only needed on this path
+
+    registry = getattr(torch.ops, "flagos_fast_plan", None)
+    if registry is None:
+        raise Unsupported(
+            "this wheel has no flagos_fast_plan registry (built without the fast plan)"
+        )
+    return registry.unregister_fast_plan(key)
 
 
 def enable(names, package=None):

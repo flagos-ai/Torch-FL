@@ -7,9 +7,9 @@
 #include <ATen/ATen.h>
 #include <ATen/core/Tensor.h>
 #include <c10/core/ScalarType.h>
-#include <torch/library.h>
-#include <c10/core/TensorImpl.h>
 #include <c10/core/Storage.h>
+#include <c10/core/TensorImpl.h>
+#include <torch/library.h>
 
 #include <algorithm>
 #include <atomic>
@@ -28,6 +28,8 @@
 // registers a plan and keeps the Python route.
 #include <dlfcn.h>
 
+#include <c10/core/DeviceGuard.h>
+#include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 
@@ -84,46 +86,106 @@ const DriverApi& Driver() {
   return api;
 }
 
-// A pooled result buffer. The pool hands a slot back only when the last reference to the
-// tensor wrapping it drops, so two live results can never alias; when every slot is busy
-// the pool grows instead of reusing.
-struct Pool {
-  std::vector<at::Tensor> buffers;
-  std::vector<bool> busy;
-
-  size_t acquire(int64_t numel, c10::ScalarType dtype, const at::Device& device) {
-    for (size_t index = 0; index < buffers.size(); ++index) {
-      if (!busy[index]) {
-        busy[index] = true;
-        return index;
-      }
-    }
-    buffers.push_back(
-        at::empty({numel}, at::TensorOptions().dtype(dtype).device(device)));
-    busy.push_back(true);
-    return buffers.size() - 1;
-  }
-
-  void release(size_t index) { busy[index] = false; }
+// A pooled result buffer.
+//
+// Reuse is gated twice, because two different things keep a buffer alive: a host tensor
+// that still references it (`busy`), and the GPU work that produced or consumes it. The
+// second is why dropping the last host reference is not enough - the producing kernel may
+// still be queued - so each launch records an event on its stream and a buffer is only
+// handed out again once that event has completed.
+struct Slot {
+  at::Tensor buffer;
+  bool busy = false;
+  at::cuda::CUDAEvent done;  // recorded on the producing stream after each launch
+  bool has_event = false;
 };
 
-// Ownership of a pooled slot travels with the result: the deleter returns the slot to the
-// pool when the last reference to the tensor drops, which is what keeps two live results
-// from sharing a buffer without needing any bookkeeping at the call site.
+struct Pool {
+  std::mutex mutex;
+  std::vector<Slot> slots;
+  int64_t numel = 0;
+  c10::ScalarType dtype = c10::ScalarType::Float;
+  at::Device device = at::Device(at::kCPU);
+  bool has_device = false;
+
+  size_t Acquire(const at::Device& wanted) {
+    std::lock_guard<std::mutex> guard(mutex);
+    if (!has_device) {
+      device = wanted;
+      has_device = true;
+    }
+    for (size_t index = 0; index < slots.size(); ++index) {
+      Slot& slot = slots[index];
+      if (slot.busy) {
+        continue;  // a live tensor references it
+      }
+      if (slot.has_event && !slot.done.query()) {
+        continue;  // the GPU may still be reading or writing it
+      }
+      slot.busy = true;
+      return index;
+    }
+    Slot fresh;
+    fresh.buffer = at::empty({numel}, at::TensorOptions().dtype(dtype).device(device));
+    fresh.busy = true;
+    slots.push_back(std::move(fresh));
+    return slots.size() - 1;
+  }
+
+  void Release(size_t index) {
+    std::lock_guard<std::mutex> guard(mutex);
+    slots[index].busy = false;
+  }
+
+  void RecordLaunch(size_t index, const c10::cuda::CUDAStream& stream) {
+    std::lock_guard<std::mutex> guard(mutex);
+    Slot& slot = slots[index];
+    slot.done.record(stream);
+    slot.has_event = true;
+  }
+
+  void* DataPtr(size_t index) const { return slots[index].buffer.data_ptr(); }
+};
+
+// Ownership of a pooled slot travels with the result: the deleter releases the slot when
+// the last reference to the tensor drops, and the shared ownership of the pool keeps the
+// buffers alive even if the plan is unregistered or replaced while results are outstanding.
 struct SlotState {
-  Pool* pool = nullptr;
+  std::shared_ptr<Pool> pool;
   size_t index = 0;
 };
 
-at::Tensor WrapSlot(Pool* pool, size_t slot, const std::vector<int64_t>& shape,
-                    c10::ScalarType dtype, const c10::DispatchKeySet& key_set,
-                    const at::Device& device) {
+struct Plan {
+  std::string kernel;
+  CUfunction fn = nullptr;
+  unsigned grid[3] = {1, 1, 1};
+  unsigned threads = 1;
+  unsigned shared = 0;
+  int device_index = 0;
+  std::vector<std::string> kinds;
+  // The scalars the plan was captured with, at their kernel positions. Pointer positions
+  // stay zero: they are filled per call into a local copy, so a replay never mutates the
+  // plan and two calls cannot race on it.
+  std::vector<uint64_t> template_values;
+  std::vector<std::vector<int64_t>> operand_shapes;
+  std::vector<c10::ScalarType> operand_dtypes;
+  std::vector<int64_t> scalar_values;
+  std::vector<int64_t> out_shape;
+  int64_t out_numel = 0;
+  c10::ScalarType out_dtype = c10::ScalarType::Float;
+  std::shared_ptr<Pool> pool;
+  std::atomic<int64_t> replays{0};
+};
+
+at::Tensor WrapSlot(const std::shared_ptr<Pool>& pool, size_t slot,
+                    const std::vector<int64_t>& shape, c10::ScalarType dtype,
+                    const c10::DispatchKeySet& key_set, const at::Device& device) {
   auto* state = new SlotState{pool, slot};
-  const int64_t bytes = pool->buffers[slot].nbytes();
-  c10::DataPtr data(pool->buffers[slot].data_ptr(), state,
+  const int64_t bytes = pool->slots[slot].buffer.nbytes();
+  c10::DataPtr data(pool->DataPtr(slot), state,
                     [](void* context) {
                       auto* owned = static_cast<SlotState*>(context);
-                      owned->pool->release(owned->index);
+                      owned->pool->Release(owned->index);
                       delete owned;
                     },
                     device);
@@ -135,24 +197,6 @@ at::Tensor WrapSlot(Pool* pool, size_t slot, const std::vector<int64_t>& shape,
   return tensor;
 }
 
-struct Plan {
-  std::string kernel;
-  CUfunction fn = nullptr;
-  int grid = 0;
-  int threads = 0;
-  int shared = 0;
-  std::vector<std::string> kinds;
-  std::vector<uint64_t> values;  // argument storage the kernel reads
-  std::vector<std::vector<int64_t>> operand_shapes;
-  std::vector<c10::ScalarType> operand_dtypes;
-  std::vector<int64_t> scalar_values;  // the call's non-tensor arguments
-  std::vector<int64_t> out_shape;
-  int64_t out_numel = 0;
-  c10::ScalarType out_dtype = c10::ScalarType::Float;
-  Pool pool;
-  std::atomic<int64_t> replays{0};
-};
-
 std::mutex& RegistryMutex() {
   static std::mutex mutex;
   return mutex;
@@ -163,17 +207,21 @@ std::unordered_map<std::string, std::shared_ptr<Plan>>& Registry() {
   return registry;
 }
 
-// The kernel is launched with each parameter as its own slot, so the values live in a
-// per-launch array of pointers into the plan's storage.
-CUresult Launch(const Plan& plan, CUstream stream, void** kernel_params) {
-  return Driver().launch_kernel(plan.fn, static_cast<unsigned>(plan.grid), 1, 1,
-                                static_cast<unsigned>(plan.threads), 1, 1,
-                                static_cast<unsigned>(plan.shared), stream, kernel_params,
+std::shared_ptr<Plan> Lookup(const char* op) {
+  if (op == nullptr) {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> guard(RegistryMutex());
+  auto found = Registry().find(op);
+  return found == Registry().end() ? nullptr : found->second;
+}
+
+CUresult Launch(Plan& plan, CUstream stream, void** kernel_params) {
+  return Driver().launch_kernel(plan.fn, plan.grid[0], plan.grid[1], plan.grid[2],
+                                plan.threads, 1, 1, plan.shared, stream, kernel_params,
                                 nullptr);
 }
 
-// The plan is only valid for the call it was captured from: same operand shapes, types
-// and layout, and the same scalar arguments.
 bool CallMatches(const Plan& plan, const std::vector<at::Tensor>& operands,
                  const std::vector<int64_t>& scalars) {
   if (operands.size() != plan.operand_shapes.size()) {
@@ -184,6 +232,11 @@ bool CallMatches(const Plan& plan, const std::vector<at::Tensor>& operands,
   }
   for (size_t index = 0; index < operands.size(); ++index) {
     const at::Tensor& operand = operands[index];
+    // A CUfunction belongs to the context it was loaded in, and a pooled buffer belongs to
+    // one device: replaying either on another device would compute on the wrong memory.
+    if (operand.device().index() != plan.device_index) {
+      return false;
+    }
     if (operand.scalar_type() != plan.operand_dtypes[index]) {
       return false;
     }
@@ -213,7 +266,8 @@ int64_t ScalarPayload(const c10::IValue& value) {
 }  // namespace
 
 bool RegisterFastPlan(const std::string& op, const std::string& kernel, const void* cubin,
-                      size_t cubin_size, int64_t grid, int64_t threads, int64_t shared,
+                      size_t cubin_size, int64_t grid_x, int64_t grid_y, int64_t grid_z,
+                      int64_t threads, int64_t shared, int64_t device_index,
                       const std::vector<std::string>& kinds,
                       const std::vector<int64_t>& ints,
                       const std::vector<std::vector<int64_t>>& operand_shapes,
@@ -222,6 +276,9 @@ bool RegisterFastPlan(const std::string& op, const std::string& kernel, const vo
                       const std::vector<int64_t>& out_shape, int64_t out_dtype) {
   const DriverApi& driver = Driver();
   if (!driver.ok() || cubin == nullptr || cubin_size == 0) {
+    return false;
+  }
+  if (grid_x <= 0 || grid_y <= 0 || grid_z <= 0 || device_index < 0) {
     return false;
   }
   CUmodule module = nullptr;
@@ -233,14 +290,17 @@ bool RegisterFastPlan(const std::string& op, const std::string& kernel, const vo
     return false;
   }
   plan->kernel = kernel;
-  plan->grid = static_cast<int>(grid);
-  plan->threads = static_cast<int>(threads);
-  plan->shared = static_cast<int>(shared);
+  plan->grid[0] = static_cast<unsigned>(grid_x);
+  plan->grid[1] = static_cast<unsigned>(grid_y);
+  plan->grid[2] = static_cast<unsigned>(grid_z);
+  plan->threads = static_cast<unsigned>(threads);
+  plan->shared = static_cast<unsigned>(shared);
+  plan->device_index = static_cast<int>(device_index);
   plan->kinds = kinds;
-  plan->values.assign(kinds.size(), 0);
+  plan->template_values.assign(kinds.size(), 0);
 
   // Scalar parameters are baked from the captured launch, in kernel order. They describe
-  // the shape the plan was captured for, which is why the plan is also matched on shapes.
+  // the call the plan was captured for, which is why the plan is also matched on them.
   size_t int_index = 0;
   for (size_t slot = 0; slot < plan->kinds.size(); ++slot) {
     if (plan->kinds[slot] == "i32") {
@@ -248,8 +308,7 @@ bool RegisterFastPlan(const std::string& op, const std::string& kernel, const vo
         return false;
       }
       const int32_t value = static_cast<int32_t>(ints[int_index++]);
-      plan->values[slot] = 0;
-      std::memcpy(&plan->values[slot], &value, sizeof(value));
+      std::memcpy(&plan->template_values[slot], &value, sizeof(value));
     }
   }
   if (operand_dtypes.size() != operand_shapes.size()) {
@@ -267,19 +326,32 @@ bool RegisterFastPlan(const std::string& op, const std::string& kernel, const vo
   for (int64_t extent : plan->out_shape) {
     plan->out_numel *= extent;
   }
+  plan->pool = std::make_shared<Pool>();
+  plan->pool->numel = plan->out_numel;
+  plan->pool->dtype = plan->out_dtype;
 
   std::lock_guard<std::mutex> guard(RegistryMutex());
   Registry()[op] = std::move(plan);
   return true;
 }
 
-bool HasFastPlan(const char* op) {
-  if (op == nullptr) {
-    return false;
+bool UnregisterFastPlan(const std::string& op) {
+  std::shared_ptr<Plan> removed;
+  {
+    std::lock_guard<std::mutex> guard(RegistryMutex());
+    auto found = Registry().find(op);
+    if (found == Registry().end()) {
+      return false;
+    }
+    removed = std::move(found->second);
+    Registry().erase(found);
   }
-  std::lock_guard<std::mutex> guard(RegistryMutex());
-  return Registry().find(op) != Registry().end();
+  // `removed` goes out of scope here, but any result still in flight holds its own
+  // reference to the pool, so outstanding tensors stay valid.
+  return true;
 }
+
+bool HasFastPlan(const char* op) { return Lookup(op) != nullptr; }
 
 int64_t FastPlanCount() {
   std::lock_guard<std::mutex> guard(RegistryMutex());
@@ -287,16 +359,13 @@ int64_t FastPlanCount() {
 }
 
 int64_t FastPlanReplays(const char* op) {
-  if (op == nullptr) {
-    return 0;
-  }
-  std::lock_guard<std::mutex> guard(RegistryMutex());
-  auto found = Registry().find(op);
-  return found == Registry().end() ? 0 : found->second->replays.load();
+  auto plan = Lookup(op);
+  return plan == nullptr ? 0 : plan->replays.load();
 }
 
 at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
-  if (op == nullptr) {
+  auto plan = Lookup(op);
+  if (plan == nullptr) {
     return at::Tensor();
   }
   std::vector<at::Tensor> operands;
@@ -309,74 +378,92 @@ at::Tensor TryFastReplay(const char* op, const std::vector<c10::IValue>& args) {
       scalars.push_back(ScalarPayload(arg));
     }
   }
-  if (operands.empty()) {
-    return at::Tensor();
-  }
-  std::shared_ptr<Plan> plan;
-  {
-    std::lock_guard<std::mutex> guard(RegistryMutex());
-    auto found = Registry().find(op);
-    if (found == Registry().end()) {
-      return at::Tensor();
-    }
-    plan = found->second;
-  }
-  if (!CallMatches(*plan, operands, scalars)) {
-    // A different shape or layout is what the plan was not captured for; the caller falls
-    // back rather than launching with the captured geometry.
+  if (operands.empty() || !CallMatches(*plan, operands, scalars)) {
     return at::Tensor();
   }
 
+  // The device comes from the operands: this file is not where the plugin's device type is
+  // named, and the pointer the plan replays with belongs to whatever device they sit on.
   const at::Device device = operands[0].device();
-  const size_t slot = plan->pool.acquire(plan->out_numel, plan->out_dtype, device);
+  const std::shared_ptr<Pool> pool = plan->pool;
+  const size_t slot = pool->Acquire(device);
+
+  // The arguments are assembled per call from the plan's template, so a replay never
+  // writes to the plan and concurrent calls cannot overwrite each other's pointers.
+  std::vector<uint64_t> values = plan->template_values;
   size_t operand_index = 0;
   for (size_t position = 0; position < plan->kinds.size(); ++position) {
     const std::string& kind = plan->kinds[position];
     if (kind == "in") {
-      plan->values[position] = reinterpret_cast<uint64_t>(operands[operand_index].data_ptr());
+      values[position] = reinterpret_cast<uint64_t>(operands[operand_index].data_ptr());
       ++operand_index;
     } else if (kind == "out") {
-      plan->values[position] =
-          reinterpret_cast<uint64_t>(plan->pool.buffers[slot].data_ptr());
+      values[position] = reinterpret_cast<uint64_t>(pool->DataPtr(slot));
     }
   }
-
-  // The driver reads each parameter through its slot for the duration of the call, so the
-  // pointer array is built on the stack from the plan's storage.
-  uint64_t local[16];
-  void* kernel_params[16];
-  const size_t count =
-      std::min(plan->kinds.size(), sizeof(kernel_params) / sizeof(kernel_params[0]));
-  for (size_t index = 0; index < count; ++index) {
-    local[index] = plan->values[index];
-    kernel_params[index] = &local[index];
+  std::vector<void*> kernel_params(values.size());
+  for (size_t index = 0; index < values.size(); ++index) {
+    kernel_params[index] = &values[index];
   }
 
-  CUstream stream = reinterpret_cast<CUstream>(c10::cuda::getCurrentCUDAStream().stream());
-  if (Launch(*plan, stream, kernel_params) != CUDA_SUCCESS) {
-    plan->pool.release(slot);
+  // The replay runs before the caller's device guard, and both the CUfunction and the
+  // stream belong to a device, so select it here. A generic guard, not a CUDA one: the
+  // operands live on the plugin's own device type, which the CUDA guard rejects.
+  const c10::OptionalDeviceGuard guard(device);
+  const c10::cuda::CUDAStream stream = c10::cuda::getCurrentCUDAStream(device.index());
+  if (Launch(*plan, stream.stream(), kernel_params.data()) != CUDA_SUCCESS) {
+    pool->Release(slot);
     return at::Tensor();
   }
-
+  pool->RecordLaunch(slot, stream);
   plan->replays.fetch_add(1, std::memory_order_relaxed);
-  return WrapSlot(&plan->pool, slot, plan->out_shape, plan->out_dtype,
-                  operands[0].key_set(), device);
+  return WrapSlot(pool, slot, plan->out_shape, plan->out_dtype, operands[0].key_set(),
+                  device);
 }
 
 }  // namespace at::native::flagos
+
+// Registration surface for Python, which owns the compiled kernel. A custom operator
+// rather than a pybind module: the plugin builds one shared library and registers its
+// entry points through torch, so this needs no new module, no new build target and no
+// packaging change.
+TORCH_LIBRARY(flagos_fast_plan, m) {
+  m.def(
+      "register_fast_plan(str op, str kernel, Tensor cubin, int grid_x, int grid_y, "
+      "int grid_z, int threads, int shared, int device, str[] kinds, int[] ints, "
+      "int[][] operand_shapes, int[] operand_dtypes, int[] scalars, int[] out_shape, "
+      "int out_dtype) -> bool",
+      [](const std::string& op, const std::string& kernel, const at::Tensor& cubin,
+         int64_t grid_x, int64_t grid_y, int64_t grid_z, int64_t threads, int64_t shared,
+         int64_t device, std::vector<std::string> kinds, std::vector<int64_t> ints,
+         std::vector<std::vector<int64_t>> operand_shapes,
+         std::vector<int64_t> operand_dtypes, std::vector<int64_t> scalars,
+         std::vector<int64_t> out_shape, int64_t out_dtype) {
+        return at::native::flagos::RegisterFastPlan(
+            op, kernel, cubin.data_ptr(), static_cast<size_t>(cubin.numel()), grid_x,
+            grid_y, grid_z, threads, shared, device, kinds, ints, operand_shapes,
+            operand_dtypes, scalars, out_shape, out_dtype);
+      });
+  m.def("unregister_fast_plan(str op) -> bool", [](const std::string& op) {
+    return at::native::flagos::UnregisterFastPlan(op);
+  });
+  m.def("fast_plan_count() -> int", []() { return at::native::flagos::FastPlanCount(); });
+}
 
 #else  // FLAGOS_HAVE_FAST_PLAN
 
 namespace at::native::flagos {
 
 bool RegisterFastPlan(const std::string&, const std::string&, const void*, size_t, int64_t,
-                      int64_t, int64_t, const std::vector<std::string>&,
-                      const std::vector<int64_t>&,
+                      int64_t, int64_t, int64_t, int64_t, int64_t,
+                      const std::vector<std::string>&, const std::vector<int64_t>&,
                       const std::vector<std::vector<int64_t>>&,
                       const std::vector<int64_t>&, const std::vector<int64_t>&,
                       const std::vector<int64_t>&, int64_t) {
   return false;
 }
+
+bool UnregisterFastPlan(const std::string&) { return false; }
 
 bool HasFastPlan(const char*) { return false; }
 
@@ -389,31 +476,5 @@ int64_t FastPlanCount() { return 0; }
 int64_t FastPlanReplays(const char*) { return 0; }
 
 }  // namespace at::native::flagos
-
-#endif  // FLAGOS_HAVE_FAST_PLAN
-#if defined(FLAGOS_HAVE_FAST_PLAN)
-
-// Registration surface for Python, which owns the compiled kernel. A custom operator
-// rather than a pybind module: the plugin builds one shared library and registers its
-// entry points through torch, so this needs no new module, no new build target and no
-// packaging change.
-TORCH_LIBRARY(flagos_fast_plan, m) {
-  m.def(
-      "register_fast_plan(str op, str kernel, Tensor cubin, int grid, int threads, "
-      "int shared, str[] kinds, int[] ints, int[][] operand_shapes, "
-      "int[] operand_dtypes, int[] scalars, int[] out_shape, int out_dtype) -> bool",
-      [](const std::string& op, const std::string& kernel, const at::Tensor& cubin,
-         int64_t grid, int64_t threads, int64_t shared, std::vector<std::string> kinds,
-         std::vector<int64_t> ints,
-         std::vector<std::vector<int64_t>> operand_shapes,
-         std::vector<int64_t> operand_dtypes, std::vector<int64_t> scalars,
-         std::vector<int64_t> out_shape, int64_t out_dtype) {
-        return at::native::flagos::RegisterFastPlan(
-            op, kernel, cubin.data_ptr(), static_cast<size_t>(cubin.numel()), grid,
-            threads, shared, kinds, ints, operand_shapes, operand_dtypes, scalars,
-            out_shape, out_dtype);
-      });
-  m.def("fast_plan_count() -> int", []() { return at::native::flagos::FastPlanCount(); });
-}
 
 #endif  // FLAGOS_HAVE_FAST_PLAN

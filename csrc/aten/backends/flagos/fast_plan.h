@@ -31,23 +31,33 @@ namespace at::native::flagos {
 
 // Register a plan that replays `op` (the FlagGems callable name, e.g. "flag_gems.mul").
 //
-// `cubin` is the compiled kernel image, `kernel` its entry name. `kinds` describes each
-// kernel parameter in order: "in" (operand, taken from the call), "out" (pooled result)
-// or "zero" (a scratch pointer Triton declares but this path never fills). `ints` are the
-// scalar parameters in kernel order, `operand_shapes`/`operand_dtypes` the operands the
-// plan was captured for, and `out_shape`/`out_dtype` the result's. The plan is replayed
-// only for operands that match those shapes and types exactly.
+// `cubin` is the compiled kernel image, `kernel` its entry name, and `grid_x/y/z`,
+// `threads`, `shared` the launch geometry it must be replayed with - all three grid
+// dimensions, because a reduction over a non-final dimension is a multidimensional grid.
+// `device_index` is the device the function and its pooled buffers belong to; a plan never
+// answers for another device.
+//
+// `kinds` describes each kernel parameter in order: "in" (operand, taken from the call),
+// "out" (pooled result) or "zero" (a scratch pointer Triton declares but this path never
+// fills). `ints` are the scalar parameters in kernel order, `operand_shapes`/
+// `operand_dtypes` the operands the plan was captured for, and `out_shape`/`out_dtype` the
+// result's. The plan is replayed only for operands that match those shapes, types and
+// device exactly.
 //
 // Returns false when the driver, the cubin or the kernel cannot be resolved; the caller
 // then keeps the Python route.
 bool RegisterFastPlan(const std::string& op, const std::string& kernel,
-                      const void* cubin, size_t cubin_size, int64_t grid, int64_t threads,
-                      int64_t shared, const std::vector<std::string>& kinds,
+                      const void* cubin, size_t cubin_size, int64_t grid_x, int64_t grid_y,
+                      int64_t grid_z, int64_t threads, int64_t shared,
+                      int64_t device_index, const std::vector<std::string>& kinds,
                       const std::vector<int64_t>& ints,
                       const std::vector<std::vector<int64_t>>& operand_shapes,
                       const std::vector<int64_t>& operand_dtypes,
                       const std::vector<int64_t>& scalar_values,
                       const std::vector<int64_t>& out_shape, int64_t out_dtype);
+
+// Remove a plan. Results still outstanding stay valid: they own a reference to the pool.
+bool UnregisterFastPlan(const std::string& op);
 
 // True when `op` has a plan, so a caller can decide before doing any work.
 bool HasFastPlan(const char* op);
