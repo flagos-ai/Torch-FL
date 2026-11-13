@@ -103,13 +103,12 @@ steps:
     environment_from_config:
       environment_check: FLAGOS_ENVIRONMENT_CHECK
 
-  # The independent Iluvatar runtime must keep the official CPU torch core.
-  # Audit mapped core libraries, ELF dependencies and the BI-V150 Triton target
-  # before the shared operator suites, then launch a Triton add probe.
+  # The common environment group validates Iluvatar's configured CPU core,
+  # ELF dependencies and CoreX target. Keep its existing computation smoke here.
   - id: iluvatar_runtime
-    name: Check Iluvatar CPU core and runtime
+    name: Run Iluvatar runtime computation smoke
     platforms: [iluvatar]
-    command: cd "$GITHUB_WORKSPACE" && python .github/scripts/verify_iluvatar.py --runtime
+    command: python -m pytest tests/integration/test_iluvatar_runtime.py -v -s --tb=short
 
   # Issue #391: the multi-device contract files sit at the top level of
   # tests/integration/, where no manifest sweeps by default -- a file added there

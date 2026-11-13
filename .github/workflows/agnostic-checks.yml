@@ -132,7 +132,6 @@ jobs:
             tests/unit/test_gen_vendor_confs.py
             tests/unit/test_import_phase_order.py
             tests/unit/test_iluvatar_env_script.py
-            tests/unit/test_iluvatar_cpu_runtime.py
             tests/unit/test_integration_manifest.py
             tests/unit/test_integration_source_contract.py
             tests/unit/test_integration_workdir.py
@@ -145,6 +144,7 @@ jobs:
             tests/unit/test_patch_triton_ascend.py
             tests/unit/test_platform_capability_matrix.py
             tests/unit/test_platform_detect.py
+            tests/unit/test_platform_environment.py
             tests/unit/test_platform_support_detect.py
             tests/unit/test_platform_vendor_naming.py
             tests/unit/test_ppu_env_script.py
@@ -152,6 +152,7 @@ jobs:
             tests/unit/test_run_integration_tests.py
             tests/unit/test_run_unit_tests.py
             tests/unit/test_route_log_name_tables.py
+            tests/unit/test_seed_runtime.py
             tests/unit/test_set_env_common.py
             tests/unit/test_set_env_runner.py
             tests/unit/test_startup_lifecycle.py

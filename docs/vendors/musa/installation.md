@@ -51,20 +51,20 @@ The same `seed_runtime.py` used by the other migrated lanes copies compatible
 RECORD-owned distributions into this venv, including matching FlagTree and
 FlagGems. It never exposes a whole runtime site-packages directory. Requirements
 in `.github/requirements-mthreads.txt` are checked before pip supplies gaps;
-SQLAlchemy accepts FlagGems' `>=1.4.31,<2.1` range instead of forcing the old
-`2.0.48`. Existing integration-only BERT/transformers dependencies and optional
-Qwen tokenizer dependencies keep their existing stage/opt-in policy. FlagCX
-communication remains explicit opt-in; its presence in the runtime does not
-enable another backend or test group.
+SQLAlchemy uses the shared migrated-CI range `>=2.0.55,<2.0.58`, within FlagGems'
+dependency range, instead of forcing the old `2.0.48`. Existing integration-only
+BERT/transformers dependencies and optional Qwen tokenizer dependencies keep
+their existing stage/opt-in policy. Published FlagCX still depends on the vendor
+Torch extension, so this CI venv defers it until a compatible wheel is available.
 
 After SDK initialization, later shells retain `BASH_ENV=/dev/null`, an empty
 `PYTHONPATH`, and the CI venv first on PATH. FlagTree reuse validates its actual
 version, import origin, and MThreads backend directory. A final `pip check` and
 JSON environment inventory run before the existing native build. The shared
-four-lane pip-cache selection/recovery is retained. This caches downloads, not
+eight-platform pip-cache selection/recovery is retained. This caches downloads, not
 venvs or Docker layers; a cold pull of the approximately 4.62 GB compressed
-image has a separate cost. Explicit local/prebuilt users of the legacy
-development image retain their previous setup path.
+image has a separate cost. CI always creates its own venv from the selected
+runtime interpreter; the old development-image/prebuilt-venv path is retired.
 
 No project-native sources, shared CMake definitions, compile stages, operator
 routes, or integration selections change as part of this migration.

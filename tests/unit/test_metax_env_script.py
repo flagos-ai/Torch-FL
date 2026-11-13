@@ -28,6 +28,7 @@ def run_shell(body, **environment):
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "PYTHONPATH": "",
             "PYTHONNOUSERSITE": "1",
+            "REPO_ROOT": str(ROOT),
             **environment,
         },
         capture_output=True,
@@ -91,7 +92,8 @@ def test_build_torch_remains_the_cpu_wheel(tmp_path, version, cuda, accepted):
         f"__version__ = {version!r}\nclass version: cuda = {cuda!r}\n"
     )
     result = run_shell(
-        shell_function("metax_cpu_torch_is_usable") + "\nmetax_cpu_torch_is_usable",
+        shell_function("runtime_cpu_torch_is_usable", COMMON)
+        + "\nruntime_cpu_torch_is_usable",
         VENV_PYTHON=str(root / "bin/python"),
         CPU_TORCH_VERSION="2.10.0",
     )
@@ -107,8 +109,8 @@ def test_venv_does_not_inherit_the_runtime_interpreter(tmp_path, leak):
     python = sys.executable if leak == "outside-prefix" else str(root / "bin/python")
     result = run_shell(
         "venv_is_usable() { return 0; }\n"
-        + shell_function("metax_venv_is_isolated")
-        + "\nmetax_venv_is_isolated",
+        + shell_function("runtime_venv_is_isolated", COMMON)
+        + "\nruntime_venv_is_isolated ",
         VENV_ROOT=str(root),
         VENV_PYTHON=python,
     )
@@ -159,8 +161,8 @@ def test_compiler_reuse_keeps_the_current_post2_cohort(
     if spec:
         (triton / "_flagtree_spec.py").touch()
     result = run_shell(
-        shell_function("metax_runtime_flagtree_is_usable")
-        + "\nmetax_runtime_flagtree_is_usable",
+        shell_function("runtime_flagtree_is_usable", COMMON)
+        + "\nruntime_flagtree_is_usable metax _flagtree_spec.py",
         VENV_PYTHON=str(root / "bin/python"),
         FLAGTREE_VERSION="0.7.0.post2+metax3.6",
     )
@@ -214,7 +216,6 @@ def test_runtime_isolation_and_provenance_reach_later_steps(tmp_path):
     result = run_shell(
         shell_function("export_ci_env", COMMON) + "\n" + SCRIPT[start:end],
         **{name: "" for name in names},
-        METAX_RUNTIME_REUSE="1",
         BASH_ENV="/dev/null",
         PYTHONPATH="",
         FLAGOS_SDK_VERSION="3.8.1.3",
@@ -227,3 +228,24 @@ def test_runtime_isolation_and_provenance_reach_later_steps(tmp_path):
     assert rows["PYTHONPATH"] == ""
     assert rows["FLAGOS_SDK_VERSION"] == "3.8.1.3"
     assert rows["FLAGOS_VENDOR_TORCH_VERSION"] == "2.10.0+metax3.8.1.0"
+
+
+@pytest.mark.parametrize("prepared", [True, False])
+def test_runtime_flagcx_reuses_or_installs_the_declared_dependency(tmp_path, prepared):
+    python = tmp_path / "python"
+    python.write_text(f"#!/bin/sh\nexit {0 if prepared else 1}\n")
+    python.chmod(0o755)
+    start = SCRIPT.index('FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:')
+    end = SCRIPT.index('\n"$VENV_PYTHON" -m pip check', start)
+    result = run_shell(
+        "install_flagcx() { echo install-flagcx; }\n"
+        + SCRIPT[start:end]
+        + '\ntest "$FLAGCX_TORCH_BACKEND" = flagos\ntest "$TORCH_DEVICE_BACKEND_AUTOLOAD" = 0',
+        FLAGOS_VENDOR_TORCH_LIB="/flagos/vendor-torch/lib",
+        VENV_PYTHON=str(python),
+        REPO_ROOT=str(ROOT),
+        FLAGCX_VERSION_metax="0.14.0+maca3.8.1.3",
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("install-flagcx" in result.stdout) == (not prepared)
+    assert ("Using prepared FlagCX" in result.stdout) == prepared

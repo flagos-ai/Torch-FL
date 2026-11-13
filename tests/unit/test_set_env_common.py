@@ -29,6 +29,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / ".github" / "scripts"
 LIB = SCRIPTS_DIR / "lib" / "set_env_common.sh"
@@ -41,6 +43,13 @@ SHARED_FUNCS = [
     "install_flag_gems",
     "strip_vendor_paths",
     "venv_is_usable",
+    "ensure_runtime_requirement",
+    "ensure_runtime_requirements",
+    "create_runtime_venv",
+    "runtime_venv_is_isolated",
+    "runtime_cpu_torch_is_usable",
+    "runtime_flagtree_is_usable",
+    "validate_runtime_build_tools",
 ]
 
 #: The provisioning phases that were byte-for-byte the same modulo the pins.
@@ -250,3 +259,169 @@ pip_error_is_permanent "$1"
     ).stdout
     assert "Tunnel connection failed: 503" in reason
     assert "allowlist" in reason
+
+
+@pytest.mark.parametrize(
+    "state,exit_code",
+    [("prepared", 0), ("missing", 0), ("download-failure", 47), ("unrepaired", 1)],
+)
+def test_runtime_requirements_reuse_or_fill_gaps_and_stop_on_failure(
+    tmp_path, state, exit_code
+):
+    """Satisfied packages never use pip; failed installs cannot reach later tools."""
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("# Build tools\n\nwheel\npytest")
+    installed = tmp_path / "installed"
+    installed.write_text("wheel\npytest\n" if state == "prepared" else "pytest\n")
+    calls = tmp_path / "calls"
+    python = tmp_path / "python"
+    python.write_text(
+        '#!/bin/sh\nprintf "check:%s\\n" "$3" >> "$CALL_LOG"\n'
+        'grep -Fxq -- "$3" "$INSTALLED"\n'
+    )
+    python.chmod(0o755)
+    script = """
+set -euo pipefail
+source "$COMMON_LIBRARY"
+pip_retry() {
+  printf 'pip:%s\n' "$*" >> "$CALL_LOG"
+  if [[ "$PACKAGE_STATE" == download-failure ]]; then return 47; fi
+  if [[ "$PACKAGE_STATE" != unrepaired ]]; then
+    printf '%s\n' "$3" >> "$INSTALLED"
+  fi
+}
+if ensure_runtime_requirements "$REQUIREMENTS" https://example.invalid/simple; then
+  echo complete >> "$CALL_LOG"
+else
+  exit $?
+fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "COMMON_LIBRARY": str(LIB),
+            "REPO_ROOT": str(REPO_ROOT),
+            "VENV_PYTHON": str(python),
+            "REQUIREMENTS": str(requirements),
+            "INSTALLED": str(installed),
+            "CALL_LOG": str(calls),
+            "PACKAGE_STATE": state,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    rows = calls.read_text().splitlines()
+    pip_calls = [row for row in rows if row.startswith("pip:")]
+    assert pip_calls == (
+        []
+        if state == "prepared"
+        else ["pip:--index-url https://example.invalid/simple wheel"]
+    )
+    assert ("check:pytest" in rows) == (exit_code == 0)
+    assert ("complete" in rows) == (exit_code == 0)
+    if state == "prepared":
+        assert "Using prepared requirement: wheel" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "source",
+        "source-parent",
+        "source-child",
+        "base",
+        "base-child",
+        "checkout",
+        "checkout-parent",
+    ],
+)
+def test_runtime_venv_target_guard_stops_before_creation_even_in_a_conditional(
+    tmp_path, target
+):
+    import os
+    import sys
+
+    source = tmp_path / "image/env"
+    base = tmp_path / "image/base"
+    repo = tmp_path / "checkout"
+    for directory in (source, base, repo):
+        directory.mkdir(parents=True)
+    destinations = {
+        "source": source,
+        "source-parent": source.parent,
+        "source-child": source / "child",
+        "base": base,
+        "base-child": base / "child",
+        "checkout": repo,
+        "checkout-parent": tmp_path,
+    }
+    python = tmp_path / "vendor-python"
+    python.write_text(r"""#!/bin/bash
+if [[ "$1 $2" == '-I -' ]]; then
+  exec "$REAL_PYTHON" -I -c 'import os,sys; sys.prefix=os.environ["SOURCE_PREFIX"]; sys.base_prefix=os.environ["BASE_PREFIX"]; exec(sys.stdin.read())' "${@:3}"
+fi
+echo unexpected-creation >> "$CREATION_LOG"
+exit 42
+""")
+    python.chmod(0o755)
+    log = tmp_path / "creation-log"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\nsource "$COMMON"\nif create_runtime_venv "$SOURCE_PYTHON"; then exit 2; fi',
+        ],
+        env={
+            **os.environ,
+            "COMMON": str(LIB),
+            "SOURCE_PYTHON": str(python),
+            "REAL_PYTHON": sys.executable,
+            "SOURCE_PREFIX": str(source),
+            "BASE_PREFIX": str(base),
+            "REPO_ROOT": str(repo),
+            "VENV_ROOT": str(destinations[target]),
+            "CREATION_LOG": str(log),
+        },
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not log.exists()
+    assert source.is_dir() and base.is_dir() and repo.is_dir()
+
+
+def test_shared_runtime_venv_creation_clears_only_the_destination_and_verifies_isolation(
+    tmp_path,
+):
+    import os
+    import sys
+
+    target = tmp_path / "ci-venv"
+    target.mkdir()
+    marker = target / "stale-package"
+    marker.touch()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\nsource "$COMMON"\ncreate_runtime_venv "$SOURCE_PYTHON"\ntest "$VIRTUAL_ENV" = /flagos\n"$VENV_PYTHON" -I -c "import sys; print(sys.prefix)"',
+        ],
+        env={
+            **os.environ,
+            "COMMON": str(LIB),
+            "SOURCE_PYTHON": sys.executable,
+            "REPO_ROOT": str(REPO_ROOT),
+            "VENV_ROOT": str(target),
+            "VIRTUAL_ENV": "/flagos",
+        },
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == str(target)
+    assert not marker.exists()
+    assert "include-system-site-packages = false" in (target / "pyvenv.cfg").read_text()

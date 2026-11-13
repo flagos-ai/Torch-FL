@@ -49,8 +49,8 @@ container_volumes: []
 integration_environment: {}
 
 # MUSA is non-NVIDIA: expose the /dev/mtgpu* device nodes through --privileged
-# (mirrors the MetaX layout). MTHREADS_VISIBLE_DEVICES=all lets musart see every
-# MT device from container start; set_env_mthreads.sh re-exports it for subprocesses.
+# (mirrors the MetaX layout). MTHREADS_VISIBLE_DEVICES=all requests all devices
+# from the container toolkit; application-level filtering uses MUSA_VISIBLE_DEVICES.
 container_options: >-
   --privileged
   --ipc=host
@@ -74,6 +74,7 @@ wheel_artifact_name: wheel-musa
 # package in the same interpreter means an ABI mismatch, which is worth failing
 # on here rather than as a device error later.
 environment_check:
+  venv_isolation: true
   torch_version_base: "2.10.0"
   cuda_version: null
   torch_path_forbidden:
@@ -81,5 +82,5 @@ environment_check:
   forbid_package_files:
     - lib/libtorch_cuda.so
   flagos_devices:
-    more_than: 0
+    at_least: 2
   torch_musa_shim_only: true

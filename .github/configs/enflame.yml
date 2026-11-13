@@ -70,6 +70,7 @@ wheel_artifact_name: wheel-gcu
 # behind by the image: only flagtree carries the enflame backend, and without it
 # every FlagGems route in backends_enflame.conf fails to compile.
 environment_check:
+  venv_isolation: true
   torch_version_base: "2.10.0"
   cuda_version: null
   torch_path_forbidden:
@@ -79,6 +80,6 @@ environment_check:
   forbid_package_files:
     - lib/libtorch_cuda.so
   flagos_devices:
-    at_least: 8
+    at_least: 2
   triton_backend: enflame
   flaggems_vendor: enflame

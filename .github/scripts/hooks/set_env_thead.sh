@@ -234,47 +234,11 @@ if [[ "${BOXING_LANE:-}" == "1" ]]; then
 fi
 
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}${BOXING_LANE:+-boxing}}"
-"$VENDOR_PYTHON" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PYCODE'
-from pathlib import Path
-import sys
-
-target, repo = (Path(p).resolve() for p in sys.argv[1:])
-for prefix in (sys.prefix, sys.base_prefix):
-    source = Path(prefix).resolve()
-    if source.is_relative_to(target) or target.is_relative_to(source):
-        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
-if repo.is_relative_to(target):
-    raise SystemExit("CI venv must not contain the source checkout")
-assert sys.version_info[:2] == (3, 12), "PPU FlagTree requires Python 3.12"
-PYCODE
-if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
-    exit 1
-  fi
-  uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
-fi
-VENV_PYTHON="$VENV_ROOT/bin/python"
-if [[ ! -x "$VENV_PYTHON" ]]; then
-  echo "::error::Isolated Python was not created at $VENV_ROOT"
+if ! "$VENDOR_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
+  echo "::error::PPU FlagTree requires Python 3.12" >&2
   exit 1
 fi
-
-"$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
-from pathlib import Path
-import sys
-
-root = Path(sys.argv[1]).resolve()
-assert Path(sys.prefix).resolve() == root
-assert sys.prefix != sys.base_prefix
-settings = {}
-for line in (root / "pyvenv.cfg").read_text().splitlines():
-    key, separator, value = line.partition("=")
-    if separator:
-        settings[key.strip().lower()] = value.strip().lower()
-assert settings.get("include-system-site-packages") == "false"
-PY
-
+create_runtime_venv "$VENDOR_PYTHON"
 # The pod's proxied egress to files.pythonhosted.org has been observed at
 # ~90 kB/s, well below what pip's 15s default read timeout tolerates for a
 # single wheel (e.g. the ~30 MB cmake wheel stalled mid-download and tripped
@@ -292,19 +256,7 @@ export PIP_DEFAULT_TIMEOUT=120
   --flaggems-version "$FLAGGEMS_VERSION" \
   --requirements-file "$REPO_ROOT/.github/requirements-thead.txt"
 
-ppu_runtime_requirement() {
-  if ! "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-      --check-installed "$1"; then
-    pip_retry --index-url "$PIP_INDEX_URL" "$1"
-  fi
-  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-    --check-installed "$1"
-}
-
-while IFS= read -r requirement || [[ -n "$requirement" ]]; do
-  [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-  ppu_runtime_requirement "$requirement"
-done < "$REPO_ROOT/.github/requirements-thead.txt"
+ensure_runtime_requirements "$REPO_ROOT/.github/requirements-thead.txt" "$PIP_INDEX_URL"
 if ! "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PYCODE'
 import sys
 import torch
@@ -316,32 +268,13 @@ then
   install_cpu_torch
 fi
 
-ppu_runtime_flagtree_is_usable() {
-  "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PYCODE'
-from importlib import metadata, util
-from pathlib import Path
-import sys
-
-try:
-    dist = metadata.distribution("flagtree")
-    root = Path(dist.locate_file("triton")).resolve()
-    spec = util.find_spec("triton")
-    assert dist.version == sys.argv[1]
-    assert root.is_relative_to(Path(sys.prefix).resolve())
-    assert spec is not None and spec.origin
-    assert Path(spec.origin).resolve().parent == root
-    assert (root / "backends/ppu").is_dir()
-except (metadata.PackageNotFoundError, AssertionError):
-    raise SystemExit(1)
-PYCODE
-}
 
 # Retain the existing integration-only compiler, operator and model packages.
 if [[ "$CI_STAGE" == "integration" ]]; then
   for requirement in pytest 'transformers>=4.51,<5' sentencepiece tiktoken protobuf; do
-    ppu_runtime_requirement "$requirement"
+    ensure_runtime_requirement "$requirement" "$PIP_INDEX_URL"
   done
-  if ppu_runtime_flagtree_is_usable; then
+  if runtime_flagtree_is_usable ppu; then
     echo "Using prepared FlagTree $FLAGTREE_VERSION"
   else
     "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels

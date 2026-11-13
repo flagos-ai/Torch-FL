@@ -460,6 +460,10 @@ def test_every_expectation_key_is_one_the_check_script_reads(platform):
         f"{platform} states {unknown}, which check_platform_environment.py does "
         "not read; add the key to SUPPORTED_KEYS and assert it"
     )
+    environment_check.validate_spec(block)
+    boxing = platform_config(platform).get("boxing_environment_check")
+    if boxing:
+        environment_check.validate_spec(boxing)
     for key in ("flagos_devices", "cuda_devices"):
         bound = block.get(key)
         if bound is not None:

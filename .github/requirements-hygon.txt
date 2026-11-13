@@ -1,7 +1,8 @@
-# Python tools for the independent Hygon runtime-image CI venv.
-# System compilers and DTK come from the runtime image.
+# Python package selection for the isolated hygon CI venv.
+# Version ranges come from constraints-runtime-ci.txt for runtime copies,
+# installed-package checks and pip. Keep only platform restrictions here.
 pip>=23.2
-setuptools>=64
+setuptools
 wheel
 cmake>=3.19,<4
 ninja
@@ -9,7 +10,7 @@ build
 pytest
 patchelf
 pybind11
-packaging>=26.0
-PyYAML==6.0.1
-sqlalchemy==2.0.48
-numpy<2
+packaging
+PyYAML
+sqlalchemy
+numpy

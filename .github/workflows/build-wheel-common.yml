@@ -140,7 +140,7 @@ jobs:
         timeout-minutes: 1
         with:
           path: ${{ env.PIP_CACHE_DIR }}
-          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', '.github/scripts/lib/pip_cache.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), format('.github/requirements-{0}.txt', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
+          key: ${{ inputs.display_name }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/constraints-runtime-ci.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', '.github/scripts/lib/pip_cache.sh', format('.github/scripts/hooks/set_env_{0}.sh', inputs.setup_platform), format('.github/configs/{0}.yml', inputs.setup_platform), format('.github/requirements-{0}.txt', inputs.setup_platform), '.github/workflows/build-wheel-common.yml') }}
           lookup-only: true
           restore-keys: |
             ${{ inputs.display_name }}-pip-${{ runner.os }}-
@@ -172,7 +172,10 @@ jobs:
           BOXING_LANE: ${{ inputs.boxing_lane }}
         run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
 
+      # Migrated runtime hooks already provision build under the shared policy.
+      # Keep the existing upgrade only for other platform environments.
       - name: Install build tools
+        if: ${{ !endsWith(env.PIP_CONSTRAINT, '/constraints-runtime-ci.txt') }}
         run: python -m pip install --upgrade build
 
       # A release candidate tag has to reach setup.py, which is what turns

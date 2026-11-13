@@ -70,12 +70,14 @@ wheel_artifact_name: wheel-kunlunxin
 #
 # The FlagGems stack has to be the flagtree build, not a stock triton wheel left
 # behind by the image: only flagtree carries the xpu backend the XPU kernels are
-# compiled for. One P800 is enough for the suites that run here.
+# compiled for. The shared hardware gate requires two visible devices so
+# CI resource requirements agree with the other runtime-migration lanes.
 environment_check:
+  venv_isolation: true
   torch_version_base: "2.10.0"
   cuda_version: null
   torch_path_forbidden:
     - /usr/local/lib/python3.10/dist-packages
   flagos_devices:
-    at_least: 1
+    at_least: 2
   triton_backend: xpu

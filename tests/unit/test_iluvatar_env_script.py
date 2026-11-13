@@ -3,12 +3,18 @@
 
 """Exercise warm-image reuse and job-local compiler/operator replacements."""
 
+import builtins
+import importlib.metadata
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 import pytest
+
+from manifest_composer import environment_check as CHECKS
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +49,7 @@ def run_hook(tmp_path, *, prepared=True, fail="", boxing=False, cached_occupancy
         "#!/bin/bash\n"
         'if [[ "$*" == *--check-installed* ]]; then\n'
         '  printf "check %s\\n" "$3" >> "$CALL_LOG"\n'
+        '  if grep -Fxq -- "installed $3" "$CALL_LOG"; then exit 0; fi\n'
         '  exit "$PREPARED_STATUS"\n'
         "fi\n"
         'printf "python %s\\n" "$*" >> "$CALL_LOG"\n'
@@ -113,7 +120,8 @@ install_cpu_torch() {
 }
 pip_retry() {
   printf 'pip %s\n' "$*" >> "$CALL_LOG"
-  [[ "$FAIL_PHASE" != pip ]]
+  [[ "$FAIL_PHASE" != pip ]] || return 1
+  printf 'installed %s\n' "${@: -1}" >> "$CALL_LOG"
 }
 install_flagtree() { :; }
 install_flag_gems() { :; }
@@ -166,7 +174,7 @@ def test_missing_runtime_packages_use_cpu_torch_and_pip_fallback(tmp_path):
     done, calls, *_ = run_hook(tmp_path, prepared=False)
     assert done.returncode == 0, done.stderr
     assert "cpu-torch" in calls
-    assert any(row.endswith("numpy<2") and row.startswith("pip ") for row in calls)
+    assert any(row.endswith("numpy") and row.startswith("pip ") for row in calls)
     assert "CPU-core-build" in calls
 
 
@@ -335,3 +343,112 @@ def test_failed_replacement_or_dependency_check_stops_provisioning(tmp_path, fai
     assert done.returncode == 47, done.stderr
     if failure == "uninstall":
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "",
+        "vendor-torch",
+        "foreign-torch",
+        "foreign-triton",
+        "foreign-path",
+        "cmake4",
+        "wrong-tree",
+    ],
+)
+def test_hook_preparation_keeps_cpu_core_and_compiler_contract(
+    tmp_path, monkeypatch, problem
+):
+    root = tmp_path / "venv"
+    root.mkdir()
+    (root / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
+    sdk = tmp_path / "sdk"
+    for directory in (sdk / "include", sdk / "lib"):
+        directory.mkdir(parents=True)
+    for header in ("cuda_runtime.h", "cudnn.h", "cublas_v2.h"):
+        (sdk / "include" / header).touch()
+    for library in ("libcudart.so", "libcudnn.so", "libcublas.so"):
+        (sdk / "lib" / library).touch()
+    monkeypatch.setenv("VIRTUAL_ENV", str(root))
+    monkeypatch.setenv("COREX_PATH", str(sdk))
+    monkeypatch.setenv("FLAGTREE_VERSION", "0.7.1a1+iluvatar3.6")
+    monkeypatch.setenv("FLAGGEMS_VERSION", "5.4.0")
+    torch_file = (
+        tmp_path / "vendor/torch/__init__.py"
+        if problem == "foreign-torch"
+        else root / "site-packages/torch/__init__.py"
+    )
+    triton_file = (
+        tmp_path / "vendor/triton/__init__.py"
+        if problem == "foreign-triton"
+        else root / "site-packages/triton/__init__.py"
+    )
+    torch = SimpleNamespace(
+        __version__="2.10.0+corex" if problem == "vendor-torch" else "2.10.0+cpu",
+        __file__=str(torch_file),
+        version=SimpleNamespace(cuda=None),
+        _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+    )
+    triton = SimpleNamespace(
+        __version__="3.6.0",
+        __file__=str(triton_file),
+        backends=SimpleNamespace(backends={"iluvatar": object()}),
+    )
+    interpreter = SimpleNamespace(
+        argv=["-", str(ROOT), "3.12", "2.10.0"],
+        prefix=str(root),
+        base_prefix="/usr",
+        version_info=(3, 12),
+        version="3.12.12",
+        path=[str(root / "site-packages")]
+        + (
+            ["/flagos/lib/python3.12/site-packages"]
+            if problem == "foreign-path"
+            else []
+        ),
+    )
+    versions = {
+        "torch": "2.10.0+cpu",
+        "flagtree": "0.7.0+iluvatar3.6"
+        if problem == "wrong-tree"
+        else "0.7.1a1+iluvatar3.6",
+        "flag_gems": "5.4.0",
+        "cmake": "4.0" if problem == "cmake4" else "3.31.8",
+    }
+    monkeypatch.setattr(importlib.metadata, "version", versions.__getitem__)
+    original_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: None if name == "vllm" else original_spec(name),
+    )
+    monkeypatch.setattr(shutil, "which", lambda name: str(root / "bin" / name))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+    snippet = (
+        HOOK.read_text()
+        .split("# Validate build inputs here;", 1)[1]
+        .split("<<'PY'\n", 1)[1]
+        .split("\nPY\n", 1)[0]
+    )
+    real_import = builtins.__import__
+    substitutes = {
+        "torch": torch,
+        "triton": triton,
+        "sys": interpreter,
+        "check_platform_environment": CHECKS,
+    }
+
+    def import_probe(name, *args, **kwargs):
+        return (
+            substitutes[name]
+            if name in substitutes
+            else real_import(name, *args, **kwargs)
+        )
+
+    namespace = {"__builtins__": {**vars(builtins), "__import__": import_probe}}
+    if problem:
+        with pytest.raises(AssertionError):
+            exec(compile(snippet, str(HOOK), "exec"), namespace)
+    else:
+        exec(compile(snippet, str(HOOK), "exec"), namespace)

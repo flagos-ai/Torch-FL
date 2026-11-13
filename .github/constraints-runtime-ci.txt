@@ -1,0 +1,32 @@
+# Copyright 2026 FlagOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared CI-only compatibility ranges for the migrated runtime-image lanes.
+# Keep compatible image packages instead of upgrading them to a common patch.
+# Requirements files select what to install; these constraints also apply to
+# transitive dependencies, runtime copies and already-installed checks.
+# Torch/FlagTree/FlagGems/FlagCX pins remain in version-pins.env.
+-c constraints.txt
+
+pip>=23.2,<27
+setuptools>=64,<85
+wheel>=0.45,<0.49
+build>=1.2,<2
+cmake>=3.19,<5
+pybind11>=3.0,<3.2
+ninja>=1.11,<2
+patchelf>=0.17,<0.20
+
+pytest>=9.1,<10
+pluggy>=1.6,<2
+iniconfig>=2.3,<3
+Pygments>=2.20,<3
+pyproject-hooks>=1.2,<2
+pytest-json-report==1.5.0
+pytest-metadata>=3.1,<4
+coverage==7.10.7
+
+packaging>=26,<27
+PyYAML==6.0.1
+SQLAlchemy>=2.0.55,<2.0.58
+numpy>=1.26,<2

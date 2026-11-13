@@ -55,6 +55,39 @@ def test_the_pipeline_no_longer_uses_a_managed_cache_entry():
     assert not [use for use in uses if use.startswith("actions/cache")]
 
 
+def test_final_environment_gate_runs_after_all_installs_and_keeps_failure_evidence():
+    steps = _steps()
+    positions = {step.get("name"): i for i, step in enumerate(steps)}
+    gate = next(step for step in steps if step.get("id") == "final-environment")
+    gate_position = steps.index(gate)
+    for name in (
+        "Install wheel",
+        "Install test dependencies",
+        "Install pytest JSON reporting",
+        "Prepare Python line coverage",
+    ):
+        assert positions[name] < gate_position
+    assert gate_position < next(
+        i for i, step in enumerate(steps) if step.get("id") == "integration-tests"
+    )
+    assert "constraints-runtime-ci.txt" in gate["if"]
+    assert "--finalize-environment" in gate["run"]
+    assert not gate.get("continue-on-error")
+    retain = next(
+        step for step in steps if step.get("name") == "Retain final runtime environment"
+    )
+    assert "steps.final-environment.outcome != 'skipped'" in retain["if"]
+    assert retain["uses"] == "actions/upload-artifact@v4"
+    assert "environment-*.json" in retain["with"]["path"]
+    pytest_reports = next(
+        step for step in steps if step.get("name") == "Retain pytest reports"
+    )
+    assert (
+        "!${{ env.FLAGCICD_REPORT_DIR }}/environment-*.json"
+        in pytest_reports["with"]["path"].splitlines()
+    )
+
+
 def test_the_cache_lives_above_runner_temp():
     """RUNNER_TEMP and the checkout are cleared per job; `_work` is not.
 
@@ -175,6 +208,7 @@ def test_each_platform_gets_its_own_directory(tmp_path, platform):
 
 CACHE_HELPER = ROOT / ".github/scripts/lib/pip_cache.sh"
 RUNTIME_PLATFORMS = [
+    "hygon",
     "ascend",
     "iluvatar",
     "kunlunxin",
@@ -356,6 +390,16 @@ def test_real_workflow_uses_shared_cache_selection(tmp_path, platform):
 
 def test_key_and_entrypoint_include_the_shared_helper():
     assert ".github/scripts/lib/pip_cache.sh" in _step()["env"]["PIP_CACHE_KEY"]
+    assert ".github/constraints-runtime-ci.txt" in _step()["env"]["PIP_CACHE_KEY"]
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/build-wheel-common.yml").read_text()
+    )
+    keys = [
+        step.get("with", {}).get("key", "")
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+    ]
+    assert any(".github/constraints-runtime-ci.txt" in key for key in keys)
     runner = (ROOT / ".github/scripts/set_env.sh").read_text()
     assert "ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)" in runner
     assert 'prepare_pip_cache "$PLATFORM"' in runner
@@ -410,6 +454,7 @@ def test_real_entrypoint_selects_cache_before_loading_runtime_hooks(tmp_path, pl
         'test -d "$PIP_CACHE_DIR"\n'
         'test "$PIP_RETRY_NO_CACHE" = 0\n'
         'test -z "$PIP_NO_CACHE_DIR"\n'
+        'test "$PIP_CONSTRAINT" = "$REPO_ROOT/.github/constraints-runtime-ci.txt"\n'
         'echo "hook-cache=$PIP_CACHE_DIR"\n'
     )
     blocked = tmp_path / "blocked"
@@ -434,6 +479,7 @@ def test_real_entrypoint_selects_cache_before_loading_runtime_hooks(tmp_path, pl
     rows = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
     assert f"hook-cache={rows['PIP_CACHE_DIR']}" in result.stdout
     assert rows["PIP_CACHE_DIR"] == str(blocked) + f"-uid-{os.geteuid()}"
+    assert rows["PIP_CONSTRAINT"] == str(repo / ".github/constraints-runtime-ci.txt")
 
 
 @pytest.mark.parametrize("old_key,preserved", [("same-key", True), ("old-key", False)])

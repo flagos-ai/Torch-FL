@@ -39,7 +39,8 @@ missing or incompatible requirements. System tools and SDK libraries stay in
 the image. FlagTree reuse requires matching metadata, an import origin inside
 the venv and the PPU backend. The vendor's alternate `/opt/triton` compiler is
 never activated. Integration-only model dependencies retain `transformers>=4.51,<5`,
-sentencepiece, tiktoken and protobuf; SQLAlchemy remains `2.0.48`.
+sentencepiece, tiktoken and protobuf. SQLAlchemy uses the shared migrated-CI
+range `>=2.0.55,<2.0.58`; compatible image packages are retained.
 
 Both CI lanes keep published `torch==2.10.0+cpu` as the installed Python package.
 The default lane compiles FlagGems routes without boxing or a vendor bundle.

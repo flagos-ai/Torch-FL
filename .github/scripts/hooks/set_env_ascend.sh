@@ -200,40 +200,20 @@ if ! "$VENDOR_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2]
   exit 1
 fi
 
-PREBUILT_VENV="${TORCH_FL_PREBUILT_ASCEND_VENV:-/opt/torch-fl-ascend-venv}"
-if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
-  VENV_ROOT="$PREBUILT_VENV"
-  echo "Using prebuilt Ascend venv: $VENV_ROOT"
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ascend-${CI_STAGE}}"
+create_runtime_venv "$VENDOR_PYTHON"
+"$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+  --target-python "$VENV_PYTHON" \
+  --torch-version "$CPU_TORCH_VERSION" \
+  --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
+  --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
+  --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}" \
+  --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
+if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
+  echo "Using prepared CPU torch $CPU_TORCH_VERSION"
 else
-  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ascend-${CI_STAGE}}"
-  if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
-    echo "::warning::Build Python cannot create a venv; trying uv"
-    if ! command -v uv >/dev/null 2>&1; then
-      "$VENDOR_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade uv
-    fi
-    uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
-  fi
-fi
-VENV_PYTHON="$VENV_ROOT/bin/python"
-if [[ ! -x "$VENV_PYTHON" ]]; then
-  echo "::error::Isolated Python was not created at $VENV_ROOT"
-  exit 1
-fi
-
-if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-    --target-python "$VENV_PYTHON" \
-    --torch-version "$CPU_TORCH_VERSION" \
-    --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
-    --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
-    --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}" \
-    --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-      --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
-    echo "Using prepared CPU torch $CPU_TORCH_VERSION"
-  else
-    install_cpu_torch
-  fi
+  install_cpu_torch
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
@@ -304,15 +284,7 @@ fi
 # Matching runtime tools were copied already. Pip accepts satisfied packages
 # and installs only gaps, one requirement at a time for bounded retries. This
 # list also supplies build/pytest to the combined CI_STAGE=build job.
-while IFS= read -r requirement || [[ -n "$requirement" ]]; do
-  [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-      --check-installed "$requirement"; then
-    echo "Using prepared requirement: $requirement"
-  else
-    pip_retry --index-url "$PIP_INDEX_URL" "$requirement"
-  fi
-done < "$REPO_ROOT/.github/requirements-ascend.txt"
+ensure_runtime_requirements "$REPO_ROOT/.github/requirements-ascend.txt" "$PIP_INDEX_URL"
 
 # Validate the complete environment after copying and filling dependencies.
 "$VENV_PYTHON" -m pip check

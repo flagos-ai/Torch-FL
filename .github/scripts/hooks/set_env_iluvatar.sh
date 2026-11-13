@@ -70,22 +70,7 @@ done
 export CPATH="$COREX_PATH/include${CPATH:+:$CPATH}"
 
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-iluvatar-${CI_STAGE}}"
-# --clear must never target the source runtime or a parent of its prefix.
-"$VENDOR_PYTHON" -I - "$VENV_ROOT" <<'PY'
-from pathlib import Path
-import sys
-source, target = Path(sys.prefix).resolve(), Path(sys.argv[1]).resolve()
-if source.is_relative_to(target) or target.is_relative_to(source):
-    raise SystemExit("CI venv must be separate from the runtime Python prefix")
-PY
-if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
-    exit 1
-  fi
-  uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
-fi
-VENV_PYTHON="$VENV_ROOT/bin/python"
+create_runtime_venv "$VENDOR_PYTHON"
 "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
   --target-python "$VENV_PYTHON" \
   --torch-version "$CPU_TORCH_VERSION" \
@@ -104,15 +89,7 @@ else
   install_cpu_torch
 fi
 
-while IFS= read -r requirement || [[ -n "$requirement" ]]; do
-  [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-      --check-installed "$requirement"; then
-    echo "Using prepared requirement: $requirement"
-  else
-    pip_retry --index-url "$PIP_INDEX_URL" "$requirement"
-  fi
-done < "$REPO_ROOT/.github/requirements-iluvatar.txt"
+ensure_runtime_requirements "$REPO_ROOT/.github/requirements-iluvatar.txt" "$PIP_INDEX_URL"
 
 # Triton matmul tuning needs the real host driver tool, not a placeholder.
 if [[ "$CI_STAGE" == integration ]]; then
@@ -158,9 +135,72 @@ prepare_iluvatar_packages
 echo "Prepared Iluvatar CI environment (runtime reuse and pip installs above):"
 "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
 
-# Use the checkout's verifier and pins, not the older copy baked into Harbor.
-TORCH_FL_VERSION_PINS="$REPO_ROOT/.github/version-pins.env" \
-  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/verify_iluvatar.py"
+# Validate build inputs here; the common hardware gate owns installed-wheel
+# checks, and the integration test owns the original computation smoke.
+"$VENV_PYTHON" - "$REPO_ROOT" "$FLAGTREE_PYTHON_VERSION_iluvatar" "$CPU_TORCH_VERSION_DEFAULT" <<'PY'
+import importlib.metadata
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import torch
+import triton
+import yaml
+from packaging.version import Version
+
+sys.path.insert(0, str(Path(sys.argv[1]) / ".github/scripts"))
+import check_platform_environment as checks
+
+spec = yaml.safe_load(
+    (Path(sys.argv[1]) / ".github/configs/iluvatar.yml").read_text()
+)["environment_check"]
+checks.validate_spec(spec)
+assert sys.argv[3] == "2.10.0", (
+    "Changing CPU torch requires validation of the independent CoreX runtime"
+)
+assert sys.version_info[:2] == tuple(map(int, sys.argv[2].split("."))), sys.version
+dependencies = SimpleNamespace(torch=torch, triton=triton)
+checks.assert_torch_version(dependencies, spec)
+checks.assert_cuda_version(dependencies, spec)
+assert torch._C._GLIBCXX_USE_CXX11_ABI == spec["torch_cxx11_abi"], (
+    "The untouched CPU core must be active"
+)
+root = checks.isolated_venv_root(sys)
+checks.assert_venv_package(root, torch.__file__)
+checks.assert_venv_package(root, triton.__file__)
+checks.assert_import_isolation(root, sys.path)
+assert importlib.util.find_spec("vllm") is None, "Base Python packages leaked"
+assert importlib.metadata.version("flagtree") == os.environ["FLAGTREE_VERSION"]
+assert importlib.metadata.version("flag_gems") == os.environ["FLAGGEMS_VERSION"]
+checks.assert_triton_backend(dependencies, spec["triton_backend"])
+cmake_version = Version(importlib.metadata.version("cmake"))
+assert Version("3.19") <= cmake_version < Version("4"), cmake_version
+checks.assert_venv_package(root, shutil.which("cmake"))
+
+sdk = Path(os.environ["COREX_PATH"])
+for header in ("cuda_runtime.h", "cudnn.h", "cublas_v2.h"):
+    assert (sdk / "include" / header).is_file(), header
+for library in ("libcudart.so*", "libcudnn.so*", "libcublas.so*"):
+    assert any(
+        path.is_file()
+        for directory in ("lib", "lib64")
+        for path in (sdk / directory).glob(library)
+    ), library
+subprocess.run(
+    ["c++", "-fsyntax-only", "-x", "c++", "-I", str(sdk / "include"), "-"],
+    input=(
+        "#include <cublas_v2.h>\n#include <cudnn.h>\n"
+        "int main() { ixblasStatus_t s = IXBLAS_STATUS_SUCCESS; "
+        "ixblasDataType_t d = IX_R_16BF; return int(s) + int(d); }\n"
+    ),
+    text=True,
+    check=True,
+)
+PY
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" "$COREX_PATH/bin" >> "$GITHUB_PATH"

@@ -38,8 +38,9 @@ replacement removes the complete old Triton provider. FlagCX is
 not copied merely because the runtime includes it; this lane has no FlagCX pin.
 
 `.github/requirements-iluvatar.txt` defines Python build/test tools and FlagGems
-dependencies. SQLAlchemy follows FlagGems 5.4.0's `>=1.4.31,<2.1` requirement,
-which accepts the image's 2.0.55 instead of forcing a downgrade to 2.0.48.
+dependencies. SQLAlchemy uses the shared migrated-CI range `>=2.0.55,<2.0.58`,
+within FlagGems 5.4.0's dependency range. This accepts the image's 2.0.55 instead
+of forcing a downgrade to 2.0.48.
 A local version/dependency check skips pip entirely for satisfied
 requirements; pip fills gaps under the checkout's CPU-Torch constraints.
 System gcc/g++, make and readelf remain available from the image. CMake's Python
@@ -84,16 +85,23 @@ After the image initializes its SDK environment, the hook persists
 It clears inherited PYTHONPATH and vendor Torch library/header/CMake paths,
 preserves CoreX paths, and exports the venv and SDK settings to subsequent steps.
 `FLAGOS_VENDOR_TORCH_LIB` and vendor version metadata remain empty. The checkout
-[verification script](../../../.github/scripts/verify_iluvatar.py) checks the
-isolated CPU environment and installed runtime used by CI.
+[environment hook](../../../.github/scripts/hooks/set_env_iluvatar.sh) owns the
+CoreX preparation probe. The common environment checker reads this platform's
+configured CPU core, ELF dependency and compiler-target expectations before the
+[runtime test](../../../tests/integration/test_iluvatar_runtime.py) executes the
+original Triton and FlagOS add computations. Shared isolation assertions have
+one implementation in the common checker; there is no separate verifier CLI.
 
 ## Host device access
 
 The inspected u121 host has 16 BI-V150 cards, Ubuntu 20.04, driver/IX-ML 5.0.0
-and CoreX SDK 4.5.0. The validated container configuration maps `/dev/itrctl`
-and `/dev/iluvatar0` through `/dev/iluvatar15`, uses explicit runc, unlimited
-memlock and 16 GiB shared memory. Computation stays reserved to physical cards
-8 and 9 through `CUDA_VISIBLE_DEVICES=8,9`; keep that reservation on the runner.
+and CoreX SDK 4.5.0. The current CI configuration uses privileged access with
+explicit runc, unlimited memlock and 16 GiB shared memory. This exposes the
+compute nodes and `/dev/itrctl` required by `cuInit` without a redundant
+per-device mapping list. CI no longer imposes the historical physical-card
+8/9 mask: all devices available to the runner are usable. The common environment
+gate requires at least two visible devices, with no upper bound. This access
+change still needs validation on the hardware runner.
 
 Read-only mounts from `/usr/local/corex-4.5.0` provide:
 

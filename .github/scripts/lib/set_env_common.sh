@@ -356,6 +356,107 @@ venv_is_usable() {
   "$VENV_PYTHON" -m pip --version >/dev/null 2>&1
 }
 
+# Runtime-image lanes always create a job-owned venv. Never clear the source
+# interpreter, its parent, or a directory containing the checkout.
+create_runtime_venv() {
+  local source_python="$1"
+  "$source_python" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY' || return $?
+from pathlib import Path
+import sys
+
+target, repo = (Path(value).resolve() for value in sys.argv[1:])
+for prefix in (sys.prefix, sys.base_prefix):
+    source = Path(prefix).resolve()
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
+if repo.is_relative_to(target):
+    raise SystemExit("CI venv must not contain the source checkout")
+PY
+  if ! "$source_python" -m venv --clear "$VENV_ROOT"; then
+    if ! command -v uv >/dev/null 2>&1; then
+      echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
+      return 1
+    fi
+    uv venv --clear --seed --python "$source_python" "$VENV_ROOT" || return $?
+  fi
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  if ! runtime_venv_is_isolated "${2:-}"; then
+    echo "::error::Isolated Python with pip was not created at $VENV_ROOT" >&2
+    return 1
+  fi
+}
+
+validate_runtime_build_tools() {
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
+import build
+import setuptools
+from setuptools.command.editable_wheel import editable_wheel
+
+print(f"Build frontend: {build.__version__}")
+print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
+PY
+}
+
+runtime_venv_is_isolated() {
+  venv_is_usable || return 1
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" -I - "$REPO_ROOT" "$VENV_ROOT" "${1:-}" <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(sys.argv[1]) / ".github/scripts"))
+from check_platform_environment import isolated_venv_root
+
+# This check also runs before the hook activates the newly created venv.
+import os
+os.environ["VIRTUAL_ENV"] = sys.argv[2]
+isolated_venv_root()
+forbidden = sys.argv[3]
+if forbidden:
+    assert importlib.util.find_spec(forbidden) is None
+    try:
+        metadata.distribution(forbidden)
+    except metadata.PackageNotFoundError:
+        pass
+    else:
+        raise SystemExit(f"vendor {forbidden} metadata is present")
+PY
+}
+
+runtime_cpu_torch_is_usable() {
+  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PY'
+import sys
+import torch
+
+expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
+assert torch.__version__ == expected, torch.__version__
+assert torch.version.cuda is None, torch.version.cuda
+PY
+}
+
+runtime_flagtree_is_usable() {
+  "$VENV_PYTHON" - "$FLAGTREE_VERSION" "$1" "${2:-}" <<'PY'
+from importlib import metadata, util
+from pathlib import Path
+import sys
+
+try:
+    dist = metadata.distribution("flagtree")
+    root = Path(dist.locate_file("triton")).resolve()
+    spec = util.find_spec("triton")
+    assert dist.version == sys.argv[1]
+    assert root.is_relative_to(Path(sys.prefix).resolve())
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).resolve().parent == root
+    assert (root / "backends" / sys.argv[2]).is_dir()
+    if sys.argv[3]:
+        assert (root / sys.argv[3]).is_file()
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PY
+}
+
 # ---------------------------------------------------------------------------
 # Shared provisioning phases.
 #
@@ -551,6 +652,29 @@ install_flagtree() {
   # MB they are small enough for the cache to win.
   PIP_RETRY_NO_CACHE=1 pip_retry --no-deps --only-binary=:all: \
     --index-url "$FLAGTREE_INDEX_URL" "flagtree===${FLAGTREE_VERSION}"
+}
+
+# Keep runtime copies that satisfy the selected CI constraints and their
+# dependency closure. Use the platform's existing index only for missing or
+# incompatible packages, then verify the result before continuing.
+ensure_runtime_requirement() {
+  local requirement="$1" index_url="$2"
+  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+      --check-installed "$requirement"; then
+    echo "Using prepared requirement: $requirement"
+    return 0
+  fi
+  pip_retry --index-url "$index_url" "$requirement" || return $?
+  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "$requirement"
+}
+
+ensure_runtime_requirements() {
+  local requirements_file="$1" index_url="$2" requirement=""
+  while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+    [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+    ensure_runtime_requirement "$requirement" "$index_url" || return $?
+  done < "$requirements_file"
 }
 
 # Install the published FlagCX wheel and point torch at the flagos backend.

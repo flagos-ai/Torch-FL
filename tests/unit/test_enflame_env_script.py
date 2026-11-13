@@ -13,11 +13,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = (ROOT / ".github/scripts/hooks/set_env_enflame.sh").read_text()
+COMMON = (ROOT / ".github/scripts/lib/set_env_common.sh").read_text()
 
 
-def shell_function(name):
-    start = SCRIPT.index(f"{name}() {{")
-    return SCRIPT[start : SCRIPT.index("\n}\n", start) + 3]
+def shell_function(name, source=SCRIPT):
+    start = source.index(f"{name}() {{")
+    return source[start : source.index("\n}\n", start) + 3]
 
 
 def run_shell(body, **environment):
@@ -26,6 +27,7 @@ def run_shell(body, **environment):
         env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "PYTHONNOUSERSITE": "1",
+            "REPO_ROOT": str(ROOT),
             "PYTHONPATH": "",
             **environment,
         },
@@ -71,7 +73,8 @@ def test_cpu_torch_rejects_the_runtime_cohort(tmp_path, version, cuda, usable):
         f"__version__ = {version!r}\nclass version: cuda = {cuda!r}\n"
     )
     result = run_shell(
-        shell_function("gcu_cpu_torch_is_usable") + "\ngcu_cpu_torch_is_usable",
+        shell_function("runtime_cpu_torch_is_usable", COMMON)
+        + "\nruntime_cpu_torch_is_usable",
         VENV_PYTHON=str(root / "bin/python"),
         CPU_TORCH_VERSION="2.10.0",
     )
@@ -97,8 +100,8 @@ def test_venv_rejects_vendor_torch_and_system_packages(tmp_path, leak):
         )
     result = run_shell(
         "venv_is_usable() { return 0; }\n"
-        + shell_function("gcu_venv_is_isolated")
-        + "\ngcu_venv_is_isolated",
+        + shell_function("runtime_venv_is_isolated", COMMON)
+        + "\nruntime_venv_is_isolated torch_gcu",
         VENV_PYTHON=str(root / "bin/python"),
         VENV_ROOT=str(root),
     )
@@ -145,7 +148,6 @@ def test_later_shell_cannot_reactivate_the_image(tmp_path):
     result = run_shell(
         common[a:b] + "\n" + SCRIPT[start:end],
         **{name: "" for name in names if name != "PATH"},
-        GCU_RUNTIME_REUSE="1",
         BASH_ENV="/dev/null",
         FLAGOS_SDK_VERSION="1.10.6",
         GITHUB_ENV=str(env_file),

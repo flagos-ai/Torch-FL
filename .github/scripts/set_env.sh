@@ -97,6 +97,14 @@ source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
 # pip constraints for the provisioning venvs: the transitive pulls the pin table
 # cannot reach. Exported so every pip install in the platform hook honours it.
 export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints.txt"
+case "$PLATFORM" in
+  hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
+    export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints-runtime-ci.txt"
+    if [[ -n "${GITHUB_ENV:-}" ]]; then
+      printf 'PIP_CONSTRAINT=%s\n' "$PIP_CONSTRAINT" >> "$GITHUB_ENV"
+    fi
+    ;;
+esac
 
 HOOK="${REPO_ROOT}/.github/scripts/hooks/set_env_${PLATFORM}.sh"
 if [[ ! -f "$HOOK" ]]; then

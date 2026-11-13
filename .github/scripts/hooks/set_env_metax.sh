@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # Resolve the operator names the checked-in Python kernels call against the
 # FlagGems an interpreter in $1 imports, and print "<missing>/<total>".
 #
@@ -75,79 +74,6 @@ PY
 
 # Runtime preparation follows the same isolated package/cache path as the
 # other migrated lanes. Vendor libtorch remains a read-only build input.
-metax_validate_build_tools() {
-  # setup.py imports editable_wheel even for a non-editable native build.
-  # Validate real imports after provisioning, before any large wheel download.
-  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - <<'PY'
-import build
-import setuptools
-from setuptools.command.editable_wheel import editable_wheel
-
-print(f"Build frontend: {build.__version__}")
-print(f"Setuptools: {setuptools.__version__} (editable_wheel available)")
-PY
-}
-
-metax_venv_is_isolated() {
-  venv_is_usable || return 1
-  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$VENV_ROOT" <<'PY'
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve()
-assert Path(sys.prefix).resolve() == root
-assert sys.prefix != sys.base_prefix
-settings = {}
-for line in (root / "pyvenv.cfg").read_text().splitlines():
-    key, separator, value = line.partition("=")
-    if separator:
-        settings[key.strip().lower()] = value.strip().lower()
-assert settings.get("include-system-site-packages") == "false"
-PY
-}
-
-metax_cpu_torch_is_usable() {
-  TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PY'
-import sys
-import torch
-
-expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
-assert torch.__version__ == expected, torch.__version__
-assert torch.version.cuda is None, torch.version.cuda
-PY
-}
-
-metax_runtime_requirement() {
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-      --check-installed "$1"; then
-    echo "Using prepared requirement: $1"
-  else
-    pip_retry --index-url "$PIP_INDEX_URL_ARG" "$1"
-  fi
-  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-    --check-installed "$1"
-}
-
-metax_runtime_flagtree_is_usable() {
-  "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
-from importlib import metadata, util
-from pathlib import Path
-import sys
-
-try:
-    dist = metadata.distribution("flagtree")
-    root = Path(dist.locate_file("triton")).resolve()
-    spec = util.find_spec("triton")
-    assert dist.version == sys.argv[1]
-    assert root.is_relative_to(Path(sys.prefix).resolve())
-    assert spec is not None and spec.origin
-    assert Path(spec.origin).resolve().parent == root
-    assert (root / "backends/metax").is_dir()
-    assert (root / "_flagtree_spec.py").is_file()
-except (metadata.PackageNotFoundError, AssertionError):
-    raise SystemExit(1)
-PY
-}
 
 metax_record_runtime_sdk() {
   local version=""
@@ -184,7 +110,7 @@ PY
   export TORCH_FL_VENDOR_TORCH_VERSION="${FLAGOS_VENDOR_TORCH_VERSION%%+*}"
 }
 
-prepare_metax_runtime_environment() {
+prepare_metax_environment() {
   metax_record_runtime_sdk
   local vendor_python="${TORCH_FL_VENDOR_PYTHON:-$(command -v python3.12 || true)}"
   export BASH_ENV=/dev/null
@@ -199,90 +125,34 @@ prepare_metax_runtime_environment() {
   local suffix=""
   if [[ "${BOXING_LANE:-}" == 1 ]]; then suffix=-boxing; fi
   VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-metax-${CI_STAGE}${suffix}}"
-  "$vendor_python" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY'
-from pathlib import Path
-import sys
-
-target, repo = (Path(p).resolve() for p in sys.argv[1:])
-for prefix in (sys.prefix, sys.base_prefix):
-    source = Path(prefix).resolve()
-    if source.is_relative_to(target) or target.is_relative_to(source):
-        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
-if repo.is_relative_to(target):
-    raise SystemExit("CI venv must not contain the source checkout")
-PY
-  if ! "$vendor_python" -m venv --clear "$VENV_ROOT"; then
-    if ! command -v uv >/dev/null 2>&1; then
-      echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
-      return 1
-    fi
-    uv venv --clear --seed --python "$vendor_python" "$VENV_ROOT"
-  fi
-  VENV_PYTHON="$VENV_ROOT/bin/python"
-  metax_venv_is_isolated
+  create_runtime_venv "$vendor_python"
   "$vendor_python" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
     --target-python "$VENV_PYTHON" \
     --torch-version "${CPU_TORCH_VERSION%+cpu}" \
     --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}" \
     --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
+    --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}" \
     --requirements-file "$REPO_ROOT/.github/requirements-metax.txt"
   export VIRTUAL_ENV="$VENV_ROOT"
   export PATH="$VENV_ROOT/bin:$PATH"
   # A Python CMake distribution is required by pyproject.toml even when the
   # image supplies /usr/bin/cmake. Bootstrap pip before resolving CPU Torch.
-  local requirement
-  while IFS= read -r requirement || [[ -n "$requirement" ]]; do
-    [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-    metax_runtime_requirement "$requirement"
-  done < "$REPO_ROOT/.github/requirements-metax.txt"
-  metax_validate_build_tools
-  if ! metax_cpu_torch_is_usable 2>/dev/null; then
+  ensure_runtime_requirements "$REPO_ROOT/.github/requirements-metax.txt" "$PIP_INDEX_URL_ARG"
+  validate_runtime_build_tools
+  if ! runtime_cpu_torch_is_usable 2>/dev/null; then
     CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
     install_cpu_torch
   fi
 }
 
-# The runtime path uses a job-owned venv; explicit legacy development-image
-# users retain their prebuilt /opt/venv and library-only input below. Both paths
-# install CPU Torch through the same shared index/mirror helper.
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
-METAX_RUNTIME_REUSE=0
-if [[ "${VIRTUAL_ENV:-}" == /flagos || -n "${TORCH_FL_VENDOR_PYTHON:-}" ]]; then
-  METAX_RUNTIME_REUSE=1
-  prepare_metax_runtime_environment
-else
-VENV_ROOT=/opt/venv
-VENV_PYTHON=/opt/venv/bin/python
-if [[ ! -x /opt/venv/bin/python && -x /flagos/bin/python ]]; then
-  FLAGOS_VENDOR_TORCH_LIB="$(/flagos/bin/python - <<'PY'
-from pathlib import Path
-import torch
+prepare_metax_environment
 
-assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-print(Path(torch.__file__).resolve().parent / "lib")
-PY
-)"
-  export FLAGOS_VENDOR_TORCH_LIB
-  if ! /flagos/bin/python -m venv /opt/venv; then
-    uv venv --clear --seed --python /flagos/bin/python /opt/venv
-  fi
-  install_cpu_torch
-  pip_retry --index-url "$PIP_INDEX_URL_DEFAULT" \
-    build cmake ninja setuptools wheel pytest patchelf
-  export PYTHONPATH=""
-else
-  export FLAGOS_VENDOR_TORCH_LIB=/opt/vendor-libtorch/lib
-  # This image stages only the shared libraries, without torch/version.py.
-  # The image's vendor core is built against the pinned 2.10.0 Python wheel.
-  export TORCH_FL_VENDOR_TORCH_VERSION=2.10.0
-fi
-fi
 # The wheel label follows the shared SDK table; record the inspected runtime's
 # actual SDK and vendor Torch independently in the compatibility manifest.
 export PATH="$VENV_ROOT/bin:/opt/maca/tools/cu-bridge/bin:/opt/maca/mxgpu_llvm/bin:/opt/maca/bin:$PATH"
-export VIRTUAL_ENV="$VENV_ROOT"
 export PYTHONNOUSERSITE=1
 
 export FLAGOS_ACCELERATOR=metax
@@ -315,8 +185,8 @@ export MACA_HOME=/opt/maca
 #                FlagGems where this build has it (594 ops) and boxing for the
 #                other 1442.
 export FLAGOS_BUILD_VENDOR=OFF
-# Both legacy CI lanes inherited these values from the old development image.
-# State them explicitly instead of relying on that image-only environment.
+# Both lanes require these CUDA asset/shim settings independently of the
+# runtime image's defaults.
 export FLAGOS_METAX_CUDART_SHIM="${FLAGOS_METAX_CUDART_SHIM:-1}"
 export FLAGOS_DISABLE_CUDA_ASSETS="${FLAGOS_DISABLE_CUDA_ASSETS:-1}"
 if [[ "${BOXING_LANE:-}" == "1" ]]; then
@@ -393,45 +263,26 @@ PY
 # packages the tests import are the ones this script put there. Linking is what
 # let a stale image cohort shadow the pinned revision: the venv resolved
 # whatever the image's editable install pointed at, and the pin below never ran.
-if [[ "$CI_STAGE" == "integration" || "$METAX_RUNTIME_REUSE" == 1 ]]; then
-  VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+# --- FlagTree: the Triton build carrying the "metax" backend ----------------
+#
+# The MetaX wheel supplies the backend used by FlagGems. Install only a
+# published binary so CI cannot fall back to a source build.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
+if runtime_flagtree_is_usable metax _flagtree_spec.py; then
+  echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
+else
+  "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
+  install_flagtree
+fi
 
-  # Install FlagGems' runtime dependencies into the venv. flag_gems imports
-  # packaging, yaml (PyYAML), sqlalchemy and numpy at or shortly after import.
-  # Use --no-deps to protect the torch ABI (same rationale as test-dependencies).
-  # numpy<2 because numpy 2.x breaks the stock +cpu torch C extensions at import
-  # (documented in set_env_mthreads.sh:176-178).
-  if [[ "$METAX_RUNTIME_REUSE" == 0 ]]; then
-    python -m pip install --no-deps 'packaging>=26.0' 'PyYAML==6.0.1' 'sqlalchemy==2.0.48' 'numpy>=1.20,<2.0'
-  fi
-
-  # --- FlagTree: the Triton build carrying the "metax" backend ----------------
-  #
-  # The MetaX wheel supplies the backend used by FlagGems. Install only a
-  # published binary so CI cannot fall back to a source build.
-  FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}"
-  FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-  if [[ "$METAX_RUNTIME_REUSE" == 1 ]] && metax_runtime_flagtree_is_usable; then
-    echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
-  else
-    if [[ "$METAX_RUNTIME_REUSE" == 1 ]]; then
-      "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
-    fi
-    install_flagtree
-  fi
-
-  # flagtree installs itself as the `triton` module, so assert on the resolved
-  # module and not on the distribution name: an image triton-metax winning the
-  # import, or a stock PyPI triton arriving as a dependency, would leave every
-  # triton test running on a Triton the conf was not generated against --
-  # silently, since both import as `triton`.
-  #
-  # Nothing is uninstalled first. If the venv inherits system site-packages, a
-  # `pip uninstall triton` would reach into the image's own MetaX torch install,
-  # and this script deliberately consumes only libtorch from it. flagtree's files
-  # win on their own: the venv's site-packages precede the system one on
-  # sys.path, which is what the assertion below checks.
-  python - <<'PY'
+# flagtree installs itself as the `triton` module, so assert on the resolved
+# module and not on the distribution name: an image triton-metax winning the
+# import, or a stock PyPI triton arriving as a dependency, would leave every
+# triton test running on a Triton the conf was not generated against --
+# silently, since both import as `triton`.
+#
+python - <<'PY'
 from pathlib import Path
 import sysconfig
 
@@ -453,39 +304,29 @@ assert (site / "_flagtree_spec.py").is_file(), (
 print(f"FlagTree Triton: {triton.__version__} ({site})")
 PY
 
-  # A generated kernel resolves each flag_gems.<name> at dispatch time. Keep
-  # the cohort-gap probe at the end of this script, after torch_fl is built.
-  FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
-  FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-metax/simple}"
-  # Older images linked a vendor source checkout into this venv. A matching
-  # dist-info alone would otherwise make that link look like the wheel.
-  if [[ -L "$VENV_SITE/flag_gems" ]]; then
-    rm "$VENV_SITE/flag_gems"
-  fi
-  for metadata in "$VENV_SITE"/flag_gems-*.dist-info; do
-    [[ -L "$metadata" ]] && rm "$metadata"
-  done
-  install_flag_gems
+# A generated kernel resolves each flag_gems.<name> at dispatch time. Keep
+# the cohort-gap probe at the end of this script, after torch_fl is built.
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-metax/simple}"
+install_flag_gems
 
-  # Preserve the legacy FlagCX branch. A new runtime carrying the wheel does
-  # not opt either CI lane into communication.
-  if [[ "$METAX_RUNTIME_REUSE" == 0 && "$FLAGOS_VENDOR_TORCH_LIB" == /flagos/* ]]; then
-    FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}"
-    pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
-      "flagcx===$FLAGCX_VERSION"
-    export FLAGCX_TORCH_BACKEND=flagos
-    # The extension is built after provisioning, so defer PyTorch's FlagCX
-    # entry-point import until later workflow steps.
-    export TORCH_DEVICE_BACKEND_AUTOLOAD=0
-  fi
+# The runtime's FlagCX uses the same Torch 2.10/MACA libraries bundled by
+# both lanes. Install the declared dependency without importing it before
+# torch_fl has selected its private vendor core.
+FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}"
+if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "flagcx===${FLAGCX_VERSION}"; then
+  echo "Using prepared FlagCX $FLAGCX_VERSION"
+else
+  install_flagcx
 fi
+export FLAGCX_TORCH_BACKEND=flagos
+# The extension is built after provisioning, so defer PyTorch's FlagCX
+# entry-point import until later workflow steps.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
-if [[ "$METAX_RUNTIME_REUSE" == 1 ]]; then
-  "$VENV_PYTHON" -m pip check
-  "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
-fi
-# Preserve the existing fallback metadata for legacy library-only images.
-: "${TORCH_FL_VENDOR_TORCH_VERSION:=2.10.0}"
+"$VENV_PYTHON" -m pip check
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
 if command -v mx-smi >/dev/null 2>&1; then
   mx-smi
 fi
@@ -506,9 +347,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   # so both lanes persist an explicit value.
   : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
-  if [[ "$METAX_RUNTIME_REUSE" == 1 ]]; then
-    export_ci_env BASH_ENV PYTHONPATH FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION
-  fi
+  export_ci_env BASH_ENV PYTHONPATH FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION
   export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR FLAGOS_BACKEND_CONFIG MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
   if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
     printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"

@@ -26,6 +26,8 @@ environments), but the pin wiring is fully visible in their source.
 """
 
 import json
+import importlib.machinery
+import importlib.util
 import os
 import re
 import subprocess
@@ -49,6 +51,7 @@ PLATFORMS = [
     "hygon",
     "enflame",
     "iluvatar",
+    "kunlunxin",
     "metax",
     "mthreads",
     "thead",
@@ -215,6 +218,54 @@ def test_the_wheel_declares_the_flagtree_pin_its_platform_script_installs():
     for platform in PLATFORMS:
         version = pins[f"FLAGTREE_VERSION_{platform}"]
         assert f"flagtree=={version}" in _declared(platform), platform
+
+
+@pytest.mark.parametrize("compiler_present", [True, False])
+def test_kunlunxin_wheel_validates_its_xpu_compiler_without_stock_triton(
+    monkeypatch, compiler_present
+):
+    """The installed-wheel gate must accept XPU FlagTree and reject its absence."""
+    globals_ = _setup_globals()
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "kunlunxin")
+    kwargs = globals_["_get_setup_kwargs"]()
+    loader = importlib.machinery.SourceFileLoader(
+        "kunlunxin_preflight_test", str(REPO_ROOT / "scripts/tools/torch-fl-preflight")
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    preflight = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(preflight)
+    versions = {
+        "torch": "2.10.0+cpu",
+        "packaging": "26.3",
+        "flagtree": _pins()["FLAGTREE_VERSION_kunlunxin"],
+        "flag_gems": _pins()["FLAGGEMS_VERSION_DEFAULT"],
+    }
+    monkeypatch.setattr(preflight, "installed_version", versions.get)
+    manifest = preflight.make_manifest(
+        platform="kunlunxin",
+        wheel_version=kwargs["version"],
+        kernels=["vendor", "flaggems"],
+        bundle_libdir="lib",
+        vendor_torch_libraries=False,
+        requirements=kwargs["install_requires"],
+        torch_abi=True,
+    )
+    if not compiler_present:
+        versions.pop("flagtree")
+    errors, _ = preflight.check_environment(
+        manifest,
+        platform="kunlunxin",
+        check_installed=True,
+        check_build_env=True,
+    )
+    if compiler_present:
+        assert not errors, errors
+    else:
+        assert any(
+            error.startswith("Required flagtree==") and error.endswith("missing")
+            for error in errors
+        ), errors
+    assert kwargs["python_requires"] == ">=3.10,<3.11"
 
 
 def test_flag_gems_is_declared_everywhere_at_the_pinned_version():
@@ -426,24 +477,21 @@ def test_cuda_runtime_wheels_still_follow_boxing(monkeypatch):
     assert [r for r in globals_["_install_requires"]() if r.startswith("nvidia-")]
 
 
-def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
-    """The two travel together: both describe the one published artifact.
+def test_published_sdk_or_flagtree_cohort_has_an_interpreter_pin():
+    """Interpreter restrictions follow the published compiler or SDK cohort.
 
-    An SDK segment (``+cuda13.3``) names the FlagTree build the wheel links, so
-    it must come with that build's interpreter. A platform-id segment (``+mps``)
-    names the wheel's platform and nothing else -- MPS links no FlagTree -- so it
-    must not borrow a pin it does not have; ``Requires-Python`` then falls back
-    to the base builds' range.
+    Kunlunxin keeps a platform-id wheel segment but depends on a cp310-only
+    FlagTree. Metal has neither an SDK segment nor a FlagTree dependency and
+    retains the base interpreter range.
     """
     pins = _pins()
     for platform in _platforms_in_the_table():
         segment = _wheel_local(platform)
-        if segment == platform:
-            assert f"FLAGTREE_PYTHON_VERSION_{platform}" not in pins, platform
-        else:
-            assert bool(segment) == bool(
-                pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-            ), platform
+        compiler = pins.get(f"FLAGTREE_VERSION_{_table_vendor(platform)}")
+        needs_pin = bool(compiler) or bool(segment and segment != platform)
+        assert bool(pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")) == needs_pin, (
+            platform
+        )
 
 
 def test_the_wheel_segment_matches_the_flagcx_sdk_where_flagcx_exists():

@@ -111,6 +111,7 @@ wheel_artifact_name: wheel-ppu
 boxing_lane: true
 
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
@@ -125,9 +126,10 @@ environment_check:
   forbid_build_kernels:
     - boxing
   flagos_devices:
-    more_than: 0
+    at_least: 2
 
 boxing_environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: "13.0"
   torch_path_forbidden:
@@ -138,4 +140,4 @@ boxing_environment_check:
   require_package_files:
     - lib_thead/libtorch_cuda.so
   flagos_devices:
-    more_than: 0
+    at_least: 2

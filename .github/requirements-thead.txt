@@ -1,12 +1,14 @@
-# Python tools for the isolated PPU build and test environment.
-# System compilers and the PPU SDK come from the runtime image.
-setuptools>=64
+# Python package selection for the isolated thead CI venv.
+# Version ranges come from constraints-runtime-ci.txt for runtime copies,
+# installed-package checks and pip. Keep only platform restrictions here.
+pip>=23.2
+setuptools
 wheel
 cmake>=3.19
 patchelf
 build
 pybind11
-packaging>=26.0
-PyYAML==6.0.1
-sqlalchemy==2.0.48
-numpy<2
+packaging
+PyYAML
+sqlalchemy
+numpy

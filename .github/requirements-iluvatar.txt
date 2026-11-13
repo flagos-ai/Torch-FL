@@ -1,13 +1,14 @@
-# Python tools for the isolated Iluvatar build and test environment.
-# seed_runtime.py copies compatible distributions before pip fills gaps.
-setuptools>=64
+# Python package selection for the isolated iluvatar CI venv.
+# Version ranges come from constraints-runtime-ci.txt for runtime copies,
+# installed-package checks and pip. Keep only platform restrictions here.
+pip>=23.2
+setuptools
 wheel
 cmake>=3.19,<4
 build
 pytest
 pybind11
-packaging>=26.0
-PyYAML==6.0.1
-# FlagGems 5.4.0's declared range accepts the runtime's SQLAlchemy 2.0.55.
-sqlalchemy>=1.4.31,<2.1
-numpy<2
+packaging
+PyYAML
+sqlalchemy
+numpy

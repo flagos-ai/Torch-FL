@@ -1,13 +1,15 @@
-# Python tools for the isolated Kunlunxin build and test environment.
-# seed_runtime.py copies compatible runtime distributions; pip fills gaps.
-setuptools>=64
+# Python package selection for the isolated kunlunxin CI venv.
+# Version ranges come from constraints-runtime-ci.txt for runtime copies,
+# installed-package checks and pip. Keep only platform restrictions here.
+pip>=23.2
+setuptools
 wheel
 cmake>=3.19,<4
 ninja
 build
 pytest
 pybind11
-packaging>=26.0
-PyYAML==6.0.1
-sqlalchemy>=1.4.31,<2.1
-numpy<2
+packaging
+PyYAML
+sqlalchemy
+numpy

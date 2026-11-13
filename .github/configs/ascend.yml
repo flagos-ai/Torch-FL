@@ -44,7 +44,6 @@ paths_watch:
   - csrc/runtime/accelerator/ascend/
   - csrc/runtime/allocator/backends/ascend_memory.h
   - .github/scripts/hooks/set_env_ascend.sh
-  - .github/scripts/seed_runtime.py
   - .github/requirements-ascend.txt
   - .github/scripts/set_env_ascend.sh
   - scripts/vendor/patch_triton_ascend.py
@@ -60,17 +59,6 @@ container_options: >-
   --shm-size=512g
   --ulimit memlock=-1
   --cap-add=SYS_PTRACE
-  --device=/dev/davinci_manager
-  --device=/dev/davinci0
-  --device=/dev/davinci1
-  --device=/dev/davinci2
-  --device=/dev/davinci3
-  --device=/dev/davinci4
-  --device=/dev/davinci5
-  --device=/dev/davinci6
-  --device=/dev/davinci7
-  --device=/dev/devmm_svm
-  --device=/dev/hisi_hdc
   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
 
 timeout_minutes: 120
@@ -84,8 +72,9 @@ wheel_artifact_name: wheel-ascend
 # the hand-written heredoc that used to sit here did.
 #
 # Ascend is a pure ACLNN build: no CUDA dispatcher library ships in the wheel,
-# and CANN exposes eight logical devices on the 910C runner.
+# and CI uses every CANN device exposed to the runner, requiring at least two.
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
@@ -94,6 +83,6 @@ environment_check:
   forbid_package_files:
     - lib/libtorch_cuda.so
   flagos_devices:
-    at_least: 8
+    at_least: 2
   triton_backend: ascend
   flaggems_vendor: ascend

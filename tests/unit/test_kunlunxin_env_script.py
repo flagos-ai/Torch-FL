@@ -42,6 +42,7 @@ if [[ "$*" == *--check-installed* ]]; then
   if [[ "$3" == 'pip>=23.2' ]]; then
     [[ "$PIP_READY" == 1 || -f "$PIP_BOOTSTRAPPED" ]]; exit $?
   fi
+  if grep -Fxq -- "installed $3" "$CALL_LOG"; then exit 0; fi
   if [[ "$3" == cmake* && "$FAIL_PHASE" == cmake-metadata ]]; then exit 1; fi
   exit "$PREPARED_STATUS"
 fi
@@ -145,6 +146,7 @@ pip_retry() {
     [[ "$FAIL_PHASE" != bootstrap ]] || return 1
     [[ "$FAIL_PHASE" == stale-pip ]] || touch "$PIP_BOOTSTRAPPED"
   fi
+  printf 'installed %s\n' "${@: -1}" >> "$CALL_LOG"
 }
 build_flagos_inplace() {
   test "$FLAGOS_BUILD_BOXING" = 0
@@ -193,7 +195,7 @@ def test_missing_packages_install_declared_python_build_requirements(tmp_path):
     done, calls, *_ = run_hook(tmp_path, prepared=False)
     assert done.returncode == 0, done.stderr
     assert "cpu-torch" in calls and "flagtree" in calls
-    assert any(row.startswith("pip ") and row.endswith("numpy<2") for row in calls)
+    assert any(row.startswith("pip ") and row.endswith("numpy") for row in calls)
     assert any(
         row.startswith("pip ") and row.endswith("cmake>=3.19,<4") for row in calls
     )

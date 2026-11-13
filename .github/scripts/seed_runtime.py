@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Copy matching runtime wheels into a separate venv, without accelerator imports."""
+"""Prepare, inspect and validate isolated runtime-image CI environments."""
 
 import argparse
 import base64
@@ -12,11 +12,15 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
+import shlex
 import shutil
 import site
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 
 
 def copy_distribution(distribution, target_site, target_bin, target_python):
@@ -127,9 +131,43 @@ def requirement_type():
     return Requirement
 
 
+def constraint_requirements():
+    """Read the selected local pip constraints, including relative -c files."""
+    selected = os.environ.get("PIP_CONSTRAINT")
+    if not selected:
+        return {}
+    Requirement = requirement_type()
+    result = {}
+
+    def read(path, parents):
+        path = path.resolve()
+        if path in parents:
+            raise ValueError(f"Cyclic CI constraints include: {path}")
+        for line in path.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith(("-c ", "--constraint ")):
+                _, included = shlex.split(line)
+                read(path.parent / included, parents | {path})
+                continue
+            requirement = Requirement(line)
+            if requirement.marker and not requirement.marker.evaluate():
+                continue
+            name = re.sub(r"[-_.]+", "-", requirement.name).lower()
+            if name in result:
+                result[name] &= requirement.specifier
+            else:
+                result[name] = requirement.specifier
+
+    read(Path(selected), set())
+    return result
+
+
 def requirement_satisfied(value):
     """Check the installed version and dependency closure without a network probe."""
     Requirement = requirement_type()
+    constraints = constraint_requirements()
     seen = set()
 
     def check(requirement):
@@ -138,8 +176,13 @@ def requirement_satisfied(value):
         distribution = metadata.distribution(requirement.name)
         if not requirement.specifier.contains(distribution.version, prereleases=True):
             return False
+        name = re.sub(r"[-_.]+", "-", requirement.name).lower()
+        if name in constraints and not constraints[name].contains(
+            distribution.version, prereleases=True
+        ):
+            return False
         key = (
-            requirement.name.lower().replace("_", "-"),
+            name,
             tuple(sorted(requirement.extras)),
         )
         if key in seen:
@@ -174,6 +217,7 @@ def tool_requirements(path):
         print("Tool reuse skipped: source interpreter has no packaging module")
         return {}
     result = {}
+    constraints = constraint_requirements()
     for line in path.read_text().splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
@@ -181,7 +225,11 @@ def tool_requirements(path):
         requirement = Requirement(line)
         if requirement.marker and not requirement.marker.evaluate():
             continue
-        result[requirement.name.lower().replace("_", "-")] = requirement.specifier
+        name = re.sub(r"[-_.]+", "-", requirement.name).lower()
+        limits = requirement.specifier
+        if name in constraints:
+            limits &= constraints[name]
+        result[name] = limits
     return result
 
 
@@ -220,12 +268,13 @@ def seed(
     if flagcx_version:
         expected["flagcx"] = flagcx_version
     tools = tool_requirements(requirements_file)
+    constraints = constraint_requirements()
     target_site = Path(target["site"])
     source_paths = site.getsitepackages() + ["/opt/flagtree"]
     started = time.monotonic()
     reused = set()
     for distribution in metadata.distributions(path=source_paths):
-        name = distribution.metadata.get("Name", "").lower().replace("_", "-")
+        name = re.sub(r"[-_.]+", "-", distribution.metadata.get("Name", "")).lower()
         if (name not in expected and name not in tools) or name in reused:
             continue
         if name in expected:
@@ -238,6 +287,15 @@ def seed(
         else:
             required = str(tools[name]) or "any installed version"
             matches = tools[name].contains(distribution.version)
+        if name in expected and name in tools:
+            matches = matches and tools[name].contains(
+                distribution.version, prereleases=True
+            )
+        if name in constraints:
+            matches = matches and constraints[name].contains(
+                distribution.version, prereleases=True
+            )
+            required = f"{required}; CI constraints {constraints[name]}"
         if not matches:
             print(f"Runtime reuse skipped: {name} {distribution.version} != {required}")
             continue
@@ -272,6 +330,17 @@ def environment_report():
             except (OSError, subprocess.TimeoutExpired) as error:
                 tool["error"] = type(error).__name__
         tools[name] = tool
+    packages = []
+    for distribution in metadata.distributions():
+        name = distribution.metadata.get("Name")
+        version = distribution.version
+        location = str(Path(distribution.locate_file("")).resolve())
+        if not isinstance(name, str) or not name.strip() or not version:
+            raise ValueError(
+                f"Invalid installed distribution metadata at {location}: "
+                f"Name={name!r}, Version={version!r}"
+            )
+        packages.append({"name": name, "version": version, "location": location})
     return {
         "schema_version": "torch-fl.ci-environment/v1",
         "python": {
@@ -283,23 +352,253 @@ def environment_report():
         "architecture": platform.machine(),
         "tools": tools,
         "packages": sorted(
-            (
-                {
-                    "name": dist.metadata["Name"],
-                    "version": dist.version,
-                    "location": str(Path(dist.locate_file("")).resolve()),
-                }
-                for dist in metadata.distributions()
-            ),
+            packages,
             key=lambda package: (package["name"].lower(), package["location"]),
         ),
     }
+
+
+def defer_missing_flagcx(checks, manifest, platform):
+    """Recognize only the explicitly deferred GCU/MUSA FlagCX dependency."""
+    if platform not in {"enflame", "gcu", "mthreads", "musa"}:
+        return False
+    try:
+        metadata.distribution("flagcx")
+        return False
+    except metadata.PackageNotFoundError:
+        pass
+    if manifest.get("build", {}).get("distributions", {}).get("flagcx"):
+        return False
+    Requirement = requirement_type()
+    required = []
+    for text in manifest.get("requirements", []):
+        requirement = Requirement(text)
+        if requirement.name.lower() == "flagcx" and (
+            not requirement.marker or requirement.marker.evaluate({"extra": ""})
+        ):
+            required.append(text)
+    if not required:
+        return False
+    expected = {f"ERROR: Required {text}; installed missing" for text in required}
+    missing = rf"torch[-_.]fl {re.escape(manifest['wheel_version'])} requires flagcx, which is not installed\."
+    deferred = False
+    for record in checks:
+        if record["exit_code"] != 1 or record.get("truncated"):
+            continue
+        stdout, stderr = (
+            record.get("stdout", "").strip(),
+            record.get("stderr", "").strip(),
+        )
+        if record["name"] == "pip-check":
+            accepted = not stderr and re.fullmatch(missing, stdout, re.IGNORECASE)
+        elif record["name"] == "installed-wheel":
+            lines = stderr.splitlines()
+            errors = {line for line in lines if line.startswith("ERROR:")}
+            accepted = (
+                not stdout
+                and bool(errors)
+                and errors <= expected
+                and all(
+                    line in expected or line.startswith("WARNING:") for line in lines
+                )
+            )
+        else:
+            accepted = False
+        if accepted:
+            record["deferred_dependency"] = "flagcx"
+            deferred = True
+    return deferred
+
+
+def finalize_environment(wheel, output, requirements_file=None):
+    """Validate the installed test environment and retain evidence on failure."""
+    wheel = wheel.resolve()
+    report = {
+        "schema_version": "torch-fl.ci-environment/v1",
+        "phase": "before-tests",
+        "source_ref": os.environ.get("SOURCE_REF", os.environ.get("GITHUB_SHA")),
+    }
+    report["runtime"] = {
+        name: os.environ.get(name)
+        for name in (
+            "FLAGOS_ACCELERATOR",
+            "FLAGOS_SDK_VERSION",
+            "FLAGOS_VENDOR_TORCH_VERSION",
+            "TORCH_FL_VENDOR_TORCH_VERSION",
+            "FLAGOS_VENDOR_TORCH_LIB",
+            "FLAGCX_TORCH_BACKEND",
+        )
+    }
+    checks = []
+
+    def check(name, command, timeout=60):
+        try:
+            with tempfile.TemporaryDirectory(prefix="torch-fl-final-env-") as workdir:
+                result = subprocess.run(
+                    command,
+                    cwd=workdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+                )
+            record = {
+                "name": name,
+                "exit_code": result.returncode,
+                "stdout": result.stdout[-20000:],
+                "stderr": result.stderr[-20000:],
+                "truncated": len(result.stdout) > 20000 or len(result.stderr) > 20000,
+            }
+        except (OSError, subprocess.TimeoutExpired) as error:
+            record = {"name": name, "exit_code": 1, "stderr": str(error)}
+        checks.append(record)
+        print(f"Final environment check: {name}: {record['exit_code']}")
+        for stream in ("stdout", "stderr"):
+            if record.get(stream):
+                print(record[stream])
+
+    try:
+        report.update(environment_report())
+        digest = hashlib.sha256()
+        with wheel.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        with zipfile.ZipFile(wheel) as archive:
+            manifest = json.loads(archive.read("torch_fl/compatibility.json"))
+        report["wheel"] = {
+            "file": wheel.name,
+            "sha256": digest.hexdigest(),
+            "manifest": manifest,
+        }
+        limits = constraint_requirements()
+        report["constraints"] = {
+            "path": os.environ.get("PIP_CONSTRAINT"),
+            "requirements": {name: str(value) for name, value in limits.items()},
+        }
+        errors = []
+        installed_wheels = [
+            item["version"]
+            for item in report["packages"]
+            if re.sub(r"[-_.]+", "-", item["name"]).lower() == "torch-fl"
+        ]
+        if installed_wheels != [manifest["wheel_version"]]:
+            errors.append(
+                f"Installed Torch-FL {installed_wheels} differs from wheel {manifest['wheel_version']}"
+            )
+        required_tools = tool_requirements(requirements_file)
+        report["requirements"] = {
+            name: str(value) for name, value in required_tools.items()
+        }
+        for name, specifier in required_tools.items():
+            if not requirement_satisfied(name + str(specifier)):
+                errors.append(
+                    f"Required CI package or dependency is missing/incompatible: {name}{specifier}"
+                )
+        for distribution in metadata.distributions():
+            name = re.sub(r"[-_.]+", "-", distribution.metadata["Name"]).lower()
+            if name in limits and not limits[name].contains(
+                distribution.version, prereleases=True
+            ):
+                errors.append(f"{name}=={distribution.version} violates {limits[name]}")
+        for error in errors:
+            print(f"::error::{error}")
+        checks.append(
+            {"name": "ci-ranges", "exit_code": int(bool(errors)), "errors": errors}
+        )
+        check("pip-check", [sys.executable, "-m", "pip", "check"])
+        command = [
+            sys.executable,
+            str(
+                Path(__file__).resolve().parents[2] / "scripts/tools/torch-fl-preflight"
+            ),
+            "--wheel",
+            str(wheel),
+            "--check-installed",
+            "--check-build-env",
+        ]
+        if os.environ.get("FLAGOS_ACCELERATOR"):
+            command += ["--platform", os.environ["FLAGOS_ACCELERATOR"]]
+        if os.environ.get("FLAGOS_SDK_VERSION"):
+            command += ["--sdk-version", os.environ["FLAGOS_SDK_VERSION"]]
+        check("installed-wheel", command)
+        if defer_missing_flagcx(checks, manifest, os.environ.get("FLAGOS_ACCELERATOR")):
+            report["deferred_dependencies"] = [
+                {
+                    "name": "flagcx",
+                    "reason": "Published vendor build requires a Torch extension excluded from this CI venv; compatible binary is pending.",
+                }
+            ]
+            print(
+                "::warning::FlagCX is explicitly deferred on GCU/MUSA; final dependencies are not complete."
+            )
+        if not any(
+            item["exit_code"] and not item.get("deferred_dependency") for item in checks
+        ):
+            try:
+                metadata.distribution("flagcx")
+            except metadata.PackageNotFoundError:
+                pass
+            else:
+                check(
+                    "flagcx-import",
+                    [
+                        sys.executable,
+                        "-c",
+                        """
+import os
+os.environ["FLAGCX_TORCH_BACKEND"] = "flagos"
+import torch_fl
+import flagcx
+import torch.distributed as dist
+from pathlib import Path
+assert dist.is_backend_available("flagcx"), "FlagCX backend was not registered"
+maps = Path("/proc/self/maps").read_text()
+for forbidden in ("libtorch_npu.so", "libtorch_gcu.so", "libmusa_python.so"):
+    assert forbidden not in maps, f"FlagCX loaded forbidden vendor Torch extension: {forbidden}"
+for line in maps.splitlines():
+    assert not ("/flagos/" in line and "/torch/" in line), "FlagCX escaped the CI Torch core: " + line
+print("FlagCX import and backend registration validated")
+""",
+                    ],
+                )
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        print(f"::error::Final environment record failed: {error}")
+        checks.append(
+            {"name": "environment-record", "exit_code": 1, "stderr": str(error)}
+        )
+    report["validation"] = checks
+    report["valid"] = all(item["exit_code"] == 0 for item in checks)
+    report["ready_for_tests"] = all(
+        item["exit_code"] == 0 or item.get("deferred_dependency") == "flagcx"
+        for item in checks
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n")
+    print(
+        f"Final environment: valid={report['valid']}, ready_for_tests={report['ready_for_tests']}"
+    )
+    print(f"Final environment snapshot: {output}")
+    return 0 if report["ready_for_tests"] else 1
 
 
 def main():
     if sys.argv[1:] == ["--report-environment"]:
         print(json.dumps(environment_report(), indent=2))
         return
+    if "--finalize-environment" in sys.argv[1:]:
+        parser = argparse.ArgumentParser(
+            description="Validate the final test environment"
+        )
+        parser.add_argument(
+            "--finalize-environment", action="store_true", required=True
+        )
+        parser.add_argument("--wheel", required=True, type=Path)
+        parser.add_argument("--output", required=True, type=Path)
+        parser.add_argument("--requirements-file", type=Path)
+        args = parser.parse_args()
+        raise SystemExit(
+            finalize_environment(args.wheel, args.output, args.requirements_file)
+        )
     if "--check-installed" in sys.argv[1:]:
         parser = argparse.ArgumentParser(description="Check an installed requirement")
         parser.add_argument("--check-installed", required=True)

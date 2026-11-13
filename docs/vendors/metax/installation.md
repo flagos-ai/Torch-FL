@@ -29,8 +29,12 @@ Vendor Torch provenance is read from distribution metadata without importing
 its Python package. Its existing libtorch input, native prebuild, bundling
 order, kernel switches, import-order checks and both hardware test selections
 are retained. The old development image supplied the CUDA asset/shim flags to
-both lanes; the hook now states those defaults explicitly. The runtime carrying
-FlagCX does not automatically opt CI into communication.
+both lanes; the hook now states those defaults explicitly. Both lanes now reuse
+or install their declared `0.14.0+maca3.8.1.3` FlagCX dependency. Backend
+autoload stays disabled during setup and wheel building. The final environment
+gate imports `torch_fl` before FlagCX so the private vendor core is selected
+first; it checks native loading and backend registration without adding a
+collective test group or claiming multi-rank communication has been validated.
 
 The hook verifies MACA using `/opt/maca/Version.txt` before recording SDK
 3.8.1.3 and records the vendor Torch version separately in the compatibility

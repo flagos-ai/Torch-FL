@@ -46,8 +46,7 @@ follow-up (see [FlagGems on Kunlunxin](#flaggems-on-kunlunxin)).
 - Kunlun vendor PyTorch, if you are taking the xdnn op library from a vendor
   install. The build itself never imports it, so its version is not part of the
   requirement (see below)
-- Python 3.8 or later, matching the FlagTree XPU wheel's interpreter (cp310 in
-  the pinned configuration)
+- Python 3.10, matching the pinned FlagTree XPU wheel's cp310 interpreter tag
 - `cmake >= 3.18`, `ninja`, and a host C++17 compiler
 
 The build never imports or links the vendor torch. All a vendor install supplies
@@ -73,6 +72,13 @@ assets, GCC/G++ and make. Its Python 3.10, FlagTree `0.7.0+xpu3.6` and FlagGems
 `5.4.0` match the CI cohort. Its vendor Torch `2.9.0+cu129` remains outside the
 build interpreter: CI continues to use the existing official CPU Torch 2.10.0
 wheel, not a Torch source build.
+
+The compiler pin is shared with the published Torch-FL wheel through
+`.github/version-pins.env`: `flagtree==0.7.0+xpu3.6`. The wheel declares this
+dependency instead of ordinary `triton`, and its `Requires-Python` is
+`>=3.10,<3.11`. FlagTree provides the `triton` import module with the XPU backend;
+no separate `triton` distribution is needed to satisfy the final environment
+checks.
 
 The platform hook creates a fresh job-owned venv using the image interpreter,
 with the image's uv as a fallback when Python's venv module cannot seed pip.
@@ -103,9 +109,10 @@ PATH. XDNN is located before the runtime venv is replaced and is used as native
 SDK assets, without importing or copying `torch_xmlir`.
 
 FlagGems 5.4.0 and FlagTree remain pinned. Compatible Python tools may be newer
-than in the old image; SQLAlchemy follows FlagGems' declared range
-`>=1.4.31,<2.1` instead of the previous exact 2.0.48 pin, and NumPy stays below
-2. No FlagCX Python package is added to the CI venv. A final `pip check`, CPU
+than in the old image; SQLAlchemy uses the shared migrated-CI range
+`>=2.0.55,<2.0.58`, within FlagGems' dependency range, instead of the previous
+exact 2.0.48 pin, and NumPy stays below 2. No FlagCX Python package is added to
+the CI venv. A final `pip check`, CPU
 Torch/compiler isolation checks and a JSON package/tool inventory run before
 the existing native build. Build-stage precompilation, wheel preflight and the
 existing integration test selection are retained. No native source, shared

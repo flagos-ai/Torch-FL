@@ -44,6 +44,7 @@ def run_shell(body, *, cwd=None, **environment):
         "PYTHONPATH": "",
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
+        "REPO_ROOT": str(REPO_ROOT),
     }
     env.update(environment)
     return subprocess.run(
@@ -99,8 +100,8 @@ def test_build_tools_require_real_imports(
     site = next((root / "lib").glob("python*/site-packages"))
     fake_build_tools(site, editable=editable, frontend=frontend)
     result = run_shell(
-        shell_function("musa_validate_build_tools")
-        + '\nmusa_validate_build_tools\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
+        shell_function("validate_runtime_build_tools", COMMON)
+        + '\nvalidate_runtime_build_tools\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
         # Do not import the checkout's build/ directory as a namespace package.
         cwd=tmp_path,
         VENV_PYTHON=str(root / "bin/python"),
@@ -133,12 +134,12 @@ def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
         "LD_LIBRARY_PATH"
     ).split()
     environment = {name: "" for name in names if name != "PATH"}
+    environment.update(BASH_ENV="/dev/null", FLAGOS_SDK_VERSION="5.2.0")
     github_env = tmp_path / "github-env"
     cache = tmp_path / "cache"
     result = run_shell(
         shell_function("export_ci_env", COMMON) + "\n" + SCRIPT[start:end],
         **environment,
-        MUSA_RUNTIME_REUSE="0",
         PIP_CACHE_DIR=str(cache),
         GITHUB_ENV=str(github_env),
     )
@@ -184,8 +185,8 @@ def test_venv_reuse_requires_isolation(tmp_path, condition, usable):
     result = run_shell(
         shell_function("venv_is_usable", COMMON)
         + "\n"
-        + shell_function("musa_venv_is_isolated")
-        + "\nmusa_venv_is_isolated",
+        + shell_function("runtime_venv_is_isolated", COMMON)
+        + "\nruntime_venv_is_isolated torch_musa",
         VENV_ROOT=str(root),
         VENV_PYTHON=str(root / "bin/python"),
     )
@@ -284,18 +285,17 @@ def test_flaggems_rejects_an_unusable_installed_wheel(tmp_path):
 
 @pytest.mark.parametrize("qwen", ["0", "1"])
 def test_integration_keeps_bert_and_gates_tokenizer_deps(qwen):
-    # Execute the dependency block with an offline recording pip helper.
-    start = SCRIPT.index('if [[ "$CI_STAGE" == "integration" ]]; then')
-    end = SCRIPT.index("\nfi\n\nfi", start) + 3
+    block = shell_function("prepare_musa_environment")
+    start = block.index('  if [[ "$CI_STAGE" == integration ]]; then')
+    end = block.index("  export FLAGOS_SDK_VERSION", start)
     result = run_shell(
-        'pip_retry() { printf "%s\\n" "$@"; }\n' + SCRIPT[start:end],
+        'ensure_runtime_requirement() { printf "%s\\n" "$@"; }\n' + block[start:end],
         CI_STAGE="integration",
         PIP_INDEX_URL_ARG="https://example.invalid/simple",
         TORCH_FL_INSTALL_QWEN_DEPS=qwen,
     )
     assert result.returncode == 0, result.stderr
     assert "transformers>=4.51,<5" in result.stdout
-    assert "PyYAML==6.0.1" in result.stdout
     for package in ("sentencepiece", "tiktoken", "protobuf"):
         assert (package in result.stdout) == (qwen == "1")
 
@@ -317,8 +317,8 @@ def test_cpu_torch_probe_requires_the_pinned_cpu_build(tmp_path, version, cuda, 
         f"class version: cuda = {cuda!r}\n"
     )
     result = run_shell(
-        shell_function("musa_cpu_torch_is_usable")
-        + '\nmusa_cpu_torch_is_usable\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
+        shell_function("runtime_cpu_torch_is_usable", COMMON)
+        + '\nruntime_cpu_torch_is_usable\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
         VENV_PYTHON=sys.executable,
         CPU_TORCH_VERSION="2.10.0",
         PYTHONPATH=str(tmp_path),
@@ -352,127 +352,6 @@ def test_shared_pip_retry_honors_musa_cache_setting(tmp_path, cache):
     )
     assert result.returncode == 0, result.stderr
     assert ("--no-cache-dir" in result.stdout) == (cache == "1")
-
-
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        "fresh",
-        "reused",
-        "prebuilt",
-        "invalid_local",
-        "invalid_prebuilt",
-        "stale_prebuilt",
-        "noncpu_prebuilt",
-    ],
-)
-@pytest.mark.parametrize("stage", ["build", "integration"])
-def test_isolated_setup_reconciles_existing_and_fresh_environments(
-    tmp_path, scenario, stage
-):
-    # Run the complete Python setup section, but replace package installs and
-    # bootstrap creation with offline stubs. Real venvs still test isolation.
-    root = tmp_path / "venv"
-    marker = root / "keep-existing-environment"
-    if scenario != "fresh":
-        subprocess.run(
-            [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True
-        )
-        marker.touch()
-        site = next((root / "lib").glob("python*/site-packages"))
-        (site / "pip.py").touch()
-        torch_version = {
-            "stale_prebuilt": "2.9.1+cpu",
-            "noncpu_prebuilt": "2.10.0",
-        }.get(scenario, "2.10.0+cpu")
-        (site / "torch.py").write_text(
-            "import os\n"
-            "assert os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] == '0'\n"
-            f"__version__ = {torch_version!r}\n"
-            "class version: cuda = None\n"
-        )
-        if scenario.startswith("invalid"):
-            config = root / "pyvenv.cfg"
-            config.write_text(config.read_text().replace("= false", "= true"))
-
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.write_text(
-        "#!/bin/bash\nset -euo pipefail\n"
-        'if [[ "$1" == "-m" && "$2" == "venv" ]]; then\n'
-        '  "$REAL_PYTHON" -m venv --without-pip "${@:3}"\n'
-        '  "$REAL_PYTHON" - "${!#}" <<\'PY\'\n'
-        "import sys\nfrom pathlib import Path\n"
-        'site = next((Path(sys.argv[1]) / "lib").glob("python*/site-packages"))\n'
-        '(site / "pip.py").touch()\n'
-        "PY\n"
-        'else\n  exec "$REAL_PYTHON" "$@"\nfi\n'
-    )
-    bootstrap.chmod(0o755)
-    build_tools = tmp_path / "build-tools"
-    fake_build_tools(build_tools)
-    # Fail rather than touching the host if the setup unexpectedly calls apt.
-    apt = tmp_path / "apt-get"
-    apt.write_text("#!/bin/bash\necho UNEXPECTED_APT >&2\nexit 1\n")
-    apt.chmod(0o755)
-    start = SCRIPT.index("# --- Isolated Python")
-    end = SCRIPT.index("\nexport VIRTUAL_ENV=", start)
-    prebuilt = scenario.endswith("prebuilt")
-    result = run_shell(
-        f'source "{COMMON_PATH}"\n'
-        f'source "{REPO_ROOT}/.github/scripts/lib/pip_cache.sh"\n'
-        "prepare_pip_cache mthreads\n"
-        "pip_retry() {\n"
-        '  printf "PIP %s\\n" "$*"\n'
-        '  if [[ "$*" == *"setuptools>="* ]]; then\n'
-        '    cp -a "$STUB_BUILD_TOOLS/." "$STUB_VENV_SITE/"\n'
-        "  fi\n"
-        "}\n"
-        'install_cpu_torch() { echo "CPU_TORCH_INSTALL $CPU_TORCH_VERSION"; }\n'
-        + SCRIPT[start:end]
-        + '\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
-        REAL_PYTHON=sys.executable,
-        STUB_BUILD_TOOLS=str(build_tools),
-        STUB_VENV_SITE=str(
-            root
-            / "lib"
-            / f"python{sys.version_info.major}.{sys.version_info.minor}"
-            / "site-packages"
-        ),
-        TORCH_FL_BOOTSTRAP_PYTHON=str(bootstrap),
-        TORCH_FL_PREBUILT_MUSA_VENV=str(root if prebuilt else tmp_path / "absent"),
-        TORCH_FL_VENV_ROOT="" if prebuilt else str(root),
-        REPO_ROOT=str(REPO_ROOT),
-        RUNNER_TEMP=str(tmp_path / "job"),
-        PIP_CACHE_DIR="",
-        PIP_RETRY_NO_CACHE="0",
-        CI_STAGE=stage,
-        CPU_TORCH_VERSION="2.10.0",
-        PIP_INDEX_URL_ARG="https://example.invalid/simple",
-        TORCH_FL_INSTALL_QWEN_DEPS="0",
-        TORCH_DEVICE_BACKEND_AUTOLOAD="1",
-        PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
-        PYTHONPATH=str(tmp_path / "inherited-vendor-python-path"),
-    )
-    if scenario == "invalid_prebuilt":
-        assert result.returncode != 0
-        assert "Prebuilt MUSA venv is not isolated" in result.stderr
-        assert "PIP " not in result.stdout
-        assert marker.exists()
-        return
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert marker.exists() == (scenario in ("reused", "prebuilt") or prebuilt)
-    assert "--upgrade" not in result.stdout
-    assert "ninja build" in result.stdout
-    assert "setuptools>=64" in result.stdout
-    assert "editable_wheel available" in result.stdout
-    assert f"pip download cache: {tmp_path / 'job/pip-cache/mthreads'}" in result.stdout
-    assert ("transformers>=4.51,<5" in result.stdout) == (stage == "integration")
-    assert ("CPU_TORCH_INSTALL" in result.stdout) == (
-        scenario in ("fresh", "invalid_local", "stale_prebuilt", "noncpu_prebuilt")
-    )
-    if "CPU_TORCH_INSTALL" in result.stdout:
-        assert "CPU_TORCH_INSTALL 2.10.0+cpu" in result.stdout
-    assert "AUTOLOAD=1" in result.stdout
 
 
 def run_runtime_hook(
@@ -638,10 +517,7 @@ def test_runtime_image_installs_only_missing_python_requirements(tmp_path, stage
     assert any(
         row.endswith("cmake>=3.19,<4") and row.startswith("pip ") for row in calls
     )
-    assert any(
-        row.endswith("sqlalchemy>=1.4.31,<2.1") and row.startswith("pip ")
-        for row in calls
-    )
+    assert any(row.endswith("sqlalchemy") and row.startswith("pip ") for row in calls)
     assert any("transformers>=4.51,<5" in row for row in calls) == (
         stage == "integration"
     )
@@ -715,13 +591,13 @@ def test_runtime_compiler_reuse_requires_local_matching_provider(tmp_path, state
         (shadow / "triton/__init__.py").touch()
         paths.insert(0, str(shadow))
     probe = (
-        SCRIPT.split("musa_runtime_flagtree_is_usable() {", 1)[1]
+        COMMON.split("runtime_flagtree_is_usable() {", 1)[1]
         .split("<<'PY'\n", 1)[1]
         .split("\nPY", 1)[0]
     )
     code = f"import sys; sys.prefix={str(prefix)!r}; sys.path[:0]={paths!r}\n" + probe
     done = subprocess.run(
-        [sys.executable, "-I", "-c", code, "0.7.0+mthreads3.6"],
+        [sys.executable, "-I", "-c", code, "0.7.0+mthreads3.6", "mthreads", ""],
         capture_output=True,
         text=True,
     )
@@ -739,27 +615,4 @@ def test_musa_selects_the_verified_runtime_without_changing_the_build_contract()
     assert config["runner_labels"] == ["mt-8g-cicd-pytorch"]
     assert SCRIPT.count("\nbuild_flagos_inplace\n") == 1
     assert "seed_runtime.py" in SCRIPT
-    assert (
-        "apt-get"
-        not in SCRIPT.split("prepare_musa_runtime_environment() {", 1)[1].split(
-            "musa_runtime_requirement() {", 1
-        )[0]
-    )
-
-
-def test_legacy_compiler_install_does_not_gain_a_runtime_uninstall(tmp_path):
-    start = SCRIPT.index('FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:')
-    end = SCRIPT.index("\n# flagtree may bring torch_musa", start)
-    python = tmp_path / "python"
-    python.write_text("#!/bin/sh\necho unexpected-python >&2\nexit 1\n")
-    python.chmod(0o755)
-    result = run_shell(
-        "install_flagtree() { echo install-flagtree; }\n" + SCRIPT[start:end],
-        MUSA_RUNTIME_REUSE="0",
-        VENV_PYTHON=str(python),
-        FLAGTREE_VERSION_mthreads="0.7.0+mthreads3.6",
-        FLAGTREE_INDEX_URL_DEFAULT="https://example.invalid/simple",
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "install-flagtree"
-    assert "unexpected-python" not in result.stderr
+    assert "apt-get" not in SCRIPT

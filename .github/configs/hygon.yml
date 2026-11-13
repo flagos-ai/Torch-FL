@@ -109,6 +109,7 @@ wheel_artifact_name: wheel-dcu
 boxing_lane: true
 
 environment_check:
+  venv_isolation: true
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
@@ -117,13 +118,14 @@ environment_check:
   require_package_files:
     - lib/libtorch_fl.so
   flagos_devices:
-    more_than: 0
+    at_least: 2
   require_build_kernels:
     - flaggems
   forbid_build_kernels:
     - boxing
 
 boxing_environment_check:
+  venv_isolation: true
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
@@ -132,7 +134,7 @@ boxing_environment_check:
   require_package_files:
     - lib/libtorch_fl.so
   flagos_devices:
-    more_than: 0
+    at_least: 2
   require_build_kernels:
     - flaggems
     - boxing

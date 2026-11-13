@@ -98,6 +98,7 @@ wheel_artifact_name: wheel-metax
 boxing_lane: true
 
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   torch_path_forbidden:
     - /opt/conda/
@@ -105,10 +106,10 @@ environment_check:
     - /opt/flagtree/
     - /opt/triton/
   flagos_devices:
-    exactly: 8
+    at_least: 2
   cuda_available: true
   cuda_devices:
-    exactly: 8
+    at_least: 2
   triton_backend: metax
   require_imports:
     - flag_gems
@@ -118,6 +119,7 @@ environment_check:
     - boxing
 
 boxing_environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   torch_path_forbidden:
     - /opt/conda/
@@ -125,10 +127,10 @@ boxing_environment_check:
     - /opt/flagtree/
     - /opt/triton/
   flagos_devices:
-    exactly: 8
+    at_least: 2
   cuda_available: true
   cuda_devices:
-    exactly: 8
+    at_least: 2
   triton_backend: metax
   require_imports:
     - flag_gems

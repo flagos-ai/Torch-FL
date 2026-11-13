@@ -43,8 +43,8 @@ fi
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
-# This CI-only pin must not add a cp310-only dependency to published wheels.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.7.0+xpu3.6}"
+# Keep the CI compiler aligned with the published wheel's dependency.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_kunlunxin}"
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-kunlunxin/simple}"
@@ -188,30 +188,7 @@ export LD_LIBRARY_PATH="$XCUDART_DIR:$XDNN_ROOT:$XDNN_ROOT/lib${LD_LIBRARY_PATH:
 # A job owns its venv. Never clear the runtime, its managed base interpreter,
 # or the checkout itself through an overridden target path.
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-kunlunxin-${CI_STAGE}}"
-"$VENDOR_PYTHON" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY'
-from pathlib import Path
-import sys
-
-target, repo = (Path(p).resolve() for p in sys.argv[1:])
-for prefix in (sys.prefix, sys.base_prefix):
-    source = Path(prefix).resolve()
-    if source.is_relative_to(target) or target.is_relative_to(source):
-        raise SystemExit("CI venv must be separate from the runtime Python prefixes")
-if repo.is_relative_to(target):
-    raise SystemExit("CI venv must not contain the source checkout")
-PY
-if ! "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"; then
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "::error::Python venv creation failed and the runtime has no uv fallback" >&2
-    exit 1
-  fi
-  uv venv --clear --seed --python "$VENDOR_PYTHON" "$VENV_ROOT"
-fi
-VENV_PYTHON="$VENV_ROOT/bin/python"
-if ! venv_is_usable; then
-  echo "::error::Isolated Python with pip was not created at $VENV_ROOT" >&2
-  exit 1
-fi
+create_runtime_venv "$VENDOR_PYTHON"
 "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
   --target-python "$VENV_PYTHON" \
   --torch-version "$CPU_TORCH_VERSION" \
@@ -239,17 +216,8 @@ else
   install_cpu_torch
 fi
 
-while IFS= read -r requirement || [[ -n "$requirement" ]]; do
-  [[ -z "$requirement" || "$requirement" == \#* ]] && continue
-  # The wheel frontend checks Python build requirements, including CMake's
-  # distribution metadata. A system executable alone cannot satisfy that gate.
-  if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-      --check-installed "$requirement"; then
-    echo "Using prepared requirement: $requirement"
-  else
-    pip_retry --index-url "$PIP_INDEX_URL_ARG" "$requirement"
-  fi
-done < "$REPO_ROOT/.github/requirements-kunlunxin.txt"
+# The wheel frontend requires CMake distribution metadata as well as its executable.
+ensure_runtime_requirements "$REPO_ROOT/.github/requirements-kunlunxin.txt" "$PIP_INDEX_URL_ARG"
 
 "$VENV_PYTHON" - <<'PY'
 from pathlib import Path
