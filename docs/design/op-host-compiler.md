@@ -1026,6 +1026,46 @@ layers, which does not change the operator set but does change the counts. And `
 appears once - a CPU synchronisation point - which no routing change removes; on a real decode loop its
 cost depends on where the graph forces a scalar read.
 
+
+#### What the `none` routes actually cost, measured
+
+The eleven `none` routes are not a uniform gap, and the non-boxing default wheel answers them with
+`cpu_fallback`. Reproducing that path exactly - copy the operand to CPU, run the CPU kernel, copy the
+result back - at Qwen3-8B shapes (sequence 1024, hidden 4096, 32 key heads of width 128), median of 50
+warm calls:
+
+| operator | native route (us) | cpu_fallback (us) | ratio |
+| --- | ---: | ---: | ---: |
+| `transpose.int` | 2.48 | **3332.8** | 1344x |
+| `t` | 2.22 | **82488.2** | 37157x |
+| `unsqueeze` | 2.26 | **3189.5** | 1411x |
+| `select.int` | 2.87 | **1142.0** | 398x |
+| `clone` | 9.60 | **3263.8** | 340x |
+| `_to_copy` f32 to bf16 | 11.05 | **2630.1** | 238x |
+
+These are metadata operations: the native route moves no data, so its cost is flat and shape
+independent. `cpu_fallback` moves the whole tensor, so its cost is proportional to the operand size -
+`t` on a 4096x4096 weight is 67 MB out and back, which is where 82 ms comes from.
+
+That difference decides the question this section opened. On the non-boxing wheel, a model that touches
+these operators per layer does not run "somewhat slower" - with per-forward counts in the hundreds
+after scaling to 36 layers, the penalty lands in the **seconds per forward**, against the 13.73 ms a
+boxing wheel takes for the same shrunk model. Three orders of magnitude, not percent.
+
+Two consequences, and they point the same way:
+
+- **`none` is not an acceptable resting place for a metadata operator.** `cpu_fallback` is the right
+  fallback for an operator nobody has implemented; it is the wrong answer for one whose native cost is
+  a stride update.
+- **Routing these to FlagGems is not the fix either**, and the repository already measured why:
+  `unsqueeze` costs 5.40 us through FlagGems against 1.86 us natively, and `_unsafe_view` through
+  FlagGems silently materialises a copy where ATen must raise. What they need is a **native metadata
+  implementation in the plugin** - no kernel, no Python, no copy.
+
+That reframes the Qwen3 work: before any host program, six metadata operators need to exist natively
+for the non-boxing wheel to be usable at all. `t`, `detach`, `select` and the view family are stride
+manipulation; `clone` and `_to_copy` are the only two that need a real copy kernel.
+
 ### Where that leaves the recommendation
 
 **This paragraph is superseded by "Decision: FlagGems is the single source of truth" below, which
