@@ -131,7 +131,6 @@ prepare_metax_environment() {
     --torch-version "${CPU_TORCH_VERSION%+cpu}" \
     --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_metax}" \
     --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
-    --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}" \
     --requirements-file "$REPO_ROOT/.github/requirements-metax.txt"
   export VIRTUAL_ENV="$VENV_ROOT"
   export PATH="$VENV_ROOT/bin:$PATH"
@@ -310,19 +309,7 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-metax/simple}"
 install_flag_gems
 
-# The runtime's FlagCX uses the same Torch 2.10/MACA libraries bundled by
-# both lanes. Install the declared dependency without importing it before
-# torch_fl has selected its private vendor core.
-FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_metax}"
-if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-    --check-installed "flagcx===${FLAGCX_VERSION}"; then
-  echo "Using prepared FlagCX $FLAGCX_VERSION"
-else
-  install_flagcx
-fi
-export FLAGCX_TORCH_BACKEND=flagos
-# The extension is built after provisioning, so defer PyTorch's FlagCX
-# entry-point import until later workflow steps.
+# Import the backend explicitly after the native extension is built.
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 "$VENV_PYTHON" -m pip check
@@ -349,9 +336,6 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   : "${FLAGOS_BACKEND_CONFIG:=}"
   export_ci_env BASH_ENV PYTHONPATH FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION
   export_ci_env VIRTUAL_ENV PYTHONNOUSERSITE FLAGOS_ACCELERATOR FLAGOS_BACKEND_CONFIG MACA_PATH MACA_HOME FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_METAX_CUDART_SHIM FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION LD_LIBRARY_PATH LIBRARY_PATH CPATH
-  if [[ -n "${FLAGCX_TORCH_BACKEND:-}" ]]; then
-    printf 'FLAGCX_TORCH_BACKEND=%s\n' "$FLAGCX_TORCH_BACKEND" >> "$GITHUB_ENV"
-  fi
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi

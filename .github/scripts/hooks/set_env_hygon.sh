@@ -210,7 +210,6 @@ create_runtime_venv "$VENDOR_PYTHON"
   --torch-version "$CPU_TORCH_VERSION" \
   --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_hygon}" \
   --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
-  --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_dcu}" \
   --requirements-file "$REPO_ROOT/.github/requirements-hygon.txt"
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
@@ -223,9 +222,8 @@ if [[ "$CI_STAGE" == integration ]]; then
   ensure_runtime_requirement transformers "$PIP_INDEX_URL_ARG"
 fi
 
-# Install the published DTK-specific FlagCX wheel below. Triton is deliberately
-# not copied from the vendor image: the FlagTree wheel supplies the hcu backend
-# and its entry-point metadata.
+# The FlagTree wheel supplies the hcu backend and its entry-point metadata;
+# do not copy a conflicting Triton provider from the vendor image.
 VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
 # --- Published Hygon wheels --------------------------------------------------
@@ -277,36 +275,12 @@ fi
 HYGON_INDEX_URL="${TORCH_FL_HYGON_INDEX_URL:-$HYGON_INDEX_URL_DEFAULT}"
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="$HYGON_INDEX_URL"
-FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_dcu}"
 
 # The release wheel avoids a GitHub clone on every job. The index advertises a
 # SHA-256 for each wheel, so pip verifies the download before installing it.
 install_flag_gems
 
-# FlagCX follows the DTK/Python cohort pinned for the current runtime image.
-# Remove any files previously copied from the vendor Python before installing
-# a different version, since those copies are not necessarily pip-managed.
-if "$VENV_PYTHON" - "$FLAGCX_VERSION" <<'PY'
-import importlib.metadata as metadata
-import importlib.util
-import sys
-
-try:
-    assert metadata.version("flagcx") == sys.argv[1]
-    assert importlib.util.find_spec("flagcx") is not None
-except (AssertionError, metadata.PackageNotFoundError):
-    raise SystemExit(1)
-PY
-then
-  echo "Using preinstalled FlagCX $FLAGCX_VERSION"
-else
-  rm -rf "$VENV_SITE/flagcx" "$VENV_SITE"/flagcx-*.dist-info
-  pip_retry --no-deps --only-binary=:all: --index-url "$HYGON_INDEX_URL" \
-    "flagcx===$FLAGCX_VERSION"
-fi
-# Keep PyTorch from auto-loading FlagCX during this step and the separate wheel
-# build step. The DTK libraries are preloaded by torch_fl before its explicit
-# FlagCX communication import, not by a bare import torch in the build backend.
+# Native Torch-FL extensions are imported explicitly after wheel installation.
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 "$VENV_PYTHON" -m pip check
@@ -353,7 +327,6 @@ fi
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
-export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 
 CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
 CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
@@ -648,5 +621,5 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   # so both lanes persist an explicit value.
   : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGCX_PATH FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

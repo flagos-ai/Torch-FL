@@ -322,50 +322,24 @@ def test_cuda_package_metadata_makes_flagcx_an_explicit_extra(tmp_path, accelera
     assert "cuda-comm" in metadata.get_all("Provides-Extra", [])
 
 
-@pytest.mark.parametrize(
-    ("enabled", "cuda_version", "expected_code"),
-    [("0", "13.0.88", 0), ("0", "13.3.0", 0), ("1", "13.3.0", 0), ("1", "13.0.88", 1)],
-)
-def test_cuda_flagcx_provisioning_requires_explicit_compatible_opt_in(
-    enabled, cuda_version, expected_code, tmp_path
-):
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_cuda_flagcx_is_deferred_even_with_the_former_opt_in(enabled):
     hook = (HOOKS_DIR / "set_env_nvidia.sh").read_text()
-    branch = hook.split("# CUDA functional CI", 1)[1].split(
-        "# Install the published FlagGems wheel", 1
-    )[0]
-    branch = "# CUDA functional CI" + branch
-    script = (
-        'set -euo pipefail\nsource "$1"\npip_retry() { printf "INSTALL %s\\n" "$*"; }\n'
-        + branch
-        + "\nexport_ci_env FLAGCX_TORCH_BACKEND\n"
-        + '\nprintf "AUTOLOAD=%s TLE=%s\\n" "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" "${USE_TLE_DIST:-}"\n'
+    branch = (
+        "# FlagCX is deferred across CI."
+        + hook.split("# FlagCX is deferred across CI.", 1)[1].split(
+            "# Install the published FlagGems wheel", 1
+        )[0]
     )
     result = subprocess.run(
-        ["bash", "-c", script, "cuda-test", str(SCRIPTS_DIR / "lib/set_env_common.sh")],
-        env={
-            "PATH": "/usr/bin:/bin",
-            "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled,
-            "CUDA_VERSION": cuda_version,
-            "VENV_PYTHON": sys.executable,
-            "FLAGGEMS_INDEX_URL": "https://example.invalid/simple",
-            "FLAGCX_VERSION": _pins()["FLAGCX_VERSION_cuda"],
-            "GITHUB_ENV": str(tmp_path / "github-env"),
-        },
+        ["bash", "-c", "set -euo pipefail\n" + branch + '\ntest "$USE_TLE_DIST" = 0'],
+        env={"PATH": "/usr/bin:/bin", "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled},
         capture_output=True,
         text=True,
     )
-    assert result.returncode == expected_code, result.stdout + result.stderr
-    if enabled == "0":
-        assert "INSTALL" not in result.stdout
-        assert "FlagCX communication is not validated" in result.stdout
-        assert "TLE=0" in result.stdout
-        assert (tmp_path / "github-env").read_text() == "FLAGCX_TORCH_BACKEND=vendor\n"
-    elif expected_code == 0:
-        assert f"flagcx==={_pins()['FLAGCX_VERSION_cuda']}" in result.stdout
-        assert "AUTOLOAD=0" in result.stdout
-    else:
-        assert "INSTALL" not in result.stdout
-        assert "CUDA 13.3" in result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FlagCX communication is deferred" in result.stdout
+    assert "TORCH_FL_CUDA_FLAGCX_WHEEL" not in hook
 
 
 def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():

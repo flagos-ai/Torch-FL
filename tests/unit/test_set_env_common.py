@@ -56,7 +56,6 @@ SHARED_FUNCS = [
 SHARED_PHASES = [
     "install_cpu_torch",
     "install_flagtree",
-    "install_flagcx",
     "build_flagos_inplace",
     "export_ci_env",
 ]
@@ -116,8 +115,6 @@ def test_no_script_redefines_a_shared_phase():
 def test_every_script_calls_the_common_phases():
     """Shared phases remain shared; MPS and Iluvatar have special provisioning.
 
-    install_flagcx is defined for the platforms whose hook installs a published
-    FlagCX wheel, which is not every one of them, so it is not asserted here.
     FlagTree is absent on MPS, which has no Metal Triton build. Iluvatar keeps
     CPU torch in its own venv and can replace the compiler cohort through its hook
     that delegates installation to the common phases. build_flagos_inplace runs
@@ -425,3 +422,12 @@ def test_shared_runtime_venv_creation_clears_only_the_destination_and_verifies_i
     assert result.stdout.strip() == str(target)
     assert not marker.exists()
     assert "include-system-site-packages = false" in (target / "pyvenv.cfg").read_text()
+
+
+def test_ci_hooks_do_not_install_or_seed_flagcx():
+    for hook in _scripts():
+        text = hook.read_text()
+        assert "--flagcx-version" not in text, hook.name
+        assert "install_flagcx" not in text, hook.name
+        assert not re.search(r"flagcx(?:===|==)", text), hook.name
+    assert "install_flagcx()" not in LIB.read_text()

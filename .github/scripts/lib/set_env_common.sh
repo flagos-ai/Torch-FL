@@ -677,13 +677,6 @@ ensure_runtime_requirements() {
   done < "$requirements_file"
 }
 
-# Install the published FlagCX wheel and point torch at the flagos backend.
-install_flagcx() {
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
-    "flagcx===${FLAGCX_VERSION}"
-  export FLAGCX_TORCH_BACKEND=flagos
-}
-
 # Build the in-tree extension so package_data sees libtorch_fl.so before the
 # common workflow runs `python -m build`.
 build_flagos_inplace() {

@@ -379,8 +379,7 @@ def test_tool_reuse_obeys_the_same_requirements_as_pip(
         "2.10.0",
         "0.7.0+ascend3.5",
         "5.4.0",
-        "0.14.0+cann9.0.0.910c",
-        requirements,
+        requirements_file=requirements,
     )
     assert target.exists() == reused
 
@@ -406,7 +405,7 @@ def test_installed_check_works_with_only_venv_pip(tmp_path):
         ("torch", "2.10.0+cpu", [3, 9], False),
         ("torch", "2.10.0+cpu", list(sys.version_info[:2]), True),
         ("flagcx", "0.14.0+cann9.0.0", list(sys.version_info[:2]), False),
-        ("flagcx", "0.14.0+cann9.0.0.910c", list(sys.version_info[:2]), True),
+        ("flagcx", "0.14.0+cann9.0.0.910c", list(sys.version_info[:2]), False),
     ],
 )
 def test_seed_requires_matching_versions_and_python(
@@ -424,14 +423,13 @@ def test_seed_requires_matching_versions_and_python(
             {"site": str(target), "version": python_version}
         ),
     )
-    SEED.seed(
-        binary / "python", "2.10.0", "0.7.0+ascend3.5", "5.4.0", "0.14.0+cann9.0.0.910c"
-    )
+    SEED.seed(binary / "python", "2.10.0", "0.7.0+ascend3.5", "5.4.0")
     assert target.exists() == reused
 
 
-def test_a_lane_without_flagcx_keeps_the_runtime_communication_package_out(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("listed_as_tool", [False, True])
+def test_runtime_communication_package_is_never_copied(
+    tmp_path, monkeypatch, listed_as_tool
 ):
     dist = runtime_distribution(
         tmp_path / "runtime", name="flagcx", version="0.14.0+corex4.5.0"
@@ -447,7 +445,15 @@ def test_a_lane_without_flagcx_keeps_the_runtime_communication_package_out(
             {"site": str(target), "version": list(sys.version_info[:2])}
         ),
     )
-    SEED.seed(binary / "python", "2.10.0", "0.7.0+iluvatar3.6", "5.4.0")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("flagcx" if listed_as_tool else "")
+    SEED.seed(
+        binary / "python",
+        "2.10.0",
+        "0.7.0+iluvatar3.6",
+        "5.4.0",
+        requirements_file=requirements,
+    )
     assert not target.exists()
 
 
@@ -720,7 +726,7 @@ def test_real_pip_fallback_uses_the_same_runtime_range_without_network(tmp_path)
         "wheel-identity",
         "pip-check",
         "installed-wheel",
-        "flagcx-import",
+        "flagcx-installed",
         "timeout",
     ],
 )
@@ -759,11 +765,13 @@ def test_final_environment_records_all_installs_and_retains_failures(
             ],
         },
     )
-    monkeypatch.setattr(
-        SEED.metadata,
-        "distribution",
-        lambda name: SimpleNamespace(version="0.14.0+maca3.8.1.3"),
-    )
+
+    def distribution(name):
+        if name == "flagcx" and failure == "flagcx-installed":
+            return SimpleNamespace(version="0.14.0+maca3.8.1.3")
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(SEED.metadata, "distribution", distribution)
     monkeypatch.setattr(
         SEED.metadata,
         "distributions",
@@ -788,13 +796,7 @@ def test_final_environment_records_all_installs_and_retains_failures(
         assert kwargs["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
         if failure == "timeout":
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-        name = (
-            "flagcx-import"
-            if "-c" in command
-            else "pip-check"
-            if command[-1] == "check"
-            else "installed-wheel"
-        )
+        name = "pip-check" if command[-1] == "check" else "installed-wheel"
         return SimpleNamespace(
             returncode=int(name == failure),
             stdout=name,
@@ -818,7 +820,8 @@ def test_final_environment_records_all_installs_and_retains_failures(
         "--check-installed" in call and "--check-build-env" in call for call in calls
     )
     assert any("--sdk-version" in call and "3.8.1.3" in call for call in calls)
-    assert any("-c" in call for call in calls) == (failure in (None, "flagcx-import"))
+    assert not any("-c" in call for call in calls)
+    assert report["test_scope"] == {"flagcx": "deferred"}
 
 
 def test_final_environment_retains_an_invalid_wheel_report(tmp_path, monkeypatch):
@@ -833,9 +836,23 @@ def test_final_environment_retains_an_invalid_wheel_report(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    "platform", ["gcu", "enflame", "musa", "mthreads", "metax", "ascend", "ppu"]
+    "platform",
+    [
+        "gcu",
+        "musa",
+        "metax",
+        "ascend",
+        "ppu",
+        "dcu",
+        "cuda",
+        "iluvatar",
+        "kunlunxin",
+        "mps",
+    ],
 )
-def test_only_explicit_platforms_defer_missing_flagcx(monkeypatch, platform):
+def test_all_ci_platforms_defer_only_missing_flagcx(monkeypatch, platform):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", platform)
+
     def missing(name):
         raise metadata.PackageNotFoundError(name)
 
@@ -859,12 +876,8 @@ def test_only_explicit_platforms_defer_missing_flagcx(monkeypatch, platform):
             "stderr": "ERROR: Required flagcx==0.14.0+test; installed missing\n",
         },
     ]
-    accepted = platform in {"gcu", "enflame", "musa", "mthreads"}
-    assert SEED.defer_missing_flagcx(checks, manifest, platform) == accepted
-    assert (
-        all(check.get("deferred_dependency") == "flagcx" for check in checks)
-        == accepted
-    )
+    assert SEED.defer_missing_flagcx(checks, manifest)
+    assert all(check.get("deferred_dependency") == "flagcx" for check in checks)
 
 
 @pytest.mark.parametrize(
@@ -917,12 +930,25 @@ def test_flagcx_deferral_never_hides_other_failures(monkeypatch, failure):
         )
     if failure == "truncated":
         check["truncated"] = True
-    assert not SEED.defer_missing_flagcx([check], manifest, "gcu")
+    assert not SEED.defer_missing_flagcx([check], manifest)
     assert "deferred_dependency" not in check
 
 
+@pytest.mark.parametrize(
+    "platform",
+    [
+        "ascend",
+        "hygon",
+        "metax",
+        "enflame",
+        "mthreads",
+        "thead",
+        "iluvatar",
+        "kunlunxin",
+    ],
+)
 def test_final_environment_labels_deferred_dependencies_incomplete(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, platform
 ):
     version = "2.10.0+tops1.9.10"
     manifest = {
@@ -945,7 +971,7 @@ def test_final_environment_labels_deferred_dependencies_incomplete(
         raise metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(SEED.metadata, "distribution", missing)
-    monkeypatch.setenv("FLAGOS_ACCELERATOR", "enflame")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", platform)
 
     def run(command, **kwargs):
         if command[-1] == "check":

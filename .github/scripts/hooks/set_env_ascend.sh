@@ -100,8 +100,7 @@ export ASCEND_HOME
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
-# FlagCX's torch entrypoint imports torch_fl, whose native extension is not
-# built during setup. Explicit imports still work once the extension is built.
+# Select the backend explicitly after the native extension is built.
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 # FlagTree's task queue launches through at_npu::native::OpCommand, a torch_npu
 # symbol this environment does not have (and must not have). torch_fl's FlagTree
@@ -207,7 +206,6 @@ create_runtime_venv "$VENDOR_PYTHON"
   --torch-version "$CPU_TORCH_VERSION" \
   --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
   --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
-  --flagcx-version "${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}" \
   --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
 if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
     --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
@@ -260,26 +258,6 @@ fi
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple}"
 install_flag_gems
-
-# Reuse the matching FlagCX copied from the runtime, or install the exact pin.
-# Keep the backend selection identical on both paths.
-FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_ascend}"
-if "$VENV_PYTHON" - "$FLAGCX_VERSION" <<'PY'
-from importlib import metadata, util
-import sys
-
-try:
-    assert metadata.version("flagcx") == sys.argv[1]
-    assert util.find_spec("flagcx") is not None
-except (metadata.PackageNotFoundError, AssertionError):
-    raise SystemExit(1)
-PY
-then
-  echo "Using runtime-seeded FlagCX $FLAGCX_VERSION"
-  export FLAGCX_TORCH_BACKEND=flagos
-else
-  install_flagcx
-fi
 
 # Matching runtime tools were copied already. Pip accepts satisfied packages
 # and installs only gaps, one requirement at a time for bounded retries. This
@@ -350,7 +328,7 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV BASH_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGCX_TORCH_BACKEND TORCH_DEVICE_BACKEND_AUTOLOAD TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
+  export_ci_env PATH VIRTUAL_ENV BASH_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR ASCEND_HOME FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD TRITON_ENABLE_TASKQUEUE PIP_INDEX_URL PIP_DEFAULT_TIMEOUT PIP_RETRIES CPATH LIBRARY_PATH LD_LIBRARY_PATH ASCEND_MSPTI_PRELOAD
   # Later steps do not replay vendor.sh once BASH_ENV is disabled. Preserve
   # the SDK settings it supplied as well as the paths prepared above.
   while IFS='=' read -r sdk_name _; do

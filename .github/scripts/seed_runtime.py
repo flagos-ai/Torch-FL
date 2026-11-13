@@ -238,7 +238,6 @@ def seed(
     torch_version,
     flagtree_version,
     flaggems_version,
-    flagcx_version=None,
     requirements_file=None,
 ):
     target = json.loads(
@@ -263,10 +262,6 @@ def seed(
         "flag-gems": flaggems_version,
         "numpy": None,
     }
-    # A runtime may carry FlagCX for its compiler without the CI lane using
-    # that communication stack. Copy it only when the caller requests a pin.
-    if flagcx_version:
-        expected["flagcx"] = flagcx_version
     tools = tool_requirements(requirements_file)
     constraints = constraint_requirements()
     target_site = Path(target["site"])
@@ -275,6 +270,10 @@ def seed(
     reused = set()
     for distribution in metadata.distributions(path=source_paths):
         name = re.sub(r"[-_.]+", "-", distribution.metadata.get("Name", "")).lower()
+        # Collective communication is deferred across CI, including packages
+        # available in the runtime or accidentally added to a tool list.
+        if name == "flagcx":
+            continue
         if (name not in expected and name not in tools) or name in reused:
             continue
         if name in expected:
@@ -358,10 +357,8 @@ def environment_report():
     }
 
 
-def defer_missing_flagcx(checks, manifest, platform):
-    """Recognize only the explicitly deferred GCU/MUSA FlagCX dependency."""
-    if platform not in {"enflame", "gcu", "mthreads", "musa"}:
-        return False
+def defer_missing_flagcx(checks, manifest):
+    """Defer only Torch-FL's missing FlagCX dependency under the CI-wide policy."""
     try:
         metadata.distribution("flagcx")
         return False
@@ -459,6 +456,7 @@ def finalize_environment(wheel, output, requirements_file=None):
 
     try:
         report.update(environment_report())
+        report["test_scope"] = {"flagcx": "deferred"}
         digest = hashlib.sha256()
         with wheel.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -476,6 +474,14 @@ def finalize_environment(wheel, output, requirements_file=None):
             "requirements": {name: str(value) for name, value in limits.items()},
         }
         errors = []
+        try:
+            flagcx = metadata.distribution("flagcx")
+        except metadata.PackageNotFoundError:
+            pass
+        else:
+            errors.append(
+                f"FlagCX is deferred across CI, but flagcx=={flagcx.version} is installed"
+            )
         installed_wheels = [
             item["version"]
             for item in report["packages"]
@@ -521,46 +527,16 @@ def finalize_environment(wheel, output, requirements_file=None):
         if os.environ.get("FLAGOS_SDK_VERSION"):
             command += ["--sdk-version", os.environ["FLAGOS_SDK_VERSION"]]
         check("installed-wheel", command)
-        if defer_missing_flagcx(checks, manifest, os.environ.get("FLAGOS_ACCELERATOR")):
+        if defer_missing_flagcx(checks, manifest):
             report["deferred_dependencies"] = [
                 {
                     "name": "flagcx",
-                    "reason": "Published vendor build requires a Torch extension excluded from this CI venv; compatible binary is pending.",
+                    "reason": "FlagCX installation, runtime reuse and collective validation are deferred across CI; release requirements are unchanged.",
                 }
             ]
             print(
-                "::warning::FlagCX is explicitly deferred on GCU/MUSA; final dependencies are not complete."
+                "::warning::FlagCX is deferred across CI; release dependencies are not complete and FlagCX collective communication is not validated."
             )
-        if not any(
-            item["exit_code"] and not item.get("deferred_dependency") for item in checks
-        ):
-            try:
-                metadata.distribution("flagcx")
-            except metadata.PackageNotFoundError:
-                pass
-            else:
-                check(
-                    "flagcx-import",
-                    [
-                        sys.executable,
-                        "-c",
-                        """
-import os
-os.environ["FLAGCX_TORCH_BACKEND"] = "flagos"
-import torch_fl
-import flagcx
-import torch.distributed as dist
-from pathlib import Path
-assert dist.is_backend_available("flagcx"), "FlagCX backend was not registered"
-maps = Path("/proc/self/maps").read_text()
-for forbidden in ("libtorch_npu.so", "libtorch_gcu.so", "libmusa_python.so"):
-    assert forbidden not in maps, f"FlagCX loaded forbidden vendor Torch extension: {forbidden}"
-for line in maps.splitlines():
-    assert not ("/flagos/" in line and "/torch/" in line), "FlagCX escaped the CI Torch core: " + line
-print("FlagCX import and backend registration validated")
-""",
-                    ],
-                )
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         print(f"::error::Final environment record failed: {error}")
         checks.append(
@@ -609,7 +585,6 @@ def main():
     parser.add_argument("--torch-version", required=True)
     parser.add_argument("--flagtree-version", required=True)
     parser.add_argument("--flaggems-version", required=True)
-    parser.add_argument("--flagcx-version")
     parser.add_argument("--requirements-file", type=Path)
     args = parser.parse_args()
     seed(
@@ -617,7 +592,6 @@ def main():
         args.torch_version,
         args.flagtree_version,
         args.flaggems_version,
-        args.flagcx_version,
         args.requirements_file,
     )
 

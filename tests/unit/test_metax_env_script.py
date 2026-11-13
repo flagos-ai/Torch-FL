@@ -228,24 +228,3 @@ def test_runtime_isolation_and_provenance_reach_later_steps(tmp_path):
     assert rows["PYTHONPATH"] == ""
     assert rows["FLAGOS_SDK_VERSION"] == "3.8.1.3"
     assert rows["FLAGOS_VENDOR_TORCH_VERSION"] == "2.10.0+metax3.8.1.0"
-
-
-@pytest.mark.parametrize("prepared", [True, False])
-def test_runtime_flagcx_reuses_or_installs_the_declared_dependency(tmp_path, prepared):
-    python = tmp_path / "python"
-    python.write_text(f"#!/bin/sh\nexit {0 if prepared else 1}\n")
-    python.chmod(0o755)
-    start = SCRIPT.index('FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:')
-    end = SCRIPT.index('\n"$VENV_PYTHON" -m pip check', start)
-    result = run_shell(
-        "install_flagcx() { echo install-flagcx; }\n"
-        + SCRIPT[start:end]
-        + '\ntest "$FLAGCX_TORCH_BACKEND" = flagos\ntest "$TORCH_DEVICE_BACKEND_AUTOLOAD" = 0',
-        FLAGOS_VENDOR_TORCH_LIB="/flagos/vendor-torch/lib",
-        VENV_PYTHON=str(python),
-        REPO_ROOT=str(ROOT),
-        FLAGCX_VERSION_metax="0.14.0+maca3.8.1.3",
-    )
-    assert result.returncode == 0, result.stderr
-    assert ("install-flagcx" in result.stdout) == (not prepared)
-    assert ("Using prepared FlagCX" in result.stdout) == prepared

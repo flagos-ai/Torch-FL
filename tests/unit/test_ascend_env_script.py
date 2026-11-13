@@ -18,7 +18,6 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
-import sys
 
 import pytest
 
@@ -157,46 +156,3 @@ def test_ascend_final_dependency_check_precedes_report_and_build(
         not broken_dependencies
     )
     assert ("build" in rows) == (not broken_dependencies)
-
-
-@pytest.mark.parametrize(
-    "version,reused",
-    [("0.14.0+cann9.0.0.910c", True), ("0.14.0+cann9.0.0", False)],
-)
-def test_flagcx_reuse_and_install_both_select_the_flagos_backend(
-    tmp_path, version, reused
-):
-    venv = tmp_path / "venv"
-    subprocess.run(
-        [sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True
-    )
-    target = next((venv / "lib").glob("python*/site-packages"))
-    (target / "flagcx").mkdir()
-    (target / "flagcx/__init__.py").touch()
-    info = target / f"flagcx-{version}.dist-info"
-    info.mkdir()
-    (info / "METADATA").write_text(f"Name: flagcx\nVersion: {version}\n")
-    script = HOOK.split("# Reuse the matching FlagCX", 1)[1]
-    script = (
-        "# Reuse the matching FlagCX" + script.split("# Matching runtime tools", 1)[0]
-    )
-    result = subprocess.run(
-        [
-            "/bin/bash",
-            "-c",
-            "set -euo pipefail\ninstall_flagcx() { echo download; export FLAGCX_TORCH_BACKEND=flagos; }\n"
-            + script
-            + '\ntest "$FLAGCX_TORCH_BACKEND" = flagos',
-        ],
-        env={
-            "PATH": "/usr/bin:/bin",
-            "VENV_PYTHON": str(venv / "bin/python"),
-            "FLAGCX_VERSION_ascend": "0.14.0+cann9.0.0.910c",
-            "PYTHONNOUSERSITE": "1",
-        },
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert ("Using runtime-seeded FlagCX" in result.stdout) == reused
-    assert ("download" in result.stdout) == (not reused)
