@@ -253,7 +253,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # All counts are `flaggems` only: `backends_metax.conf` also carries 15
     # `flaggems_cpp` routes and `backends_metax_boxing.conf` 12, which neither
     # metax number includes.
-    "nvidia": 548,
+    "nvidia": 549,
     "nvidia_boxing": 0,
     # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
     # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
