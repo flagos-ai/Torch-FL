@@ -27,8 +27,12 @@ setup_platform: nvidia
 # rebuild on an older userland fails naming the requirement.
 ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev
 
+# The fleet-wide label for the A100 40G host this lane builds on. The host is
+# shared with vllm-plugin-FL's `a100` lane, which is why the label is not
+# Torch-FL-specific; the older `torch-fl-nv` label was retired on 2026-11-09 and
+# no runner answers to it any more, which left both NVIDIA jobs queued forever.
 runner_labels:
-  - torch-fl-nv
+  - flagcicd-a100
 
 # Platform-specific code selects this hardware lane on PRs.
 # Shared or unrecognized code selects every lane conservatively.
