@@ -127,6 +127,7 @@ jobs:
             tests/unit/test_dtype_cast_arm_contract.py
             tests/unit/test_env_registry.py
             tests/unit/test_gen_vendor_confs.py
+            tests/unit/test_host_program_admission.py
             tests/unit/test_import_phase_order.py
             tests/unit/test_iluvatar_env_script.py
             tests/unit/test_iluvatar_cpu_runtime.py

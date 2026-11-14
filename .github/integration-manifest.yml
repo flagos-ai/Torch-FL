@@ -418,6 +418,17 @@ steps:
       python -m pytest tests/integration/ops/ -m "flaggems_python"
       -v -s --tb=short
 
+  # Native host generation requires the CPU-Torch NVIDIA build without boxing.
+  # Keep these cases explicit: the main_ops selections do not select them.
+  - id: nvidia_host_programs
+    name: Native FlagGems host programs and metadata views
+    platforms: [nvidia]
+    vendor_only: true
+    min_passed: 53
+    command: >-
+      python -m pytest tests/integration/ops/test_nvidia_host_program.py
+      tests/integration/ops/test_nvidia_metadata_views.py -v -s --tb=short
+
   # CUDA-only route regression: the profiler must own the device, and the
   # default FlagGems-primary wheel does not require CUDA boxing kernels.
   - id: cuda_flaggems_mul

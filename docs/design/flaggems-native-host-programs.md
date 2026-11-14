@@ -79,6 +79,8 @@ Numerical ATen residuals are rejected during capture. Generated kernel launch
 names must match the captured original FlagGems kernels. Admission repeats that
 check, rejects Inductor fused-kernel markers in the actual library bytes and
 external `aoti_torch_copy_` calls, and verifies the library checksum when present.
+New manifests record the generated source checksum separately from the build
+fingerprint, which also includes the owned headers and PyTorch version.
 These checks catch accidental provider substitution; they are not a sandbox for
 untrusted native libraries. Use only caches created by your own installation.
 
@@ -89,7 +91,10 @@ covered 188 programs and their actual shared libraries.
 
 Admission is bounded to 256 resident programs and 512 MiB of wrapper-library
 files; these limits do not measure total host or device memory. Up to 512
-distinct compilation requests are attempted per process. Modules remain resident
+distinct compilation requests are attempted per process, independently of up to
+512 metadata-only collection requests. Deduplication includes the selected cache
+directory, so collection can be followed by compilation in the same process.
+Repeated enablement reuses the two runtime library handles. Modules remain resident
 until process exit so disabling the feature cannot unload code in use. There is
 no eviction. Capture, compilation or admission failure preserves the already
 computed FlagGems result. Failure records remain beside the artifact, with
@@ -227,6 +232,10 @@ zero FlagGems/Triton Python events on native hits, invalid guard domains,
 non-default streams, embedding flags, strided copies, overlapping destinations
 and fresh views with shared version counters. Admission unit tests require no
 PyTorch installation. The PR records exact lint, test and codegen-check output.
+The integration manifest runs both hardware test files in the default NVIDIA
+PR and nightly lanes, with a 53-pass minimum; the boxing lane does not select
+this compiler-specific group. Admission and lifecycle unit tests run in the
+shared CPU workflow without requiring PyTorch or an accelerator.
 
 ## Remaining work
 
