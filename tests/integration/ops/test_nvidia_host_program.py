@@ -21,18 +21,12 @@ from pathlib import Path
 import pytest
 import torch
 import torch_fl
-from torch_fl import _build_config, host_compiler
-from torch_fl._platform import detect_platform
+from torch_fl import host_compiler
 
 pytestmark = [
     pytest.mark.anyplatform,
-    pytest.mark.skipif(
-        detect_platform() != "cuda"
-        or torch.version.cuda is not None
-        or "boxing" in _build_config.KERNELS
-        or "flaggems" not in _build_config.KERNELS,
-        reason="NVIDIA native host compiler requires the CPU-Torch FlagGems build",
-    ),
+    pytest.mark.nvidia,
+    pytest.mark.host_compiler,
 ]
 
 

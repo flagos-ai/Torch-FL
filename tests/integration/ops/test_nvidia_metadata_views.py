@@ -20,14 +20,11 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-from torch_fl._platform import detect_platform
-
-
 # The repository's `cuda` mark requires boxing; this regression exercises the
 # default NVIDIA build, where there is deliberately no boxing kernel set.
 pytestmark = [
     pytest.mark.anyplatform,
-    pytest.mark.skipif(detect_platform() != "cuda", reason="NVIDIA metadata views"),
+    pytest.mark.nvidia,
 ]
 
 CASES = [
