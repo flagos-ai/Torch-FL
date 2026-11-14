@@ -16,7 +16,7 @@
 # torch is pinned to 2.10 to match the checked-in generated ATen bindings; the
 # same pin is applied to install_requires via TORCH_PIN in setup.py, where the
 # reasoning is spelled out.
-requires = ["setuptools>=45", "wheel", "cmake>=3.18", "torch>=2.10,<2.11"]
+requires = ["setuptools>=45", "wheel", "cmake>=3.18", "torch>=2.10,<2.11", "Cython==3.2.4"]
 build-backend = "setuptools.build_meta"
 
 [project]

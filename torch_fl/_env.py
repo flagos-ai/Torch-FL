@@ -329,6 +329,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "Compile the FlagGems Python kernel wrappers (calls into Python, no C++ "
         "linking). Set OFF for a runtime-only build with no FlagGems routes (bpu)",
     ),
+    "FLAGOS_BUILD_NATIVE_HOST": (
+        SCOPE_BUILD,
+        "OFF",
+        "Generate and compile FlagGems host source into the NVIDIA CPU-Torch "
+        "wheel. Experimental; requires FlagGems, Cython and the CUDA toolkit at "
+        "build time. Boxing, FlagGems C++ and TileOPs must be disabled",
+    ),
     "FLAGOS_BUILD_BOXING": (
         SCOPE_BUILD,
         "OFF",

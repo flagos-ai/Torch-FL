@@ -136,6 +136,25 @@ For device queries, synchronization, and multi-device usage patterns, see the [Q
 
 ### Experimental native FlagGems hosts
 
+To compile source-derived hosts into a NVIDIA CPU-Torch wheel, build with the
+published, pinned FlagGems/FlagTree wheels already installed:
+
+```bash
+FLAGOS_ACCELERATOR=nvidia FLAGOS_BUILD_NATIVE_HOST=1 \
+FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 \
+FLAGOS_BUILD_TILEOPS=0 FLAGOS_BUILD_BOXING=0 python setup.py bdist_wheel
+```
+
+This opt-in build uses Cython 3.2.4 and a CUDA toolkit. The generated hosts and
+the common launcher are installed with the wheel and activated on import.
+Models use ordinary eager inference under `torch.no_grad()`. Runtime misses
+compile the original FlagGems device kernels; they do not compile host C/C++.
+Kernel provenance is checked and CPU fallback is rejected. See the
+[build-time host design and validation](docs/design/flaggems-build-time-hosts.md)
+for the current H100 evidence, compatibility requirements and performance tradeoffs.
+
+The earlier capture-based experiment remains available on ordinary wheels:
+
 The NVIDIA CPU-Torch build can generate native host programs from the installed
 FlagGems implementations. The model remains ordinary eager Python:
 
