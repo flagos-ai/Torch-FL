@@ -379,7 +379,7 @@
       "bundle_libdir": "lib_hygon",
       "vendor_torch_libraries": true,
       "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
-      "wheel_local": "dtk2604",
+      "wheel_local": "dtk2610",
       "pypi_lane": "hygon",
       "use_macro": "USE_DCU",
       "writes_platform_marker": false,

@@ -137,6 +137,7 @@ def test_a_conf_is_still_named_for_its_platform_id():
         "csrc/aten/generated/register.inc",
         "csrc/runtime/generator.cc",
         ".github/scripts/set_env.sh",
+        ".github/scripts/seed_runtime.py",
         ".github/scripts/lib/set_env_common.sh",
         ".github/version-pins.env",
         "cmake/flagos_platforms.json",
@@ -150,6 +151,13 @@ def test_a_conf_is_still_named_for_its_platform_id():
 )
 def test_shared_or_unknown_code_runs_every_lane_even_with_vendor_changes(path):
     assert _run(files=f"torch_fl/accelerator/ascend/op.py\n{path}")[1] == LANES
+
+
+def test_runtime_seeding_change_selects_all_lanes():
+    """A shared runtime helper must not be owned by only its first consumers."""
+    result, selected = _run(files=".github/scripts/seed_runtime.py")
+    assert result.returncode == 0, result.stderr
+    assert selected == LANES
 
 
 def test_multiple_vendors_select_the_union():
@@ -215,6 +223,7 @@ def test_routing_labels_override_file_filters_without_duplicates(labels, expecte
     "files",
     [
         ".github/workflows/ci.yml",
+        ".github/scripts/seed_runtime.py",
         "unknown/runtime.cc",
         ".github/configs/mthreads.yml",
     ],

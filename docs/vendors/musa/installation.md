@@ -18,6 +18,57 @@ The MUSA toolkit provides:
 
 ## Installation
 
+### CI runtime image
+
+The MUSA lane selects the official `2.3.0` runtime, pinned to
+`sha256:1870e059f98d95465009f55db78d723cf77640b211ff1c5f1378d59b8e200c27`:
+
+```text
+harbor.baai.ac.cn/flagos-runtime/flagos-runtime-mthreads-musa5.2.0:2.3.0
+```
+
+The image provides MUSA 5.2.0, muDNN 3.4.0, Python 3.10, FlagTree
+`0.7.0+mthreads3.6`, and FlagGems `5.4.0`. Its muDNN image layer was inspected
+directly and contains the `mudnncxx/` C++ headers and native libraries. The
+setup hook still requires the muDNN and muRAND headers/libraries before any
+provisioning; missing assets are an error, not a reason to disable native ops.
+
+Official prerequisites name host driver `5.2.0-server`. The previous CI image
+reported `3.3.5-server` through `mthreads-gmi`; changing the image does not
+upgrade a host kernel driver. Driver/runtime compatibility, native linking,
+device discovery, and unchanged integration suites must pass on the actual
+runner before accepting this migration. Image metadata alone is insufficient.
+
+The runtime's vendor Torch `2.9.1+musa5.2.0` stays outside the build venv. CI
+continues to use published CPU Torch `2.10.0+cpu`. The runtime-specific helper
+creates a fresh job-owned venv, refuses paths overlapping the source Python or
+containing the checkout, and uses the image's `uv` if Python cannot seed pip.
+It does not install system packages with apt. GCC/G++, make, and the SDK remain
+image-provided. CMake's Python distribution is also required by the wheel
+frontend, so a system CMake executable alone does not satisfy provisioning.
+
+The same `seed_runtime.py` used by the other migrated lanes copies compatible
+RECORD-owned distributions into this venv, including matching FlagTree and
+FlagGems. It never exposes a whole runtime site-packages directory. Requirements
+in `.github/requirements-mthreads.txt` are checked before pip supplies gaps;
+SQLAlchemy uses the shared migrated-CI range `>=2.0.55,<2.0.58`, within FlagGems'
+dependency range, instead of forcing the old `2.0.48`. Existing integration-only
+BERT/transformers dependencies and optional Qwen tokenizer dependencies keep
+their existing stage/opt-in policy. Published FlagCX still depends on the vendor
+Torch extension, so this CI venv defers it until a compatible wheel is available.
+
+After SDK initialization, later shells retain `BASH_ENV=/dev/null`, an empty
+`PYTHONPATH`, and the CI venv first on PATH. FlagTree reuse validates its actual
+version, import origin, and MThreads backend directory. A final `pip check` and
+JSON environment inventory run before the existing native build. The shared
+eight-platform pip-cache selection/recovery is retained. This caches downloads, not
+venvs or Docker layers; a cold pull of the approximately 4.62 GB compressed
+image has a separate cost. CI always creates its own venv from the selected
+runtime interpreter; the old development-image/prebuilt-venv path is retired.
+
+No project-native sources, shared CMake definitions, compile stages, operator
+routes, or integration selections change as part of this migration.
+
 ### 1. Install CPU PyTorch
 
 ```bash

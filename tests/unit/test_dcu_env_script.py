@@ -22,8 +22,8 @@ exits 0 even when it skips every named package, so the loop never terminated.
 The job sat on that line with all output sent to ``/dev/null`` until the
 60-minute job timeout cancelled it.
 
-These checks are static on purpose: they must run on any host, without a DCU or
-a network.
+These checks use source inspection and a recording interpreter, without a DCU
+or a network.
 """
 
 import re
@@ -40,7 +40,9 @@ _SCRIPT_PATH = (
 _SCRIPT = _SCRIPT_PATH.read_text(encoding="utf-8")
 
 # A `while <condition>; do ... done` preamble, across continuation lines.
-_WHILE_RE = re.compile(r"\bwhile\b(?P<condition>.*?)\bdo\b", re.DOTALL)
+_WHILE_RE = re.compile(
+    r"^[ \t]*while[ \t]+(?P<condition>.*?)\bdo\b", re.MULTILINE | re.DOTALL
+)
 
 
 def _while_conditions(script: str) -> list[str]:
@@ -80,26 +82,42 @@ def test_no_while_loop_terminates_on_a_pip_command():
     )
 
 
-def test_triton_is_cleared_by_path_and_the_uninstall_is_bounded():
-    """The copied vendor triton ships no dist-info, so it is removed by path.
+@pytest.mark.parametrize("usable", [True, False])
+def test_flagtree_replacement_uninstalls_its_metadata_owner_once(tmp_path, usable):
+    import os
 
-    Without the path removal pip has nothing to act on and the flagtree install
-    leaves two Tritons in the venv; without the dist-info bound the uninstall
-    step is unbounded again.
-    """
-    assert 'rm -rf "$VENV_SITE/triton" "$VENV_SITE/triton_kernels"' in _SCRIPT
-    assert 'compgen -G "$VENV_SITE/triton-*.dist-info"' in _SCRIPT
-    assert 'compgen -G "$VENV_SITE/triton_kernels-*.dist-info"' in _SCRIPT
-
-
-def test_uninstall_is_retried_at_most_once_per_present_metadata():
-    """The loop body still runs pip, but only while metadata remains.
-
-    Guards against 'fixing' the hang by dropping the uninstall entirely: a
-    stale dist-info would then survive into the flagtree install.
-    """
-    body = _SCRIPT.split('while compgen -G "$VENV_SITE/triton-*.dist-info"', 1)
-    assert len(body) == 2, "dist-info bound not found"
-    loop = body[1].split("done", 1)[0]
-    assert "pip uninstall" in loop
-    assert "|| break" in loop
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == "-" ]]; then cat >/dev/null; exit "$USABLE_STATUS"; fi\n'
+        'printf "%s\\n" "$*" >> "$CALL_LOG"\n'
+    )
+    python.chmod(0o755)
+    log = tmp_path / "calls"
+    start = _SCRIPT.index('if "$VENV_PYTHON" - "$FLAGTREE_VERSION"')
+    end = _SCRIPT.index("\nHYGON_INDEX_URL=", start)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\ninstall_flagtree() { echo install >> "$CALL_LOG"; }\n'
+            + _SCRIPT[start:end],
+        ],
+        env={
+            **os.environ,
+            "VENV_PYTHON": str(python),
+            "USABLE_STATUS": "0" if usable else "1",
+            "FLAGTREE_VERSION": "0.7.0+hcu3.6",
+            "CALL_LOG": str(log),
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines() if log.exists() else []
+    assert calls == (
+        []
+        if usable
+        else ["-m pip uninstall -y flagtree triton triton_kernels", "install"]
+    )

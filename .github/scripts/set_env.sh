@@ -62,18 +62,22 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Keep pip downloads in the directory restored by the integration/build jobs.
-# /github/home may be unwritable inside vendor containers, while RUNNER_TEMP is
-# available to the job user. Later workflow steps need the same location.
-export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache}"
-mkdir -p "$PIP_CACHE_DIR"
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
-fi
-
-# Cache ordinary pip_retry downloads. Individual oversized wheel installs can
-# still opt out with an explicit --no-cache-dir.
-export PIP_RETRY_NO_CACHE=0
+# The runtime-migration lanes share cache selection and failure fallback.
+# Other platform hooks retain their existing cache policy.
+case "$PLATFORM" in
+  hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
+    source "$REPO_ROOT/.github/scripts/lib/pip_cache.sh"
+    prepare_pip_cache "$PLATFORM"
+    ;;
+  *)
+    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/pip-cache}"
+    mkdir -p "$PIP_CACHE_DIR"
+    if [[ -n "${GITHUB_ENV:-}" ]]; then
+      printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"
+    fi
+    export PIP_RETRY_NO_CACHE=0
+    ;;
+esac
 
 # Shared version pins (torch, FlagTree, FlagGems); see .github/version-pins.env.
 # shellcheck source=.github/version-pins.env
@@ -93,6 +97,14 @@ source "${REPO_ROOT}/.github/scripts/lib/set_env_common.sh"
 # pip constraints for the provisioning venvs: the transitive pulls the pin table
 # cannot reach. Exported so every pip install in the platform hook honours it.
 export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints.txt"
+case "$PLATFORM" in
+  hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
+    export PIP_CONSTRAINT="${REPO_ROOT}/.github/constraints-runtime-ci.txt"
+    if [[ -n "${GITHUB_ENV:-}" ]]; then
+      printf 'PIP_CONSTRAINT=%s\n' "$PIP_CONSTRAINT" >> "$GITHUB_ENV"
+    fi
+    ;;
+esac
 
 HOOK="${REPO_ROOT}/.github/scripts/hooks/set_env_${PLATFORM}.sh"
 if [[ ! -f "$HOOK" ]]; then

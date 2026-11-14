@@ -29,7 +29,6 @@ FLAGTREE_PYTHON_VERSION="${TORCH_FL_FLAGTREE_PYTHON_VERSION:-$FLAGTREE_PYTHON_VE
 FLAGTREE_MIN_GLIBC="${TORCH_FL_FLAGTREE_MIN_GLIBC:-$FLAGTREE_MIN_GLIBC_DEFAULT}"
 FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-nvidia/simple}"
-FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_cuda}"
 
 # Where the accelerator-side PyTorch comes from. A FlagOS-built image already
 # carries one (`image`); the stock NVIDIA CUDA image does not, so `bootstrap`
@@ -44,8 +43,8 @@ FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_cuda}"
 # multi-GB `torch+cu130` wheel for a path that was never read, and that download
 # is what failed the lane while download.pytorch.org answered 503 through the
 # runner proxy (PR #712, #705). Resolve an image-provided accelerator torch when
-# the image has one -- its site-packages still supplies the flagcx package and
-# the FlagGems C++ route below -- but never install one on the vendor lane.
+# the image has one -- it can supply the FlagGems C++ route below -- but never
+# install one on the vendor lane.
 VENDOR_MODE="${TORCH_FL_CUDA_VENDOR_MODE:-auto}"
 VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-$VENDOR_TORCH_INDEX_URL_cuda}"
 
@@ -183,9 +182,8 @@ bootstrap_vendor_python() {
 
 # Reads the accelerator torch's version, CUDA runtime and site-packages out of
 # $VENDOR_PYTHON, so the boxing gate stages a version-matched libtorch_cuda.so
-# and the flagcx copy below finds the image's package. Only called when a
-# VENDOR_SOURCE actually resolved one; the vendor lane installs no accelerator
-# torch and reads none of these.
+# from the image. Only called when VENDOR_SOURCE resolved an interpreter;
+# the vendor lane installs no accelerator torch and reads none of these.
 resolve_vendor_torch() {
   if [[ ! -x "$VENDOR_PYTHON" ]]; then
     echo "::error::The accelerator interpreter resolved to '$VENDOR_PYTHON', which is not an executable file"
@@ -281,8 +279,7 @@ fi
 echo "Accelerator PyTorch source: $VENDOR_SOURCE ($VENDOR_PYTHON)"
 # The vendor lane resolves no accelerator torch, so the probe below is skipped
 # there rather than pointed at an empty path. Everything it fills in is read
-# only by the boxing gate and by the flagcx copy, which has nothing to copy when
-# the image carries no accelerator torch.
+# only by the boxing gate and the native FlagGems route.
 VENDOR_TORCH_VERSION=""
 VENDOR_TORCH_BASE_VERSION=""
 VENDOR_CUDA_VERSION=""
@@ -469,29 +466,10 @@ echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
 
 install_flagtree
 
-# CUDA functional CI does not exercise FlagCX collectives. Keep the native
-# plugin out of the isolated environment unless communication is requested.
-export FLAGCX_TORCH_BACKEND="${FLAGCX_TORCH_BACKEND:-vendor}"
-if [[ "${TORCH_FL_CUDA_FLAGCX_WHEEL:-0}" == "1" ]]; then
-  if [[ "${CUDA_VERSION:-}" != 13.3.* ]]; then
-    echo "::error::CUDA FlagCX requires a verified CUDA 13.3 toolkit/driver environment" >&2
-    exit 1
-  fi
-  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --no-deps --only-binary=:all: \
-    --index-url "$FLAGGEMS_INDEX_URL" "flagcx===$FLAGCX_VERSION"
-  export FLAGCX_TORCH_BACKEND=flagos
-  # The wheel build runs in a separate step without an importable torch_fl;
-  # keep FlagCX auto-loading off across steps and import it on demand for comm.
-  export TORCH_DEVICE_BACKEND_AUTOLOAD=0
-else
-  # FlagTree 0.7.0rc2 probes its TLE distributed runtime while FlagGems is
-  # imported. That probe can find a libflagcx.so even when no flagcx Python
-  # package was installed here. The library it finds needs
-  # libcudart.so.12, whereas this job uses CUDA 13.0; disable only TLE's
-  # optional distributed loader until a toolkit-matched FlagCX wheel is used.
-  export USE_TLE_DIST=0
-  echo "::notice::CUDA functional scope: FlagCX communication is not validated"
-fi
+# FlagCX is deferred across CI. FlagTree can find a system libflagcx.so
+# even without the Python package, so disable its optional distributed loader.
+export USE_TLE_DIST=0
+echo "::notice::CI scope: FlagCX communication is deferred"
 
 # Install the published FlagGems wheel after FlagTree. --no-deps keeps the
 # CPU-only torch ABI intact; install its non-torch dependencies explicitly.
@@ -542,7 +520,6 @@ fi
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}"
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
-export FLAGCX_PATH="${FLAGCX_PATH:-/opt/FlagCX}"
 export FLAGTREE_VERSION
 export GEMS_VENDOR="${GEMS_VENDOR:-nvidia}"
 # Keep the CUDA FlagTune workaround until the new FlagTree wheel has passed an
@@ -687,7 +664,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   : "${FLAGOS_DISABLE_CUDA_ASSETS:=}"
   : "${FLAGOS_VENDOR_TORCH_LIB:=}"
   : "${TORCH_FL_VENDOR_TORCH_VERSION:=}"
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG FLAGOS_CUDA_ASSETS_DIR FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGGEMS_DIR FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG FLAGOS_CUDA_ASSETS_DIR FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi

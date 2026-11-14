@@ -62,9 +62,20 @@ Hardware identity is retained with the test artifacts for diagnosis. An unknown
 SDK label alone does not reject functional tests. The existing platform
 preflight still checks the actual device and runtime requirements.
 
-CUDA functional CI keeps FlagCX communication optional through `cuda-comm`.
-It does not run a global `pip check` or claim collective-communication support.
-Other platforms retain their existing dependency setup.
+FlagCX installation and runtime-package reuse are deferred across all CI
+platforms, including CUDA's former optional installation path. Functional CI
+therefore does not establish FlagCX collective-communication support. Published
+wheel requirements and the `cuda-comm` release extra remain unchanged.
+
+The migrated runtime lanes retain raw `pip check` and installed-wheel preflight
+results in their final environment snapshots. Only the missing FlagCX dependency
+of Torch-FL is marked as deferred, and only when FlagCX was absent at build time
+and remains absent in the test venv. Other missing packages, version conflicts,
+preflight failures and an unexpectedly installed FlagCX still fail the gate.
+A snapshot with a deferred dependency records `valid=false` while allowing the
+remaining functional tests to run through `ready_for_tests=true`. CUDA retains
+its existing dependency checks and disables FlagTree's optional distributed
+loader; no FlagCX import or communication check is scheduled.
 
 Release publication continues through the existing wheel-build and publishing
 workflows, with platform names and boxing-mode propagation kept consistent with

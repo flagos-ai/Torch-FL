@@ -44,6 +44,7 @@ def run_shell(body, *, cwd=None, **environment):
         "PYTHONPATH": "",
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
+        "REPO_ROOT": str(REPO_ROOT),
     }
     env.update(environment)
     return subprocess.run(
@@ -99,8 +100,8 @@ def test_build_tools_require_real_imports(
     site = next((root / "lib").glob("python*/site-packages"))
     fake_build_tools(site, editable=editable, frontend=frontend)
     result = run_shell(
-        shell_function("musa_validate_build_tools")
-        + '\nmusa_validate_build_tools\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
+        shell_function("validate_runtime_build_tools", COMMON)
+        + '\nvalidate_runtime_build_tools\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
         # Do not import the checkout's build/ directory as a namespace package.
         cwd=tmp_path,
         VENV_PYTHON=str(root / "bin/python"),
@@ -115,84 +116,11 @@ def test_build_tools_require_real_imports(
         assert "ModuleNotFoundError" in result.stderr
 
 
-@pytest.mark.parametrize(
-    "mode",
-    [
-        "default",
-        "override",
-        "relative_override",
-        "repo_fallback",
-        "disabled",
-        "blocked",
-    ],
-)
-def test_pip_cache_is_created_in_a_writable_location(tmp_path, mode):
-    custom = tmp_path / "custom cache"
-    if mode == "blocked":
-        custom.touch()
-    result = run_shell(
-        'cd "$CACHE_BASE"\n'
-        + shell_function("musa_prepare_pip_cache")
-        + '\nmusa_prepare_pip_cache\necho "CACHE=${PIP_CACHE_DIR:-}"',
-        CACHE_BASE=str(tmp_path),
-        RUNNER_TEMP="" if mode == "repo_fallback" else str(tmp_path / "job"),
-        REPO_ROOT=str(tmp_path / "repo"),
-        PIP_CACHE_DIR=(
-            "custom cache"
-            if mode == "relative_override"
-            else str(custom)
-            if mode in ("override", "blocked")
-            else ""
-        ),
-        PIP_RETRY_NO_CACHE="1" if mode == "disabled" else "0",
-    )
-    if mode == "blocked":
-        assert result.returncode != 0
-        assert "MUSA pip cache must be writable" in result.stderr
-        return
-    assert result.returncode == 0, result.stderr
-    if mode == "disabled":
-        assert "CACHE=\n" in result.stdout
-        assert not (tmp_path / "job").exists()
-        return
-    expected = {
-        "default": tmp_path / "job/pip-cache/musa",
-        "override": custom,
-        "relative_override": custom,
-        "repo_fallback": tmp_path / "repo/.ci/pip-cache/musa",
-    }[mode]
-    assert f"CACHE={expected}" in result.stdout
-    assert expected.is_dir()
-    assert expected.stat().st_uid == os.geteuid()
-    assert os.access(expected, os.W_OK)
-
-
-def test_pip_cache_does_not_require_ownership(tmp_path):
-    """A runner-prepared cache dir may belong to another user (#786).
-
-    Since the pip downloads moved onto the runner instead of a managed cache
-    entry, the directory the workflow hands over at ``/__w/.pip-cache/<platform>``
-    is prepared by the runner and can be owned by a user this job is not. The
-    job only needs to write there, not to own it: requiring ``-O`` failed the
-    MUSA environment step before the build started on every run whose
-    persistent cache was reused.
-    """
-    function = shell_function("musa_prepare_pip_cache")
-    assert '[[ ! -O "$cache_dir"' not in function
-    assert '[[ ! -w "$cache_dir" ]]' in function
-
-    shared = tmp_path / "shared cache"
-    shared.mkdir()
-    result = run_shell(
-        shell_function("musa_prepare_pip_cache")
-        + '\nmusa_prepare_pip_cache\necho "CACHE=${PIP_CACHE_DIR:-}"',
-        RUNNER_TEMP=str(tmp_path / "job"),
-        REPO_ROOT=str(tmp_path / "repo"),
-        PIP_CACHE_DIR=str(shared),
-        PIP_RETRY_NO_CACHE="0",
-    )
-    assert result.returncode == 0, result.stderr
-    assert f"CACHE={shared}" in result.stdout
+def test_musa_uses_the_entrypoint_cache_policy():
+    assert "musa_prepare_pip_cache" not in SCRIPT
+    runner = (REPO_ROOT / ".github/scripts/set_env.sh").read_text()
+    assert 'prepare_pip_cache "$PLATFORM"' in runner
+    assert "ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)" in runner
 
 
 def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
@@ -206,6 +134,7 @@ def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
         "LD_LIBRARY_PATH"
     ).split()
     environment = {name: "" for name in names if name != "PATH"}
+    environment.update(BASH_ENV="/dev/null", FLAGOS_SDK_VERSION="5.2.0")
     github_env = tmp_path / "github-env"
     cache = tmp_path / "cache"
     result = run_shell(
@@ -256,8 +185,8 @@ def test_venv_reuse_requires_isolation(tmp_path, condition, usable):
     result = run_shell(
         shell_function("venv_is_usable", COMMON)
         + "\n"
-        + shell_function("musa_venv_is_isolated")
-        + "\nmusa_venv_is_isolated",
+        + shell_function("runtime_venv_is_isolated", COMMON)
+        + "\nruntime_venv_is_isolated torch_musa",
         VENV_ROOT=str(root),
         VENV_PYTHON=str(root / "bin/python"),
     )
@@ -356,18 +285,17 @@ def test_flaggems_rejects_an_unusable_installed_wheel(tmp_path):
 
 @pytest.mark.parametrize("qwen", ["0", "1"])
 def test_integration_keeps_bert_and_gates_tokenizer_deps(qwen):
-    # Execute the dependency block with an offline recording pip helper.
-    start = SCRIPT.index('if [[ "$CI_STAGE" == "integration" ]]; then')
-    end = SCRIPT.index("\nexport VIRTUAL_ENV=", start)
+    block = shell_function("prepare_musa_environment")
+    start = block.index('  if [[ "$CI_STAGE" == integration ]]; then')
+    end = block.index("  export FLAGOS_SDK_VERSION", start)
     result = run_shell(
-        'pip_retry() { printf "%s\\n" "$@"; }\n' + SCRIPT[start:end],
+        'ensure_runtime_requirement() { printf "%s\\n" "$@"; }\n' + block[start:end],
         CI_STAGE="integration",
         PIP_INDEX_URL_ARG="https://example.invalid/simple",
         TORCH_FL_INSTALL_QWEN_DEPS=qwen,
     )
     assert result.returncode == 0, result.stderr
     assert "transformers>=4.51,<5" in result.stdout
-    assert "PyYAML==6.0.1" in result.stdout
     for package in ("sentencepiece", "tiktoken", "protobuf"):
         assert (package in result.stdout) == (qwen == "1")
 
@@ -389,8 +317,8 @@ def test_cpu_torch_probe_requires_the_pinned_cpu_build(tmp_path, version, cuda, 
         f"class version: cuda = {cuda!r}\n"
     )
     result = run_shell(
-        shell_function("musa_cpu_torch_is_usable")
-        + '\nmusa_cpu_torch_is_usable\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
+        shell_function("runtime_cpu_torch_is_usable", COMMON)
+        + '\nruntime_cpu_torch_is_usable\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
         VENV_PYTHON=sys.executable,
         CPU_TORCH_VERSION="2.10.0",
         PYTHONPATH=str(tmp_path),
@@ -426,120 +354,265 @@ def test_shared_pip_retry_honors_musa_cache_setting(tmp_path, cache):
     assert ("--no-cache-dir" in result.stdout) == (cache == "1")
 
 
+def run_runtime_hook(
+    tmp_path, *, prepared=True, fail="", stage="integration", target="ci"
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".github").symlink_to(REPO_ROOT / ".github", target_is_directory=True)
+    image = tmp_path / "image"
+    image.mkdir()
+    sdk = tmp_path / "sdk"
+    for asset in (
+        "include/mudnncxx/mudnn.h",
+        "include/murand.h",
+        "lib/libmudnn.so",
+        "lib/libmurand.so",
+    ):
+        path = sdk / asset
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    ci = tmp_path / "ci-python"
+    ci.write_text(r"""#!/bin/bash
+printf 'python %s\n' "$*" >> "$CALL_LOG"
+if [[ "$*" == *--check-installed* ]]; then
+  [[ "$PREPARED" == 1 ]] || grep -Fxq -- "$3" "$INSTALLED" 2>/dev/null
+  exit $?
+fi
+if [[ "$1 $2" == '-m pip' ]]; then
+  [[ "$3" != check || "$FAIL_PHASE" != check ]]; exit $?
+fi
+if [[ "$1" == '-c' ]]; then
+  [[ "$2" != 'import torch_fl._C' ]]; exit $?
+fi
+if [[ "$1" == '-' ]]; then
+  input="$(cat)"
+  if [[ "$input" == *'expected = sys.argv[1]'* ]]; then
+    [[ "$PREPARED" == 1 || -f "$CPU_READY" ]]; exit $?
+  fi
+  if [[ "$input" == *'metadata.distribution("flagtree")'* ]]; then
+    [[ "$PREPARED" == 1 && "$FAIL_PHASE" != backend ]]; exit $?
+  fi
+fi
+if [[ $# == 0 ]]; then echo ci-python; fi
+""")
+    ci.chmod(0o755)
+    vendor = image / "python3.10"
+    vendor.write_text(r"""#!/bin/bash
+set -e
+printf 'vendor %s\n' "$*" >> "$CALL_LOG"
+if [[ "$1 $2" == '-I -c' ]]; then [[ "$FAIL_PHASE" != python ]]; exit $?; fi
+if [[ "$1 $2" == '-I -' ]]; then
+  exec "$REAL_PYTHON" -I -c 'import os,sys; sys.prefix=os.environ["IMAGE_PREFIX"]; sys.base_prefix=sys.prefix; exec(sys.stdin.read())' "$3" "$4"
+fi
+if [[ "$1 $2" == '-m venv' ]]; then
+  [[ "$FAIL_PHASE" != venv && "$FAIL_PHASE" != uv ]] || exit 1
+  mkdir -p "$4/bin"; cp "$CI_PYTHON" "$4/bin/python"; exit 0
+fi
+if [[ "$*" == *seed_runtime.py* ]]; then [[ "$FAIL_PHASE" != seed ]]; exit $?; fi
+exit 2
+""")
+    vendor.chmod(0o755)
+    uv = image / "uv"
+    uv.write_text(r"""#!/bin/bash
+printf 'uv %s\n' "$*" >> "$CALL_LOG"
+[[ "$FAIL_PHASE" != uv ]] || exit 1
+target="${@: -1}"
+mkdir -p "$target/bin"; cp "$CI_PYTHON" "$target/bin/python"
+""")
+    uv.chmod(0o755)
+    apt = image / "apt-get"
+    apt.write_text('#!/bin/sh\necho forbidden-apt >> "$CALL_LOG"\nexit 1\n')
+    apt.chmod(0o755)
+    gmi = image / "mthreads-gmi"
+    gmi.write_text('#!/bin/sh\necho gmi >> "$CALL_LOG"\n')
+    gmi.chmod(0o755)
+    startup = tmp_path / "startup"
+    startup.write_text('echo startup >> "$CALL_LOG"\nexport PYTHONPATH=/opt/flagtree\n')
+    calls = tmp_path / "calls"
+    env_file = tmp_path / "github-env"
+    path_file = tmp_path / "github-path"
+    env = dict(
+        os.environ,
+        PATH=f"{image}:/usr/bin:/bin",
+        BASH_ENV=str(startup),
+        REAL_PYTHON=sys.executable,
+        IMAGE_PREFIX=str(image),
+        TORCH_FL_VENDOR_PYTHON=str(vendor),
+        TORCH_FL_VENV_ROOT=str(tmp_path / target),
+        MUSA_HOME=str(sdk),
+        REPO_ROOT=str(repo),
+        CI_STAGE=stage,
+        GITHUB_ENV=str(env_file),
+        GITHUB_PATH=str(path_file),
+        CALL_LOG=str(calls),
+        CI_PYTHON=str(ci),
+        CPU_READY=str(tmp_path / "cpu-ready"),
+        INSTALLED=str(tmp_path / "installed"),
+        PREPARED="1" if prepared else "0",
+        FAIL_PHASE=fail,
+        PIP_CACHE_DIR=str(tmp_path / "cache"),
+        PIP_RETRY_NO_CACHE="0",
+        PIP_CONSTRAINT=str(REPO_ROOT / ".github/constraints.txt"),
+    )
+    if fail == "sdk":
+        (sdk / "include/mudnncxx/mudnn.h").unlink()
+    script = r"""
+set -euo pipefail
+source "$REPO_ROOT/.github/version-pins.env"
+source "$REPO_ROOT/.github/scripts/lib/set_env_common.sh"
+venv_is_usable() { [[ "$FAIL_PHASE" != isolated ]]; }
+install_cpu_torch() { echo cpu-torch >> "$CALL_LOG"; touch "$CPU_READY"; [[ "$FAIL_PHASE" != cpu ]]; }
+install_flagtree() { echo flagtree >> "$CALL_LOG"; [[ "$FAIL_PHASE" != flagtree ]]; }
+install_flag_gems() { echo flag-gems >> "$CALL_LOG"; [[ "$FAIL_PHASE" != gems ]]; }
+pip_retry() {
+  printf 'pip %s\n' "$*" >> "$CALL_LOG"
+  [[ "$FAIL_PHASE" != pip ]] || return 1
+  [[ "$FAIL_PHASE" == ineffective-pip ]] || printf '%s\n' "${@: -1}" >> "$INSTALLED"
+}
+build_flagos_inplace() { echo native-build >> "$CALL_LOG"; }
+ls() { if [[ "$1" == /dev/mtgpu* ]]; then return 0; fi; command ls "$@"; }
+source "$REPO_ROOT/.github/scripts/hooks/set_env_mthreads.sh"
+"""
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return result, calls.read_text().splitlines(), env_file, path_file, env
+
+
+@pytest.mark.parametrize("stage", ["build", "integration"])
+def test_runtime_image_reuses_packages_and_keeps_next_shell_isolated(tmp_path, stage):
+    done, calls, env_file, path_file, env = run_runtime_hook(tmp_path, stage=stage)
+    assert done.returncode == 0, done.stderr
+    assert calls.count("native-build") == 1
+    assert "flagtree" not in calls and "cpu-torch" not in calls
+    assert not any(row.startswith("pip ") for row in calls)
+    assert "forbidden-apt" not in calls
+    assert not any("--flagcx-version" in row for row in calls)
+    rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
+    assert rows["BASH_ENV"] == "/dev/null"
+    assert rows["PYTHONPATH"] == ""
+    assert rows["FLAGOS_SDK_VERSION"] == "5.2.0"
+    assert rows["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
+    assert any("--report-environment" in row for row in calls)
+    result = subprocess.run(
+        ["bash", "-c", "python"],
+        env={**env, **rows, "PATH": path_file.read_text().strip() + ":" + rows["PATH"]},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "ci-python"
+    assert Path(env["CALL_LOG"]).read_text().splitlines().count("startup") == 1
+
+
+@pytest.mark.parametrize("stage", ["build", "integration"])
+def test_runtime_image_installs_only_missing_python_requirements(tmp_path, stage):
+    done, calls, *_ = run_runtime_hook(tmp_path, prepared=False, stage=stage)
+    assert done.returncode == 0, done.stderr
+    assert "cpu-torch" in calls and "flagtree" in calls
+    assert any(
+        row.endswith("cmake>=3.19,<4") and row.startswith("pip ") for row in calls
+    )
+    assert any(row.endswith("sqlalchemy") and row.startswith("pip ") for row in calls)
+    assert any("transformers>=4.51,<5" in row for row in calls) == (
+        stage == "integration"
+    )
+    assert next(
+        i
+        for i, row in enumerate(calls)
+        if row.startswith("pip ") and row.endswith("pip>=23.2")
+    ) < calls.index("cpu-torch")
+    assert "forbidden-apt" not in calls
+
+
 @pytest.mark.parametrize(
-    "scenario",
+    "fail",
     [
-        "fresh",
-        "reused",
-        "prebuilt",
-        "invalid_local",
-        "invalid_prebuilt",
-        "stale_prebuilt",
-        "noncpu_prebuilt",
+        "sdk",
+        "python",
+        "seed",
+        "isolated",
+        "uv",
+        "pip",
+        "ineffective-pip",
+        "cpu",
+        "gems",
+        "check",
+        "flagtree",
     ],
 )
-@pytest.mark.parametrize("stage", ["build", "integration"])
-def test_isolated_setup_reconciles_existing_and_fresh_environments(
-    tmp_path, scenario, stage
-):
-    # Run the complete Python setup section, but replace package installs and
-    # bootstrap creation with offline stubs. Real venvs still test isolation.
-    root = tmp_path / "venv"
-    marker = root / "keep-existing-environment"
-    if scenario != "fresh":
-        subprocess.run(
-            [sys.executable, "-m", "venv", "--without-pip", str(root)], check=True
-        )
-        marker.touch()
-        site = next((root / "lib").glob("python*/site-packages"))
-        (site / "pip.py").touch()
-        torch_version = {
-            "stale_prebuilt": "2.9.1+cpu",
-            "noncpu_prebuilt": "2.10.0",
-        }.get(scenario, "2.10.0+cpu")
-        (site / "torch.py").write_text(
-            "import os\n"
-            "assert os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] == '0'\n"
-            f"__version__ = {torch_version!r}\n"
-            "class version: cuda = None\n"
-        )
-        if scenario.startswith("invalid"):
-            config = root / "pyvenv.cfg"
-            config.write_text(config.read_text().replace("= false", "= true"))
+def test_invalid_runtime_or_failed_install_stops_before_native_build(tmp_path, fail):
+    done, calls, *_ = run_runtime_hook(tmp_path, prepared=False, fail=fail)
+    assert done.returncode != 0
+    assert "native-build" not in calls
+    assert "forbidden-apt" not in calls
 
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.write_text(
-        "#!/bin/bash\nset -euo pipefail\n"
-        'if [[ "$1" == "-m" && "$2" == "venv" ]]; then\n'
-        '  "$REAL_PYTHON" -m venv --without-pip "${@:3}"\n'
-        '  "$REAL_PYTHON" - "${!#}" <<\'PY\'\n'
-        "import sys\nfrom pathlib import Path\n"
-        'site = next((Path(sys.argv[1]) / "lib").glob("python*/site-packages"))\n'
-        '(site / "pip.py").touch()\n'
-        "PY\n"
-        'else\n  exec "$REAL_PYTHON" "$@"\nfi\n'
+
+def test_runtime_image_uses_uv_if_the_venv_module_cannot_seed_pip(tmp_path):
+    done, calls, *_ = run_runtime_hook(tmp_path, fail="venv")
+    assert done.returncode == 0, done.stderr
+    assert any(row.startswith("uv venv --clear --seed --python ") for row in calls)
+    assert "forbidden-apt" not in calls
+
+
+@pytest.mark.parametrize("target", ["image", "image/subdir", ".", "repo"])
+def test_runtime_venv_override_cannot_clear_the_image_or_checkout(tmp_path, target):
+    done, calls, *_ = run_runtime_hook(tmp_path, target=target)
+    assert done.returncode != 0
+    assert not any("-m venv" in row for row in calls)
+    assert "native-build" not in calls
+
+
+@pytest.mark.parametrize(
+    "state", ["local", "wrong-version", "shadowed", "no-mthreads", "external"]
+)
+def test_runtime_compiler_reuse_requires_local_matching_provider(tmp_path, state):
+    prefix = tmp_path / "ci"
+    site = prefix / "site-packages"
+    site.mkdir(parents=True)
+    provider = site if state != "external" else tmp_path / "external"
+    compiler = provider / "triton"
+    (compiler / "backends/mthreads").mkdir(parents=True)
+    (compiler / "__init__.py").touch()
+    info = provider / "flagtree-0.7.0.dist-info"
+    info.mkdir()
+    version = "0.6.1+mthreads3.6" if state == "wrong-version" else "0.7.0+mthreads3.6"
+    (info / "METADATA").write_text(f"Name: flagtree\nVersion: {version}\n")
+    if state == "no-mthreads":
+        (compiler / "backends/mthreads").rmdir()
+    paths = [str(provider)]
+    if state == "shadowed":
+        shadow = tmp_path / "shadow"
+        (shadow / "triton").mkdir(parents=True)
+        (shadow / "triton/__init__.py").touch()
+        paths.insert(0, str(shadow))
+    probe = (
+        COMMON.split("runtime_flagtree_is_usable() {", 1)[1]
+        .split("<<'PY'\n", 1)[1]
+        .split("\nPY", 1)[0]
     )
-    bootstrap.chmod(0o755)
-    build_tools = tmp_path / "build-tools"
-    fake_build_tools(build_tools)
-    # Fail rather than touching the host if the setup unexpectedly calls apt.
-    apt = tmp_path / "apt-get"
-    apt.write_text("#!/bin/bash\necho UNEXPECTED_APT >&2\nexit 1\n")
-    apt.chmod(0o755)
-    start = SCRIPT.index("# --- Isolated Python")
-    end = SCRIPT.index("\nexport VIRTUAL_ENV=", start)
-    prebuilt = scenario.endswith("prebuilt")
-    result = run_shell(
-        f'source "{COMMON_PATH}"\n'
-        "pip_retry() {\n"
-        '  printf "PIP %s\\n" "$*"\n'
-        '  if [[ "$*" == *"setuptools>="* ]]; then\n'
-        '    cp -a "$STUB_BUILD_TOOLS/." "$STUB_VENV_SITE/"\n'
-        "  fi\n"
-        "}\n"
-        'install_cpu_torch() { echo "CPU_TORCH_INSTALL $CPU_TORCH_VERSION"; }\n'
-        + SCRIPT[start:end]
-        + '\necho "AUTOLOAD=$TORCH_DEVICE_BACKEND_AUTOLOAD"',
-        REAL_PYTHON=sys.executable,
-        STUB_BUILD_TOOLS=str(build_tools),
-        STUB_VENV_SITE=str(
-            root
-            / "lib"
-            / f"python{sys.version_info.major}.{sys.version_info.minor}"
-            / "site-packages"
-        ),
-        TORCH_FL_BOOTSTRAP_PYTHON=str(bootstrap),
-        TORCH_FL_PREBUILT_MUSA_VENV=str(root if prebuilt else tmp_path / "absent"),
-        TORCH_FL_VENV_ROOT="" if prebuilt else str(root),
-        REPO_ROOT=str(REPO_ROOT),
-        RUNNER_TEMP=str(tmp_path / "job"),
-        PIP_CACHE_DIR="",
-        PIP_RETRY_NO_CACHE="0",
-        CI_STAGE=stage,
-        CPU_TORCH_VERSION="2.10.0",
-        PIP_INDEX_URL_ARG="https://example.invalid/simple",
-        TORCH_FL_INSTALL_QWEN_DEPS="0",
-        TORCH_DEVICE_BACKEND_AUTOLOAD="1",
-        PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
-        PYTHONPATH=str(tmp_path / "inherited-vendor-python-path"),
+    code = f"import sys; sys.prefix={str(prefix)!r}; sys.path[:0]={paths!r}\n" + probe
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code, "0.7.0+mthreads3.6", "mthreads", ""],
+        capture_output=True,
+        text=True,
     )
-    if scenario == "invalid_prebuilt":
-        assert result.returncode != 0
-        assert "Prebuilt MUSA venv is not isolated" in result.stderr
-        assert "PIP " not in result.stdout
-        assert marker.exists()
-        return
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert marker.exists() == (scenario in ("reused", "prebuilt") or prebuilt)
-    assert "--upgrade" not in result.stdout
-    assert "ninja build" in result.stdout
-    assert "setuptools>=64" in result.stdout
-    assert "editable_wheel available" in result.stdout
-    assert f"MUSA pip cache: {tmp_path / 'job/pip-cache/musa'}" in result.stdout
-    assert ("transformers>=4.51,<5" in result.stdout) == (stage == "integration")
-    assert ("CPU_TORCH_INSTALL" in result.stdout) == (
-        scenario in ("fresh", "invalid_local", "stale_prebuilt", "noncpu_prebuilt")
+    assert (done.returncode == 0) == (state == "local"), done.stderr
+
+
+def test_musa_selects_the_verified_runtime_without_changing_the_build_contract():
+    import yaml
+
+    config = yaml.safe_load((REPO_ROOT / ".github/configs/mthreads.yml").read_text())
+    assert config["ci_image"].endswith(
+        ":2.3.0@sha256:1870e059f98d95465009f55db78d723cf77640b211ff1c5f1378d59b8e200c27"
     )
-    if "CPU_TORCH_INSTALL" in result.stdout:
-        assert "CPU_TORCH_INSTALL 2.10.0+cpu" in result.stdout
-    assert "AUTOLOAD=1" in result.stdout
+    assert config["setup_platform"] == "mthreads"
+    assert config["runner_labels"] == ["mt-8g-cicd-pytorch"]
+    assert SCRIPT.count("\nbuild_flagos_inplace\n") == 1
+    assert "seed_runtime.py" in SCRIPT
+    assert "apt-get" not in SCRIPT

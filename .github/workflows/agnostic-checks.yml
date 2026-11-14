@@ -104,12 +104,14 @@ jobs:
           set -euo pipefail
           tests=(
             tests/unit/test_ai_reviewer.py
+            tests/unit/test_ascend_env_script.py
             tests/unit/test_backend_autoload_contract.py
             tests/unit/test_backend_enum_naming.py
             tests/unit/test_backend_key_vendor_naming.py
             tests/unit/test_case_gap_issues.py
             tests/unit/test_ci_fail_fast.py
             tests/unit/test_ci_functional_profiles.py
+            tests/unit/test_ci_local_pip_cache.py
             tests/unit/test_ci_pip_cache.py
             tests/unit/test_ci_platform_routing.py
             tests/unit/test_ci_matrix.py
@@ -126,14 +128,16 @@ jobs:
             tests/unit/test_device_tracer_selection.py
             tests/unit/test_dtype_cast_arm_contract.py
             tests/unit/test_env_registry.py
+            tests/unit/test_enflame_env_script.py
             tests/unit/test_gen_vendor_confs.py
             tests/unit/test_host_program_admission.py
             tests/unit/test_import_phase_order.py
             tests/unit/test_iluvatar_env_script.py
-            tests/unit/test_iluvatar_cpu_runtime.py
             tests/unit/test_integration_manifest.py
             tests/unit/test_integration_source_contract.py
             tests/unit/test_integration_workdir.py
+            tests/unit/test_kunlunxin_env_script.py
+            tests/unit/test_metax_env_script.py
             tests/unit/test_mps_collection_without_numpy.py
             tests/unit/test_musa_ci_manifest.py
             tests/unit/test_musa_env_script.py
@@ -141,12 +145,15 @@ jobs:
             tests/unit/test_patch_triton_ascend.py
             tests/unit/test_platform_capability_matrix.py
             tests/unit/test_platform_detect.py
+            tests/unit/test_platform_environment.py
             tests/unit/test_platform_support_detect.py
             tests/unit/test_platform_vendor_naming.py
+            tests/unit/test_ppu_env_script.py
             tests/unit/test_profiler_capabilities.py
             tests/unit/test_run_integration_tests.py
             tests/unit/test_run_unit_tests.py
             tests/unit/test_route_log_name_tables.py
+            tests/unit/test_seed_runtime.py
             tests/unit/test_set_env_common.py
             tests/unit/test_set_env_runner.py
             tests/unit/test_startup_lifecycle.py

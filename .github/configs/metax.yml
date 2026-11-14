@@ -17,7 +17,9 @@ display_name: MetaX
 setup_script: .github/scripts/set_env.sh
 setup_platform: metax
 
-ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-dev
+# Official MACA 3.8.1.3 runtime 2.3.0 (OCI index with an amd64 image).
+# The host driver is independent of the container; the release lists 3.9.6.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-metax-maca3.8.1.3:2.3.0@sha256:77f066000a100aac41c62a4b3cb3eae2a99185725039b84bdfc4d6b421550cd9
 
 runner_labels:
   - mx-8g-cicd-pytorch
@@ -32,6 +34,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/nvidia_memory.h
   - .github/scripts/hooks/set_env_metax.sh
   - .github/scripts/set_env_metax.sh
+  - .github/requirements-metax.txt
   - scripts/vendor/bundle_metax_libtorch.sh
 
 container_volumes: []
@@ -95,15 +98,18 @@ wheel_artifact_name: wheel-metax
 boxing_lane: true
 
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
-  torch_path_prefix: /opt/venv/
   torch_path_forbidden:
     - /opt/conda/
+    - /flagos/
+    - /opt/flagtree/
+    - /opt/triton/
   flagos_devices:
-    exactly: 8
+    at_least: 2
   cuda_available: true
   cuda_devices:
-    exactly: 8
+    at_least: 2
   triton_backend: metax
   require_imports:
     - flag_gems
@@ -113,15 +119,18 @@ environment_check:
     - boxing
 
 boxing_environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
-  torch_path_prefix: /opt/venv/
   torch_path_forbidden:
     - /opt/conda/
+    - /flagos/
+    - /opt/flagtree/
+    - /opt/triton/
   flagos_devices:
-    exactly: 8
+    at_least: 2
   cuda_available: true
   cuda_devices:
-    exactly: 8
+    at_least: 2
   triton_backend: metax
   require_imports:
     - flag_gems

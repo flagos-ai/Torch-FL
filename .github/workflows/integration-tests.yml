@@ -161,16 +161,20 @@ jobs:
         shell: bash
         env:
           PLATFORM: ${{ needs.configuration.outputs.platform }}
-          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform)) }}
+          PIP_CACHE_KEY: ${{ needs.configuration.outputs.platform }}-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'setup.py', '.github/version-pins.env', '.github/constraints.txt', '.github/constraints-runtime-ci.txt', '.github/scripts/set_env.sh', '.github/scripts/lib/set_env_common.sh', '.github/scripts/lib/pip_cache.sh', format('.github/scripts/hooks/set_env_{0}.sh', needs.configuration.outputs.platform), format('.github/configs/{0}.yml', needs.configuration.outputs.platform), format('.github/requirements-{0}.txt', needs.configuration.outputs.platform)) }}
         run: |
           set -euo pipefail
           root="$(dirname "${RUNNER_WORKSPACE:-${GITHUB_WORKSPACE}/..}")"
           cache_root="$root/.pip-cache"
           PIP_CACHE_DIR="$cache_root/${PLATFORM:?platform is required}"
+          case "$PLATFORM" in
+            hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
+              source .github/scripts/lib/pip_cache.sh
+              prepare_pip_cache "$PLATFORM" "$PIP_CACHE_KEY"
+              exit 0
+              ;;
+          esac
           key_file="$cache_root/${PLATFORM}.key"
-          # A different dependency set makes the directory meaningless; a runner
-          # that wiped it looks the same as a first run, which is a cold cache
-          # rather than an error.
           if [[ -f "$key_file" && "$(cat "$key_file")" != "$PIP_CACHE_KEY" ]]; then
             echo "pip cache key changed for ${PLATFORM}; discarding the previous downloads"
             rm -rf "$PIP_CACHE_DIR"
@@ -265,6 +269,29 @@ jobs:
           COVERAGE_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/torch-fl-coverage.XXXXXX")
           python .github/scripts/python_coverage.py prepare --report-dir "$COVERAGE_DIR" --env-file "$GITHUB_ENV"
 
+      - name: Validate final runtime environment
+        id: final-environment
+        if: endsWith(env.PIP_CONSTRAINT, '/constraints-runtime-ci.txt')
+        timeout-minutes: 5
+        env:
+          REPORT_PLATFORM: ${{ inputs.platform }}
+          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+        run: >-
+          python .github/scripts/seed_runtime.py --finalize-environment
+          --wheel dist/*.whl
+          --requirements-file ".github/requirements-${{ needs.configuration.outputs.setup_platform }}.txt"
+          --output "$FLAGCICD_REPORT_DIR/environment-$REPORT_PLATFORM.json"
+
+      - name: Retain final runtime environment
+        if: ${{ !cancelled() && steps.final-environment.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: environment-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: ${{ env.FLAGCICD_REPORT_DIR }}/environment-*.json
+          if-no-files-found: warn
+
       - name: Run ${{ needs.configuration.outputs.display_name }} integration tests
         id: integration-tests
         env:
@@ -333,6 +360,7 @@ jobs:
           path: |
             pytest-${{ inputs.platform }}.json
             ${{ env.FLAGCICD_REPORT_DIR }}/
+            !${{ env.FLAGCICD_REPORT_DIR }}/environment-*.json
           if-no-files-found: warn
 
       - name: Merge Python line coverage
@@ -426,12 +454,15 @@ jobs:
           BUILD_RESULT: ${{ steps.build.outcome }}
           VALIDATE_RESULT: ${{ steps.validate.outcome }}
           INSTALL_RESULT: ${{ steps.install.outcome }}
+          FINAL_ENVIRONMENT_RESULT: ${{ steps.final-environment.outcome }}
           TEST_RESULT: ${{ steps.integration-tests.outcome }}
         run: |
           python3 - <<'PY'
           import json
           import os
           stages = {key: os.environ[key.upper() + '_RESULT'] for key in ('setup', 'build', 'validate', 'install', 'test')}
+          if os.environ.get('FINAL_ENVIRONMENT_RESULT') in ('failure', 'cancelled'):
+              stages['install'] = os.environ['FINAL_ENVIRONMENT_RESULT']
           stages['tests'] = stages.pop('test')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('stages=' + json.dumps(stages) + '\n')

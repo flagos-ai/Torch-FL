@@ -87,6 +87,43 @@ facade can select the matching runtime.
 
 Full measurements and rationale: [vendor-free-core-libs.md](vendor-free-core-libs.md).
 
+## DTK 26.10 runtime CI trial
+
+The CI image is the official [DTK 26.10 runtime](https://flagos-ai.github.io/release-info/zh-cn/runtime/hygon-dtk26.10/),
+pinned to runtime 2.3.0 at
+`sha256:8b0c171807b0a25358cf1ce8a269728a9de392ea6a0c280f88250807ba4cccf0`.
+It contains Python 3.12 and vendor Torch
+`2.13.0+dtk2610.2610261432.gefb4e1`. The official host-driver requirement is
+`6.4.2-V2.1.0`; selecting an image does not update the runner's host driver.
+
+This is an experimental combination: CI retains official CPU Torch 2.10.0
+and extracts the image's vendor device libraries. It does not install the
+vendor Torch Python frontend or replace the official CPU core. Each of the
+existing default and boxing lanes creates its own isolated venv, selectively
+copies compatible RECORD-owned distributions, and installs missing Python
+requirements. FlagTree remains `0.7.0+hcu3.6`; the FlagCX cohort becomes
+`0.14.1+dtk2610`. System compilers and DTK are image-provided, and download
+caching uses the same recovery helper as the other migrated platforms.
+The wheel SDK segment becomes `+dtk2610`; the CPU Torch dependency stays 2.10.
+SDK metadata is recorded only if the sourced SDK supplies a verified version.
+
+The unmodified runtime normally rejects different Torch base versions. The
+CI trial explicitly sets the existing `FLAGOS_DCU_SKIP_RUNTIME_CHECK=1` opt-out
+so that it can measure this combination. The existing environment gate still
+checks CUDA dispatch registration for `mm`, `add.Tensor`, `_softmax` and `bmm`,
+device initialization, CUDA events and matrix results against CPU. The bundle's
+symbol ABI guard remains mandatory; new missing symbols fail the build.
+The existing hardware test selections on both lanes remain unchanged, without
+additional hardware tests or operator/source changes.
+
+The existing full-vendor-core legacy smoke is a separate configuration requiring
+a matching Python frontend. This decoupled-only trial explicitly sets
+`FLAGOS_DCU_SKIP_LEGACY_SMOKE=1` and does not claim legacy-mode acceptance.
+Outside the trial environment, the normal version guard remains in effect.
+Passing the targeted CI suite would establish evidence for the tested cohort;
+it would not establish a general cross-version ABI contract. This combination
+is not hardware-accepted until both new-image lanes finish successfully.
+
 ## Verification
 
 ### Basic Device Check

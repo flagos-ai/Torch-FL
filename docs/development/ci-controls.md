@@ -4,6 +4,220 @@ CI schedules configured hardware platforms through the shared integration
 workflow. Runner labels, images and device access come from each platform config;
 test groups come from the shared integration manifest.
 
+## Runtime environment preparation
+
+Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same preparation layout:
+`.github/configs/<platform>.yml` selects the digest-pinned runtime and device
+access; `.github/scripts/set_env.sh` dispatches to
+`.github/scripts/hooks/set_env_<platform>.sh`; and
+`.github/requirements-<platform>.txt` declares each isolated environment's
+Python tools. Platform-specific preparation functions live in their hook.
+Shared package reuse, installation and cache utilities remain under
+`.github/scripts/seed_runtime.py` and `.github/scripts/lib/`.
+
+Each hook creates a separate venv, selectively copies compatible RECORD-owned
+wheels, checks the declared requirements and installs missing packages through
+the shared `ensure_runtime_requirements` helper. It keeps satisfied packages,
+uses the platform's selected pip index for gaps, and rechecks each installation.
+The runtime supplies system compilers and its SDK. Child shells retain the
+venv through `GITHUB_ENV`/`GITHUB_PATH`; image startup scripts cannot reactivate
+vendor Python or add `/opt/flagtree` to `PYTHONPATH`. A fresh venv and a download
+cache have separate lifecycles: cached downloads never skip the native build,
+wheel validation or tests. CPU-only provisioning and cache regression tests run
+in the shared platform-agnostic job.
+
+The eight migrated platforms use `.github/constraints-runtime-ci.txt` as their
+shared CI-only version policy. It includes the existing global constraints and
+sets compatibility ranges for Python build tools, test plugins and common
+runtime dependencies. Platform requirements select which packages are needed
+and retain narrower restrictions, such as CMake below 4 where required. A
+compatible installed or copied package is retained instead of upgraded to a
+common patch version: SQLAlchemy 2.0.55 and 2.0.57 both satisfy the shared
+`>=2.0.55,<2.0.58` range. Bounds are maintained explicitly; these are CI
+provisioning limits, not changes to the published wheel's supported versions.
+
+Every migrated hook uses `create_runtime_venv` in `lib/set_env_common.sh`.
+It checks target/source/checkout boundaries before clearing the target, creates
+the venv with the selected interpreter (or the image's `uv` fallback), then
+requires pip and verifies interpreter ownership and disabled system-site
+inheritance through the common environment checker. CI never reuses a prebuilt
+venv or selects an old development-image provisioning branch. Explicit
+`TORCH_FL_VENDOR_PYTHON` and `TORCH_FL_VENV_ROOT` inputs remain available for
+the runtime interpreter and job-owned destination.
+
+Shared helpers also own repeated build-tool imports, CPU-Torch identity and
+FlagTree provider-origin checks. Hooks retain SDK discovery, platform-specific
+package restrictions and vendor-library staging. GCU/MUSA continue to defer
+FlagCX; removing old environment branches does not enable unsupported binaries.
+
+Runtime copying, installed-package dependency checks and pip all honor the
+same constraints, including constraints on transitive dependencies. Constraints
+do not select additional packages for installation. `PIP_CONSTRAINT` is persisted
+through `GITHUB_ENV` so later test-dependency and reporting installs use the same
+policy. Environment reports retain the actual versions used; compatible patch
+differences remain visible rather than silently treated as identical. The
+constraints file participates in both integration and manual-wheel cache keys.
+Other platform entrypoints retain the existing global constraints.
+
+Manual and release wheel builds keep the `build` frontend prepared by migrated
+runtime hooks. The later build-tool upgrade applies only to other platforms.
+
+### Final test environment validation
+
+After installing the built wheel, platform test dependencies and reporting
+plugins, the migrated lanes run `seed_runtime.py --finalize-environment` before
+the hardware suites. This verifies required CI tools and shared ranges, runs
+`pip check`, checks installed distributions against the wheel manifest, and
+records the final package/tool inventory, SDK/vendor-library provenance,
+source ref and wheel SHA256. The earlier preparation snapshot is not treated
+as the final test environment. Validation failures retain their JSON artifact
+and count as installation failures in execution evidence.
+
+When FlagCX is installed, an isolated subprocess imports `torch_fl` before
+FlagCX, checks backend registration and rejects vendor Torch extensions or
+Torch libraries loaded from `/flagos`. This import check does not replace
+multi-rank collective tests and adds no source build. MetaX's two lanes reuse
+the matching `0.14.0+maca3.8.1.3` package, or install that published pin, against
+the vendor Torch libraries already bundled by those lanes.
+
+GCU and MUSA explicitly defer FlagCX until compatible binaries are available.
+Static inspection of their published 0.14.0 and 0.14.1 extensions found a hard
+dependency on `libtorch_gcu.so` or `libmusa_python.so.2`, respectively; changing
+the Python backend selector does not remove those ELF dependencies. Do not
+copy those vendor extensions into the isolated CPU-Torch environment, build a
+new FlagCX from source, or remove the artifact's declared requirements to make
+this check pass.
+
+The final gate accepts only the exact missing-FlagCX diagnostic for Torch-FL
+on these two platforms. Missing unrelated dependencies, version conflicts,
+checker failures, and missing FlagCX recorded as present at build time remain
+fatal. The raw nonzero checker results and the deferred requirement remain in
+the artifact: `valid` is false while `ready_for_tests` can be true under this
+explicit functional-CI policy. This is not a claim that the published wheel's
+complete dependency contract or communication support has been validated.
+MetaX, Ascend and Hygon do not receive this exception.
+
+The interpreter, compiler backend and SDK follow each chosen runtime, while CPU
+Torch and published package pins retain their existing lane contracts. PPU retains
+its two existing lanes: default uses CPU Torch without a vendor bundle; boxing
+bundles vendor libtorch after the existing native build. No additional native
+build, source-built Torch or hardware test-selection exclusions are introduced
+by this migration. Hygon's [DTK 26.10 trial](../vendors/dcu/installation.md#dtk-2610-runtime-ci-trial)
+explicitly pairs CPU Torch 2.10 with vendor Torch 2.13 device libraries. It
+bypasses the existing version-equality gate, retains ABI/dispatch/computation
+checks and the two existing hardware suites, and excludes the separate
+full-vendor-core legacy smoke. This experimental cohort is not an accepted
+cross-version runtime contract.
+
+### Organization of environment checks
+
+Environment preparation, installed-wheel validation, hardware-environment
+validation and computation tests are separate stages. Hooks own SDK discovery,
+build inputs and vendor-library staging. The final dependency gate owns package
+ranges and the wheel contract. The first integration group runs
+`check_platform_environment.py` for every platform; its expectations come from
+the platform's `environment_check` or `boxing_environment_check` mapping.
+Computation and runtime-contract suites retain their existing groups and coverage.
+
+All eight migrated platforms enable `venv_isolation` in both applicable lanes.
+It verifies the active venv, disabled system-site inheritance, package locations
+and absence of runtime Python search paths. Optional native checks are driven by
+configuration: exact Torch metadata/module versions, C++ ABI, loaded Torch
+libraries, forbidden ELF dependencies, and the compiler target. Unknown keys or
+malformed nested policies fail before accelerator imports. These are values in
+YAML, not embedded Python or shell commands.
+
+| Platform | Preparation/build checks retained | Hardware checks and functional owner |
+| --- | --- | --- |
+| Ascend | CANN/driver assets and isolated Python | Common environment group; existing operator suites |
+| Iluvatar | CoreX assets/header syntax probe; shared isolation assertions | Common group audits CPU core mappings, ELF dependencies and CoreX target; the existing `iluvatar_runtime` group retains both add computations |
+| Enflame | TOPS assets and isolated Python | Common environment group; existing native and FlagGems suites |
+| Kunlunxin | XPU/XDNN assets and XPU compiler origin | Common environment group; existing native and FlagGems suites |
+| MUSA | MUSA/mudnn assets and isolated compiler | Common environment group; the existing MUSA runtime-contract test retains driver binding and compile-target validation |
+| PPU | SDK and boxing-only vendor bundle | Common lane-specific environment group; existing computation suites |
+| MetaX | Vendor bundle and non-mutating Torch facade checks | Common lane-specific environment group; existing computation suites |
+| Hygon | DTK/driver assets, bundle ABI and dispatch checks | Common lane-specific environment group; existing trial and hardware gates |
+
+Loaded-core policies must describe the actual lane. Iluvatar expects the
+official CPU core; PPU/MetaX vendor-core combinations and Hygon's decoupled
+trial must not inherit that policy. This reorganization moves Iluvatar's
+existing native assertions into the common checker; it does not invent
+unverified loaded-library allowlists for other vendors.
+
+The Iluvatar hook owns the CoreX preparation probe and calls shared assertions
+from the common checker. The original two computations run through pytest in
+`tests/integration/test_iluvatar_runtime.py`, after the common environment group,
+just as MUSA's runtime contract lives under `tests/integration/`. No standalone
+platform verifier or legacy CLI remains. No operator selection or failure
+exception is added by this reorganization.
+
+The checker records expected values, observed results and failure reasons in
+`hardware-environment-<platform>.json`, retained with the existing pytest report
+artifact even when the environment group fails. The earlier dependency snapshot
+remains a separate pre-test artifact. A failed assertion still fails its group;
+reporting cannot convert it into a skip or pass.
+
+Configuration loading and policy validation participate in the same failure
+reporting path: malformed or missing policy data fails before accelerator
+imports and still retains the diagnostic JSON.
+
+### Device access for the runtime-migration lanes
+
+The eight migrated platforms use all devices made available to their runner;
+CI does not impose a fixed card selection or device-count upper bound. Both
+vendor and boxing environment policies require at least two visible FlagOS
+devices so existing cross-device tests cannot silently lose their second card.
+Where a lane also checks the CUDA-compatible interface, it uses the same minimum.
+This is a functional prerequisite, not a device allocator or a claim that every
+visible card is exercised. The current test commands do not automatically shard
+work across additional cards.
+
+Seven platforms use privileged-container access. Iluvatar now follows this
+model and no longer masks physical devices 8 and 9. Ascend's redundant
+per-card mappings are omitted because privileged access already exposes its
+device nodes; its driver mount remains required. PPU is the runner-specific
+exception: DSW authZ prohibits privileged containers, so it retains explicit
+compute/control node mappings. Device access is established once when each job
+container starts and remains unchanged throughout preparation and testing.
+
+## Download caching for the runtime-migration lanes
+
+Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same cache-selection helper,
+`.github/scripts/lib/pip_cache.sh`, before their platform environment hooks run.
+The integration workflow prefers the existing runner-local
+`/__w/.pip-cache/<platform>` directory. It checks ownership, directory access
+and an actual temporary-file write, because an existing directory can still be
+unusable by pip in a container with a different UID.
+
+If that directory cannot be used, the helper tries a persistent sibling with a
+`-uid-<uid>` suffix, then a platform directory under `RUNNER_TEMP`, and finally
+an owned temporary directory. It leaves the old cache and its owner/permissions
+untouched. A selected directory is exported through `GITHUB_ENV` so subsequent
+shells and ordinary pip commands use the same cache. MUSA no longer treats its
+own extra cache-owner check as a fatal build requirement. If every directory
+fails, CI emits a warning and explicitly disables caching for that job instead
+of skipping the build or tests.
+
+A matching dependency key retains downloads across jobs on the same runner.
+When the key changes, the selected cache's contents are discarded before the new
+key is written; the original sibling key files remain readable for migration
+from the older layout. An unowned or unwritable old cache is not purged. The key
+includes platform requirements, hooks and the shared helper, so these changes
+can cause a one-time cold cache. Other platform lanes retain their existing
+cache-selection behavior.
+
+The manual/release wheel workflow still transports downloads through its
+existing Actions cache restore/save steps; these runtime lanes use the same helper
+to select a usable directory before that transport and recheck it at setup.
+Normal PR integration jobs keep using runner-local storage.
+
+`PIP_RETRY_NO_CACHE=1` explicitly disables caching, and the exported
+`PIP_NO_CACHE_DIR` makes that choice apply to plain pip commands too. When
+caching is enabled, `PIP_NO_CACHE_DIR` is empty: pip also treats `0` and `false`
+as disabling values. FlagTree's existing per-install cache opt-out is unchanged.
+These are download caches, not reusable build environments: interpreter and
+package isolation, native builds, wheel validation and test execution still run.
+
 ## Automatic platform selection
 
 | Event | Hardware selection |
@@ -32,6 +246,11 @@ and dedicated workflow automatically belong to that lane. Shared code or an
 unrecognized code path selects all lanes; a recognized vendor change must not
 hide an unrelated shared change in the same PR. Missing or invalid watch
 metadata also selects all lanes. A failed Git comparison selects all lanes.
+
+`seed_runtime.py` is shared provisioning infrastructure. Its changes follow the
+same conservative full-matrix policy as `set_env.sh` and `set_env_common.sh`;
+do not list it as a vendor-owned watch path. Explicit routing labels retain
+their existing precedence over file filtering.
 
 Selection compares the immutable PR base and head commits and includes both
 paths when files move between platforms. Watch lists include shared consumers:

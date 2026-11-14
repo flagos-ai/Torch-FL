@@ -91,6 +91,47 @@ Cases needing a capability GCU does not provide skip with a reason naming the pl
 
 The same suites run in CI through [`.github/configs/enflame.yml`](../../../.github/configs/enflame.yml); see [CI scope](#ci-scope) for what that manifest covers and what it deliberately leaves out.
 
+## Runtime-image CI environment
+
+GCU CI uses the official
+[`enflame-tops1.10.6` runtime 2.3.0](https://flagos-ai.github.io/release-info/zh-cn/runtime/enflame-tops1.10.6/),
+pinned in `.github/configs/enflame.yml`. The host must provide a compatible
+Enflame driver (the runtime release lists 1.10.6); replacing a container does not
+replace the host kernel driver. The hook prints `efsmi` when available so the
+hardware run records the driver/device inventory.
+
+The official packages split the SDK across `/opt/tops/lib/libtopsrt.so`,
+`/usr/lib/libtopsaten.so`, and `/usr/include/gcu/topsaten/topsaten.h`. Runtime
+discovery does not require the ATen headers to share its prefix; the existing
+CMake header/library checks validate the independent locations.
+
+The image's Python is 3.12, but its CPU Torch 2.11 and `torch-gcu` extensions
+are not used by this project's Torch 2.10 build. The platform hook creates a
+separate venv, disables the image's `BASH_ENV` reactivation, and uses the shared
+`seed_runtime.py` to copy matching RECORD-owned distributions. Compatible
+FlagTree 0.7.0+enflame3.6, FlagGems 5.4.0, NumPy 1.x, and the Python tools in
+`.github/requirements-enflame.txt` can be reused; missing or incompatible packages
+are installed from the configured wheel/PyPI indexes. CPU Torch 2.10.0+cpu is
+installed separately when it cannot be reused. GCC, G++, make, and TOPS come
+from the image. There is no source build of Torch, FlagTree, or FlagGems.
+
+Provisioning checks the installed `topsruntime` package before recording
+`FLAGOS_SDK_VERSION=1.10.6`, validates the isolated compiler backend, and runs
+`pip check` and the shared environment report. NumPy is now explicitly present
+to satisfy FlagGems' declared dependency; the legacy development-image path did
+not install it. This can expose specialized implementations that previously
+failed to import, so hardware integration coverage remains the acceptance gate.
+The existing native build calls, integration selections, and kernel switches
+are retained. The shared pip-cache helper provides the same ownership checks,
+key invalidation, and fallback directories as the other migrated runtime lanes.
+
+The image's FlagCX and `torch-gcu` fallback environment do not enable another
+communication/backend path in this isolated venv. The existing shared wheel
+local-version label (`tops1.9.10`) and optional FlagCX pin remain unchanged;
+the wheel compatibility manifest records the verified SDK version separately.
+These shared release settings need a separate compatibility decision before
+publishing a TOPS 1.10.6 release wheel.
+
 ## Platform-specific Behavior
 
 ### CPU fallback for missing kernels
