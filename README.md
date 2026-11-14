@@ -134,6 +134,33 @@ Operator routing (FlagGems, vendor kernels, compatibility boxing, or CPU fallbac
 
 For device queries, synchronization, and multi-device usage patterns, see the [Quick Start Guide](docs/getting-started/quickstart.md).
 
+### Experimental native FlagGems hosts
+
+The NVIDIA CPU-Torch build can generate native host programs from the installed
+FlagGems implementations. The model remains ordinary eager Python:
+
+```python
+from torch_fl import host_compiler
+
+host_compiler.enable("/path/to/host-program-cache")
+with torch.no_grad():
+    output = model(inputs)
+```
+
+This experimental path requires PyTorch 2.10.0, the NVIDIA toolkit and a C++
+compiler. It is currently validated on H100 inference. Initial compilation is
+expensive: a separate process captures metadata, compiles the original Triton
+kernels and validates outputs before admission. Warm calls use native guards,
+allocation and launches; guard misses keep the original FlagGems route. Use
+`mode="load"` to prohibit further compilation, or `host_compiler.disable()` to
+disable native lookup. Programs are bounded and remain resident until process
+exit. Use a fresh cache after changing dependencies or the host compiler.
+
+See the [native host design](docs/design/flaggems-native-host-programs.md)
+and `benchmarks/host_compiler/qwen_eager.py` for full-model validation and its
+limitations. The feature does not enable boxing or replace uncovered operations
+with Inductor-generated kernels.
+
 ## Documentation
 
 ### Getting Started
