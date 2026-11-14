@@ -2723,6 +2723,9 @@ def _phase_vendor_compat() -> None:
     One phase of the import-time pipeline below; the order is
     load-bearing, so the constraints are documented at the runner.
     """
+    from . import native_host
+
+    native_host._bootstrap_launcher()
     _install_musa_flaggems_compat()
     _install_tsingmicro_flaggems_compat()
 
@@ -2844,6 +2847,10 @@ def _phase_ecosystem() -> None:
         )
         if _build_accelerator() == "bpu":
             activate_optional_integrations("bpu", strict=False)
+
+    from . import native_host
+
+    native_host._activate()
 
 
 # ===========================================================================
