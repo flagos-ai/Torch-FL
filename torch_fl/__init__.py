@@ -1803,6 +1803,42 @@ def _install_capability_diagnostic() -> None:
         )
 
 
+# Entry points that parse a ``device=`` argument in C++ and so cannot be reached
+# by wrapping ``torch.device``. Kept as a roster rather than discovered, because
+# the set is what a reviewer has to check: a name missing here raises
+# "Torch not compiled with CUDA enabled" under the wrapper install, where the
+# torch-function mode would have redirected it.
+_ALIAS_WRAPPED_FACTORIES = (
+    "arange",
+    "as_tensor",
+    "bernoulli",
+    "empty",
+    "empty_like",
+    "empty_permuted",
+    "empty_strided",
+    "eye",
+    "full",
+    "full_like",
+    "linspace",
+    "logspace",
+    "normal",
+    "ones",
+    "ones_like",
+    "poisson",
+    "rand",
+    "rand_like",
+    "randint",
+    "randint_like",
+    "randn",
+    "randn_like",
+    "randperm",
+    "scalar_tensor",
+    "tensor",
+    "zeros",
+    "zeros_like",
+)
+
+
 def _alias_cuda_to_flagos():
     """Make ``device="cuda"`` mean the flagos device when there is no real CUDA.
 
@@ -1894,7 +1930,81 @@ def _alias_cuda_to_flagos():
                     args = (args[0], remapped) + args[2:]
             return func(*args, **kwargs)
 
-    torch._C._push_on_torch_function_stack(_CudaAliasMode())
+    def _remap_call(args, kwargs):
+        """Rewrite a ``device`` the call would otherwise have parsed as CUDA."""
+        if args:
+            remapped = _remap(args[0])
+            if remapped is not args[0]:
+                args = (remapped,) + args[1:]
+        dev = kwargs.get("device")
+        if dev is not None:
+            remapped = _remap(dev)
+            if remapped is not dev:
+                kwargs = {**kwargs, "device": remapped}
+        return args, kwargs
+
+    def _install_alias_wrappers():
+        """Put the remap on the entry points that accept a device.
+
+        The torch-function mode below is exact: it sees every ``device=`` keyword
+        before C++ resolves it. The price is that it also puts a Python frame on
+        every torch call that has nothing to do with devices -- measured at
+        4.2 ms of a 29.9 ms training step on an MLU590 (29.7 with the mode, 25.5
+        without, two interleaved pairs). Wrapping instead costs one frame only on
+        the call that can carry a device, and leaves the ~500 dispatches of a
+        forward untouched.
+
+        The roster is deliberately explicit: `torch.device` is a C type and its
+        parsing happens inside the argument parser, so a factory that is not
+        wrapped fails rather than falling back.
+        """
+
+        def wrap_method(owner, name):
+            original = getattr(owner, name, None)
+            if original is None:
+                return
+
+            def wrapper(self, *args, **kwargs):
+                args, kwargs = _remap_call(args, kwargs)
+                return original(self, *args, **kwargs)
+
+            try:
+                functools.update_wrapper(wrapper, original)
+            except (AttributeError, TypeError):
+                pass
+            setattr(owner, name, wrapper)
+
+        def wrap_function(name):
+            original = getattr(torch, name, None)
+            if original is None:
+                return
+
+            def wrapper(*args, **kwargs):
+                args, kwargs = _remap_call(args, kwargs)
+                return original(*args, **kwargs)
+
+            try:
+                functools.update_wrapper(wrapper, original)
+            except (AttributeError, TypeError):
+                pass
+            setattr(torch, name, wrapper)
+
+        for factory_name in _ALIAS_WRAPPED_FACTORIES:
+            wrap_function(factory_name)
+
+        # `Tensor.to("cuda")`, `.to(device="cuda")` and `Module.to(...)`. Both
+        # parse in C++/in `_parse_to`, ahead of any torch.device this module
+        # could intercept.
+        wrap_method(torch.Tensor, "to")
+        wrap_method(torch.nn.Module, "to")
+
+    # The mode stays the default: an entry point missing from the roster is still
+    # redirected there, where under the wrappers it raises. Opting in is
+    # FLAGOS_ALIAS_CUDA_IMPL=wrappers.
+    if _env.value("FLAGOS_ALIAS_CUDA_IMPL", "mode") == "wrappers":
+        _install_alias_wrappers()
+    else:
+        torch._C._push_on_torch_function_stack(_CudaAliasMode())
 
     # torch.device("cuda") itself, for code that builds the device object first
     # and only later passes it to a factory (transformers' device_map does this).
