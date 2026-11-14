@@ -1,0 +1,295 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# TileOPs is an opt-in operator experiment, separate from the platform matrix.
+# The CPU job checks generated products on every relevant PR. The MetaX job is
+# manual or nightly only because it builds a non-boxing wheel and executes the
+# provider on a vendor runner; ordinary PRs never reserve that hardware.
+
+name: TileOPs experiment
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/version-pins.env
+      - .github/constraints.txt
+      - .github/scripts/tileops_metax_install.sh
+      - .github/scripts/hooks/set_env_metax.sh
+      - .github/scripts/lib/**
+      - .github/scripts/set_env.sh
+      - .github/workflows/tileops-ci.yml
+      - csrc/aten/generated/register_tileops_metax.inc
+      - csrc/aten/generated/tileops_python_kernels.cc
+      - cmake/flagos_platforms.json
+      - scripts/codegen/backend_coverage.py
+      - scripts/codegen/codegen_tileops.py
+      - scripts/codegen/gen_vendor_confs.py
+      - scripts/tools/tileops_source_check.py
+      - scripts/vendor/bundle_metax_libtorch.sh
+      - setup.py
+      - tests/integration/ops/test_tileops_*.py
+      - tests/unit/test_codegen_tileops_recipes.py
+      - tests/unit/test_conf_registration_consistency.py
+      - tests/unit/test_gen_vendor_confs.py
+      - tests/unit/test_tileops_runtime.py
+      - tests/unit/test_tileops_ci.py
+      - tests/unit/test_integration_workdir.py
+      - tests/unit/test_wheel_preflight.py
+      - torch_fl/configs/backends_*_tileops.conf
+      - torch_fl/tileops/**
+  schedule:
+    - cron: '30 18 * * *'  # 02:30 CST daily
+  workflow_dispatch:
+    inputs:
+      metax:
+        description: Build and execute the TileOPs wheel on the MetaX runner
+        type: boolean
+        default: false
+
+concurrency:
+  group: tileops-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: TileOPs source contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve TileOPs pins
+        id: pins
+        run: |
+          set -euo pipefail
+          source .github/version-pins.env
+          printf 'tileops=%s\n' "$TILEOPS_OFFICIAL_COMMIT_DEFAULT" >> "$GITHUB_OUTPUT"
+          printf 'tilelang=%s\n' "$TILELANG_CPU_VERSION_DEFAULT" >> "$GITHUB_OUTPUT"
+          printf 'tvm_ffi=%s\n' "$APACHE_TVM_FFI_VERSION_DEFAULT" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned CPU stack
+        env:
+          TILEOPS_COMMIT: ${{ steps.pins.outputs.tileops }}
+          TILELANG_VERSION: ${{ steps.pins.outputs.tilelang }}
+          TVM_FFI_VERSION: ${{ steps.pins.outputs.tvm_ffi }}
+        run: |
+          set -euo pipefail
+          source .github/version-pins.env
+          python -m pip install \
+            --index-url "$CPU_TORCH_MIRROR_INDEX_URL_DEFAULT" \
+            "torch==${CPU_TORCH_VERSION_DEFAULT}+cpu"
+          python -m pip install \
+            "tilelang==$TILELANG_VERSION" \
+            "apache-tvm-ffi==$TVM_FFI_VERSION" \
+            "pytest==9.0.2" \
+            "PyYAML==6.0.2" \
+            "ruff==0.15.12"
+          python -m pip install \
+            --no-deps \
+            "https://github.com/tile-ai/TileOPs/archive/${TILEOPS_COMMIT}.tar.gz"
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import tileops
+          print(f"TileOPs: {metadata.version('tileops')} ({tileops.__file__})")
+          PY
+
+      - name: Check generated TileOPs routes
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+          GEMS_VENDOR: cuda
+        run: python scripts/tools/tileops_source_check.py
+
+      - name: Check vendor experiment configs
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+          GEMS_VENDOR: cuda
+        run: python scripts/codegen/gen_vendor_confs.py --check
+
+      - name: Check routing and runtime contracts
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+          GEMS_VENDOR: cuda
+          PYTHONPATH: ${{ github.workspace }}
+        run: >-
+          python scripts/tools/tileops_source_check.py --
+          python -m pytest -q
+          tests/unit/test_tileops_ci.py
+          tests/unit/test_tileops_runtime.py
+          tests/unit/test_codegen_tileops_recipes.py
+          tests/unit/test_gen_vendor_confs.py
+          tests/unit/test_conf_registration_consistency.py
+          tests/unit/test_integration_workdir.py
+          tests/unit/test_wheel_preflight.py
+
+  metax:
+    name: TileOPs MetaX smoke
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.metax == true)
+    runs-on: mx-8g-cicd-pytorch
+    timeout-minutes: 120
+    container:
+      image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260731-metax-dev
+      options: >-
+        --privileged
+        --ipc=host
+        --shm-size=512g
+        --ulimit memlock=-1
+        --cap-add=SYS_PTRACE
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require private provider access
+        env:
+          TILEOPS_GITHUB_TOKEN: ${{ secrets.TILEOPS_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TILEOPS_GITHUB_TOKEN:-}" ]]; then
+            echo "::error::TILEOPS_GITHUB_TOKEN is empty; the private tileops-metax provider cannot be fetched. Configure the repository secret before running this job."
+            exit 1
+          fi
+          echo "TILEOPS_GITHUB_TOKEN is set (${#TILEOPS_GITHUB_TOKEN} characters)"
+
+      - name: Prepare MetaX build environment
+        env:
+          CI_STAGE: build
+          FLAGOS_BUILD_FLAGGEMS: '0'
+          FLAGOS_BUILD_BOXING: '0'
+          FLAGOS_BUILD_TILEOPS: '1'
+        run: bash .github/scripts/set_env.sh --platform metax
+
+      - name: Install pinned TileOPs MetaX stack
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+          PIP_EXTRA_INDEX_URL: ''
+          REPO_ROOT: ${{ github.workspace }}
+          TILEOPS_GITHUB_TOKEN: ${{ secrets.TILEOPS_GITHUB_TOKEN }}
+        run: bash .github/scripts/tileops_metax_install.sh
+
+      - name: Build the non-boxing TileOPs wheel
+        env:
+          FLAGOS_BUILD_FLAGGEMS: '0'
+          FLAGOS_BUILD_FLAGGEMS_CPP: '0'
+          FLAGOS_BUILD_BOXING: '0'
+          FLAGOS_BUILD_TILEOPS: '1'
+        run: python -m build --wheel --no-isolation
+
+      - name: Validate and install the experiment wheel
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH
+          python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform metax --check-build-env
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cd "$(mktemp -d)"
+          python - <<'PY'
+          import json
+          from importlib.metadata import distribution
+
+          installed = distribution("torch_fl")
+          manifest = json.loads(installed.read_text("torch_fl/compatibility.json"))
+          assert tuple(manifest["build"]["kernels"]) == ("tileops",), manifest
+          print(f"Installed torch_fl: {installed.locate_file('torch_fl')}")
+          print(f"Kernel sets: {manifest['build']['kernels']}")
+          PY
+
+      - name: Run the five-case TileOPs smoke
+        env:
+          PYTHONPATH: ''
+          RUNNER_TEMP: ${{ runner.temp }}
+          TILEOPS_LOG_DIR: ${{ runner.temp }}/tileops-dispatch-logs
+          TILEOPS_SOURCE_ROOT: ${{ github.workspace }}
+          TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+          FLAGOS_TILEOPS_EVIDENCE: ${{ runner.temp }}/tileops-metax-evidence.json
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/tileops-wheel-test.XXXXXX")"
+          cp -a "$GITHUB_WORKSPACE/tests" "$GITHUB_WORKSPACE/pyproject.toml" "$work/"
+          printf 'TILEOPS_WORKDIR=%s\n' "$work" >> "$GITHUB_ENV"
+          cd "$work"
+          python - "$FLAGOS_TILEOPS_EVIDENCE" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          import torch
+          from torch_fl.tileops import runtime
+
+          target = runtime._build_target()
+          assert target == "tileops_maca", target
+          assert runtime.import_tileops() is not None
+          Path(sys.argv[1]).write_text(json.dumps({
+              "provider": os.environ["FLAGOS_TILEOPS_PROVIDER"],
+              "provider_commit": os.environ["TILEOPS_PROVIDER_VERSION"],
+              "tileops_commit": os.environ["TILEOPS_VERSION"],
+              "target": target,
+              "torch": torch.__version__,
+          }, indent=2) + "\n")
+          PY
+          python -m pytest tests/integration/ops/test_tileops_vendor_smoke.py \
+            -v --tb=short --junitxml=tileops-smoke.xml
+
+      - name: Require all five smoke cases to pass
+        run: |
+          set -euo pipefail
+          cd "$TILEOPS_WORKDIR"
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          root = ET.parse(Path("tileops-smoke.xml")).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          assert suite is not None, "pytest XML has no testsuite"
+          counts = {
+              key: int(suite.attrib.get(key, 0))
+              for key in ("tests", "skipped", "failures", "errors")
+          }
+          assert counts == {
+              "tests": 5,
+              "skipped": 0,
+              "failures": 0,
+              "errors": 0,
+          }, counts
+          print(f"TileOPs smoke: {counts}")
+          PY
+
+      - name: Upload TileOPs evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tileops-metax-evidence
+          path: |
+            ${{ runner.temp }}/tileops-metax-evidence.json
+            ${{ env.TILEOPS_WORKDIR }}/tileops-smoke.xml
+            ${{ runner.temp }}/tileops-dispatch-logs/*.dispatch.log
+          if-no-files-found: warn
+          retention-days: 14

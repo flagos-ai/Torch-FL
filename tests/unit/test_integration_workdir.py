@@ -641,6 +641,11 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "exclusion on the same terms (it would also self-skip: no job builds "
         "the TileOPs kernel set)"
     ),
+    "tests/integration/ops/test_tileops_vendor_smoke.py": (
+        "requires the private MetaX TileOPs provider and a non-boxing "
+        "FLAGOS_BUILD_TILEOPS wheel; it is selected directly by the dedicated "
+        "manual/nightly tileops-ci workflow rather than by a platform manifest"
+    ),
 }
 
 

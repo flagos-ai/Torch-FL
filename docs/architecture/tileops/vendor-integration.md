@@ -116,6 +116,15 @@ provider's per-call builder registration or the device boundary.
 
 ## Validation
 
+The dedicated CI entrypoint is `.github/workflows/tileops-ci.yml`. Relevant PRs
+run the generated-source, configuration and runtime-contract checks on a CPU
+runner. The MetaX smoke is manual or nightly only and runs a five-case pytest
+file that requires no skips. It verifies the wheel build record contains only
+`tileops`, executes two calls of each representative TileOPs route, checks the
+returned `flagos` device and CPU values, and requires `transpose.int -> none`.
+The private provider is pinned by commit and fetched through
+`TILEOPS_GITHUB_TOKEN` without placing the token in a URL or command line.
+
 Run the source and configuration checks before a hardware run:
 
 ```bash
