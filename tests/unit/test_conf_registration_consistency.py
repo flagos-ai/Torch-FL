@@ -780,7 +780,7 @@ def test_conf_route_counts_are_stable():
         # The wheel's behaviour is unchanged: register_flaggems_nvidia.inc, the
         # only registration a boxing-off build includes, claims the 549 FlagGems
         # routes and none of these, so they already reached cpu_fallback.
-        "nvidia": {"flaggems": 549, "none": 1485},
+        "nvidia": {"flaggems": 550, "none": 1484},
         # dcu/metax/ppu are CUDA-ABI platforms with no vendor kernel of their
         # own on this tree, and a default conf never routes boxing (AGENTS.md,
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each

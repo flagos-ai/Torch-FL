@@ -1343,6 +1343,8 @@ def _get_setup_kwargs():
 
     package_data = {
         "torch_fl": [
+            "host_compiler/include/torch/csrc/inductor/cpp_wrapper/*.h",
+            "host_compiler/include/torch/csrc/inductor/cpp_wrapper/device_internal/*.h",
             "lib/*.so*",
             "lib/*.dylib*",
             "lib/*.dll",

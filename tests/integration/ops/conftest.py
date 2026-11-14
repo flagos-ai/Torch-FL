@@ -154,6 +154,20 @@ def _boxing_enabled() -> bool:
     return "boxing" in _env.build_kernels()
 
 
+def _host_compiler_enabled() -> bool:
+    """The experimental compiler targets NVIDIA's CPU-Torch FlagGems build."""
+    import torch
+    from torch_fl import _env
+
+    kernels = _env.build_kernels()
+    return (
+        torch.__version__.split("+")[0] == "2.10.0"
+        and torch.version.cuda is None
+        and "flaggems" in kernels
+        and "boxing" not in kernels
+    )
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -178,6 +192,25 @@ def pytest_collection_modifyitems(
     if not _boxing_enabled():
         markers_to_skip.append("cuda")
     for item in items:
+        if (
+            item.get_closest_marker("nvidia")
+            or item.get_closest_marker("host_compiler")
+        ) and platform != "cuda":
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="case requires the NVIDIA runtime",
+                reason="NVIDIA runtime contract",
+            )
+            continue
+        if item.get_closest_marker("host_compiler") and not _host_compiler_enabled():
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="host compiler requires CPU Torch 2.10.0 and FlagGems without boxing",
+                reason="native host compiler build contract",
+            )
+            continue
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             add_platform_skip(
                 item,
@@ -223,6 +256,10 @@ def pytest_collection_modifyitems(
 def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
+    config.addinivalue_line("markers", "nvidia: requires the NVIDIA runtime")
+    config.addinivalue_line(
+        "markers", "host_compiler: requires the experimental native host compiler build"
+    )
     config.addinivalue_line("markers", "metax: requires MetaX platform")
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")

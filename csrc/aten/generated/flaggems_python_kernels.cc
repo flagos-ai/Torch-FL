@@ -1408,7 +1408,7 @@ at::Tensor EluBackwardKernelPython(const at::Tensor & grad_output, const at::Sca
 }
 
 at::Tensor EmbeddingKernelPython(const at::Tensor & weight, const at::Tensor & indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
-  auto result = CallPythonOp_Generic("flag_gems.embedding", {weight, indices, padding_idx, scale_grad_by_freq, sparse});
+  auto result = CallPythonOp_Generic("flag_gems.embedding", {weight, indices, padding_idx, scale_grad_by_freq, false});
   UnboxToFlagos(result);
   return result;
 }

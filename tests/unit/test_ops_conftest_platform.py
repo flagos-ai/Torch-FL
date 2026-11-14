@@ -28,7 +28,7 @@ Run: pytest tests/unit/test_ops_conftest_platform.py -v
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -280,3 +280,60 @@ def test_every_non_mps_platform_skips_the_mps_mark():
         if platform == "mps":
             continue
         assert "mps" in markers, platform
+
+
+@pytest.mark.parametrize(
+    "version,cuda,kernels,expected",
+    [
+        ("2.10.0+cpu", None, ("flaggems", "vendor"), True),
+        ("2.10.0+cpu", None, ("flaggems", "boxing"), False),
+        ("2.10.0+cpu", None, ("vendor",), False),
+        ("2.10.0+cu130", "13.0", ("flaggems", "vendor"), False),
+        ("2.9.0+cpu", None, ("flaggems", "vendor"), False),
+    ],
+)
+def test_host_compiler_gate_reads_the_installed_build(
+    monkeypatch, version, cuda, kernels, expected
+):
+    torch = ModuleType("torch")
+    torch.__version__ = version
+    torch.version = SimpleNamespace(cuda=cuda)
+    package = ModuleType("torch_fl")
+    package._env = SimpleNamespace(build_kernels=lambda: kernels)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    assert ops_conftest._host_compiler_enabled() is expected
+
+
+@pytest.mark.parametrize(
+    "platform,compiler,marks,gate",
+    [
+        ("cuda", True, ("nvidia", "host_compiler"), None),
+        ("cuda", False, ("nvidia", "host_compiler"), "build_record"),
+        ("cuda", False, ("nvidia",), None),
+        ("mps", False, ("nvidia",), "platform_support"),
+        ("ppu", True, ("host_compiler",), "platform_support"),
+    ],
+)
+def test_native_host_cases_keep_one_collection_shape(
+    monkeypatch, platform, compiler, marks, gate
+):
+    class Item:
+        def __init__(self):
+            self.own_markers = [getattr(pytest.mark, name).mark for name in marks]
+
+        def get_closest_marker(self, name):
+            return next((m for m in self.own_markers if m.name == name), None)
+
+        def add_marker(self, marker):
+            self.own_markers.append(marker.mark)
+
+    monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: platform)
+    monkeypatch.setattr(ops_conftest, "_host_compiler_enabled", lambda: compiler)
+    monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
+    monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
+    item = Item()
+    ops_conftest.pytest_collection_modifyitems(None, [item])
+    marker = item.get_closest_marker("flagos_platform_gate")
+    assert (marker.kwargs["gate"] if marker else None) == gate
+    assert bool(item.get_closest_marker("skip")) == (gate is not None)

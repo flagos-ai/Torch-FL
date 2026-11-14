@@ -3,6 +3,7 @@
 #include "python_op_caller.h"
 
 #include "fast_plan.h"
+#include "host_program.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -558,159 +559,88 @@ py::tuple BuildPyArgs(const std::vector<c10::IValue>& args, const char* func_nam
   return py_args;
 }
 
+// Called only on a native guard miss, after the original invocation succeeded.
+// The observer serializes metadata, never caller data or input pointers.
+void ObserveHostProgram(const char* name, const std::vector<c10::IValue>& args,
+                        const std::vector<PyKwarg>& kwargs, int64_t outputs,
+                        const py::object& func, const py::tuple& py_args,
+                        const py::dict& py_kwargs) {
+  if (!HostProgramsEnabled()) return;
+  auto key = HostProgramKey(name, args, kwargs, outputs);
+  if (key.empty()) return;
+  // Like PythonOpCache, this process-lifetime reference must not DECREF after
+  // CPython has finalized the interpreter.
+  static auto* observer = new py::object(
+      py::module_::import("torch_fl.host_compiler").attr("_observe"));
+  (*observer)(key, func, py_args, py_kwargs, outputs);
+}
+
 } // namespace
 
 at::Tensor CallPythonOp_T(const char* func_name, const at::Tensor& self) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(self));
-  return PythonToTensor(result);
+  return CallPythonOp_Generic(func_name, {self});
 }
 
 at::Tensor& CallPythonOp_T_inplace(const char* func_name, at::Tensor& self) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  func(TensorToPython(self));
+  CallPythonOp_Generic(func_name, {self});
   return self;
 }
 
 at::Tensor CallPythonOp_TT(const char* func_name, const at::Tensor& a, const at::Tensor& b) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(a, b));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(a), TensorToPython(b));
-  return PythonToTensor(result);
+  return CallPythonOp_Generic(func_name, {a, b});
 }
 
 at::Tensor CallPythonOp_TTS(const char* func_name, const at::Tensor& a, const at::Tensor& b, const at::Scalar& alpha) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(a, b));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(a), TensorToPython(b), "alpha"_a = ScalarToPython(alpha));
-  return PythonToTensor(result);
+  return CallPythonOp_GenericKw(func_name, {a, b}, {PyKwarg{"alpha", alpha}});
 }
 
 at::Tensor CallPythonOp_TS(const char* func_name, const at::Tensor& self, const at::Scalar& other) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(self), ScalarToPython(other));
-  return PythonToTensor(result);
+  return CallPythonOp_Generic(func_name, {self, other});
 }
 
 at::Tensor CallPythonOp_TIB(const char* func_name, const at::Tensor& self, int64_t dim, bool flag) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(self), py::int_(dim), py::bool_(flag));
-  return PythonToTensor(result);
+  return CallPythonOp_Generic(func_name, {self, dim, flag});
 }
 
 at::Tensor CallPythonOp_TOIB(const char* func_name, const at::Tensor& self,
                               at::OptionalIntArrayRef dim, bool keepdim,
                               std::optional<at::ScalarType> dtype) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(
-      TensorToPython(self),
-      OptionalIntArrayRefToPython(dim),
-      py::bool_(keepdim),
-      "dtype"_a = OptionalDtypeToPython(dtype));
-  return PythonToTensor(result);
+  c10::IValue dims = dim ? c10::IValue(dim->vec()) : c10::IValue();
+  return CallPythonOp_GenericKw(func_name, {self, dims, keepdim},
+      {PyKwarg{"dtype", dtype ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), true, !dtype}});
 }
 
 at::Tensor CallPythonOp_TTT(const char* func_name, const at::Tensor& a, const at::Tensor& b, const at::Tensor& c) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(a, b, c));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(a), TensorToPython(b), TensorToPython(c));
-  return PythonToTensor(result);
+  return CallPythonOp_Generic(func_name, {a, b, c});
 }
 
 at::Tensor CallPythonOp_TD(const char* func_name, const at::Tensor& self,
                             std::optional<at::ScalarType> dtype) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(self));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(TensorToPython(self), "dtype"_a = OptionalDtypeToPython(dtype));
-  return PythonToTensor(result);
+  return CallPythonOp_GenericKw(func_name, {self},
+      {PyKwarg{"dtype", dtype ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), true, !dtype}});
 }
 
 at::Tensor CallPythonOp_ListI(const char* func_name,
                               const at::ITensorListRef& tensors, int64_t dim) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  std::optional<c10::Device> list_dev;
-  for (const auto& t : tensors) {
-    if ((list_dev = DeviceOfTensor(t))) break;
-  }
-  const c10::OptionalDeviceGuard device_guard(list_dev);
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::list py_tensors;
-  for (const auto& t : tensors) {
-    py_tensors.append(TensorToPython(t));
-  }
-  py::object result = func(py_tensors, py::int_(dim));
-  return PythonToTensor(result);
+  std::vector<at::Tensor> values;
+  for (const auto& t : tensors) values.push_back(t);
+  return CallPythonOp_Generic(func_name, {values, dim});
 }
 
 at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weight,
                                   const at::Tensor& indices, int64_t padding_idx,
                                   bool scale_grad_by_freq, bool sparse) {
-  const CallScope call;
-  auto& cache = GetCache();
-  cache.EnsureInitialized();
-  const c10::OptionalDeviceGuard device_guard(DeviceOfFirst(weight, indices));
-  py::gil_scoped_acquire gil;
-  auto func = cache.GetFunc(func_name);
-  py::object result = func(
-      TensorToPython(weight), TensorToPython(indices),
-      py::int_(padding_idx), py::bool_(scale_grad_by_freq), py::bool_(sparse));
-  return PythonToTensor(result);
+  return CallPythonOp_Generic(func_name, {weight, indices, padding_idx, scale_grad_by_freq, sparse});
 }
 
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args) {
-  // A registered plan replays the same FlagGems Triton kernel without entering the
-  // interpreter. It answers only for the exact call it was captured from; anything else
-  // - another shape, another scalar argument, no plan at all - falls through to the
-  // Python route below.
-  if (HasFastPlan(func_name)) {
-    at::Tensor replayed = TryFastReplay(func_name, args);
-    if (replayed.defined()) {
-      return replayed;
-    }
+  std::vector<at::Tensor> native;
+  if (TryHostProgram(func_name, args, {}, 1, native)) return native[0];
+  // Preserve the older opt-in API outside host-compiler mode. Host compilation
+  // never consults captured plans, including on a native guard miss.
+  if (!HostProgramsEnabled() && HasFastPlan(func_name)) {
+    auto replayed = TryFastReplay(func_name, args);
+    if (replayed.defined()) return replayed;
   }
   const CallScope call;
   auto& cache = GetCache();
@@ -720,7 +650,9 @@ at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IV
   py::gil_scoped_acquire gil;
   auto func = cache.GetFunc(func_name);
   py::tuple py_args = BuildPyArgs(args, func_name);
-  return PythonToTensor(func(*py_args));
+  auto result = func(*py_args);
+  ObserveHostProgram(func_name, args, {}, 1, func, py_args, py::dict());
+  return PythonToTensor(result);
 }
 
 namespace {
@@ -753,6 +685,8 @@ at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<c10::IValue>& args,
                                   const std::vector<PyKwarg>& kwargs,
                                   bool python_dtype_for_fp8) {
+  std::vector<at::Tensor> native;
+  if (TryHostProgram(func_name, args, kwargs, 1, native)) return native[0];
   const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
@@ -762,7 +696,9 @@ at::Tensor CallPythonOp_GenericKw(const char* func_name,
   auto func = cache.GetFuncBare(func_name);
   py::tuple py_args = BuildPyArgs(args, func_name);
   py::dict py_kwargs = BuildPyKwargs(kwargs, func_name, python_dtype_for_fp8);
-  return PythonToTensor(func(*py_args, **py_kwargs));
+  auto result = func(*py_args, **py_kwargs);
+  ObserveHostProgram(func_name, args, kwargs, 1, func, py_args, py_kwargs);
+  return PythonToTensor(result);
 }
 
 at::Tensor CallPythonOp_Factory(const char* func_name,
@@ -858,6 +794,8 @@ at::Tensor CallPythonOp_RandomInplace(const char* func_name,
 std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
     const char* func_name, const std::vector<c10::IValue>& args,
     const std::vector<PyKwarg>& kwargs, int64_t n, bool python_dtype_for_fp8) {
+  std::vector<at::Tensor> native;
+  if (TryHostProgram(func_name, args, kwargs, n, native)) return native;
   const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
@@ -868,6 +806,7 @@ std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
   py::tuple py_args = BuildPyArgs(args, func_name);
   py::dict py_kwargs = BuildPyKwargs(kwargs, func_name, python_dtype_for_fp8);
   py::object result = func(*py_args, **py_kwargs);
+  ObserveHostProgram(func_name, args, kwargs, n, func, py_args, py_kwargs);
 
   py::sequence seq = py::reinterpret_borrow<py::sequence>(result);
   TORCH_CHECK(static_cast<int64_t>(py::len(seq)) == n,
@@ -883,6 +822,8 @@ std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
 
 std::vector<at::Tensor> CallPythonOp_GenericTuple(
     const char* func_name, const std::vector<c10::IValue>& args, int64_t n) {
+  std::vector<at::Tensor> native;
+  if (TryHostProgram(func_name, args, {}, n, native)) return native;
   const CallScope call;
   auto& cache = GetCache();
   cache.EnsureInitialized();
@@ -892,6 +833,7 @@ std::vector<at::Tensor> CallPythonOp_GenericTuple(
   auto func = cache.GetFunc(func_name);
   py::tuple py_args = BuildPyArgs(args, func_name);
   py::object result = func(*py_args);
+  ObserveHostProgram(func_name, args, {}, n, func, py_args, py::dict());
 
   // FlagGems tuple-returning ops give back a tuple/list of Tensors (some may be
   // None, e.g. an optional running-stats output); map None -> undefined Tensor.

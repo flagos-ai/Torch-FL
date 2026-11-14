@@ -9,6 +9,7 @@
 #include "copy_dispatcher.h"
 
 #include <ATen/native/Resize.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/ops/_pin_memory.h>
 #include <ATen/ops/_to_copy.h>
 #include <ATen/ops/_to_copy_ops.h>
@@ -87,7 +88,37 @@
 #include <c10/cuda/CUDAStream.h>
 #endif
 
+#if defined(FLAGOS_NVIDIA_GEMS_COPY)
+#include "backends/flagos/python_op_caller.h"
+#endif
+
 namespace at::native::flagos {
+
+bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
+#if defined(FLAGOS_NVIDIA_GEMS_COPY)
+  static thread_local bool active = false;
+  if (active || !src.device().is_privateuseone() || src.device() != dst.device() ||
+      src.is_conj() || src.is_neg() || dst.is_conj() || dst.is_neg() ||
+      src.is_complex() || dst.is_complex() || src.numel() > INT32_MAX ||
+      dst.numel() > INT32_MAX || src.numel() == 0 || dst.numel() == 0 ||
+      src.is_alias_of(dst)) return false;
+  const auto supported = [](at::ScalarType t) {
+    return t == at::kFloat || t == at::kHalf || t == at::kBFloat16 ||
+           t == at::kLong || t == at::kInt || t == at::kBool || t == at::kByte;
+  };
+  if (!supported(src.scalar_type()) || !supported(dst.scalar_type())) return false;
+  at::assert_no_internal_overlap(dst);
+  struct Scope {
+    bool& active;
+    explicit Scope(bool& value) : active(value) { active = true; }
+    ~Scope() { active = false; }
+  } scope(active);
+  CallPythonOp_Generic("flag_gems.copy_", {dst, src});
+  return true;
+#else
+  return false;
+#endif
+}
 
 namespace {
 
@@ -357,6 +388,7 @@ bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
 // buffer it touches and drains that device's queue first -- src and dst need not
 // live on the same device, so the guard is per-copy rather than per-function.
 void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
+  if (TryGemsDeviceCopy(src, dst)) return;
   at::Tensor src_contig = src.is_contiguous()
       ? src
       : at::native::flagos::contiguous(src, c10::MemoryFormat::Contiguous);

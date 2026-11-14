@@ -1414,6 +1414,11 @@ def gen_flaggems_python_kernel(
     # operands are packed for the call. See _DOT_CONTRACT_PADDED_OPS.
     dotpad_lines, dotpad_rename = _dot_contract_prelude(op, args)
     passed_names = [dotpad_rename.get(n, n) for n in passed_names]
+    if op == "embedding":
+        # sparse only selects the ATen backward representation. The forward
+        # gather is identical; FlagGems rejects sparse=True unnecessarily.
+        # Autograd retains the original schema argument above this backend.
+        passed_names = ["false" if n == "sparse" else n for n in passed_names]
     ivalues = "{" + ", ".join(passed_names) + "}"
 
     # kwarg call selects the *Kw caller variant; positional-only uses the plain one.
@@ -3246,7 +3251,6 @@ def main():
             "cosh.out",
             "dequantize.self",
             "elu_backward",
-            "embedding",
             "mul_.Tensor",
             "nanmedian.dim_values",
             "norm.Scalar",

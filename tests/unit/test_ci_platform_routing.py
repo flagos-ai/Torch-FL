@@ -87,6 +87,7 @@ def test_cpu_workflows_do_not_schedule_the_same_explicit_test_file_twice():
     assert len(codegen) == len(set(codegen))
     assert not set(agnostic) & set(codegen)
     assert "tests/unit/test_gen_vendor_confs.py" in agnostic
+    assert "tests/unit/test_host_program_admission.py" in agnostic
 
 
 def test_stdlib_vendor_conf_check_has_one_lightweight_owner():
