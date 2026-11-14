@@ -14,6 +14,7 @@
 
 """Native eager dispatch must preserve values, guards, streams and storage."""
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -39,8 +40,17 @@ def compiled_mul(tmp_path_factory):
         torch.mul(x, x)
     manifests = list(Path(directory).glob("*/artifact.json"))
     assert manifests, [p.read_text() for p in Path(directory).glob("*/failure.txt")]
+    artifact = json.loads(manifests[0].read_text())
+    assert (
+        artifact["source_sha256"]
+        == hashlib.sha256(Path(artifact["source"]).read_bytes()).hexdigest()
+    )
+    assert (
+        artifact["library_sha256"]
+        == hashlib.sha256(Path(artifact["library"]).read_bytes()).hexdigest()
+    )
     host_compiler._mode = "load"
-    yield json.loads(manifests[0].read_text())
+    yield artifact
     host_compiler.disable()
 
 
@@ -161,3 +171,24 @@ def test_native_slice_returns_a_fresh_view(compiled_mul):
             assert view._version == x._version
     finally:
         host_compiler._mode = "load"
+
+
+def test_collect_then_compile_admits_the_recorded_call(compiled_mul, tmp_path):
+    previous_root, previous_mode = host_compiler._root, host_compiler._mode
+    with torch.no_grad():
+        cpu = torch.randn(9, 128)
+        x = cpu.to("flagos:0")
+        try:
+            host_compiler.enable(tmp_path, mode="collect")
+            torch.neg(x)
+            assert len(list(tmp_path.glob("*/request.json"))) == 1
+            assert not list(tmp_path.glob("*/artifact.json"))
+            host_compiler.enable(tmp_path, mode="compile")
+            torch.neg(x)
+            assert len(list(tmp_path.glob("*/artifact.json"))) == 1
+            before = torch.ops.flagos.host_program_stats()[2]
+            result = torch.neg(x)
+            assert torch.ops.flagos.host_program_stats()[2] == before + 1
+            torch.testing.assert_close(result.cpu(), -cpu, rtol=0, atol=0)
+        finally:
+            host_compiler.enable(previous_root, mode=previous_mode)

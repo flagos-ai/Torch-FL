@@ -18,7 +18,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -131,3 +131,52 @@ def test_attempt_budget_does_not_grow_on_new_specializations(compiler):
             "key", test_attempt_budget_does_not_grow_on_new_specializations, (), {}, 1
         )
     assert len(compiler._seen) == 512
+
+
+@pytest.fixture
+def enabled_compiler(compiler, monkeypatch):
+    package = ModuleType("torch_fl")
+    package._build_config = SimpleNamespace(KERNELS=("flaggems", "vendor"))
+    platform = ModuleType("torch_fl._platform")
+    platform.detect_platform = lambda: "cuda"
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setitem(sys.modules, "torch_fl._platform", platform)
+    compiler.torch.__version__ = "2.10.0+cpu"
+    compiler.torch.version = SimpleNamespace(cuda=None)
+    compiler.torch.ops.flagos.host_program_enable = lambda enabled: None
+    monkeypatch.setattr(compiler, "_encode", lambda value: [])
+    with patch.object(compiler.ctypes, "CDLL"):
+        yield compiler
+
+
+def test_collection_does_not_consume_a_compilation_attempt(enabled_compiler, tmp_path):
+    compiler = enabled_compiler
+    function = test_collection_does_not_consume_a_compilation_attempt
+    compiler.enable(tmp_path, mode="collect")
+    compiler._observe("key", function, (), {}, 1)
+    assert len(list(tmp_path.glob("*/request.json"))) == 1
+    compiler.enable(tmp_path, mode="compile")
+    with patch.object(compiler, "_compile", return_value=0) as compile_request:
+        compiler._observe("key", function, (), {}, 1)
+        compiler._observe("key", function, (), {}, 1)
+        compile_request.assert_called_once()
+
+
+def test_collection_tracks_the_selected_cache_directory(enabled_compiler, tmp_path):
+    compiler = enabled_compiler
+    for name in ("first", "second"):
+        root = tmp_path / name
+        compiler.enable(root, mode="collect")
+        compiler._observe(
+            "key", test_collection_tracks_the_selected_cache_directory, (), {}, 1
+        )
+        assert len(list(root.glob("*/request.json"))) == 1
+
+
+def test_reenabling_keeps_one_pair_of_runtime_libraries(enabled_compiler, tmp_path):
+    compiler = enabled_compiler
+    compiler.enable(tmp_path, mode="collect")
+    compiler.disable()
+    compiler.enable(tmp_path, mode="compile")
+    assert compiler.ctypes.CDLL.call_count == 2
+    assert len(compiler._libraries) == 2

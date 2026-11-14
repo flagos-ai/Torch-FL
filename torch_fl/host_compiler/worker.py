@@ -425,7 +425,8 @@ def compile_request(request):
         "kernels": launches,
         "guards": [str(g.expr) for g in graph.shape_env.guards],
         "source": str(immutable_source),
-        "source_sha256": digest,
+        "source_sha256": hashlib.sha256(cpp.encode()).hexdigest(),
+        "build_sha256": digest,
         "library_sha256": hashlib.sha256(Path(library).read_bytes()).hexdigest(),
         "cohort": {
             "torch": torch.__version__,

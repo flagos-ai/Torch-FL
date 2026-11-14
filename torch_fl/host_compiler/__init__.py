@@ -35,6 +35,7 @@ import torch
 _mode = "collect"
 _root = None
 _seen = set()
+_collected = set()
 _lock = threading.RLock()
 _local = threading.local()
 _libraries = []
@@ -61,23 +62,27 @@ def enable(cache_dir: Union[str, os.PathLike], *, mode: str = "compile") -> None
         raise RuntimeError(
             "host compiler validation requires the CPU-Torch vendor build"
         )
-    _libraries.append(ctypes.CDLL("libcuda.so.1", mode=ctypes.RTLD_GLOBAL))
-    _libraries.append(
-        ctypes.CDLL(
-            str(Path(__file__).parents[1] / "lib/libflagos.so"), mode=ctypes.RTLD_GLOBAL
-        )
-    )
-    _root = Path(cache_dir).resolve()
-    _root.mkdir(parents=True, exist_ok=True)
-    _mode = mode
-    for manifest in sorted(_root.glob("*/artifact.json")):
-        try:
-            _register(json.loads(manifest.read_text()), manifest)
-        except (OSError, ValueError) as error:
-            warnings.warn(
-                f"Cannot read host artifact {manifest}: {error}", RuntimeWarning
-            )
-    torch.ops.flagos.host_program_enable(True)
+    with _lock:
+        if not _libraries:
+            libraries = [
+                ctypes.CDLL("libcuda.so.1", mode=ctypes.RTLD_GLOBAL),
+                ctypes.CDLL(
+                    str(Path(__file__).parents[1] / "lib/libflagos.so"),
+                    mode=ctypes.RTLD_GLOBAL,
+                ),
+            ]
+            _libraries.extend(libraries)
+        _root = Path(cache_dir).resolve()
+        _root.mkdir(parents=True, exist_ok=True)
+        _mode = mode
+        for manifest in sorted(_root.glob("*/artifact.json")):
+            try:
+                _register(json.loads(manifest.read_text()), manifest)
+            except (OSError, ValueError) as error:
+                warnings.warn(
+                    f"Cannot read host artifact {manifest}: {error}", RuntimeWarning
+                )
+        torch.ops.flagos.host_program_enable(True)
 
 
 def disable() -> None:
@@ -173,10 +178,17 @@ def _observe(key, func, args, kwargs, outputs):
         encoded = json.dumps(spec, sort_keys=True)
         digest = hashlib.sha256(encoded.encode()).hexdigest()[:24]
         with _lock:
-            if digest in _seen or len(_seen) >= 512:
+            # Collection must not consume the later compilation attempt, and
+            # selecting a different cache must write its own request file.
+            if _mode == "load":
                 return
-            _seen.add(digest)
+            seen = _seen if _mode == "compile" else _collected
+            if len(seen) >= 512:
+                return
             directory = _root / digest
+            if directory in seen:
+                return
+            seen.add(directory)
             directory.mkdir(exist_ok=True)
             request = directory / "request.json"
             request.write_text(encoded)
