@@ -95,7 +95,9 @@ Stream_t GetCurrentStreamForDevice(int device) {
   if (it != current_streams.end()) {
     return reinterpret_cast<Stream_t>(it->second);
   }
-  return GetDefaultStreamForDevice(device);
+  auto stream = GetDefaultStreamForDevice(device);
+  if (stream) current_streams.emplace(device, reinterpret_cast<cudaStream_t>(stream));
+  return stream;
 }
 
 Error_t SetCurrentStreamForDevice(int device, Stream_t stream) {

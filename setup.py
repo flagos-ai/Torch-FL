@@ -1399,9 +1399,13 @@ def _get_setup_kwargs():
     package_data = {
         "torch_fl": [
             "native_host/csrc/*.cc",
+            "native_host/csrc/*.h",
             "native_host/_generated/*.so",
             "native_host/_generated/*.json",
             "native_host/_generated/*.py",
+            "native_host/_generated/typed/*.so",
+            "native_host/_generated/typed/*.json",
+            "native_host/_generated/typed/*.py",
             "native_host/_generated/licenses/*",
             "host_compiler/include/torch/csrc/inductor/cpp_wrapper/*.h",
             "host_compiler/include/torch/csrc/inductor/cpp_wrapper/device_internal/*.h",
@@ -1496,6 +1500,11 @@ def _get_setup_kwargs():
         },
         include_package_data=False,
         python_requires=_requires_python(),
+        # setuptools exposes these through PEP 517's build-requirements hook.
+        # Ordinary and non-NVIDIA wheels do not compile the optional hosts.
+        setup_requires=(
+            ["Cython==3.2.4"] if _env_module().flag("FLAGOS_BUILD_NATIVE_HOST") else []
+        ),
         install_requires=_install_requires(),
         # No extras_require here: pyproject.toml's
         # [project.optional-dependencies] owns that table and setuptools reports

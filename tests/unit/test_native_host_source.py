@@ -152,6 +152,67 @@ def host(value):
     assert calls == [("math", "ceil")]
 
 
+def test_metadata_exception_region_keeps_conversion_and_error(source_module):
+    original = source_module("""
+def host(dim):
+    try:
+        dim = list(dim)
+    except TypeError:
+        raise TypeError(f'invalid dimensions: {type(dim)}')
+    return dim
+""")
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    (region,) = record["regions"]
+    helper = generated[region["name"]]
+    assert region["inputs"] == region["outputs"] == ["dim"]
+    dimensions = [1, 2]
+    assert helper(dimensions) == dimensions
+    assert helper(dimensions) is not dimensions
+    with pytest.raises(TypeError, match="invalid dimensions"):
+        helper(None)
+
+
+def test_local_callback_region_retains_each_calls_capture(source_module):
+    original = source_module("""
+callbacks = []
+def install(callback):
+    callbacks.append(callback)
+def host(value):
+    if value is not None:
+        def callback(scale, value=value):
+            return value * scale
+        install(callback)
+    return value
+""")
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    generated["_bind"](lambda value: value)
+    (region,) = [r for r in record["regions"] if r.get("kind") == "closure"]
+    assert region["inputs"] == ["value"]
+    helper = generated[region["name"]]
+    helper(3)
+    helper(7)
+    assert [callback(5) for callback in original.callbacks] == [15, 35]
+
+
+def test_local_callback_region_refuses_nonlocal_mutation(source_module):
+    original = source_module("""
+def install(callback):
+    callback()
+def host(value):
+    def callback():
+        nonlocal value
+        value += 1
+    install(callback)
+    return value
+""")
+    _, record = build.source_module(original, "fg_aot")
+    assert not [r for r in record["regions"] if r.get("kind") == "closure"]
+
+
 def test_shared_host_class_keeps_dynamic_control_flow(source_module):
     original = source_module(
         """

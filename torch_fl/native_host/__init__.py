@@ -45,3 +45,10 @@ def audit():
     if _hosts is None:
         raise RuntimeError("the wheel was built without native FlagGems hosts")
     return _hosts.audit()
+
+
+def compile(model, *, dynamic=True, fullgraph=True):
+    """Compile an inference model's host graph; numerical kernels stay FlagGems."""
+    from .model import compile_model
+
+    return compile_model(model, dynamic=dynamic, fullgraph=fullgraph)

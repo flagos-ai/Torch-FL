@@ -69,7 +69,12 @@ jobs:
           # which needs torchgen (shipped with torch) at import time. Stock CPU
           # torch is enough: no built torch_fl._C and no vendor toolkit.
           pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0"
-          pip install pyyaml pytest
+          pip install pyyaml pytest setuptools wheel
+
+      - name: Verify generated native host semantics
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: python3 -m pytest tests/unit/test_native_host_ir.py tests/unit/test_native_host_constants.py -q --tb=short
 
       - name: Run generator --check modes
         run: |

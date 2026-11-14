@@ -4,6 +4,7 @@
 
 #include "fast_plan.h"
 #include "host_program.h"
+#include "source_host.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -633,8 +634,26 @@ at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weigh
   return CallPythonOp_Generic(func_name, {weight, indices, padding_idx, scale_grad_by_freq, sparse});
 }
 
+at::Tensor CallPythonOp_Generic(const char* func_name,
+                                std::initializer_list<c10::IValue> args) {
+  at::Tensor result;
+  if(TrySourceHostTensor(func_name,c10::ArrayRef<c10::IValue>(args),{},result))return result;
+  return CallPythonOp_Generic(func_name,std::vector<c10::IValue>(args));
+}
+
+at::Tensor CallPythonOp_GenericKw(const char* func_name,
+                                  std::initializer_list<c10::IValue> args,
+                                  std::initializer_list<PyKwarg> kwargs,
+                                  bool python_dtype_for_fp8) {
+  at::Tensor result;
+  if(TrySourceHostTensor(func_name,c10::ArrayRef<c10::IValue>(args),c10::ArrayRef<PyKwarg>(kwargs),result))return result;
+  return CallPythonOp_GenericKw(func_name,std::vector<c10::IValue>(args),
+                                std::vector<PyKwarg>(kwargs),python_dtype_for_fp8);
+}
+
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args) {
   std::vector<at::Tensor> native;
+  if (TrySourceHost(func_name, args, {}, 1, native)) return native[0];
   if (TryHostProgram(func_name, args, {}, 1, native)) return native[0];
   // Preserve the older opt-in API outside host-compiler mode. Host compilation
   // never consults captured plans, including on a native guard miss.
@@ -686,6 +705,7 @@ at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<PyKwarg>& kwargs,
                                   bool python_dtype_for_fp8) {
   std::vector<at::Tensor> native;
+  if (TrySourceHost(func_name, args, kwargs, 1, native)) return native[0];
   if (TryHostProgram(func_name, args, kwargs, 1, native)) return native[0];
   const CallScope call;
   auto& cache = GetCache();
@@ -795,6 +815,7 @@ std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
     const char* func_name, const std::vector<c10::IValue>& args,
     const std::vector<PyKwarg>& kwargs, int64_t n, bool python_dtype_for_fp8) {
   std::vector<at::Tensor> native;
+  if (TrySourceHost(func_name, args, kwargs, n, native)) return native;
   if (TryHostProgram(func_name, args, kwargs, n, native)) return native;
   const CallScope call;
   auto& cache = GetCache();
@@ -823,6 +844,7 @@ std::vector<at::Tensor> CallPythonOp_GenericKwTuple(
 std::vector<at::Tensor> CallPythonOp_GenericTuple(
     const char* func_name, const std::vector<c10::IValue>& args, int64_t n) {
   std::vector<at::Tensor> native;
+  if (TrySourceHost(func_name, args, {}, n, native)) return native;
   if (TryHostProgram(func_name, args, {}, n, native)) return native;
   const CallScope call;
   auto& cache = GetCache();

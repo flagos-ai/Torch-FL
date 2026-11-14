@@ -168,9 +168,12 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
                         static_cast<c10::DeviceIndex>(device))};
   }
 
-  // Use nullptr as stream for default stream allocations.
-  // In a more complete implementation, we would get the current stream.
   Stream_t stream = nullptr;
+#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
+  // Keep native CUDA pools separate per stream. Same-stream reuse is ordered by
+  // the queue; a free block must not be handed to a different queue prematurely.
+  stream = ::GetCurrentStreamForDevice(device);
+#endif
 
   Block* block = alloc_block(nbytes, stream, device);
   TORCH_CHECK(

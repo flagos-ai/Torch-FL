@@ -12,6 +12,7 @@
 #include <c10/util/ArrayRef.h>
 
 #include <utility>
+#include <initializer_list>
 
 namespace at::native::flagos {
 
@@ -72,6 +73,8 @@ at::Tensor CallPythonOp_Embedding(const char* func_name, const at::Tensor& weigh
 // For ops with complex signatures not covered above.
 // Arguments are passed as a vector of IValues.
 at::Tensor CallPythonOp_Generic(const char* func_name, const std::vector<c10::IValue>& args);
+at::Tensor CallPythonOp_Generic(const char* func_name,
+                               std::initializer_list<c10::IValue> args);
 
 // A keyword argument to forward to the FlagGems Python op by name. Used for the
 // aten trailing args that gems declares keyword-only (dtype/alpha/correction/...).
@@ -102,6 +105,10 @@ struct PyKwarg {
 at::Tensor CallPythonOp_GenericKw(const char* func_name,
                                   const std::vector<c10::IValue>& args,
                                   const std::vector<PyKwarg>& kwargs,
+                                  bool python_dtype_for_fp8 = false);
+at::Tensor CallPythonOp_GenericKw(const char* func_name,
+                                  std::initializer_list<c10::IValue> args,
+                                  std::initializer_list<PyKwarg> kwargs,
                                   bool python_dtype_for_fp8 = false);
 
 // Like CallPythonOp_GenericTuple, but with keyword args (e.g. sort.stable,

@@ -51,7 +51,7 @@ class DeviceScope:
         return self
 
     def __exit__(self, kind, value, traceback):
-        if self.previous is not None:
+        if self.previous is not None and _C._get_device() != self.previous:
             _C._set_device(self.previous)
         return False
 
@@ -114,6 +114,9 @@ class KernelEntry:
             param.name: param.default for param in self.params if param.has_default
         }
         self.cache = {}
+        self.native_cache = _launcher.KernelCache(
+            self.arg_names, self.defaults, self.returns_constants
+        )
 
     def __getitem__(self, grid):
         return BoundKernel(self, grid)
@@ -129,6 +132,9 @@ class KernelEntry:
         if kwargs["warmup"]:
             return self.original.run(*args, grid=grid, **kwargs)
         device = _C._get_device()
+        native = self.native_cache.run(args, kwargs, grid, device)
+        if native is not None and not isinstance(native, bytes):
+            return native
         key = (
             device,
             tuple(argument_key(a) for a in args),
@@ -154,7 +160,11 @@ class KernelEntry:
                 hooks,
             )
             self.cache[key] = variant
+            if native is not None:
+                self.native_cache.prepare(native, args, kwargs, variant)
             return (kernel, constants) if self.returns_constants else kernel
+        if native is not None:
+            self.native_cache.prepare(native, args, kwargs, variant)
         kernel, launch, function, packed, constants, tuned, heuristics, hooks = variant
         named = dict(zip(self.arg_names, args))
         named.update(kwargs)
@@ -199,8 +209,18 @@ class PointwiseOverload:
         self.owner = owner
         self.ndim = ndim
         self.kernel = kernel
+        self.native = _launcher.PointwiseSchedule(
+            owner,
+            ndim,
+            kernel,
+            _pointwise_helpers,
+            (_C._exchangeDevice, _C._set_device),
+        )
 
     def __call__(self, *args, **kwargs):
+        native = self.native(args, kwargs)
+        if native is not None:
+            return native
         owner = self.owner
         schema, config, ndim = owner.fx, owner.config, self.ndim
         outputs = [kwargs[f"out{i}"] for i in range(schema.num_output_tensors())]
@@ -278,6 +298,18 @@ def pointwise_instantiate(owner, ndim):
         overload = PointwiseOverload(owner, ndim, _kernel_factory(owner, ndim))
         owner.overloads[key] = overload
     return overload
+
+
+def pointwise_prepare(owner, args, kwargs, execute=False):
+    native = owner.__dict__.get("_native_spec")
+    if native is None:
+        native = _launcher.PointwiseSpec(
+            owner.fx,
+            _imports["flag_gems.utils.pointwise_dynamic"].type_promotion,
+            owner.config,
+        )
+        owner._native_spec = native
+    return native.prepare(args, kwargs, _C._get_device(), owner if execute else None)
 
 
 def configure(resolve, kernel_factory, helpers, imports):

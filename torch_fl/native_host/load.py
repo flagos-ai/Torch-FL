@@ -80,7 +80,7 @@ def function_identity(function):
     return f"{function.__module__}:{function.__qualname__}:{Path(code.co_filename).name}:{code.co_firstlineno}"
 
 
-def install_launcher(package="fg_aot"):
+def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
     global _audit_installed, _launcher_module
     import triton.backends.nvidia.driver as driver
 
@@ -90,7 +90,7 @@ def install_launcher(package="fg_aot"):
     driver.CudaUtils = lambda: cuda_utils
     driver.PyCUtensorMap = cuda_utils.PyCUtensorMap
     driver.CudaLauncher = kernel_launcher
-    if not _audit_installed:
+    if enforce_native_compilation and not _audit_installed:
         sys.addaudithook(audit_native_compilers)
         _audit_installed = True
 
@@ -101,6 +101,18 @@ def install_launcher(package="fg_aot"):
     driver.compile_module_from_src = reject
     from triton.runtime import driver as runtime_driver
 
+    # Driver creation happens after the CPU-Torch CUDA compatibility setup.
+    # Bind both future and existing drivers to the same live stream provider
+    # used by native launches, without forcing early driver initialization.
+    if not getattr(driver.CudaDriver.__init__, "_flagos_stream_provider", False):
+        original_init = driver.CudaDriver.__init__
+
+        def initialize(instance, *args, **kwargs):
+            original_init(instance, *args, **kwargs)
+            instance.get_current_stream = _launcher_module.current_stream
+
+        initialize._flagos_stream_provider = True
+        driver.CudaDriver.__init__ = initialize
     for active in (
         getattr(runtime_driver, "_active", None),
         getattr(runtime_driver, "_default", None),
@@ -108,6 +120,7 @@ def install_launcher(package="fg_aot"):
         if active is not None:
             active.utils = cuda_utils
             active.launcher_cls = kernel_launcher
+            active.get_current_stream = _launcher_module.current_stream
 
 
 class Hosts:
@@ -327,8 +340,10 @@ class Hosts:
 
     def _artifacts(self):
         return {
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in self.path.glob("*.so")
+            str(path.relative_to(self.path)): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in self.path.rglob("*.so")
         }
 
     def audit(self):
@@ -357,3 +372,7 @@ class Hosts:
             setattr(flag_gems, name, function)
             if hasattr(flag_gems.ops, name):
                 setattr(flag_gems.ops, name, function)
+        if self.manifest.get("typed_hosts"):
+            from .typed import activate
+
+            self.typed = activate(self)

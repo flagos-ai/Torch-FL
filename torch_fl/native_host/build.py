@@ -5,6 +5,7 @@
 
 import argparse
 import ast
+import copy
 import dataclasses
 from enum import Enum
 import hashlib
@@ -30,6 +31,212 @@ def function_identity(function):
 def write_changed(path, text):
     if not path.exists() or path.read_text() != text:
         path.write_text(text)
+
+
+def metadata_regions(definition):
+    """Export straight-line exception regions without changing their semantics."""
+    regions = []
+    if not isinstance(definition, ast.FunctionDef):
+        return regions
+
+    def scope_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            ):
+                yield child
+            else:
+                yield from scope_nodes(child)
+
+    nodes = list(scope_nodes(definition))
+    locals_ = {
+        node.id
+        for node in nodes
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    locals_.update(
+        argument.arg
+        for argument in ast.walk(definition.args)
+        if isinstance(argument, ast.arg)
+    )
+    locals_.update(
+        node.name for node in nodes if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    )
+    for region in nodes:
+        if not isinstance(region, ast.Try) or region.orelse or region.finalbody:
+            continue
+        if not all(isinstance(statement, ast.Assign) for statement in region.body):
+            continue
+        if any(
+            isinstance(
+                node,
+                (
+                    ast.ListComp,
+                    ast.SetComp,
+                    ast.DictComp,
+                    ast.GeneratorExp,
+                    ast.Lambda,
+                    ast.NamedExpr,
+                ),
+            )
+            for node in ast.walk(region)
+        ):
+            continue
+        if not all(
+            len(handler.body) == 1 and isinstance(handler.body[0], ast.Raise)
+            for handler in region.handlers
+        ):
+            continue
+        written = set()
+        inputs = set()
+        for statement in region.body:
+            inputs.update(
+                node.id
+                for node in ast.walk(statement.value)
+                if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id in locals_
+                and node.id not in written
+            )
+            written.update(
+                node.id
+                for target in statement.targets
+                for node in ast.walk(target)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+            )
+        if not written:
+            continue
+        handler_reads = {
+            node.id
+            for handler in region.handlers
+            for node in ast.walk(handler)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in locals_
+        }
+        if not handler_reads.issubset(inputs):
+            continue
+        digest = hashlib.sha256(
+            (
+                definition.name + "\n" + ast.dump(region, include_attributes=False)
+            ).encode()
+        ).hexdigest()[:16]
+        name = "_host_region_" + digest
+        inputs, outputs = sorted(inputs), sorted(written)
+        function = ast.parse(f"def {name}({', '.join(inputs)}): pass").body[0]
+        result = [ast.Name(output, ast.Load()) for output in outputs]
+        function.body = [
+            copy.deepcopy(region),
+            ast.Return(
+                result[0] if len(result) == 1 else ast.Tuple(result, ast.Load())
+            ),
+        ]
+        regions.append((function, {"name": name, "inputs": inputs, "outputs": outputs}))
+    return regions
+
+
+def closure_regions(definition):
+    """Export local callbacks handed directly to a consumer, with live captures."""
+    if not isinstance(definition, ast.FunctionDef):
+        return []
+
+    def outer_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            yield from outer_nodes(child)
+
+    outer = list(outer_nodes(definition))
+    locals_ = {
+        n.id for n in outer if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+    }
+    locals_.update(a.arg for a in ast.walk(definition.args) if isinstance(a, ast.arg))
+    regions = []
+    for parent in outer:
+        for _, statements in ast.iter_fields(parent):
+            if not isinstance(statements, list):
+                continue
+            for first, second in zip(statements, statements[1:]):
+                if not isinstance(first, ast.FunctionDef) or not isinstance(
+                    second, ast.Expr
+                ):
+                    continue
+                if not isinstance(second.value, ast.Call):
+                    continue
+                uses = [
+                    n
+                    for n in ast.walk(second)
+                    if isinstance(n, ast.Name) and n.id == first.name
+                ]
+                outside_uses = [
+                    n for n in outer if isinstance(n, ast.Name) and n.id == first.name
+                ]
+                if len(uses) != 1 or outside_uses != uses:
+                    continue
+                scoped = (
+                    ast.Nonlocal,
+                    ast.Global,
+                    ast.Lambda,
+                    ast.ListComp,
+                    ast.SetComp,
+                    ast.DictComp,
+                    ast.GeneratorExp,
+                    ast.ClassDef,
+                )
+                if any(isinstance(n, scoped) for n in ast.walk(first)) or any(
+                    isinstance(n, ast.FunctionDef) and n is not first
+                    for n in ast.walk(first)
+                ):
+                    continue
+                bound = {first.name}
+                bound.update(
+                    a.arg for a in ast.walk(first.args) if isinstance(a, ast.arg)
+                )
+                bound.update(
+                    n.id
+                    for n in ast.walk(first)
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                )
+                block = ast.Module(body=[first, second], type_ignores=[])
+
+                def reads(node):
+                    return {
+                        n.id
+                        for n in ast.walk(node)
+                        if isinstance(n, ast.Name)
+                        and isinstance(n.ctx, ast.Load)
+                        and n.id in locals_
+                    }
+
+                body_reads = set().union(*(reads(n) for n in first.body)) - bound
+                evaluated_reads = reads(first.args) | reads(second)
+                for decorator in first.decorator_list:
+                    evaluated_reads.update(reads(decorator))
+                inputs = sorted(body_reads | (evaluated_reads - {first.name}))
+                digest = hashlib.sha256(
+                    (
+                        definition.name
+                        + "\n"
+                        + ast.dump(block, include_attributes=False)
+                    ).encode()
+                ).hexdigest()[:16]
+                name = "_host_closure_" + digest
+                helper = ast.parse(f"def {name}({', '.join(inputs)}): pass").body[0]
+                helper.body = [copy.deepcopy(first), copy.deepcopy(second)]
+                regions.append(
+                    (
+                        helper,
+                        {
+                            "name": name,
+                            "inputs": inputs,
+                            "outputs": [],
+                            "kind": "closure",
+                        },
+                    )
+                )
+    return regions
 
 
 class HostSource(ast.NodeTransformer):
@@ -141,6 +348,12 @@ def source_module(module, package, modules=()):
                 ]
                 node.decorator_list = []
             definitions.append(node)
+    regions = [
+        region
+        for definition in definitions
+        for region in metadata_regions(definition) + closure_regions(definition)
+    ]
+    definitions.extend(function for function, _ in regions)
     definitions = [HostSource(modules).visit(node) for node in definitions]
     for definition in definitions:
         if (
@@ -148,7 +361,18 @@ def source_module(module, package, modules=()):
             and definition.name == "PointwiseDynamicFunction"
         ):
             for method in definition.body:
-                if isinstance(method, ast.FunctionDef) and method.name == "instantiate":
+                if (
+                    isinstance(method, ast.FunctionDef)
+                    and method.name == "_call_real_impl"
+                ):
+                    method.body[:0] = ast.parse("""
+_native_result = _runtime.pointwise_prepare(self, args, kwargs, execute=True)
+if _native_result is not None:
+    return _native_result
+""").body
+                elif (
+                    isinstance(method, ast.FunctionDef) and method.name == "instantiate"
+                ):
                     method.body = ast.parse(
                         "return _runtime.pointwise_instantiate(self, ndim)"
                     ).body
@@ -187,6 +411,7 @@ def source_module(module, package, modules=()):
         "sha256": hashlib.sha256(source.encode()).hexdigest(),
         "functions": sorted(names),
         "globals": globals_used,
+        "regions": [record for _, record in regions],
     }
 
 
@@ -295,10 +520,18 @@ def main():
             namespace + "._launcher",
             [str(root / "csrc/launcher.cc")],
             include_dirs=[str(torch_include), str(cuda / "include")],
-            library_dirs=[str(cuda / "lib64/stubs"), str(cuda / "lib/stubs")],
-            libraries=["cuda"],
+            library_dirs=[
+                str(cuda / "lib64/stubs"),
+                str(cuda / "lib/stubs"),
+                str(Path(torch.__file__).parent / "lib"),
+            ],
+            libraries=["cuda", "torch_python", "torch_cpu", "c10"],
             language="c++",
-            extra_compile_args=["-O3", "-std=c++17"],
+            extra_compile_args=[
+                "-O3",
+                "-std=c++17",
+                f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
+            ],
         ),
         Extension(
             namespace + ".cuda_utils",
@@ -457,6 +690,27 @@ def main():
     for old in package.glob("*.so"):
         if old.resolve() not in expected:
             old.unlink()
+    if not args.launcher_only:
+        from torch_fl.native_host.compiler.bundle import build as build_typed
+        from torch_fl.native_host.load import Hosts, install_launcher
+
+        # This process is the wheel builder. Its final C++ compilation is still
+        # build-time work; installed wheels always enable the compilation guard.
+        install_launcher(namespace, enforce_native_compilation=False)
+        hosts = Hosts(package)
+        hosts.activate()
+        typed = build_typed(
+            package / "typed",
+            hosts,
+            set(manifest["ops"]),
+            source_root=root.parents[1],
+            build_temp=build_temp / "typed",
+        )
+        manifest["typed_hosts"] = {
+            "compiled": len(typed["compiled"]),
+            "fallback": len(typed["fallback"]),
+        }
+        (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"output": str(output), "host_modules": len(extensions)}))
 
 

@@ -94,6 +94,18 @@ def _load_setup(monkeypatch):
     return namespace, kwargs
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cython_is_only_a_native_host_build_requirement(monkeypatch, enabled):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", str(int(enabled)))
+    monkeypatch.setattr(sys, "argv", ["setup.py", "egg_info"])
+    _, kwargs = _load_setup(monkeypatch)
+    assert kwargs["setup_requires"] == (["Cython==3.2.4"] if enabled else [])
+    source = (ROOT / "pyproject.toml").read_text()
+    build_system = source.split("[build-system]", 1)[1].split("[project]", 1)[0]
+    assert "Cython" not in build_system
+
+
 def test_iluvatar_native_build_uses_active_cpu_torch(monkeypatch, tmp_path):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
     # A legacy image variable must not redirect the native build to vendor torch.

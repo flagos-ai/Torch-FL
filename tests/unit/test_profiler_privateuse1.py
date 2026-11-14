@@ -187,7 +187,8 @@ def test_stage_b_chrome_trace_has_gpu_kernels():
     CUPTI-decoded names and non-zero durations. This is the core Stage B goal --
     torch.profiler capturing the CUDA kernel timeline via our dlopen'd CUPTI
     child profiler, on the CPU-torch + external libtorch_cuda stack (no CUDA
-    wheel). Running N matmuls must surface N sgemm kernels, not just one.
+    wheel). Running N matmuls must surface at least N matmul kernels, including
+    FlagGems kernels on the default NVIDIA route.
     """
     N = 10
     x = torch.randn(1024, 1024, device="flagos")
@@ -232,9 +233,11 @@ def test_stage_b_chrome_trace_has_gpu_kernels():
         for e in named
         if "sgemm" in str(e.get("name", "")).lower()
         or "gemm" in str(e.get("name", "")).lower()
+        or "mm_kernel" in str(e.get("name", "")).lower()
+        or "matmul" in str(e.get("name", "")).lower()
     ]
     assert sgemm, (
-        f"no matmul (sgemm) kernel captured; names={[e.get('name') for e in named][:5]}"
+        f"no matmul kernel captured; names={[e.get('name') for e in named][:5]}"
     )
     # We launched N matmuls; expect roughly N sgemm launches (allow some slack).
     assert len(sgemm) >= N // 2, f"expected ~{N} sgemm kernels, got {len(sgemm)}"

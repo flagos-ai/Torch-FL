@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Full official Qwen3 eager prefill/decode, with a separate vendor reference.
+"""Full official Qwen3 prefill/decode, with a separate vendor reference.
 
-No torch.compile, CUDA graphs, layer truncation, replacement model or output
-pooling is used. Run each backend in its own process on an otherwise idle GPU.
+Eager execution is the default. --model-host compiles only the model's host
+graph through ATen; all numerical kernels remain FlagGems. Neither mode uses
+CUDA graphs, layer truncation, a replacement model or output pooling. Run each
+backend in its own process on an otherwise idle GPU.
 """
 
 import argparse
@@ -57,7 +59,13 @@ def main():
     )
     parser.add_argument("--cache", type=Path)
     parser.add_argument("--hosts", type=Path, help="Prebuilt FlagGems source hosts")
+    parser.add_argument(
+        "--model-host", action="store_true", help="Use the generic FlagGems model host"
+    )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--profile-kernels", type=Path, help="Export a separate kernel-provenance trace"
+    )
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--progress-every", type=int, default=0)
@@ -73,12 +81,17 @@ def main():
         "--prompt", default="Explain in one sentence why the sky is blue."
     )
     args = parser.parse_args()
+    if args.model_host and (args.device != "flagos:0" or args.mode != "plain"):
+        parser.error("--model-host requires --device flagos:0 --mode plain")
+    if args.profile_kernels and args.device != "flagos:0":
+        parser.error("--profile-kernels audits FlagGems launches on --device flagos:0")
     hosts = None
     report = {
         "torch": torch.__version__,
         "device": args.device,
         "mode": args.mode,
         "dtype": args.dtype,
+        "execution": "flaggems-model-host" if args.model_host else "eager",
     }
     if args.device.startswith("flagos"):
         if args.hosts:
@@ -120,6 +133,8 @@ def main():
         .eval()
         .to(args.device)
     )
+    if args.model_host:
+        model = torch_fl.native_host.compile(model)
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": args.prompt}],
         tokenize=False,
@@ -262,11 +277,48 @@ def main():
         finally:
             sys.setprofile(None)
         report["warm_python_calls"] = dict(calls)
+        if args.profile_kernels:
+            if hosts is None:
+                raise RuntimeError("kernel provenance requires the native-host wheel")
+            from torch.profiler import ProfilerActivity, profile as torch_profile
+
+            with torch_profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
+            ) as profiler:
+                out = model(ids, use_cache=True)
+                out = model(
+                    device_inputs[0],
+                    past_key_values=out.past_key_values,
+                    use_cache=True,
+                )
+                synchronize()
+            args.profile_kernels.parent.mkdir(parents=True, exist_ok=True)
+            profiler.export_chrome_trace(str(args.profile_kernels))
+            trace = json.loads(args.profile_kernels.read_text())
+            events = trace["traceEvents"]
+            kernels = [event for event in events if event.get("cat") == "kernel"]
+            counts = Counter(event["name"] for event in kernels)
+            admitted = hosts.audit()["launched_kernels"]
+            unmatched = sorted(set(counts) - set(admitted))
+            if not counts or unmatched:
+                raise RuntimeError(f"GPU kernel provenance audit failed: {unmatched}")
+            report["gpu_kernel_audit"] = {
+                "model_calls": 2,
+                "counts": dict(counts),
+                "unmatched": unmatched,
+                "summed_device_ms": sum(event["dur"] for event in kernels) / 1000,
+            }
         if hosts is not None:
             report["kernel_sources"] = hosts.provenance
             report["native_audit"] = hosts.audit()
+            if hasattr(hosts, "typed"):
+                report["native_source_stats"] = torch.ops.flagos.native_source_stats()
+                report["typed_variants"] = len(hosts.typed["compiled"])
+                report["typed_fallbacks"] = len(hosts.typed["fallback"])
         if args.device == "flagos:0":
             report["host_program_stats"] = torch.ops.flagos.host_program_stats()
+        if args.model_host:
+            report["model_host_graphs"] = model.forward._flagos_host_backend.graphs
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"logits": logits, "inputs": inputs, "layers": layers},

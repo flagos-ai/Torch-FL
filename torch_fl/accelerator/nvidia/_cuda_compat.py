@@ -45,6 +45,7 @@ Modeled on ``torch_fl/accelerator/metax/_metax_compat.py``.
 import ctypes
 import functools
 import os
+import sys
 import warnings
 from dataclasses import dataclass
 from typing import Union
@@ -417,6 +418,10 @@ def _real_stream(device_index=0):
     denotes the same physical stream the boxing kernels submit to. Returns
     ``None`` on a runtime with no CUDA stream API to read from.
     """
+    # A CPU wheel cannot construct a real CUDA stream. Reentering flagos here
+    # would construct another _StreamShim and recurse until RecursionError.
+    if not hasattr(torch._C, "_cuda_getCurrentStream"):
+        return None
     flagos = getattr(torch, "flagos", None)
     if flagos is None:
         return None
@@ -431,9 +436,9 @@ class _StreamShim:
     """Stream stand-in for the CPU torch wheel, where ``torch.cuda.Stream`` is a
     dummy base class that raises on construction.
 
-    Triton's launcher reads ``.cuda_stream`` to pick the launch stream; that is 0,
-    the null/default stream, until something selects another one, matching the
-    boxing path where the caching allocator is given ``stream=nullptr``.
+    Triton's launcher reads ``.cuda_stream`` to pick the launch stream. Native
+    NVIDIA builds read the runtime's stream registry; legacy boxing uses its
+    null stream when a real CUDA stream object is unavailable.
 
     The event/ordering half of the stream API delegates to the real stream
     (``_real_stream``) rather than being stubbed out. ``torch.cuda.Stream``
@@ -446,15 +451,28 @@ class _StreamShim:
     ``_synchronize``-only, `.cuda_stream`-only surface broke on PPU.
     """
 
-    def __init__(self, index=0):
+    def __init__(self, index=0, *, use_default=False):
         self.cuda_stream = 0
         self.device_index = index
+        self._real = None
+        core = getattr(sys.modules.get("torch_fl"), "_C", None)
+        name = (
+            "_get_nvidia_default_raw_stream"
+            if use_default
+            else "_get_nvidia_current_raw_stream"
+        )
+        native = getattr(core, name, None)
+        if native is not None:
+            self.cuda_stream = native(index)
+            return
         # Snapshot the stream that is current *now*, rather than reading it on
         # every attribute access. A stream object has to keep denoting the same
         # stream for as long as it is held: torch.cuda.StreamContext saves
         # current_stream() on entry and restores it on exit, so a live view would
         # restore whatever became current in between -- i.e. never restore at all.
         self._real = _real_stream(index)
+        if self._real is not None:
+            self.cuda_stream = self._real.cuda_stream
 
     @property
     def device(self):
@@ -468,7 +486,7 @@ class _StreamShim:
 
     @property
     def stream_id(self):
-        return 0 if self._real is None else self._real.stream_id
+        return self.cuda_stream if self._real is None else self._real.stream_id
 
     @property
     def handle(self):
@@ -625,16 +643,16 @@ def patch_torch_cuda_for_flagos():
     torch.cuda._maybe_exchange_device = _exchange_device
 
     # Streams for triton raw-stream lookup.
-    torch.cuda.current_stream = lambda device=None: _StreamShim(_device_index(device))
-    torch.cuda.default_stream = lambda device=None: _StreamShim(_device_index(device))
+    torch.cuda.current_stream = lambda device=None: _StreamShim(
+        _current_device() if device is None else _device_index(device)
+    )
+    torch.cuda.default_stream = lambda device=None: _StreamShim(
+        _current_device() if device is None else _device_index(device), use_default=True
+    )
 
-    # torch.cuda.set_stream -- and therefore StreamContext, i.e. every
-    # ``with torch.cuda.stream(...)`` block -- writes through
-    # torch._C._cuda_setStream, absent from the CPU wheel. The shims above always
-    # denote stream 0, so "switch to the shim's stream" is switching to the stream
-    # already selected; dropping the call is not an approximation of the switch,
-    # it is the switch. Triton's do_bench_cudagraph enters a torch.cuda.stream
-    # block before benchmarking any candidate config.
+    # CPU wheels have no CUDA stream setter. These compatibility objects expose
+    # handles for launchers; native stream selection uses torch.Stream on the
+    # flagos device. Legacy autotuning contexts keep their no-op setter.
     if not hasattr(torch._C, "_cuda_setStream"):
         torch.cuda.set_stream = lambda stream: None
 

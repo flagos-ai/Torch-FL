@@ -301,6 +301,9 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   // Convert at::Stream to flagos Stream_t.
   // The stream id encodes the underlying device stream pointer.
   Stream_t stream = reinterpret_cast<Stream_t>(s.id());
+#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
+  c10::OptionalDeviceGuard device_guard(s.device());
+#endif
   alloc->record_stream(self.storage().data_ptr(), stream);
 }
 
@@ -442,6 +445,16 @@ FlagosWrapperConvolutionBackwardOverrideable(
 // runs and mm/bmm reach the appropriate backend kernels.
 static at::Tensor WrapperMatmul(
     const at::Tensor& self, const at::Tensor& other) {
+#if !defined(USE_ASCEND)
+  // Symbolic inference must reach Python/FakeTensor dispatch before the C++
+  // composite reads concrete sizes. Real tensors keep the existing path.
+  if (!c10::GradMode::is_enabled() &&
+      (self.unsafeGetTensorImpl()->has_symbolic_sizes_strides() ||
+       other.unsafeGetTensorImpl()->has_symbolic_sizes_strides())) {
+    c10::impl::ExcludeDispatchKeyGuard guard(c10::DispatchKey::AutogradPrivateUse1);
+    return at::matmul(self, other);
+  }
+#endif
 #if defined(USE_ASCEND)
   // aten::matmul is CompositeImplicitAutograd: normally it decomposes into
   // mm/bmm/view, and autograd records the backward through those sub-ops. Taking
