@@ -230,6 +230,28 @@ def pytest_collection_modifyitems(
                 reason="native host compiler build contract",
             )
             continue
+        if minimum := item.get_closest_marker("min_devices"):
+            import torch_fl
+
+            required = minimum.args[0]
+            if torch_fl.flagos.device_count() < required:
+                add_platform_skip(
+                    item,
+                    gate="device_count",
+                    detail=f"case requires {required} visible devices",
+                    reason=f"requires {required} visible devices",
+                )
+                continue
+        if item.get_closest_marker("cpython_dict_watchers") and not (
+            sys.implementation.name == "cpython" and sys.version_info >= (3, 12)
+        ):
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="dictionary watchers require CPython 3.12 or newer",
+                reason="CPython dictionary watcher runtime contract",
+            )
+            continue
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             add_platform_skip(
                 item,
@@ -281,6 +303,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "native_source_host: requires precompiled FlagGems source hosts"
+    )
+    config.addinivalue_line("markers", "min_devices(count): minimum visible devices")
+    config.addinivalue_line(
+        "markers", "cpython_dict_watchers: requires CPython 3.12 dictionary watchers"
     )
     config.addinivalue_line("markers", "metax: requires MetaX platform")
     config.addinivalue_line("markers", "ascend: requires Ascend platform")

@@ -345,3 +345,54 @@ def test_native_host_cases_keep_one_collection_shape(
     marker = item.get_closest_marker("flagos_platform_gate")
     assert (marker.kwargs["gate"] if marker else None) == gate
     assert bool(item.get_closest_marker("skip")) == (gate is not None)
+
+
+@pytest.mark.parametrize(
+    "enabled,devices,implementation,version,gate",
+    [
+        (True, 2, "cpython", (3, 12), None),
+        (True, 1, "cpython", (3, 12), "device_count"),
+        (True, 2, "cpython", (3, 11), "platform_support"),
+        (True, 2, "pypy", (3, 12), "platform_support"),
+        (False, 0, "cpython", (3, 11), "build_record"),
+    ],
+)
+def test_source_host_runtime_requirements_are_collection_gates(
+    monkeypatch, enabled, devices, implementation, version, gate
+):
+    class Item:
+        own_markers = [
+            pytest.mark.native_source_host.mark,
+            pytest.mark.min_devices(2).mark,
+            pytest.mark.cpython_dict_watchers.mark,
+        ]
+
+        def get_closest_marker(self, name):
+            return next((m for m in self.own_markers if m.name == name), None)
+
+        def add_marker(self, marker):
+            self.own_markers.append(marker.mark)
+
+    def device_count():
+        assert enabled, "ordinary builds must skip before device discovery"
+        return devices
+
+    package = ModuleType("torch_fl")
+    package.flagos = SimpleNamespace(device_count=device_count)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: "cuda")
+    monkeypatch.setattr(ops_conftest, "_native_source_host_enabled", lambda: enabled)
+    monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
+    monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
+    monkeypatch.setattr(
+        ops_conftest,
+        "sys",
+        SimpleNamespace(
+            implementation=SimpleNamespace(name=implementation), version_info=version
+        ),
+    )
+    item = Item()
+    ops_conftest.pytest_collection_modifyitems(None, [item])
+    marker = item.get_closest_marker("flagos_platform_gate")
+    assert (marker.kwargs["gate"] if marker else None) == gate
+    assert bool(item.get_closest_marker("skip")) == (gate is not None)

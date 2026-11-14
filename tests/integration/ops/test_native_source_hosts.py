@@ -141,9 +141,8 @@ def test_pointwise_promotion_matches_source_across_default_dtypes():
         torch.set_default_dtype(original)
 
 
+@pytest.mark.min_devices(2)
 def test_empty_strided_preserves_current_device():
-    if torch_fl.flagos.device_count() < 2:
-        pytest.skip("two devices are required")
     initial = torch_fl.flagos.current_device()
     other = (initial + 1) % torch_fl.flagos.device_count()
     with torch_fl.flagos.device(other):
@@ -242,9 +241,8 @@ def test_model_host_accepts_unseen_matmul_dimensions_without_host_compilation():
         model(a, b)
 
 
+@pytest.mark.cpython_dict_watchers
 def test_pointwise_config_change_during_instantiation_is_not_cached(monkeypatch):
-    if sys.version_info < (3, 12):
-        pytest.skip("dictionary invalidation uses CPython 3.12 watchers")
     hosts = torch_fl.native_host._hosts
     owner = hosts.resolve(hosts.original_ops["cos"].__globals__["cos_func"])
     value = torch.randn(137).to("flagos")
