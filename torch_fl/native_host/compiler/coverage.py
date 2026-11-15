@@ -109,6 +109,9 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
             entry["reason"] = "source_unavailable"
             continue
         entry["source_sha256"] = hashlib.sha256(source.encode()).hexdigest()
+        positional = [
+            a for a in schema.arguments if not getattr(a, "kwarg_only", False)
+        ]
         flexible = sorted(
             {
                 call.args[0].id
@@ -136,13 +139,26 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
                     )
                 else:
                     argument = (
-                        schema.arguments[position]
-                        if position < len(schema.arguments)
-                        else None
+                        positional[position]
+                        if position < len(positional)
+                        else next(
+                            (
+                                a
+                                for a in schema.arguments
+                                if getattr(a, "kwarg_only", False) and a.name == p.name
+                            ),
+                            None,
+                        )
                     )
                     position += 1
                 if argument is None and p.name == "out" and p.default is None:
                     kind = "Optional[torch.Tensor]"
+                elif argument is None and type(p.default) in (bool, int, float, str):
+                    # A Python helper may accept an extra defaulted positional
+                    # parameter (e.g. step), even when the ATen overload ends
+                    # its positional arguments before TensorOptions. Do not
+                    # bind that parameter to the schema's first keyword.
+                    kind = type(p.default).__name__
                 elif argument is None:
                     reason = "unmapped_parameter"
                     break

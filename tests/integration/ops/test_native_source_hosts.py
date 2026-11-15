@@ -325,6 +325,99 @@ def _typed_hits(op):
     return torch.ops.flagos.native_source_typed_hits("aten::" + op)
 
 
+@pytest.mark.parametrize(
+    "source_dtype,target_dtype",
+    [
+        (torch.bfloat16, torch.float32),
+        (torch.float32, torch.bfloat16),
+        (torch.int32, torch.float32),
+        (torch.bool, torch.int64),
+    ],
+)
+def test_dtype_cast_uses_generated_source_bridge(source_dtype, target_dtype):
+    value = torch.arange(257).to(source_dtype).to("flagos")
+    before = torch_fl.native_host.audit()["host_artifacts"]
+    with torch.no_grad():
+        hits = _typed_hits("copy_")
+        legacy = torch.ops.flagos.native_source_stats()[1]
+        first = value.to(target_dtype)
+        second = value.to(target_dtype)
+        assert _typed_hits("copy_") == hits + 2
+        assert torch.ops.flagos.native_source_stats()[1] == legacy
+    torch_fl.flagos.synchronize()
+    expected = value.cpu().to(target_dtype)
+    assert first.data_ptr() != second.data_ptr()
+    torch.testing.assert_close(first.cpu(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(second.cpu(), expected, rtol=0, atol=0)
+    assert torch_fl.native_host.audit()["host_artifacts"] == before
+
+
+def test_generated_copy_bridge_preserves_strides_alias_and_version():
+    value = torch.arange(35, dtype=torch.float32).to("flagos").reshape(5, 7).t()
+    assert not value.is_contiguous()
+    target = torch.empty(value.shape, device="flagos", dtype=torch.float32)
+    address, version = target.data_ptr(), target._version
+    with torch.no_grad():
+        hits = _typed_hits("copy_")
+        legacy = torch.ops.flagos.native_source_stats()[1]
+        returned = target.copy_(value, non_blocking=True)
+        assert _typed_hits("copy_") == hits + 1
+        assert torch.ops.flagos.native_source_stats()[1] == legacy
+    torch_fl.flagos.synchronize()
+    assert returned is target and target.data_ptr() == address
+    assert target._version > version
+    torch.testing.assert_close(target.cpu(), value.cpu(), rtol=0, atol=0)
+    with torch.no_grad():
+        hits = _typed_hits("copy_")
+        assert target.copy_(target) is target
+        assert _typed_hits("copy_") == hits
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_extra_python_default_preserves_round_and_inplace(dtype):
+    cpu = torch.tensor(
+        [
+            float("-inf"),
+            -3.5,
+            -2.5,
+            -0.5,
+            -0.0,
+            0.0,
+            0.125,
+            0.5,
+            2.5,
+            3.5,
+            float("inf"),
+            float("nan"),
+        ],
+        dtype=dtype,
+    )
+    value = cpu.to("flagos")
+    originals = torch_fl.native_host._hosts.original_ops
+    artifacts = torch_fl.native_host.audit()["host_artifacts"]
+    with torch.no_grad():
+        expected = originals["round"](value)
+        hits = _typed_hits("round")
+        actual = torch.round(value)
+        assert _typed_hits("round") == hits + 1
+        inplace = value.clone()
+        address, version = inplace.data_ptr(), inplace._version
+        hits = _typed_hits("round_")
+        returned = inplace.round_()
+        assert _typed_hits("round_") == hits + 1
+    torch_fl.flagos.synchronize()
+    assert returned is inplace and inplace.data_ptr() == address
+    assert inplace._version > version
+    for got, reference in ((actual, expected), (inplace, expected)):
+        torch.testing.assert_close(
+            got.cpu(), reference.cpu(), rtol=0, atol=0, equal_nan=True
+        )
+    torch.testing.assert_close(
+        actual.cpu(), cpu.round(), rtol=0, atol=0, equal_nan=True
+    )
+    assert torch_fl.native_host.audit()["host_artifacts"] == artifacts
+
+
 @pytest.mark.parametrize("alpha", [2, 0.25])
 def test_typed_scalar_keyword_avoids_generic_entry(alpha):
     value = torch.arange(21, dtype=torch.float32).reshape(3, 7).to("flagos")

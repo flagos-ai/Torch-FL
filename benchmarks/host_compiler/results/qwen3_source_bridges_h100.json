@@ -1,0 +1,1147 @@
+{
+  "schema_version": 1,
+  "base_commit": "0842fdf3efc4b227b77b53ff4bd91f53eafac223",
+  "measurement": {
+    "target_ms": 30,
+    "metric": "synchronized complete-model forward latency",
+    "scope": "warm eager inference; no model graph capture",
+    "eligible_for_eager_acceptance": true,
+    "target_met": false,
+    "excluded_on_both_sides": [
+      "tokenization",
+      "token selection",
+      "oracle comparison",
+      "profiler"
+    ],
+    "warmup": "one correctness traversal and one untimed timing traversal",
+    "fresh_device_cache": false,
+    "rounds": 3,
+    "decode_steps": 512,
+    "percentile_method": "sorted samples, floor(p * (n - 1))",
+    "comparison": "Sequential complete-wheel runs on the same physical GPU; source bridges and schema-binding repair, not an ABI-only ablation"
+  },
+  "cohort": {
+    "torch": "2.10.0+cpu",
+    "vendor_torch": "2.10.0+cu130",
+    "flag_gems": "5.4.0",
+    "flagtree": "0.7.0",
+    "cython": "3.2.4",
+    "transformers": "5.17.0",
+    "python": "3.12.14",
+    "hardware": "NVIDIA H100 80GB",
+    "physical_gpu": 1,
+    "cpu_affinity": "8-15",
+    "artifact_type": "development wheel; not a release artifact",
+    "cuda_toolkit": "13.1.115",
+    "vendor_baseline": "Native CUDA Torch; TORCH_DEVICE_BACKEND_AUTOLOAD=0; no torch_fl or FlagGems activation"
+  },
+  "model": {
+    "name": "Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "checkpoint_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
+    "layers": 28,
+    "parameters": 596049920,
+    "dtype": "bfloat16",
+    "attention": "eager",
+    "input_protocol": "teacher-forced original FlagGems tokens; identical inputs for vendor timing"
+  },
+  "prompt": "Explain in one sentence why the sky is blue. blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue ",
+  "oracle_sha256": "72c1da66fb0070a0b2f10fb8139bc48093c76fe3a9e94c4b6b4cb68a46288d14",
+  "results": {
+    "baseline": {
+      "torch": "2.10.0+cpu",
+      "medians": {
+        "prefill_submit_ms": 33.20595622062683,
+        "prefill_complete_ms": 33.23809988796711,
+        "decode_submit_ms": 31.06724377721548,
+        "decode_complete_ms": 31.1427004635334
+      },
+      "prefill_complete_ms": [
+        33.23809988796711,
+        32.91955217719078,
+        36.63606010377407
+      ],
+      "decode_complete": {
+        "count": 1536,
+        "median_ms": 31.1427004635334,
+        "mean_ms": 31.175108980581474,
+        "p95_ms": 31.481366604566574,
+        "p99_ms": 32.64259546995163,
+        "max_ms": 34.04506295919418
+      },
+      "import_ms": 4950.715854763985,
+      "first_prefill_ms": 21203.606870025396,
+      "correctness_vs_original_flaggems": {
+        "logits_count": 513,
+        "bitwise_equal_count": 513,
+        "top1_equal_count": 513,
+        "allclose_rtol_003_atol_01_count": 513,
+        "max_abs": 0,
+        "max_relative_l2": 0
+      },
+      "model_capture_audit": {
+        "blocked_entry_points": [
+          "torch.compile",
+          "torch._dynamo.optimize",
+          "torch._dynamo.export",
+          "torch._dynamo.optimize_assert",
+          "torch._dynamo.eval_frame.optimize",
+          "torch._dynamo.eval_frame._optimize",
+          "torch._dynamo.eval_frame.optimize_assert",
+          "torch.jit.script",
+          "torch.jit.trace",
+          "torch.jit.trace_module"
+        ],
+        "calls": 0
+      },
+      "warm_python_frame_count": 0,
+      "host_libraries": 773,
+      "host_hashes_unchanged": true,
+      "host_artifact_manifest_sha256": "3273b7047e467866b14b537dbeea76d3174ba92ba7080c4c5227587c69ca9281",
+      "runtime_subprocess_commands": [
+        [
+          "/usr/local/cuda/bin/ptxas",
+          "--version"
+        ],
+        [
+          "/usr/local/cuda/bin/ptxas",
+          "--version"
+        ]
+      ],
+      "native_source_stats": [
+        523,
+        1019783
+      ],
+      "typed_entry_stats": [
+        400,
+        4073829
+      ],
+      "legacy_host_program_stats": [
+        0,
+        0,
+        0
+      ]
+    },
+    "bridge": {
+      "torch": "2.10.0+cpu",
+      "medians": {
+        "prefill_submit_ms": 32.11591951549053,
+        "prefill_complete_ms": 32.15313330292702,
+        "decode_submit_ms": 30.239485204219818,
+        "decode_complete_ms": 30.314555391669273
+      },
+      "prefill_complete_ms": [
+        32.15313330292702,
+        32.146235927939415,
+        32.986653968691826
+      ],
+      "decode_complete": {
+        "count": 1536,
+        "median_ms": 30.314555391669273,
+        "mean_ms": 30.395187572139548,
+        "p95_ms": 30.672399327158928,
+        "p99_ms": 31.98099695146084,
+        "max_ms": 48.362964764237404
+      },
+      "import_ms": 4896.643133834004,
+      "first_prefill_ms": 21173.437800258398,
+      "correctness_vs_original_flaggems": {
+        "logits_count": 513,
+        "bitwise_equal_count": 513,
+        "top1_equal_count": 513,
+        "allclose_rtol_003_atol_01_count": 513,
+        "max_abs": 0,
+        "max_relative_l2": 0
+      },
+      "model_capture_audit": {
+        "blocked_entry_points": [
+          "torch.compile",
+          "torch._dynamo.optimize",
+          "torch._dynamo.export",
+          "torch._dynamo.optimize_assert",
+          "torch._dynamo.eval_frame.optimize",
+          "torch._dynamo.eval_frame._optimize",
+          "torch._dynamo.eval_frame.optimize_assert",
+          "torch.jit.script",
+          "torch.jit.trace",
+          "torch.jit.trace_module"
+        ],
+        "calls": 0
+      },
+      "warm_python_frame_count": 0,
+      "host_libraries": 773,
+      "host_hashes_unchanged": true,
+      "host_artifact_manifest_sha256": "2e60453bf011fa70c6f8f8012d0df8820d4d7e13e21dcf7c1bac03c357089ec3",
+      "runtime_subprocess_commands": [
+        [
+          "/usr/local/cuda/bin/ptxas",
+          "--version"
+        ],
+        [
+          "/usr/local/cuda/bin/ptxas",
+          "--version"
+        ]
+      ],
+      "native_source_stats": [
+        527,
+        0
+      ],
+      "typed_entry_stats": [
+        404,
+        5097694
+      ],
+      "legacy_host_program_stats": [
+        0,
+        0,
+        0
+      ]
+    },
+    "vendor": {
+      "torch": "2.10.0+cu130",
+      "medians": {
+        "prefill_submit_ms": 25.21408535540104,
+        "prefill_complete_ms": 25.251369923353195,
+        "decode_submit_ms": 23.63063022494316,
+        "decode_complete_ms": 23.712124675512314
+      },
+      "prefill_complete_ms": [
+        25.251369923353195,
+        25.337504222989082,
+        25.163454934954643
+      ],
+      "decode_complete": {
+        "count": 1536,
+        "median_ms": 23.712124675512314,
+        "mean_ms": 23.734784562596662,
+        "p95_ms": 23.985426872968674,
+        "p99_ms": 24.570226669311523,
+        "max_ms": 27.0466897636652
+      },
+      "import_ms": null,
+      "first_prefill_ms": 367.6272742450237,
+      "correctness_vs_original_flaggems": {
+        "logits_count": 513,
+        "bitwise_equal_count": 0,
+        "top1_equal_count": 505,
+        "allclose_rtol_003_atol_01_count": 0,
+        "max_abs": 1.34375,
+        "max_relative_l2": 0.09507481753826141
+      },
+      "model_capture_audit": {
+        "blocked_entry_points": [
+          "torch.compile",
+          "torch._dynamo.optimize",
+          "torch._dynamo.export",
+          "torch._dynamo.optimize_assert",
+          "torch._dynamo.eval_frame.optimize",
+          "torch._dynamo.eval_frame._optimize",
+          "torch._dynamo.eval_frame.optimize_assert",
+          "torch.jit.script",
+          "torch.jit.trace",
+          "torch.jit.trace_module"
+        ],
+        "calls": 0
+      },
+      "warm_python_frame_count": 0
+    }
+  },
+  "latency_ratios": {
+    "prefill_complete_ms": {
+      "bridge_over_prior": 0.9673577434120152,
+      "bridge_over_vendor": 1.2733223346108788
+    },
+    "decode_complete_ms": {
+      "bridge_over_prior": 0.9734080519820737,
+      "bridge_over_vendor": 1.2784411269132427
+    }
+  },
+  "gpu_kernel_audit": {
+    "model_calls": 2,
+    "counts": {
+      "embedding_kernel": 2,
+      "arange_func": 10,
+      "add_func_tensor_scalar_kernel_rank_1": 232,
+      "le_func_kernel_rank_4": 2,
+      "scalar_tensor_kernel": 2,
+      "where_inner_kernel_rank_4": 2,
+      "_copy_kernel_kernel_rank_3": 236,
+      "bmm_kernel": 114,
+      "cat_copy_func_kernel_4": 170,
+      "cos_func_kernel_rank_1": 2,
+      "mul_scalar_kernel": 60,
+      "sin_func_kernel_rank_1": 2,
+      "pow_func_tensor_scalar_kernel_rank_1": 226,
+      "mean_dim_kernel_inner": 226,
+      "rsqrt_func_kernel_rank_1": 226,
+      "mul_generic_nd_kernel": 676,
+      "mm_kernel_general_host_tma": 394,
+      "_copy_kernel_kernel_rank_4": 560,
+      "neg_func_kernel_rank_4": 112,
+      "add_func_kernel_rank_1": 224,
+      "_copy_kernel_kernel_rank_5": 112,
+      "add_func_kernel_rank_4": 56,
+      "softmax_kernel_inner": 56,
+      "silu_forward_kernel_rank_1": 56,
+      "mul_kernel": 56
+    },
+    "unmatched": [],
+    "summed_device_ms": 7.18908,
+    "total_launches": 3814,
+    "distinct_names": 25,
+    "trace_is_outside_timed_pass": true
+  },
+  "kernel_provenance": {
+    "embedding_kernel": {
+      "kernel": "embedding_kernel",
+      "source": "flag_gems/ops/embedding.py",
+      "sha256": "fcd43804572bc1c8ea8362ed3a69c3232097b4ce9a2d6e8cd40b24d6c0bcb46b",
+      "jit_sha256": "0f82a3ba0801b3692aaf25cda25530d7f5e1ffa4f834a8a84f163df91277ca4a"
+    },
+    "arange_func": {
+      "kernel": "arange_func",
+      "source": "flag_gems/ops/arange.py",
+      "sha256": "136facf402fbbad25c846615a1bacb800870014faf137b2b554e817f62969332",
+      "jit_sha256": "16561a88c4047c7f41f52cd6c56bd6e8707562903febf92f06272c4724786462"
+    },
+    "add_func_tensor_scalar_kernel_rank_1": {
+      "kernel": "add_func_tensor_scalar_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_42e37e4da2a0c7d6ed6ab463e3ec74b793e4243f1174f9eae50040fa2541a060.py",
+      "sha256": "42e37e4da2a0c7d6ed6ab463e3ec74b793e4243f1174f9eae50040fa2541a060",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "add_func_tensor_scalar",
+      "jit_sha256": "f473fc80a9140b5da7ec2f7010d7109bdaa44f7fcdaeaeb4a71b6014579f4353"
+    },
+    "le_func_kernel_rank_4": {
+      "kernel": "le_func_kernel_rank_4",
+      "source": "FlagGems-code-cache/native_host_kernel_3899a09bbfa93ca10456df0bca2f3320ba2cb6fa9514a6fb599516d7141ec609.py",
+      "sha256": "3899a09bbfa93ca10456df0bca2f3320ba2cb6fa9514a6fb599516d7141ec609",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "le_func",
+      "jit_sha256": "fdba0f599223d866b96d3b5211557cfa6e0a2fe7db1c4bc090d3cf55de86bc15"
+    },
+    "scalar_tensor_kernel": {
+      "kernel": "scalar_tensor_kernel",
+      "source": "flag_gems/ops/scalar_tensor.py",
+      "sha256": "227eff57c09c28d53defc4d6c7d6eea95e77ed8d211301aa64b7cde23e15086a",
+      "jit_sha256": "d98ec000eba32f0f464fe5c101ba04ab842b7f60c53f0186718f3cf406294bed"
+    },
+    "where_inner_kernel_rank_4": {
+      "kernel": "where_inner_kernel_rank_4",
+      "source": "FlagGems-code-cache/native_host_kernel_94bd1ad6c551fd32f51231794a82e054a3091e0e6b3e3a550826e452aa257cbf.py",
+      "sha256": "94bd1ad6c551fd32f51231794a82e054a3091e0e6b3e3a550826e452aa257cbf",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "where_inner",
+      "jit_sha256": "c32446d5e423764a0849243fa40c891d3258c713082cb42cb40271389a800b7f"
+    },
+    "_copy_kernel_kernel_rank_3": {
+      "kernel": "_copy_kernel_kernel_rank_3",
+      "source": "FlagGems-code-cache/native_host_kernel_e8074061121ee5162cee79eac568aeb9a6703eb6181186f83e30198596737a15.py",
+      "sha256": "e8074061121ee5162cee79eac568aeb9a6703eb6181186f83e30198596737a15",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "_copy_kernel",
+      "jit_sha256": "88c99f6250f57c7fc8a1d34f7545e76a8f2fe0b07da09c9b37ecf338e2160d7c"
+    },
+    "bmm_kernel": {
+      "kernel": "bmm_kernel",
+      "source": "flag_gems/ops/bmm.py",
+      "sha256": "e07964330ae4b2a4fffea5144d5382e275bc5f4b11deab9cea714705b5e7e509",
+      "jit_sha256": "2f3a269eb126c013a0341708018d93db7cbb16fb4e16601b8c551dc4a6ac3f3f"
+    },
+    "cat_copy_func_kernel_4": {
+      "kernel": "cat_copy_func_kernel_4",
+      "source": "flag_gems/ops/cat.py",
+      "sha256": "0ccc55b9dac8a171ffcf2c51d5ceffa32a0ae43896db22b49007b3f9bb302ee6",
+      "jit_sha256": "43a315e812e2c420fd0455fa81b07ffdff35bc314bc4461ed54e25c51f41386b"
+    },
+    "cos_func_kernel_rank_1": {
+      "kernel": "cos_func_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_e88fb8d04343f489d0cbf23e9e05746942ba505c277f033e693594d9d4617f8d.py",
+      "sha256": "e88fb8d04343f489d0cbf23e9e05746942ba505c277f033e693594d9d4617f8d",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "cos_func",
+      "jit_sha256": "08cfb4f2de9c4da41a850c59e565dd08dc2c8a1d60301694f2eaef4090e0939f"
+    },
+    "mul_scalar_kernel": {
+      "kernel": "mul_scalar_kernel",
+      "source": "flag_gems/ops/mul.py",
+      "sha256": "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348",
+      "jit_sha256": "825eacc6eff3d231d7fda49a8aed0016e8a3c757a47595fdb4d7afa1f960484a"
+    },
+    "sin_func_kernel_rank_1": {
+      "kernel": "sin_func_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_89ca39a76048bb8e62606ad17e1150181627587bb28a195aa53c83ceeff4ccfd.py",
+      "sha256": "89ca39a76048bb8e62606ad17e1150181627587bb28a195aa53c83ceeff4ccfd",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "sin_func",
+      "jit_sha256": "b9f0f83462b988b0f31e6d27061a70f168f4e72cc37ff6ff612d69010a1859ef"
+    },
+    "pow_func_tensor_scalar_kernel_rank_1": {
+      "kernel": "pow_func_tensor_scalar_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_c757133441977032a709921cedbc3b89f658e058df9f76868cc00565a37653b8.py",
+      "sha256": "c757133441977032a709921cedbc3b89f658e058df9f76868cc00565a37653b8",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "pow_func_tensor_scalar",
+      "jit_sha256": "c20500b04ddde346e35f87a775dcc50250a0143e453aad79f0fe7be918490def"
+    },
+    "mean_dim_kernel_inner": {
+      "kernel": "mean_dim_kernel_inner",
+      "source": "flag_gems/ops/mean.py",
+      "sha256": "c968ad14d3ba76ed87c29e5e9346a0e392cdaeaeb01c0774cfd7c5c489394d1c",
+      "jit_sha256": "dc361d1b88f9d7e607dfdceb1772e5ff286dc97040536030f45813b57172c8ac"
+    },
+    "rsqrt_func_kernel_rank_1": {
+      "kernel": "rsqrt_func_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_17cb051d838b000fc9e6d91d789d8b71e170e2affd1553e1cf05666a814c2b9d.py",
+      "sha256": "17cb051d838b000fc9e6d91d789d8b71e170e2affd1553e1cf05666a814c2b9d",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "rsqrt_func",
+      "jit_sha256": "0bc1e4674b9c5f253d4a3ccc329675fa3121f0ae2656922b580cd66b3f998da4"
+    },
+    "mul_generic_nd_kernel": {
+      "kernel": "mul_generic_nd_kernel",
+      "source": "flag_gems/ops/mul.py",
+      "sha256": "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348",
+      "jit_sha256": "d179fe4123c8e161161672582302089fa6659bb538d5f93c0e299e075d71aea3"
+    },
+    "mm_kernel_general_host_tma": {
+      "kernel": "mm_kernel_general_host_tma",
+      "source": "flag_gems/runtime/backend/_nvidia/hopper/ops/mm.py",
+      "sha256": "97447f493cb2962575640d6efca03aac9bfd7ee031ec3ac2c2ff1dd282392e5b",
+      "jit_sha256": "fb2577f35665f67c1f58e5052bf3e3baff9b15d5f000ee0ae81a8982b9fb02b7"
+    },
+    "_copy_kernel_kernel_rank_4": {
+      "kernel": "_copy_kernel_kernel_rank_4",
+      "source": "FlagGems-code-cache/native_host_kernel_06cd17b53e5166c0d9a46ee6759c3743d6704aad70808d71c14b4aea6aac8b37.py",
+      "sha256": "06cd17b53e5166c0d9a46ee6759c3743d6704aad70808d71c14b4aea6aac8b37",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "_copy_kernel",
+      "jit_sha256": "ee7aa3b7f91030a80f421836ec17fb5e62c1f213a1116950067a66ae820f2f37"
+    },
+    "neg_func_kernel_rank_4": {
+      "kernel": "neg_func_kernel_rank_4",
+      "source": "FlagGems-code-cache/native_host_kernel_ff3a0deb4c950f3976b32e54e7dadf5e904bac3e0883a5ac9cdf4bba2fe66a74.py",
+      "sha256": "ff3a0deb4c950f3976b32e54e7dadf5e904bac3e0883a5ac9cdf4bba2fe66a74",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "neg_func",
+      "jit_sha256": "f9bf58cc4ca5b2224b8b86802d849f0de3636bfd9ead0de9248c1f09b5483461"
+    },
+    "add_func_kernel_rank_1": {
+      "kernel": "add_func_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_9b3c32d24bed7752cf476e1e401b39d9764ff5162e1f5632c12f8562762af350.py",
+      "sha256": "9b3c32d24bed7752cf476e1e401b39d9764ff5162e1f5632c12f8562762af350",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "add_func",
+      "jit_sha256": "6ca135c282207705161354b48d5d3f1be740c92d0fdb26af087a826a00bd9dfb"
+    },
+    "_copy_kernel_kernel_rank_5": {
+      "kernel": "_copy_kernel_kernel_rank_5",
+      "source": "FlagGems-code-cache/native_host_kernel_a9ba626604079173ce505ba368d9a78cf0c42c29e726e9f2ef508f1608502b5d.py",
+      "sha256": "a9ba626604079173ce505ba368d9a78cf0c42c29e726e9f2ef508f1608502b5d",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "_copy_kernel",
+      "jit_sha256": "a95ff89b806c678dcc300947f9bec33e2f6dd1b65f6da7841a6f50364ebbdfaa"
+    },
+    "add_func_kernel_rank_4": {
+      "kernel": "add_func_kernel_rank_4",
+      "source": "FlagGems-code-cache/native_host_kernel_93ee1c61b197a725327d26c9044567645b1189b1ed1af8dc2b815dfa09c9f116.py",
+      "sha256": "93ee1c61b197a725327d26c9044567645b1189b1ed1af8dc2b815dfa09c9f116",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "add_func",
+      "jit_sha256": "eb0b07f3722fc40f69025963ba5b872eab2a24ef5095e6f0c63f09bb39119c1f"
+    },
+    "softmax_kernel_inner": {
+      "kernel": "softmax_kernel_inner",
+      "source": "flag_gems/ops/softmax.py",
+      "sha256": "d7c6eef628fba956403c1f43f4a2c94dea1142ec8fa532359de5016e3bf9488d",
+      "jit_sha256": "03d51abb7e826dcafcbd330ad230c185c3d4e28483e58426a41b8b099a50f319"
+    },
+    "silu_forward_kernel_rank_1": {
+      "kernel": "silu_forward_kernel_rank_1",
+      "source": "FlagGems-code-cache/native_host_kernel_85b4c80a0a09ada0e91ba3f1078c3f065c6614b7e68cebbdd543892d385857a3.py",
+      "sha256": "85b4c80a0a09ada0e91ba3f1078c3f065c6614b7e68cebbdd543892d385857a3",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "silu_forward",
+      "jit_sha256": "e0e395d0d5769c63257987506452159afac77916591fe84a7d65dfa943c9fe5a"
+    },
+    "mul_kernel": {
+      "kernel": "mul_kernel",
+      "source": "flag_gems/ops/mul.py",
+      "sha256": "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348",
+      "jit_sha256": "4f5f69ad1b4b3c317fec2463a2958e680a78c506f520dfd235bf86af743ed9f9"
+    }
+  },
+  "native_generation": {
+    "compiled_signatures": 1008,
+    "fallback_signatures": 553,
+    "typed_entries": 404,
+    "new_bound_entries": [
+      "aten::_reshape_alias",
+      "aten::copy_",
+      "aten::round",
+      "aten::round_"
+    ],
+    "multi_output_entries": 13,
+    "static_slots": 690,
+    "generated_source_bridges": [
+      "aten::_reshape_alias",
+      "aten::copy_"
+    ],
+    "connected_source_bridge": "aten::copy_",
+    "existing_dispatcher_registrations": 688,
+    "coverage": {
+      "registry_entries": 1099,
+      "unique_operators": 1097,
+      "entries_by_status": {
+        "compiler_fallback": 409,
+        "excluded": 99,
+        "lowered": 555,
+        "partial": 36
+      },
+      "entries_by_reason": {
+        "compile_error": 445,
+        "missing_schema": 22,
+        "unmapped_parameter": 19,
+        "unsupported_default": 8,
+        "unsupported_parameter_type": 20,
+        "variadic_parameters": 30
+      },
+      "unique_signatures": 1561,
+      "lowered_signatures": 1008,
+      "fallback_signatures": 553,
+      "pending_signatures": 0
+    },
+    "codegen_reproducible": true,
+    "route_registrations_unchanged": true
+  },
+  "operator_method": {
+    "process_order": [
+      "baseline-1",
+      "bridge-1",
+      "bridge-2",
+      "baseline-2"
+    ],
+    "warmup_calls": 30,
+    "rounds_per_process": 7,
+    "calls_per_round": 200,
+    "normal_allocations": true,
+    "typed_hits_include_warmup": true,
+    "interpretation": "Cast process medians overlap; no reliable per-operator latency reduction is claimed."
+  },
+  "operators": {
+    "baseline-1": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "cases": {
+        "mm_bf16_23_1024_3072": {
+          "median_us": 23.37744,
+          "rounds_us": [
+            23.33286,
+            23.435045,
+            23.437810000000002,
+            23.37744,
+            23.354290000000002,
+            23.520294999999997,
+            23.038685
+          ],
+          "complete_median_us": 23.417085,
+          "complete_rounds_us": [
+            23.373005000000003,
+            23.47318,
+            23.477025,
+            23.417085,
+            23.39342,
+            23.558895,
+            23.076990000000002
+          ],
+          "typed_entry_hits": 1430
+        },
+        "cast_bf16_to_fp32_1_1_1024": {
+          "median_us": 8.652995,
+          "rounds_us": [
+            8.653235,
+            8.652995,
+            8.643575,
+            8.677865,
+            8.60008,
+            8.64909,
+            8.661209999999999
+          ],
+          "complete_median_us": 8.673465,
+          "complete_rounds_us": [
+            8.677605,
+            8.673465,
+            8.664024999999999,
+            8.698665,
+            8.62121,
+            8.669004999999999,
+            8.68227
+          ],
+          "typed_entry_hits": 0
+        },
+        "silu_bf16_1_23_3072": {
+          "median_us": 7.64081,
+          "rounds_us": [
+            7.650725,
+            7.6961949999999995,
+            7.612865,
+            7.64081,
+            7.640205,
+            7.61477,
+            7.65066
+          ],
+          "complete_median_us": 7.66488,
+          "complete_rounds_us": [
+            7.6765550000000005,
+            7.720825,
+            7.636355,
+            7.66488,
+            7.663315,
+            7.63872,
+            7.674325
+          ],
+          "typed_entry_hits": 1430
+        },
+        "softmax_fp32_1_16_1_24": {
+          "median_us": 6.76319,
+          "rounds_us": [
+            6.76319,
+            6.77961,
+            6.713465,
+            6.812495,
+            6.8404750000000005,
+            6.71091,
+            6.694439999999999
+          ],
+          "complete_median_us": 6.787875,
+          "complete_rounds_us": [
+            6.787875,
+            6.8039,
+            6.737185,
+            6.836024999999999,
+            6.863569999999999,
+            6.735165,
+            6.718005
+          ],
+          "typed_entry_hits": 1430
+        },
+        "arange_int64_24": {
+          "median_us": 15.78263,
+          "rounds_us": [
+            15.91411,
+            15.78263,
+            15.771690000000001,
+            15.776815000000001,
+            15.784465,
+            15.80254,
+            15.758045
+          ],
+          "complete_median_us": 15.799025,
+          "complete_rounds_us": [
+            15.940520000000001,
+            15.799025,
+            15.78594,
+            15.79125,
+            15.799595,
+            15.82031,
+            15.77294
+          ],
+          "typed_entry_hits": 0
+        },
+        "scalar_tensor_fp32": {
+          "median_us": 15.891440000000001,
+          "rounds_us": [
+            15.900225,
+            15.848370000000001,
+            15.891440000000001,
+            15.9237,
+            15.86543,
+            15.90957,
+            15.863885
+          ],
+          "complete_median_us": 15.90648,
+          "complete_rounds_us": [
+            15.92786,
+            15.86482,
+            15.90648,
+            15.938685,
+            15.881540000000001,
+            15.923924999999999,
+            15.877889999999999
+          ],
+          "typed_entry_hits": 0
+        }
+      }
+    },
+    "bridge-1": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "cases": {
+        "mm_bf16_23_1024_3072": {
+          "median_us": 23.837795,
+          "rounds_us": [
+            23.94929,
+            24.013740000000002,
+            23.826985,
+            23.837795,
+            23.873015,
+            23.80723,
+            23.72018
+          ],
+          "complete_median_us": 23.87644,
+          "complete_rounds_us": [
+            23.99291,
+            24.05123,
+            23.865485,
+            23.87644,
+            23.91093,
+            23.844875,
+            23.759155
+          ],
+          "typed_entry_hits": 1430
+        },
+        "cast_bf16_to_fp32_1_1_1024": {
+          "median_us": 8.947445,
+          "rounds_us": [
+            8.993780000000001,
+            8.965834999999998,
+            8.947445,
+            8.925510000000001,
+            8.932139999999999,
+            8.952805,
+            8.905185
+          ],
+          "complete_median_us": 8.96782,
+          "complete_rounds_us": [
+            9.020344999999999,
+            8.986355,
+            8.96782,
+            8.94486,
+            8.951625,
+            8.97335,
+            8.925270000000001
+          ],
+          "typed_entry_hits": 1430
+        },
+        "silu_bf16_1_23_3072": {
+          "median_us": 8.108045,
+          "rounds_us": [
+            8.13073,
+            8.541545,
+            8.057625,
+            8.103835,
+            8.081395,
+            8.108045,
+            8.15165
+          ],
+          "complete_median_us": 8.131170000000001,
+          "complete_rounds_us": [
+            8.156335,
+            8.566315000000001,
+            8.08125,
+            8.127180000000001,
+            8.104645,
+            8.131170000000001,
+            8.175545
+          ],
+          "typed_entry_hits": 1430
+        },
+        "softmax_fp32_1_16_1_24": {
+          "median_us": 7.1315349999999995,
+          "rounds_us": [
+            7.199274999999999,
+            7.119305000000001,
+            7.116765,
+            7.14201,
+            7.1315349999999995,
+            7.129659999999999,
+            7.153935000000001
+          ],
+          "complete_median_us": 7.154435,
+          "complete_rounds_us": [
+            7.225335,
+            7.142205,
+            7.14187,
+            7.165430000000001,
+            7.154435,
+            7.1526499999999995,
+            7.1769799999999995
+          ],
+          "typed_entry_hits": 1430
+        },
+        "arange_int64_24": {
+          "median_us": 16.15108,
+          "rounds_us": [
+            16.214935,
+            16.28719,
+            16.186105,
+            16.147365,
+            16.121795,
+            16.101805,
+            16.15108
+          ],
+          "complete_median_us": 16.165405,
+          "complete_rounds_us": [
+            16.236495,
+            16.30365,
+            16.20108,
+            16.16116,
+            16.13649,
+            16.115305,
+            16.165405
+          ],
+          "typed_entry_hits": 0
+        },
+        "scalar_tensor_fp32": {
+          "median_us": 16.096375,
+          "rounds_us": [
+            16.118365,
+            16.096375,
+            16.13572,
+            16.150275,
+            16.0885,
+            16.07007,
+            16.03526
+          ],
+          "complete_median_us": 16.112275,
+          "complete_rounds_us": [
+            16.143465,
+            16.112275,
+            16.15061,
+            16.16765,
+            16.104415,
+            16.084094999999998,
+            16.049364999999998
+          ],
+          "typed_entry_hits": 0
+        }
+      }
+    },
+    "bridge-2": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "cases": {
+        "mm_bf16_23_1024_3072": {
+          "median_us": 22.991455000000002,
+          "rounds_us": [
+            22.99033,
+            22.999200000000002,
+            22.991455000000002,
+            22.97436,
+            22.99584,
+            22.64575,
+            23.19515
+          ],
+          "complete_median_us": 23.02945,
+          "complete_rounds_us": [
+            23.02908,
+            23.037105,
+            23.02945,
+            23.012835,
+            23.034470000000002,
+            22.68451,
+            23.234185
+          ],
+          "typed_entry_hits": 1430
+        },
+        "cast_bf16_to_fp32_1_1_1024": {
+          "median_us": 8.41701,
+          "rounds_us": [
+            8.44864,
+            8.418695,
+            8.423055,
+            8.36347,
+            8.41701,
+            8.403675,
+            8.391915000000001
+          ],
+          "complete_median_us": 8.436345,
+          "complete_rounds_us": [
+            8.472764999999999,
+            8.441355,
+            8.473555000000001,
+            8.384875,
+            8.436345,
+            8.424415000000002,
+            8.41315
+          ],
+          "typed_entry_hits": 1430
+        },
+        "silu_bf16_1_23_3072": {
+          "median_us": 7.698965,
+          "rounds_us": [
+            8.14197,
+            7.71603,
+            7.7172,
+            7.638555,
+            7.676285,
+            7.698965,
+            7.591045
+          ],
+          "complete_median_us": 7.72178,
+          "complete_rounds_us": [
+            8.170444999999999,
+            7.740795,
+            7.740195,
+            7.66202,
+            7.699154999999999,
+            7.72178,
+            7.614185
+          ],
+          "typed_entry_hits": 1430
+        },
+        "softmax_fp32_1_16_1_24": {
+          "median_us": 6.6611,
+          "rounds_us": [
+            6.65911,
+            6.688065,
+            6.6611,
+            6.689649999999999,
+            6.63767,
+            6.7908800000000005,
+            6.658755
+          ],
+          "complete_median_us": 6.685545,
+          "complete_rounds_us": [
+            6.685545,
+            6.7120299999999995,
+            6.684495,
+            6.71358,
+            6.66164,
+            6.81451,
+            6.68246
+          ],
+          "typed_entry_hits": 1430
+        },
+        "arange_int64_24": {
+          "median_us": 15.71152,
+          "rounds_us": [
+            15.71152,
+            15.72031,
+            15.711799999999998,
+            15.812719999999999,
+            15.70212,
+            15.639265,
+            15.692885
+          ],
+          "complete_median_us": 15.726899999999999,
+          "complete_rounds_us": [
+            15.7331,
+            15.73522,
+            15.726899999999999,
+            15.82812,
+            15.717690000000001,
+            15.6531,
+            15.706915
+          ],
+          "typed_entry_hits": 0
+        },
+        "scalar_tensor_fp32": {
+          "median_us": 15.73962,
+          "rounds_us": [
+            15.808950000000001,
+            15.67683,
+            15.774059999999999,
+            15.73962,
+            15.79223,
+            15.69368,
+            15.671149999999999
+          ],
+          "complete_median_us": 15.75576,
+          "complete_rounds_us": [
+            15.837015,
+            15.69209,
+            15.7902,
+            15.75576,
+            15.807375,
+            15.708885,
+            15.685775
+          ],
+          "typed_entry_hits": 0
+        }
+      }
+    },
+    "baseline-2": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "cases": {
+        "mm_bf16_23_1024_3072": {
+          "median_us": 22.834259999999997,
+          "rounds_us": [
+            22.834259999999997,
+            22.816855,
+            22.86105,
+            22.80473,
+            22.83673,
+            22.964380000000002,
+            22.524965
+          ],
+          "complete_median_us": 22.875655,
+          "complete_rounds_us": [
+            22.87618,
+            22.854535,
+            22.899455000000003,
+            22.842565,
+            22.875655,
+            23.0044,
+            22.564685
+          ],
+          "typed_entry_hits": 1430
+        },
+        "cast_bf16_to_fp32_1_1_1024": {
+          "median_us": 8.61129,
+          "rounds_us": [
+            8.67699,
+            8.566785,
+            8.65546,
+            8.61251,
+            8.5513,
+            8.61129,
+            8.604965
+          ],
+          "complete_median_us": 8.632185,
+          "complete_rounds_us": [
+            8.699129999999998,
+            8.58835,
+            8.675725,
+            8.632610000000001,
+            8.570895,
+            8.632185,
+            8.624604999999999
+          ],
+          "typed_entry_hits": 0
+        },
+        "silu_bf16_1_23_3072": {
+          "median_us": 7.764654999999999,
+          "rounds_us": [
+            7.81795,
+            8.0877,
+            7.7454849999999995,
+            7.84522,
+            7.74055,
+            7.761010000000001,
+            7.764654999999999
+          ],
+          "complete_median_us": 7.787725,
+          "complete_rounds_us": [
+            7.84462,
+            8.11148,
+            7.768470000000001,
+            7.86874,
+            7.763765,
+            7.784385,
+            7.787725
+          ],
+          "typed_entry_hits": 1430
+        },
+        "softmax_fp32_1_16_1_24": {
+          "median_us": 6.725705,
+          "rounds_us": [
+            6.74681,
+            6.761685000000001,
+            6.7002049999999995,
+            6.67869,
+            6.73124,
+            6.725705,
+            6.647415
+          ],
+          "complete_median_us": 6.74939,
+          "complete_rounds_us": [
+            6.772545,
+            6.786275,
+            6.723364999999999,
+            6.702185,
+            6.754415,
+            6.74939,
+            6.671275
+          ],
+          "typed_entry_hits": 1430
+        },
+        "arange_int64_24": {
+          "median_us": 15.486495000000001,
+          "rounds_us": [
+            15.560705,
+            15.44009,
+            15.602924999999999,
+            15.471785,
+            15.505004999999999,
+            15.46667,
+            15.486495000000001
+          ],
+          "complete_median_us": 15.501905,
+          "complete_rounds_us": [
+            15.584465,
+            15.456325000000001,
+            15.61914,
+            15.485885,
+            15.52005,
+            15.48147,
+            15.501905
+          ],
+          "typed_entry_hits": 0
+        },
+        "scalar_tensor_fp32": {
+          "median_us": 15.909690000000001,
+          "rounds_us": [
+            15.97932,
+            15.929125,
+            15.961780000000001,
+            15.909690000000001,
+            15.88367,
+            15.85211,
+            15.841595
+          ],
+          "complete_median_us": 15.924059999999999,
+          "complete_rounds_us": [
+            16.00194,
+            15.945345,
+            15.977325,
+            15.924059999999999,
+            15.898985,
+            15.866165,
+            15.855655
+          ],
+          "typed_entry_hits": 0
+        }
+      }
+    }
+  },
+  "wheel": {
+    "name": "torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl",
+    "sha256": "5a37d1034af9115894777765ecce4c50de55b4282e49285237c2d43a6cdb4b5d",
+    "sdk_version": null,
+    "manifests": {
+      "torch_fl/native_host/_generated/manifest.json": "784953e3ab3fa6fa4043716507152fb4e2ff189a6564f419db77e08566d71701",
+      "torch_fl/native_host/_generated/typed/manifest.json": "452b3ce574be37fef431acc3fc0943b65df8f5dfa1c84e80401d9f4e6d20979b",
+      "torch_fl/compatibility.json": "18efc98eb5297d3066e9064f9d37f5bc8ed08be0676e164e38a0e26c07c5a7d5"
+    }
+  },
+  "generated_cpp_sha256": {
+    "flaggems_source_bridges.cc": "19d60b74e73fd19d49ba508da77158ca303529a85fed2c5f12e4dffd5f9cbfca",
+    "flaggems_source_bridges.h": "8a5c570e4f104c4b593438fed4cb68f319f29b9964dd06235be34d06d3ed3f70"
+  },
+  "raw_evidence_sha256": {
+    "operators-final-baseline-1.json": "360b1b27a0232110979454cfc8f48cd6b9ebd0e5d3dc98ec9664adbd63c53cf7",
+    "operators-final-bridge-2.json": "583f030ecef228bf06031385f48fd1274e5472f49b71f9b7e126ff6f50c4bb37",
+    "operators-final-baseline-2.json": "c915948bfa0c250771445ede83a63c86c0d762a03a92f5c053fc5d2e2626ae4c",
+    "qwen-final-bridge-trace.json": "77801a5f0720fa9d3a4dc76c04446c27cf0a7953d028b070f089b49defb60b31",
+    "qwen-final-vendor.json": "deeb07f9b5b43311868401c2ec7e6a9fcf5160acab986654e5fe9258bb98acee",
+    "preflight-2.json": "18efc98eb5297d3066e9064f9d37f5bc8ed08be0676e164e38a0e26c07c5a7d5",
+    "operators-final-bridge-1.json": "c7aaa42dae6b894032daadacb0eeb899c0bf5aa9027a67ce55e7d661a8bb62d2",
+    "qwen-final-baseline.json": "1bc9f7da63411d909c199cb0469af5fb75cd18830e60844e28d6f84e63c2b495",
+    "qwen-final-bridge.json": "61eeb20370b8f3b5e16e9830811a5e1dbc8920789bd0754b7527edf3f35d1fe3"
+  },
+  "validation": {
+    "agnostic": "1462 passed, 14 skipped, 43 warnings in 61.24s",
+    "metadata_ir_codegen": "85 passed, 18 warnings in 16.48s",
+    "final_gpu_integration": "43 passed, 1 deselected, 2 warnings in 28.22s",
+    "deselection": "Dynamo model-host diagnostic; excluded from eager acceptance",
+    "final_source_bridge_codegen": "3 passed in 0.79s",
+    "build_and_preflight": "passed"
+  },
+  "limitations": [
+    "This result does not establish full-registry native execution or other-vendor support.",
+    "General scalar/list/optional result bindings and host-language gaps remain under issue #829.",
+    "Arange and scalar_tensor still have zero typed hits in this workload.",
+    "Vendor numerical equivalence is a separate unpassed gate; the bridge preserves original FlagGems results exactly."
+  ]
+}

@@ -32,9 +32,10 @@ class Type:
 
 
 class Schema:
-    def __init__(self, arguments, returns=("TensorType",), overload=""):
+    def __init__(self, arguments, returns=("TensorType",), overload="", kwonly=()):
         self.arguments = [
-            SimpleNamespace(name=name, type=Type(kind)) for name, kind in arguments
+            SimpleNamespace(name=name, type=Type(kind), kwarg_only=name in kwonly)
+            for name, kind in arguments
         ]
         self.returns = [
             SimpleNamespace(type=Type(kind) if isinstance(kind, str) else kind)
@@ -86,6 +87,14 @@ def required_dim_host(value, dim=None, keepdim=False):
     return value
 
 
+def default_step_host(start, end, step=1, *, dtype=None):
+    return start + end + step
+
+
+def positional_dtype_host(value, dtype=None):
+    return value
+
+
 def discover(function=tensor_host, schema=None, **kwargs):
     schema = schema or Schema([("value", "TensorType")])
     return coverage.discover_variants(
@@ -134,6 +143,39 @@ def test_required_schema_type_is_not_weakened_by_a_none_default():
     schema.arguments[1].type = Type("OptionalType", Type("IntType"))
     variants, _ = discover(required_dim_host, schema)
     assert "dim: Optional[int]=None" in variants[0][2]
+
+
+def test_helper_default_does_not_consume_schema_keyword_argument():
+    schema = Schema(
+        [("start", "NumberType"), ("end", "NumberType"), ("dtype", "IntType")],
+        kwonly=("dtype",),
+    )
+    schema.arguments[-1].type = Type("OptionalType", Type("IntType"))
+    variants, rows = discover(default_step_host, schema)
+    assert len(variants) == 3
+    assert rows[0]["status"] == "pending"
+    for _, _, signature, public in variants:
+        assert "step: int=1" in signature
+        assert "dtype: Optional[torch.dtype]=None" in signature
+        assert public[2] == {
+            "name": "step",
+            "type": "int",
+            "keyword": False,
+            "has_default": True,
+            "default": 1,
+        }
+
+
+def test_positional_python_parameter_can_bind_schema_keyword_by_name():
+    schema = Schema(
+        [("value", "TensorType"), ("alpha", "NumberType")], kwonly=("alpha",)
+    )
+    variants, _ = discover(scalar_host, schema)
+    assert {v[3][1]["type"] for v in variants} == {"bool", "int", "float"}
+    schema = Schema([("value", "TensorType"), ("dtype", "IntType")], kwonly=("dtype",))
+    schema.arguments[-1].type = Type("OptionalType", Type("IntType"))
+    variants, _ = discover(positional_dtype_host, schema)
+    assert "dtype: Optional[torch.dtype]=None" in variants[0][2]
 
 
 @pytest.mark.parametrize("function", [varargs_host, kwargs_host])
