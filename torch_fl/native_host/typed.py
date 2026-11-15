@@ -101,4 +101,14 @@ def activate(hosts):
         )
     for name, address in module.callbacks.items():
         torch.ops.flagos.native_source_register(name, address, 1, 2)
+    if manifest.get("typed_entries"):
+        if manifest.get("typed_entry_abi") != 1:
+            raise RuntimeError("typed entry ABI does not match the installed runtime")
+        for entry in manifest["typed_entries"]:
+            torch.ops.flagos.native_source_register_typed(
+                entry["op"],
+                entry["host"],
+                entry["abi"],
+                module.typed_callbacks[entry["op"]],
+            )
     return manifest

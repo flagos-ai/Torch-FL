@@ -315,6 +315,10 @@ def main():
                 report["native_source_stats"] = torch.ops.flagos.native_source_stats()
                 report["typed_variants"] = len(hosts.typed["compiled"])
                 report["typed_fallbacks"] = len(hosts.typed["fallback"])
+                if hasattr(torch.ops.flagos, "native_source_typed_stats"):
+                    report["typed_entry_stats"] = (
+                        torch.ops.flagos.native_source_typed_stats()
+                    )
         if args.device == "flagos:0":
             report["host_program_stats"] = torch.ops.flagos.host_program_stats()
         if args.model_host:

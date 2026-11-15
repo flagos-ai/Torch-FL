@@ -28,14 +28,21 @@ def measure(call, synchronize):
         call()
     synchronize()
     rounds = []
+    complete = []
     for _ in range(7):
         start = time.perf_counter_ns()
         for _ in range(200):
             output = call()
         rounds.append((time.perf_counter_ns() - start) / 200 / 1000)
         synchronize()
+        complete.append((time.perf_counter_ns() - start) / 200 / 1000)
         del output
-    return {"median_us": statistics.median(rounds), "rounds_us": rounds}
+    return {
+        "median_us": statistics.median(rounds),
+        "rounds_us": rounds,
+        "complete_median_us": statistics.median(complete),
+        "complete_rounds_us": complete,
+    }
 
 
 def main():
@@ -53,6 +60,7 @@ def main():
             host_compiler.enable(args.cache, mode="load")
     else:
         synchronize = torch.cuda.synchronize
+    torch.manual_seed(0)
     with torch.no_grad():
         x = torch.randn(23, 1024, dtype=torch.bfloat16).to(args.device)
         weight = torch.randn(3072, 1024, dtype=torch.bfloat16).to(args.device).t()
@@ -70,9 +78,18 @@ def main():
         report = {"torch": torch.__version__, "device": args.device, "cases": {}}
         for name, call in operations.items():
             before = torch.ops.flagos.host_program_stats()[2] if args.cache else None
+            typed_stats = (
+                torch.ops.flagos.native_source_typed_stats
+                if args.device.startswith("flagos")
+                and hasattr(torch.ops.flagos, "native_source_typed_stats")
+                else None
+            )
+            typed_before = typed_stats()[1] if typed_stats else None
             row = measure(call, synchronize)
             if before is not None:
                 row["native_hits"] = torch.ops.flagos.host_program_stats()[2] - before
+            if typed_stats:
+                row["typed_entry_hits"] = typed_stats()[1] - typed_before
             report["cases"][name] = row
     args.output.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

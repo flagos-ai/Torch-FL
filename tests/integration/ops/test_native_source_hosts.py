@@ -321,6 +321,152 @@ def test_warm_kernel_does_not_execute_flaggems_python():
     assert torch_fl.native_host.audit()["launched_kernels"]
 
 
+def _typed_hits(op):
+    return torch.ops.flagos.native_source_typed_hits("aten::" + op)
+
+
+@pytest.mark.parametrize("alpha", [2, 0.25])
+def test_typed_scalar_keyword_avoids_generic_entry(alpha):
+    value = torch.arange(21, dtype=torch.float32).reshape(3, 7).to("flagos")
+    other = torch.ones_like(value)
+    with torch.no_grad():
+        torch.add(value, other, alpha=alpha)
+        before = _typed_hits("add.Tensor")
+        legacy = torch.ops.flagos.native_source_stats()[1]
+        actual = torch.add(value, other, alpha=alpha)
+        assert _typed_hits("add.Tensor") == before + 1
+        assert torch.ops.flagos.native_source_stats()[1] == legacy
+    torch_fl.flagos.synchronize()
+    torch.testing.assert_close(actual.cpu(), value.cpu() + other.cpu() * alpha)
+
+
+@pytest.mark.parametrize("dim", [None, [0], [0, 1]])
+@pytest.mark.parametrize("correction", [0.0, 1.0, None])
+def test_typed_tuple_optional_list_and_scalar(dim, correction):
+    cpu = torch.arange(21, dtype=torch.float32).reshape(3, 7) / 16
+    value = cpu.to("flagos")
+    before = torch_fl.native_host.audit()["host_artifacts"]
+    with torch.no_grad():
+        expected = torch_fl.native_host._hosts.original_ops["var_mean"](
+            value, dim=dim, correction=correction, keepdim=True
+        )
+        hits = _typed_hits("var_mean.correction")
+        actual = torch.var_mean(value, dim=dim, correction=correction, keepdim=True)
+        assert _typed_hits("var_mean.correction") == hits + 1
+    torch_fl.flagos.synchronize()
+    for got, original, reference in zip(
+        actual,
+        expected,
+        torch.var_mean(cpu, dim=dim, correction=correction, keepdim=True),
+    ):
+        torch.testing.assert_close(got.cpu(), original.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(got.cpu(), reference)
+    assert actual[0].data_ptr() != actual[1].data_ptr()
+    assert torch_fl.native_host.audit()["host_artifacts"] == before
+
+
+@pytest.mark.parametrize("correction", [0, 1])
+def test_typed_tuple_preserves_unlowered_scalar_fallback(correction):
+    value = torch.arange(21, dtype=torch.float32).reshape(3, 7).to("flagos")
+    hosts = torch_fl.native_host._hosts
+    entry = next(
+        r
+        for r in hosts.typed["typed_entries"]
+        if r["op"] == "aten::var_mean.correction"
+    )
+    integer_lowered = any(
+        row["namespace"] in entry["variants"]
+        and (
+            "correction: Optional[int]" in row["signature"]
+            or "correction: int" in row["signature"]
+        )
+        for row in hosts.typed["compiled"]
+    )
+    # A compiled float variant must not accept an integer by coercion. When a
+    # cohort gains the integer variant, require that native path instead.
+    with torch.no_grad():
+        expected = hosts.original_ops["var_mean"](value, dim=[0], correction=correction)
+        before = _typed_hits("var_mean.correction")
+        actual = torch.var_mean(value, dim=[0], correction=correction)
+        assert _typed_hits("var_mean.correction") == before + int(integer_lowered)
+    torch_fl.flagos.synchronize()
+    for got, original in zip(actual, expected):
+        torch.testing.assert_close(got.cpu(), original.cpu(), rtol=0, atol=0)
+
+
+def test_typed_tensorlist_keeps_borrowed_inputs_and_live_results():
+    values = [
+        torch.arange(15, dtype=torch.float32).reshape(3, 5).t().to("flagos")
+        for _ in range(2)
+    ]
+    with torch.no_grad():
+        hits = _typed_hits("cat")
+        first = torch.cat(values, dim=1)
+        second = torch.cat(values[::-1], dim=0)
+        assert _typed_hits("cat") == hits + 2
+    torch_fl.flagos.synchronize()
+    assert first.data_ptr() != second.data_ptr()
+    torch.testing.assert_close(first.cpu(), torch.cat([v.cpu() for v in values], dim=1))
+    torch.testing.assert_close(
+        second.cpu(), torch.cat([v.cpu() for v in values[::-1]], dim=0)
+    )
+
+
+def test_typed_out_and_inplace_preserve_aliases_and_versions():
+    value = (torch.arange(31, dtype=torch.float32) / 16).to("flagos")
+    out = torch.empty_like(value)
+    address, version = out.data_ptr(), out._version
+    with torch.no_grad():
+        hits = _typed_hits("exp.out")
+        result = torch.exp(value, out=out)
+        assert _typed_hits("exp.out") == hits + 1
+        assert result is out and result.data_ptr() == address
+        assert out._version > version
+        prior = out.clone()
+        version = out._version
+        hits = _typed_hits("add_.Tensor")
+        mutated = out.add_(value, alpha=2)
+        assert _typed_hits("add_.Tensor") == hits + 1
+    torch_fl.flagos.synchronize()
+    assert mutated is out and out.data_ptr() == address
+    assert out._version > version
+    torch.testing.assert_close(prior.cpu(), value.cpu().exp())
+    torch.testing.assert_close(out.cpu(), prior.cpu() + value.cpu() * 2)
+
+
+def test_typed_entry_preserves_grad_mode_fallback():
+    value = torch.randn(37).to("flagos")
+    with torch.enable_grad():
+        before = _typed_hits("cos")
+        actual = torch.cos(value)
+        assert _typed_hits("cos") == before
+    torch_fl.flagos.synchronize()
+    torch.testing.assert_close(actual.cpu(), value.cpu().cos())
+
+
+def test_typed_entry_registration_rejects_mismatched_abi():
+    hosts = torch_fl.native_host._hosts
+    module = importlib.import_module(hosts.package + ".typed._source_hosts")
+    entry = next(
+        r for r in hosts.typed["typed_entries"] if r["op"] == "aten::mul.Tensor"
+    )
+    address = module.typed_callbacks[entry["op"]]
+    before = torch.ops.flagos.native_source_typed_stats()
+    register = torch.ops.flagos.native_source_register_typed
+    with pytest.raises(RuntimeError, match="ABI mismatch"):
+        register(entry["op"], entry["host"], "wrong-abi", address)
+    with pytest.raises(RuntimeError, match="ABI mismatch"):
+        register(entry["op"], "flag_gems.wrong_host", entry["abi"], address)
+    with pytest.raises(RuntimeError, match="already registered"):
+        register(entry["op"], entry["host"], entry["abi"], 1)
+    with pytest.raises(RuntimeError, match="unknown typed source"):
+        register(
+            "aten::__missing_typed_source_test", entry["host"], entry["abi"], address
+        )
+    register(entry["op"], entry["host"], entry["abi"], address)
+    assert torch.ops.flagos.native_source_typed_stats() == before
+
+
 def test_direct_jit_warmup_does_not_launch_and_keeps_return_type():
     module = importlib.import_module("flag_gems.ops.scalar_tensor")
     entry = torch_fl.native_host._hosts.resolve(module.scalar_tensor_kernel)
