@@ -148,7 +148,12 @@ FLAGOS_BUILD_TILEOPS=0 FLAGOS_BUILD_BOXING=0 python setup.py bdist_wheel
 This opt-in build uses Cython 3.2.4 and a CUDA toolkit. The generated hosts and
 the common launcher are installed with the wheel and activated on import.
 Eager inference uses the generated operator hosts under `torch.no_grad()`.
-To also compile the model's host graph, explicitly use:
+The acceptance target is synchronized complete-model latency at most 30 ms
+against the roughly 24 ms vendor workload, with the model remaining eager.
+This target has not yet been demonstrated without model graph compilation.
+
+An optional graph-mode comparison uses Dynamo to capture the model and
+TorchScript to execute its ATen graph:
 
 ```python
 model = torch_fl.native_host.compile(model.eval().to("flagos"))
@@ -160,9 +165,10 @@ This backend runs the graph through ATen and FlagGems with numerical fusers
 disabled. It generates no Inductor or replacement Triton kernels. Runtime
 operator misses compile only original FlagGems device kernels, including its
 pointwise generator's kernels; they do not compile host C/C++ libraries.
-Kernel provenance is checked and CPU fallback is rejected. The strict performance
-target is synchronized complete-model latency at most 30 ms against a roughly
-24 ms vendor baseline; eager and model-host measurements are reported separately.
+Kernel provenance is checked and CPU fallback is rejected. Its measured
+approximately 26 ms latency depends on model graph capture and does not satisfy
+the eager acceptance requirement. Eager and graph-mode results are reported
+separately.
 See the
 [build-time host design and validation](docs/design/flaggems-build-time-hosts.md)
 for the current H100 evidence, compatibility requirements and performance tradeoffs.

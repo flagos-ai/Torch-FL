@@ -4,6 +4,9 @@
     "target_ms": 30,
     "metric": "synchronized complete-model forward latency",
     "scope": "warm inference; explicit torch_fl.native_host.compile(model)",
+    "model_graph_capture": "torch._dynamo",
+    "eligible_for_eager_acceptance": false,
+    "acceptance_exclusion": "Uses model graph capture; retained as a diagnostic comparison only",
     "excluded_on_both_sides": [
       "tokenization",
       "token selection",

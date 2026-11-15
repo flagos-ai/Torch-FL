@@ -1,10 +1,11 @@
 # Build-time FlagGems hosts
 
-Status: opt-in implementation with complete-model H100 measurements. The target
-is synchronized warm prefill and decode latency at most 30 ms against the
-approximately 24 ms vendor workload. The measurements below are separate from
-the capture-based prototype merged in PR #824. A sevenfold slowdown does not
-meet the acceptance criterion.
+Status: experimental; the eager performance target has not been met. Acceptance
+requires synchronized warm prefill and decode latency at most 30 ms against the
+approximately 24 ms vendor workload, with the original model remaining eager.
+The approximately 26 ms measurements below use Dynamo model graph capture and
+cannot count toward that requirement. The measurements are also separate from
+the capture-based operator prototype merged in PR #824.
 
 The installed FlagGems wheel is the source of both host semantics and numerical
 kernels. The build generates native host code from its source, including shape
@@ -60,7 +61,7 @@ sequences, or shape-specific host programs. On CPython 3.12, dictionary watchers
 invalidate rank definitions when configuration or overload definitions change;
 without watcher support the original instantiation path runs on every call.
 
-## Explicit model host
+## Optional Dynamo model-graph comparison
 
 `torch_fl.native_host.compile(model)` additionally compiles the model's Python
 host graph through Dynamo and TorchScript's ATen executor. It returns the same
@@ -75,7 +76,9 @@ still selects FlagGems. No Inductor backend is called and no attention or other
 numerical operator is substituted. The measured Qwen traversal needs three guarded
 model graphs across 512 decode steps, rather than a graph per token. This model
 mode is distinct from ordinary eager execution, which retains additional Python
-overhead; benchmark reports record the execution mode explicitly.
+overhead; benchmark reports record the execution mode explicitly. It changes the
+model execution route and is retained only as a diagnostic comparison, not as
+evidence that the source-generated operator hosts meet the eager target.
 
 Use `torch.Stream(device="flagos:0")` and its context manager for nondefault
 streams on the CPU-Torch NVIDIA build. The native runtime, allocator, kernel
@@ -108,7 +111,34 @@ TileOPs are disabled for this build. A missing numerical route is an error.
 This work does not add new vendor-native fallback operators or claim coverage
 for other accelerator backends.
 
-## Typed hosts and complete-model measurement
+## Current eager baseline: target not met
+
+The same installed wheel was rerun with the original model forward and no
+model-host compilation. A separate validation wrapper rejected calls to
+`torch.compile`, Dynamo optimize/export entry points, and TorchScript model
+script/trace entry points. None was called. The ordinary benchmark used the
+same 60-token prompt, 512 teacher-forced decode inputs, BF16 eager attention,
+H100 GPU and CPU affinity as the graph comparison below.
+
+| Synchronized complete eager forward | Latency |
+|---|---:|
+| Prefill median | 35.65 ms |
+| Decode median | 33.54 ms |
+| Decode p99 | 34.94 ms |
+
+The three prefill samples were 35.65, 36.43 and 35.19 ms. The 1,536 decode
+samples came from three complete traversals. All 513 logits matched the
+unmodified FlagGems oracle bitwise, all 773 host libraries remained unchanged,
+and the warm FlagGems/Triton Python-frame audit was empty. There were no legacy
+host plans. The separate two-forward trace recorded 3,814 original FlagGems
+kernel launches, with no unmatched kernel names.
+
+This is the relevant baseline for the requested eager solution, and both
+prefill and decode exceed 30 ms. The [eager evidence record](../../benchmarks/host_compiler/results/qwen3_eager_source_hosts_h100.json)
+retains the capture guards, timings and artifact hashes. The graph-mode result
+below must not be substituted for it.
+
+## Typed hosts with Dynamo: comparison measurements
 
 The final measurements use the complete official Qwen3-0.6B model, BF16, eager
 attention, 28 layers and 596,049,920 parameters on an H100 80GB. The model host is
@@ -129,10 +159,10 @@ three prefill and 1,536 decode samples. Profiling is a separate, untimed pass.
 | Decode p99 | 25.05 ms | 27.52 ms |
 | Maximum observed decode sample | 37.33 ms | 30.65 ms |
 
-All three model-host prefill samples are below 30 ms. These measurements satisfy
-the warm median target; they are not a guarantee that every individual call
-finishes within 30 ms. The maximum samples above are retained rather than
-discarded. Ordinary eager mode is not claimed to meet this target.
+All three graph-mode prefill samples are below 30 ms. These measurements do not
+satisfy eager acceptance because the model was captured by Dynamo. They also do
+not guarantee that every individual call finishes within 30 ms. The maximum
+samples above are retained rather than discarded.
 
 The 60-token prompt and 512 decode steps produce 513 logits tensors, all bitwise
 equal to the unmodified FlagGems oracle. The 23-token, eight-step check also
@@ -232,6 +262,9 @@ arguments. The 1032 generated entries have not all been correctness-tested.
 - Require synchronized complete-model prefill and decode latency at most 30 ms
   on the approximately 24 ms vendor workload. Submission time alone, a favorable
   individual run, or a relaxed numerical tolerance cannot satisfy this gate.
+- Keep the original model eager. Do not use Dynamo capture, model tracing,
+  runtime model-graph compilation or replay to satisfy the latency gate.
+  Build-time typed IR of individual FlagGems host source remains allowed.
 - Compare actual GPU trace kernel names against admitted FlagGems specializations,
   including kernels emitted by its original pointwise generator. Keep the trace
   outside the timed measurement.
