@@ -286,6 +286,9 @@ struct alignas(128) Slot {
 };
 
 struct Argument {
+  enum class Kind {
+    Pointer, Descriptor, Float64, Float32, Bool, Int8, Int16, Int32, Int64, Other
+  };
   std::vector<size_t> path;
   std::string type;
   py::object descriptor_metadata;
@@ -293,6 +296,7 @@ struct Argument {
   uint64_t element_size = 0;
   int element_type = 0, swizzle = 0;
   bool fp4_padded = false;
+  Kind kind = Kind::Other;
 };
 
 class Launcher {
@@ -434,24 +438,24 @@ class Launcher {
                   const std::vector<int64_t>& grid, int device, uint64_t function) const {
     TORCH_CHECK(argument_count == num_args_, "native launch argument arity mismatch");
     c10::SmallVector<Slot, 32> slots;
-    size_t capacity = 2;
-    for (const auto& arg : arguments_)
-      capacity += arg.type.rfind("tensordesc", 0) == 0
-                      ? (arg.block.empty() ? 22 : 1 + 2 * arg.block.size())
-                      : 1;
-    slots.reserve(capacity);
+    slots.reserve(slot_capacity_);
     for (const auto& arg : arguments_) {
-      c10::IValue value = get_value(arg.path.front());
+      // The caller owns this value through packing. A copied legacy argument
+      // also lives here until this iteration ends; nested leaves are borrowed.
+      const auto& root = get_value(arg.path.front());
+      const auto* leaf = &root;
       for (size_t depth = 1; depth < arg.path.size(); ++depth)
-        value = value.isTuple() ? value.toTupleRef().elements().at(arg.path[depth])
-                                : value.toList().get(arg.path[depth]);
-      if (arg.type.rfind("tensordesc", 0) == 0) {
+        leaf = leaf->isTuple() ? &leaf->toTupleRef().elements().at(arg.path[depth])
+                              : &leaf->toListRef().at(arg.path[depth]);
+      const auto& value = *leaf;
+      if (arg.kind == Argument::Kind::Descriptor) {
         PackDescriptorNative(arg, value, slots);
         continue;
       }
       slots.emplace_back();
       auto& slot = slots.back();
-      if (arg.type[0] == '*') {
+      switch (arg.kind) {
+      case Argument::Kind::Pointer: {
         uint64_t pointer = 0;
         if (value.isTensor()) {
           const auto& tensor = value.toTensor();
@@ -461,22 +465,32 @@ class Launcher {
         } else if (!value.isNone())
           pointer = static_cast<uint64_t>(value.toInt());
         slot.Set(pointer);
-      } else if (arg.type == "fp64")
+        break;
+      }
+      case Argument::Kind::Float64:
         slot.Set(value.toDouble());
-      else if (arg.type == "fp32" || arg.type == "f32")
+        break;
+      case Argument::Kind::Float32:
         slot.Set(static_cast<float>(value.toDouble()));
-      else if (arg.type == "i1" || arg.type == "u1")
+        break;
+      case Argument::Kind::Bool:
         slot.Set(static_cast<uint8_t>(value.toBool()));
-      else if (arg.type == "i8" || arg.type == "u8")
+        break;
+      case Argument::Kind::Int8:
         slot.Set(static_cast<uint8_t>(value.toInt()));
-      else if (arg.type == "i16" || arg.type == "u16")
+        break;
+      case Argument::Kind::Int16:
         slot.Set(static_cast<uint16_t>(value.toInt()));
-      else if (arg.type == "i32" || arg.type == "u32")
+        break;
+      case Argument::Kind::Int32:
         slot.Set(static_cast<uint32_t>(value.toInt()));
-      else if (arg.type == "i64" || arg.type == "u64")
+        break;
+      case Argument::Kind::Int64:
         slot.Set(static_cast<uint64_t>(value.toInt()));
-      else
+        break;
+      default:
         throw std::invalid_argument("unsupported native scalar ABI");
+      }
     }
     slots.emplace_back();
     slots.back().Set(uint64_t(0));
@@ -564,6 +578,7 @@ class Launcher {
     if (name == "constexpr") return;
     Argument argument{std::move(path), name, py::none()};
     if (name.rfind("tensordesc", 0) == 0) {
+      argument.kind = Argument::Kind::Descriptor;
       if (!descriptors.is_none()) argument.descriptor_metadata = descriptors[py::int_(descriptor)];
       ++descriptor;
       if (!argument.descriptor_metadata.is_none()) {
@@ -574,7 +589,18 @@ class Launcher {
         argument.swizzle = py::cast<int>(meta["swizzle"]);
         argument.fp4_padded = py::cast<bool>(meta["fp4_padded"]);
       }
-    }
+    } else if (!name.empty() && name[0] == '*')
+      argument.kind = Argument::Kind::Pointer;
+    else if (name == "fp64") argument.kind = Argument::Kind::Float64;
+    else if (name == "fp32" || name == "f32") argument.kind = Argument::Kind::Float32;
+    else if (name == "i1" || name == "u1") argument.kind = Argument::Kind::Bool;
+    else if (name == "i8" || name == "u8") argument.kind = Argument::Kind::Int8;
+    else if (name == "i16" || name == "u16") argument.kind = Argument::Kind::Int16;
+    else if (name == "i32" || name == "u32") argument.kind = Argument::Kind::Int32;
+    else if (name == "i64" || name == "u64") argument.kind = Argument::Kind::Int64;
+    slot_capacity_ += argument.kind == Argument::Kind::Descriptor
+                          ? (argument.block.empty() ? 22 : 1 + 2 * argument.block.size())
+                          : 1;
     arguments_.push_back(std::move(argument));
   }
   static void Pack(const Argument& a, py::handle value, std::vector<Slot>& slots) {
@@ -777,6 +803,7 @@ class Launcher {
   }
 
   std::vector<Argument> arguments_;
+  size_t slot_capacity_ = 2;
   py::object metadata_;
   size_t num_args_;
   unsigned num_warps_, num_ctas_, shared_;
@@ -959,15 +986,26 @@ class KernelCache {
     Append(key, args.size());
     for (const auto& value : args)
       if (!NativeValue(key, value)) return false;
-    c10::SmallVector<std::pair<std::string_view, c10::IValue>, 8> ordered;
-    for (const auto& item : kwargs) ordered.emplace_back(item.key(), item.value());
-    if (!kwargs.contains("warmup")) ordered.emplace_back("warmup", false);
+    c10::SmallVector<std::pair<std::string_view, const c10::IValue*>, 8> ordered;
+    c10::SmallVector<c10::IValue, 8> owned_keywords;
+    if constexpr (!std::is_lvalue_reference_v<decltype((*kwargs.begin()).value())>)
+      owned_keywords.reserve(kwargs.size());
+    for (const auto& item : kwargs) {
+      if constexpr (std::is_lvalue_reference_v<decltype(item.value())>)
+        ordered.emplace_back(item.key(), &item.value());
+      else {
+        owned_keywords.push_back(item.value());
+        ordered.emplace_back(item.key(), &owned_keywords.back());
+      }
+    }
+    const c10::IValue warmup(false);
+    if (!kwargs.contains("warmup")) ordered.emplace_back("warmup", &warmup);
     std::sort(ordered.begin(), ordered.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
     Append(key, ordered.size());
     for (const auto& item : ordered) {
       Text(key, item.first.data(), item.first.size());
-      if (!NativeValue(key, item.second)) return false;
+      if (!NativeValue(key, *item.second)) return false;
     }
     const Variant* selected = nullptr;
     {
@@ -982,11 +1020,18 @@ class KernelCache {
       if (!selected) return false;
     }
     const auto& variant = *selected;
-    auto get_value = [&](size_t position) -> c10::IValue {
+    auto get_value = [&](size_t position) -> decltype(auto) {
       const auto& binding = variant.bindings.at(position);
-      if (binding.position >= 0) return args.get(binding.position);
-      if (!binding.keyword_name.empty()) return kwargs.at(binding.keyword_name);
-      return binding.native_constant;
+      if constexpr (std::is_same_v<Args, flagos::native_host::Arguments>) {
+        if (binding.position >= 0) return args.get(binding.position);
+        if (!binding.keyword_name.empty()) return kwargs.at(binding.keyword_name);
+        return (binding.native_constant);
+      } else {
+        if (binding.position >= 0) return c10::IValue(args.get(binding.position));
+        if (!binding.keyword_name.empty())
+          return c10::IValue(kwargs.at(binding.keyword_name));
+        return c10::IValue(binding.native_constant);
+      }
     };
     std::vector<int64_t> actual_grid;
     if (grid_function) {
@@ -1134,6 +1179,11 @@ class KernelCache {
   static bool NativeValue(Buffer& key, const c10::IValue& value) {
     if (IsDescriptor(value)) {
       key.push_back('D');
+      if (value.isList()) {
+        for (const auto& field : value.toListRef().slice(1))
+          if (!NativeValue(key, field)) return false;
+        return true;
+      }
       const flagos::native_host::Descriptor descriptor(value);
       for (const char* name : {"base", "shape", "strides", "block_shape", "padding"})
         if (!NativeValue(key, descriptor.at(name))) return false;
@@ -1159,7 +1209,7 @@ class KernelCache {
     }
     if (value.isString()) {
       key.push_back('s');
-      auto text = value.toStringRef();
+      const auto& text = value.toStringRef();
       Text(key, text.data(), text.size());
       return true;
     }
@@ -1170,13 +1220,17 @@ class KernelCache {
       Append(key, tensor.device().index());
       Append(key, tensor.dim());
       Append(key, reinterpret_cast<uint64_t>(tensor.const_data_ptr()) % 16 == 0);
-      for (auto size : tensor.sizes()) Append(key, size);
-      for (auto stride : tensor.strides()) Append(key, stride);
+      if (tensor.dim()) {
+        key.append(reinterpret_cast<const char*>(tensor.sizes().data()),
+                   tensor.dim() * sizeof(int64_t));
+        key.append(reinterpret_cast<const char*>(tensor.strides().data()),
+                   tensor.dim() * sizeof(int64_t));
+      }
       return true;
     }
     if (value.isList()) {
       key.push_back('q');
-      auto list = value.toList();
+      const auto list = value.toListRef();
       Append(key, list.size());
       for (const auto& item : list)
         if (!NativeValue(key, item)) return false;

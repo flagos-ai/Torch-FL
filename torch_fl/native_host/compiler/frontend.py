@@ -15,7 +15,7 @@ import hashlib
 import sys
 import types
 
-from .constants import Evaluator
+from .constants import Evaluator, NotConstant
 from .bindings import preserve_scalar_bindings
 
 
@@ -656,6 +656,73 @@ class Transform(ast.NodeTransformer):
 
         index = 0
         while index < len(items):
+            if isinstance(items[index], ast.Try) and self.return_type in {
+                "bool",
+                "int",
+                "float",
+                "str",
+                "torch.Tensor",
+            }:
+                tail = ast.Module(body=items[index:], type_ignores=[])
+                digest = hashlib.sha256(
+                    (
+                        self.function.__name__
+                        + "\n"
+                        + ast.dump(tail, include_attributes=False)
+                    ).encode()
+                ).hexdigest()[:16]
+                helper_name = "_host_continuation_" + digest
+                record = next(
+                    (
+                        r
+                        for r in self.frontend.hosts.manifest["modules"]
+                        .get(self.function.__module__, {})
+                        .get("regions", [])
+                        if r["name"] == helper_name and r.get("kind") == "continuation"
+                    ),
+                    None,
+                )
+                # Dtype/layout objects and unknown values cannot cross the
+                # untyped bridge through their TorchScript integer encoding.
+                allowed = {
+                    "bool",
+                    "int",
+                    "float",
+                    "str",
+                    "torch.Tensor",
+                    "torch.device",
+                }
+                if record and all(
+                    self.types.get(n) in allowed for n in record["inputs"]
+                ):
+                    helper = getattr(
+                        self.frontend.hosts.modules[self.function.__module__],
+                        helper_name,
+                    )
+                    slot = self.frontend.launcher.register_foreign(helper, ())
+                    temporary = "_continuation_" + digest
+                    call = ast.Call(
+                        ast.parse("torch.ops.flagos_source_native.foreign_value")
+                        .body[0]
+                        .value,
+                        [
+                            ast.Constant(slot),
+                            annotated_list(
+                                "Any",
+                                [ast.Name(n, ast.Load()) for n in record["inputs"]],
+                            ),
+                            annotated_dict([]),
+                        ],
+                        [],
+                    )
+                    result.extend(
+                        [
+                            ast.Assign([ast.Name(temporary, ast.Store())], call),
+                            self.assert_type(temporary, self.return_type),
+                            ast.Return(ast.Name(temporary, ast.Load())),
+                        ]
+                    )
+                    return result
             if (
                 index + 1 < len(items)
                 and isinstance(items[index], ast.FunctionDef)
@@ -1198,6 +1265,17 @@ class Transform(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_Compare(self, node):
+        if (
+            len(node.ops) == 1
+            and isinstance(node.ops[0], (ast.Is, ast.IsNot))
+            and isinstance(node.left, ast.Name)
+            and node.left.id in self.objects
+            and isinstance(node.comparators[0], ast.Constant)
+            and node.comparators[0].value is None
+        ):
+            return ast.Constant(
+                (self.objects[node.left.id] is None) == isinstance(node.ops[0], ast.Is)
+            )
         if len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
             left = self.visit(node.left)
             right = self.visit(node.comparators[0])
@@ -1750,6 +1828,32 @@ class Transform(ast.NodeTransformer):
     def visit_Assign(self, node):
         value = node.value
         if (
+            node in self.root.body
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id not in self.inputs
+            and self.assignments[node.targets[0].id] == 1
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "getattr"
+            and "getattr" not in self.locals
+            and self.globals.get("getattr", builtins.getattr) is builtins.getattr
+        ):
+            try:
+                reference = self.frontend.constants.expression(
+                    value, self.objects, self.globals
+                )
+            except (NotConstant, AttributeError, TypeError):
+                pass
+            else:
+                if (
+                    isinstance(reference, types.ModuleType)
+                    or type(reference) is type
+                    or inspect.isfunction(reference)
+                ):
+                    self.objects[node.targets[0].id] = reference
+                    return None
+        if (
             isinstance(node.targets[0], ast.Name)
             and isinstance(value, ast.Call)
             and ast.unparse(value.func) == "type"
@@ -1902,16 +2006,22 @@ class Transform(ast.NodeTransformer):
         except (Exception,):
             pass
         if (
-            label == "hasattr"
-            and len(node.args) == 2
-            and isinstance(node.args[1], ast.Constant)
+            label in ("getattr", "hasattr")
+            and label not in self.locals
+            and (
+                self.globals.get(label, getattr(builtins, label))
+                is getattr(builtins, label)
+            )
         ):
             try:
-                owner = self.resolve(node.args[0])
-            except (ValueError, AttributeError):
-                owner = None
-            if inspect.ismodule(owner):
-                return ast.Constant(hasattr(owner, node.args[1].value))
+                value = self.frontend.constants.expression(
+                    node, self.objects, self.globals
+                )
+            except (NotConstant, AttributeError, TypeError):
+                raise NotImplementedError("dynamic metadata attribute query") from None
+            if value is None or type(value) in (bool, int, float, str):
+                return ast.Constant(value)
+            raise NotImplementedError("escaping metadata API reference")
         if label == "torch.are_deterministic_algorithms_enabled":
             return ast.Call(
                 ast.parse("torch.ops.flagos_script_host.deterministic").body[0].value,

@@ -326,6 +326,38 @@ matches and 0/513 recorded full-logit allclose checks. The
 [scalar-semantics evidence](../../benchmarks/host_compiler/results/qwen3_scalar_semantics_h100.json)
 records cohort/source/wheel hashes, distributions, interleaved rounds and audits.
 
+## Guarded exception continuations and launch arguments
+
+An exception-bearing helper need not send its entire guard through Python object
+dispatch. The source generator can export a top-level `try` and the rest of its
+function as a continuation after an early-return guard. The typed prefix tests
+current arguments on every call. A reached continuation executes the original
+`try`/`except`/`else`/`finally` and return statements in its compiled Cython host.
+It does not repeat the prefix or retry failed calls. This is a shared source
+transformation with no operator-name or observed-input matching.
+Existing metadata regions take precedence, keeping subsequent operations native
+instead of moving an already supported remainder into an object continuation.
+
+Only definitely bound, faithfully represented inputs may cross this boundary:
+Tensor, bool, int, float, str and device. Optional or opaque metadata objects,
+including dtype's TorchScript integer encoding, keep the original whole host.
+Nested functions, captures, namespace introspection and conditionally bound
+inputs also decline. An admitted typed entry can still call a compiled object
+continuation; it does not imply an entirely Python-free transitive call graph.
+
+Static API-reference bindings use the existing restricted metadata evaluator and
+dependency hashes. Dynamic module attributes, custom metaclasses, dynamic
+descriptors and shadowed builtins are not evaluated at build time. Runtime
+capability queries in the exception tail remain runtime queries.
+
+The common launcher decodes signature kinds and maximum argument-slot capacity
+when a device specialization is registered. Each warm call still reads its
+current tensor metadata, scalar values, keyword values, descriptors, grid,
+prehooks, output addresses and stream. Key serialization and argument packing
+borrow values only for the duration of that call; nested references and sorted
+keyword pointers never become cache contents. The original device-specialization
+key remains byte-for-byte compatible with its Python counterpart.
+
 ## Typed-entry eager measurement: target not met
 
 The paired H100 rerun uses the same complete Qwen3-0.6B model, 60-token prompt,

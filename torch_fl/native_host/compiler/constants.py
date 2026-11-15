@@ -4,6 +4,7 @@
 """Evaluate admitted immutable metadata expressions without executing host calls."""
 
 import ast
+import builtins
 import inspect
 import operator
 import textwrap
@@ -41,7 +42,10 @@ class Evaluator:
         self.dependencies = set()
 
     def call(self, function, args, kwargs):
-        if not inspect.isfunction(function) or function.__module__ not in self.modules:
+        if (
+            type(function) is not types.FunctionType
+            or function.__module__ not in self.modules
+        ):
             raise NotConstant()
         if function in self.active:
             raise NotConstant()
@@ -63,12 +67,13 @@ class Evaluator:
         return None
 
     def attribute(self, value, name, default=None, has_default=False):
-        if isinstance(value, types.ModuleType) and value.__name__ in self.modules:
+        if type(value) is types.ModuleType and value.__name__ in self.modules:
             self.dependencies.add(value.__name__)
             if name in vars(value):
                 result = vars(value)[name]
-                if isinstance(result, (types.ModuleType, type)) or inspect.isfunction(
-                    result
+                if (
+                    type(result) in (types.ModuleType, type)
+                    or type(result) is types.FunctionType
                 ):
                     return result
                 # The wheel cohort pins its version, while runtime global flags
@@ -76,13 +81,24 @@ class Evaluator:
                 if name == "__version__" and type(result) is str:
                     return result
                 raise NotConstant()
+            if "__getattr__" in vars(value):
+                raise NotConstant()
             if has_default:
                 return default
             raise AttributeError(name)
-        if isinstance(value, type) and value.__module__ in self.modules:
+        if type(value) is type and value.__module__ in self.modules:
             self.dependencies.add(value.__module__)
             try:
-                return inspect.getattr_static(value, name)
+                result = inspect.getattr_static(value, name)
+                if inspect.getattr_static(
+                    type(result), "__get__", None
+                ) is not None and not (
+                    type(result) is types.FunctionType
+                    or type(result) in (staticmethod, classmethod)
+                    and type(result.__func__) is types.FunctionType
+                ):
+                    raise NotConstant()
+                return result
             except AttributeError:
                 if has_default:
                     return default
@@ -99,9 +115,9 @@ class Evaluator:
             if node.id in local:
                 return local[node.id]
             value = global_.get(node.id)
-            if isinstance(value, types.ModuleType) and value.__name__ in self.modules:
+            if type(value) is types.ModuleType and value.__name__ in self.modules:
                 return value
-            if inspect.isfunction(value) and value.__module__ in self.modules:
+            if type(value) is types.FunctionType and value.__module__ in self.modules:
                 return value
             if node.id in _ALLOWED_EXCEPTIONS:
                 return _ALLOWED_EXCEPTIONS[node.id]
@@ -157,6 +173,21 @@ class Evaluator:
             kwargs = {k.arg: ev(k.value) for k in node.keywords}
             if isinstance(node.func, ast.Name):
                 name = node.func.id
+                if name in (
+                    "getattr",
+                    "hasattr",
+                    "int",
+                    "str",
+                    "bool",
+                    "tuple",
+                    "list",
+                    "len",
+                ) and (
+                    name in local
+                    or global_.get(name, getattr(builtins, name))
+                    is not getattr(builtins, name)
+                ):
+                    raise NotConstant()
                 if (
                     name in ("getattr", "hasattr")
                     and not kwargs
@@ -169,6 +200,8 @@ class Evaluator:
                             args[2] if len(args) == 3 else None,
                             len(args) == 3,
                         )
+                    if len(args) != 2:
+                        raise NotConstant()
                     try:
                         self.attribute(args[0], args[1])
                         return True

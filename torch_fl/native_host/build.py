@@ -136,6 +136,113 @@ def metadata_regions(definition):
     return regions
 
 
+def continuation_regions(definition):
+    """Keep guarded prefixes native while an exception-bearing tail stays Python."""
+    if not isinstance(definition, ast.FunctionDef):
+        return []
+    nodes = list(ast.walk(definition))
+    scoped = (
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.Lambda,
+        ast.Global,
+        ast.Nonlocal,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+        ast.NamedExpr,
+        ast.Delete,
+        ast.Match,
+        ast.Yield,
+        ast.YieldFrom,
+        ast.Await,
+    )
+    if any(isinstance(n, scoped) for n in nodes) or any(
+        isinstance(n, ast.FunctionDef) and n is not definition for n in nodes
+    ):
+        return []
+    if any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id in {"locals", "globals", "vars", "eval", "exec", "dir"}
+        for n in nodes
+    ):
+        return []
+
+    def written(items):
+        result = set()
+        for item in items:
+            for node in ast.walk(item):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    result.add(node.id)
+                elif isinstance(node, ast.alias):
+                    result.add(node.asname or node.name.split(".")[0])
+                elif isinstance(node, ast.ExceptHandler) and node.name:
+                    result.add(node.name)
+        return result
+
+    arguments = {a.arg for a in ast.walk(definition.args) if isinstance(a, ast.arg)}
+    # A small existing region can keep the remainder native. Do not replace it
+    # with a coarser continuation that moves all subsequent launches to Cython.
+    metadata = {
+        ast.dump(helper.body[0], include_attributes=False)
+        for helper, _ in metadata_regions(definition)
+    }
+    known = set(arguments)
+    prefix_writes = set()
+    guarded = False
+    regions = []
+    for index, statement in enumerate(definition.body):
+        if (
+            isinstance(statement, ast.Try)
+            and guarded
+            and ast.dump(statement, include_attributes=False) not in metadata
+        ):
+            tail = ast.Module(body=definition.body[index:], type_ignores=[])
+            reads = {
+                n.id
+                for n in ast.walk(tail)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+            }
+            # Passing a conditionally bound local eagerly could introduce an
+            # UnboundLocalError on a path that never reads it in the original.
+            if reads & (prefix_writes - known):
+                return regions
+            inputs = sorted(reads & known)
+            digest = hashlib.sha256(
+                (
+                    definition.name + "\n" + ast.dump(tail, include_attributes=False)
+                ).encode()
+            ).hexdigest()[:16]
+            name = "_host_continuation_" + digest
+            helper = ast.parse(f"def {name}({', '.join(inputs)}): pass").body[0]
+            helper.body = copy.deepcopy(tail.body)
+            regions.append(
+                (
+                    helper,
+                    {
+                        "name": name,
+                        "inputs": inputs,
+                        "outputs": [],
+                        "kind": "continuation",
+                    },
+                )
+            )
+        prefix_writes.update(written([statement]))
+        if isinstance(statement, ast.Assign):
+            known.update(written(statement.targets))
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            known.update(written([statement.target]))
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            known.update(written([statement]))
+        if isinstance(statement, ast.If) and any(
+            isinstance(n, ast.Return) for n in ast.walk(statement)
+        ):
+            guarded = True
+    return regions
+
+
 def closure_regions(definition):
     """Export local callbacks handed directly to a consumer, with live captures."""
     if not isinstance(definition, ast.FunctionDef):
@@ -351,7 +458,11 @@ def source_module(module, package, modules=()):
     regions = [
         region
         for definition in definitions
-        for region in metadata_regions(definition) + closure_regions(definition)
+        for region in (
+            metadata_regions(definition)
+            + closure_regions(definition)
+            + continuation_regions(definition)
+        )
     ]
     definitions.extend(function for function, _ in regions)
     definitions = [HostSource(modules).visit(node) for node in definitions]
