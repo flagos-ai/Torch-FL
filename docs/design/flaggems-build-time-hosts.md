@@ -157,7 +157,86 @@ same reconciled counts. None of these states establishes numerical correctness,
 all-input coverage, warm native execution or performance. Genuine FlagGems gaps
 and compiler limitations must remain separate when selecting vendor-native routes.
 
-## Current eager baseline: target not met
+## Schema-typed eager entries
+
+The operator generator emits one static slot for each existing generated
+FlagGems ATen overload. Its catalog records the resolved host, faithful C++
+argument types, positional/keyword mapping and result shape. An ABI hash covers
+that contract. The native-host builder binds source-derived variants to these
+slots and emits typed C++ callbacks. Import validates the host identity and ABI
+before publishing each callback address. Replacing an already registered address
+is rejected; repeated registration of the same address is idempotent.
+
+An admitted warm call loads its slot directly, checks the device and argument
+types, then invokes the source-generated host. It does not construct an IValue
+argument array or search for a host by name. The original generic call is inside
+a lazy fallback lambda. A variant can decline before execution; an exception
+after entering the host propagates without retrying side effects. Current-device
+and stream behavior, tensor subclass/functionalization guards, and the existing
+GradMode fallback are retained. This remains inference-only native admission;
+training semantics are tracked in #829.
+
+The first binding slice supports Tensor results and fixed Tensor tuples, exact
+bool/int/float scalar admission, optional values, integer/Tensor lists, keyword
+defaults and existing out/in-place adapters. Tuple handles retain ownership and
+order. It preserves all 688 existing generated registrations and their routes.
+The measured NVIDIA build binds 400 overload entries, including 13 with multiple
+outputs, from 997 lowered signatures. These are generation counts, not proof
+that every registered input combination has been executed.
+
+`native_source_typed_stats()` reports registered slots and successful calls;
+`native_source_typed_hits(op)` exposes a per-overload counter for audits outside
+timing loops. The manifest records `typed_entry_abi`, `typed_entries` and
+`typed_rejected`. General scalar/list/optional **result** bindings, the remaining
+handwritten dispatcher bridges and unlowered host variants remain work under
+#828 and #829. They do not acquire handwritten host implementations or get
+silently rerouted to vendor kernels.
+
+For example, the pinned `var_mean` source assigns `1.0` when `correction` is
+`None`. TorchScript rejects its Optional[int] variant at that assignment, while
+Optional[float] lowers. Integer arguments retain the original FlagGems path;
+admission never coerces them to float to hide the compiler gap. Separately,
+schema-required parameters keep their schema type when a Python helper has a
+`None` default; generated facades pass all arguments explicitly.
+
+## Typed-entry eager measurement: target not met
+
+The paired H100 rerun uses the same complete Qwen3-0.6B model, 60-token prompt,
+512 teacher-forced decode inputs, BF16 eager attention and CPU affinity. Each
+environment runs sequentially on the same idle physical GPU, with normal
+allocations, three timed traversals and synchronization around every forward.
+Token selection, comparisons and profiling remain outside the timed passes.
+
+| Synchronized complete forward | Prior native-host wheel | Typed entries | Vendor PyTorch |
+|---|---:|---:|---:|
+| Prefill median | 34.87 ms | 32.66 ms | 24.58 ms |
+| Decode median | 32.86 ms | 31.12 ms | 23.14 ms |
+| Decode p99 | 33.96 ms | 32.26 ms | 24.17 ms |
+
+Prefill and decode medians decrease by 6.35% and 5.31%, respectively. Both still
+exceed 30 ms. This compares complete development wheels, including the generic
+signature/default fixes; it does not isolate the entry ABI's contribution.
+The [typed-entry evidence](../../benchmarks/host_compiler/results/qwen3_typed_entries_h100.json)
+records distributions, cohort, artifact hashes and per-operator measurements.
+Representative CPU submission medians decrease from 26.29 to 23.22 us for mm,
+8.79 to 7.72 us for SiLU and 7.95 to 6.82 us for softmax. Cast, arange and
+scalar_tensor still report zero typed-entry hits in this workload.
+
+All 513 logits remain bitwise equal to the original FlagGems oracle. The
+independent capture guard reports zero calls to ten model compilation/tracing
+entry points; no legacy host plans are present. A separate two-forward trace
+contains 3,814 launches from 25 original FlagGems kernel names, with no unmatched
+names. Host artifact hashes remain unchanged, and the warm FlagGems/Triton
+Python-frame audit is empty. Vendor timing uses native Torch 2.10.0+cu130 with
+backend autoload disabled and identical teacher-forced inputs; numerical
+differences between vendor Torch and FlagGems are recorded separately.
+
+Reproduce with `benchmarks/host_compiler/qwen_strict_eager.py`, using the normal
+`qwen_eager.py` arguments, `--mode plain`, `--steps 512`, `--rounds 3`, the same
+prompt/reference and each environment's device. The wrapper rejects model
+capture and legacy host-plan modes. It adds no changes to model code.
+
+## Earlier eager baseline: target not met
 
 The same installed wheel was rerun with the original model forward and no
 model-host compilation. A separate validation wrapper rejected calls to
@@ -179,7 +258,7 @@ and the warm FlagGems/Triton Python-frame audit was empty. There were no legacy
 host plans. The separate two-forward trace recorded 3,814 original FlagGems
 kernel launches, with no unmatched kernel names.
 
-This is the relevant baseline for the requested eager solution, and both
+This earlier baseline is eligible for the requested eager comparison, and both
 prefill and decode exceed 30 ms. The [eager evidence record](../../benchmarks/host_compiler/results/qwen3_eager_source_hosts_h100.json)
 retains the capture guards, timings and artifact hashes. The graph-mode result
 below must not be substituted for it.

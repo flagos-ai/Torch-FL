@@ -457,7 +457,9 @@ class Frontend:
         text += (
             "\n\nclass Host(torch.nn.Module):\n    def forward(_host_instance, "
             + parameters
-            + ") -> torch.Tensor:\n        return "
+            + ") -> "
+            + ast.unparse(node.returns)
+            + ":\n        return "
             + name
             + "("
             + ", ".join(arguments)

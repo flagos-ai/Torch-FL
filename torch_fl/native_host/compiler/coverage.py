@@ -41,6 +41,13 @@ def symbol(function) -> str:
     )
 
 
+def return_annotation(returns) -> str:
+    if not returns:
+        return "None"
+    fields = [annotation(value.type, "", "float") for value in returns]
+    return fields[0] if len(fields) == 1 else "Tuple[" + ", ".join(fields) + "]"
+
+
 def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -> tuple:
     """Return deduplicated compiler inputs and one record for each registry row.
 
@@ -81,7 +88,9 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
             entry["reason"] = "missing_schema"
             continue
         entry["schema"] = str(schema)
-        if len(schema.returns) != 1 or schema.returns[0].type.kind() != "TensorType":
+        try:
+            result_annotation = return_annotation(schema.returns)
+        except KeyError:
             entry["reason"] = "unsupported_return"
             continue
         try:
@@ -119,6 +128,7 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
             public = []
             position = 0
             reason = None
+            required_none = False
             for p in parameters:
                 if p.kind == p.KEYWORD_ONLY:
                     argument = next(
@@ -146,7 +156,11 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
                 if p.name == scalarized and kind == "torch.Tensor":
                     kind = scalar
                 if default is None and not kind.startswith("Optional["):
-                    kind = "Optional[" + kind + "]"
+                    # The schema may require a value even when the Python
+                    # helper has a None default it cannot execute with. Native
+                    # callers pass every parameter; defaults remain in public
+                    # for admission of the legacy Python-style call surface.
+                    required_none = True
                 if default is not p.empty and not (
                     default is None or type(default) in (bool, int, float, str)
                 ):
@@ -170,7 +184,15 @@ def discover_variants(registry, original_ops: dict, names: set, schema_lookup) -
             if reason:
                 entry["reason"] = reason
                 continue
-            header = "def f(" + ", ".join(fields) + ") -> torch.Tensor: pass"
+            if required_none:
+                fields = []
+                for parameter in public:
+                    if parameter["keyword"] and "*" not in fields:
+                        fields.append("*")
+                    fields.append(parameter["name"] + ": " + parameter["type"])
+            header = (
+                "def f(" + ", ".join(fields) + ") -> " + result_annotation + ": pass"
+            )
             if header not in entry["signatures"]:
                 entry["signatures"].append(header)
             key = (name, header)

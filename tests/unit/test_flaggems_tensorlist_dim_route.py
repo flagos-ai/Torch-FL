@@ -268,7 +268,11 @@ class TestEmitter:
         file; comparing the two is the only automatic check that the committed
         definition is still the one the emitter writes.
         """
-        assert _committed_cat_kernel() == _emit()
+        native = _emit(typed=True)
+        assert (
+            _committed_cat_kernel()
+            == native[native.index("at::Tensor CatKernelPython(") :]
+        )
 
 
 class TestGeneratedArtifact:

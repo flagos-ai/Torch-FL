@@ -36,7 +36,10 @@ class Schema:
         self.arguments = [
             SimpleNamespace(name=name, type=Type(kind)) for name, kind in arguments
         ]
-        self.returns = [SimpleNamespace(type=Type(kind)) for kind in returns]
+        self.returns = [
+            SimpleNamespace(type=Type(kind) if isinstance(kind, str) else kind)
+            for kind in returns
+        ]
         self.overload_name = overload
 
     def __str__(self):
@@ -79,6 +82,10 @@ def keyword_host(value, *, scale=1.0, out=None):
     return value
 
 
+def required_dim_host(value, dim=None, keepdim=False):
+    return value
+
+
 def discover(function=tensor_host, schema=None, **kwargs):
     schema = schema or Schema([("value", "TensorType")])
     return coverage.discover_variants(
@@ -89,15 +96,44 @@ def discover(function=tensor_host, schema=None, **kwargs):
     )
 
 
-@pytest.mark.parametrize(
-    "returns", [(), ("TensorType", "TensorType"), ("ListType",), ("IntType",)]
-)
+@pytest.mark.parametrize("returns", [("GeneratorType",), ("DictType",), ("ClassType",)])
 def test_unsupported_returns_remain_in_denominator(returns):
     variants, rows = discover(schema=Schema([("value", "TensorType")], returns))
     assert variants == []
     assert len(rows) == 1
     assert rows[0]["reason"] == "unsupported_return"
     assert rows[0]["operator"] == "aten::test"
+
+
+@pytest.mark.parametrize(
+    "returns,expected",
+    [
+        ((), "None"),
+        (("TensorType", "TensorType"), "Tuple[torch.Tensor, torch.Tensor]"),
+        ((Type("ListType", Type("TensorType")),), "List[torch.Tensor]"),
+        ((Type("OptionalType", Type("TensorType")),), "Optional[torch.Tensor]"),
+        (("IntType",), "int"),
+    ],
+)
+def test_schema_return_types_are_preserved(returns, expected):
+    variants, rows = discover(schema=Schema([("value", "TensorType")], returns))
+    assert len(variants) == 1
+    assert variants[0][2].endswith(" -> " + expected + ": pass")
+    assert rows[0]["status"] == "pending"
+
+
+def test_required_schema_type_is_not_weakened_by_a_none_default():
+    schema = Schema(
+        [("value", "TensorType"), ("dim", "IntType"), ("keepdim", "BoolType")]
+    )
+    variants, _ = discover(required_dim_host, schema)
+    assert variants[0][2] == (
+        "def f(value: torch.Tensor, dim: int, keepdim: bool) -> torch.Tensor: pass"
+    )
+    assert variants[0][3][1]["default"] is None
+    schema.arguments[1].type = Type("OptionalType", Type("IntType"))
+    variants, _ = discover(required_dim_host, schema)
+    assert "dim: Optional[int]=None" in variants[0][2]
 
 
 @pytest.mark.parametrize("function", [varargs_host, kwargs_host])
@@ -259,7 +295,7 @@ def test_missing_duplicate_and_unknown_results_cannot_claim_completion():
 
 
 def test_zero_success_report_is_persisted_and_deterministic(tmp_path):
-    _, rows = discover(schema=Schema([("value", "TensorType")], ("IntType",)))
+    _, rows = discover(schema=Schema([("value", "TensorType")], ("GeneratorType",)))
     for entries in (rows, []):
         report = coverage.write_coverage(
             tmp_path, entries, [], [], cohort={"torch": "test"}, complete=True

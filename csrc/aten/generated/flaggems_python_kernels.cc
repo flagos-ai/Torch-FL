@@ -6,30 +6,35 @@
 #include "ops.h"
 #include "../device_boxing.h"
 #include "../backends/flagos/python_op_caller.h"
+#include "../backends/flagos/typed_source_host.h"
 
 namespace at::native::flagos {
 namespace {
 
+static TypedSourceSlot PrivAdaptiveAvgPool2dFnSource("aten::_adaptive_avg_pool2d", "flag_gems.adaptive_avg_pool2d", "d738213f2a3d0f3a511e22a8a3d5752dc52ba50d7e10802a6e1b49cd71961f08", "{\"abi\": \"d738213f2a3d0f3a511e22a8a3d5752dc52ba50d7e10802a6e1b49cd71961f08\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.adaptive_avg_pool2d\", \"op\": \"aten::_adaptive_avg_pool2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivAdaptiveAvgPool2dKernelPython(const at::Tensor & self, at::IntArrayRef output_size) {
-  auto result = CallPythonOp_Generic("flag_gems.adaptive_avg_pool2d", {self, output_size});
+  auto result = PrivAdaptiveAvgPool2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.adaptive_avg_pool2d", {self, output_size}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivAdaptiveAvgPool2dBackwardFnSource("aten::_adaptive_avg_pool2d_backward", "flag_gems._adaptive_avg_pool2d_backward", "83257d383987b09fec32e09b57f8d5fb9265023e0c79e041b56d660f6232ba2c", "{\"abi\": \"83257d383987b09fec32e09b57f8d5fb9265023e0c79e041b56d660f6232ba2c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._adaptive_avg_pool2d_backward\", \"op\": \"aten::_adaptive_avg_pool2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivAdaptiveAvgPool2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems._adaptive_avg_pool2d_backward", {grad_output, self});
+  auto result = PrivAdaptiveAvgPool2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._adaptive_avg_pool2d_backward", {grad_output, self}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivAdaptiveAvgPool3dBackwardFnSource("aten::_adaptive_avg_pool3d_backward", "flag_gems._adaptive_avg_pool3d_backward", "15ceca04d1cdf532909ceac44bc58a5bb2bd10c01987ade312d05fe7099fa65b", "{\"abi\": \"15ceca04d1cdf532909ceac44bc58a5bb2bd10c01987ade312d05fe7099fa65b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._adaptive_avg_pool3d_backward\", \"op\": \"aten::_adaptive_avg_pool3d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivAdaptiveAvgPool3dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems._adaptive_avg_pool3d_backward", {grad_output, self});
+  auto result = PrivAdaptiveAvgPool3dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._adaptive_avg_pool3d_backward", {grad_output, self}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivBatchNormNoUpdateFnSource("aten::_batch_norm_no_update", "flag_gems._batch_norm_no_update", "bfb807d45e41e5b1ca9e5249ed280a611289bc0751b5212c2df89e3c136c6b34", "{\"abi\": \"bfb807d45e41e5b1ca9e5249ed280a611289bc0751b5212c2df89e3c136c6b34\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._batch_norm_no_update\", \"op\": \"aten::_batch_norm_no_update\", \"outputs\": 4, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> PrivBatchNormNoUpdateKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & running_mean, const ::std::optional<at::Tensor> & running_var, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._batch_norm_no_update", {input, weight, bias, running_mean, running_var, momentum, eps}, 4);
+  auto result = PrivBatchNormNoUpdateFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._batch_norm_no_update", {input, weight, bias, running_mean, running_var, momentum, eps}, 4); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const ::std::optional<at::Tensor>&>(running_mean), static_cast<const ::std::optional<at::Tensor>&>(running_var), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -37,8 +42,9 @@ at::Tensor PrivAdaptiveAvgPool3dBackwardKernelPython(const at::Tensor & grad_out
   return {result[0], result[1], result[2], result[3]};
 }
 
+static TypedSourceSlot PrivBatchNormWithUpdateFunctionalFnSource("aten::_batch_norm_with_update_functional", "flag_gems._batch_norm_with_update_functional", "4120f0be147520b8021ce37e54ea008e6ca5f12ebe2501634a98ed026ad201b4", "{\"abi\": \"4120f0be147520b8021ce37e54ea008e6ca5f12ebe2501634a98ed026ad201b4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._batch_norm_with_update_functional\", \"op\": \"aten::_batch_norm_with_update_functional\", \"outputs\": 6, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor,at::Tensor,at::Tensor> PrivBatchNormWithUpdateFunctionalKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, const at::Tensor & running_mean, const at::Tensor & running_var, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._batch_norm_with_update_functional", {input, weight, bias, running_mean, running_var, momentum, eps}, 6);
+  auto result = PrivBatchNormWithUpdateFunctionalFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._batch_norm_with_update_functional", {input, weight, bias, running_mean, running_var, momentum, eps}, 6); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::Tensor&>(running_mean), static_cast<const at::Tensor&>(running_var), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -48,67 +54,78 @@ at::Tensor PrivAdaptiveAvgPool3dBackwardKernelPython(const at::Tensor & grad_out
   return {result[0], result[1], result[2], result[3], result[4], result[5]};
 }
 
+static TypedSourceSlot PrivCdistBackwardFnSource("aten::_cdist_backward", "flag_gems._cdist_backward", "eb888dcabf3097f69963ef69bd5c8434dcf2e20d9bfee63d02536cd6b8f18b96", "{\"abi\": \"eb888dcabf3097f69963ef69bd5c8434dcf2e20d9bfee63d02536cd6b8f18b96\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._cdist_backward\", \"op\": \"aten::_cdist_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivCdistBackwardKernelPython(const at::Tensor & grad, const at::Tensor & x1, const at::Tensor & x2, double p, const at::Tensor & cdist) {
-  auto result = CallPythonOp_Generic("flag_gems._cdist_backward", {grad, x1, x2, p, cdist});
+  auto result = PrivCdistBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._cdist_backward", {grad, x1, x2, p, cdist}); }, static_cast<const at::Tensor&>(grad), static_cast<const at::Tensor&>(x1), static_cast<const at::Tensor&>(x2), static_cast<const double&>(p), static_cast<const at::Tensor&>(cdist));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivCdistForwardFnSource("aten::_cdist_forward", "flag_gems._cdist_forward", "73456f1253fe5d816e31dc8692c063ab1e5e1782266a69b6a2a1bc839bcae3fb", "{\"abi\": \"73456f1253fe5d816e31dc8692c063ab1e5e1782266a69b6a2a1bc839bcae3fb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems._cdist_forward\", \"op\": \"aten::_cdist_forward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivCdistForwardKernelPython(const at::Tensor & x1, const at::Tensor & x2, double p, ::std::optional<int64_t> compute_mode) {
-  auto result = CallPythonOp_Generic("flag_gems._cdist_forward", {x1, x2, p, compute_mode});
+  auto result = PrivCdistForwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._cdist_forward", {x1, x2, p, compute_mode}); }, static_cast<const at::Tensor&>(x1), static_cast<const at::Tensor&>(x2), static_cast<const double&>(p), static_cast<const ::std::optional<int64_t>&>(compute_mode));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivCholeskySolveHelperFnSource("aten::_cholesky_solve_helper", "flag_gems._cholesky_solve_helper", "c76aa76c822cb2e989657e31a03737d4dc6aa7db36e8bf9511728dffd7ec6856", "{\"abi\": \"c76aa76c822cb2e989657e31a03737d4dc6aa7db36e8bf9511728dffd7ec6856\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems._cholesky_solve_helper\", \"op\": \"aten::_cholesky_solve_helper\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivCholeskySolveHelperKernelPython(const at::Tensor & self, const at::Tensor & A, bool upper) {
-  auto result = CallPythonOp_Generic("flag_gems._cholesky_solve_helper", {self, A, upper});
+  auto result = PrivCholeskySolveHelperFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._cholesky_solve_helper", {self, A, upper}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(A), static_cast<const bool&>(upper));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivComputeLinearCombinationFnSource("aten::_compute_linear_combination", "flag_gems._compute_linear_combination", "d495af83ff2587db7ab1c8dfa4701e8394d7796dfd83ff66c122e5468fc94d88", "{\"abi\": \"d495af83ff2587db7ab1c8dfa4701e8394d7796dfd83ff66c122e5468fc94d88\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._compute_linear_combination\", \"op\": \"aten::_compute_linear_combination\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivComputeLinearCombinationKernelPython(const at::Tensor & input, const at::Tensor & coefficients) {
-  auto result = CallPythonOp_Generic("flag_gems._compute_linear_combination", {input, coefficients});
+  auto result = PrivComputeLinearCombinationFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._compute_linear_combination", {input, coefficients}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(coefficients));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivComputeLinearCombinationOutFnSource("aten::_compute_linear_combination.out", "flag_gems._compute_linear_combination_out", "402faf0317c65e6c3f6acaa12e98f47adc7d6aa6fbbc316c9142f2e9f3892f8d", "{\"abi\": \"402faf0317c65e6c3f6acaa12e98f47adc7d6aa6fbbc316c9142f2e9f3892f8d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._compute_linear_combination_out\", \"op\": \"aten::_compute_linear_combination.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivComputeLinearCombinationOutKernelPython(const at::Tensor & input, const at::Tensor & coefficients, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems._compute_linear_combination_out", {input, coefficients});
+  auto result = PrivComputeLinearCombinationOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._compute_linear_combination_out", {input, coefficients}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(coefficients));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot PrivConjFnSource("aten::_conj", "flag_gems._conj", "a482469c1a75feb8fc3a0c023b5f64bec99375baa1a15b1c30a91f1f06e02bba", "{\"abi\": \"a482469c1a75feb8fc3a0c023b5f64bec99375baa1a15b1c30a91f1f06e02bba\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._conj\", \"op\": \"aten::_conj\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivConjKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems._conj", {self});
+  auto result = PrivConjFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._conj", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivConjCopyOutFnSource("aten::_conj_copy.out", "flag_gems._conj_copy_out", "6fe8f616a1562e6a3dd711bb0182911e758426671f8a3ad65ae89e8a7a43ef63", "{\"abi\": \"6fe8f616a1562e6a3dd711bb0182911e758426671f8a3ad65ae89e8a7a43ef63\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._conj_copy_out\", \"op\": \"aten::_conj_copy.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivConjCopyOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems._conj_copy_out", {self}, {PyKwarg{"out", out}});
+  PrivConjCopyOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems._conj_copy_out", {self}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot PrivConvDepthwise2dFnSource("aten::_conv_depthwise2d", "flag_gems._conv_depthwise2d", "24237c88e8702eee08560d172726d59597a86669b9d89e279f2dec5f2a83df1b", "{\"abi\": \"24237c88e8702eee08560d172726d59597a86669b9d89e279f2dec5f2a83df1b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems._conv_depthwise2d\", \"op\": \"aten::_conv_depthwise2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivConvDepthwise2dKernelPython(const at::Tensor & self, const at::Tensor & weight, at::IntArrayRef kernel_size, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation) {
-  auto result = CallPythonOp_Generic("flag_gems._conv_depthwise2d", {self, weight, kernel_size, bias, stride, padding, dilation});
+  auto result = PrivConvDepthwise2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._conv_depthwise2d", {self, weight, kernel_size, bias, stride, padding, dilation}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(weight), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivConvertWeightToInt4packFnSource("aten::_convert_weight_to_int4pack", "flag_gems._convert_weight_to_int4pack", "d8b79eb82f8e83655dd12bce6b9d4a1b357a1c6bcee32e0a79d87bb9c25163c1", "{\"abi\": \"d8b79eb82f8e83655dd12bce6b9d4a1b357a1c6bcee32e0a79d87bb9c25163c1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems._convert_weight_to_int4pack\", \"op\": \"aten::_convert_weight_to_int4pack\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivConvertWeightToInt4packKernelPython(const at::Tensor & self, int64_t innerKTiles) {
-  auto result = CallPythonOp_Generic("flag_gems._convert_weight_to_int4pack", {self, innerKTiles});
+  auto result = PrivConvertWeightToInt4packFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._convert_weight_to_int4pack", {self, innerKTiles}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(innerKTiles));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivDirichletGradFnSource("aten::_dirichlet_grad", "flag_gems._dirichlet_grad", "380c2bb514e32b8cab5ca0f387a95d3321a762f65e3db4c49bc128f3162c4df5", "{\"abi\": \"380c2bb514e32b8cab5ca0f387a95d3321a762f65e3db4c49bc128f3162c4df5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._dirichlet_grad\", \"op\": \"aten::_dirichlet_grad\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivDirichletGradKernelPython(const at::Tensor & x, const at::Tensor & alpha, const at::Tensor & total) {
-  auto result = CallPythonOp_Generic("flag_gems._dirichlet_grad", {x, alpha, total});
+  auto result = PrivDirichletGradFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._dirichlet_grad", {x, alpha, total}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(alpha), static_cast<const at::Tensor&>(total));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivEfficientAttentionBackwardFnSource("aten::_efficient_attention_backward", "flag_gems.efficient_attention_backward", "8472c282f17f964fc1adaa57be5b3bd78366b32748cf9dcb741e4f5e270e9b0c", "{\"abi\": \"8472c282f17f964fc1adaa57be5b3bd78366b32748cf9dcb741e4f5e270e9b0c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"scale\", \"type\": \"::std::optional<double>\"}, {\"keyword\": \"num_splits_key\", \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": \"window_size\", \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": \"shared_storage_dqdkdv\", \"type\": \"bool\"}], \"host\": \"flag_gems.efficient_attention_backward\", \"op\": \"aten::_efficient_attention_backward\", \"outputs\": 4, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> PrivEfficientAttentionBackwardKernelPython(const at::Tensor & grad_out_, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const ::std::optional<at::Tensor> & bias, const at::Tensor & out, const ::std::optional<at::Tensor> & cu_seqlens_q, const ::std::optional<at::Tensor> & cu_seqlens_k, int64_t max_seqlen_q, int64_t max_seqlen_k, const at::Tensor & logsumexp, double dropout_p, const at::Tensor & philox_seed, const at::Tensor & philox_offset, int64_t custom_mask_type, bool bias_requires_grad, ::std::optional<double> scale, ::std::optional<int64_t> num_splits_key, ::std::optional<int64_t> window_size, bool shared_storage_dqdkdv) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.efficient_attention_backward", {grad_out_, query, key, value, bias, out, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, logsumexp, dropout_p, philox_seed, philox_offset, custom_mask_type, bias_requires_grad}, {PyKwarg{"scale", scale}, PyKwarg{"num_splits_key", num_splits_key}, PyKwarg{"window_size", window_size}, PyKwarg{"shared_storage_dqdkdv", shared_storage_dqdkdv}}, 4);
+  auto result = PrivEfficientAttentionBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.efficient_attention_backward", {grad_out_, query, key, value, bias, out, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, logsumexp, dropout_p, philox_seed, philox_offset, custom_mask_type, bias_requires_grad}, {PyKwarg{"scale", scale}, PyKwarg{"num_splits_key", num_splits_key}, PyKwarg{"window_size", window_size}, PyKwarg{"shared_storage_dqdkdv", shared_storage_dqdkdv}}, 4); }, static_cast<const at::Tensor&>(grad_out_), static_cast<const at::Tensor&>(query), static_cast<const at::Tensor&>(key), static_cast<const at::Tensor&>(value), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::Tensor&>(out), static_cast<const ::std::optional<at::Tensor>&>(cu_seqlens_q), static_cast<const ::std::optional<at::Tensor>&>(cu_seqlens_k), static_cast<const int64_t&>(max_seqlen_q), static_cast<const int64_t&>(max_seqlen_k), static_cast<const at::Tensor&>(logsumexp), static_cast<const double&>(dropout_p), static_cast<const at::Tensor&>(philox_seed), static_cast<const at::Tensor&>(philox_offset), static_cast<const int64_t&>(custom_mask_type), static_cast<const bool&>(bias_requires_grad), static_cast<const ::std::optional<double>&>(scale), static_cast<const ::std::optional<int64_t>&>(num_splits_key), static_cast<const ::std::optional<int64_t>&>(window_size), static_cast<const bool&>(shared_storage_dqdkdv));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -116,150 +133,173 @@ at::Tensor PrivDirichletGradKernelPython(const at::Tensor & x, const at::Tensor 
   return {result[0], result[1], result[2], result[3]};
 }
 
+static TypedSourceSlot PrivEmbeddingBagDenseBackwardFnSource("aten::_embedding_bag_dense_backward", "flag_gems._embedding_bag_dense_backward", "28f05574352e89467c9c63752e05267fa9306c16b45540e421b2c268888a9226", "{\"abi\": \"28f05574352e89467c9c63752e05267fa9306c16b45540e421b2c268888a9226\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems._embedding_bag_dense_backward\", \"op\": \"aten::_embedding_bag_dense_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivEmbeddingBagDenseBackwardKernelPython(const at::Tensor & grad, const at::Tensor & indices, const at::Tensor & offset2bag, const at::Tensor & bag_size, const at::Tensor & maximum_indices, int64_t num_weights, bool scale_grad_by_freq, int64_t mode, const ::std::optional<at::Tensor> & per_sample_weights, int64_t padding_idx) {
-  auto result = CallPythonOp_Generic("flag_gems._embedding_bag_dense_backward", {grad, indices, offset2bag, bag_size, maximum_indices, num_weights, scale_grad_by_freq, mode, per_sample_weights, padding_idx});
+  auto result = PrivEmbeddingBagDenseBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._embedding_bag_dense_backward", {grad, indices, offset2bag, bag_size, maximum_indices, num_weights, scale_grad_by_freq, mode, per_sample_weights, padding_idx}); }, static_cast<const at::Tensor&>(grad), static_cast<const at::Tensor&>(indices), static_cast<const at::Tensor&>(offset2bag), static_cast<const at::Tensor&>(bag_size), static_cast<const at::Tensor&>(maximum_indices), static_cast<const int64_t&>(num_weights), static_cast<const bool&>(scale_grad_by_freq), static_cast<const int64_t&>(mode), static_cast<const ::std::optional<at::Tensor>&>(per_sample_weights), static_cast<const int64_t&>(padding_idx));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivEmbeddingBagPerSampleWeightsBackwardFnSource("aten::_embedding_bag_per_sample_weights_backward", "flag_gems._embedding_bag_per_sample_weights_backward", "1490c95ce11814f17cab84ee4ab6aa922e4f7525394ce04a56800a5835644ff3", "{\"abi\": \"1490c95ce11814f17cab84ee4ab6aa922e4f7525394ce04a56800a5835644ff3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems._embedding_bag_per_sample_weights_backward\", \"op\": \"aten::_embedding_bag_per_sample_weights_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivEmbeddingBagPerSampleWeightsBackwardKernelPython(const at::Tensor & grad, const at::Tensor & weight, const at::Tensor & indices, const at::Tensor & offsets, const at::Tensor & offset2bag, int64_t mode, int64_t padding_idx) {
-  auto result = CallPythonOp_Generic("flag_gems._embedding_bag_per_sample_weights_backward", {grad, weight, indices, offsets, offset2bag, mode, padding_idx});
+  auto result = PrivEmbeddingBagPerSampleWeightsBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._embedding_bag_per_sample_weights_backward", {grad, weight, indices, offsets, offset2bag, mode, padding_idx}); }, static_cast<const at::Tensor&>(grad), static_cast<const at::Tensor&>(weight), static_cast<const at::Tensor&>(indices), static_cast<const at::Tensor&>(offsets), static_cast<const at::Tensor&>(offset2bag), static_cast<const int64_t&>(mode), static_cast<const int64_t&>(padding_idx));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivEuclideanDistFnSource("aten::_euclidean_dist", "flag_gems._euclidean_dist", "eb1cb732272681a2fa60a3221a9bd2860dd3c169c9482b763e60a587ce9c379a", "{\"abi\": \"eb1cb732272681a2fa60a3221a9bd2860dd3c169c9482b763e60a587ce9c379a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._euclidean_dist\", \"op\": \"aten::_euclidean_dist\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivEuclideanDistKernelPython(const at::Tensor & x1, const at::Tensor & x2) {
-  auto result = CallPythonOp_Generic("flag_gems._euclidean_dist", {x1, x2});
+  auto result = PrivEuclideanDistFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._euclidean_dist", {x1, x2}); }, static_cast<const at::Tensor&>(x1), static_cast<const at::Tensor&>(x2));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivFakeQuantizeLearnablePerChannelAffineBackwardFnSource("aten::_fake_quantize_learnable_per_channel_affine_backward", "flag_gems._fake_quantize_learnable_per_channel_affine_backward", "4ef7215649c0bf9f631fc6d476a191b828f58e25070f51e2917d05fc9291dd1a", "{\"abi\": \"4ef7215649c0bf9f631fc6d476a191b828f58e25070f51e2917d05fc9291dd1a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._fake_quantize_learnable_per_channel_affine_backward\", \"op\": \"aten::_fake_quantize_learnable_per_channel_affine_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivFakeQuantizeLearnablePerChannelAffineBackwardKernelPython(const at::Tensor & grad, const at::Tensor & self, const at::Tensor & scale, const at::Tensor & zero_point, int64_t axis, int64_t quant_min, int64_t quant_max, double grad_factor) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._fake_quantize_learnable_per_channel_affine_backward", {grad, self, scale, zero_point, axis, quant_min, quant_max, grad_factor}, 3);
+  auto result = PrivFakeQuantizeLearnablePerChannelAffineBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._fake_quantize_learnable_per_channel_affine_backward", {grad, self, scale, zero_point, axis, quant_min, quant_max, grad_factor}, 3); }, static_cast<const at::Tensor&>(grad), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const int64_t&>(axis), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max), static_cast<const double&>(grad_factor));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivFakeQuantizeLearnablePerTensorAffineFnSource("aten::_fake_quantize_learnable_per_tensor_affine", "flag_gems._fake_quantize_learnable_per_tensor_affine", "ef95b1bd0fe73b3f983467adcea959a7094435fd5d514ef5de9a10067365d875", "{\"abi\": \"ef95b1bd0fe73b3f983467adcea959a7094435fd5d514ef5de9a10067365d875\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._fake_quantize_learnable_per_tensor_affine\", \"op\": \"aten::_fake_quantize_learnable_per_tensor_affine\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivFakeQuantizeLearnablePerTensorAffineKernelPython(const at::Tensor & self, const at::Tensor & scale, const at::Tensor & zero_point, int64_t quant_min, int64_t quant_max, double grad_factor) {
-  auto result = CallPythonOp_Generic("flag_gems._fake_quantize_learnable_per_tensor_affine", {self, scale, zero_point, quant_min, quant_max, grad_factor});
+  auto result = PrivFakeQuantizeLearnablePerTensorAffineFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._fake_quantize_learnable_per_tensor_affine", {self, scale, zero_point, quant_min, quant_max, grad_factor}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max), static_cast<const double&>(grad_factor));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivFakeQuantizeLearnablePerTensorAffineBackwardFnSource("aten::_fake_quantize_learnable_per_tensor_affine_backward", "flag_gems._fake_quantize_learnable_per_tensor_affine_backward", "4590654723e1d6ad551a09f77c995a28e96e32af1b91789a4e87e2e8ccd32eaa", "{\"abi\": \"4590654723e1d6ad551a09f77c995a28e96e32af1b91789a4e87e2e8ccd32eaa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._fake_quantize_learnable_per_tensor_affine_backward\", \"op\": \"aten::_fake_quantize_learnable_per_tensor_affine_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivFakeQuantizeLearnablePerTensorAffineBackwardKernelPython(const at::Tensor & grad, const at::Tensor & self, const at::Tensor & scale, const at::Tensor & zero_point, int64_t quant_min, int64_t quant_max, double grad_factor) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._fake_quantize_learnable_per_tensor_affine_backward", {grad, self, scale, zero_point, quant_min, quant_max, grad_factor}, 3);
+  auto result = PrivFakeQuantizeLearnablePerTensorAffineBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._fake_quantize_learnable_per_tensor_affine_backward", {grad, self, scale, zero_point, quant_min, quant_max, grad_factor}, 3); }, static_cast<const at::Tensor&>(grad), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max), static_cast<const double&>(grad_factor));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivFakeQuantizePerTensorAffineCachemaskTensorQparamsFnSource("aten::_fake_quantize_per_tensor_affine_cachemask_tensor_qparams", "flag_gems._fake_quantize_per_tensor_affine_cachemask_tensor_qparams", "ed2e4b6f2f81260d64d67717573736b29f33ee7d3dc8e2e1e703d19dd22364ba", "{\"abi\": \"ed2e4b6f2f81260d64d67717573736b29f33ee7d3dc8e2e1e703d19dd22364ba\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems._fake_quantize_per_tensor_affine_cachemask_tensor_qparams\", \"op\": \"aten::_fake_quantize_per_tensor_affine_cachemask_tensor_qparams\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> PrivFakeQuantizePerTensorAffineCachemaskTensorQparamsKernelPython(const at::Tensor & self, const at::Tensor & scale, const at::Tensor & zero_point, const at::Tensor & fake_quant_enabled, int64_t quant_min, int64_t quant_max) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._fake_quantize_per_tensor_affine_cachemask_tensor_qparams", {self, scale, zero_point, fake_quant_enabled, quant_min, quant_max}, 2);
+  auto result = PrivFakeQuantizePerTensorAffineCachemaskTensorQparamsFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._fake_quantize_per_tensor_affine_cachemask_tensor_qparams", {self, scale, zero_point, fake_quant_enabled, quant_min, quant_max}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const at::Tensor&>(fake_quant_enabled), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot PrivFlashAttentionBackwardFnSource("aten::_flash_attention_backward", "flag_gems.flash_attention_backward", "17ab9713b22aab3031a1781e85937ca8f62dd6525f4324b7b4b87dcdce8b2730", "{\"abi\": \"17ab9713b22aab3031a1781e85937ca8f62dd6525f4324b7b4b87dcdce8b2730\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"scale\", \"type\": \"::std::optional<double>\"}, {\"keyword\": \"window_size_left\", \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": \"window_size_right\", \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.flash_attention_backward\", \"op\": \"aten::_flash_attention_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivFlashAttentionBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const at::Tensor & out, const at::Tensor & logsumexp, const at::Tensor & cum_seq_q, const at::Tensor & cum_seq_k, int64_t max_q, int64_t max_k, double dropout_p, bool is_causal, const at::Tensor & rng_state, const at::Tensor & unused, ::std::optional<double> scale, ::std::optional<int64_t> window_size_left, ::std::optional<int64_t> window_size_right) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.flash_attention_backward", {grad_out, query, key, value, out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, rng_state, unused}, {PyKwarg{"scale", scale}, PyKwarg{"window_size_left", window_size_left}, PyKwarg{"window_size_right", window_size_right}}, 3);
+  auto result = PrivFlashAttentionBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.flash_attention_backward", {grad_out, query, key, value, out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, rng_state, unused}, {PyKwarg{"scale", scale}, PyKwarg{"window_size_left", window_size_left}, PyKwarg{"window_size_right", window_size_right}}, 3); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(query), static_cast<const at::Tensor&>(key), static_cast<const at::Tensor&>(value), static_cast<const at::Tensor&>(out), static_cast<const at::Tensor&>(logsumexp), static_cast<const at::Tensor&>(cum_seq_q), static_cast<const at::Tensor&>(cum_seq_k), static_cast<const int64_t&>(max_q), static_cast<const int64_t&>(max_k), static_cast<const double&>(dropout_p), static_cast<const bool&>(is_causal), static_cast<const at::Tensor&>(rng_state), static_cast<const at::Tensor&>(unused), static_cast<const ::std::optional<double>&>(scale), static_cast<const ::std::optional<int64_t>&>(window_size_left), static_cast<const ::std::optional<int64_t>&>(window_size_right));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivFusedMovingAvgObsFqHelperFnSource("aten::_fused_moving_avg_obs_fq_helper", "flag_gems._fused_moving_avg_obs_fq_helper", "1f8e364f4f24acd0abe311fd8cda0bf47a3be3526d94de63706cbbcdcde0764e", "{\"abi\": \"1f8e364f4f24acd0abe311fd8cda0bf47a3be3526d94de63706cbbcdcde0764e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems._fused_moving_avg_obs_fq_helper\", \"op\": \"aten::_fused_moving_avg_obs_fq_helper\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> PrivFusedMovingAvgObsFqHelperKernelPython(const at::Tensor & self, const at::Tensor & observer_on, const at::Tensor & fake_quant_on, at::Tensor & running_min, at::Tensor & running_max, at::Tensor & scale, at::Tensor & zero_point, double averaging_const, int64_t quant_min, int64_t quant_max, int64_t ch_axis, bool per_row_fake_quant, bool symmetric_quant) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._fused_moving_avg_obs_fq_helper", {self, observer_on, fake_quant_on, running_min, running_max, scale, zero_point, averaging_const, quant_min, quant_max, ch_axis, per_row_fake_quant, symmetric_quant}, 2);
+  auto result = PrivFusedMovingAvgObsFqHelperFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._fused_moving_avg_obs_fq_helper", {self, observer_on, fake_quant_on, running_min, running_max, scale, zero_point, averaging_const, quant_min, quant_max, ch_axis, per_row_fake_quant, symmetric_quant}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(observer_on), static_cast<const at::Tensor&>(fake_quant_on), static_cast<const at::Tensor&>(running_min), static_cast<const at::Tensor&>(running_max), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const double&>(averaging_const), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max), static_cast<const int64_t&>(ch_axis), static_cast<const bool&>(per_row_fake_quant), static_cast<const bool&>(symmetric_quant));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot PrivFusedRmsNormFnSource("aten::_fused_rms_norm", "flag_gems._fused_rms_norm", "e2b0cd6f835fa9e51f5cbaa2069724e7865c799c4bbffb94daf58262275a97aa", "{\"abi\": \"e2b0cd6f835fa9e51f5cbaa2069724e7865c799c4bbffb94daf58262275a97aa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._fused_rms_norm\", \"op\": \"aten::_fused_rms_norm\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> PrivFusedRmsNormKernelPython(const at::Tensor & input, at::IntArrayRef normalized_shape, const ::std::optional<at::Tensor> & weight, ::std::optional<double> eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._fused_rms_norm", {input, normalized_shape, weight, eps}, 2);
+  auto result = PrivFusedRmsNormFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._fused_rms_norm", {input, normalized_shape, weight, eps}, 2); }, static_cast<const at::Tensor&>(input), static_cast<const at::IntArrayRef&>(normalized_shape), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<double>&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot PrivFusedRmsNormBackwardFnSource("aten::_fused_rms_norm_backward", "flag_gems._fused_rms_norm_backward", "4ca1263f5f8372a39fcc6df583745cb71c8f3912fa5860d2a32d810be8e13f7b", "{\"abi\": \"4ca1263f5f8372a39fcc6df583745cb71c8f3912fa5860d2a32d810be8e13f7b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::array<bool,2>\"}], \"host\": \"flag_gems._fused_rms_norm_backward\", \"op\": \"aten::_fused_rms_norm_backward\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> PrivFusedRmsNormBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & input, at::IntArrayRef normalized_shape, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, ::std::array<bool,2> output_mask) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._fused_rms_norm_backward", {grad_out, input, normalized_shape, rstd, weight, output_mask}, 2);
+  auto result = PrivFusedRmsNormBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._fused_rms_norm_backward", {grad_out, input, normalized_shape, rstd, weight, output_mask}, 2); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(input), static_cast<const at::IntArrayRef&>(normalized_shape), static_cast<const at::Tensor&>(rstd), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::array<bool,2>&>(output_mask));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot PrivIsAllTrueFnSource("aten::_is_all_true", "flag_gems._is_all_true", "cca93d9a0dfa3bef1505313464cf443255a2db8e454f3440accf0efa8b14a43e", "{\"abi\": \"cca93d9a0dfa3bef1505313464cf443255a2db8e454f3440accf0efa8b14a43e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._is_all_true\", \"op\": \"aten::_is_all_true\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivIsAllTrueKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems._is_all_true", {self});
+  auto result = PrivIsAllTrueFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._is_all_true", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivLinalgEigvalsFnSource("aten::_linalg_eigvals", "flag_gems._linalg_eigvals", "b24b09594ced6948ef92029bd6116b97e48201e645b8d57f96268af570f0325a", "{\"abi\": \"b24b09594ced6948ef92029bd6116b97e48201e645b8d57f96268af570f0325a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._linalg_eigvals\", \"op\": \"aten::_linalg_eigvals\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivLinalgEigvalsKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems._linalg_eigvals", {self});
+  auto result = PrivLinalgEigvalsFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._linalg_eigvals", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivLogSoftmaxFnSource("aten::_log_softmax", "flag_gems.log_softmax", "bfaa3156d71408e8c7b541ff7b69c56e83859dd4dd40074a070fb8b45cdb39db", "{\"abi\": \"bfaa3156d71408e8c7b541ff7b69c56e83859dd4dd40074a070fb8b45cdb39db\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.log_softmax\", \"op\": \"aten::_log_softmax\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivLogSoftmaxKernelPython(const at::Tensor & self, int64_t dim, bool half_to_float) {
-  auto result = CallPythonOp_Generic("flag_gems.log_softmax", {self, dim, half_to_float});
+  auto result = PrivLogSoftmaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log_softmax", {self, dim, half_to_float}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(half_to_float));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivLogSoftmaxOutFnSource("aten::_log_softmax.out", "flag_gems.log_softmax_out", "3af23ea082fcdac4a37ccde6c04931887aae9c25e46d5f65d29c7c2c1115ad53", "{\"abi\": \"3af23ea082fcdac4a37ccde6c04931887aae9c25e46d5f65d29c7c2c1115ad53\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log_softmax_out\", \"op\": \"aten::_log_softmax.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivLogSoftmaxOutKernelPython(const at::Tensor & self, int64_t dim, bool half_to_float, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.log_softmax_out", {self, dim, half_to_float}, {PyKwarg{"out", out}});
+  PrivLogSoftmaxOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_softmax_out", {self, dim, half_to_float}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(half_to_float), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot PrivLogSoftmaxBackwardDataFnSource("aten::_log_softmax_backward_data", "flag_gems.log_softmax_backward", "aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1", "{\"abi\": \"aca263c2da6fc21abcd7232097f4616d6c967fd2a504e724032a4835ddd446c1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}], \"host\": \"flag_gems.log_softmax_backward\", \"op\": \"aten::_log_softmax_backward_data\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivLogSoftmaxBackwardDataKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.log_softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}});
+  auto result = PrivLogSoftmaxBackwardDataFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivLogSoftmaxBackwardDataOutFnSource("aten::_log_softmax_backward_data.out", "flag_gems.log_softmax_backward_out", "36ea3532118e97a85b87a84bd2643e88aba6f282130b091b33af8ee1a7a53c02", "{\"abi\": \"36ea3532118e97a85b87a84bd2643e88aba6f282130b091b33af8ee1a7a53c02\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log_softmax_backward_out\", \"op\": \"aten::_log_softmax_backward_data.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivLogSoftmaxBackwardDataOutKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.log_softmax_backward_out", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}, PyKwarg{"out", out}});
+  PrivLogSoftmaxBackwardDataOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_softmax_backward_out", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot PrivMaskedScaleFnSource("aten::_masked_scale", "flag_gems._masked_scale", "9e7c556558ab5387e4c61bf4d9d251ec57a3607c5a036b31d8e81f8cca55365e", "{\"abi\": \"9e7c556558ab5387e4c61bf4d9d251ec57a3607c5a036b31d8e81f8cca55365e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._masked_scale\", \"op\": \"aten::_masked_scale\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivMaskedScaleKernelPython(const at::Tensor & self, const at::Tensor & mask, double scale) {
-  auto result = CallPythonOp_Generic("flag_gems._masked_scale", {self, mask, scale});
+  auto result = PrivMaskedScaleFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._masked_scale", {self, mask, scale}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const double&>(scale));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivNativeBatchNormLegitFnSource("aten::_native_batch_norm_legit", "flag_gems._native_batch_norm_legit", "4f70d6622f79d0d7cee444ad259237a3a9c89c2f996b7830a449f8830fc34bc1", "{\"abi\": \"4f70d6622f79d0d7cee444ad259237a3a9c89c2f996b7830a449f8830fc34bc1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._native_batch_norm_legit\", \"op\": \"aten::_native_batch_norm_legit\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivNativeBatchNormLegitKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, at::Tensor & running_mean, at::Tensor & running_var, bool training, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit", {input, weight, bias, running_mean, running_var, training, momentum, eps}, 3);
+  auto result = PrivNativeBatchNormLegitFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit", {input, weight, bias, running_mean, running_var, training, momentum, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::Tensor&>(running_mean), static_cast<const at::Tensor&>(running_var), static_cast<const bool&>(training), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivNativeBatchNormLegitNoStatsFnSource("aten::_native_batch_norm_legit.no_stats", "flag_gems._native_batch_norm_legit_no_stats", "b35d90b0cbe9e434db6d2abf5cd14a69a652a7834cf39b6b1ecf69624842ca5f", "{\"abi\": \"b35d90b0cbe9e434db6d2abf5cd14a69a652a7834cf39b6b1ecf69624842ca5f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._native_batch_norm_legit_no_stats\", \"op\": \"aten::_native_batch_norm_legit.no_stats\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivNativeBatchNormLegitNoStatsKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, bool training, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit_no_stats", {input, weight, bias, training, momentum, eps}, 3);
+  auto result = PrivNativeBatchNormLegitNoStatsFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit_no_stats", {input, weight, bias, training, momentum, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const bool&>(training), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivNativeBatchNormLegitNoStatsOutFnSource("aten::_native_batch_norm_legit.no_stats_out", "flag_gems._native_batch_norm_legit_no_stats_out", "60d460b3e8d2b2d6c90a7e50025a34b7cc5fb9eae4318470d8991b60656fb10f", "{\"abi\": \"60d460b3e8d2b2d6c90a7e50025a34b7cc5fb9eae4318470d8991b60656fb10f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}, {\"keyword\": \"save_mean\", \"type\": \"at::Tensor\"}, {\"keyword\": \"save_invstd\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._native_batch_norm_legit_no_stats_out\", \"op\": \"aten::_native_batch_norm_legit.no_stats_out\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &,at::Tensor &> PrivNativeBatchNormLegitNoStatsOutKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, bool training, double momentum, double eps, at::Tensor & out, at::Tensor & save_mean, at::Tensor & save_invstd) {
-  CallPythonOp_GenericKwTuple("flag_gems._native_batch_norm_legit_no_stats_out", {input, weight, bias, training, momentum, eps}, {PyKwarg{"out", out}, PyKwarg{"save_mean", save_mean}, PyKwarg{"save_invstd", save_invstd}}, 3);
+  PrivNativeBatchNormLegitNoStatsOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems._native_batch_norm_legit_no_stats_out", {input, weight, bias, training, momentum, eps}, {PyKwarg{"out", out}, PyKwarg{"save_mean", save_mean}, PyKwarg{"save_invstd", save_invstd}}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const bool&>(training), static_cast<const double&>(momentum), static_cast<const double&>(eps), static_cast<const at::Tensor&>(out), static_cast<const at::Tensor&>(save_mean), static_cast<const at::Tensor&>(save_invstd));
   return {out, save_mean, save_invstd};
 }
 
+static TypedSourceSlot PrivNativeBatchNormLegitOutFnSource("aten::_native_batch_norm_legit.out", "flag_gems._native_batch_norm_legit_out", "0ce7543ef281ae9d5f43ebb030ce3d0a4f87d92771aa6f46f18b86e9d8532ad7", "{\"abi\": \"0ce7543ef281ae9d5f43ebb030ce3d0a4f87d92771aa6f46f18b86e9d8532ad7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}, {\"keyword\": \"save_mean\", \"type\": \"at::Tensor\"}, {\"keyword\": \"save_invstd\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._native_batch_norm_legit_out\", \"op\": \"aten::_native_batch_norm_legit.out\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &,at::Tensor &> PrivNativeBatchNormLegitOutKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, at::Tensor & running_mean, at::Tensor & running_var, bool training, double momentum, double eps, at::Tensor & out, at::Tensor & save_mean, at::Tensor & save_invstd) {
-  CallPythonOp_GenericKwTuple("flag_gems._native_batch_norm_legit_out", {input, weight, bias, running_mean, running_var, training, momentum, eps}, {PyKwarg{"out", out}, PyKwarg{"save_mean", save_mean}, PyKwarg{"save_invstd", save_invstd}}, 3);
+  PrivNativeBatchNormLegitOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems._native_batch_norm_legit_out", {input, weight, bias, running_mean, running_var, training, momentum, eps}, {PyKwarg{"out", out}, PyKwarg{"save_mean", save_mean}, PyKwarg{"save_invstd", save_invstd}}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::Tensor&>(running_mean), static_cast<const at::Tensor&>(running_var), static_cast<const bool&>(training), static_cast<const double&>(momentum), static_cast<const double&>(eps), static_cast<const at::Tensor&>(out), static_cast<const at::Tensor&>(save_mean), static_cast<const at::Tensor&>(save_invstd));
   return {out, save_mean, save_invstd};
 }
 
+static TypedSourceSlot PrivNativeBatchNormLegitFunctionalFnSource("aten::_native_batch_norm_legit_functional", "flag_gems._native_batch_norm_legit_functional", "ae6d384bb7f800ddc8a321a8584fc78e0850f439848ffaf41a2edff6a3beea53", "{\"abi\": \"ae6d384bb7f800ddc8a321a8584fc78e0850f439848ffaf41a2edff6a3beea53\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._native_batch_norm_legit_functional\", \"op\": \"aten::_native_batch_norm_legit_functional\", \"outputs\": 5, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor,at::Tensor> PrivNativeBatchNormLegitFunctionalKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, const at::Tensor & running_mean, const at::Tensor & running_var, bool training, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit_functional", {input, weight, bias, running_mean, running_var, training, momentum, eps}, 5);
+  auto result = PrivNativeBatchNormLegitFunctionalFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit_functional", {input, weight, bias, running_mean, running_var, training, momentum, eps}, 5); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::Tensor&>(running_mean), static_cast<const at::Tensor&>(running_var), static_cast<const bool&>(training), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -268,42 +308,48 @@ at::Tensor PrivMaskedScaleKernelPython(const at::Tensor & self, const at::Tensor
   return {result[0], result[1], result[2], result[3], result[4]};
 }
 
+static TypedSourceSlot PrivNativeBatchNormLegitNoTrainingFnSource("aten::_native_batch_norm_legit_no_training", "flag_gems._native_batch_norm_legit_no_training", "d82a34e5076739856e125fd9975cabdec46bfb640cbd344451662fae67de5260", "{\"abi\": \"d82a34e5076739856e125fd9975cabdec46bfb640cbd344451662fae67de5260\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._native_batch_norm_legit_no_training\", \"op\": \"aten::_native_batch_norm_legit_no_training\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivNativeBatchNormLegitNoTrainingKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, const at::Tensor & running_mean, const at::Tensor & running_var, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit_no_training", {input, weight, bias, running_mean, running_var, momentum, eps}, 3);
+  auto result = PrivNativeBatchNormLegitNoTrainingFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._native_batch_norm_legit_no_training", {input, weight, bias, running_mean, running_var, momentum, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::Tensor&>(running_mean), static_cast<const at::Tensor&>(running_var), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivPdistBackwardFnSource("aten::_pdist_backward", "flag_gems._pdist_backward", "82844d170f709236d878e29f2a060388b80c015d3876ec37f75c4e97109a4d37", "{\"abi\": \"82844d170f709236d878e29f2a060388b80c015d3876ec37f75c4e97109a4d37\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._pdist_backward\", \"op\": \"aten::_pdist_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivPdistBackwardKernelPython(const at::Tensor & grad, const at::Tensor & self, double p, const at::Tensor & pdist) {
-  auto result = CallPythonOp_Generic("flag_gems._pdist_backward", {grad, self, p, pdist});
+  auto result = PrivPdistBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._pdist_backward", {grad, self, p, pdist}); }, static_cast<const at::Tensor&>(grad), static_cast<const at::Tensor&>(self), static_cast<const double&>(p), static_cast<const at::Tensor&>(pdist));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivPdistForwardFnSource("aten::_pdist_forward", "flag_gems._pdist_forward", "d8a148807bbc6b7b3344a65ca7d80b26f386931f20a475e292ade79a4aa82ad5", "{\"abi\": \"d8a148807bbc6b7b3344a65ca7d80b26f386931f20a475e292ade79a4aa82ad5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems._pdist_forward\", \"op\": \"aten::_pdist_forward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivPdistForwardKernelPython(const at::Tensor & self, double p) {
-  auto result = CallPythonOp_Generic("flag_gems._pdist_forward", {self, p});
+  auto result = PrivPdistForwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._pdist_forward", {self, p}); }, static_cast<const at::Tensor&>(self), static_cast<const double&>(p));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivPreluKernelFnSource("aten::_prelu_kernel", "flag_gems._prelu_kernel", "95d99aa859e835284dc89f198f0fa7fc38763cdb71fc1112c783a0539de6605d", "{\"abi\": \"95d99aa859e835284dc89f198f0fa7fc38763cdb71fc1112c783a0539de6605d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._prelu_kernel\", \"op\": \"aten::_prelu_kernel\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivPreluKernelKernelPython(const at::Tensor & self, const at::Tensor & weight) {
-  auto result = CallPythonOp_Generic("flag_gems._prelu_kernel", {self, weight});
+  auto result = PrivPreluKernelFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._prelu_kernel", {self, weight}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(weight));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivScaledDotProductCudnnAttentionBackwardFnSource("aten::_scaled_dot_product_cudnn_attention_backward", "flag_gems.scaled_dot_product_cudnn_attention_backward", "ca729721cd33fe3fd57845bc8a47804ae36204879103e3c45796bf145342ae50", "{\"abi\": \"ca729721cd33fe3fd57845bc8a47804ae36204879103e3c45796bf145342ae50\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"scale\", \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.scaled_dot_product_cudnn_attention_backward\", \"op\": \"aten::_scaled_dot_product_cudnn_attention_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivScaledDotProductCudnnAttentionBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const at::Tensor & out, const at::Tensor & logsumexp, const at::Tensor & philox_seed, const at::Tensor & philox_offset, const at::Tensor & attn_bias, const at::Tensor & cum_seq_q, const at::Tensor & cum_seq_k, int64_t max_q, int64_t max_k, double dropout_p, bool is_causal, ::std::optional<double> scale) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.scaled_dot_product_cudnn_attention_backward", {grad_out, query, key, value, out, logsumexp, philox_seed, philox_offset, attn_bias, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal}, {PyKwarg{"scale", scale}}, 3);
+  auto result = PrivScaledDotProductCudnnAttentionBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.scaled_dot_product_cudnn_attention_backward", {grad_out, query, key, value, out, logsumexp, philox_seed, philox_offset, attn_bias, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal}, {PyKwarg{"scale", scale}}, 3); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(query), static_cast<const at::Tensor&>(key), static_cast<const at::Tensor&>(value), static_cast<const at::Tensor&>(out), static_cast<const at::Tensor&>(logsumexp), static_cast<const at::Tensor&>(philox_seed), static_cast<const at::Tensor&>(philox_offset), static_cast<const at::Tensor&>(attn_bias), static_cast<const at::Tensor&>(cum_seq_q), static_cast<const at::Tensor&>(cum_seq_k), static_cast<const int64_t&>(max_q), static_cast<const int64_t&>(max_k), static_cast<const double&>(dropout_p), static_cast<const bool&>(is_causal), static_cast<const ::std::optional<double>&>(scale));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivScaledDotProductEfficientAttentionFnSource("aten::_scaled_dot_product_efficient_attention", "flag_gems._scaled_dot_product_efficient_attention", "1a539cd1bb6864f56e7e89aef58e1a0a1403f7a9def6f29a6d9e1d59915f05fd", "{\"abi\": \"1a539cd1bb6864f56e7e89aef58e1a0a1403f7a9def6f29a6d9e1d59915f05fd\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._scaled_dot_product_efficient_attention\", \"op\": \"aten::_scaled_dot_product_efficient_attention\", \"outputs\": 4, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> PrivScaledDotProductEfficientAttentionKernelPython(const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const ::std::optional<at::Tensor> & attn_bias, bool compute_log_sumexp, double dropout_p, bool is_causal, ::std::optional<double> scale) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._scaled_dot_product_efficient_attention", {query, key, value, attn_bias, compute_log_sumexp, dropout_p, is_causal, scale}, 4);
+  auto result = PrivScaledDotProductEfficientAttentionFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._scaled_dot_product_efficient_attention", {query, key, value, attn_bias, compute_log_sumexp, dropout_p, is_causal, scale}, 4); }, static_cast<const at::Tensor&>(query), static_cast<const at::Tensor&>(key), static_cast<const at::Tensor&>(value), static_cast<const ::std::optional<at::Tensor>&>(attn_bias), static_cast<const bool&>(compute_log_sumexp), static_cast<const double&>(dropout_p), static_cast<const bool&>(is_causal), static_cast<const ::std::optional<double>&>(scale));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -311,8 +357,9 @@ at::Tensor PrivPreluKernelKernelPython(const at::Tensor & self, const at::Tensor
   return {result[0], result[1], result[2], result[3]};
 }
 
+static TypedSourceSlot PrivScaledDotProductEfficientAttentionBackwardFnSource("aten::_scaled_dot_product_efficient_attention_backward", "flag_gems.scaled_dot_product_efficient_attention_backward", "0be8114f44754742760e5e796199c115ffae194d26542b3d0b1e914ba7ae8e5d", "{\"abi\": \"0be8114f44754742760e5e796199c115ffae194d26542b3d0b1e914ba7ae8e5d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"::std::array<bool,4>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"scale\", \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.scaled_dot_product_efficient_attention_backward\", \"op\": \"aten::_scaled_dot_product_efficient_attention_backward\", \"outputs\": 4, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> PrivScaledDotProductEfficientAttentionBackwardKernelPython(const at::Tensor & grad_out_, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const at::Tensor & attn_bias, const at::Tensor & out, const at::Tensor & logsumexp, const at::Tensor & philox_seed, const at::Tensor & philox_offset, double dropout_p, ::std::array<bool,4> grad_input_mask, bool is_causal, ::std::optional<double> scale) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.scaled_dot_product_efficient_attention_backward", {grad_out_, query, key, value, attn_bias, out, logsumexp, philox_seed, philox_offset, dropout_p, grad_input_mask, is_causal}, {PyKwarg{"scale", scale}}, 4);
+  auto result = PrivScaledDotProductEfficientAttentionBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.scaled_dot_product_efficient_attention_backward", {grad_out_, query, key, value, attn_bias, out, logsumexp, philox_seed, philox_offset, dropout_p, grad_input_mask, is_causal}, {PyKwarg{"scale", scale}}, 4); }, static_cast<const at::Tensor&>(grad_out_), static_cast<const at::Tensor&>(query), static_cast<const at::Tensor&>(key), static_cast<const at::Tensor&>(value), static_cast<const at::Tensor&>(attn_bias), static_cast<const at::Tensor&>(out), static_cast<const at::Tensor&>(logsumexp), static_cast<const at::Tensor&>(philox_seed), static_cast<const at::Tensor&>(philox_offset), static_cast<const double&>(dropout_p), static_cast<const ::std::array<bool,4>&>(grad_input_mask), static_cast<const bool&>(is_causal), static_cast<const ::std::optional<double>&>(scale));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -320,1942 +367,2265 @@ at::Tensor PrivPreluKernelKernelPython(const at::Tensor & self, const at::Tensor
   return {result[0], result[1], result[2], result[3]};
 }
 
+static TypedSourceSlot PrivScaledDotProductFlashAttentionBackwardFnSource("aten::_scaled_dot_product_flash_attention_backward", "flag_gems.scaled_dot_product_flash_attention_backward", "e2c806f028ba2139356613b28c13444edd9683c50ca545b5c58e59aa8f758a23", "{\"abi\": \"e2c806f028ba2139356613b28c13444edd9683c50ca545b5c58e59aa8f758a23\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"scale\", \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.scaled_dot_product_flash_attention_backward\", \"op\": \"aten::_scaled_dot_product_flash_attention_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivScaledDotProductFlashAttentionBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & query, const at::Tensor & key, const at::Tensor & value, const at::Tensor & out, const at::Tensor & logsumexp, const at::Tensor & cum_seq_q, const at::Tensor & cum_seq_k, int64_t max_q, int64_t max_k, double dropout_p, bool is_causal, const at::Tensor & philox_seed, const at::Tensor & philox_offset, ::std::optional<double> scale) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.scaled_dot_product_flash_attention_backward", {grad_out, query, key, value, out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, philox_seed, philox_offset}, {PyKwarg{"scale", scale}}, 3);
+  auto result = PrivScaledDotProductFlashAttentionBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.scaled_dot_product_flash_attention_backward", {grad_out, query, key, value, out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k, dropout_p, is_causal, philox_seed, philox_offset}, {PyKwarg{"scale", scale}}, 3); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(query), static_cast<const at::Tensor&>(key), static_cast<const at::Tensor&>(value), static_cast<const at::Tensor&>(out), static_cast<const at::Tensor&>(logsumexp), static_cast<const at::Tensor&>(cum_seq_q), static_cast<const at::Tensor&>(cum_seq_k), static_cast<const int64_t&>(max_q), static_cast<const int64_t&>(max_k), static_cast<const double&>(dropout_p), static_cast<const bool&>(is_causal), static_cast<const at::Tensor&>(philox_seed), static_cast<const at::Tensor&>(philox_offset), static_cast<const ::std::optional<double>&>(scale));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivSoftmaxFnSource("aten::_softmax", "flag_gems.softmax", "87fb0fe6cd92f856cb3d12d8c26b6fab2f54c3886e5ac26627a407d8e8b6b07a", "{\"abi\": \"87fb0fe6cd92f856cb3d12d8c26b6fab2f54c3886e5ac26627a407d8e8b6b07a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.softmax\", \"op\": \"aten::_softmax\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivSoftmaxKernelPython(const at::Tensor & self, int64_t dim, bool half_to_float) {
-  auto result = CallPythonOp_Generic("flag_gems.softmax", {self, dim, half_to_float});
+  auto result = PrivSoftmaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.softmax", {self, dim, half_to_float}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(half_to_float));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivSoftmaxOutFnSource("aten::_softmax.out", "flag_gems.softmax_out", "3db07898dff115402894c78d88c908291bb9940b873906afde559fe8d9e1e47a", "{\"abi\": \"3db07898dff115402894c78d88c908291bb9940b873906afde559fe8d9e1e47a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.softmax_out\", \"op\": \"aten::_softmax.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivSoftmaxOutKernelPython(const at::Tensor & self, int64_t dim, bool half_to_float, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.softmax_out", {self, dim, half_to_float}, {PyKwarg{"out", out}});
+  PrivSoftmaxOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.softmax_out", {self, dim, half_to_float}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(half_to_float), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot PrivSoftmaxBackwardDataFnSource("aten::_softmax_backward_data", "flag_gems.softmax_backward", "4ee74f655b7d6507da8e49568c9a9c68261c1461aad0c8869b8c2007f6ef6428", "{\"abi\": \"4ee74f655b7d6507da8e49568c9a9c68261c1461aad0c8869b8c2007f6ef6428\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}], \"host\": \"flag_gems.softmax_backward\", \"op\": \"aten::_softmax_backward_data\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivSoftmaxBackwardDataKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}});
+  auto result = PrivSoftmaxBackwardDataFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.softmax_backward", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivSoftmaxBackwardDataOutFnSource("aten::_softmax_backward_data.out", "flag_gems.softmax_backward_out", "abf929f78bb82281daacdb6e12f7b50e47b13392f4d6d8ac5612d74007cd4809", "{\"abi\": \"abf929f78bb82281daacdb6e12f7b50e47b13392f4d6d8ac5612d74007cd4809\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"input_dtype\", \"type\": \"at::ScalarType\"}, {\"keyword\": \"grad_input\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.softmax_backward_out\", \"op\": \"aten::_softmax_backward_data.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivSoftmaxBackwardDataOutKernelPython(const at::Tensor & grad_output, const at::Tensor & output, int64_t dim, at::ScalarType input_dtype, at::Tensor & grad_input) {
-  CallPythonOp_GenericKw("flag_gems.softmax_backward_out", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}, PyKwarg{"grad_input", grad_input}});
+  PrivSoftmaxBackwardDataOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.softmax_backward_out", {grad_output, output, dim}, {PyKwarg{"input_dtype", c10::IValue(static_cast<int64_t>(input_dtype)), /*is_dtype=*/true}, PyKwarg{"grad_input", grad_input}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output), static_cast<const int64_t&>(dim), static_cast<const at::ScalarType&>(input_dtype), static_cast<const at::Tensor&>(grad_input));
   return grad_input;
 }
 
+static TypedSourceSlot PrivSparseSemiStructuredAddmmFnSource("aten::_sparse_semi_structured_addmm", "flag_gems._sparse_semi_structured_addmm", "4955778b307ea686956bf4a48520cd74ecf7d83d80fd9828ed5f657a406ebe96", "{\"abi\": \"4955778b307ea686956bf4a48520cd74ecf7d83d80fd9828ed5f657a406ebe96\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"out_dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems._sparse_semi_structured_addmm\", \"op\": \"aten::_sparse_semi_structured_addmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivSparseSemiStructuredAddmmKernelPython(const at::Tensor & input, const at::Tensor & mat1, const at::Tensor & mat1_meta, const at::Tensor & mat2, const at::Scalar & alpha, const at::Scalar & beta, ::std::optional<at::ScalarType> out_dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems._sparse_semi_structured_addmm", {input, mat1, mat1_meta, mat2}, {PyKwarg{"alpha", alpha}, PyKwarg{"beta", beta}, PyKwarg{"out_dtype", out_dtype.has_value() ? c10::IValue(static_cast<int64_t>(*out_dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!out_dtype.has_value()}});
+  auto result = PrivSparseSemiStructuredAddmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems._sparse_semi_structured_addmm", {input, mat1, mat1_meta, mat2}, {PyKwarg{"alpha", alpha}, PyKwarg{"beta", beta}, PyKwarg{"out_dtype", out_dtype.has_value() ? c10::IValue(static_cast<int64_t>(*out_dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!out_dtype.has_value()}}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat1_meta), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(alpha), static_cast<const at::Scalar&>(beta), static_cast<const ::std::optional<at::ScalarType>&>(out_dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivSparseSemiStructuredMmFnSource("aten::_sparse_semi_structured_mm", "flag_gems._sparse_semi_structured_mm", "799a97bf6b43169a853fb8d6ab17a4a6ca4f74004a239dcb1d4e650fa9d70b75", "{\"abi\": \"799a97bf6b43169a853fb8d6ab17a4a6ca4f74004a239dcb1d4e650fa9d70b75\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out_dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems._sparse_semi_structured_mm\", \"op\": \"aten::_sparse_semi_structured_mm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivSparseSemiStructuredMmKernelPython(const at::Tensor & mat1, const at::Tensor & mat1_meta, const at::Tensor & mat2, ::std::optional<at::ScalarType> out_dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems._sparse_semi_structured_mm", {mat1, mat1_meta, mat2}, {PyKwarg{"out_dtype", out_dtype.has_value() ? c10::IValue(static_cast<int64_t>(*out_dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!out_dtype.has_value()}});
+  auto result = PrivSparseSemiStructuredMmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems._sparse_semi_structured_mm", {mat1, mat1_meta, mat2}, {PyKwarg{"out_dtype", out_dtype.has_value() ? c10::IValue(static_cast<int64_t>(*out_dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!out_dtype.has_value()}}); }, static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat1_meta), static_cast<const at::Tensor&>(mat2), static_cast<const ::std::optional<at::ScalarType>&>(out_dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivThnnFusedLstmCellFnSource("aten::_thnn_fused_lstm_cell", "flag_gems._thnn_fused_lstm_cell", "62172484b9af3c92819888f668bb8f3440698e7a25be6a7c67171755a5d54b69", "{\"abi\": \"62172484b9af3c92819888f668bb8f3440698e7a25be6a7c67171755a5d54b69\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}], \"host\": \"flag_gems._thnn_fused_lstm_cell\", \"op\": \"aten::_thnn_fused_lstm_cell\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivThnnFusedLstmCellKernelPython(const at::Tensor & input_gates, const at::Tensor & hidden_gates, const at::Tensor & cx, const ::std::optional<at::Tensor> & input_bias, const ::std::optional<at::Tensor> & hidden_bias) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._thnn_fused_lstm_cell", {input_gates, hidden_gates, cx, input_bias, hidden_bias}, 3);
+  auto result = PrivThnnFusedLstmCellFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._thnn_fused_lstm_cell", {input_gates, hidden_gates, cx, input_bias, hidden_bias}, 3); }, static_cast<const at::Tensor&>(input_gates), static_cast<const at::Tensor&>(hidden_gates), static_cast<const at::Tensor&>(cx), static_cast<const ::std::optional<at::Tensor>&>(input_bias), static_cast<const ::std::optional<at::Tensor>&>(hidden_bias));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivThnnFusedLstmCellBackwardImplFnSource("aten::_thnn_fused_lstm_cell_backward_impl", "flag_gems._thnn_fused_lstm_cell_backward_impl", "2a0e97920d83ff457fbdc18da6f2b81849a137d8c76c87fb245a0e1b49e9e44e", "{\"abi\": \"2a0e97920d83ff457fbdc18da6f2b81849a137d8c76c87fb245a0e1b49e9e44e\", \"arguments\": [{\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems._thnn_fused_lstm_cell_backward_impl\", \"op\": \"aten::_thnn_fused_lstm_cell_backward_impl\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivThnnFusedLstmCellBackwardImplKernelPython(const ::std::optional<at::Tensor> & grad_hy, const ::std::optional<at::Tensor> & grad_cy, const at::Tensor & cx, const at::Tensor & cy, const at::Tensor & workspace, bool has_bias) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._thnn_fused_lstm_cell_backward_impl", {grad_hy, grad_cy, cx, cy, workspace, has_bias}, 3);
+  auto result = PrivThnnFusedLstmCellBackwardImplFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._thnn_fused_lstm_cell_backward_impl", {grad_hy, grad_cy, cx, cy, workspace, has_bias}, 3); }, static_cast<const ::std::optional<at::Tensor>&>(grad_hy), static_cast<const ::std::optional<at::Tensor>&>(grad_cy), static_cast<const at::Tensor&>(cx), static_cast<const at::Tensor&>(cy), static_cast<const at::Tensor&>(workspace), static_cast<const bool&>(has_bias));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivUnique2FnSource("aten::_unique2", "flag_gems._unique2", "031446c0c1ad4a3c448d4ada7cad6a27374a8bbdb6e04cb78bde5d0b0b9dd6ae", "{\"abi\": \"031446c0c1ad4a3c448d4ada7cad6a27374a8bbdb6e04cb78bde5d0b0b9dd6ae\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems._unique2\", \"op\": \"aten::_unique2\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> PrivUnique2KernelPython(const at::Tensor & self, bool sorted, bool return_inverse, bool return_counts) {
-  auto result = CallPythonOp_GenericTuple("flag_gems._unique2", {self, sorted, return_inverse, return_counts}, 3);
+  auto result = PrivUnique2FnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems._unique2", {self, sorted, return_inverse, return_counts}, 3); }, static_cast<const at::Tensor&>(self), static_cast<const bool&>(sorted), static_cast<const bool&>(return_inverse), static_cast<const bool&>(return_counts));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot PrivUnsafeViewFnSource("aten::_unsafe_view", "flag_gems._unsafe_view", "873830181b5714c67e350022f6af9c25ee23b38520076ef324e0058c891e2356", "{\"abi\": \"873830181b5714c67e350022f6af9c25ee23b38520076ef324e0058c891e2356\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems._unsafe_view\", \"op\": \"aten::_unsafe_view\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUnsafeViewKernelPython(const at::Tensor & self, at::IntArrayRef size) {
-  auto result = CallPythonOp_Generic("flag_gems._unsafe_view", {self, size});
+  auto result = PrivUnsafeViewFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._unsafe_view", {self, size}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(size));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivUpsampleBicubic2dAaBackwardFnSource("aten::_upsample_bicubic2d_aa_backward", "flag_gems._upsample_bicubic2d_aa_backward", "f4be2c2a5af1afcb7fa71223307ba03c37ac585739a0b1755e10af8e3ffaa67d", "{\"abi\": \"f4be2c2a5af1afcb7fa71223307ba03c37ac585739a0b1755e10af8e3ffaa67d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._upsample_bicubic2d_aa_backward\", \"op\": \"aten::_upsample_bicubic2d_aa_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUpsampleBicubic2dAaBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef output_size, at::IntArrayRef input_size, bool align_corners, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems._upsample_bicubic2d_aa_backward", {grad_output, output_size, input_size, align_corners, scales_h, scales_w});
+  auto result = PrivUpsampleBicubic2dAaBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._upsample_bicubic2d_aa_backward", {grad_output, output_size, input_size, align_corners, scales_h, scales_w}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(input_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivUpsampleBilinear2dAaFnSource("aten::_upsample_bilinear2d_aa", "flag_gems._upsample_bilinear2d_aa", "db3d6f4a3d748a9fed433de274af265a619fd54c6ef3f6630751593ab323b388", "{\"abi\": \"db3d6f4a3d748a9fed433de274af265a619fd54c6ef3f6630751593ab323b388\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._upsample_bilinear2d_aa\", \"op\": \"aten::_upsample_bilinear2d_aa\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUpsampleBilinear2dAaKernelPython(const at::Tensor & self, at::IntArrayRef output_size, bool align_corners, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems._upsample_bilinear2d_aa", {self, output_size, align_corners, scales_h, scales_w});
+  auto result = PrivUpsampleBilinear2dAaFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._upsample_bilinear2d_aa", {self, output_size, align_corners, scales_h, scales_w}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivUpsampleBilinear2dAaBackwardFnSource("aten::_upsample_bilinear2d_aa_backward", "flag_gems._upsample_bilinear2d_aa_backward", "6ccfcf5ff06d7992d48c0c2182aede02b0060cd99d81ddefe4ed49e0b6a97b67", "{\"abi\": \"6ccfcf5ff06d7992d48c0c2182aede02b0060cd99d81ddefe4ed49e0b6a97b67\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._upsample_bilinear2d_aa_backward\", \"op\": \"aten::_upsample_bilinear2d_aa_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUpsampleBilinear2dAaBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef output_size, at::IntArrayRef input_size, bool align_corners, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems._upsample_bilinear2d_aa_backward", {grad_output, output_size, input_size, align_corners, scales_h, scales_w});
+  auto result = PrivUpsampleBilinear2dAaBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._upsample_bilinear2d_aa_backward", {grad_output, output_size, input_size, align_corners, scales_h, scales_w}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(input_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivUpsampleNearestExact1dBackwardFnSource("aten::_upsample_nearest_exact1d_backward", "flag_gems._upsample_nearest_exact1d_backward", "3210b38d7313965fc3cbf505e8a75d9b217f8fc96a5f257a7b43801428c40824", "{\"abi\": \"3210b38d7313965fc3cbf505e8a75d9b217f8fc96a5f257a7b43801428c40824\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._upsample_nearest_exact1d_backward\", \"op\": \"aten::_upsample_nearest_exact1d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUpsampleNearestExact1dBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef output_size, at::IntArrayRef input_size, ::std::optional<double> scales) {
-  auto result = CallPythonOp_Generic("flag_gems._upsample_nearest_exact1d_backward", {grad_output, output_size, input_size, scales});
+  auto result = PrivUpsampleNearestExact1dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._upsample_nearest_exact1d_backward", {grad_output, output_size, input_size, scales}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(input_size), static_cast<const ::std::optional<double>&>(scales));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivUpsampleNearestExact1dBackwardGradInputFnSource("aten::_upsample_nearest_exact1d_backward.grad_input", "flag_gems._upsample_nearest_exact1d_backward_grad_input", "61346a214767fa60b095bf4cf8224d637c80bd5b77afc6f6716a59cde4f483f2", "{\"abi\": \"61346a214767fa60b095bf4cf8224d637c80bd5b77afc6f6716a59cde4f483f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": \"grad_input\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems._upsample_nearest_exact1d_backward_grad_input\", \"op\": \"aten::_upsample_nearest_exact1d_backward.grad_input\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PrivUpsampleNearestExact1dBackwardGradInputKernelPython(const at::Tensor & grad_output, at::IntArrayRef output_size, at::IntArrayRef input_size, ::std::optional<double> scales, at::Tensor & grad_input) {
-  CallPythonOp_GenericKw("flag_gems._upsample_nearest_exact1d_backward_grad_input", {grad_output, output_size, input_size, scales}, {PyKwarg{"grad_input", grad_input}});
+  PrivUpsampleNearestExact1dBackwardGradInputFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems._upsample_nearest_exact1d_backward_grad_input", {grad_output, output_size, input_size, scales}, {PyKwarg{"grad_input", grad_input}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(input_size), static_cast<const ::std::optional<double>&>(scales), static_cast<const at::Tensor&>(grad_input));
   return grad_input;
 }
 
+static TypedSourceSlot PrivUpsampleNearestExact2dBackwardFnSource("aten::_upsample_nearest_exact2d_backward", "flag_gems._upsample_nearest_exact2d_backward", "d4620f35e16d0fc1e158ecc4a0584d912efc62f45411679b4964ff6080851d9b", "{\"abi\": \"d4620f35e16d0fc1e158ecc4a0584d912efc62f45411679b4964ff6080851d9b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems._upsample_nearest_exact2d_backward\", \"op\": \"aten::_upsample_nearest_exact2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUpsampleNearestExact2dBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef output_size, at::IntArrayRef input_size, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems._upsample_nearest_exact2d_backward", {grad_output, output_size, input_size, scales_h, scales_w});
+  auto result = PrivUpsampleNearestExact2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._upsample_nearest_exact2d_backward", {grad_output, output_size, input_size, scales_h, scales_w}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(input_size), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivWeightInt8packMmFnSource("aten::_weight_int8pack_mm", "flag_gems.weight_int8pack_mm", "03b2ae9e14a5a83e05b61fadc54721de9e8bcc5ee540b61bce3795437dd9d2f7", "{\"abi\": \"03b2ae9e14a5a83e05b61fadc54721de9e8bcc5ee540b61bce3795437dd9d2f7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.weight_int8pack_mm\", \"op\": \"aten::_weight_int8pack_mm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivWeightInt8packMmKernelPython(const at::Tensor & self, const at::Tensor & mat2, const at::Tensor & scales) {
-  auto result = CallPythonOp_Generic("flag_gems.weight_int8pack_mm", {self, mat2, scales});
+  auto result = PrivWeightInt8packMmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.weight_int8pack_mm", {self, mat2, scales}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(scales));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PrivWeightNormInterfaceFnSource("aten::_weight_norm_interface", "flag_gems.weight_norm_interface", "96db9b5a63ffa8ff4fcefce5f416c7a207d34fb135092f567f96896099107026", "{\"abi\": \"96db9b5a63ffa8ff4fcefce5f416c7a207d34fb135092f567f96896099107026\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.weight_norm_interface\", \"op\": \"aten::_weight_norm_interface\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> PrivWeightNormInterfaceKernelPython(const at::Tensor & v, const at::Tensor & g, int64_t dim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.weight_norm_interface", {v, g, dim}, 2);
+  auto result = PrivWeightNormInterfaceFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.weight_norm_interface", {v, g, dim}, 2); }, static_cast<const at::Tensor&>(v), static_cast<const at::Tensor&>(g), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot PrivWeightNormInterfaceBackwardFnSource("aten::_weight_norm_interface_backward", "flag_gems.weight_norm_interface_backward", "39afb4e4af430aaba034d1e73cc14e8c91f3e7584c369e3435e9ffadd648e719", "{\"abi\": \"39afb4e4af430aaba034d1e73cc14e8c91f3e7584c369e3435e9ffadd648e719\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.weight_norm_interface_backward\", \"op\": \"aten::_weight_norm_interface_backward\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> PrivWeightNormInterfaceBackwardKernelPython(const at::Tensor & grad_w, const at::Tensor & saved_v, const at::Tensor & saved_g, const at::Tensor & saved_norms, int64_t dim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.weight_norm_interface_backward", {grad_w, saved_v, saved_g, saved_norms, dim}, 2);
+  auto result = PrivWeightNormInterfaceBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.weight_norm_interface_backward", {grad_w, saved_v, saved_g, saved_norms, dim}, 2); }, static_cast<const at::Tensor&>(grad_w), static_cast<const at::Tensor&>(saved_v), static_cast<const at::Tensor&>(saved_g), static_cast<const at::Tensor&>(saved_norms), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot AbsFnSource("aten::abs", "flag_gems.abs", "1cc0de3243398bbf212b50875d86fbe848be7f591d5ef44abe445264a36895c5", "{\"abi\": \"1cc0de3243398bbf212b50875d86fbe848be7f591d5ef44abe445264a36895c5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.abs\", \"op\": \"aten::abs\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AbsKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.abs", {self});
+  auto result = AbsFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.abs", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AbsInplaceFnSource("aten::abs_", "flag_gems.abs_", "01a25ba155f1168ddcf69a09ad9bac937db98577e977ceaaba503fe00764d739", "{\"abi\": \"01a25ba155f1168ddcf69a09ad9bac937db98577e977ceaaba503fe00764d739\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.abs_\", \"op\": \"aten::abs_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AbsInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.abs_", {self});
+  auto result = AbsInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.abs_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AcosFnSource("aten::acos", "flag_gems.acos", "4756ef99c839f6a512396334e9b0840952bf12db208af14ab8e7e5341244bfeb", "{\"abi\": \"4756ef99c839f6a512396334e9b0840952bf12db208af14ab8e7e5341244bfeb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.acos\", \"op\": \"aten::acos\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AcosKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.acos", {self});
+  auto result = AcosFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.acos", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AcosInplaceFnSource("aten::acos_", "flag_gems.acos_", "ff78efde730050fdf474f7a68cff4cd1564a0cfe5a332bd46146b5fe5f1b827b", "{\"abi\": \"ff78efde730050fdf474f7a68cff4cd1564a0cfe5a332bd46146b5fe5f1b827b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.acos_\", \"op\": \"aten::acos_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AcosInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.acos_", {self});
+  auto result = AcosInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.acos_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AcoshFnSource("aten::acosh", "flag_gems.acosh", "9fcf48a41f489e3344066a88890ce4c7757d680acd74f129ddc8281848167548", "{\"abi\": \"9fcf48a41f489e3344066a88890ce4c7757d680acd74f129ddc8281848167548\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.acosh\", \"op\": \"aten::acosh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AcoshKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.acosh", {self});
+  auto result = AcoshFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.acosh", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AcoshInplaceFnSource("aten::acosh_", "flag_gems.acosh_", "3417ddf1705edf94338002b36f8345041927f62ed580d0aead9c06e9d1c7e648", "{\"abi\": \"3417ddf1705edf94338002b36f8345041927f62ed580d0aead9c06e9d1c7e648\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.acosh_\", \"op\": \"aten::acosh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AcoshInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.acosh_", {self});
+  auto result = AcoshInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.acosh_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AdaptiveAvgPool3dBackwardGradInputFnSource("aten::adaptive_avg_pool3d_backward.grad_input", "flag_gems.adaptive_avg_pool3d_backward_grad_input", "f67c0418ca448f5696e136e46cdabee56f8f320e1e935f3c7de508b9dea993d4", "{\"abi\": \"f67c0418ca448f5696e136e46cdabee56f8f320e1e935f3c7de508b9dea993d4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"grad_input\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.adaptive_avg_pool3d_backward_grad_input\", \"op\": \"aten::adaptive_avg_pool3d_backward.grad_input\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AdaptiveAvgPool3dBackwardGradInputKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::Tensor & grad_input) {
-  CallPythonOp_GenericKw("flag_gems.adaptive_avg_pool3d_backward_grad_input", {grad_output, self}, {PyKwarg{"grad_input", grad_input}});
+  AdaptiveAvgPool3dBackwardGradInputFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.adaptive_avg_pool3d_backward_grad_input", {grad_output, self}, {PyKwarg{"grad_input", grad_input}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(grad_input));
   return grad_input;
 }
 
+static TypedSourceSlot AdaptiveMaxPool2dFnSource("aten::adaptive_max_pool2d", "flag_gems.adaptive_max_pool2d", "a978bbf9163dd6c612b68f5f28d680d3047d6f3a80ce2564995d33d382247ebf", "{\"abi\": \"a978bbf9163dd6c612b68f5f28d680d3047d6f3a80ce2564995d33d382247ebf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.adaptive_max_pool2d\", \"op\": \"aten::adaptive_max_pool2d\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> AdaptiveMaxPool2dKernelPython(const at::Tensor & self, at::IntArrayRef output_size) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.adaptive_max_pool2d", {self, output_size}, 2);
+  auto result = AdaptiveMaxPool2dFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.adaptive_max_pool2d", {self, output_size}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot AdaptiveMaxPool2dBackwardFnSource("aten::adaptive_max_pool2d_backward", "flag_gems.adaptive_max_pool2d_backward", "65debf98602dd93e7ffd70433351c6317098c15e09ddcbd9b78342049c4f73a5", "{\"abi\": \"65debf98602dd93e7ffd70433351c6317098c15e09ddcbd9b78342049c4f73a5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.adaptive_max_pool2d_backward\", \"op\": \"aten::adaptive_max_pool2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AdaptiveMaxPool2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & indices) {
-  auto result = CallPythonOp_Generic("flag_gems.adaptive_max_pool2d_backward", {grad_output, self, indices});
+  auto result = AdaptiveMaxPool2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.adaptive_max_pool2d_backward", {grad_output, self, indices}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(indices));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AdaptiveMaxPool3dFnSource("aten::adaptive_max_pool3d", "flag_gems.adaptive_max_pool3d", "42b5aafed0281fcab6ba67976709462a304a1e345dce2d3c032d13af8f11f400", "{\"abi\": \"42b5aafed0281fcab6ba67976709462a304a1e345dce2d3c032d13af8f11f400\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.adaptive_max_pool3d\", \"op\": \"aten::adaptive_max_pool3d\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> AdaptiveMaxPool3dKernelPython(const at::Tensor & self, at::IntArrayRef output_size) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.adaptive_max_pool3d", {self, output_size}, 2);
+  auto result = AdaptiveMaxPool3dFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.adaptive_max_pool3d", {self, output_size}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot AdaptiveMaxPool3dBackwardFnSource("aten::adaptive_max_pool3d_backward", "flag_gems.adaptive_max_pool3d_backward", "7e4bcef360ce1ade2d16d1ce32229b4ba3600cbf99da3e0905e6bdb92ecc369b", "{\"abi\": \"7e4bcef360ce1ade2d16d1ce32229b4ba3600cbf99da3e0905e6bdb92ecc369b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.adaptive_max_pool3d_backward\", \"op\": \"aten::adaptive_max_pool3d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AdaptiveMaxPool3dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & indices) {
-  auto result = CallPythonOp_Generic("flag_gems.adaptive_max_pool3d_backward", {grad_output, self, indices});
+  auto result = AdaptiveMaxPool3dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.adaptive_max_pool3d_backward", {grad_output, self, indices}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(indices));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddTensorFnSource("aten::add.Tensor", "flag_gems.add", "fb0edf418eebcfa98e41dff7d746ec8e1dc6d2742c252afbcb38a995ca5f3a72", "{\"abi\": \"fb0edf418eebcfa98e41dff7d746ec8e1dc6d2742c252afbcb38a995ca5f3a72\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.add\", \"op\": \"aten::add.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.add", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = AddTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.add", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddInplaceTensorFnSource("aten::add_.Tensor", "flag_gems.add_", "1b351573d35e2a3323b644364e80e318cbda91d54b694c8ac662239a73e6d0d7", "{\"abi\": \"1b351573d35e2a3323b644364e80e318cbda91d54b694c8ac662239a73e6d0d7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.add_\", \"op\": \"aten::add_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.add_", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = AddInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.add_", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AddbmmFnSource("aten::addbmm", "flag_gems.addbmm", "51c622fad1ffdb01785512fc6b6c1b5d946bf499d4fdbe15cb86a81984792e52", "{\"abi\": \"51c622fad1ffdb01785512fc6b6c1b5d946bf499d4fdbe15cb86a81984792e52\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addbmm\", \"op\": \"aten::addbmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddbmmKernelPython(const at::Tensor & self, const at::Tensor & batch1, const at::Tensor & batch2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.addbmm", {self, batch1, batch2, beta, alpha});
+  auto result = AddbmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.addbmm", {self, batch1, batch2, beta, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(batch1), static_cast<const at::Tensor&>(batch2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddbmmInplaceFnSource("aten::addbmm_", "flag_gems.addbmm_", "80d0f8b50bc3a6d35447078a3981c67800dbd8696e16a58b9959c84574d9f0ff", "{\"abi\": \"80d0f8b50bc3a6d35447078a3981c67800dbd8696e16a58b9959c84574d9f0ff\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addbmm_\", \"op\": \"aten::addbmm_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddbmmInplaceKernelPython(at::Tensor & self, const at::Tensor & batch1, const at::Tensor & batch2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.addbmm_", {self, batch1, batch2, beta, alpha});
+  auto result = AddbmmInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.addbmm_", {self, batch1, batch2, beta, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(batch1), static_cast<const at::Tensor&>(batch2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AddcdivFnSource("aten::addcdiv", "flag_gems.addcdiv", "72e644747e313e3d028df9ab359695bc20e5471faa31246aad0eaec755bd8be4", "{\"abi\": \"72e644747e313e3d028df9ab359695bc20e5471faa31246aad0eaec755bd8be4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addcdiv\", \"op\": \"aten::addcdiv\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddcdivKernelPython(const at::Tensor & self, const at::Tensor & tensor1, const at::Tensor & tensor2, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.addcdiv", {self, tensor1, tensor2, value});
+  auto result = AddcdivFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.addcdiv", {self, tensor1, tensor2, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor1), static_cast<const at::Tensor&>(tensor2), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddcdivOutFnSource("aten::addcdiv.out", "flag_gems.addcdiv_out", "9a6e42ed9062c97d009a6d92053d9f2945768262f146e710a11050558c71aaf1", "{\"abi\": \"9a6e42ed9062c97d009a6d92053d9f2945768262f146e710a11050558c71aaf1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"value\", \"type\": \"at::Scalar\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.addcdiv_out\", \"op\": \"aten::addcdiv.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddcdivOutKernelPython(const at::Tensor & self, const at::Tensor & tensor1, const at::Tensor & tensor2, const at::Scalar & value, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.addcdiv_out", {self, tensor1, tensor2}, {PyKwarg{"value", value}, PyKwarg{"out", out}});
+  AddcdivOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addcdiv_out", {self, tensor1, tensor2}, {PyKwarg{"value", value}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor1), static_cast<const at::Tensor&>(tensor2), static_cast<const at::Scalar&>(value), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot AddcdivInplaceFnSource("aten::addcdiv_", "flag_gems.addcdiv_", "ff269bb08b46fcf26c903d06d17c27f9a1e4988f6c4d24c8ea757d0c13d29de9", "{\"abi\": \"ff269bb08b46fcf26c903d06d17c27f9a1e4988f6c4d24c8ea757d0c13d29de9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addcdiv_\", \"op\": \"aten::addcdiv_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddcdivInplaceKernelPython(at::Tensor & self, const at::Tensor & tensor1, const at::Tensor & tensor2, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.addcdiv_", {self, tensor1, tensor2, value});
+  auto result = AddcdivInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.addcdiv_", {self, tensor1, tensor2, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor1), static_cast<const at::Tensor&>(tensor2), static_cast<const at::Scalar&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AddcmulFnSource("aten::addcmul", "flag_gems.addcmul", "9873b485e1d01860034efe92e406a1825eaab39e59d043eca6c7ce567461115e", "{\"abi\": \"9873b485e1d01860034efe92e406a1825eaab39e59d043eca6c7ce567461115e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"value\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addcmul\", \"op\": \"aten::addcmul\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddcmulKernelPython(const at::Tensor & self, const at::Tensor & tensor1, const at::Tensor & tensor2, const at::Scalar & value) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addcmul", {self, tensor1, tensor2}, {PyKwarg{"value", value}});
+  auto result = AddcmulFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addcmul", {self, tensor1, tensor2}, {PyKwarg{"value", value}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor1), static_cast<const at::Tensor&>(tensor2), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddcmulOutFnSource("aten::addcmul.out", "flag_gems.addcmul_out", "0c04b1ccb4d7c6ec4bc98f45c60d285213cd67ee7f48119f19f1222c45cd9c42", "{\"abi\": \"0c04b1ccb4d7c6ec4bc98f45c60d285213cd67ee7f48119f19f1222c45cd9c42\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"value\", \"type\": \"at::Scalar\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.addcmul_out\", \"op\": \"aten::addcmul.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddcmulOutKernelPython(const at::Tensor & self, const at::Tensor & tensor1, const at::Tensor & tensor2, const at::Scalar & value, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.addcmul_out", {self, tensor1, tensor2}, {PyKwarg{"value", value}, PyKwarg{"out", out}});
+  AddcmulOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addcmul_out", {self, tensor1, tensor2}, {PyKwarg{"value", value}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor1), static_cast<const at::Tensor&>(tensor2), static_cast<const at::Scalar&>(value), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot AddcmulInplaceFnSource("aten::addcmul_", "flag_gems.addcmul_", "32fac01827218a16ae308021c4b1503deff6f4f7ebed9801efd69f09939dc5f7", "{\"abi\": \"32fac01827218a16ae308021c4b1503deff6f4f7ebed9801efd69f09939dc5f7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"value\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addcmul_\", \"op\": \"aten::addcmul_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddcmulInplaceKernelPython(at::Tensor & self, const at::Tensor & tensor1, const at::Tensor & tensor2, const at::Scalar & value) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addcmul_", {self, tensor1, tensor2}, {PyKwarg{"value", value}});
+  auto result = AddcmulInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addcmul_", {self, tensor1, tensor2}, {PyKwarg{"value", value}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor1), static_cast<const at::Tensor&>(tensor2), static_cast<const at::Scalar&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AddmmFnSource("aten::addmm", "flag_gems.addmm", "b3c7331b92ae21c60eb406f10f1905182dbab0e9790ae3e32f48783ddeec21c8", "{\"abi\": \"b3c7331b92ae21c60eb406f10f1905182dbab0e9790ae3e32f48783ddeec21c8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmm\", \"op\": \"aten::addmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddmmKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmm", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddmmDtypeFnSource("aten::addmm.dtype", "flag_gems.addmm_dtype", "6eaa824834e4188196834f5ad848fe09efbb9853762d0bd22da946d208eb5d0a", "{\"abi\": \"6eaa824834e4188196834f5ad848fe09efbb9853762d0bd22da946d208eb5d0a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out_dtype\", \"type\": \"at::ScalarType\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmm_dtype\", \"op\": \"aten::addmm.dtype\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddmmDtypeKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, at::ScalarType out_dtype, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmm_dtype", {self, mat1, mat2}, {PyKwarg{"out_dtype", c10::IValue(static_cast<int64_t>(out_dtype)), /*is_dtype=*/true}, PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmmDtypeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm_dtype", {self, mat1, mat2}, {PyKwarg{"out_dtype", c10::IValue(static_cast<int64_t>(out_dtype)), /*is_dtype=*/true}, PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::ScalarType&>(out_dtype), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddmmDtypeOutFnSource("aten::addmm.dtype_out", "flag_gems.addmm_dtype_out", "ea3628b21ee97d128fe42abec274a7e2401feafca6269ef692ae105b303d9683", "{\"abi\": \"ea3628b21ee97d128fe42abec274a7e2401feafca6269ef692ae105b303d9683\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out_dtype\", \"type\": \"at::ScalarType\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.addmm_dtype_out\", \"op\": \"aten::addmm.dtype_out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddmmDtypeOutKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, at::ScalarType out_dtype, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.addmm_dtype_out", {self, mat1, mat2}, {PyKwarg{"out_dtype", c10::IValue(static_cast<int64_t>(out_dtype)), /*is_dtype=*/true}, PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}, PyKwarg{"out", out}});
+  AddmmDtypeOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm_dtype_out", {self, mat1, mat2}, {PyKwarg{"out_dtype", c10::IValue(static_cast<int64_t>(out_dtype)), /*is_dtype=*/true}, PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::ScalarType&>(out_dtype), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot AddmmOutFnSource("aten::addmm.out", "flag_gems.addmm_out", "b9ea5f42a92b62393d110b7a0da433283115509893cbd2968b7c622fc85397e9", "{\"abi\": \"b9ea5f42a92b62393d110b7a0da433283115509893cbd2968b7c622fc85397e9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmm_out\", \"op\": \"aten::addmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmm_out", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm_out", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot AddmmInplaceFnSource("aten::addmm_", "flag_gems.addmm_", "e476686637b2c906ec770343f749569f5f617d894fd26f7600e3ae6086115fb7", "{\"abi\": \"e476686637b2c906ec770343f749569f5f617d894fd26f7600e3ae6086115fb7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmm_\", \"op\": \"aten::addmm_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddmmInplaceKernelPython(at::Tensor & self, const at::Tensor & mat1, const at::Tensor & mat2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmm_", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmmInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmm_", {self, mat1, mat2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat1), static_cast<const at::Tensor&>(mat2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AddmvFnSource("aten::addmv", "flag_gems.addmv", "eaf892647fe6a6db64402243c336993dd50b865b0ec2cdec660de07fcd656a60", "{\"abi\": \"eaf892647fe6a6db64402243c336993dd50b865b0ec2cdec660de07fcd656a60\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmv\", \"op\": \"aten::addmv\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddmvKernelPython(const at::Tensor & self, const at::Tensor & mat, const at::Tensor & vec, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmv", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmvFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmv", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat), static_cast<const at::Tensor&>(vec), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddmvOutFnSource("aten::addmv.out", "flag_gems.addmv_out", "1d177680a5ccb6776e603792482fdd776697c3363c780937868c79b38ea50302", "{\"abi\": \"1d177680a5ccb6776e603792482fdd776697c3363c780937868c79b38ea50302\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmv_out\", \"op\": \"aten::addmv.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddmvOutKernelPython(const at::Tensor & self, const at::Tensor & mat, const at::Tensor & vec, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmv_out", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmvOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmv_out", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat), static_cast<const at::Tensor&>(vec), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot AddmvInplaceFnSource("aten::addmv_", "flag_gems.addmv_", "0158dc4a89bad2fb50956d21fabadf03fa417111d70e888ce77956aee294bc62", "{\"abi\": \"0158dc4a89bad2fb50956d21fabadf03fa417111d70e888ce77956aee294bc62\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addmv_\", \"op\": \"aten::addmv_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddmvInplaceKernelPython(at::Tensor & self, const at::Tensor & mat, const at::Tensor & vec, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addmv_", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddmvInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addmv_", {self, mat, vec}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat), static_cast<const at::Tensor&>(vec), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AddrFnSource("aten::addr", "flag_gems.addr", "da59e348f1a1f17b4caece2c9b8a9991df8b780c4be83a84c63b209db02fb5fe", "{\"abi\": \"da59e348f1a1f17b4caece2c9b8a9991df8b780c4be83a84c63b209db02fb5fe\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addr\", \"op\": \"aten::addr\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddrKernelPython(const at::Tensor & self, const at::Tensor & vec1, const at::Tensor & vec2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addr", {self, vec1, vec2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddrFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addr", {self, vec1, vec2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(vec1), static_cast<const at::Tensor&>(vec2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AddrInplaceFnSource("aten::addr_", "flag_gems.addr_", "fadaa8c8f96adb4a51904e37b2582e9ebead4ce23d75afdeaff17e8aa569e073", "{\"abi\": \"fadaa8c8f96adb4a51904e37b2582e9ebead4ce23d75afdeaff17e8aa569e073\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.addr_\", \"op\": \"aten::addr_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AddrInplaceKernelPython(at::Tensor & self, const at::Tensor & vec1, const at::Tensor & vec2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.addr_", {self, vec1, vec2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = AddrInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.addr_", {self, vec1, vec2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(vec1), static_cast<const at::Tensor&>(vec2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AffineGridGeneratorFnSource("aten::affine_grid_generator", "flag_gems.affine_grid_generator", "cc072571415b0d8c80b8e076d4fa2345851cfdf49f993b10d8c2da66ddee2f9e", "{\"abi\": \"cc072571415b0d8c80b8e076d4fa2345851cfdf49f993b10d8c2da66ddee2f9e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.affine_grid_generator\", \"op\": \"aten::affine_grid_generator\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AffineGridGeneratorKernelPython(const at::Tensor & theta, at::IntArrayRef size, bool align_corners) {
-  auto result = CallPythonOp_Generic("flag_gems.affine_grid_generator", {theta, size, align_corners});
+  auto result = AffineGridGeneratorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.affine_grid_generator", {theta, size, align_corners}); }, static_cast<const at::Tensor&>(theta), static_cast<const at::IntArrayRef&>(size), static_cast<const bool&>(align_corners));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AliasFnSource("aten::alias", "flag_gems.alias", "58fa63fbc838c8c81a98722faa88edc47d704b7a0e034baa2d5a989904d2f264", "{\"abi\": \"58fa63fbc838c8c81a98722faa88edc47d704b7a0e034baa2d5a989904d2f264\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.alias\", \"op\": \"aten::alias\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AliasKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.alias", {self});
+  auto result = AliasFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.alias", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AllFnSource("aten::all", "flag_gems.all", "9cffcdf1dac05a19d53fa444af6c547eed0ff3077be523a9e74f1659a1b1e2ab", "{\"abi\": \"9cffcdf1dac05a19d53fa444af6c547eed0ff3077be523a9e74f1659a1b1e2ab\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.all\", \"op\": \"aten::all\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AllKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.all", {self});
+  auto result = AllFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.all", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AllDimFnSource("aten::all.dim", "flag_gems.all_dim", "34d137df54f8c889e3e5c8da41dd10f5e3ef68ed724f8c17ae0cb916f6e1f2d0", "{\"abi\": \"34d137df54f8c889e3e5c8da41dd10f5e3ef68ed724f8c17ae0cb916f6e1f2d0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.all_dim\", \"op\": \"aten::all.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AllDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.all_dim", {self, dim, keepdim});
+  auto result = AllDimFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.all_dim", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AllDimsFnSource("aten::all.dims", "flag_gems.all_dims", "be5ed26a295c0053e9133a19aeaa340441ecbb639abaddd0cbef7cde9018b800", "{\"abi\": \"be5ed26a295c0053e9133a19aeaa340441ecbb639abaddd0cbef7cde9018b800\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.all_dims\", \"op\": \"aten::all.dims\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AllDimsKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.all_dims", {self, dim, keepdim});
+  auto result = AllDimsFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.all_dims", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AmaxFnSource("aten::amax", "flag_gems.amax", "50b675cf66b84f445075066fa8e2eabb450c71e4b345653cc0dcdfb559a08678", "{\"abi\": \"50b675cf66b84f445075066fa8e2eabb450c71e4b345653cc0dcdfb559a08678\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.amax\", \"op\": \"aten::amax\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AmaxKernelPython(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.amax", {self, dim, keepdim});
+  auto result = AmaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.amax", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AminFnSource("aten::amin", "flag_gems.amin", "7cab71fe4bd12496fc6d3da2a73d7209e20329847c488a950ec11d5409ee3154", "{\"abi\": \"7cab71fe4bd12496fc6d3da2a73d7209e20329847c488a950ec11d5409ee3154\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.amin\", \"op\": \"aten::amin\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AminKernelPython(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.amin", {self, dim, keepdim});
+  auto result = AminFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.amin", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AminmaxFnSource("aten::aminmax", "flag_gems.aminmax", "0c6d53ba8c586ffda5206ca8fe9be6b53da0b329c4befea3c9e7a9e414791bea", "{\"abi\": \"0c6d53ba8c586ffda5206ca8fe9be6b53da0b329c4befea3c9e7a9e414791bea\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.aminmax\", \"op\": \"aten::aminmax\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> AminmaxKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.aminmax", {self, dim, keepdim}, 2);
+  auto result = AminmaxFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.aminmax", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<int64_t>&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot AngleFnSource("aten::angle", "flag_gems.angle", "cab0db241f08ad9994557414af3eef5fc96c8d12ce865c46ba8b3fa7a95f495d", "{\"abi\": \"cab0db241f08ad9994557414af3eef5fc96c8d12ce865c46ba8b3fa7a95f495d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.angle\", \"op\": \"aten::angle\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AngleKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.angle", {self});
+  auto result = AngleFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.angle", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AnyFnSource("aten::any", "flag_gems.any", "b503a66f726a79002af2cf9d064c07d715950ae8dd5160cff717e14db2f95d86", "{\"abi\": \"b503a66f726a79002af2cf9d064c07d715950ae8dd5160cff717e14db2f95d86\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.any\", \"op\": \"aten::any\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AnyKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.any", {self});
+  auto result = AnyFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.any", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AnyDimFnSource("aten::any.dim", "flag_gems.any_dim", "8721580fb6f17f487c034e58c0cc11965b6ee9d8d5b3d971a425d26581defd69", "{\"abi\": \"8721580fb6f17f487c034e58c0cc11965b6ee9d8d5b3d971a425d26581defd69\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.any_dim\", \"op\": \"aten::any.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AnyDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.any_dim", {self, dim, keepdim});
+  auto result = AnyDimFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.any_dim", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AnyDimsFnSource("aten::any.dims", "flag_gems.any_dims", "f4dc575594897fd21d5dcdb2cc9aa58de7c18e12b06244d73addfa246fe9d2c3", "{\"abi\": \"f4dc575594897fd21d5dcdb2cc9aa58de7c18e12b06244d73addfa246fe9d2c3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.any_dims\", \"op\": \"aten::any.dims\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AnyDimsKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.any_dims", {self, dim, keepdim});
+  auto result = AnyDimsFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.any_dims", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ArangeFnSource("aten::arange", "flag_gems.arange", "e8a9fa3db346e041fc8205cb1d16cc3ec4c12f81d9425970594a6b4ddef4627b", "{\"abi\": \"e8a9fa3db346e041fc8205cb1d16cc3ec4c12f81d9425970594a6b4ddef4627b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.arange\", \"op\": \"aten::arange\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ArangeKernelPython(const at::Scalar & end, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
   ::std::optional<at::ScalarType> _dt = dtype;
   if (!_dt.has_value()) _dt = (end.isFloatingPoint())
       ? at::typeMetaToScalarType(at::get_default_dtype()) : at::kLong;
-  auto result = CallPythonOp_Factory("flag_gems.arange", {end}, _dt, device);
+  auto result = ([&]() { if (!ArangeFnSource.Available()) return CallPythonOp_Factory("flag_gems.arange", {end}, _dt, device); const auto _native_target = TypedSourceFactoryDevice(device); return ArangeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.arange", {end}, _dt, device); }, static_cast<const at::Scalar&>(end), static_cast<const std::optional<at::ScalarType>&>(_dt), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ArangeStartFnSource("aten::arange.start", "flag_gems.arange_start", "15970bf76ab9e28c31a65b31199c45e7cbe33889003724ec7308ea66a141e677", "{\"abi\": \"15970bf76ab9e28c31a65b31199c45e7cbe33889003724ec7308ea66a141e677\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.arange_start\", \"op\": \"aten::arange.start\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ArangeStartKernelPython(const at::Scalar & start, const at::Scalar & end, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
   ::std::optional<at::ScalarType> _dt = dtype;
   if (!_dt.has_value()) _dt = (start.isFloatingPoint() || end.isFloatingPoint())
       ? at::typeMetaToScalarType(at::get_default_dtype()) : at::kLong;
-  auto result = CallPythonOp_Factory("flag_gems.arange_start", {start, end}, _dt, device);
+  auto result = ([&]() { if (!ArangeStartFnSource.Available()) return CallPythonOp_Factory("flag_gems.arange_start", {start, end}, _dt, device); const auto _native_target = TypedSourceFactoryDevice(device); return ArangeStartFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.arange_start", {start, end}, _dt, device); }, static_cast<const at::Scalar&>(start), static_cast<const at::Scalar&>(end), static_cast<const std::optional<at::ScalarType>&>(_dt), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ArangeStartStepFnSource("aten::arange.start_step", "flag_gems.arange_start", "c077d1f4ef6370839dee6dd43e245788cadecd188733587e2fa78907633489c6", "{\"abi\": \"c077d1f4ef6370839dee6dd43e245788cadecd188733587e2fa78907633489c6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.arange_start\", \"op\": \"aten::arange.start_step\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ArangeStartStepKernelPython(const at::Scalar & start, const at::Scalar & end, const at::Scalar & step, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
   ::std::optional<at::ScalarType> _dt = dtype;
   if (!_dt.has_value()) _dt = (start.isFloatingPoint() || end.isFloatingPoint() || step.isFloatingPoint())
       ? at::typeMetaToScalarType(at::get_default_dtype()) : at::kLong;
-  auto result = CallPythonOp_Factory("flag_gems.arange_start", {start, end, step}, _dt, device);
+  auto result = ([&]() { if (!ArangeStartStepFnSource.Available()) return CallPythonOp_Factory("flag_gems.arange_start", {start, end, step}, _dt, device); const auto _native_target = TypedSourceFactoryDevice(device); return ArangeStartStepFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.arange_start", {start, end, step}, _dt, device); }, static_cast<const at::Scalar&>(start), static_cast<const at::Scalar&>(end), static_cast<const at::Scalar&>(step), static_cast<const std::optional<at::ScalarType>&>(_dt), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ArgmaxFnSource("aten::argmax", "flag_gems.argmax", "acf3208121666dfe13a20cdac9e20aef57b1bc8e33e2fe58449dfe40d4a57ee2", "{\"abi\": \"acf3208121666dfe13a20cdac9e20aef57b1bc8e33e2fe58449dfe40d4a57ee2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.argmax\", \"op\": \"aten::argmax\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ArgmaxKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.argmax", {self, dim, keepdim});
+  auto result = ArgmaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.argmax", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<int64_t>&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ArgminFnSource("aten::argmin", "flag_gems.argmin", "b7ed0cbbd18f7aa03ad6a700df3b6ba9efef8b339ece535e5ad353818f5d492f", "{\"abi\": \"b7ed0cbbd18f7aa03ad6a700df3b6ba9efef8b339ece535e5ad353818f5d492f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.argmin\", \"op\": \"aten::argmin\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ArgminKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.argmin", {self, dim, keepdim});
+  auto result = ArgminFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.argmin", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<int64_t>&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AsStridedCopyOutFnSource("aten::as_strided_copy.out", "flag_gems.as_strided_copy_out", "0e1f80c40b4f38be9053132a1b673fb51d7b010730b6854dbbc2a6f0d94dbc57", "{\"abi\": \"0e1f80c40b4f38be9053132a1b673fb51d7b010730b6854dbbc2a6f0d94dbc57\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.as_strided_copy_out\", \"op\": \"aten::as_strided_copy.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AsStridedCopyOutKernelPython(const at::Tensor & self, at::IntArrayRef size, at::IntArrayRef stride, ::std::optional<int64_t> storage_offset, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.as_strided_copy_out", {self, size, stride, storage_offset}, {PyKwarg{"out", out}});
+  AsStridedCopyOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.as_strided_copy_out", {self, size, stride, storage_offset}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(size), static_cast<const at::IntArrayRef&>(stride), static_cast<const ::std::optional<int64_t>&>(storage_offset), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot AsinFnSource("aten::asin", "flag_gems.asin", "c4164c2ce8e2f1f256f9bdfd616d4929fc988074595ee4f594cb3d9789f79073", "{\"abi\": \"c4164c2ce8e2f1f256f9bdfd616d4929fc988074595ee4f594cb3d9789f79073\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.asin\", \"op\": \"aten::asin\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AsinKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.asin", {self});
+  auto result = AsinFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.asin", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AsinInplaceFnSource("aten::asin_", "flag_gems.asin_", "28eef5521ee55950cda8dfcf03b33085ccfc7d4def1e28f65b56f98b5fb3e2a6", "{\"abi\": \"28eef5521ee55950cda8dfcf03b33085ccfc7d4def1e28f65b56f98b5fb3e2a6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.asin_\", \"op\": \"aten::asin_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AsinInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.asin_", {self});
+  auto result = AsinInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.asin_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AsinhFnSource("aten::asinh", "flag_gems.asinh", "2f8b1280c6af5aab95ada522d459a21cef2967d2120d6922518772eb85fcafea", "{\"abi\": \"2f8b1280c6af5aab95ada522d459a21cef2967d2120d6922518772eb85fcafea\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.asinh\", \"op\": \"aten::asinh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AsinhKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.asinh", {self});
+  auto result = AsinhFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.asinh", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AsinhOutFnSource("aten::asinh.out", "flag_gems.asinh_out", "f0a8dc7695ad9b41c8b12088948a944014e28ae3cebdb1b0a732bcdf085346f2", "{\"abi\": \"f0a8dc7695ad9b41c8b12088948a944014e28ae3cebdb1b0a732bcdf085346f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.asinh_out\", \"op\": \"aten::asinh.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AsinhOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.asinh_out", {self, out});
+  AsinhOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.asinh_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot AsinhInplaceFnSource("aten::asinh_", "flag_gems.asinh_", "1ecb6d398707f04b5e5cb8ff2eb7dfbbd9ab88f4383795ccd4bd28a3a2f11edf", "{\"abi\": \"1ecb6d398707f04b5e5cb8ff2eb7dfbbd9ab88f4383795ccd4bd28a3a2f11edf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.asinh_\", \"op\": \"aten::asinh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AsinhInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.asinh_", {self});
+  auto result = AsinhInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.asinh_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AtanFnSource("aten::atan", "flag_gems.atan", "3900c1c658830ee1377d07c91ee8fa9e2719ff851aca1fcf01c90c73b739b4bc", "{\"abi\": \"3900c1c658830ee1377d07c91ee8fa9e2719ff851aca1fcf01c90c73b739b4bc\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atan\", \"op\": \"aten::atan\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AtanKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.atan", {self});
+  auto result = AtanFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atan", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Atan2FnSource("aten::atan2", "flag_gems.atan2", "96a7744c841420e2ccc32f086e178da4f6da909b1a7e376421619a7b56dd6b6b", "{\"abi\": \"96a7744c841420e2ccc32f086e178da4f6da909b1a7e376421619a7b56dd6b6b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atan2\", \"op\": \"aten::atan2\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Atan2KernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.atan2", {self, other});
+  auto result = Atan2FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atan2", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Atan2OutFnSource("aten::atan2.out", "flag_gems.atan2_out", "5703640ae6b54dad61f4adc24874eef75b5478a3c4f3580edfda190ee3f75c6f", "{\"abi\": \"5703640ae6b54dad61f4adc24874eef75b5478a3c4f3580edfda190ee3f75c6f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atan2_out\", \"op\": \"aten::atan2.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Atan2OutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.atan2_out", {self, other, out});
+  Atan2OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atan2_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Atan2InplaceFnSource("aten::atan2_", "flag_gems.atan2_", "987039ba370f2068726206c256ffd64c38a239fae944f43a1aacfd3d8969c92a", "{\"abi\": \"987039ba370f2068726206c256ffd64c38a239fae944f43a1aacfd3d8969c92a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atan2_\", \"op\": \"aten::atan2_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Atan2InplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.atan2_", {self, other});
+  auto result = Atan2InplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atan2_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AtanInplaceFnSource("aten::atan_", "flag_gems.atan_", "5c76be47957a7b87905d6b73f81efeab9f6a4d620be7cbe7e7e89d1f6af0130f", "{\"abi\": \"5c76be47957a7b87905d6b73f81efeab9f6a4d620be7cbe7e7e89d1f6af0130f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atan_\", \"op\": \"aten::atan_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AtanInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.atan_", {self});
+  auto result = AtanInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atan_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AtanhFnSource("aten::atanh", "flag_gems.atanh", "4e283a97a4c6a1d5187942d68c1490f02bab799773db049aa96b104946001202", "{\"abi\": \"4e283a97a4c6a1d5187942d68c1490f02bab799773db049aa96b104946001202\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atanh\", \"op\": \"aten::atanh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AtanhKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.atanh", {self});
+  auto result = AtanhFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atanh", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AtanhInplaceFnSource("aten::atanh_", "flag_gems.atanh_", "e1b3a0070e049d26553f64a7bacf68f12443fe908bd0ac60620de577e5efb42d", "{\"abi\": \"e1b3a0070e049d26553f64a7bacf68f12443fe908bd0ac60620de577e5efb42d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.atanh_\", \"op\": \"aten::atanh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & AtanhInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.atanh_", {self});
+  auto result = AtanhInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.atanh_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot AvgPool2dFnSource("aten::avg_pool2d", "flag_gems.avg_pool2d", "47b9bd0cf35acb0f07a0bbe139306564d4c00755e1fe6c22f07303230784de68", "{\"abi\": \"47b9bd0cf35acb0f07a0bbe139306564d4c00755e1fe6c22f07303230784de68\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.avg_pool2d\", \"op\": \"aten::avg_pool2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AvgPool2dKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, bool ceil_mode, bool count_include_pad, ::std::optional<int64_t> divisor_override) {
-  auto result = CallPythonOp_Generic("flag_gems.avg_pool2d", {self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override});
+  auto result = AvgPool2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.avg_pool2d", {self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const bool&>(ceil_mode), static_cast<const bool&>(count_include_pad), static_cast<const ::std::optional<int64_t>&>(divisor_override));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AvgPool2dBackwardFnSource("aten::avg_pool2d_backward", "flag_gems.avg_pool2d_backward", "a2d90db54a027961017b96d5d3a7b55dba1a9ac2794f58782ce8c0269bafab35", "{\"abi\": \"a2d90db54a027961017b96d5d3a7b55dba1a9ac2794f58782ce8c0269bafab35\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.avg_pool2d_backward\", \"op\": \"aten::avg_pool2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AvgPool2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, bool ceil_mode, bool count_include_pad, ::std::optional<int64_t> divisor_override) {
-  auto result = CallPythonOp_Generic("flag_gems.avg_pool2d_backward", {grad_output, self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override});
+  auto result = AvgPool2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.avg_pool2d_backward", {grad_output, self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const bool&>(ceil_mode), static_cast<const bool&>(count_include_pad), static_cast<const ::std::optional<int64_t>&>(divisor_override));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AvgPool3dFnSource("aten::avg_pool3d", "flag_gems.avg_pool3d", "43030d851a89a34b7b0e9ace45bfdc9bf2153a3591dd42a853dbf4c6cc0a48e0", "{\"abi\": \"43030d851a89a34b7b0e9ace45bfdc9bf2153a3591dd42a853dbf4c6cc0a48e0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.avg_pool3d\", \"op\": \"aten::avg_pool3d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AvgPool3dKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, bool ceil_mode, bool count_include_pad, ::std::optional<int64_t> divisor_override) {
-  auto result = CallPythonOp_Generic("flag_gems.avg_pool3d", {self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override});
+  auto result = AvgPool3dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.avg_pool3d", {self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const bool&>(ceil_mode), static_cast<const bool&>(count_include_pad), static_cast<const ::std::optional<int64_t>&>(divisor_override));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot AvgPool3dBackwardFnSource("aten::avg_pool3d_backward", "flag_gems.avg_pool3d_backward", "45e1b3b1b94b23a4ef85c3f030648e2d500baefc815acea0a0c7a9ac8e175ce9", "{\"abi\": \"45e1b3b1b94b23a4ef85c3f030648e2d500baefc815acea0a0c7a9ac8e175ce9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.avg_pool3d_backward\", \"op\": \"aten::avg_pool3d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AvgPool3dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, bool ceil_mode, bool count_include_pad, ::std::optional<int64_t> divisor_override) {
-  auto result = CallPythonOp_Generic("flag_gems.avg_pool3d_backward", {grad_output, self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override});
+  auto result = AvgPool3dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.avg_pool3d_backward", {grad_output, self, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const bool&>(ceil_mode), static_cast<const bool&>(count_include_pad), static_cast<const ::std::optional<int64_t>&>(divisor_override));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BaddbmmFnSource("aten::baddbmm", "flag_gems.baddbmm", "2cb516dbffe992d0002a8fc43a7729184b720020920b80130bde9badeb8970a9", "{\"abi\": \"2cb516dbffe992d0002a8fc43a7729184b720020920b80130bde9badeb8970a9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.baddbmm\", \"op\": \"aten::baddbmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BaddbmmKernelPython(const at::Tensor & self, const at::Tensor & batch1, const at::Tensor & batch2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.baddbmm", {self, batch1, batch2, beta, alpha});
+  auto result = BaddbmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.baddbmm", {self, batch1, batch2, beta, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(batch1), static_cast<const at::Tensor&>(batch2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BaddbmmOutFnSource("aten::baddbmm.out", "flag_gems.baddbmm_out", "fb1a330bbdfd2181a386609415d6130692c0b452875067c4396a22e54a9ce252", "{\"abi\": \"fb1a330bbdfd2181a386609415d6130692c0b452875067c4396a22e54a9ce252\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.baddbmm_out\", \"op\": \"aten::baddbmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BaddbmmOutKernelPython(const at::Tensor & self, const at::Tensor & batch1, const at::Tensor & batch2, const at::Scalar & beta, const at::Scalar & alpha, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.baddbmm_out", {self, batch1, batch2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}, PyKwarg{"out", out}});
+  BaddbmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.baddbmm_out", {self, batch1, batch2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(batch1), static_cast<const at::Tensor&>(batch2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot BaddbmmInplaceFnSource("aten::baddbmm_", "flag_gems.baddbmm_", "6ddc514cd9a5af514a0da4783f174ea31bd209cdf1190fa374b78e19bf2e65b4", "{\"abi\": \"6ddc514cd9a5af514a0da4783f174ea31bd209cdf1190fa374b78e19bf2e65b4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"beta\", \"type\": \"at::Scalar\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.baddbmm_\", \"op\": \"aten::baddbmm_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BaddbmmInplaceKernelPython(at::Tensor & self, const at::Tensor & batch1, const at::Tensor & batch2, const at::Scalar & beta, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.baddbmm_", {self, batch1, batch2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}});
+  auto result = BaddbmmInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.baddbmm_", {self, batch1, batch2}, {PyKwarg{"beta", beta}, PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(batch1), static_cast<const at::Tensor&>(batch2), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BernoulliInplaceFloatFnSource("aten::bernoulli_.float", "flag_gems.bernoulli_", "f6ab584af159951e75b61e08f7c6234d33c61cf514df07d3d78bdc57656477ec", "{\"abi\": \"f6ab584af159951e75b61e08f7c6234d33c61cf514df07d3d78bdc57656477ec\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.bernoulli_\", \"op\": \"aten::bernoulli_.float\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BernoulliInplaceFloatKernelPython(at::Tensor & self, double p, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_RandomInplace("flag_gems.bernoulli_", {self, p});
+  auto result = BernoulliInplaceFloatFnSource.Call<at::Tensor>([&]() { return CallPythonOp_RandomInplace("flag_gems.bernoulli_", {self, p}); }, static_cast<const at::Tensor&>(self), static_cast<const double&>(p));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BinaryCrossEntropyFnSource("aten::binary_cross_entropy", "flag_gems.binary_cross_entropy", "32af715afafee468954311d28a5f3603e982b69b632d55deb5abd85fb2832c56", "{\"abi\": \"32af715afafee468954311d28a5f3603e982b69b632d55deb5abd85fb2832c56\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.binary_cross_entropy\", \"op\": \"aten::binary_cross_entropy\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BinaryCrossEntropyKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.binary_cross_entropy", {self, target, weight, reduction});
+  auto result = BinaryCrossEntropyFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.binary_cross_entropy", {self, target, weight, reduction}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BinaryCrossEntropyOutFnSource("aten::binary_cross_entropy.out", "flag_gems.binary_cross_entropy_out", "3a0f08fc11d00f634467c79ba2dbab16062799b2928a0459f9fb7e4dafe5f042", "{\"abi\": \"3a0f08fc11d00f634467c79ba2dbab16062799b2928a0459f9fb7e4dafe5f042\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.binary_cross_entropy_out\", \"op\": \"aten::binary_cross_entropy.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BinaryCrossEntropyOutKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.binary_cross_entropy_out", {self, target, weight, reduction, out});
+  BinaryCrossEntropyOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.binary_cross_entropy_out", {self, target, weight, reduction, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot BinaryCrossEntropyBackwardFnSource("aten::binary_cross_entropy_backward", "flag_gems.binary_cross_entropy_backward", "0a9a78effb080f188e4818425d94b2b708619ebd561e6afc574103215bdf336d", "{\"abi\": \"0a9a78effb080f188e4818425d94b2b708619ebd561e6afc574103215bdf336d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.binary_cross_entropy_backward\", \"op\": \"aten::binary_cross_entropy_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BinaryCrossEntropyBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.binary_cross_entropy_backward", {grad_output, self, target, weight, reduction});
+  auto result = BinaryCrossEntropyBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.binary_cross_entropy_backward", {grad_output, self, target, weight, reduction}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BinaryCrossEntropyWithLogitsFnSource("aten::binary_cross_entropy_with_logits", "flag_gems.binary_cross_entropy_with_logits", "3593eb330cc50f38acf3344d2adce0601c4d33a6a3137d1b8384c3eef9b5a7e1", "{\"abi\": \"3593eb330cc50f38acf3344d2adce0601c4d33a6a3137d1b8384c3eef9b5a7e1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.binary_cross_entropy_with_logits\", \"op\": \"aten::binary_cross_entropy_with_logits\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BinaryCrossEntropyWithLogitsKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & pos_weight, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.binary_cross_entropy_with_logits", {self, target, weight, pos_weight, reduction});
+  auto result = BinaryCrossEntropyWithLogitsFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.binary_cross_entropy_with_logits", {self, target, weight, pos_weight, reduction}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(pos_weight), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BincountFnSource("aten::bincount", "flag_gems.bincount", "8cb8e80fc104985990974efd3269ede0bf0eddff3100e863e1e693f4844e3be8", "{\"abi\": \"8cb8e80fc104985990974efd3269ede0bf0eddff3100e863e1e693f4844e3be8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.bincount\", \"op\": \"aten::bincount\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BincountKernelPython(const at::Tensor & self, const ::std::optional<at::Tensor> & weights, int64_t minlength) {
-  auto result = CallPythonOp_Generic("flag_gems.bincount", {self, weights, minlength});
+  auto result = BincountFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bincount", {self, weights, minlength}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::Tensor>&>(weights), static_cast<const int64_t&>(minlength));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseAndScalarFnSource("aten::bitwise_and.Scalar", "flag_gems.bitwise_and_scalar", "9ee682b0ff3064c6fe69c0761da1c80923b8967bb53f772b8fef0798d013f1f8", "{\"abi\": \"9ee682b0ff3064c6fe69c0761da1c80923b8967bb53f772b8fef0798d013f1f8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.bitwise_and_scalar\", \"op\": \"aten::bitwise_and.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseAndScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_and_scalar", {self, other});
+  auto result = BitwiseAndScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_and_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseAndScalarTensorFnSource("aten::bitwise_and.Scalar_Tensor", "flag_gems.bitwise_and_scalar_tensor", "58127516286478e0f6df740f539ae183931c1dc317bac16b73f56eadd281395d", "{\"abi\": \"58127516286478e0f6df740f539ae183931c1dc317bac16b73f56eadd281395d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_and_scalar_tensor\", \"op\": \"aten::bitwise_and.Scalar_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseAndScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_and_scalar_tensor", {self, other});
+  auto result = BitwiseAndScalarTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_and_scalar_tensor", {self, other}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseAndTensorFnSource("aten::bitwise_and.Tensor", "flag_gems.bitwise_and_tensor", "644e3e7cf1b85836e6b358709223612acf1e3607ed793ac959a256c2c91dd4c3", "{\"abi\": \"644e3e7cf1b85836e6b358709223612acf1e3607ed793ac959a256c2c91dd4c3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_and_tensor\", \"op\": \"aten::bitwise_and.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseAndTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_and_tensor", {self, other});
+  auto result = BitwiseAndTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_and_tensor", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseAndInplaceScalarFnSource("aten::bitwise_and_.Scalar", "flag_gems.bitwise_and_scalar_", "7fc6b3037e52398ed485737ff5dcc84936118c1ae41a3fdb51da1dd56ec3532c", "{\"abi\": \"7fc6b3037e52398ed485737ff5dcc84936118c1ae41a3fdb51da1dd56ec3532c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.bitwise_and_scalar_\", \"op\": \"aten::bitwise_and_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseAndInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_and_scalar_", {self, other});
+  auto result = BitwiseAndInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_and_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseAndInplaceTensorFnSource("aten::bitwise_and_.Tensor", "flag_gems.bitwise_and_tensor_", "792f7c216d9e46d9512ccb59d72f0bf7998628f69c3a63189aae511ad96b7b8f", "{\"abi\": \"792f7c216d9e46d9512ccb59d72f0bf7998628f69c3a63189aae511ad96b7b8f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_and_tensor_\", \"op\": \"aten::bitwise_and_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseAndInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_and_tensor_", {self, other});
+  auto result = BitwiseAndInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_and_tensor_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseNotFnSource("aten::bitwise_not", "flag_gems.bitwise_not", "e189a0dd039b6a2a182c2d9d98b7a810433bf62b667eab0a2ce3daa47274afe6", "{\"abi\": \"e189a0dd039b6a2a182c2d9d98b7a810433bf62b667eab0a2ce3daa47274afe6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_not\", \"op\": \"aten::bitwise_not\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseNotKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_not", {self});
+  auto result = BitwiseNotFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_not", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseNotInplaceFnSource("aten::bitwise_not_", "flag_gems.bitwise_not_", "98bc2c141cdaf47956d342d0bd440f152ff91e3955519138076bf2297791d164", "{\"abi\": \"98bc2c141cdaf47956d342d0bd440f152ff91e3955519138076bf2297791d164\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_not_\", \"op\": \"aten::bitwise_not_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseNotInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_not_", {self});
+  auto result = BitwiseNotInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_not_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseOrScalarFnSource("aten::bitwise_or.Scalar", "flag_gems.bitwise_or_scalar", "7d4173ab9299f72b3808c88bd1617ef092165ac6e155392249aae923db5730af", "{\"abi\": \"7d4173ab9299f72b3808c88bd1617ef092165ac6e155392249aae923db5730af\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.bitwise_or_scalar\", \"op\": \"aten::bitwise_or.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseOrScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_or_scalar", {self, other});
+  auto result = BitwiseOrScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_or_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseOrScalarTensorFnSource("aten::bitwise_or.Scalar_Tensor", "flag_gems.bitwise_or_scalar_tensor", "d8abb8827eb3808afc0e8db0272634408e24b5268de2fce92b898c4a09711e1b", "{\"abi\": \"d8abb8827eb3808afc0e8db0272634408e24b5268de2fce92b898c4a09711e1b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_or_scalar_tensor\", \"op\": \"aten::bitwise_or.Scalar_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseOrScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_or_scalar_tensor", {self, other});
+  auto result = BitwiseOrScalarTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_or_scalar_tensor", {self, other}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseOrTensorFnSource("aten::bitwise_or.Tensor", "flag_gems.bitwise_or_tensor", "12ed4501b3c70841b9f87c70cfa06a396ae8d96adf53adf52105dcba3e0b4a98", "{\"abi\": \"12ed4501b3c70841b9f87c70cfa06a396ae8d96adf53adf52105dcba3e0b4a98\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_or_tensor\", \"op\": \"aten::bitwise_or.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseOrTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_or_tensor", {self, other});
+  auto result = BitwiseOrTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_or_tensor", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseOrInplaceScalarFnSource("aten::bitwise_or_.Scalar", "flag_gems.bitwise_or_scalar_", "5a55a996d62734047123de258b761a4aa39dcd375fe3413e02098593bf58283c", "{\"abi\": \"5a55a996d62734047123de258b761a4aa39dcd375fe3413e02098593bf58283c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.bitwise_or_scalar_\", \"op\": \"aten::bitwise_or_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseOrInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_or_scalar_", {self, other});
+  auto result = BitwiseOrInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_or_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseOrInplaceTensorFnSource("aten::bitwise_or_.Tensor", "flag_gems.bitwise_or_tensor_", "486fdee412810cb5acd954f1be6ab20c720bac50bfb1e5e434a676481c8aa4f3", "{\"abi\": \"486fdee412810cb5acd954f1be6ab20c720bac50bfb1e5e434a676481c8aa4f3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_or_tensor_\", \"op\": \"aten::bitwise_or_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseOrInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_or_tensor_", {self, other});
+  auto result = BitwiseOrInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_or_tensor_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseRightShiftTensorFnSource("aten::bitwise_right_shift.Tensor", "flag_gems.bitwise_right_shift", "378862b3829de2e8c0188f90f3ce7e59615ec309be2153f2d3e33490ca9cfa96", "{\"abi\": \"378862b3829de2e8c0188f90f3ce7e59615ec309be2153f2d3e33490ca9cfa96\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_right_shift\", \"op\": \"aten::bitwise_right_shift.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseRightShiftTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_right_shift", {self, other});
+  auto result = BitwiseRightShiftTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_right_shift", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseRightShiftInplaceTensorFnSource("aten::bitwise_right_shift_.Tensor", "flag_gems.bitwise_right_shift_", "c316568090cf14084cca1119f78e1f790fd6726bb92dfd8e49b47c8ac181ae8c", "{\"abi\": \"c316568090cf14084cca1119f78e1f790fd6726bb92dfd8e49b47c8ac181ae8c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_right_shift_\", \"op\": \"aten::bitwise_right_shift_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseRightShiftInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_right_shift_", {self, other});
+  auto result = BitwiseRightShiftInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_right_shift_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseXorScalarFnSource("aten::bitwise_xor.Scalar", "flag_gems.bitwise_xor_scalar", "733e7356b398a51edf24851d9491be09b6b93499f1df7d3ec90ea84ca18c86a5", "{\"abi\": \"733e7356b398a51edf24851d9491be09b6b93499f1df7d3ec90ea84ca18c86a5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.bitwise_xor_scalar\", \"op\": \"aten::bitwise_xor.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseXorScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_xor_scalar", {self, other});
+  auto result = BitwiseXorScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_xor_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseXorScalarTensorFnSource("aten::bitwise_xor.Scalar_Tensor", "flag_gems.bitwise_xor_scalar_tensor", "22b2625d2b36fd0b564fcf5b4cf7a29efb4e3173e44ee59499244c352a9e8ded", "{\"abi\": \"22b2625d2b36fd0b564fcf5b4cf7a29efb4e3173e44ee59499244c352a9e8ded\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_xor_scalar_tensor\", \"op\": \"aten::bitwise_xor.Scalar_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseXorScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_xor_scalar_tensor", {self, other});
+  auto result = BitwiseXorScalarTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_xor_scalar_tensor", {self, other}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseXorTensorFnSource("aten::bitwise_xor.Tensor", "flag_gems.bitwise_xor_tensor", "703926aa8d1f92290ca53125e15ea3e76948c07b2d0098630b76958a8341500d", "{\"abi\": \"703926aa8d1f92290ca53125e15ea3e76948c07b2d0098630b76958a8341500d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_xor_tensor\", \"op\": \"aten::bitwise_xor.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BitwiseXorTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_xor_tensor", {self, other});
+  auto result = BitwiseXorTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_xor_tensor", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BitwiseXorInplaceScalarFnSource("aten::bitwise_xor_.Scalar", "flag_gems.bitwise_xor_scalar_", "1e52a6b1b08d5630f621c84078333239a72802018d501da68acd1e27ff07d8ff", "{\"abi\": \"1e52a6b1b08d5630f621c84078333239a72802018d501da68acd1e27ff07d8ff\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.bitwise_xor_scalar_\", \"op\": \"aten::bitwise_xor_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseXorInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_xor_scalar_", {self, other});
+  auto result = BitwiseXorInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_xor_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BitwiseXorInplaceTensorFnSource("aten::bitwise_xor_.Tensor", "flag_gems.bitwise_xor_tensor_", "ac1893fd5920e0523592203f1f9cccba4c5b5577450cd054fc1693d2ed818611", "{\"abi\": \"ac1893fd5920e0523592203f1f9cccba4c5b5577450cd054fc1693d2ed818611\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bitwise_xor_tensor_\", \"op\": \"aten::bitwise_xor_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BitwiseXorInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.bitwise_xor_tensor_", {self, other});
+  auto result = BitwiseXorInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bitwise_xor_tensor_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot BlackmanWindowFnSource("aten::blackman_window", "flag_gems.blackman_window", "6c59250e8ff13a7bd7514f33deedb272364eee521a1c824adc2dd48243fcf358", "{\"abi\": \"6c59250e8ff13a7bd7514f33deedb272364eee521a1c824adc2dd48243fcf358\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.blackman_window\", \"op\": \"aten::blackman_window\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BlackmanWindowKernelPython(int64_t window_length, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.blackman_window", {window_length}, dtype, device);
+  auto result = ([&]() { if (!BlackmanWindowFnSource.Available()) return CallPythonOp_Factory("flag_gems.blackman_window", {window_length}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return BlackmanWindowFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.blackman_window", {window_length}, dtype, device); }, static_cast<const int64_t&>(window_length), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BlackmanWindowPeriodicFnSource("aten::blackman_window.periodic", "flag_gems.blackman_window_periodic", "dd536224c8f3ecff3654cd7c06dd444c6077c4a4ea5e2e28cd5f225464947779", "{\"abi\": \"dd536224c8f3ecff3654cd7c06dd444c6077c4a4ea5e2e28cd5f225464947779\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.blackman_window_periodic\", \"op\": \"aten::blackman_window.periodic\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool periodic, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.blackman_window_periodic", {window_length, periodic}, dtype, device);
+  auto result = ([&]() { if (!BlackmanWindowPeriodicFnSource.Available()) return CallPythonOp_Factory("flag_gems.blackman_window_periodic", {window_length, periodic}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return BlackmanWindowPeriodicFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.blackman_window_periodic", {window_length, periodic}, dtype, device); }, static_cast<const int64_t&>(window_length), static_cast<const bool&>(periodic), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = CallPythonOp_Generic("flag_gems.bmm", {self, mat2});
+  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self, mat2}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot BmmOutFnSource("aten::bmm.out", "flag_gems.bmm_out", "f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1", "{\"abi\": \"f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm_out\", \"op\": \"aten::bmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.bmm_out", {self, mat2, out});
+  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self, mat2, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot BucketizeTensorFnSource("aten::bucketize.Tensor", "flag_gems.bucketize", "c0c47370d6b0a35fca02b7521333d6e4c1565e7b88ce3ff8063a8fedd6940ffb", "{\"abi\": \"c0c47370d6b0a35fca02b7521333d6e4c1565e7b88ce3ff8063a8fedd6940ffb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out_int32\", \"type\": \"bool\"}, {\"keyword\": \"right\", \"type\": \"bool\"}], \"host\": \"flag_gems.bucketize\", \"op\": \"aten::bucketize.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BucketizeTensorKernelPython(const at::Tensor & self, const at::Tensor & boundaries, bool out_int32, bool right) {
-  auto result = CallPythonOp_GenericKw("flag_gems.bucketize", {self, boundaries}, {PyKwarg{"out_int32", out_int32}, PyKwarg{"right", right}});
+  auto result = BucketizeTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.bucketize", {self, boundaries}, {PyKwarg{"out_int32", out_int32}, PyKwarg{"right", right}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(boundaries), static_cast<const bool&>(out_int32), static_cast<const bool&>(right));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CatFnSource("aten::cat", "flag_gems.cat", "eb699a46d1603857e5598ada5081877cc15a70ec4a7246c1ae68b54be9a85d0d", "{\"abi\": \"eb699a46d1603857e5598ada5081877cc15a70ec4a7246c1ae68b54be9a85d0d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::ITensorListRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.cat\", \"op\": \"aten::cat\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CatKernelPython(const at::ITensorListRef & tensors, int64_t dim) {
-  auto result = CallPythonOp_ListI("flag_gems.cat", tensors, dim);
+  auto result = CatFnSource.Call<at::Tensor>([&]() { return CallPythonOp_ListI("flag_gems.cat", tensors, dim); }, static_cast<const at::ITensorListRef&>(tensors), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CeilFnSource("aten::ceil", "flag_gems.ceil", "a84d32d8cf3610461b067d664d31fad5718e3e2f137e7c9064857568e8f1a254", "{\"abi\": \"a84d32d8cf3610461b067d664d31fad5718e3e2f137e7c9064857568e8f1a254\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.ceil\", \"op\": \"aten::ceil\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CeilKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.ceil", {self});
+  auto result = CeilFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ceil", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CeilOutFnSource("aten::ceil.out", "flag_gems.ceil_out", "fbcbba197293d6330751b5a61a9390a509b9121d998b24845b30cbd12decd870", "{\"abi\": \"fbcbba197293d6330751b5a61a9390a509b9121d998b24845b30cbd12decd870\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.ceil_out\", \"op\": \"aten::ceil.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CeilOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.ceil_out", {self});
+  auto result = CeilOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ceil_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot CeilInplaceFnSource("aten::ceil_", "flag_gems.ceil_", "dc0aac31131fd5655425539481eea15da7d1c8db9a2f75ca90ee3115781fae28", "{\"abi\": \"dc0aac31131fd5655425539481eea15da7d1c8db9a2f75ca90ee3115781fae28\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.ceil_\", \"op\": \"aten::ceil_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CeilInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.ceil_", {self});
+  auto result = CeilInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ceil_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot CeluFnSource("aten::celu", "flag_gems.celu", "3f52c4784f5443d6f0bc544cf6cbea0fd8288e74e86d0def1b079fb03c8581ab", "{\"abi\": \"3f52c4784f5443d6f0bc544cf6cbea0fd8288e74e86d0def1b079fb03c8581ab\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.celu\", \"op\": \"aten::celu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CeluKernelPython(const at::Tensor & self, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.celu", {self, alpha});
+  auto result = CeluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.celu", {self, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CeluInplaceFnSource("aten::celu_", "flag_gems.celu_", "6a4a858c98aaa0f1dd2eda4dc722ab4860618a0bf52ef4645f6fb47b52c01f94", "{\"abi\": \"6a4a858c98aaa0f1dd2eda4dc722ab4860618a0bf52ef4645f6fb47b52c01f94\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.celu_\", \"op\": \"aten::celu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CeluInplaceKernelPython(at::Tensor & self, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.celu_", {self, alpha});
+  auto result = CeluInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.celu_", {self, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ChannelShuffleFnSource("aten::channel_shuffle", "flag_gems.channel_shuffle", "3da94a62119564e510b0d8aa35b027c31323d867839064ffc65e9cdd3d1d954f", "{\"abi\": \"3da94a62119564e510b0d8aa35b027c31323d867839064ffc65e9cdd3d1d954f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.channel_shuffle\", \"op\": \"aten::channel_shuffle\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ChannelShuffleKernelPython(const at::Tensor & self, int64_t groups) {
-  auto result = CallPythonOp_Generic("flag_gems.channel_shuffle", {self, groups});
+  auto result = ChannelShuffleFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.channel_shuffle", {self, groups}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(groups));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CholeskyInverseFnSource("aten::cholesky_inverse", "flag_gems.cholesky_inverse", "30c331b817429a4b86902a3306b385adf71b25f79441902ea410a19f9607e0f1", "{\"abi\": \"30c331b817429a4b86902a3306b385adf71b25f79441902ea410a19f9607e0f1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.cholesky_inverse\", \"op\": \"aten::cholesky_inverse\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CholeskyInverseKernelPython(const at::Tensor & self, bool upper) {
-  auto result = CallPythonOp_Generic("flag_gems.cholesky_inverse", {self, upper});
+  auto result = CholeskyInverseFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cholesky_inverse", {self, upper}); }, static_cast<const at::Tensor&>(self), static_cast<const bool&>(upper));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CholeskySolveFnSource("aten::cholesky_solve", "flag_gems.cholesky_solve", "ed63eadb6656716968b1882b06576e503cc27450cc0a686d61241fbf2853dd02", "{\"abi\": \"ed63eadb6656716968b1882b06576e503cc27450cc0a686d61241fbf2853dd02\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.cholesky_solve\", \"op\": \"aten::cholesky_solve\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CholeskySolveKernelPython(const at::Tensor & self, const at::Tensor & input2, bool upper) {
-  auto result = CallPythonOp_Generic("flag_gems.cholesky_solve", {self, input2, upper});
+  auto result = CholeskySolveFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cholesky_solve", {self, input2, upper}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(input2), static_cast<const bool&>(upper));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CholeskySolveOutFnSource("aten::cholesky_solve.out", "flag_gems.cholesky_solve_out", "72889cb9b1360061393dea29fada886e54d63c186fff65b3f4cd3896a4d43e5a", "{\"abi\": \"72889cb9b1360061393dea29fada886e54d63c186fff65b3f4cd3896a4d43e5a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cholesky_solve_out\", \"op\": \"aten::cholesky_solve.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CholeskySolveOutKernelPython(const at::Tensor & self, const at::Tensor & input2, bool upper, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.cholesky_solve_out", {self, input2, upper}, {PyKwarg{"out", out}});
+  CholeskySolveOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.cholesky_solve_out", {self, input2, upper}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(input2), static_cast<const bool&>(upper), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot ClampFnSource("aten::clamp", "flag_gems.clamp", "8dbbb8635609f91d572d84addbae227cbfcf5cda1b8cbd32e886473de980d896", "{\"abi\": \"8dbbb8635609f91d572d84addbae227cbfcf5cda1b8cbd32e886473de980d896\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Scalar>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Scalar>\"}], \"host\": \"flag_gems.clamp\", \"op\": \"aten::clamp\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ClampKernelPython(const at::Tensor & self, const ::std::optional<at::Scalar> & min, const ::std::optional<at::Scalar> & max) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp", {self, min, max});
+  auto result = ClampFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp", {self, min, max}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::Scalar>&>(min), static_cast<const ::std::optional<at::Scalar>&>(max));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ClampTensorFnSource("aten::clamp.Tensor", "flag_gems.clamp_tensor", "dd6b28bcdebd6de7297463c9453e28525ede59be9af7a3e5ed4583396d3df7aa", "{\"abi\": \"dd6b28bcdebd6de7297463c9453e28525ede59be9af7a3e5ed4583396d3df7aa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}], \"host\": \"flag_gems.clamp_tensor\", \"op\": \"aten::clamp.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ClampTensorKernelPython(const at::Tensor & self, const ::std::optional<at::Tensor> & min, const ::std::optional<at::Tensor> & max) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_tensor", {self, min, max});
+  auto result = ClampTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_tensor", {self, min, max}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::Tensor>&>(min), static_cast<const ::std::optional<at::Tensor>&>(max));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ClampInplaceFnSource("aten::clamp_", "flag_gems.clamp_", "5c8abf54290fa0dcde19fdcfe59c5af67c766560e0b38c97127e53efa6dc9bc8", "{\"abi\": \"5c8abf54290fa0dcde19fdcfe59c5af67c766560e0b38c97127e53efa6dc9bc8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Scalar>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Scalar>\"}], \"host\": \"flag_gems.clamp_\", \"op\": \"aten::clamp_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ClampInplaceKernelPython(at::Tensor & self, const ::std::optional<at::Scalar> & min, const ::std::optional<at::Scalar> & max) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_", {self, min, max});
+  auto result = ClampInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_", {self, min, max}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::Scalar>&>(min), static_cast<const ::std::optional<at::Scalar>&>(max));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ClampInplaceTensorFnSource("aten::clamp_.Tensor", "flag_gems.clamp_tensor_", "807ceb0cbdf5fff36def8ae8666df948fc33c013f39af9d374bb1af6803130f9", "{\"abi\": \"807ceb0cbdf5fff36def8ae8666df948fc33c013f39af9d374bb1af6803130f9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}], \"host\": \"flag_gems.clamp_tensor_\", \"op\": \"aten::clamp_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ClampInplaceTensorKernelPython(at::Tensor & self, const ::std::optional<at::Tensor> & min, const ::std::optional<at::Tensor> & max) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_tensor_", {self, min, max});
+  auto result = ClampInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_tensor_", {self, min, max}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::Tensor>&>(min), static_cast<const ::std::optional<at::Tensor>&>(max));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ClampMaxFnSource("aten::clamp_max", "flag_gems.clamp_max", "c73bad1bd1b46a9bfa9ef21bb63500642538fc1dc12906a1cca9b0ebbb7b8de8", "{\"abi\": \"c73bad1bd1b46a9bfa9ef21bb63500642538fc1dc12906a1cca9b0ebbb7b8de8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.clamp_max\", \"op\": \"aten::clamp_max\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ClampMaxKernelPython(const at::Tensor & self, const at::Scalar & max) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_max", {self, max});
+  auto result = ClampMaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_max", {self, max}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(max));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ClampMaxInplaceFnSource("aten::clamp_max_", "flag_gems.clamp_max_", "ebd32c129e8d80adfe5a483aa40ea3d0a6e492588ca64a9840727f6dc0cf49cf", "{\"abi\": \"ebd32c129e8d80adfe5a483aa40ea3d0a6e492588ca64a9840727f6dc0cf49cf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.clamp_max_\", \"op\": \"aten::clamp_max_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ClampMaxInplaceKernelPython(at::Tensor & self, const at::Scalar & max) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_max_", {self, max});
+  auto result = ClampMaxInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_max_", {self, max}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(max));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ClampMinFnSource("aten::clamp_min", "flag_gems.clamp_min", "65ce3dff4d9105eafaa2df4a7a14e6b144929af7a09adc153260766d2297976e", "{\"abi\": \"65ce3dff4d9105eafaa2df4a7a14e6b144929af7a09adc153260766d2297976e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.clamp_min\", \"op\": \"aten::clamp_min\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ClampMinKernelPython(const at::Tensor & self, const at::Scalar & min) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_min", {self, min});
+  auto result = ClampMinFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_min", {self, min}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(min));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ClampMinInplaceFnSource("aten::clamp_min_", "flag_gems.clamp_min_", "2092eaad7bfa103f59bca50f7b2c823ac1aaf49fb987b4ab5ea5bbed67fb768d", "{\"abi\": \"2092eaad7bfa103f59bca50f7b2c823ac1aaf49fb987b4ab5ea5bbed67fb768d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.clamp_min_\", \"op\": \"aten::clamp_min_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ClampMinInplaceKernelPython(at::Tensor & self, const at::Scalar & min) {
-  auto result = CallPythonOp_Generic("flag_gems.clamp_min_", {self, min});
+  auto result = ClampMinInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.clamp_min_", {self, min}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(min));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot Col2imFnSource("aten::col2im", "flag_gems.col2im", "2bc429a5a6bb29bd1842de1e4d1003227c89c9538a34877761f0789001c471ed", "{\"abi\": \"2bc429a5a6bb29bd1842de1e4d1003227c89c9538a34877761f0789001c471ed\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.col2im\", \"op\": \"aten::col2im\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Col2imKernelPython(const at::Tensor & self, at::IntArrayRef output_size, at::IntArrayRef kernel_size, at::IntArrayRef dilation, at::IntArrayRef padding, at::IntArrayRef stride) {
-  auto result = CallPythonOp_Generic("flag_gems.col2im", {self, output_size, kernel_size, dilation, padding, stride});
+  auto result = Col2imFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.col2im", {self, output_size, kernel_size, dilation, padding, stride}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(dilation), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(stride));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ConjPhysicalInplaceFnSource("aten::conj_physical_", "flag_gems.conj_physical_", "6a2e88612c2fb79cb9bf0e03c57df33f6bda5cd358e7d8201e50c1324957d8bb", "{\"abi\": \"6a2e88612c2fb79cb9bf0e03c57df33f6bda5cd358e7d8201e50c1324957d8bb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.conj_physical_\", \"op\": \"aten::conj_physical_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ConjPhysicalInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.conj_physical_", {self});
+  auto result = ConjPhysicalInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.conj_physical_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ConstantPadNdFnSource("aten::constant_pad_nd", "flag_gems.constant_pad_nd", "621273739f8d32d92137d480e27294bdf0e23734eeee4993cb8aaf1270fd19f2", "{\"abi\": \"621273739f8d32d92137d480e27294bdf0e23734eeee4993cb8aaf1270fd19f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.constant_pad_nd\", \"op\": \"aten::constant_pad_nd\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ConstantPadNdKernelPython(const at::Tensor & self, at::IntArrayRef pad, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.constant_pad_nd", {self, pad, value});
+  auto result = ConstantPadNdFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.constant_pad_nd", {self, pad, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(pad), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ConvolutionOverrideableFnSource("aten::convolution_overrideable", "flag_gems.convolution_overrideable", "42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520", "{\"abi\": \"42b174b4f4653ff1481ef845341543f84533a70c90020cafe3f6c6e73c89c520\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.convolution_overrideable\", \"op\": \"aten::convolution_overrideable\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ConvolutionOverrideableKernelPython(const at::Tensor & input, const at::Tensor & weight, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed, at::IntArrayRef output_padding, int64_t groups) {
-  auto result = CallPythonOp_Generic("flag_gems.convolution_overrideable", {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups});
+  auto result = ConvolutionOverrideableFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.convolution_overrideable", {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(transposed), static_cast<const at::IntArrayRef&>(output_padding), static_cast<const int64_t&>(groups));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ConvolutionOverrideableOutFnSource("aten::convolution_overrideable.out", "flag_gems.convolution_overrideable_out", "5e39494ded091aed657186d799b1226cd77627645e85d42d8e796a256e3ec3b7", "{\"abi\": \"5e39494ded091aed657186d799b1226cd77627645e85d42d8e796a256e3ec3b7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.convolution_overrideable_out\", \"op\": \"aten::convolution_overrideable.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ConvolutionOverrideableOutKernelPython(const at::Tensor & input, const at::Tensor & weight, const ::std::optional<at::Tensor> & bias, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed, at::IntArrayRef output_padding, int64_t groups, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.convolution_overrideable_out", {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups}, {PyKwarg{"out", out}});
+  ConvolutionOverrideableOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.convolution_overrideable_out", {input, weight, bias, stride, padding, dilation, transposed, output_padding, groups}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(transposed), static_cast<const at::IntArrayRef&>(output_padding), static_cast<const int64_t&>(groups), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot CopysignOutFnSource("aten::copysign.out", "flag_gems.copysign_out", "fe4f2aa6118091363f328c39064365ecca4d262c3e301e51385cacaf82884a5a", "{\"abi\": \"fe4f2aa6118091363f328c39064365ecca4d262c3e301e51385cacaf82884a5a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.copysign_out\", \"op\": \"aten::copysign.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CopysignOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.copysign_out", {self, other});
+  auto result = CopysignOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.copysign_out", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot CopysignInplaceTensorFnSource("aten::copysign_.Tensor", "flag_gems.copysign_", "e48a2a7afb93c428cde68f13301e5a02efad02cfe966e9407d9028df5315eded", "{\"abi\": \"e48a2a7afb93c428cde68f13301e5a02efad02cfe966e9407d9028df5315eded\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.copysign_\", \"op\": \"aten::copysign_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CopysignInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.copysign_", {self, other});
+  auto result = CopysignInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.copysign_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot CosFnSource("aten::cos", "flag_gems.cos", "10b3abf750819953d3c0f8812e6231efcc5d21765325431bfc95d2bc9f13a3c8", "{\"abi\": \"10b3abf750819953d3c0f8812e6231efcc5d21765325431bfc95d2bc9f13a3c8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cos\", \"op\": \"aten::cos\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CosKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.cos", {self});
+  auto result = CosFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cos", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CosInplaceFnSource("aten::cos_", "flag_gems.cos_", "7faa43ed864a9dcf5df96566dfef1fb745416f85dc7c5b267e1f57e4f2003fe0", "{\"abi\": \"7faa43ed864a9dcf5df96566dfef1fb745416f85dc7c5b267e1f57e4f2003fe0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cos_\", \"op\": \"aten::cos_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CosInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.cos_", {self});
+  auto result = CosInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cos_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot CoshFnSource("aten::cosh", "flag_gems.cosh", "45e60c42f83c9558963696a722913685d6505f5bb7ddcafb65ea0fb37e465ca3", "{\"abi\": \"45e60c42f83c9558963696a722913685d6505f5bb7ddcafb65ea0fb37e465ca3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cosh\", \"op\": \"aten::cosh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CoshKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.cosh", {self});
+  auto result = CoshFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cosh", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CoshOutFnSource("aten::cosh.out", "flag_gems.cosh_out", "abe17487adf8283a23e1fa31d1d9d6cb899e5c150a24be5fbe467ca687b37b31", "{\"abi\": \"abe17487adf8283a23e1fa31d1d9d6cb899e5c150a24be5fbe467ca687b37b31\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cosh_out\", \"op\": \"aten::cosh.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CoshOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.cosh_out", {self, out});
+  CoshOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cosh_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot CoshInplaceFnSource("aten::cosh_", "flag_gems.cosh_", "68bf7504e03d5a10b15705d6c99f55824f3204cf0bb47829f026c676b1624120", "{\"abi\": \"68bf7504e03d5a10b15705d6c99f55824f3204cf0bb47829f026c676b1624120\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cosh_\", \"op\": \"aten::cosh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CoshInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.cosh_", {self});
+  auto result = CoshInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cosh_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot CountNonzeroFnSource("aten::count_nonzero", "flag_gems.count_nonzero", "fbe8ca49ae2352f349777f3b2e90b2f02e6eb0444783c2c77e3109cc5e6914bd", "{\"abi\": \"fbe8ca49ae2352f349777f3b2e90b2f02e6eb0444783c2c77e3109cc5e6914bd\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.count_nonzero\", \"op\": \"aten::count_nonzero\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CountNonzeroKernelPython(const at::Tensor & self, ::std::optional<int64_t> dim) {
-  auto result = CallPythonOp_Generic("flag_gems.count_nonzero", {self, dim});
+  auto result = CountNonzeroFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.count_nonzero", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<int64_t>&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CudnnBatchNormBackwardFnSource("aten::cudnn_batch_norm_backward", "flag_gems.cudnn_batch_norm_backward", "ca58863b73fd24290b70267eb71cc1f2cdd1cb4172945f330ceb03077f3c3212", "{\"abi\": \"ca58863b73fd24290b70267eb71cc1f2cdd1cb4172945f330ceb03077f3c3212\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cudnn_batch_norm_backward\", \"op\": \"aten::cudnn_batch_norm_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> CudnnBatchNormBackwardKernelPython(const at::Tensor & input, const at::Tensor & grad_output, const at::Tensor & weight, const ::std::optional<at::Tensor> & running_mean, const ::std::optional<at::Tensor> & running_var, const ::std::optional<at::Tensor> & save_mean, const ::std::optional<at::Tensor> & save_var, double epsilon, const at::Tensor & reserveSpace) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.cudnn_batch_norm_backward", {input, grad_output, weight, running_mean, running_var, save_mean, save_var, epsilon, reserveSpace}, 3);
+  auto result = CudnnBatchNormBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.cudnn_batch_norm_backward", {input, grad_output, weight, running_mean, running_var, save_mean, save_var, epsilon, reserveSpace}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(weight), static_cast<const ::std::optional<at::Tensor>&>(running_mean), static_cast<const ::std::optional<at::Tensor>&>(running_var), static_cast<const ::std::optional<at::Tensor>&>(save_mean), static_cast<const ::std::optional<at::Tensor>&>(save_var), static_cast<const double&>(epsilon), static_cast<const at::Tensor&>(reserveSpace));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot CudnnConvolutionFnSource("aten::cudnn_convolution", "flag_gems.cudnn_convolution", "c05e487665b58b06afc82cc0fb24e7abeca72721f95d250f53e226d6eda4b048", "{\"abi\": \"c05e487665b58b06afc82cc0fb24e7abeca72721f95d250f53e226d6eda4b048\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.cudnn_convolution\", \"op\": \"aten::cudnn_convolution\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CudnnConvolutionKernelPython(const at::Tensor & self, const at::Tensor & weight, at::IntArrayRef padding, at::IntArrayRef stride, at::IntArrayRef dilation, int64_t groups, bool benchmark, bool deterministic, bool allow_tf32) {
-  auto result = CallPythonOp_Generic("flag_gems.cudnn_convolution", {self, weight, padding, stride, dilation, groups, benchmark, deterministic, allow_tf32});
+  auto result = CudnnConvolutionFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cudnn_convolution", {self, weight, padding, stride, dilation, groups, benchmark, deterministic, allow_tf32}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(weight), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(dilation), static_cast<const int64_t&>(groups), static_cast<const bool&>(benchmark), static_cast<const bool&>(deterministic), static_cast<const bool&>(allow_tf32));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CudnnConvolutionTransposeFnSource("aten::cudnn_convolution_transpose", "flag_gems.cudnn_convolution_transpose", "30b368f9d4d354da091581e7c4f0d4a571a2df16d7bdb524b01fa2cfe2505f4f", "{\"abi\": \"30b368f9d4d354da091581e7c4f0d4a571a2df16d7bdb524b01fa2cfe2505f4f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.cudnn_convolution_transpose\", \"op\": \"aten::cudnn_convolution_transpose\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CudnnConvolutionTransposeKernelPython(const at::Tensor & self, const at::Tensor & weight, at::IntArrayRef padding, at::IntArrayRef output_padding, at::IntArrayRef stride, at::IntArrayRef dilation, int64_t groups, bool benchmark, bool deterministic, bool allow_tf32) {
-  auto result = CallPythonOp_Generic("flag_gems.cudnn_convolution_transpose", {self, weight, padding, output_padding, stride, dilation, groups, benchmark, deterministic, allow_tf32});
+  auto result = CudnnConvolutionTransposeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.cudnn_convolution_transpose", {self, weight, padding, output_padding, stride, dilation, groups, benchmark, deterministic, allow_tf32}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(weight), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(output_padding), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(dilation), static_cast<const int64_t&>(groups), static_cast<const bool&>(benchmark), static_cast<const bool&>(deterministic), static_cast<const bool&>(allow_tf32));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CummaxFnSource("aten::cummax", "flag_gems.cummax", "8836cf95e38dd6656638f13dd4625bb520487c145f121f4236ea53ed41511101", "{\"abi\": \"8836cf95e38dd6656638f13dd4625bb520487c145f121f4236ea53ed41511101\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.cummax\", \"op\": \"aten::cummax\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> CummaxKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.cummax", {self, dim}, 2);
+  auto result = CummaxFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.cummax", {self, dim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot CumminFnSource("aten::cummin", "flag_gems.cummin", "e18b1fdceeb5f943834c25d5db74a97583d2078a7a04fc3793884bb38270e3d7", "{\"abi\": \"e18b1fdceeb5f943834c25d5db74a97583d2078a7a04fc3793884bb38270e3d7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.cummin\", \"op\": \"aten::cummin\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> CumminKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.cummin", {self, dim}, 2);
+  auto result = CumminFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.cummin", {self, dim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot CumprodFnSource("aten::cumprod", "flag_gems.cumprod", "ff46526eb281c4580a32f29af95eb0e36c05fe3818d2085ff5b0c8de8a45017d", "{\"abi\": \"ff46526eb281c4580a32f29af95eb0e36c05fe3818d2085ff5b0c8de8a45017d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.cumprod\", \"op\": \"aten::cumprod\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CumprodKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.cumprod", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CumprodFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.cumprod", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CumprodInplaceFnSource("aten::cumprod_", "flag_gems.cumprod_", "b0fdee3d212b7c5ac06dfe85652edc4146e06bbc1bd65bbdd4563611de6708ca", "{\"abi\": \"b0fdee3d212b7c5ac06dfe85652edc4146e06bbc1bd65bbdd4563611de6708ca\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.cumprod_\", \"op\": \"aten::cumprod_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CumprodInplaceKernelPython(at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.cumprod_", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CumprodInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.cumprod_", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot CumsumFnSource("aten::cumsum", "flag_gems.cumsum", "8e0ce56892211b8ae4c029176228ab696b8b49d5573336e31758cbf1a888cb69", "{\"abi\": \"8e0ce56892211b8ae4c029176228ab696b8b49d5573336e31758cbf1a888cb69\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.cumsum\", \"op\": \"aten::cumsum\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor CumsumKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.cumsum", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CumsumFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.cumsum", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot CumsumOutFnSource("aten::cumsum.out", "flag_gems.cumsum_out", "f4680d0023282c097a38b2d5035c4f0b8296818035fe00a088086eb49996afc1", "{\"abi\": \"f4680d0023282c097a38b2d5035c4f0b8296818035fe00a088086eb49996afc1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.cumsum_out\", \"op\": \"aten::cumsum.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CumsumOutKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.cumsum_out", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
+  CumsumOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.cumsum_out", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<at::ScalarType>&>(dtype), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot CumsumInplaceFnSource("aten::cumsum_", "flag_gems.cumsum_", "b747fdbf74454a88d3a7db5d09e86236734fe7c10e758882e9af471d66bfe49e", "{\"abi\": \"b747fdbf74454a88d3a7db5d09e86236734fe7c10e758882e9af471d66bfe49e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.cumsum_\", \"op\": \"aten::cumsum_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & CumsumInplaceKernelPython(at::Tensor & self, int64_t dim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.cumsum_", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = CumsumInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.cumsum_", {self, dim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot Deg2radFnSource("aten::deg2rad", "flag_gems.deg2rad", "c4349369538731a19ab5ad29317d03abd4fb6a297d8ed5f69788fdb05e782f77", "{\"abi\": \"c4349369538731a19ab5ad29317d03abd4fb6a297d8ed5f69788fdb05e782f77\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.deg2rad\", \"op\": \"aten::deg2rad\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Deg2radKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.deg2rad", {self});
+  auto result = Deg2radFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.deg2rad", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Deg2radOutFnSource("aten::deg2rad.out", "flag_gems.deg2rad_out", "91dc2b6ab85e73989bf4465180c85626e21ac6e1263f0e4c8eb8c443f1007615", "{\"abi\": \"91dc2b6ab85e73989bf4465180c85626e21ac6e1263f0e4c8eb8c443f1007615\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.deg2rad_out\", \"op\": \"aten::deg2rad.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Deg2radOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.deg2rad_out", {self, out});
+  Deg2radOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.deg2rad_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Deg2radInplaceFnSource("aten::deg2rad_", "flag_gems.deg2rad_", "3d2d50718ce595e0b0800687114219c27a9af8025282175d62a5be085b245a5f", "{\"abi\": \"3d2d50718ce595e0b0800687114219c27a9af8025282175d62a5be085b245a5f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.deg2rad_\", \"op\": \"aten::deg2rad_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Deg2radInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.deg2rad_", {self});
+  auto result = Deg2radInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.deg2rad_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot DequantizeSelfFnSource("aten::dequantize.self", "flag_gems.dequantize", "6aa3d3662d09091fa4b002dc2c34bb1cec7a15d671196c149fe1b444580fd903", "{\"abi\": \"6aa3d3662d09091fa4b002dc2c34bb1cec7a15d671196c149fe1b444580fd903\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.dequantize\", \"op\": \"aten::dequantize.self\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DequantizeSelfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.dequantize", {self});
+  auto result = DequantizeSelfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.dequantize", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DiagonalBackwardFnSource("aten::diagonal_backward", "flag_gems.diagonal_backward", "b55d2d6595dc2e3afb0eeb42482ccc8577fc8234554f7b417d2e9535bdc36566", "{\"abi\": \"b55d2d6595dc2e3afb0eeb42482ccc8577fc8234554f7b417d2e9535bdc36566\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.diagonal_backward\", \"op\": \"aten::diagonal_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DiagonalBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef input_sizes, int64_t offset, int64_t dim1, int64_t dim2) {
-  auto result = CallPythonOp_Generic("flag_gems.diagonal_backward", {grad_output, input_sizes, offset, dim1, dim2});
+  auto result = DiagonalBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.diagonal_backward", {grad_output, input_sizes, offset, dim1, dim2}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(input_sizes), static_cast<const int64_t&>(offset), static_cast<const int64_t&>(dim1), static_cast<const int64_t&>(dim2));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DigammaFnSource("aten::digamma", "flag_gems.digamma", "af26ba060cdcfc4936ac142c058df63ee17f4dd312c5bd2aa3f3daf1a1909683", "{\"abi\": \"af26ba060cdcfc4936ac142c058df63ee17f4dd312c5bd2aa3f3daf1a1909683\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.digamma\", \"op\": \"aten::digamma\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DigammaKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.digamma", {self});
+  auto result = DigammaFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.digamma", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DigammaInplaceFnSource("aten::digamma_", "flag_gems.digamma_", "e936097f1de995591630a5c682aadf12a3fb82f12fd4d9bb0d8481b666bb606a", "{\"abi\": \"e936097f1de995591630a5c682aadf12a3fb82f12fd4d9bb0d8481b666bb606a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.digamma_\", \"op\": \"aten::digamma_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & DigammaInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.digamma_", {self});
+  auto result = DigammaInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.digamma_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot DistFnSource("aten::dist", "flag_gems.dist", "b08a10f2d7ea22d5b1e5c2c2911f390d10e14c38b2cb400b1413b43086b1e2c5", "{\"abi\": \"b08a10f2d7ea22d5b1e5c2c2911f390d10e14c38b2cb400b1413b43086b1e2c5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.dist\", \"op\": \"aten::dist\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DistKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & p) {
-  auto result = CallPythonOp_Generic("flag_gems.dist", {self, other, p});
+  auto result = DistFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.dist", {self, other, p}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(p));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DivScalarFnSource("aten::div.Scalar", "flag_gems.true_divide", "5325b680ae6521aa72f725b13baa5690af999d949612052e61af463d54e73a01", "{\"abi\": \"5325b680ae6521aa72f725b13baa5690af999d949612052e61af463d54e73a01\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.true_divide\", \"op\": \"aten::div.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DivScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.true_divide", {self, other});
+  auto result = DivScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.true_divide", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DivScalarModeFnSource("aten::div.Scalar_mode", "flag_gems.div_mode", "84f8d2fa5acf4d7945e9a0d03314ebe52bc7074982fd0049d6aca9d0febaddde", "{\"abi\": \"84f8d2fa5acf4d7945e9a0d03314ebe52bc7074982fd0049d6aca9d0febaddde\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"::std::optional<c10::string_view>\"}], \"host\": \"flag_gems.div_mode\", \"op\": \"aten::div.Scalar_mode\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DivScalarModeKernelPython(const at::Tensor & self, const at::Scalar & other, ::std::optional<c10::string_view> rounding_mode) {
-  auto result = CallPythonOp_Generic("flag_gems.div_mode", {self, other, rounding_mode});
+  auto result = DivScalarModeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.div_mode", {self, other, rounding_mode}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other), static_cast<const ::std::optional<c10::string_view>&>(rounding_mode));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DivTensorFnSource("aten::div.Tensor", "flag_gems.true_divide", "d5196e9829770e9ea743df195e4a82aaf91d1b83d51bf46cb849724582875754", "{\"abi\": \"d5196e9829770e9ea743df195e4a82aaf91d1b83d51bf46cb849724582875754\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.true_divide\", \"op\": \"aten::div.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DivTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.true_divide", {self, other});
+  auto result = DivTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.true_divide", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DivTensorModeFnSource("aten::div.Tensor_mode", "flag_gems.div_mode", "1031d8a961bdcf2597824b17544b8c4088cb8f517caf83e66c7e109d2cfe2f39", "{\"abi\": \"1031d8a961bdcf2597824b17544b8c4088cb8f517caf83e66c7e109d2cfe2f39\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<c10::string_view>\"}], \"host\": \"flag_gems.div_mode\", \"op\": \"aten::div.Tensor_mode\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DivTensorModeKernelPython(const at::Tensor & self, const at::Tensor & other, ::std::optional<c10::string_view> rounding_mode) {
-  auto result = CallPythonOp_Generic("flag_gems.div_mode", {self, other, rounding_mode});
+  auto result = DivTensorModeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.div_mode", {self, other, rounding_mode}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const ::std::optional<c10::string_view>&>(rounding_mode));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot DivOutFnSource("aten::div.out", "flag_gems.true_divide_out", "17831e8779e62ca4b04ab6d6066900b60f320104588d9bc1bba34f837724e0ed", "{\"abi\": \"17831e8779e62ca4b04ab6d6066900b60f320104588d9bc1bba34f837724e0ed\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.true_divide_out\", \"op\": \"aten::div.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & DivOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.true_divide_out", {self, other, out});
+  DivOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.true_divide_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot DivInplaceScalarFnSource("aten::div_.Scalar", "flag_gems.true_divide_", "2f1a3ba554d41a2b19b2d40a3e2eaa17e0e1697eff910ed61d74ecbbe81b1519", "{\"abi\": \"2f1a3ba554d41a2b19b2d40a3e2eaa17e0e1697eff910ed61d74ecbbe81b1519\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.true_divide_\", \"op\": \"aten::div_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & DivInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.true_divide_", {self, other});
+  auto result = DivInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.true_divide_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot DivInplaceScalarModeFnSource("aten::div_.Scalar_mode", "flag_gems.div_mode_", "871bbcee96c52e6618902f77c9324e8ece1bd7e871e2779c4bef038b7c032546", "{\"abi\": \"871bbcee96c52e6618902f77c9324e8ece1bd7e871e2779c4bef038b7c032546\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"::std::optional<c10::string_view>\"}], \"host\": \"flag_gems.div_mode_\", \"op\": \"aten::div_.Scalar_mode\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & DivInplaceScalarModeKernelPython(at::Tensor & self, const at::Scalar & other, ::std::optional<c10::string_view> rounding_mode) {
-  auto result = CallPythonOp_Generic("flag_gems.div_mode_", {self, other, rounding_mode});
+  auto result = DivInplaceScalarModeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.div_mode_", {self, other, rounding_mode}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other), static_cast<const ::std::optional<c10::string_view>&>(rounding_mode));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot DivInplaceTensorFnSource("aten::div_.Tensor", "flag_gems.true_divide_", "6d1efd4dab8b68fc6ef53784b24a42650b3ea3151c0feef2854997b2a9390992", "{\"abi\": \"6d1efd4dab8b68fc6ef53784b24a42650b3ea3151c0feef2854997b2a9390992\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.true_divide_\", \"op\": \"aten::div_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & DivInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.true_divide_", {self, other});
+  auto result = DivInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.true_divide_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot DivInplaceTensorModeFnSource("aten::div_.Tensor_mode", "flag_gems.div_mode_", "14f8ffcfc9874aec1cd17bfe1706310cadb031ee24fed24dba39d200c2825a04", "{\"abi\": \"14f8ffcfc9874aec1cd17bfe1706310cadb031ee24fed24dba39d200c2825a04\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<c10::string_view>\"}], \"host\": \"flag_gems.div_mode_\", \"op\": \"aten::div_.Tensor_mode\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & DivInplaceTensorModeKernelPython(at::Tensor & self, const at::Tensor & other, ::std::optional<c10::string_view> rounding_mode) {
-  auto result = CallPythonOp_Generic("flag_gems.div_mode_", {self, other, rounding_mode});
+  auto result = DivInplaceTensorModeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.div_mode_", {self, other, rounding_mode}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const ::std::optional<c10::string_view>&>(rounding_mode));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot DotFnSource("aten::dot", "flag_gems.dot", "b53091b188ebb15c3ae25c5c52f67de70005945d8b909c4ea306d107958f684b", "{\"abi\": \"b53091b188ebb15c3ae25c5c52f67de70005945d8b909c4ea306d107958f684b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.dot\", \"op\": \"aten::dot\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor DotKernelPython(const at::Tensor & self, const at::Tensor & tensor) {
-  auto result = CallPythonOp_Generic("flag_gems.dot", {self, tensor});
+  auto result = DotFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.dot", {self, tensor}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(tensor));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EluFnSource("aten::elu", "flag_gems.elu", "9a1da473bd66ce4e6c53948cb99f50e4fa376c06f4cef828aa7c43ec59b6c292", "{\"abi\": \"9a1da473bd66ce4e6c53948cb99f50e4fa376c06f4cef828aa7c43ec59b6c292\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.elu\", \"op\": \"aten::elu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EluKernelPython(const at::Tensor & self, const at::Scalar & alpha, const at::Scalar & scale, const at::Scalar & input_scale) {
-  auto result = CallPythonOp_Generic("flag_gems.elu", {self, alpha, scale, input_scale});
+  auto result = EluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.elu", {self, alpha, scale, input_scale}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(alpha), static_cast<const at::Scalar&>(scale), static_cast<const at::Scalar&>(input_scale));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EluInplaceFnSource("aten::elu_", "flag_gems.elu_", "480dcc394a1b20b732bfb919424cb72430af49e96f7181e23c40b817a6799e82", "{\"abi\": \"480dcc394a1b20b732bfb919424cb72430af49e96f7181e23c40b817a6799e82\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.elu_\", \"op\": \"aten::elu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & EluInplaceKernelPython(at::Tensor & self, const at::Scalar & alpha, const at::Scalar & scale, const at::Scalar & input_scale) {
-  auto result = CallPythonOp_Generic("flag_gems.elu_", {self, alpha, scale, input_scale});
+  auto result = EluInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.elu_", {self, alpha, scale, input_scale}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(alpha), static_cast<const at::Scalar&>(scale), static_cast<const at::Scalar&>(input_scale));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot EluBackwardFnSource("aten::elu_backward", "flag_gems.elu_backward", "ed6a4e862f7f02729227ba35b7581b7c80824c7355d9212d60f8d894403d24af", "{\"abi\": \"ed6a4e862f7f02729227ba35b7581b7c80824c7355d9212d60f8d894403d24af\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.elu_backward\", \"op\": \"aten::elu_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EluBackwardKernelPython(const at::Tensor & grad_output, const at::Scalar & alpha, const at::Scalar & scale, const at::Scalar & input_scale, bool is_result, const at::Tensor & self_or_result) {
-  auto result = CallPythonOp_Generic("flag_gems.elu_backward", {grad_output, alpha, scale, input_scale, is_result, self_or_result});
+  auto result = EluBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.elu_backward", {grad_output, alpha, scale, input_scale, is_result, self_or_result}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Scalar&>(alpha), static_cast<const at::Scalar&>(scale), static_cast<const at::Scalar&>(input_scale), static_cast<const bool&>(is_result), static_cast<const at::Tensor&>(self_or_result));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EmbeddingFnSource("aten::embedding", "flag_gems.embedding", "157cbaea7d61b8fa54fdf6f7bd5025024aed8c9d64489a3854ecbdbe9c470613", "{\"abi\": \"157cbaea7d61b8fa54fdf6f7bd5025024aed8c9d64489a3854ecbdbe9c470613\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.embedding\", \"op\": \"aten::embedding\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EmbeddingKernelPython(const at::Tensor & weight, const at::Tensor & indices, int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
-  auto result = CallPythonOp_Generic("flag_gems.embedding", {weight, indices, padding_idx, scale_grad_by_freq, false});
+  auto result = EmbeddingFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.embedding", {weight, indices, padding_idx, scale_grad_by_freq, false}); }, static_cast<const at::Tensor&>(weight), static_cast<const at::Tensor&>(indices), static_cast<const int64_t&>(padding_idx), static_cast<const bool&>(scale_grad_by_freq), static_cast<const bool&>(false));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EmbeddingRenormInplaceFnSource("aten::embedding_renorm_", "flag_gems.embedding_renorm_", "296654394ef23aa1ad1692c3b926486872ee19d9103bf31ca0e8c8f710b2c0d1", "{\"abi\": \"296654394ef23aa1ad1692c3b926486872ee19d9103bf31ca0e8c8f710b2c0d1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.embedding_renorm_\", \"op\": \"aten::embedding_renorm_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & EmbeddingRenormInplaceKernelPython(at::Tensor & self, const at::Tensor & indices, double max_norm, double norm_type) {
-  auto result = CallPythonOp_Generic("flag_gems.embedding_renorm_", {self, indices, max_norm, norm_type});
+  auto result = EmbeddingRenormInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.embedding_renorm_", {self, indices, max_norm, norm_type}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(indices), static_cast<const double&>(max_norm), static_cast<const double&>(norm_type));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot EmptyPermutedFnSource("aten::empty_permuted", "flag_gems.empty_permuted", "7b6d193bf1ea59ad024d8451276d5cd5ea8e893edbb1cb5e12bf714bfd20a9fe", "{\"abi\": \"7b6d193bf1ea59ad024d8451276d5cd5ea8e893edbb1cb5e12bf714bfd20a9fe\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.empty_permuted\", \"op\": \"aten::empty_permuted\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EmptyPermutedKernelPython(at::IntArrayRef size, at::IntArrayRef physical_layout, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.empty_permuted", {size, physical_layout}, dtype, device);
+  auto result = ([&]() { if (!EmptyPermutedFnSource.Available()) return CallPythonOp_Factory("flag_gems.empty_permuted", {size, physical_layout}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return EmptyPermutedFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.empty_permuted", {size, physical_layout}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const at::IntArrayRef&>(physical_layout), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EqScalarFnSource("aten::eq.Scalar", "flag_gems.eq_scalar", "6c831353b1752233d7c3dec97f42d7e5223f167ff241f89587014e52f0976e38", "{\"abi\": \"6c831353b1752233d7c3dec97f42d7e5223f167ff241f89587014e52f0976e38\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.eq_scalar\", \"op\": \"aten::eq.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EqScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.eq_scalar", {self, other});
+  auto result = EqScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.eq_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EqTensorFnSource("aten::eq.Tensor", "flag_gems.eq", "47f052b05e27b327c1ca19a6a20a718e19876dec41f5b1d960f5024f12c653cb", "{\"abi\": \"47f052b05e27b327c1ca19a6a20a718e19876dec41f5b1d960f5024f12c653cb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.eq\", \"op\": \"aten::eq.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EqTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.eq", {self, other});
+  auto result = EqTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.eq", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EqInplaceScalarFnSource("aten::eq_.Scalar", "flag_gems.eq_scalar_", "072f09e8d11622619e16d7c9699eb097dbb065692fb36f605190b81838f99f02", "{\"abi\": \"072f09e8d11622619e16d7c9699eb097dbb065692fb36f605190b81838f99f02\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.eq_scalar_\", \"op\": \"aten::eq_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & EqInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.eq_scalar_", {self, other});
+  auto result = EqInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.eq_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot EqInplaceTensorFnSource("aten::eq_.Tensor", "flag_gems.eq_", "80481cd71147151afe24df3307a13696c737f07c0cc0c54dac4b0127c631e70e", "{\"abi\": \"80481cd71147151afe24df3307a13696c737f07c0cc0c54dac4b0127c631e70e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.eq_\", \"op\": \"aten::eq_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & EqInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.eq_", {self, other});
+  auto result = EqInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.eq_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ErfFnSource("aten::erf", "flag_gems.erf", "558d8eaef1252deb0d7116bec8510bbdd96a967a26ca76140e6e010a012274ad", "{\"abi\": \"558d8eaef1252deb0d7116bec8510bbdd96a967a26ca76140e6e010a012274ad\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.erf\", \"op\": \"aten::erf\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ErfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.erf", {self});
+  auto result = ErfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.erf", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ErfInplaceFnSource("aten::erf_", "flag_gems.erf_", "466dc9425502cc6fbaea42603bf87c9e8a0ec2b0b4f6b064c719be70ee04d5df", "{\"abi\": \"466dc9425502cc6fbaea42603bf87c9e8a0ec2b0b4f6b064c719be70ee04d5df\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.erf_\", \"op\": \"aten::erf_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ErfInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.erf_", {self});
+  auto result = ErfInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.erf_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ErfcFnSource("aten::erfc", "flag_gems.erfc", "4d7fcca0386b6af46432ed9b95cdfb5a3eb90393e6c59b158f9fceeaf4d1cc63", "{\"abi\": \"4d7fcca0386b6af46432ed9b95cdfb5a3eb90393e6c59b158f9fceeaf4d1cc63\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.erfc\", \"op\": \"aten::erfc\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ErfcKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.erfc", {self});
+  auto result = ErfcFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.erfc", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ErfcInplaceFnSource("aten::erfc_", "flag_gems.erfc_", "8a3ba6a6a92c3b000d7171ad9d7809bc789d62117692336b49423d459f9836a2", "{\"abi\": \"8a3ba6a6a92c3b000d7171ad9d7809bc789d62117692336b49423d459f9836a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.erfc_\", \"op\": \"aten::erfc_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ErfcInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.erfc_", {self});
+  auto result = ErfcInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.erfc_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ErfinvFnSource("aten::erfinv", "flag_gems.erfinv", "c5d460eea301d1e614642f505308899db47dc3980b1478c667744260b1400d5d", "{\"abi\": \"c5d460eea301d1e614642f505308899db47dc3980b1478c667744260b1400d5d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.erfinv\", \"op\": \"aten::erfinv\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ErfinvKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.erfinv", {self});
+  auto result = ErfinvFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.erfinv", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ErfinvInplaceFnSource("aten::erfinv_", "flag_gems.erfinv_", "1d975d3a25ccba8421ddfe8aa6d6362bee40bc2b7008bf4e2f01bad71751257c", "{\"abi\": \"1d975d3a25ccba8421ddfe8aa6d6362bee40bc2b7008bf4e2f01bad71751257c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.erfinv_\", \"op\": \"aten::erfinv_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ErfinvInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.erfinv_", {self});
+  auto result = ErfinvInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.erfinv_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ExpFnSource("aten::exp", "flag_gems.exp", "2d3554e318970dadfcfaa934291fba38748d845371d141aec36515b6a5777aff", "{\"abi\": \"2d3554e318970dadfcfaa934291fba38748d845371d141aec36515b6a5777aff\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.exp\", \"op\": \"aten::exp\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ExpKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.exp", {self});
+  auto result = ExpFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.exp", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ExpOutFnSource("aten::exp.out", "flag_gems.exp_out", "6a8b5cc1f0c39579fe00afa4580dfbf7520ab81af5bbf8cf1359a8034569842c", "{\"abi\": \"6a8b5cc1f0c39579fe00afa4580dfbf7520ab81af5bbf8cf1359a8034569842c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.exp_out\", \"op\": \"aten::exp.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ExpOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.exp_out", {self, out});
+  ExpOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.exp_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Exp2FnSource("aten::exp2", "flag_gems.exp2", "612b1353ee89762b939bc100164a71ed311e5398ab27b7e16a60dfbd9028d017", "{\"abi\": \"612b1353ee89762b939bc100164a71ed311e5398ab27b7e16a60dfbd9028d017\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.exp2\", \"op\": \"aten::exp2\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Exp2KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.exp2", {self});
+  auto result = Exp2FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.exp2", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Exp2InplaceFnSource("aten::exp2_", "flag_gems.exp2_", "6c071575b02252846c319878ab4de1051103aa2e9f6e2cf0df122be67e515966", "{\"abi\": \"6c071575b02252846c319878ab4de1051103aa2e9f6e2cf0df122be67e515966\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.exp2_\", \"op\": \"aten::exp2_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Exp2InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.exp2_", {self});
+  auto result = Exp2InplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.exp2_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ExpInplaceFnSource("aten::exp_", "flag_gems.exp_", "2f8352ae2b5505b40b34cf6d5d3eebbe9bccabbfe8b96cb28b4a33264384d6d6", "{\"abi\": \"2f8352ae2b5505b40b34cf6d5d3eebbe9bccabbfe8b96cb28b4a33264384d6d6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.exp_\", \"op\": \"aten::exp_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ExpInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.exp_", {self});
+  auto result = ExpInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.exp_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot Expm1FnSource("aten::expm1", "flag_gems.expm1", "b16bec40c30d2d0807be5b7a51a7a0cedd96f77d7166597b34420c329dc6b9ba", "{\"abi\": \"b16bec40c30d2d0807be5b7a51a7a0cedd96f77d7166597b34420c329dc6b9ba\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.expm1\", \"op\": \"aten::expm1\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Expm1KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.expm1", {self});
+  auto result = Expm1FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.expm1", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Expm1OutFnSource("aten::expm1.out", "flag_gems.expm1_out", "966954ac662b78d39a9985287bf4f27a2802468c19635c7f3e6dc6077edb38be", "{\"abi\": \"966954ac662b78d39a9985287bf4f27a2802468c19635c7f3e6dc6077edb38be\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.expm1_out\", \"op\": \"aten::expm1.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Expm1OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.expm1_out", {self, out});
+  Expm1OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.expm1_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Expm1InplaceFnSource("aten::expm1_", "flag_gems.expm1_", "f7d1d66a470cdc87bf546b9c3502ab7d4a186ac1b448607cd2c44b10ad60d921", "{\"abi\": \"f7d1d66a470cdc87bf546b9c3502ab7d4a186ac1b448607cd2c44b10ad60d921\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.expm1_\", \"op\": \"aten::expm1_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Expm1InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.expm1_", {self});
+  auto result = Expm1InplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.expm1_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ExponentialInplaceFnSource("aten::exponential_", "flag_gems.exponential_", "673f594ad54bf27974dd340395d986c837b3d81d16f704b664a26ca5ab98d39b", "{\"abi\": \"673f594ad54bf27974dd340395d986c837b3d81d16f704b664a26ca5ab98d39b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.exponential_\", \"op\": \"aten::exponential_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ExponentialInplaceKernelPython(at::Tensor & self, double lambd, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_RandomInplace("flag_gems.exponential_", {self, lambd});
+  auto result = ExponentialInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_RandomInplace("flag_gems.exponential_", {self, lambd}); }, static_cast<const at::Tensor&>(self), static_cast<const double&>(lambd));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot EyeFnSource("aten::eye", "flag_gems.eye", "e9f607902008e992194e23331b200951b1b556036693e25a3750532a4931dcd5", "{\"abi\": \"e9f607902008e992194e23331b200951b1b556036693e25a3750532a4931dcd5\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.eye\", \"op\": \"aten::eye\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EyeKernelPython(int64_t n, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.eye", {n}, dtype, device);
+  auto result = ([&]() { if (!EyeFnSource.Available()) return CallPythonOp_Factory("flag_gems.eye", {n}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return EyeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.eye", {n}, dtype, device); }, static_cast<const int64_t&>(n), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot EyeMFnSource("aten::eye.m", "flag_gems.eye_m", "7e3917a7931cc353e86f647093a3f572c97a9cc8cde0641c132c19ea68c4f318", "{\"abi\": \"7e3917a7931cc353e86f647093a3f572c97a9cc8cde0641c132c19ea68c4f318\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.eye_m\", \"op\": \"aten::eye.m\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor EyeMKernelPython(int64_t n, int64_t m, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.eye_m", {n, m}, dtype, device);
+  auto result = ([&]() { if (!EyeMFnSource.Available()) return CallPythonOp_Factory("flag_gems.eye_m", {n, m}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return EyeMFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.eye_m", {n, m}, dtype, device); }, static_cast<const int64_t&>(n), static_cast<const int64_t&>(m), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FakeQuantizePerChannelAffineCachemaskFnSource("aten::fake_quantize_per_channel_affine_cachemask", "flag_gems.fake_quantize_per_channel_affine_cachemask", "e6774802d96afee1bc4b0267e8d346d81b5b8652026c7da079c8da07f3c4880e", "{\"abi\": \"e6774802d96afee1bc4b0267e8d346d81b5b8652026c7da079c8da07f3c4880e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.fake_quantize_per_channel_affine_cachemask\", \"op\": \"aten::fake_quantize_per_channel_affine_cachemask\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> FakeQuantizePerChannelAffineCachemaskKernelPython(const at::Tensor & self, const at::Tensor & scale, const at::Tensor & zero_point, int64_t axis, int64_t quant_min, int64_t quant_max) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.fake_quantize_per_channel_affine_cachemask", {self, scale, zero_point, axis, quant_min, quant_max}, 2);
+  auto result = FakeQuantizePerChannelAffineCachemaskFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.fake_quantize_per_channel_affine_cachemask", {self, scale, zero_point, axis, quant_min, quant_max}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const int64_t&>(axis), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot FakeQuantizePerChannelAffineCachemaskOutFnSource("aten::fake_quantize_per_channel_affine_cachemask.out", "flag_gems.fake_quantize_per_channel_affine_cachemask_out", "fe41622656a899ee9216c33dcf711789e94eeb69392f05ce4021c1e78e4ea618", "{\"abi\": \"fe41622656a899ee9216c33dcf711789e94eeb69392f05ce4021c1e78e4ea618\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"out0\", \"type\": \"at::Tensor\"}, {\"keyword\": \"out1\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fake_quantize_per_channel_affine_cachemask_out\", \"op\": \"aten::fake_quantize_per_channel_affine_cachemask.out\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &> FakeQuantizePerChannelAffineCachemaskOutKernelPython(const at::Tensor & self, const at::Tensor & scale, const at::Tensor & zero_point, int64_t axis, int64_t quant_min, int64_t quant_max, at::Tensor & out0, at::Tensor & out1) {
-  CallPythonOp_GenericKwTuple("flag_gems.fake_quantize_per_channel_affine_cachemask_out", {self, scale, zero_point, axis, quant_min, quant_max}, {PyKwarg{"out0", out0}, PyKwarg{"out1", out1}}, 2);
+  FakeQuantizePerChannelAffineCachemaskOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.fake_quantize_per_channel_affine_cachemask_out", {self, scale, zero_point, axis, quant_min, quant_max}, {PyKwarg{"out0", out0}, PyKwarg{"out1", out1}}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(scale), static_cast<const at::Tensor&>(zero_point), static_cast<const int64_t&>(axis), static_cast<const int64_t&>(quant_min), static_cast<const int64_t&>(quant_max), static_cast<const at::Tensor&>(out0), static_cast<const at::Tensor&>(out1));
   return {out0, out1};
 }
 
+static TypedSourceSlot FillScalarFnSource("aten::fill.Scalar", "flag_gems.fill_scalar", "2f377cb6ebc443230e32920c39d489b74a1e919fa4c111257e749d637196fee9", "{\"abi\": \"2f377cb6ebc443230e32920c39d489b74a1e919fa4c111257e749d637196fee9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.fill_scalar\", \"op\": \"aten::fill.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FillScalarKernelPython(const at::Tensor & self, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.fill_scalar", {self, value});
+  auto result = FillScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fill_scalar", {self, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FillScalarOutFnSource("aten::fill.Scalar_out", "flag_gems.fill_scalar_out", "737087f788e0f10c1fc440dbe5fcf4bc6cfaa084437e5230fd5047248881f7f1", "{\"abi\": \"737087f788e0f10c1fc440dbe5fcf4bc6cfaa084437e5230fd5047248881f7f1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.fill_scalar_out\", \"op\": \"aten::fill.Scalar_out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FillScalarOutKernelPython(const at::Tensor & self, const at::Scalar & value, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.fill_scalar_out", {self, value});
+  auto result = FillScalarOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fill_scalar_out", {self, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(value));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot FillTensorFnSource("aten::fill.Tensor", "flag_gems.fill_tensor", "91153e1fa67d49eb743761c68d2330616df3daac25937be0d1ae08201a504d35", "{\"abi\": \"91153e1fa67d49eb743761c68d2330616df3daac25937be0d1ae08201a504d35\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fill_tensor\", \"op\": \"aten::fill.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FillTensorKernelPython(const at::Tensor & self, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("flag_gems.fill_tensor", {self, value});
+  auto result = FillTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fill_tensor", {self, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FillTensorOutFnSource("aten::fill.Tensor_out", "flag_gems.fill_tensor_out", "24437c96d6f8a4382f119e093a432755d2ec9082851faa52f1c521dea5abae28", "{\"abi\": \"24437c96d6f8a4382f119e093a432755d2ec9082851faa52f1c521dea5abae28\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fill_tensor_out\", \"op\": \"aten::fill.Tensor_out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FillTensorOutKernelPython(const at::Tensor & self, const at::Tensor & value, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.fill_tensor_out", {self, value});
+  auto result = FillTensorOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fill_tensor_out", {self, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(value));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot FillInplaceScalarFnSource("aten::fill_.Scalar", "flag_gems.fill_scalar_", "c43fa1092efd7ee41c539dabfb87cd1b004e7818884d6947dd6310221504a0ed", "{\"abi\": \"c43fa1092efd7ee41c539dabfb87cd1b004e7818884d6947dd6310221504a0ed\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.fill_scalar_\", \"op\": \"aten::fill_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FillInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.fill_scalar_", {self, value});
+  auto result = FillInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fill_scalar_", {self, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FillInplaceTensorFnSource("aten::fill_.Tensor", "flag_gems.fill_tensor_", "b41c2f71a3fb4b97612a12a733b3e6e87bff6a678ce10d53f1c854a11ef337c4", "{\"abi\": \"b41c2f71a3fb4b97612a12a733b3e6e87bff6a678ce10d53f1c854a11ef337c4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fill_tensor_\", \"op\": \"aten::fill_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FillInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("flag_gems.fill_tensor_", {self, value});
+  auto result = FillInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fill_tensor_", {self, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FlipFnSource("aten::flip", "flag_gems.flip", "e2f11504539d358388d5708ff86e400e43eb1ff0e7df430d1265646d86b1c8cb", "{\"abi\": \"e2f11504539d358388d5708ff86e400e43eb1ff0e7df430d1265646d86b1c8cb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.flip\", \"op\": \"aten::flip\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FlipKernelPython(const at::Tensor & self, at::IntArrayRef dims) {
-  auto result = CallPythonOp_Generic("flag_gems.flip", {self, dims});
+  auto result = FlipFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.flip", {self, dims}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(dims));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FloorFnSource("aten::floor", "flag_gems.floor", "eb9bd7579bb954698a62a182604a93571917b49c596c1796541b694d69eec30a", "{\"abi\": \"eb9bd7579bb954698a62a182604a93571917b49c596c1796541b694d69eec30a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.floor\", \"op\": \"aten::floor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FloorKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.floor", {self});
+  auto result = FloorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FloorOutFnSource("aten::floor.out", "flag_gems.floor_out", "6da306a91a96b5d91a4aee860870ac84ef4001edda452c7ae13a248b636b4feb", "{\"abi\": \"6da306a91a96b5d91a4aee860870ac84ef4001edda452c7ae13a248b636b4feb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.floor_out\", \"op\": \"aten::floor.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FloorOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.floor_out", {self});
+  auto result = FloorOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot FloorInplaceFnSource("aten::floor_", "flag_gems.floor_", "c983cc495d0802c34339595b726955b562025403c38b2d5107133b7893495ead", "{\"abi\": \"c983cc495d0802c34339595b726955b562025403c38b2d5107133b7893495ead\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.floor_\", \"op\": \"aten::floor_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FloorInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.floor_", {self});
+  auto result = FloorInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FloorDivideFnSource("aten::floor_divide", "flag_gems.floor_divide", "04f36a54cc6d10d17ec34ff27b559edcbfba8f019325bd7a15d1c79ec594d818", "{\"abi\": \"04f36a54cc6d10d17ec34ff27b559edcbfba8f019325bd7a15d1c79ec594d818\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.floor_divide\", \"op\": \"aten::floor_divide\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FloorDivideKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.floor_divide", {self, other});
+  auto result = FloorDivideFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor_divide", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FloorDivideScalarFnSource("aten::floor_divide.Scalar", "flag_gems.floor_divide", "915ce42953e0d43f5304810bfb227d1bcb76b69eabc84068bad97194ab030fc1", "{\"abi\": \"915ce42953e0d43f5304810bfb227d1bcb76b69eabc84068bad97194ab030fc1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.floor_divide\", \"op\": \"aten::floor_divide.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FloorDivideScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.floor_divide", {self, other});
+  auto result = FloorDivideScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor_divide", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FloorDivideInplaceScalarFnSource("aten::floor_divide_.Scalar", "flag_gems.floor_divide_", "681ef9c3434932118a7840e289bc095fbadfdd7299e37b22edaad998909be074", "{\"abi\": \"681ef9c3434932118a7840e289bc095fbadfdd7299e37b22edaad998909be074\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.floor_divide_\", \"op\": \"aten::floor_divide_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FloorDivideInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.floor_divide_", {self, other});
+  auto result = FloorDivideInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor_divide_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FloorDivideInplaceTensorFnSource("aten::floor_divide_.Tensor", "flag_gems.floor_divide_", "332f29af82d37c39067ead984bdc7508d2a3b04744593ca7b9a102fc67a366f7", "{\"abi\": \"332f29af82d37c39067ead984bdc7508d2a3b04744593ca7b9a102fc67a366f7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.floor_divide_\", \"op\": \"aten::floor_divide_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FloorDivideInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.floor_divide_", {self, other});
+  auto result = FloorDivideInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.floor_divide_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FmaxFnSource("aten::fmax", "flag_gems.fmax", "5f6dab7bd8fc17648e755fd7234dfc3c2b5233f780617bf03c2bbc82d77b803c", "{\"abi\": \"5f6dab7bd8fc17648e755fd7234dfc3c2b5233f780617bf03c2bbc82d77b803c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fmax\", \"op\": \"aten::fmax\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FmaxKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.fmax", {self, other});
+  auto result = FmaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmax", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FmaxOutFnSource("aten::fmax.out", "flag_gems.fmax_out", "16de180c2070fc6a32d463f9233c7132a373b18501b00bcb378c02c9461cc964", "{\"abi\": \"16de180c2070fc6a32d463f9233c7132a373b18501b00bcb378c02c9461cc964\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fmax_out\", \"op\": \"aten::fmax.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FmaxOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.fmax_out", {self, other, out});
+  FmaxOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmax_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot FminFnSource("aten::fmin", "flag_gems.fmin", "1da2a82bf284b406ff7f720a605c3cd21089ef5e6fe36cee04abc6255b3d07c0", "{\"abi\": \"1da2a82bf284b406ff7f720a605c3cd21089ef5e6fe36cee04abc6255b3d07c0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fmin\", \"op\": \"aten::fmin\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FminKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.fmin", {self, other});
+  auto result = FminFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmin", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FminOutFnSource("aten::fmin.out", "flag_gems.fmin_out", "50deb00173822de320fff8a760586deec9d6c6d7c64a5f7991421596d7427f8d", "{\"abi\": \"50deb00173822de320fff8a760586deec9d6c6d7c64a5f7991421596d7427f8d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fmin_out\", \"op\": \"aten::fmin.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FminOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.fmin_out", {self, other, out});
+  FminOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmin_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot FmodScalarFnSource("aten::fmod.Scalar", "flag_gems.fmod_scalar", "8522a3e8ec55cdf1d1f4a5689057615d024712ed482afb3d266cd11992db7bb0", "{\"abi\": \"8522a3e8ec55cdf1d1f4a5689057615d024712ed482afb3d266cd11992db7bb0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.fmod_scalar\", \"op\": \"aten::fmod.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FmodScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.fmod_scalar", {self, other});
+  auto result = FmodScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmod_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FmodTensorFnSource("aten::fmod.Tensor", "flag_gems.fmod_tensor", "d5c238cd576058554171b92f020b613859322701c2c7090ce827d7e9480b76f8", "{\"abi\": \"d5c238cd576058554171b92f020b613859322701c2c7090ce827d7e9480b76f8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fmod_tensor\", \"op\": \"aten::fmod.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FmodTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.fmod_tensor", {self, other});
+  auto result = FmodTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmod_tensor", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FmodInplaceScalarFnSource("aten::fmod_.Scalar", "flag_gems.fmod_scalar_", "c410be49b484f3a02b5e1fc9a84deeaa947ae95832f012dda00828c2cafaa9b8", "{\"abi\": \"c410be49b484f3a02b5e1fc9a84deeaa947ae95832f012dda00828c2cafaa9b8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.fmod_scalar_\", \"op\": \"aten::fmod_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FmodInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.fmod_scalar_", {self, other});
+  auto result = FmodInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmod_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FmodInplaceTensorFnSource("aten::fmod_.Tensor", "flag_gems.fmod_tensor_", "ffba35914a2bfdb123ce6fe92861cdf82820e80888b9090dbb4bae825396d8e7", "{\"abi\": \"ffba35914a2bfdb123ce6fe92861cdf82820e80888b9090dbb4bae825396d8e7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fmod_tensor_\", \"op\": \"aten::fmod_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FmodInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.fmod_tensor_", {self, other});
+  auto result = FmodInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fmod_tensor_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FracFnSource("aten::frac", "flag_gems.frac", "9536e245dfa54a2cf965f62e6e8cacbac66071b17012d828643fc49a47251e94", "{\"abi\": \"9536e245dfa54a2cf965f62e6e8cacbac66071b17012d828643fc49a47251e94\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.frac\", \"op\": \"aten::frac\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FracKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.frac", {self});
+  auto result = FracFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.frac", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FracInplaceFnSource("aten::frac_", "flag_gems.frac_", "6f24a1bd8c74369d310cf54f6d8dc115aab29f6b13a5fe2b373835fa53714275", "{\"abi\": \"6f24a1bd8c74369d310cf54f6d8dc115aab29f6b13a5fe2b373835fa53714275\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.frac_\", \"op\": \"aten::frac_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & FracInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.frac_", {self});
+  auto result = FracInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.frac_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot FractionalMaxPool2dFnSource("aten::fractional_max_pool2d", "flag_gems.fractional_max_pool2d", "c2f3f481342ab3e0350d6715a0b7adea0bbc68f46886f85e1e6441fb080d12bc", "{\"abi\": \"c2f3f481342ab3e0350d6715a0b7adea0bbc68f46886f85e1e6441fb080d12bc\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fractional_max_pool2d\", \"op\": \"aten::fractional_max_pool2d\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> FractionalMaxPool2dKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef output_size, const at::Tensor & random_samples) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.fractional_max_pool2d", {self, kernel_size, output_size, random_samples}, 2);
+  auto result = FractionalMaxPool2dFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.fractional_max_pool2d", {self, kernel_size, output_size, random_samples}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::Tensor&>(random_samples));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot FractionalMaxPool2dBackwardFnSource("aten::fractional_max_pool2d_backward", "flag_gems.fractional_max_pool2d_backward", "7539f37b995e6c1e5d925d746601c4a10f89d46ddeea75728bb8285656ade8c7", "{\"abi\": \"7539f37b995e6c1e5d925d746601c4a10f89d46ddeea75728bb8285656ade8c7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.fractional_max_pool2d_backward\", \"op\": \"aten::fractional_max_pool2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FractionalMaxPool2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef output_size, const at::Tensor & indices) {
-  auto result = CallPythonOp_Generic("flag_gems.fractional_max_pool2d_backward", {grad_output, self, kernel_size, output_size, indices});
+  auto result = FractionalMaxPool2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.fractional_max_pool2d_backward", {grad_output, self, kernel_size, output_size, indices}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::Tensor&>(indices));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FullFnSource("aten::full", "flag_gems.full", "00231d69b0943146650b45a74e5c0ea8948a9948f33d186350d188e642c1d88d", "{\"abi\": \"00231d69b0943146650b45a74e5c0ea8948a9948f33d186350d188e642c1d88d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.full\", \"op\": \"aten::full\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FullKernelPython(at::IntArrayRef size, const at::Scalar & fill_value, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.full", {size, fill_value}, dtype, device);
+  auto result = ([&]() { if (!FullFnSource.Available()) return CallPythonOp_Factory("flag_gems.full", {size, fill_value}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return FullFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.full", {size, fill_value}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const at::Scalar&>(fill_value), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot FullLikeFnSource("aten::full_like", "flag_gems.full_like", "d35b56e9789fd187c9d0c5ddf83e6a25a8715bfc0f525d95b3162d0bf48ffa3b", "{\"abi\": \"d35b56e9789fd187c9d0c5ddf83e6a25a8715bfc0f525d95b3162d0bf48ffa3b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}, {\"keyword\": \"memory_format\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.full_like\", \"op\": \"aten::full_like\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor FullLikeKernelPython(const at::Tensor & self, const at::Scalar & fill_value, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("flag_gems.full_like", {self, fill_value}, dtype, device);
+  auto result = ([&]() { if (!FullLikeFnSource.Available()) return CallPythonOp_LikeFactory("flag_gems.full_like", {self, fill_value}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device, &self); return FullLikeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_LikeFactory("flag_gems.full_like", {self, fill_value}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(fill_value), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GcdFnSource("aten::gcd", "flag_gems.gcd", "d94bd624e03cc2c00a6a0ba1adf610db38adc7551ef0df1adf9e1c65e47272ea", "{\"abi\": \"d94bd624e03cc2c00a6a0ba1adf610db38adc7551ef0df1adf9e1c65e47272ea\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.gcd\", \"op\": \"aten::gcd\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GcdKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.gcd", {self, other});
+  auto result = GcdFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gcd", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GcdOutFnSource("aten::gcd.out", "flag_gems.gcd_out", "d13b80d85826fb48c94980cadeb45e65188691b0cc873d69f51820e34b113e3b", "{\"abi\": \"d13b80d85826fb48c94980cadeb45e65188691b0cc873d69f51820e34b113e3b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.gcd_out\", \"op\": \"aten::gcd.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & GcdOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.gcd_out", {self, other});
+  auto result = GcdOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gcd_out", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot GcdInplaceFnSource("aten::gcd_", "flag_gems.gcd_", "9a61e085fb836124d27463aaac291b6cc7abf0ae1fe321147664ef6c95f534f2", "{\"abi\": \"9a61e085fb836124d27463aaac291b6cc7abf0ae1fe321147664ef6c95f534f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.gcd_\", \"op\": \"aten::gcd_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & GcdInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.gcd_", {self, other});
+  auto result = GcdInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gcd_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot GeScalarFnSource("aten::ge.Scalar", "flag_gems.ge_scalar", "45ddc325d69153cb8e4b59112b9f3f5d53ea34ef37fb815fec3c62fdde335b7f", "{\"abi\": \"45ddc325d69153cb8e4b59112b9f3f5d53ea34ef37fb815fec3c62fdde335b7f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.ge_scalar\", \"op\": \"aten::ge.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GeScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.ge_scalar", {self, other});
+  auto result = GeScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ge_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GeTensorFnSource("aten::ge.Tensor", "flag_gems.ge", "4489587a21361e925b4974ec848ebbb5560a14f67ec57115d77c2e5d80099e28", "{\"abi\": \"4489587a21361e925b4974ec848ebbb5560a14f67ec57115d77c2e5d80099e28\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.ge\", \"op\": \"aten::ge.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GeTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.ge", {self, other});
+  auto result = GeTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ge", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GeluFnSource("aten::gelu", "flag_gems.gelu", "0f692a87269f89923e8cf88a69846bb14d40adb0a54e41e8f89150258e459546", "{\"abi\": \"0f692a87269f89923e8cf88a69846bb14d40adb0a54e41e8f89150258e459546\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"approximate\", \"type\": \"c10::string_view\"}], \"host\": \"flag_gems.gelu\", \"op\": \"aten::gelu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GeluKernelPython(const at::Tensor & self, c10::string_view approximate) {
-  auto result = CallPythonOp_GenericKw("flag_gems.gelu", {self}, {PyKwarg{"approximate", approximate}});
+  auto result = GeluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.gelu", {self}, {PyKwarg{"approximate", approximate}}); }, static_cast<const at::Tensor&>(self), static_cast<const c10::string_view&>(approximate));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GeluInplaceFnSource("aten::gelu_", "flag_gems.gelu_", "499dfcd3912a4b3ea454ff4de8d82f1594f4449690730b3d2cb856c7a46b60bf", "{\"abi\": \"499dfcd3912a4b3ea454ff4de8d82f1594f4449690730b3d2cb856c7a46b60bf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"approximate\", \"type\": \"c10::string_view\"}], \"host\": \"flag_gems.gelu_\", \"op\": \"aten::gelu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & GeluInplaceKernelPython(at::Tensor & self, c10::string_view approximate) {
-  auto result = CallPythonOp_GenericKw("flag_gems.gelu_", {self}, {PyKwarg{"approximate", approximate}});
+  auto result = GeluInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.gelu_", {self}, {PyKwarg{"approximate", approximate}}); }, static_cast<const at::Tensor&>(self), static_cast<const c10::string_view&>(approximate));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot GeluBackwardFnSource("aten::gelu_backward", "flag_gems.gelu_backward", "27602d523415db0ba49f904e39b43d685d3a9f05c965ef9dbac8c28ab00acc8e", "{\"abi\": \"27602d523415db0ba49f904e39b43d685d3a9f05c965ef9dbac8c28ab00acc8e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"approximate\", \"type\": \"c10::string_view\"}], \"host\": \"flag_gems.gelu_backward\", \"op\": \"aten::gelu_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GeluBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, c10::string_view approximate) {
-  auto result = CallPythonOp_GenericKw("flag_gems.gelu_backward", {grad_output, self}, {PyKwarg{"approximate", approximate}});
+  auto result = GeluBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.gelu_backward", {grad_output, self}, {PyKwarg{"approximate", approximate}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const c10::string_view&>(approximate));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GluFnSource("aten::glu", "flag_gems.glu", "a21aad67ceddaf8e1713183d20b908908187e527a4e15fd74377f09119e1928e", "{\"abi\": \"a21aad67ceddaf8e1713183d20b908908187e527a4e15fd74377f09119e1928e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.glu\", \"op\": \"aten::glu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GluKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_Generic("flag_gems.glu", {self, dim});
+  auto result = GluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.glu", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GluBackwardFnSource("aten::glu_backward", "flag_gems.glu_backward", "79b8a28b98deae36190ea4bb6486eeffaf56a131380067ff9a2bcb85916905bb", "{\"abi\": \"79b8a28b98deae36190ea4bb6486eeffaf56a131380067ff9a2bcb85916905bb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.glu_backward\", \"op\": \"aten::glu_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GluBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_Generic("flag_gems.glu_backward", {grad_output, self, dim});
+  auto result = GluBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.glu_backward", {grad_output, self, dim}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GridSampler3dFnSource("aten::grid_sampler_3d", "flag_gems.grid_sampler_3d", "5f111169a4497b0a890187966375ccaa2833dfec64b8116fef25b8f118b6f412", "{\"abi\": \"5f111169a4497b0a890187966375ccaa2833dfec64b8116fef25b8f118b6f412\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.grid_sampler_3d\", \"op\": \"aten::grid_sampler_3d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GridSampler3dKernelPython(const at::Tensor & input, const at::Tensor & grid, int64_t interpolation_mode, int64_t padding_mode, bool align_corners) {
-  auto result = CallPythonOp_Generic("flag_gems.grid_sampler_3d", {input, grid, interpolation_mode, padding_mode, align_corners});
+  auto result = GridSampler3dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.grid_sampler_3d", {input, grid, interpolation_mode, padding_mode, align_corners}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(grid), static_cast<const int64_t&>(interpolation_mode), static_cast<const int64_t&>(padding_mode), static_cast<const bool&>(align_corners));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GridSampler3dBackwardFnSource("aten::grid_sampler_3d_backward", "flag_gems.grid_sampler_3d_backward", "c2883da7e070935a431fcc1cc28381dd31b86b450e645539283e9721beda0bd4", "{\"abi\": \"c2883da7e070935a431fcc1cc28381dd31b86b450e645539283e9721beda0bd4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::array<bool,2>\"}], \"host\": \"flag_gems.grid_sampler_3d_backward\", \"op\": \"aten::grid_sampler_3d_backward\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> GridSampler3dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & input, const at::Tensor & grid, int64_t interpolation_mode, int64_t padding_mode, bool align_corners, ::std::array<bool,2> output_mask) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.grid_sampler_3d_backward", {grad_output, input, grid, interpolation_mode, padding_mode, align_corners, output_mask}, 2);
+  auto result = GridSampler3dBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.grid_sampler_3d_backward", {grad_output, input, grid, interpolation_mode, padding_mode, align_corners, output_mask}, 2); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(grid), static_cast<const int64_t&>(interpolation_mode), static_cast<const int64_t&>(padding_mode), static_cast<const bool&>(align_corners), static_cast<const ::std::array<bool,2>&>(output_mask));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot GtScalarFnSource("aten::gt.Scalar", "flag_gems.gt_scalar", "2de2b8a11592f139add593fa393ef23e709ac2e4c53c4aed57ee6e161d7c940d", "{\"abi\": \"2de2b8a11592f139add593fa393ef23e709ac2e4c53c4aed57ee6e161d7c940d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.gt_scalar\", \"op\": \"aten::gt.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GtScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.gt_scalar", {self, other});
+  auto result = GtScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gt_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GtTensorFnSource("aten::gt.Tensor", "flag_gems.gt", "f40687d778f729d29ee5ec79af228de848e156b78f892416cc1000482a839f13", "{\"abi\": \"f40687d778f729d29ee5ec79af228de848e156b78f892416cc1000482a839f13\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.gt\", \"op\": \"aten::gt.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor GtTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.gt", {self, other});
+  auto result = GtTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gt", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot GtInplaceScalarFnSource("aten::gt_.Scalar", "flag_gems.gt_scalar_", "1c32f0e2691521e143d352219a672d0b32fbbf93889440d1eb2033bf739b6aa4", "{\"abi\": \"1c32f0e2691521e143d352219a672d0b32fbbf93889440d1eb2033bf739b6aa4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.gt_scalar_\", \"op\": \"aten::gt_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & GtInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.gt_scalar_", {self, other});
+  auto result = GtInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gt_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot GtInplaceTensorFnSource("aten::gt_.Tensor", "flag_gems.gt_tensor_", "6b32ec40a2a14d90092dbb161ae50b83f8382272b334f4122484712791ee691d", "{\"abi\": \"6b32ec40a2a14d90092dbb161ae50b83f8382272b334f4122484712791ee691d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.gt_tensor_\", \"op\": \"aten::gt_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & GtInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.gt_tensor_", {self, other});
+  auto result = GtInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.gt_tensor_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot HardshrinkFnSource("aten::hardshrink", "flag_gems.hardshrink", "8980f7bc9f8327d1f998b00f9854871067f5ff7cef913f3ab7390e34eff124d3", "{\"abi\": \"8980f7bc9f8327d1f998b00f9854871067f5ff7cef913f3ab7390e34eff124d3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.hardshrink\", \"op\": \"aten::hardshrink\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardshrinkKernelPython(const at::Tensor & self, const at::Scalar & lambd) {
-  auto result = CallPythonOp_Generic("flag_gems.hardshrink", {self, lambd});
+  auto result = HardshrinkFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardshrink", {self, lambd}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(lambd));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HardshrinkOutFnSource("aten::hardshrink.out", "flag_gems.hardshrink_out", "49e6d27874e99343931367bef5e623c8e8d067d1986137b05f6677deeb90c45a", "{\"abi\": \"49e6d27874e99343931367bef5e623c8e8d067d1986137b05f6677deeb90c45a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardshrink_out\", \"op\": \"aten::hardshrink.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HardshrinkOutKernelPython(const at::Tensor & self, const at::Scalar & lambd, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.hardshrink_out", {self, lambd}, {PyKwarg{"out", out}});
+  HardshrinkOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.hardshrink_out", {self, lambd}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(lambd), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot HardsigmoidFnSource("aten::hardsigmoid", "flag_gems.hardsigmoid", "58a080578e35a3a2ef60fe14c09ebd7c048c3d8e21a026d9863f8846107aec0d", "{\"abi\": \"58a080578e35a3a2ef60fe14c09ebd7c048c3d8e21a026d9863f8846107aec0d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardsigmoid\", \"op\": \"aten::hardsigmoid\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardsigmoidKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.hardsigmoid", {self});
+  auto result = HardsigmoidFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardsigmoid", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HardsigmoidOutFnSource("aten::hardsigmoid.out", "flag_gems.hardsigmoid_out", "6a2b5d53614a0ba3e216d38f9adeb730e6c31f5020f1262be0b601ec684fe7aa", "{\"abi\": \"6a2b5d53614a0ba3e216d38f9adeb730e6c31f5020f1262be0b601ec684fe7aa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardsigmoid_out\", \"op\": \"aten::hardsigmoid.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HardsigmoidOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.hardsigmoid_out", {self, out});
+  HardsigmoidOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardsigmoid_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot HardsigmoidBackwardFnSource("aten::hardsigmoid_backward", "flag_gems.hardsigmoid_backward", "2ec1d63ae6890650117c9d6d1b281612877f753737c7e26d04f78964b7c5115e", "{\"abi\": \"2ec1d63ae6890650117c9d6d1b281612877f753737c7e26d04f78964b7c5115e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardsigmoid_backward\", \"op\": \"aten::hardsigmoid_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardsigmoidBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.hardsigmoid_backward", {grad_output, self});
+  auto result = HardsigmoidBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardsigmoid_backward", {grad_output, self}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HardswishFnSource("aten::hardswish", "flag_gems.hardswish", "7e3933d6ff9ce011521d9ce2e1eed9abdf2b1c70239b3a15ca2658349a00bb85", "{\"abi\": \"7e3933d6ff9ce011521d9ce2e1eed9abdf2b1c70239b3a15ca2658349a00bb85\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardswish\", \"op\": \"aten::hardswish\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardswishKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.hardswish", {self});
+  auto result = HardswishFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardswish", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HardswishOutFnSource("aten::hardswish.out", "flag_gems.hardswish_out", "1901c2c2d57ab16c503817f241afed6da86236ca31ec1578cd886cb3c7ace0dc", "{\"abi\": \"1901c2c2d57ab16c503817f241afed6da86236ca31ec1578cd886cb3c7ace0dc\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardswish_out\", \"op\": \"aten::hardswish.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HardswishOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.hardswish_out", {self, out});
+  HardswishOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardswish_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot HardswishInplaceFnSource("aten::hardswish_", "flag_gems.hardswish_", "4e243f3e726034ace031dc803589d8a78aa926f4c22adf026a4b7e14bee09d74", "{\"abi\": \"4e243f3e726034ace031dc803589d8a78aa926f4c22adf026a4b7e14bee09d74\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardswish_\", \"op\": \"aten::hardswish_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HardswishInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.hardswish_", {self});
+  auto result = HardswishInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardswish_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot HardswishBackwardFnSource("aten::hardswish_backward", "flag_gems.hardswish_backward", "f053449b089bbaf4e4cecccded58f7b663ffa5b01f4558845de8ddc1c99f3348", "{\"abi\": \"f053449b089bbaf4e4cecccded58f7b663ffa5b01f4558845de8ddc1c99f3348\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hardswish_backward\", \"op\": \"aten::hardswish_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardswishBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.hardswish_backward", {grad_output, self});
+  auto result = HardswishBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardswish_backward", {grad_output, self}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HardtanhFnSource("aten::hardtanh", "flag_gems.hardtanh", "1f47089425ed0d091a8646ce8abc77fbec7d94e2df6477deb0e23b7dabe05604", "{\"abi\": \"1f47089425ed0d091a8646ce8abc77fbec7d94e2df6477deb0e23b7dabe05604\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.hardtanh\", \"op\": \"aten::hardtanh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardtanhKernelPython(const at::Tensor & self, const at::Scalar & min_val, const at::Scalar & max_val) {
-  auto result = CallPythonOp_Generic("flag_gems.hardtanh", {self, min_val, max_val});
+  auto result = HardtanhFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardtanh", {self, min_val, max_val}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(min_val), static_cast<const at::Scalar&>(max_val));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HardtanhOutFnSource("aten::hardtanh.out", "flag_gems.hardtanh_out", "3e5dbc4d51f3bd344b03ffadc2210a8af44ca547c2ba7d9a3ea04be5a3083fd4", "{\"abi\": \"3e5dbc4d51f3bd344b03ffadc2210a8af44ca547c2ba7d9a3ea04be5a3083fd4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.hardtanh_out\", \"op\": \"aten::hardtanh.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HardtanhOutKernelPython(const at::Tensor & self, const at::Scalar & min_val, const at::Scalar & max_val, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.hardtanh_out", {self, min_val, max_val});
+  auto result = HardtanhOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardtanh_out", {self, min_val, max_val}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(min_val), static_cast<const at::Scalar&>(max_val));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot HardtanhInplaceFnSource("aten::hardtanh_", "flag_gems.hardtanh_", "4015cb61f9810444b7e749ddf17e2375129e107fed2aaf30885bf9e342f86087", "{\"abi\": \"4015cb61f9810444b7e749ddf17e2375129e107fed2aaf30885bf9e342f86087\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.hardtanh_\", \"op\": \"aten::hardtanh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HardtanhInplaceKernelPython(at::Tensor & self, const at::Scalar & min_val, const at::Scalar & max_val) {
-  auto result = CallPythonOp_Generic("flag_gems.hardtanh_", {self, min_val, max_val});
+  auto result = HardtanhInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardtanh_", {self, min_val, max_val}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(min_val), static_cast<const at::Scalar&>(max_val));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot HardtanhBackwardFnSource("aten::hardtanh_backward", "flag_gems.hardtanh_backward", "85a5b4336d08ad06499f08be94b8d37a75082d6bbc92db8d846e5375ffea2f74", "{\"abi\": \"85a5b4336d08ad06499f08be94b8d37a75082d6bbc92db8d846e5375ffea2f74\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.hardtanh_backward\", \"op\": \"aten::hardtanh_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HardtanhBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Scalar & min_val, const at::Scalar & max_val) {
-  auto result = CallPythonOp_Generic("flag_gems.hardtanh_backward", {grad_output, self, min_val, max_val});
+  auto result = HardtanhBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hardtanh_backward", {grad_output, self, min_val, max_val}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(min_val), static_cast<const at::Scalar&>(max_val));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HashTensorFnSource("aten::hash_tensor", "flag_gems.hash_tensor", "79111054dd22827214e0cf27547f6c5f2b1d6a2ed2ba59c6cc7fa98c3fbf9ce2", "{\"abi\": \"79111054dd22827214e0cf27547f6c5f2b1d6a2ed2ba59c6cc7fa98c3fbf9ce2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.hash_tensor\", \"op\": \"aten::hash_tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HashTensorKernelPython(const at::Tensor & self, at::IntArrayRef dim, bool keepdim, int64_t mode) {
-  auto result = CallPythonOp_Generic("flag_gems.hash_tensor", {self, dim, keepdim, mode});
+  auto result = HashTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hash_tensor", {self, dim, keepdim, mode}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const int64_t&>(mode));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HeavisideFnSource("aten::heaviside", "flag_gems.heaviside", "c9c678b7422406fcf0526c7ce36bf04a80f2d649f1725cfddaf998be831c8112", "{\"abi\": \"c9c678b7422406fcf0526c7ce36bf04a80f2d649f1725cfddaf998be831c8112\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.heaviside\", \"op\": \"aten::heaviside\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HeavisideKernelPython(const at::Tensor & self, const at::Tensor & values) {
-  auto result = CallPythonOp_Generic("flag_gems.heaviside", {self, values});
+  auto result = HeavisideFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.heaviside", {self, values}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(values));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HeavisideInplaceFnSource("aten::heaviside_", "flag_gems.heaviside_", "e2ed5262ccc8bd9ede0d2b462d6c1f9fe209f6887fd2e836f07e8b7f4eb432d3", "{\"abi\": \"e2ed5262ccc8bd9ede0d2b462d6c1f9fe209f6887fd2e836f07e8b7f4eb432d3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.heaviside_\", \"op\": \"aten::heaviside_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HeavisideInplaceKernelPython(at::Tensor & self, const at::Tensor & values) {
-  auto result = CallPythonOp_Generic("flag_gems.heaviside_", {self, values});
+  auto result = HeavisideInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.heaviside_", {self, values}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(values));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot HistcFnSource("aten::histc", "flag_gems.histc", "f90ce23b8ec740d986cdca338398244885e4fab730243382fd4e8ca818a9a055", "{\"abi\": \"f90ce23b8ec740d986cdca338398244885e4fab730243382fd4e8ca818a9a055\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.histc\", \"op\": \"aten::histc\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HistcKernelPython(const at::Tensor & self, int64_t bins, const at::Scalar & min, const at::Scalar & max) {
-  auto result = CallPythonOp_Generic("flag_gems.histc", {self, bins, min, max});
+  auto result = HistcFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.histc", {self, bins, min, max}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(bins), static_cast<const at::Scalar&>(min), static_cast<const at::Scalar&>(max));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HuberLossFnSource("aten::huber_loss", "flag_gems.huber_loss", "a31fbb078f3c058c073e616fd4469bd41b2e099cef49f35f08a0608a1c8bb1c8", "{\"abi\": \"a31fbb078f3c058c073e616fd4469bd41b2e099cef49f35f08a0608a1c8bb1c8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.huber_loss\", \"op\": \"aten::huber_loss\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HuberLossKernelPython(const at::Tensor & self, const at::Tensor & target, int64_t reduction, double delta) {
-  auto result = CallPythonOp_Generic("flag_gems.huber_loss", {self, target, reduction, delta});
+  auto result = HuberLossFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.huber_loss", {self, target, reduction, delta}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction), static_cast<const double&>(delta));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HuberLossOutFnSource("aten::huber_loss.out", "flag_gems.huber_loss_out", "1039ebde8b7232e8be6d015b5373b7d88d0e4f238017de70efc19447098f4ec2", "{\"abi\": \"1039ebde8b7232e8be6d015b5373b7d88d0e4f238017de70efc19447098f4ec2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.huber_loss_out\", \"op\": \"aten::huber_loss.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HuberLossOutKernelPython(const at::Tensor & self, const at::Tensor & target, int64_t reduction, double delta, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.huber_loss_out", {self, target, reduction, delta}, {PyKwarg{"out", out}});
+  HuberLossOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.huber_loss_out", {self, target, reduction, delta}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction), static_cast<const double&>(delta), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot HypotFnSource("aten::hypot", "flag_gems.hypot", "d6d236ba4c5a6b67fa02a9ea8c9c46007c2bc061026cb866a115014b0eb088e5", "{\"abi\": \"d6d236ba4c5a6b67fa02a9ea8c9c46007c2bc061026cb866a115014b0eb088e5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hypot\", \"op\": \"aten::hypot\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor HypotKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.hypot", {self, other});
+  auto result = HypotFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hypot", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot HypotInplaceFnSource("aten::hypot_", "flag_gems.hypot_", "412e9ae6262b39f79e23ca41ff7e4b0133b667a3a69eefd033fe5157f7761ca1", "{\"abi\": \"412e9ae6262b39f79e23ca41ff7e4b0133b667a3a69eefd033fe5157f7761ca1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.hypot_\", \"op\": \"aten::hypot_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & HypotInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.hypot_", {self, other});
+  auto result = HypotInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.hypot_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot I0FnSource("aten::i0", "flag_gems.i0", "256c15376e93a22caa900b2d0756ed9431a65d583213b1134661533603bd8265", "{\"abi\": \"256c15376e93a22caa900b2d0756ed9431a65d583213b1134661533603bd8265\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.i0\", \"op\": \"aten::i0\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor I0KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.i0", {self});
+  auto result = I0FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.i0", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot I0OutFnSource("aten::i0.out", "flag_gems.i0_out", "ad46847d0aa9f04d3e128741fb2a2035aa40e326109022467725cb114a266b8e", "{\"abi\": \"ad46847d0aa9f04d3e128741fb2a2035aa40e326109022467725cb114a266b8e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.i0_out\", \"op\": \"aten::i0.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & I0OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.i0_out", {self, out});
+  I0OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.i0_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot IgammaFnSource("aten::igamma", "flag_gems.igamma", "03caea0c9b6cb733e5a69908990d345500cda4e56efa256a8ec2a2af11875836", "{\"abi\": \"03caea0c9b6cb733e5a69908990d345500cda4e56efa256a8ec2a2af11875836\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.igamma\", \"op\": \"aten::igamma\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IgammaKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.igamma", {self, other});
+  auto result = IgammaFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.igamma", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IgammaInplaceFnSource("aten::igamma_", "flag_gems.igamma_", "d5c91cae1d68623196d8f2e16e97fd925812dbf073ad2ab15e9e28d21cb7ad5d", "{\"abi\": \"d5c91cae1d68623196d8f2e16e97fd925812dbf073ad2ab15e9e28d21cb7ad5d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.igamma_\", \"op\": \"aten::igamma_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IgammaInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.igamma_", {self, other});
+  auto result = IgammaInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.igamma_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot IgammacFnSource("aten::igammac", "flag_gems.igammac", "ec4db4e2c676fd8be075558d3941c8632e859a8f0f947c2af651ab9de915abe1", "{\"abi\": \"ec4db4e2c676fd8be075558d3941c8632e859a8f0f947c2af651ab9de915abe1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.igammac\", \"op\": \"aten::igammac\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IgammacKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.igammac", {self, other});
+  auto result = IgammacFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.igammac", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IgammacOutFnSource("aten::igammac.out", "flag_gems.igammac_out", "b613a2c54e80173997b4e1c2a89e8b7611b69e385009eef7f86f01b304dd8cde", "{\"abi\": \"b613a2c54e80173997b4e1c2a89e8b7611b69e385009eef7f86f01b304dd8cde\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.igammac_out\", \"op\": \"aten::igammac.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IgammacOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.igammac_out", {self, other, out});
+  IgammacOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.igammac_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot IgammacInplaceFnSource("aten::igammac_", "flag_gems.igammac_", "7857096a99efdc1a7a9a50531138e499de4ab3627e8b5ca67cbbff90ebf28d24", "{\"abi\": \"7857096a99efdc1a7a9a50531138e499de4ab3627e8b5ca67cbbff90ebf28d24\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.igammac_\", \"op\": \"aten::igammac_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IgammacInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.igammac_", {self, other});
+  auto result = IgammacInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.igammac_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot Im2colFnSource("aten::im2col", "flag_gems.im2col", "dca5b1e96c9f65cdf6fc87547f716701ec4a00aff603f6713afba65a387add9f", "{\"abi\": \"dca5b1e96c9f65cdf6fc87547f716701ec4a00aff603f6713afba65a387add9f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.im2col\", \"op\": \"aten::im2col\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Im2colKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef dilation, at::IntArrayRef padding, at::IntArrayRef stride) {
-  auto result = CallPythonOp_Generic("flag_gems.im2col", {self, kernel_size, dilation, padding, stride});
+  auto result = Im2colFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.im2col", {self, kernel_size, dilation, padding, stride}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(dilation), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(stride));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IndexAddFnSource("aten::index_add", "flag_gems.index_add", "0abbc1dacaa2641e840b887aef8979b20d60636fa67d0e87540e12059b910fd8", "{\"abi\": \"0abbc1dacaa2641e840b887aef8979b20d60636fa67d0e87540e12059b910fd8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.index_add\", \"op\": \"aten::index_add\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IndexAddKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.index_add", {self, dim, index, source, alpha});
+  auto result = IndexAddFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_add", {self, dim, index, source, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(source), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IndexAddInplaceFnSource("aten::index_add_", "flag_gems.index_add_", "9b89ab5e1e10e60e55ef448d87c3b0c260463321947eee403e0abd7790a53299", "{\"abi\": \"9b89ab5e1e10e60e55ef448d87c3b0c260463321947eee403e0abd7790a53299\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.index_add_\", \"op\": \"aten::index_add_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IndexAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.index_add_", {self, dim, index, source, alpha});
+  auto result = IndexAddInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_add_", {self, dim, index, source, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(source), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot IndexCopyFnSource("aten::index_copy", "flag_gems.index_copy", "ffd92962665f7bc4479aa196194537fd02c23f9c90f614bf21328ad39bfc5aec", "{\"abi\": \"ffd92962665f7bc4479aa196194537fd02c23f9c90f614bf21328ad39bfc5aec\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.index_copy\", \"op\": \"aten::index_copy\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IndexCopyKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source) {
-  auto result = CallPythonOp_Generic("flag_gems.index_copy", {self, dim, index, source});
+  auto result = IndexCopyFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_copy", {self, dim, index, source}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(source));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IndexCopyInplaceFnSource("aten::index_copy_", "flag_gems.index_copy_", "294e35adc0237c782c9eb74c87137b8047f03c641200b99ed2b116f76af02f37", "{\"abi\": \"294e35adc0237c782c9eb74c87137b8047f03c641200b99ed2b116f76af02f37\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.index_copy_\", \"op\": \"aten::index_copy_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IndexCopyInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source) {
-  auto result = CallPythonOp_Generic("flag_gems.index_copy_", {self, dim, index, source});
+  auto result = IndexCopyInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_copy_", {self, dim, index, source}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(source));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot IndexFillIntScalarFnSource("aten::index_fill.int_Scalar", "flag_gems.index_fill", "7ec23c01811e6e15b73ae55016c9ae3a663136b2f6b8ff16b8931591f0fb7efa", "{\"abi\": \"7ec23c01811e6e15b73ae55016c9ae3a663136b2f6b8ff16b8931591f0fb7efa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.index_fill\", \"op\": \"aten::index_fill.int_Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IndexFillIntScalarKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.index_fill", {self, dim, index, value});
+  auto result = IndexFillIntScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_fill", {self, dim, index, value}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IndexFillIntTensorFnSource("aten::index_fill.int_Tensor", "flag_gems.index_fill", "1abea24fc1286c15e03c6aaea328a79a2014ffd6b48d0c5148444499332f1f45", "{\"abi\": \"1abea24fc1286c15e03c6aaea328a79a2014ffd6b48d0c5148444499332f1f45\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.index_fill\", \"op\": \"aten::index_fill.int_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IndexFillIntTensorKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("flag_gems.index_fill", {self, dim, index, value});
+  auto result = IndexFillIntTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_fill", {self, dim, index, value}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IndexFillInplaceIntScalarFnSource("aten::index_fill_.int_Scalar", "flag_gems.index_fill_", "2543186f2e33f1743893e73842a1d6ed57ddd396247af286eaea510e48c63536", "{\"abi\": \"2543186f2e33f1743893e73842a1d6ed57ddd396247af286eaea510e48c63536\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.index_fill_\", \"op\": \"aten::index_fill_.int_Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IndexFillInplaceIntScalarKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.index_fill_", {self, dim, index, value});
+  auto result = IndexFillInplaceIntScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_fill_", {self, dim, index, value}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Scalar&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot IndexFillInplaceIntTensorFnSource("aten::index_fill_.int_Tensor", "flag_gems.index_fill_", "d7ea46b0c6da3b0846fdfd3d5e372a9d9228c473067cab48f1ccd82f56f2c7c6", "{\"abi\": \"d7ea46b0c6da3b0846fdfd3d5e372a9d9228c473067cab48f1ccd82f56f2c7c6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.index_fill_\", \"op\": \"aten::index_fill_.int_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IndexFillInplaceIntTensorKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("flag_gems.index_fill_", {self, dim, index, value});
+  auto result = IndexFillInplaceIntTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_fill_", {self, dim, index, value}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot IndexReduceInplaceFnSource("aten::index_reduce_", "flag_gems.index_reduce_", "2e9e86b63cdb7237c757baafa6eed0710fc44b3f165235eacba155b77f7f18c3", "{\"abi\": \"2e9e86b63cdb7237c757baafa6eed0710fc44b3f165235eacba155b77f7f18c3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}, {\"keyword\": \"include_self\", \"type\": \"bool\"}], \"host\": \"flag_gems.index_reduce_\", \"op\": \"aten::index_reduce_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IndexReduceInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & source, c10::string_view reduce, bool include_self) {
-  auto result = CallPythonOp_GenericKw("flag_gems.index_reduce_", {self, dim, index, source, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = IndexReduceInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.index_reduce_", {self, dim, index, source, reduce}, {PyKwarg{"include_self", include_self}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(source), static_cast<const c10::string_view&>(reduce), static_cast<const bool&>(include_self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot IndexSelectFnSource("aten::index_select", "flag_gems.index_select", "af78f329cf01652caea1a4449340142c3e8cbead1efd1eab03b287ae65b35849", "{\"abi\": \"af78f329cf01652caea1a4449340142c3e8cbead1efd1eab03b287ae65b35849\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.index_select\", \"op\": \"aten::index_select\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IndexSelectKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index) {
-  auto result = CallPythonOp_Generic("flag_gems.index_select", {self, dim, index});
+  auto result = IndexSelectFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.index_select", {self, dim, index}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsinScalarTensorFnSource("aten::isin.Scalar_Tensor", "flag_gems.isin", "3f3aae6cfd208dc653679ae9db7f09a68c8f7417588098a2c8ac6cd3410efa52", "{\"abi\": \"3f3aae6cfd208dc653679ae9db7f09a68c8f7417588098a2c8ac6cd3410efa52\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"assume_unique\", \"type\": \"bool\"}, {\"keyword\": \"invert\", \"type\": \"bool\"}], \"host\": \"flag_gems.isin\", \"op\": \"aten::isin.Scalar_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsinScalarTensorKernelPython(const at::Scalar & element, const at::Tensor & test_elements, bool assume_unique, bool invert) {
-  auto result = CallPythonOp_GenericKw("flag_gems.isin", {element, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
+  auto result = IsinScalarTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.isin", {element, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}}); }, static_cast<const at::Scalar&>(element), static_cast<const at::Tensor&>(test_elements), static_cast<const bool&>(assume_unique), static_cast<const bool&>(invert));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsinTensorScalarFnSource("aten::isin.Tensor_Scalar", "flag_gems.isin", "e16e25a985d0ddb43e661373d5c53260a23475f3431bd793f871fb454b120e18", "{\"abi\": \"e16e25a985d0ddb43e661373d5c53260a23475f3431bd793f871fb454b120e18\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"assume_unique\", \"type\": \"bool\"}, {\"keyword\": \"invert\", \"type\": \"bool\"}], \"host\": \"flag_gems.isin\", \"op\": \"aten::isin.Tensor_Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsinTensorScalarKernelPython(const at::Tensor & elements, const at::Scalar & test_element, bool assume_unique, bool invert) {
-  auto result = CallPythonOp_GenericKw("flag_gems.isin", {elements, test_element}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
+  auto result = IsinTensorScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.isin", {elements, test_element}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}}); }, static_cast<const at::Tensor&>(elements), static_cast<const at::Scalar&>(test_element), static_cast<const bool&>(assume_unique), static_cast<const bool&>(invert));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsinTensorTensorFnSource("aten::isin.Tensor_Tensor", "flag_gems.isin", "de3ca6349232c23ef39a3a2c3f867d9b6c53cc01397b5cec0681b27090008b9f", "{\"abi\": \"de3ca6349232c23ef39a3a2c3f867d9b6c53cc01397b5cec0681b27090008b9f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"assume_unique\", \"type\": \"bool\"}, {\"keyword\": \"invert\", \"type\": \"bool\"}], \"host\": \"flag_gems.isin\", \"op\": \"aten::isin.Tensor_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsinTensorTensorKernelPython(const at::Tensor & elements, const at::Tensor & test_elements, bool assume_unique, bool invert) {
-  auto result = CallPythonOp_GenericKw("flag_gems.isin", {elements, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}});
+  auto result = IsinTensorTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.isin", {elements, test_elements}, {PyKwarg{"assume_unique", assume_unique}, PyKwarg{"invert", invert}}); }, static_cast<const at::Tensor&>(elements), static_cast<const at::Tensor&>(test_elements), static_cast<const bool&>(assume_unique), static_cast<const bool&>(invert));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsinfFnSource("aten::isinf", "flag_gems.isinf", "c9df3a2c4c5b782e2e2f4e6ead4a66eacfb7dccae746398b35a19a177df10f4e", "{\"abi\": \"c9df3a2c4c5b782e2e2f4e6ead4a66eacfb7dccae746398b35a19a177df10f4e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.isinf\", \"op\": \"aten::isinf\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsinfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.isinf", {self});
+  auto result = IsinfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.isinf", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsnanFnSource("aten::isnan", "flag_gems.isnan", "8d40e5e18cb6e69d6bfcee3579d1f857b94e92b358a56803039d044a1a08018f", "{\"abi\": \"8d40e5e18cb6e69d6bfcee3579d1f857b94e92b358a56803039d044a1a08018f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.isnan\", \"op\": \"aten::isnan\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsnanKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.isnan", {self});
+  auto result = IsnanFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.isnan", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsneginfFnSource("aten::isneginf", "flag_gems.isneginf", "596b42535e47849e72b4998a1a837d72b52d43ac1b2160198a0f2bdb166c5125", "{\"abi\": \"596b42535e47849e72b4998a1a837d72b52d43ac1b2160198a0f2bdb166c5125\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.isneginf\", \"op\": \"aten::isneginf\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsneginfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.isneginf", {self});
+  auto result = IsneginfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.isneginf", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot IsneginfOutFnSource("aten::isneginf.out", "flag_gems.isneginf_out", "889fb0e08e88a0e5c1994df8c374ebe468e3b91e28b8eab2b44614399034d8e8", "{\"abi\": \"889fb0e08e88a0e5c1994df8c374ebe468e3b91e28b8eab2b44614399034d8e8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.isneginf_out\", \"op\": \"aten::isneginf.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & IsneginfOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.isneginf_out", {self});
+  auto result = IsneginfOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.isneginf_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot IsposinfFnSource("aten::isposinf", "flag_gems.isposinf", "33a667f0bff9159bc10031acc58824a296c9b9863b988c52713c13d6147a7394", "{\"abi\": \"33a667f0bff9159bc10031acc58824a296c9b9863b988c52713c13d6147a7394\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.isposinf\", \"op\": \"aten::isposinf\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor IsposinfKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.isposinf", {self});
+  auto result = IsposinfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.isposinf", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot KthvalueFnSource("aten::kthvalue", "flag_gems.kthvalue", "271876a8e2512195685d4273eec341003bf9849cd01b06b470a13228e771bcf5", "{\"abi\": \"271876a8e2512195685d4273eec341003bf9849cd01b06b470a13228e771bcf5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.kthvalue\", \"op\": \"aten::kthvalue\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> KthvalueKernelPython(const at::Tensor & self, int64_t k, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.kthvalue", {self, k, dim, keepdim}, 2);
+  auto result = KthvalueFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.kthvalue", {self, k, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(k), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot LcmFnSource("aten::lcm", "flag_gems.lcm", "e7b3fc5f7f49624544d254e901a0bb5ab9c31d6f4e41349b3c7f07be8f3ac4ba", "{\"abi\": \"e7b3fc5f7f49624544d254e901a0bb5ab9c31d6f4e41349b3c7f07be8f3ac4ba\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lcm\", \"op\": \"aten::lcm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LcmKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.lcm", {self, other});
+  auto result = LcmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lcm", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LcmInplaceFnSource("aten::lcm_", "flag_gems.lcm_", "1c64463f47a9521952121aff3c9faab88c55945d331ae4e5396e93da901c8095", "{\"abi\": \"1c64463f47a9521952121aff3c9faab88c55945d331ae4e5396e93da901c8095\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lcm_\", \"op\": \"aten::lcm_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LcmInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.lcm_", {self, other});
+  auto result = LcmInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lcm_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LeScalarFnSource("aten::le.Scalar", "flag_gems.le_scalar", "deac1d4b23f5e3a17d5f9b14de2ca08e333708923c5139c99b7544a4c21cdaab", "{\"abi\": \"deac1d4b23f5e3a17d5f9b14de2ca08e333708923c5139c99b7544a4c21cdaab\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.le_scalar\", \"op\": \"aten::le.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LeScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.le_scalar", {self, other});
+  auto result = LeScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.le_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LeTensorFnSource("aten::le.Tensor", "flag_gems.le", "729d79f1d324c5fb4efdb455fdaa65a6399d1e493a14006c91ed6a331853d825", "{\"abi\": \"729d79f1d324c5fb4efdb455fdaa65a6399d1e493a14006c91ed6a331853d825\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.le\", \"op\": \"aten::le.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LeTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.le", {self, other});
+  auto result = LeTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.le", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LeInplaceScalarFnSource("aten::le_.Scalar", "flag_gems.le_scalar_", "f7f89fc3c169ab9bb578d5ba48819c584f693b35511c416493dbb369e790498b", "{\"abi\": \"f7f89fc3c169ab9bb578d5ba48819c584f693b35511c416493dbb369e790498b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.le_scalar_\", \"op\": \"aten::le_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LeInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.le_scalar_", {self, other});
+  auto result = LeInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.le_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LeInplaceTensorFnSource("aten::le_.Tensor", "flag_gems.le_", "57aeae4ffc79c5b3c5fe29eca199fa7fc64f5bad4ced3dc69163731c878c8514", "{\"abi\": \"57aeae4ffc79c5b3c5fe29eca199fa7fc64f5bad4ced3dc69163731c878c8514\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.le_\", \"op\": \"aten::le_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LeInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.le_", {self, other});
+  auto result = LeInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.le_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LeakyReluFnSource("aten::leaky_relu", "flag_gems.leaky_relu", "164d907b937d968bcdec655c3d928926c409f0c6120c13f3461ff3a560da9ae4", "{\"abi\": \"164d907b937d968bcdec655c3d928926c409f0c6120c13f3461ff3a560da9ae4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.leaky_relu\", \"op\": \"aten::leaky_relu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LeakyReluKernelPython(const at::Tensor & self, const at::Scalar & negative_slope) {
-  auto result = CallPythonOp_Generic("flag_gems.leaky_relu", {self, negative_slope});
+  auto result = LeakyReluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.leaky_relu", {self, negative_slope}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(negative_slope));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LeakyReluOutFnSource("aten::leaky_relu.out", "flag_gems.leaky_relu_out", "c15277981a1d0b7fa645cd4184376f0852215b5da4d39ae43a916995fc528779", "{\"abi\": \"c15277981a1d0b7fa645cd4184376f0852215b5da4d39ae43a916995fc528779\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.leaky_relu_out\", \"op\": \"aten::leaky_relu.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LeakyReluOutKernelPython(const at::Tensor & self, const at::Scalar & negative_slope, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.leaky_relu_out", {self, negative_slope});
+  auto result = LeakyReluOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.leaky_relu_out", {self, negative_slope}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(negative_slope));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot LeakyReluInplaceFnSource("aten::leaky_relu_", "flag_gems.leaky_relu_", "5a7bca38cd1dd638af8368d5beec76ccd9df2e7e887ec20363948bfc39a39181", "{\"abi\": \"5a7bca38cd1dd638af8368d5beec76ccd9df2e7e887ec20363948bfc39a39181\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.leaky_relu_\", \"op\": \"aten::leaky_relu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LeakyReluInplaceKernelPython(at::Tensor & self, const at::Scalar & negative_slope) {
-  auto result = CallPythonOp_Generic("flag_gems.leaky_relu_", {self, negative_slope});
+  auto result = LeakyReluInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.leaky_relu_", {self, negative_slope}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(negative_slope));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LeakyReluBackwardFnSource("aten::leaky_relu_backward", "flag_gems.leaky_relu_backward", "3d89372dabdb648f727238654eb09315e7649c70a7e9de05e1e262ed8d1f01a0", "{\"abi\": \"3d89372dabdb648f727238654eb09315e7649c70a7e9de05e1e262ed8d1f01a0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.leaky_relu_backward\", \"op\": \"aten::leaky_relu_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LeakyReluBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Scalar & negative_slope, bool self_is_result) {
-  auto result = CallPythonOp_Generic("flag_gems.leaky_relu_backward", {grad_output, self, negative_slope, self_is_result});
+  auto result = LeakyReluBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.leaky_relu_backward", {grad_output, self, negative_slope, self_is_result}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(negative_slope), static_cast<const bool&>(self_is_result));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LerpScalarFnSource("aten::lerp.Scalar", "flag_gems.lerp_scalar", "a159d66cbd3be92c83733f407a4efd37ebf0c4d2604ee87df1bb63554541c255", "{\"abi\": \"a159d66cbd3be92c83733f407a4efd37ebf0c4d2604ee87df1bb63554541c255\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.lerp_scalar\", \"op\": \"aten::lerp.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LerpScalarKernelPython(const at::Tensor & self, const at::Tensor & end, const at::Scalar & weight) {
-  auto result = CallPythonOp_Generic("flag_gems.lerp_scalar", {self, end, weight});
+  auto result = LerpScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lerp_scalar", {self, end, weight}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(end), static_cast<const at::Scalar&>(weight));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LerpTensorFnSource("aten::lerp.Tensor", "flag_gems.lerp_tensor", "a58a54aed1a3c03fe29973d1a3cc39a6f80d4a77f29c0d1e395a6e39bd8f2bb1", "{\"abi\": \"a58a54aed1a3c03fe29973d1a3cc39a6f80d4a77f29c0d1e395a6e39bd8f2bb1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lerp_tensor\", \"op\": \"aten::lerp.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LerpTensorKernelPython(const at::Tensor & self, const at::Tensor & end, const at::Tensor & weight) {
-  auto result = CallPythonOp_Generic("flag_gems.lerp_tensor", {self, end, weight});
+  auto result = LerpTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lerp_tensor", {self, end, weight}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(end), static_cast<const at::Tensor&>(weight));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LerpInplaceScalarFnSource("aten::lerp_.Scalar", "flag_gems.lerp_scalar_", "cbf586597c74509eb18b81f93985667b0ad27fb272d1c772066e89607e31d269", "{\"abi\": \"cbf586597c74509eb18b81f93985667b0ad27fb272d1c772066e89607e31d269\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.lerp_scalar_\", \"op\": \"aten::lerp_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LerpInplaceScalarKernelPython(at::Tensor & self, const at::Tensor & end, const at::Scalar & weight) {
-  auto result = CallPythonOp_Generic("flag_gems.lerp_scalar_", {self, end, weight});
+  auto result = LerpInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lerp_scalar_", {self, end, weight}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(end), static_cast<const at::Scalar&>(weight));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LerpInplaceTensorFnSource("aten::lerp_.Tensor", "flag_gems.lerp_tensor_", "f38ee5d15468cb55cbcf8954e2cba2a3601fbd9167a270d871259f600af348f1", "{\"abi\": \"f38ee5d15468cb55cbcf8954e2cba2a3601fbd9167a270d871259f600af348f1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lerp_tensor_\", \"op\": \"aten::lerp_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LerpInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & end, const at::Tensor & weight) {
-  auto result = CallPythonOp_Generic("flag_gems.lerp_tensor_", {self, end, weight});
+  auto result = LerpInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lerp_tensor_", {self, end, weight}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(end), static_cast<const at::Tensor&>(weight));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LgammaFnSource("aten::lgamma", "flag_gems.lgamma", "f70dd65f2ab3bae64d92117e8fc7c590454121113fa51de4c373d3eb5d7413e9", "{\"abi\": \"f70dd65f2ab3bae64d92117e8fc7c590454121113fa51de4c373d3eb5d7413e9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lgamma\", \"op\": \"aten::lgamma\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LgammaKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.lgamma", {self});
+  auto result = LgammaFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lgamma", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LgammaInplaceFnSource("aten::lgamma_", "flag_gems.lgamma_", "72bd9b680e8803eb68df9dfd826dfa0a121f2d9db01242b53fb061e89a2183c2", "{\"abi\": \"72bd9b680e8803eb68df9dfd826dfa0a121f2d9db01242b53fb061e89a2183c2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lgamma_\", \"op\": \"aten::lgamma_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LgammaInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.lgamma_", {self});
+  auto result = LgammaInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lgamma_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LiftFnSource("aten::lift", "flag_gems.lift", "a8263c076dc26894a49e185f1d0a02fe87106ffbfc7f2f717e3b95ca0199e1a1", "{\"abi\": \"a8263c076dc26894a49e185f1d0a02fe87106ffbfc7f2f717e3b95ca0199e1a1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lift\", \"op\": \"aten::lift\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LiftKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.lift", {self});
+  auto result = LiftFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lift", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LiftOutFnSource("aten::lift.out", "flag_gems.lift_out", "86a67ba87b0b27a7cdca251b776116c527c8ce3b548259071653f6de4c1cd073", "{\"abi\": \"86a67ba87b0b27a7cdca251b776116c527c8ce3b548259071653f6de4c1cd073\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lift_out\", \"op\": \"aten::lift.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LiftOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.lift_out", {self});
+  auto result = LiftOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lift_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot LinalgCrossFnSource("aten::linalg_cross", "flag_gems.linalg_cross", "0b46cb981befae5948fb21090a5359c548a12faafa414bb0b32b3e8847424230", "{\"abi\": \"0b46cb981befae5948fb21090a5359c548a12faafa414bb0b32b3e8847424230\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dim\", \"type\": \"int64_t\"}], \"host\": \"flag_gems.linalg_cross\", \"op\": \"aten::linalg_cross\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgCrossKernelPython(const at::Tensor & self, const at::Tensor & other, int64_t dim) {
-  auto result = CallPythonOp_GenericKw("flag_gems.linalg_cross", {self, other}, {PyKwarg{"dim", dim}});
+  auto result = LinalgCrossFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.linalg_cross", {self, other}, {PyKwarg{"dim", dim}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LinalgCrossOutFnSource("aten::linalg_cross.out", "flag_gems.linalg_cross_out", "c711f4658eb5dac3ec5d273e1d128f0036270300810cb7dfbafedc8564cb5f3e", "{\"abi\": \"c711f4658eb5dac3ec5d273e1d128f0036270300810cb7dfbafedc8564cb5f3e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dim\", \"type\": \"int64_t\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.linalg_cross_out\", \"op\": \"aten::linalg_cross.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LinalgCrossOutKernelPython(const at::Tensor & self, const at::Tensor & other, int64_t dim, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.linalg_cross_out", {self, other}, {PyKwarg{"dim", dim}, PyKwarg{"out", out}});
+  LinalgCrossOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.linalg_cross_out", {self, other}, {PyKwarg{"dim", dim}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot LinalgEigFnSource("aten::linalg_eig", "flag_gems.linalg_eig", "81abb8e5451528fe00ee2842005e551c6b37164ac18face136b4ecfc581b8af8", "{\"abi\": \"81abb8e5451528fe00ee2842005e551c6b37164ac18face136b4ecfc581b8af8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.linalg_eig\", \"op\": \"aten::linalg_eig\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> LinalgEigKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.linalg_eig", {self}, 2);
+  auto result = LinalgEigFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.linalg_eig", {self}, 2); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot LinalgHouseholderProductFnSource("aten::linalg_householder_product", "flag_gems.linalg_householder_product", "7530aeb944ecc7c23b4a6da38ed854346434c90e9a7027e207c0f82f4f7a575c", "{\"abi\": \"7530aeb944ecc7c23b4a6da38ed854346434c90e9a7027e207c0f82f4f7a575c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.linalg_householder_product\", \"op\": \"aten::linalg_householder_product\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgHouseholderProductKernelPython(const at::Tensor & input, const at::Tensor & tau) {
-  auto result = CallPythonOp_Generic("flag_gems.linalg_householder_product", {input, tau});
+  auto result = LinalgHouseholderProductFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.linalg_householder_product", {input, tau}); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(tau));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LinalgLdlFactorExFnSource("aten::linalg_ldl_factor_ex", "flag_gems.ldl_factor_ex", "54b6cddfcb21fe971abdcb66ecbc06fd67fa13b57591fd5405f28da662b615a2", "{\"abi\": \"54b6cddfcb21fe971abdcb66ecbc06fd67fa13b57591fd5405f28da662b615a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.ldl_factor_ex\", \"op\": \"aten::linalg_ldl_factor_ex\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> LinalgLdlFactorExKernelPython(const at::Tensor & self, bool hermitian, bool check_errors) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.ldl_factor_ex", {self, hermitian, check_errors}, 3);
+  auto result = LinalgLdlFactorExFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.ldl_factor_ex", {self, hermitian, check_errors}, 3); }, static_cast<const at::Tensor&>(self), static_cast<const bool&>(hermitian), static_cast<const bool&>(check_errors));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot LinalgLdlSolveFnSource("aten::linalg_ldl_solve", "flag_gems.linalg_ldl_solve", "8fa475a7ee581a5e54e821302e9e4e1b912e2c5fb5ea7ba1edf53fc11506d127", "{\"abi\": \"8fa475a7ee581a5e54e821302e9e4e1b912e2c5fb5ea7ba1edf53fc11506d127\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"hermitian\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_ldl_solve\", \"op\": \"aten::linalg_ldl_solve\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgLdlSolveKernelPython(const at::Tensor & LD, const at::Tensor & pivots, const at::Tensor & B, bool hermitian) {
-  auto result = CallPythonOp_GenericKw("flag_gems.linalg_ldl_solve", {LD, pivots, B}, {PyKwarg{"hermitian", hermitian}});
+  auto result = LinalgLdlSolveFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.linalg_ldl_solve", {LD, pivots, B}, {PyKwarg{"hermitian", hermitian}}); }, static_cast<const at::Tensor&>(LD), static_cast<const at::Tensor&>(pivots), static_cast<const at::Tensor&>(B), static_cast<const bool&>(hermitian));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LinalgLstsqFnSource("aten::linalg_lstsq", "flag_gems.linalg_lstsq", "b032594f68f009e1b673747dbe2c4777c193fab1129795719a3fce90470bb0fb", "{\"abi\": \"b032594f68f009e1b673747dbe2c4777c193fab1129795719a3fce90470bb0fb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<c10::string_view>\"}], \"host\": \"flag_gems.linalg_lstsq\", \"op\": \"aten::linalg_lstsq\", \"outputs\": 4, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor,at::Tensor> LinalgLstsqKernelPython(const at::Tensor & self, const at::Tensor & b, ::std::optional<double> rcond, ::std::optional<c10::string_view> driver) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.linalg_lstsq", {self, b, rcond, driver}, 4);
+  auto result = LinalgLstsqFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.linalg_lstsq", {self, b, rcond, driver}, 4); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(b), static_cast<const ::std::optional<double>&>(rcond), static_cast<const ::std::optional<c10::string_view>&>(driver));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
@@ -2263,487 +2633,566 @@ at::Tensor LinalgLdlSolveKernelPython(const at::Tensor & LD, const at::Tensor & 
   return {result[0], result[1], result[2], result[3]};
 }
 
+static TypedSourceSlot LinalgLuFnSource("aten::linalg_lu", "flag_gems.linalg_lu", "bae46bfdb7192dc2655ce2d203daff65148b8dbbc7f29879d6b3313a1aa22d39", "{\"abi\": \"bae46bfdb7192dc2655ce2d203daff65148b8dbbc7f29879d6b3313a1aa22d39\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"pivot\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_lu\", \"op\": \"aten::linalg_lu\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> LinalgLuKernelPython(const at::Tensor & A, bool pivot) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.linalg_lu", {A}, {PyKwarg{"pivot", pivot}}, 3);
+  auto result = LinalgLuFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.linalg_lu", {A}, {PyKwarg{"pivot", pivot}}, 3); }, static_cast<const at::Tensor&>(A), static_cast<const bool&>(pivot));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot LinalgLuOutFnSource("aten::linalg_lu.out", "flag_gems.linalg_lu_out", "cc88ed4bb5ae0adfb9eef667488e61b9c5d58aecbc23948a44d4a6524af60ede", "{\"abi\": \"cc88ed4bb5ae0adfb9eef667488e61b9c5d58aecbc23948a44d4a6524af60ede\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"pivot\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_lu_out\", \"op\": \"aten::linalg_lu.out\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &,at::Tensor &> LinalgLuOutKernelPython(const at::Tensor & A, bool pivot, at::Tensor & P, at::Tensor & L, at::Tensor & U) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.linalg_lu_out", {A}, {PyKwarg{"pivot", pivot}}, 3);
+  auto result = LinalgLuOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.linalg_lu_out", {A}, {PyKwarg{"pivot", pivot}}, 3); }, static_cast<const at::Tensor&>(A), static_cast<const bool&>(pivot));
   P.copy_(result[0]);
   L.copy_(result[1]);
   U.copy_(result[2]);
   return {P, L, U};
 }
 
+static TypedSourceSlot LinalgLuFactorExFnSource("aten::linalg_lu_factor_ex", "flag_gems.linalg_lu_factor_ex", "e5f5f4a1ad884e9884e975fd2827dc5df5eca184f47f438b6bcf15b6f835e330", "{\"abi\": \"e5f5f4a1ad884e9884e975fd2827dc5df5eca184f47f438b6bcf15b6f835e330\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"pivot\", \"type\": \"bool\"}, {\"keyword\": \"check_errors\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_lu_factor_ex\", \"op\": \"aten::linalg_lu_factor_ex\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> LinalgLuFactorExKernelPython(const at::Tensor & A, bool pivot, bool check_errors) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.linalg_lu_factor_ex", {A}, {PyKwarg{"pivot", pivot}, PyKwarg{"check_errors", check_errors}}, 3);
+  auto result = LinalgLuFactorExFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.linalg_lu_factor_ex", {A}, {PyKwarg{"pivot", pivot}, PyKwarg{"check_errors", check_errors}}, 3); }, static_cast<const at::Tensor&>(A), static_cast<const bool&>(pivot), static_cast<const bool&>(check_errors));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot LinalgLuFactorExOutFnSource("aten::linalg_lu_factor_ex.out", "flag_gems.linalg_lu_factor_ex_out", "022f8899762ed3e00792e375553b08f29dfe9d5a2297ba54354bac417cba3193", "{\"abi\": \"022f8899762ed3e00792e375553b08f29dfe9d5a2297ba54354bac417cba3193\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"pivot\", \"type\": \"bool\"}, {\"keyword\": \"check_errors\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_lu_factor_ex_out\", \"op\": \"aten::linalg_lu_factor_ex.out\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &,at::Tensor &> LinalgLuFactorExOutKernelPython(const at::Tensor & A, bool pivot, bool check_errors, at::Tensor & LU, at::Tensor & pivots, at::Tensor & info) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.linalg_lu_factor_ex_out", {A}, {PyKwarg{"pivot", pivot}, PyKwarg{"check_errors", check_errors}}, 3);
+  auto result = LinalgLuFactorExOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.linalg_lu_factor_ex_out", {A}, {PyKwarg{"pivot", pivot}, PyKwarg{"check_errors", check_errors}}, 3); }, static_cast<const at::Tensor&>(A), static_cast<const bool&>(pivot), static_cast<const bool&>(check_errors));
   LU.copy_(result[0]);
   pivots.copy_(result[1]);
   info.copy_(result[2]);
   return {LU, pivots, info};
 }
 
+static TypedSourceSlot LinalgMatrixExpFnSource("aten::linalg_matrix_exp", "flag_gems.linalg_matrix_exp", "4061f585a4cb7b54c0b063b3aa3ea6e37c86fbbcd6de8a29a40083c1271d9572", "{\"abi\": \"4061f585a4cb7b54c0b063b3aa3ea6e37c86fbbcd6de8a29a40083c1271d9572\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.linalg_matrix_exp\", \"op\": \"aten::linalg_matrix_exp\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgMatrixExpKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.linalg_matrix_exp", {self});
+  auto result = LinalgMatrixExpFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.linalg_matrix_exp", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LinalgMatrixExpOutFnSource("aten::linalg_matrix_exp.out", "flag_gems.linalg_matrix_exp_out", "793b161724dc5479ba0ae4055a2860f247263c87a1538f74c43f441db6f5f8f3", "{\"abi\": \"793b161724dc5479ba0ae4055a2860f247263c87a1538f74c43f441db6f5f8f3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.linalg_matrix_exp_out\", \"op\": \"aten::linalg_matrix_exp.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LinalgMatrixExpOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.linalg_matrix_exp_out", {self});
+  auto result = LinalgMatrixExpOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.linalg_matrix_exp_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot LinalgQrFnSource("aten::linalg_qr", "flag_gems.linalg_qr", "1a6f285c17f6a4565de9207272c68ee2fed547aaf1eaf9046fce9b27a0f2a29a", "{\"abi\": \"1a6f285c17f6a4565de9207272c68ee2fed547aaf1eaf9046fce9b27a0f2a29a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}], \"host\": \"flag_gems.linalg_qr\", \"op\": \"aten::linalg_qr\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> LinalgQrKernelPython(const at::Tensor & A, c10::string_view mode) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.linalg_qr", {A, mode}, 2);
+  auto result = LinalgQrFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.linalg_qr", {A, mode}, 2); }, static_cast<const at::Tensor&>(A), static_cast<const c10::string_view&>(mode));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot LinalgQrOutFnSource("aten::linalg_qr.out", "flag_gems.linalg_qr_out", "b85bed4d3059970102db63ee892c59996efce4b97f514d2c9373d4f7e267ba9b", "{\"abi\": \"b85bed4d3059970102db63ee892c59996efce4b97f514d2c9373d4f7e267ba9b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}, {\"keyword\": \"Q\", \"type\": \"at::Tensor\"}, {\"keyword\": \"R\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.linalg_qr_out\", \"op\": \"aten::linalg_qr.out\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &> LinalgQrOutKernelPython(const at::Tensor & A, c10::string_view mode, at::Tensor & Q, at::Tensor & R) {
-  CallPythonOp_GenericKwTuple("flag_gems.linalg_qr_out", {A, mode}, {PyKwarg{"Q", Q}, PyKwarg{"R", R}}, 2);
+  LinalgQrOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.linalg_qr_out", {A, mode}, {PyKwarg{"Q", Q}, PyKwarg{"R", R}}, 2); }, static_cast<const at::Tensor&>(A), static_cast<const c10::string_view&>(mode), static_cast<const at::Tensor&>(Q), static_cast<const at::Tensor&>(R));
   return {Q, R};
 }
 
+static TypedSourceSlot LinalgSolveTriangularFnSource("aten::linalg_solve_triangular", "flag_gems.linalg_solve_triangular", "9dc74fff32b7be956708e1ce6a0863c264032655fae1f524c66c67f8450be7cf", "{\"abi\": \"9dc74fff32b7be956708e1ce6a0863c264032655fae1f524c66c67f8450be7cf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"upper\", \"type\": \"bool\"}, {\"keyword\": \"left\", \"type\": \"bool\"}, {\"keyword\": \"unitriangular\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_solve_triangular\", \"op\": \"aten::linalg_solve_triangular\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgSolveTriangularKernelPython(const at::Tensor & self, const at::Tensor & B, bool upper, bool left, bool unitriangular) {
-  auto result = CallPythonOp_GenericKw("flag_gems.linalg_solve_triangular", {self, B}, {PyKwarg{"upper", upper}, PyKwarg{"left", left}, PyKwarg{"unitriangular", unitriangular}});
+  auto result = LinalgSolveTriangularFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.linalg_solve_triangular", {self, B}, {PyKwarg{"upper", upper}, PyKwarg{"left", left}, PyKwarg{"unitriangular", unitriangular}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(B), static_cast<const bool&>(upper), static_cast<const bool&>(left), static_cast<const bool&>(unitriangular));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LinalgSolveTriangularOutFnSource("aten::linalg_solve_triangular.out", "flag_gems.linalg_solve_triangular_out", "4f61ce26a6ea9c5ac9d660c5199beb7d5f42caff116f68fdbf06a64990aefe23", "{\"abi\": \"4f61ce26a6ea9c5ac9d660c5199beb7d5f42caff116f68fdbf06a64990aefe23\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"upper\", \"type\": \"bool\"}, {\"keyword\": \"left\", \"type\": \"bool\"}, {\"keyword\": \"unitriangular\", \"type\": \"bool\"}], \"host\": \"flag_gems.linalg_solve_triangular_out\", \"op\": \"aten::linalg_solve_triangular.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LinalgSolveTriangularOutKernelPython(const at::Tensor & self, const at::Tensor & B, bool upper, bool left, bool unitriangular, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("flag_gems.linalg_solve_triangular_out", {self, B}, {PyKwarg{"upper", upper}, PyKwarg{"left", left}, PyKwarg{"unitriangular", unitriangular}});
+  auto result = LinalgSolveTriangularOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.linalg_solve_triangular_out", {self, B}, {PyKwarg{"upper", upper}, PyKwarg{"left", left}, PyKwarg{"unitriangular", unitriangular}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(B), static_cast<const bool&>(upper), static_cast<const bool&>(left), static_cast<const bool&>(unitriangular));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot LinalgVectorNormFnSource("aten::linalg_vector_norm", "flag_gems.vector_norm", "19ae56bffce8523f631ab32f1215fa207a0d8e8f0903421aec5e55f13699f646", "{\"abi\": \"19ae56bffce8523f631ab32f1215fa207a0d8e8f0903421aec5e55f13699f646\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.vector_norm\", \"op\": \"aten::linalg_vector_norm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinalgVectorNormKernelPython(const at::Tensor & self, const at::Scalar & ord, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.vector_norm", {self, ord, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = LinalgVectorNormFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.vector_norm", {self, ord, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(ord), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LinspaceFnSource("aten::linspace", "flag_gems.linspace", "9b186324d615c81166f69c93499c4294f36445a92ea97fe313810f56285c3c04", "{\"abi\": \"9b186324d615c81166f69c93499c4294f36445a92ea97fe313810f56285c3c04\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.linspace\", \"op\": \"aten::linspace\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LinspaceKernelPython(const at::Scalar & start, const at::Scalar & end, int64_t steps, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.linspace", {start, end, steps}, dtype, device);
+  auto result = ([&]() { if (!LinspaceFnSource.Available()) return CallPythonOp_Factory("flag_gems.linspace", {start, end, steps}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return LinspaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.linspace", {start, end, steps}, dtype, device); }, static_cast<const at::Scalar&>(start), static_cast<const at::Scalar&>(end), static_cast<const int64_t&>(steps), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogFnSource("aten::log", "flag_gems.log", "6cffe8c7af15aa5f850a2d49772c5c0564fadf1e5a2c6d5796947a07f7ac653a", "{\"abi\": \"6cffe8c7af15aa5f850a2d49772c5c0564fadf1e5a2c6d5796947a07f7ac653a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log\", \"op\": \"aten::log\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log", {self});
+  auto result = LogFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Log10FnSource("aten::log10", "flag_gems.log10", "de861b49feeb02941167b96f01adfa0eaf78d2a7ceb84f80c904472a465e82b9", "{\"abi\": \"de861b49feeb02941167b96f01adfa0eaf78d2a7ceb84f80c904472a465e82b9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log10\", \"op\": \"aten::log10\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Log10KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log10", {self});
+  auto result = Log10FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log10", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Log10OutFnSource("aten::log10.out", "flag_gems.log10_out", "b6ec7da97cf22765f59436119023db82d14f4f2fdbd9ac448cc84a39fb6058d3", "{\"abi\": \"b6ec7da97cf22765f59436119023db82d14f4f2fdbd9ac448cc84a39fb6058d3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log10_out\", \"op\": \"aten::log10.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Log10OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.log10_out", {self, out});
+  Log10OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log10_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Log10InplaceFnSource("aten::log10_", "flag_gems.log10_", "85f77c508d7644ff6e349e0bf1a48df55880e40ae4627d298830dad38b719b81", "{\"abi\": \"85f77c508d7644ff6e349e0bf1a48df55880e40ae4627d298830dad38b719b81\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log10_\", \"op\": \"aten::log10_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Log10InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log10_", {self});
+  auto result = Log10InplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log10_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot Log1pFnSource("aten::log1p", "flag_gems.log1p", "f33ed02b4815ba1c8a8a3fd7cc79ff79bc45cbba9828355ea8648856eca35ac8", "{\"abi\": \"f33ed02b4815ba1c8a8a3fd7cc79ff79bc45cbba9828355ea8648856eca35ac8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log1p\", \"op\": \"aten::log1p\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Log1pKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log1p", {self});
+  auto result = Log1pFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log1p", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Log1pOutFnSource("aten::log1p.out", "flag_gems.log1p_out", "bdc8232ce1f0970fece492fc2acf9be6b2e3a1bf31091b49a2a00c0ab90d06b9", "{\"abi\": \"bdc8232ce1f0970fece492fc2acf9be6b2e3a1bf31091b49a2a00c0ab90d06b9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log1p_out\", \"op\": \"aten::log1p.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Log1pOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.log1p_out", {self, out});
+  Log1pOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log1p_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Log1pInplaceFnSource("aten::log1p_", "flag_gems.log1p_", "65c695c17b39202eb4500ce4400f22a11c290ee52bd661b85137ecc6e69a657a", "{\"abi\": \"65c695c17b39202eb4500ce4400f22a11c290ee52bd661b85137ecc6e69a657a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log1p_\", \"op\": \"aten::log1p_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Log1pInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log1p_", {self});
+  auto result = Log1pInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log1p_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot Log2FnSource("aten::log2", "flag_gems.log2", "afb2a28a4726f6401afb45a2ddd3c8e5267caedb753f911036774e0ae2f02732", "{\"abi\": \"afb2a28a4726f6401afb45a2ddd3c8e5267caedb753f911036774e0ae2f02732\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log2\", \"op\": \"aten::log2\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Log2KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log2", {self});
+  auto result = Log2FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log2", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Log2InplaceFnSource("aten::log2_", "flag_gems.log2_", "6fb46253bc21ac13e9a2f65c45a1e069299e2069dffd799ab57fad1e406de8cb", "{\"abi\": \"6fb46253bc21ac13e9a2f65c45a1e069299e2069dffd799ab57fad1e406de8cb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log2_\", \"op\": \"aten::log2_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Log2InplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.log2_", {self});
+  auto result = Log2InplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log2_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LogSigmoidBackwardFnSource("aten::log_sigmoid_backward", "flag_gems.log_sigmoid_backward", "189b6537ad8d13003fff2ce407a4875783ad2961b9e9a2e5b1bd00aa4bfce149", "{\"abi\": \"189b6537ad8d13003fff2ce407a4875783ad2961b9e9a2e5b1bd00aa4bfce149\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log_sigmoid_backward\", \"op\": \"aten::log_sigmoid_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogSigmoidBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & buffer) {
-  auto result = CallPythonOp_Generic("flag_gems.log_sigmoid_backward", {grad_output, self, buffer});
+  auto result = LogSigmoidBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.log_sigmoid_backward", {grad_output, self, buffer}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(buffer));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogSigmoidBackwardGradInputFnSource("aten::log_sigmoid_backward.grad_input", "flag_gems.log_sigmoid_backward_out", "c0b27125fe90d78b181af6de632aa43d355937acacaf89dd2d3ca5dde46fcdf0", "{\"abi\": \"c0b27125fe90d78b181af6de632aa43d355937acacaf89dd2d3ca5dde46fcdf0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"grad_input\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log_sigmoid_backward_out\", \"op\": \"aten::log_sigmoid_backward.grad_input\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogSigmoidBackwardGradInputKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & buffer, at::Tensor & grad_input) {
-  CallPythonOp_GenericKw("flag_gems.log_sigmoid_backward_out", {grad_output, self, buffer}, {PyKwarg{"grad_input", grad_input}});
+  LogSigmoidBackwardGradInputFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.log_sigmoid_backward_out", {grad_output, self, buffer}, {PyKwarg{"grad_input", grad_input}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(buffer), static_cast<const at::Tensor&>(grad_input));
   return grad_input;
 }
 
+static TypedSourceSlot LogSigmoidForwardFnSource("aten::log_sigmoid_forward", "flag_gems.log_sigmoid_forward", "7f888a21a3ef97223f7b689bbd5de7ecd68fa6f580dc270e3a79984f6717f897", "{\"abi\": \"7f888a21a3ef97223f7b689bbd5de7ecd68fa6f580dc270e3a79984f6717f897\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.log_sigmoid_forward\", \"op\": \"aten::log_sigmoid_forward\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> LogSigmoidForwardKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.log_sigmoid_forward", {self}, 2);
+  auto result = LogSigmoidForwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.log_sigmoid_forward", {self}, 2); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot LogaddexpFnSource("aten::logaddexp", "flag_gems.logaddexp", "be05fec0c1d8d8741d735fe6d0e0c1f4af9189109bae259331088f24896c7e77", "{\"abi\": \"be05fec0c1d8d8741d735fe6d0e0c1f4af9189109bae259331088f24896c7e77\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logaddexp\", \"op\": \"aten::logaddexp\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogaddexpKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logaddexp", {self, other});
+  auto result = LogaddexpFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logaddexp", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogaddexpOutFnSource("aten::logaddexp.out", "flag_gems.logaddexp_out", "e2d8c941f72b3ff8acc381a482b4c2c40c01c86420fc8e11756ed9b207511cb7", "{\"abi\": \"e2d8c941f72b3ff8acc381a482b4c2c40c01c86420fc8e11756ed9b207511cb7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logaddexp_out\", \"op\": \"aten::logaddexp.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogaddexpOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.logaddexp_out", {self, other, out});
+  LogaddexpOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logaddexp_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot Logaddexp2FnSource("aten::logaddexp2", "flag_gems.logaddexp2", "f9d45d80e9fe197365e54e8829d308fbd0e332cc9403d7c34b5b84df35fed0ac", "{\"abi\": \"f9d45d80e9fe197365e54e8829d308fbd0e332cc9403d7c34b5b84df35fed0ac\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logaddexp2\", \"op\": \"aten::logaddexp2\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Logaddexp2KernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logaddexp2", {self, other});
+  auto result = Logaddexp2FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logaddexp2", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Logaddexp2OutFnSource("aten::logaddexp2.out", "flag_gems.logaddexp2_out", "8c349db25addaef5278d233896edea5510da0c7012b0a305f78c33e4993fe636", "{\"abi\": \"8c349db25addaef5278d233896edea5510da0c7012b0a305f78c33e4993fe636\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logaddexp2_out\", \"op\": \"aten::logaddexp2.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Logaddexp2OutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.logaddexp2_out", {self, other, out});
+  Logaddexp2OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logaddexp2_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot LogcumsumexpFnSource("aten::logcumsumexp", "flag_gems.logcumsumexp", "a916ac5983257d7883d5c0819b3f9065baf9bf61e9e631d9bd38316307b2e630", "{\"abi\": \"a916ac5983257d7883d5c0819b3f9065baf9bf61e9e631d9bd38316307b2e630\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.logcumsumexp\", \"op\": \"aten::logcumsumexp\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogcumsumexpKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_Generic("flag_gems.logcumsumexp", {self, dim});
+  auto result = LogcumsumexpFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logcumsumexp", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogcumsumexpOutFnSource("aten::logcumsumexp.out", "flag_gems.logcumsumexp_out", "f23cd3f4d6dc4b67769433dec4007c87d32d71eb29410e85703aae80988f988b", "{\"abi\": \"f23cd3f4d6dc4b67769433dec4007c87d32d71eb29410e85703aae80988f988b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logcumsumexp_out\", \"op\": \"aten::logcumsumexp.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogcumsumexpOutKernelPython(const at::Tensor & self, int64_t dim, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.logcumsumexp_out", {self, dim}, {PyKwarg{"out", out}});
+  LogcumsumexpOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.logcumsumexp_out", {self, dim}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot LogicalAndFnSource("aten::logical_and", "flag_gems.logical_and", "46e5186bc9572e84f2b55596d6bf89ef66c31ba49f4504dfe4c260294e767ad3", "{\"abi\": \"46e5186bc9572e84f2b55596d6bf89ef66c31ba49f4504dfe4c260294e767ad3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_and\", \"op\": \"aten::logical_and\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogicalAndKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_and", {self, other});
+  auto result = LogicalAndFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_and", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogicalAndInplaceFnSource("aten::logical_and_", "flag_gems.logical_and_", "3ef88c44501a474a4bebd60c640b56015a88f23c4a60a89d43f646c7f44373ae", "{\"abi\": \"3ef88c44501a474a4bebd60c640b56015a88f23c4a60a89d43f646c7f44373ae\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_and_\", \"op\": \"aten::logical_and_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogicalAndInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_and_", {self, other});
+  auto result = LogicalAndInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_and_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LogicalNotFnSource("aten::logical_not", "flag_gems.logical_not", "17ac4334c09483e9574fa016f3d21ab58f7cceb351184d6b9555fce2ab5b5537", "{\"abi\": \"17ac4334c09483e9574fa016f3d21ab58f7cceb351184d6b9555fce2ab5b5537\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_not\", \"op\": \"aten::logical_not\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogicalNotKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_not", {self});
+  auto result = LogicalNotFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_not", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogicalNotInplaceFnSource("aten::logical_not_", "flag_gems.logical_not_", "57464adf18256be5ec3652ad5bd854877911170df23f58296b2c36e92c21750f", "{\"abi\": \"57464adf18256be5ec3652ad5bd854877911170df23f58296b2c36e92c21750f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_not_\", \"op\": \"aten::logical_not_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogicalNotInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_not_", {self});
+  auto result = LogicalNotInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_not_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LogicalOrFnSource("aten::logical_or", "flag_gems.logical_or", "3f51c1a1c9db7af08caaf359389b3996219348cae4ec6f9fe47b73523743d0d8", "{\"abi\": \"3f51c1a1c9db7af08caaf359389b3996219348cae4ec6f9fe47b73523743d0d8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_or\", \"op\": \"aten::logical_or\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogicalOrKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_or", {self, other});
+  auto result = LogicalOrFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_or", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogicalOrInplaceFnSource("aten::logical_or_", "flag_gems.logical_or_", "594f9c5e4ef97948ffa5e80059ac264d8f60a937eeb098da80efd61ea7413ae0", "{\"abi\": \"594f9c5e4ef97948ffa5e80059ac264d8f60a937eeb098da80efd61ea7413ae0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_or_\", \"op\": \"aten::logical_or_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogicalOrInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_or_", {self, other});
+  auto result = LogicalOrInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_or_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LogicalXorFnSource("aten::logical_xor", "flag_gems.logical_xor", "64c5bd4e31ef25e4d46ebbee1092a04c3d12714cc4b406de9f895aa0a7f466b9", "{\"abi\": \"64c5bd4e31ef25e4d46ebbee1092a04c3d12714cc4b406de9f895aa0a7f466b9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_xor\", \"op\": \"aten::logical_xor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogicalXorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_xor", {self, other});
+  auto result = LogicalXorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_xor", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogicalXorInplaceFnSource("aten::logical_xor_", "flag_gems.logical_xor_", "900d2404c70128f9ed7323faa4979611a09d8d4c2f03bd410f653fd18459128e", "{\"abi\": \"900d2404c70128f9ed7323faa4979611a09d8d4c2f03bd410f653fd18459128e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logical_xor_\", \"op\": \"aten::logical_xor_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogicalXorInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.logical_xor_", {self, other});
+  auto result = LogicalXorInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logical_xor_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LogitFnSource("aten::logit", "flag_gems.logit", "ff6e636c4a6ff83e3179c9191be37e813f4fe002f18300832ff4e81606c1ff43", "{\"abi\": \"ff6e636c4a6ff83e3179c9191be37e813f4fe002f18300832ff4e81606c1ff43\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.logit\", \"op\": \"aten::logit\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogitKernelPython(const at::Tensor & self, ::std::optional<double> eps) {
-  auto result = CallPythonOp_Generic("flag_gems.logit", {self, eps});
+  auto result = LogitFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logit", {self, eps}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<double>&>(eps));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogitOutFnSource("aten::logit.out", "flag_gems.logit_out", "5441f235b3cfa774b6818bb83281f1d130262125618015f9cfccb6c74a49c2f7", "{\"abi\": \"5441f235b3cfa774b6818bb83281f1d130262125618015f9cfccb6c74a49c2f7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.logit_out\", \"op\": \"aten::logit.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogitOutKernelPython(const at::Tensor & self, ::std::optional<double> eps, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.logit_out", {self, eps, out});
+  LogitOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logit_out", {self, eps, out}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<double>&>(eps), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot LogitInplaceFnSource("aten::logit_", "flag_gems.logit_", "c295ecdcdd2216b01fa3e41c2ad10811af322e021dd50f248ac769e4204414e3", "{\"abi\": \"c295ecdcdd2216b01fa3e41c2ad10811af322e021dd50f248ac769e4204414e3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.logit_\", \"op\": \"aten::logit_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LogitInplaceKernelPython(at::Tensor & self, ::std::optional<double> eps) {
-  auto result = CallPythonOp_Generic("flag_gems.logit_", {self, eps});
+  auto result = LogitInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logit_", {self, eps}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<double>&>(eps));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LogitBackwardFnSource("aten::logit_backward", "flag_gems.logit_backward", "9b5b6ee861942ab0e177e42dea8b96a736844c9aa1f12028166ae94bf27ce2c2", "{\"abi\": \"9b5b6ee861942ab0e177e42dea8b96a736844c9aa1f12028166ae94bf27ce2c2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.logit_backward\", \"op\": \"aten::logit_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogitBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, ::std::optional<double> eps) {
-  auto result = CallPythonOp_Generic("flag_gems.logit_backward", {grad_output, self, eps});
+  auto result = LogitBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logit_backward", {grad_output, self, eps}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<double>&>(eps));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogspaceFnSource("aten::logspace", "flag_gems.logspace", "d165f12a7332e4305563ab96c7e984130386d1818fef9a7f664e521b570cda1c", "{\"abi\": \"d165f12a7332e4305563ab96c7e984130386d1818fef9a7f664e521b570cda1c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.logspace\", \"op\": \"aten::logspace\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogspaceKernelPython(const at::Scalar & start, const at::Scalar & end, int64_t steps, double base, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.logspace", {start, end, steps, base}, dtype, device);
+  auto result = ([&]() { if (!LogspaceFnSource.Available()) return CallPythonOp_Factory("flag_gems.logspace", {start, end, steps, base}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return LogspaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.logspace", {start, end, steps, base}, dtype, device); }, static_cast<const at::Scalar&>(start), static_cast<const at::Scalar&>(end), static_cast<const int64_t&>(steps), static_cast<const double&>(base), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LogsumexpFnSource("aten::logsumexp", "flag_gems.logsumexp", "71bec69b28c1511057055da2723ef143ac7472849e2ac06241127ca2d9b45822", "{\"abi\": \"71bec69b28c1511057055da2723ef143ac7472849e2ac06241127ca2d9b45822\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.logsumexp\", \"op\": \"aten::logsumexp\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LogsumexpKernelPython(const at::Tensor & self, at::IntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.logsumexp", {self, dim, keepdim});
+  auto result = LogsumexpFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.logsumexp", {self, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LtScalarFnSource("aten::lt.Scalar", "flag_gems.lt_scalar", "d715f0b67687915d1af67e46770482707f001d3b87bfc7a382732c301c5997ac", "{\"abi\": \"d715f0b67687915d1af67e46770482707f001d3b87bfc7a382732c301c5997ac\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.lt_scalar\", \"op\": \"aten::lt.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LtScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.lt_scalar", {self, other});
+  auto result = LtScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lt_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LtTensorFnSource("aten::lt.Tensor", "flag_gems.lt", "addd5e703f965c9d92c0b9b70e7c230c8d5250067a0d2ae13d33febb24ced12b", "{\"abi\": \"addd5e703f965c9d92c0b9b70e7c230c8d5250067a0d2ae13d33febb24ced12b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lt\", \"op\": \"aten::lt.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor LtTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.lt", {self, other});
+  auto result = LtTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lt", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot LtInplaceScalarFnSource("aten::lt_.Scalar", "flag_gems.lt_scalar_", "89b7e61f5a8701b8c107176fb58df317c00778927f995c750affb08e8f45faf8", "{\"abi\": \"89b7e61f5a8701b8c107176fb58df317c00778927f995c750affb08e8f45faf8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.lt_scalar_\", \"op\": \"aten::lt_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LtInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.lt_scalar_", {self, other});
+  auto result = LtInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lt_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LtInplaceTensorFnSource("aten::lt_.Tensor", "flag_gems.lt_", "462f7eafc95edd39f2310f52b31297826642c9e1eee06670f54727e4c197f867", "{\"abi\": \"462f7eafc95edd39f2310f52b31297826642c9e1eee06670f54727e4c197f867\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.lt_\", \"op\": \"aten::lt_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & LtInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.lt_", {self, other});
+  auto result = LtInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.lt_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot LuUnpackFnSource("aten::lu_unpack", "flag_gems.lu_unpack", "8097353e112571ce2ad57998c4336c92bef80f57c307c6edbaf74f8d04bd5ca4", "{\"abi\": \"8097353e112571ce2ad57998c4336c92bef80f57c307c6edbaf74f8d04bd5ca4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.lu_unpack\", \"op\": \"aten::lu_unpack\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> LuUnpackKernelPython(const at::Tensor & LU_data, const at::Tensor & LU_pivots, bool unpack_data, bool unpack_pivots) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.lu_unpack", {LU_data, LU_pivots, unpack_data, unpack_pivots}, 3);
+  auto result = LuUnpackFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.lu_unpack", {LU_data, LU_pivots, unpack_data, unpack_pivots}, 3); }, static_cast<const at::Tensor&>(LU_data), static_cast<const at::Tensor&>(LU_pivots), static_cast<const bool&>(unpack_data), static_cast<const bool&>(unpack_pivots));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot LuUnpackOutFnSource("aten::lu_unpack.out", "flag_gems.lu_unpack_out", "4f5dd43dba2d823192e244f02401f5314d794a2c1df4503147bbd64953b824cf", "{\"abi\": \"4f5dd43dba2d823192e244f02401f5314d794a2c1df4503147bbd64953b824cf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.lu_unpack_out\", \"op\": \"aten::lu_unpack.out\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &,at::Tensor &> LuUnpackOutKernelPython(const at::Tensor & LU_data, const at::Tensor & LU_pivots, bool unpack_data, bool unpack_pivots, at::Tensor & P, at::Tensor & L, at::Tensor & U) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.lu_unpack_out", {LU_data, LU_pivots, unpack_data, unpack_pivots}, 3);
+  auto result = LuUnpackOutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.lu_unpack_out", {LU_data, LU_pivots, unpack_data, unpack_pivots}, 3); }, static_cast<const at::Tensor&>(LU_data), static_cast<const at::Tensor&>(LU_pivots), static_cast<const bool&>(unpack_data), static_cast<const bool&>(unpack_pivots));
   P.copy_(result[0]);
   L.copy_(result[1]);
   U.copy_(result[2]);
   return {P, L, U};
 }
 
+static TypedSourceSlot MaskedFillScalarFnSource("aten::masked_fill.Scalar", "flag_gems.masked_fill", "d3d0b4d099930106ddd51363632410dd461a273f62dfed88b1ed9a0068784667", "{\"abi\": \"d3d0b4d099930106ddd51363632410dd461a273f62dfed88b1ed9a0068784667\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.masked_fill\", \"op\": \"aten::masked_fill.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaskedFillScalarKernelPython(const at::Tensor & self, const at::Tensor & mask, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_fill", {self, mask, value});
+  auto result = MaskedFillScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_fill", {self, mask, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaskedFillTensorFnSource("aten::masked_fill.Tensor", "flag_gems.masked_fill", "0351cb08b81cec6020083722f3f9226bc4844f865ea685f850bedf4d7bec6c05", "{\"abi\": \"0351cb08b81cec6020083722f3f9226bc4844f865ea685f850bedf4d7bec6c05\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.masked_fill\", \"op\": \"aten::masked_fill.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaskedFillTensorKernelPython(const at::Tensor & self, const at::Tensor & mask, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_fill", {self, mask, value});
+  auto result = MaskedFillTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_fill", {self, mask, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const at::Tensor&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaskedFillInplaceScalarFnSource("aten::masked_fill_.Scalar", "flag_gems.masked_fill_", "5998bebe9b4f47a87fd5548150c3470274f7178d2bf28c0be0ff69d8b551b3b4", "{\"abi\": \"5998bebe9b4f47a87fd5548150c3470274f7178d2bf28c0be0ff69d8b551b3b4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.masked_fill_\", \"op\": \"aten::masked_fill_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MaskedFillInplaceScalarKernelPython(at::Tensor & self, const at::Tensor & mask, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_fill_", {self, mask, value});
+  auto result = MaskedFillInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_fill_", {self, mask, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const at::Scalar&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot MaskedFillInplaceTensorFnSource("aten::masked_fill_.Tensor", "flag_gems.masked_fill_", "992a6dd17ed49b761bf34efa6785117229c0a13f29e04f76a7b95f65922fb231", "{\"abi\": \"992a6dd17ed49b761bf34efa6785117229c0a13f29e04f76a7b95f65922fb231\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.masked_fill_\", \"op\": \"aten::masked_fill_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MaskedFillInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & mask, const at::Tensor & value) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_fill_", {self, mask, value});
+  auto result = MaskedFillInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_fill_", {self, mask, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const at::Tensor&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot MaskedScatterFnSource("aten::masked_scatter", "flag_gems.masked_scatter", "e9a9ac59766142ef0c500359d03fa7685754c369a890c870cdd69d9e97bb7070", "{\"abi\": \"e9a9ac59766142ef0c500359d03fa7685754c369a890c870cdd69d9e97bb7070\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.masked_scatter\", \"op\": \"aten::masked_scatter\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaskedScatterKernelPython(const at::Tensor & self, const at::Tensor & mask, const at::Tensor & source) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_scatter", {self, mask, source});
+  auto result = MaskedScatterFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_scatter", {self, mask, source}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const at::Tensor&>(source));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaskedScatterInplaceFnSource("aten::masked_scatter_", "flag_gems.masked_scatter_", "6cab88bcf8ea35b59d01b065346ca836fe342c6a2e531b0b6d3a2bfd0a660de6", "{\"abi\": \"6cab88bcf8ea35b59d01b065346ca836fe342c6a2e531b0b6d3a2bfd0a660de6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.masked_scatter_\", \"op\": \"aten::masked_scatter_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MaskedScatterInplaceKernelPython(at::Tensor & self, const at::Tensor & mask, const at::Tensor & source) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_scatter_", {self, mask, source});
+  auto result = MaskedScatterInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_scatter_", {self, mask, source}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask), static_cast<const at::Tensor&>(source));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot MaskedScatterBackwardFnSource("aten::masked_scatter_backward", "flag_gems.masked_scatter_backward", "10677068a94d30ea7d4000e056e5fa6961078b357e2285768f205ea7a9d5e05c", "{\"abi\": \"10677068a94d30ea7d4000e056e5fa6961078b357e2285768f205ea7a9d5e05c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.masked_scatter_backward\", \"op\": \"aten::masked_scatter_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaskedScatterBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & mask, at::IntArrayRef sizes) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_scatter_backward", {grad_output, mask, sizes});
+  auto result = MaskedScatterBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_scatter_backward", {grad_output, mask, sizes}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(mask), static_cast<const at::IntArrayRef&>(sizes));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaskedSelectFnSource("aten::masked_select", "flag_gems.masked_select", "fc36332d8c7a91112c30ae33ef61f0d92642acd77921a9ed3678ac185fc3d774", "{\"abi\": \"fc36332d8c7a91112c30ae33ef61f0d92642acd77921a9ed3678ac185fc3d774\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.masked_select\", \"op\": \"aten::masked_select\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaskedSelectKernelPython(const at::Tensor & self, const at::Tensor & mask) {
-  auto result = CallPythonOp_Generic("flag_gems.masked_select", {self, mask});
+  auto result = MaskedSelectFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.masked_select", {self, mask}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mask));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaxFnSource("aten::max", "flag_gems.max", "28e38d147c624fee8055eedece418931eb032b644e954a0316bc49bc52864e80", "{\"abi\": \"28e38d147c624fee8055eedece418931eb032b644e954a0316bc49bc52864e80\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.max\", \"op\": \"aten::max\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaxKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.max", {self});
+  auto result = MaxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.max", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaxDimFnSource("aten::max.dim", "flag_gems.max_dim", "a8a5fb445dcd00f194435e9ebc311a57117e038c7e31f6c2650610a07c3f28a3", "{\"abi\": \"a8a5fb445dcd00f194435e9ebc311a57117e038c7e31f6c2650610a07c3f28a3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.max_dim\", \"op\": \"aten::max.dim\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MaxDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.max_dim", {self, dim, keepdim}, 2);
+  auto result = MaxDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.max_dim", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot MaxPool2dWithIndicesFnSource("aten::max_pool2d_with_indices", "flag_gems.max_pool2d_with_indices", "9f404908c609debef704f06777f9a0f80a5112dae515c4cf39b20fddc34fb77c", "{\"abi\": \"9f404908c609debef704f06777f9a0f80a5112dae515c4cf39b20fddc34fb77c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.max_pool2d_with_indices\", \"op\": \"aten::max_pool2d_with_indices\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MaxPool2dWithIndicesKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.max_pool2d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2);
+  auto result = MaxPool2dWithIndicesFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.max_pool2d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(ceil_mode));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot MaxPool2dWithIndicesBackwardFnSource("aten::max_pool2d_with_indices_backward", "flag_gems.max_pool2d_with_indices_backward", "eef0389ee08110bca0c6c338cb69f2dff04782ff95cf7abfb34cb6da3ea3c78e", "{\"abi\": \"eef0389ee08110bca0c6c338cb69f2dff04782ff95cf7abfb34cb6da3ea3c78e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.max_pool2d_with_indices_backward\", \"op\": \"aten::max_pool2d_with_indices_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaxPool2dWithIndicesBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode, const at::Tensor & indices) {
-  auto result = CallPythonOp_Generic("flag_gems.max_pool2d_with_indices_backward", {grad_output, self, kernel_size, stride, padding, dilation, ceil_mode, indices});
+  auto result = MaxPool2dWithIndicesBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.max_pool2d_with_indices_backward", {grad_output, self, kernel_size, stride, padding, dilation, ceil_mode, indices}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(ceil_mode), static_cast<const at::Tensor&>(indices));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaxPool3dWithIndicesFnSource("aten::max_pool3d_with_indices", "flag_gems.max_pool3d_with_indices", "75d683cb5eab172b03b7bd204b3ff09be43259ed4c3eeec656f74013a457024c", "{\"abi\": \"75d683cb5eab172b03b7bd204b3ff09be43259ed4c3eeec656f74013a457024c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.max_pool3d_with_indices\", \"op\": \"aten::max_pool3d_with_indices\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MaxPool3dWithIndicesKernelPython(const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.max_pool3d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2);
+  auto result = MaxPool3dWithIndicesFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.max_pool3d_with_indices", {self, kernel_size, stride, padding, dilation, ceil_mode}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(ceil_mode));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot MaxPool3dWithIndicesBackwardFnSource("aten::max_pool3d_with_indices_backward", "flag_gems.max_pool3d_with_indices_backward", "52ffaf81d0cfe9ede20600aba01ec8a157bb24915d6c822779e81077316b076f", "{\"abi\": \"52ffaf81d0cfe9ede20600aba01ec8a157bb24915d6c822779e81077316b076f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.max_pool3d_with_indices_backward\", \"op\": \"aten::max_pool3d_with_indices_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaxPool3dWithIndicesBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef kernel_size, at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode, const at::Tensor & indices) {
-  auto result = CallPythonOp_Generic("flag_gems.max_pool3d_with_indices_backward", {grad_output, self, kernel_size, stride, padding, dilation, ceil_mode, indices});
+  auto result = MaxPool3dWithIndicesBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.max_pool3d_with_indices_backward", {grad_output, self, kernel_size, stride, padding, dilation, ceil_mode, indices}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(kernel_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::IntArrayRef&>(dilation), static_cast<const bool&>(ceil_mode), static_cast<const at::Tensor&>(indices));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaxUnpool2dFnSource("aten::max_unpool2d", "flag_gems.max_unpool2d", "d7d79488ecae0d02812e22945ae7f47fb94cbe6d35fca9e40182f00b33c7b5c5", "{\"abi\": \"d7d79488ecae0d02812e22945ae7f47fb94cbe6d35fca9e40182f00b33c7b5c5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.max_unpool2d\", \"op\": \"aten::max_unpool2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaxUnpool2dKernelPython(const at::Tensor & self, const at::Tensor & indices, at::IntArrayRef output_size) {
-  auto result = CallPythonOp_Generic("flag_gems.max_unpool2d", {self, indices, output_size});
+  auto result = MaxUnpool2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.max_unpool2d", {self, indices, output_size}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(indices), static_cast<const at::IntArrayRef&>(output_size));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MaxUnpool3dFnSource("aten::max_unpool3d", "flag_gems.max_unpool3d", "ee32eef534823ca12bf7d32872252220cb1532a9aa16e6c97300e7a73eeb60af", "{\"abi\": \"ee32eef534823ca12bf7d32872252220cb1532a9aa16e6c97300e7a73eeb60af\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.max_unpool3d\", \"op\": \"aten::max_unpool3d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MaxUnpool3dKernelPython(const at::Tensor & self, const at::Tensor & indices, at::IntArrayRef output_size, at::IntArrayRef stride, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.max_unpool3d", {self, indices, output_size, stride, padding});
+  auto result = MaxUnpool3dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.max_unpool3d", {self, indices, output_size, stride, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(indices), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(stride), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MeanFnSource("aten::mean", "flag_gems.mean", "9fa64c336deb33ff67529287ee04ab021bb31fa326b12b6736aa197f185c1086", "{\"abi\": \"9fa64c336deb33ff67529287ee04ab021bb31fa326b12b6736aa197f185c1086\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean\", \"op\": \"aten::mean\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.mean", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = MeanFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mean", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = MeanDimFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MedianFnSource("aten::median", "flag_gems.median", "652112beec01e336b38932083240a03f0ca8bb31c11423153cf85ea541f6fcc1", "{\"abi\": \"652112beec01e336b38932083240a03f0ca8bb31c11423153cf85ea541f6fcc1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.median\", \"op\": \"aten::median\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MedianKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.median", {self});
+  auto result = MedianFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.median", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MedianDimFnSource("aten::median.dim", "flag_gems.median_dim", "b4106fcdaa10f4d25ad780e338bfc1f7350bdb5b84667180785db944857e80c8", "{\"abi\": \"b4106fcdaa10f4d25ad780e338bfc1f7350bdb5b84667180785db944857e80c8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.median_dim\", \"op\": \"aten::median.dim\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MedianDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.median_dim", {self, dim, keepdim}, 2);
+  auto result = MedianDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.median_dim", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot MedianDimValuesFnSource("aten::median.dim_values", "flag_gems.median_dim_values", "1090c484087f6d866b9df9acaec72a5ce38beb12aced1a7a5a8ca40ca6fe659d", "{\"abi\": \"1090c484087f6d866b9df9acaec72a5ce38beb12aced1a7a5a8ca40ca6fe659d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"values\", \"type\": \"at::Tensor\"}, {\"keyword\": \"indices\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.median_dim_values\", \"op\": \"aten::median.dim_values\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &> MedianDimValuesKernelPython(const at::Tensor & self, int64_t dim, bool keepdim, at::Tensor & values, at::Tensor & indices) {
-  CallPythonOp_GenericKwTuple("flag_gems.median_dim_values", {self, dim, keepdim}, {PyKwarg{"values", values}, PyKwarg{"indices", indices}}, 2);
+  MedianDimValuesFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.median_dim_values", {self, dim, keepdim}, {PyKwarg{"values", values}, PyKwarg{"indices", indices}}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim), static_cast<const at::Tensor&>(values), static_cast<const at::Tensor&>(indices));
   return {values, indices};
 }
 
+static TypedSourceSlot MedianOutFnSource("aten::median.out", "flag_gems.median_out", "f4740028608c63bbe3aacb220c583d9f9cbcfb01f030ad709476426d7e03fea5", "{\"abi\": \"f4740028608c63bbe3aacb220c583d9f9cbcfb01f030ad709476426d7e03fea5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.median_out\", \"op\": \"aten::median.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MedianOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.median_out", {self}, {PyKwarg{"out", out}});
+  MedianOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.median_out", {self}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot MinFnSource("aten::min", "flag_gems.min", "1ba5dc49ab33e216e9eec64ceb79d46c43eff79e2b888e7f49f95af072178cfa", "{\"abi\": \"1ba5dc49ab33e216e9eec64ceb79d46c43eff79e2b888e7f49f95af072178cfa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.min\", \"op\": \"aten::min\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MinKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.min", {self});
+  auto result = MinFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.min", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MinDimFnSource("aten::min.dim", "flag_gems.min_dim", "b0d3566ece2d15be67087af81fbc2f05bd20af5de7081e3b1a085540c0a384bf", "{\"abi\": \"b0d3566ece2d15be67087af81fbc2f05bd20af5de7081e3b1a085540c0a384bf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.min_dim\", \"op\": \"aten::min.dim\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> MinDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.min_dim", {self, dim, keepdim}, 2);
+  auto result = MinDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.min_dim", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot MiopenBatchNormFnSource("aten::miopen_batch_norm", "flag_gems.miopen_batch_norm", "7ed4203ccde24130a3b61b9b5ad76d152217ba713343e675eea662686c7db07b", "{\"abi\": \"7ed4203ccde24130a3b61b9b5ad76d152217ba713343e675eea662686c7db07b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.miopen_batch_norm\", \"op\": \"aten::miopen_batch_norm\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> MiopenBatchNormKernelPython(const at::Tensor & input, const at::Tensor & weight, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & running_mean, const ::std::optional<at::Tensor> & running_var, bool training, double exponential_average_factor, double epsilon) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.miopen_batch_norm", {input, weight, bias, running_mean, running_var, training, exponential_average_factor, epsilon}, 3);
+  auto result = MiopenBatchNormFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.miopen_batch_norm", {input, weight, bias, running_mean, running_var, training, exponential_average_factor, epsilon}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const ::std::optional<at::Tensor>&>(running_mean), static_cast<const ::std::optional<at::Tensor>&>(running_var), static_cast<const bool&>(training), static_cast<const double&>(exponential_average_factor), static_cast<const double&>(epsilon));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot MiopenBatchNormBackwardFnSource("aten::miopen_batch_norm_backward", "flag_gems.miopen_batch_norm_backward", "98743ff22ce63426255b617c7179b0230d20d3d6c6019928b2e0a28ee116d1db", "{\"abi\": \"98743ff22ce63426255b617c7179b0230d20d3d6c6019928b2e0a28ee116d1db\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.miopen_batch_norm_backward\", \"op\": \"aten::miopen_batch_norm_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> MiopenBatchNormBackwardKernelPython(const at::Tensor & input, const at::Tensor & grad_output, const at::Tensor & weight, const ::std::optional<at::Tensor> & running_mean, const ::std::optional<at::Tensor> & running_var, const ::std::optional<at::Tensor> & save_mean, const ::std::optional<at::Tensor> & save_var, double epsilon) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.miopen_batch_norm_backward", {input, grad_output, weight, running_mean, running_var, save_mean, save_var, epsilon}, 3);
+  auto result = MiopenBatchNormBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.miopen_batch_norm_backward", {input, grad_output, weight, running_mean, running_var, save_mean, save_var, epsilon}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(weight), static_cast<const ::std::optional<at::Tensor>&>(running_mean), static_cast<const ::std::optional<at::Tensor>&>(running_var), static_cast<const ::std::optional<at::Tensor>&>(save_mean), static_cast<const ::std::optional<at::Tensor>&>(save_var), static_cast<const double&>(epsilon));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot MishFnSource("aten::mish", "flag_gems.mish", "a596dee0abf58e5f79e3f323ae35b31b3a969073f65431bc3485c6749bc1f5dd", "{\"abi\": \"a596dee0abf58e5f79e3f323ae35b31b3a969073f65431bc3485c6749bc1f5dd\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mish\", \"op\": \"aten::mish\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MishKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.mish", {self});
+  auto result = MishFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mish", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MishInplaceFnSource("aten::mish_", "flag_gems.mish_", "2d5b0b0cbbea3005e4c61b5ed8301c2b0bf226ab6b9ebbd8d1bb141a9796d344", "{\"abi\": \"2d5b0b0cbbea3005e4c61b5ed8301c2b0bf226ab6b9ebbd8d1bb141a9796d344\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mish_\", \"op\": \"aten::mish_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MishInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.mish_", {self});
+  auto result = MishInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mish_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot MmFnSource("aten::mm", "flag_gems.mm", "cef32e3e04c638b8728dcf6d0d6b964b42a8266bc91119f0c5bcb34ccbd222ab", "{\"abi\": \"cef32e3e04c638b8728dcf6d0d6b964b42a8266bc91119f0c5bcb34ccbd222ab\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mm\", \"op\": \"aten::mm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
   if (at::native::flagos::FlagGemsMatmulNeedsHost(self.scalar_type())) {
     return at::native::flagos::MatmulOnHost(self, mat2);
@@ -2751,1443 +3200,1683 @@ at::Tensor MmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
-  auto result = CallPythonOp_Generic("flag_gems.mm", {self_dotpad, mat2_dotpad});
+  auto result = MmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mm", {self_dotpad, mat2_dotpad}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MmOutFnSource("aten::mm.out", "flag_gems.mm_out", "8e42adb0b8e70779d3aff9fa45f4efadf8a6c3b998096f8f477ff84304ba1b3b", "{\"abi\": \"8e42adb0b8e70779d3aff9fa45f4efadf8a6c3b998096f8f477ff84304ba1b3b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mm_out\", \"op\": \"aten::mm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.mm_out", {self, mat2}, {PyKwarg{"out", out}});
+  MmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mm_out", {self, mat2}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot ModeFnSource("aten::mode", "flag_gems.mode", "4c3fa40e22b813f133dc3250d72d7d18a69c71821653b51dd618224bf6fa7b53", "{\"abi\": \"4c3fa40e22b813f133dc3250d72d7d18a69c71821653b51dd618224bf6fa7b53\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.mode\", \"op\": \"aten::mode\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> ModeKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.mode", {self, dim, keepdim}, 2);
+  auto result = ModeFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.mode", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot MseLossFnSource("aten::mse_loss", "flag_gems.mse_loss", "591dd0823447d6ae17a7327ad53b3c263044736657f5917f96c1ba15935a9a4b", "{\"abi\": \"591dd0823447d6ae17a7327ad53b3c263044736657f5917f96c1ba15935a9a4b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.mse_loss\", \"op\": \"aten::mse_loss\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MseLossKernelPython(const at::Tensor & self, const at::Tensor & target, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.mse_loss", {self, target, reduction});
+  auto result = MseLossFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mse_loss", {self, target, reduction}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MseLossBackwardFnSource("aten::mse_loss_backward", "flag_gems.mse_loss_backward", "3adbfd49eb53fc0249ccc48007f13574bef183275e264bd2bc028a7e2a44545d", "{\"abi\": \"3adbfd49eb53fc0249ccc48007f13574bef183275e264bd2bc028a7e2a44545d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.mse_loss_backward\", \"op\": \"aten::mse_loss_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MseLossBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.mse_loss_backward", {grad_output, self, target, reduction});
+  auto result = MseLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mse_loss_backward", {grad_output, self, target, reduction}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MulTensorFnSource("aten::mul.Tensor", "flag_gems.mul", "8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2", "{\"abi\": \"8101128c7200897c8e10a3deebc523678c14898916831d2b4c3af03763d0f1a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mul\", \"op\": \"aten::mul.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MulTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.mul", {self, other});
+  auto result = MulTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MulInplaceTensorFnSource("aten::mul_.Tensor", "flag_gems.mul_", "708efc069404cc6bfa86001a552a2168f02d2d0754a679be142902537651a97b", "{\"abi\": \"708efc069404cc6bfa86001a552a2168f02d2d0754a679be142902537651a97b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mul_\", \"op\": \"aten::mul_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & MulInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.mul_", {self, other});
+  auto result = MulInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mul_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot MultinomialFnSource("aten::multinomial", "flag_gems.multinomial", "24890e78918ce9f16eb6de79e26e595e18e8fca72fe9d17b15a22df3d90cf1bb", "{\"abi\": \"24890e78918ce9f16eb6de79e26e595e18e8fca72fe9d17b15a22df3d90cf1bb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.multinomial\", \"op\": \"aten::multinomial\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MultinomialKernelPython(const at::Tensor & self, int64_t num_samples, bool replacement, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_Generic("flag_gems.multinomial", {self, num_samples, replacement});
+  auto result = MultinomialFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.multinomial", {self, num_samples, replacement}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(num_samples), static_cast<const bool&>(replacement));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot MvFnSource("aten::mv", "flag_gems.mv", "2ec30c1ccd2745670455a568c06f9c0f356466bc5b89d6df53878ab0c2d68186", "{\"abi\": \"2ec30c1ccd2745670455a568c06f9c0f356466bc5b89d6df53878ab0c2d68186\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.mv\", \"op\": \"aten::mv\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MvKernelPython(const at::Tensor & self, const at::Tensor & vec) {
-  auto result = CallPythonOp_Generic("flag_gems.mv", {self, vec});
+  auto result = MvFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.mv", {self, vec}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(vec));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NanToNumFnSource("aten::nan_to_num", "flag_gems.nan_to_num", "fd6542aea1968bf51cd7747d853006888b736be34f075b6dd0c866f16366f5d0", "{\"abi\": \"fd6542aea1968bf51cd7747d853006888b736be34f075b6dd0c866f16366f5d0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.nan_to_num\", \"op\": \"aten::nan_to_num\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NanToNumKernelPython(const at::Tensor & self, ::std::optional<double> nan, ::std::optional<double> posinf, ::std::optional<double> neginf) {
-  auto result = CallPythonOp_Generic("flag_gems.nan_to_num", {self, nan, posinf, neginf});
+  auto result = NanToNumFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nan_to_num", {self, nan, posinf, neginf}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<double>&>(nan), static_cast<const ::std::optional<double>&>(posinf), static_cast<const ::std::optional<double>&>(neginf));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NanToNumInplaceFnSource("aten::nan_to_num_", "flag_gems.nan_to_num_", "ed5072c249d5478431df57503a3db1c6e3bdfdca0e032d4588fda907e10b4712", "{\"abi\": \"ed5072c249d5478431df57503a3db1c6e3bdfdca0e032d4588fda907e10b4712\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.nan_to_num_\", \"op\": \"aten::nan_to_num_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NanToNumInplaceKernelPython(at::Tensor & self, ::std::optional<double> nan, ::std::optional<double> posinf, ::std::optional<double> neginf) {
-  auto result = CallPythonOp_Generic("flag_gems.nan_to_num_", {self, nan, posinf, neginf});
+  auto result = NanToNumInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nan_to_num_", {self, nan, posinf, neginf}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<double>&>(nan), static_cast<const ::std::optional<double>&>(posinf), static_cast<const ::std::optional<double>&>(neginf));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot NanmedianFnSource("aten::nanmedian", "flag_gems.nanmedian", "2aa421d25f0133da3c1e2d443b8142785c98d45612e857726882bf47fdca691f", "{\"abi\": \"2aa421d25f0133da3c1e2d443b8142785c98d45612e857726882bf47fdca691f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nanmedian\", \"op\": \"aten::nanmedian\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NanmedianKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.nanmedian", {self});
+  auto result = NanmedianFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nanmedian", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NanmedianDimFnSource("aten::nanmedian.dim", "flag_gems.nanmedian_dim", "394c687595a27a7c1cd6b9e9b5ffb28151dd02bdadaad670bccf4f8b7f127aa7", "{\"abi\": \"394c687595a27a7c1cd6b9e9b5ffb28151dd02bdadaad670bccf4f8b7f127aa7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.nanmedian_dim\", \"op\": \"aten::nanmedian.dim\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> NanmedianDimKernelPython(const at::Tensor & self, int64_t dim, bool keepdim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.nanmedian_dim", {self, dim, keepdim}, 2);
+  auto result = NanmedianDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.nanmedian_dim", {self, dim, keepdim}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot NanmedianDimValuesFnSource("aten::nanmedian.dim_values", "flag_gems.nanmedian_dim_values", "c319ac7ff0dd9c704efd33c66846e72633d2ef60e3bc4df2956d74b42436497d", "{\"abi\": \"c319ac7ff0dd9c704efd33c66846e72633d2ef60e3bc4df2956d74b42436497d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"values\", \"type\": \"at::Tensor\"}, {\"keyword\": \"indices\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nanmedian_dim_values\", \"op\": \"aten::nanmedian.dim_values\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor &,at::Tensor &> NanmedianDimValuesKernelPython(const at::Tensor & self, int64_t dim, bool keepdim, at::Tensor & values, at::Tensor & indices) {
-  CallPythonOp_GenericKwTuple("flag_gems.nanmedian_dim_values", {self, dim, keepdim}, {PyKwarg{"values", values}, PyKwarg{"indices", indices}}, 2);
+  NanmedianDimValuesFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.nanmedian_dim_values", {self, dim, keepdim}, {PyKwarg{"values", values}, PyKwarg{"indices", indices}}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim), static_cast<const at::Tensor&>(values), static_cast<const at::Tensor&>(indices));
   return {values, indices};
 }
 
+static TypedSourceSlot NanmedianOutFnSource("aten::nanmedian.out", "flag_gems.nanmedian_out", "19776e07b955c02aa0df45e87c5a8da84c5607c8d3c9d70c5e3fc52b61499ec4", "{\"abi\": \"19776e07b955c02aa0df45e87c5a8da84c5607c8d3c9d70c5e3fc52b61499ec4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nanmedian_out\", \"op\": \"aten::nanmedian.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NanmedianOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.nanmedian_out", {self}, {PyKwarg{"out", out}});
+  NanmedianOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.nanmedian_out", {self}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot NansumFnSource("aten::nansum", "flag_gems.nansum", "2373f04fdf61185922f700672f680305b92d2bae83f9e7a9c41013c3fc63f321", "{\"abi\": \"2373f04fdf61185922f700672f680305b92d2bae83f9e7a9c41013c3fc63f321\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.nansum\", \"op\": \"aten::nansum\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NansumKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.nansum", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = NansumFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.nansum", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NansumOutFnSource("aten::nansum.out", "flag_gems.nansum_out", "4d7df7dceb98a2cc2a21fa4b97f5bb7a86d18805f946ec9fadd8ab521fcbf423", "{\"abi\": \"4d7df7dceb98a2cc2a21fa4b97f5bb7a86d18805f946ec9fadd8ab521fcbf423\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.nansum_out\", \"op\": \"aten::nansum.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NansumOutKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("flag_gems.nansum_out", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = NansumOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.nansum_out", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot NativeBatchNormFnSource("aten::native_batch_norm", "flag_gems.native_batch_norm", "5418d27a347592abcd4ac1b64322abe60753e725517b5aff63f34900e0de2328", "{\"abi\": \"5418d27a347592abcd4ac1b64322abe60753e725517b5aff63f34900e0de2328\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.native_batch_norm\", \"op\": \"aten::native_batch_norm\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeBatchNormKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, const ::std::optional<at::Tensor> & running_mean, const ::std::optional<at::Tensor> & running_var, bool training, double momentum, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.native_batch_norm", {input, weight, bias, running_mean, running_var, training, momentum, eps}, 3);
+  auto result = NativeBatchNormFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.native_batch_norm", {input, weight, bias, running_mean, running_var, training, momentum, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const ::std::optional<at::Tensor>&>(running_mean), static_cast<const ::std::optional<at::Tensor>&>(running_var), static_cast<const bool&>(training), static_cast<const double&>(momentum), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot NativeBatchNormBackwardFnSource("aten::native_batch_norm_backward", "flag_gems.batch_norm_backward", "28f1935f0a44c1707a89e56af8935a06b6e3a29a4096a8e6fc254cd7fc35b023", "{\"abi\": \"28f1935f0a44c1707a89e56af8935a06b6e3a29a4096a8e6fc254cd7fc35b023\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"::std::array<bool,3>\"}], \"host\": \"flag_gems.batch_norm_backward\", \"op\": \"aten::native_batch_norm_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeBatchNormBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & running_mean, const ::std::optional<at::Tensor> & running_var, const ::std::optional<at::Tensor> & save_mean, const ::std::optional<at::Tensor> & save_invstd, bool train, double eps, ::std::array<bool,3> output_mask) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.batch_norm_backward", {grad_out, input, weight, running_mean, running_var, save_mean, save_invstd, train, eps, output_mask}, 3);
+  auto result = NativeBatchNormBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.batch_norm_backward", {grad_out, input, weight, running_mean, running_var, save_mean, save_invstd, train, eps, output_mask}, 3); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(running_mean), static_cast<const ::std::optional<at::Tensor>&>(running_var), static_cast<const ::std::optional<at::Tensor>&>(save_mean), static_cast<const ::std::optional<at::Tensor>&>(save_invstd), static_cast<const bool&>(train), static_cast<const double&>(eps), static_cast<const ::std::array<bool,3>&>(output_mask));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot NativeDropoutFnSource("aten::native_dropout", "flag_gems.dropout", "a8d1c3bd297dda86228721f52bf5d29b6ea916664805dea0dd539265b296ffc6", "{\"abi\": \"a8d1c3bd297dda86228721f52bf5d29b6ea916664805dea0dd539265b296ffc6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"::std::optional<bool>\"}], \"host\": \"flag_gems.dropout\", \"op\": \"aten::native_dropout\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> NativeDropoutKernelPython(const at::Tensor & input, double p, ::std::optional<bool> train) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.dropout", {input, p, train}, 2);
+  auto result = NativeDropoutFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.dropout", {input, p, train}, 2); }, static_cast<const at::Tensor&>(input), static_cast<const double&>(p), static_cast<const ::std::optional<bool>&>(train));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot NativeDropoutBackwardFnSource("aten::native_dropout_backward", "flag_gems.native_dropout_backward", "a1c033c1b427297fb9a82a416be157ee858266adb5e100b1b8564f0c6ce86f06", "{\"abi\": \"a1c033c1b427297fb9a82a416be157ee858266adb5e100b1b8564f0c6ce86f06\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.native_dropout_backward\", \"op\": \"aten::native_dropout_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NativeDropoutBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & mask, double scale) {
-  auto result = CallPythonOp_Generic("flag_gems.native_dropout_backward", {grad_output, mask, scale});
+  auto result = NativeDropoutBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.native_dropout_backward", {grad_output, mask, scale}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(mask), static_cast<const double&>(scale));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NativeGroupNormFnSource("aten::native_group_norm", "flag_gems.native_group_norm", "59e2a90fe57889e897abbfd229867fd05883ec25c3f70791c935c5798daeca91", "{\"abi\": \"59e2a90fe57889e897abbfd229867fd05883ec25c3f70791c935c5798daeca91\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.native_group_norm\", \"op\": \"aten::native_group_norm\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeGroupNormKernelPython(const at::Tensor & input, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, int64_t N, int64_t C, int64_t HxW, int64_t group, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.native_group_norm", {input, weight, bias, N, C, HxW, group, eps}, 3);
+  auto result = NativeGroupNormFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.native_group_norm", {input, weight, bias, N, C, HxW, group, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const int64_t&>(N), static_cast<const int64_t&>(C), static_cast<const int64_t&>(HxW), static_cast<const int64_t&>(group), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot NativeGroupNormBackwardFnSource("aten::native_group_norm_backward", "flag_gems.group_norm_backward", "7101ca9c83dd77e5277fd521f1c31cd2e721dee7cfbb6671419afcdf76819313", "{\"abi\": \"7101ca9c83dd77e5277fd521f1c31cd2e721dee7cfbb6671419afcdf76819313\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"::std::array<bool,3>\"}], \"host\": \"flag_gems.group_norm_backward\", \"op\": \"aten::native_group_norm_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeGroupNormBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & input, const at::Tensor & mean, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, int64_t N, int64_t C, int64_t HxW, int64_t group, ::std::array<bool,3> output_mask) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.group_norm_backward", {grad_out, input, mean, rstd, weight, N, C, HxW, group, output_mask}, 3);
+  auto result = NativeGroupNormBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.group_norm_backward", {grad_out, input, mean, rstd, weight, N, C, HxW, group, output_mask}, 3); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(input), static_cast<const at::Tensor&>(mean), static_cast<const at::Tensor&>(rstd), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(N), static_cast<const int64_t&>(C), static_cast<const int64_t&>(HxW), static_cast<const int64_t&>(group), static_cast<const ::std::array<bool,3>&>(output_mask));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot NativeLayerNormFnSource("aten::native_layer_norm", "flag_gems.native_layer_norm", "95743593c99762af62cdf694b89a49df0ec3bfd396851fd5ec28c23b17b140dd", "{\"abi\": \"95743593c99762af62cdf694b89a49df0ec3bfd396851fd5ec28c23b17b140dd\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.native_layer_norm\", \"op\": \"aten::native_layer_norm\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeLayerNormKernelPython(const at::Tensor & input, at::IntArrayRef normalized_shape, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, double eps) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.native_layer_norm", {input, normalized_shape, weight, bias, eps}, 3);
+  auto result = NativeLayerNormFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.native_layer_norm", {input, normalized_shape, weight, bias, eps}, 3); }, static_cast<const at::Tensor&>(input), static_cast<const at::IntArrayRef&>(normalized_shape), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const double&>(eps));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot NativeLayerNormBackwardFnSource("aten::native_layer_norm_backward", "flag_gems.layer_norm_backward", "dcfd267411cfa0074450b314cc183516f483897ea25f0e2fbbf097a11851e582", "{\"abi\": \"dcfd267411cfa0074450b314cc183516f483897ea25f0e2fbbf097a11851e582\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"::std::array<bool,3>\"}], \"host\": \"flag_gems.layer_norm_backward\", \"op\": \"aten::native_layer_norm_backward\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> NativeLayerNormBackwardKernelPython(const at::Tensor & grad_out, const at::Tensor & input, at::IntArrayRef normalized_shape, const at::Tensor & mean, const at::Tensor & rstd, const ::std::optional<at::Tensor> & weight, const ::std::optional<at::Tensor> & bias, ::std::array<bool,3> output_mask) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.layer_norm_backward", {grad_out, input, normalized_shape, mean, rstd, weight, bias, output_mask}, 3);
+  auto result = NativeLayerNormBackwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.layer_norm_backward", {grad_out, input, normalized_shape, mean, rstd, weight, bias, output_mask}, 3); }, static_cast<const at::Tensor&>(grad_out), static_cast<const at::Tensor&>(input), static_cast<const at::IntArrayRef&>(normalized_shape), static_cast<const at::Tensor&>(mean), static_cast<const at::Tensor&>(rstd), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const ::std::optional<at::Tensor>&>(bias), static_cast<const ::std::array<bool,3>&>(output_mask));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot NeScalarFnSource("aten::ne.Scalar", "flag_gems.ne_scalar", "7efc8d4f183d147c790afcb0320d6112697e07c4cddc30101d449fc26f350b41", "{\"abi\": \"7efc8d4f183d147c790afcb0320d6112697e07c4cddc30101d449fc26f350b41\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.ne_scalar\", \"op\": \"aten::ne.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NeScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.ne_scalar", {self, other});
+  auto result = NeScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ne_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NeTensorFnSource("aten::ne.Tensor", "flag_gems.ne", "53d86d5c2766ba5941e91634e038f9f2fae5110da65b0715e2eb1c37431b8a6a", "{\"abi\": \"53d86d5c2766ba5941e91634e038f9f2fae5110da65b0715e2eb1c37431b8a6a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.ne\", \"op\": \"aten::ne.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NeTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.ne", {self, other});
+  auto result = NeTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ne", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NeInplaceScalarFnSource("aten::ne_.Scalar", "flag_gems.not_equal_scalar_", "a7c5890e29dc513da3f9b295f47ca90e6904f6f1d345fdc78fad3f8b04d6810e", "{\"abi\": \"a7c5890e29dc513da3f9b295f47ca90e6904f6f1d345fdc78fad3f8b04d6810e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.not_equal_scalar_\", \"op\": \"aten::ne_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NeInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.not_equal_scalar_", {self, other});
+  auto result = NeInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.not_equal_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot NeInplaceTensorFnSource("aten::ne_.Tensor", "flag_gems.not_equal_", "1247a02a3aac526f2e00b06fcee96a7a6beecfcc7c626339c345c292c874457a", "{\"abi\": \"1247a02a3aac526f2e00b06fcee96a7a6beecfcc7c626339c345c292c874457a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.not_equal_\", \"op\": \"aten::ne_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NeInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.not_equal_", {self, other});
+  auto result = NeInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.not_equal_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot NegFnSource("aten::neg", "flag_gems.neg", "f3cc47c2b25dfc9fde8df0b32381893f431cdad210c5b6aabe2d4a2b8d22c3f2", "{\"abi\": \"f3cc47c2b25dfc9fde8df0b32381893f431cdad210c5b6aabe2d4a2b8d22c3f2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.neg\", \"op\": \"aten::neg\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NegKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.neg", {self});
+  auto result = NegFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.neg", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NegInplaceFnSource("aten::neg_", "flag_gems.neg_", "fa13561a315903cf405196046d5c9b827d3feadeb15abbb5d0ffc065f894206b", "{\"abi\": \"fa13561a315903cf405196046d5c9b827d3feadeb15abbb5d0ffc065f894206b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.neg_\", \"op\": \"aten::neg_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NegInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.neg_", {self});
+  auto result = NegInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.neg_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot NewOnesFnSource("aten::new_ones", "flag_gems.new_ones", "43ce6b033594b8e51eef3205cfd6d22b9fd7602628614dfd479201900875cfbc", "{\"abi\": \"43ce6b033594b8e51eef3205cfd6d22b9fd7602628614dfd479201900875cfbc\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.new_ones\", \"op\": \"aten::new_ones\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NewOnesKernelPython(const at::Tensor & self, at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.new_ones", {self, size}, dtype, device);
+  auto result = ([&]() { if (!NewOnesFnSource.Available()) return CallPythonOp_Factory("flag_gems.new_ones", {self, size}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return NewOnesFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.new_ones", {self, size}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(size), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NextafterFnSource("aten::nextafter", "flag_gems.nextafter", "e23cc48aec1a363b0dbfa87c7fe616eae5fe456bf6c16c06af876684ffe65c81", "{\"abi\": \"e23cc48aec1a363b0dbfa87c7fe616eae5fe456bf6c16c06af876684ffe65c81\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nextafter\", \"op\": \"aten::nextafter\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NextafterKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.nextafter", {self, other});
+  auto result = NextafterFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nextafter", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NextafterOutFnSource("aten::nextafter.out", "flag_gems.nextafter", "949e166be514efce61f142f087724daee3167a4997dc442efa3a3526ca1d1070", "{\"abi\": \"949e166be514efce61f142f087724daee3167a4997dc442efa3a3526ca1d1070\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nextafter\", \"op\": \"aten::nextafter.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NextafterOutKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.nextafter", {self, other});
+  auto result = NextafterOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nextafter", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot NextafterInplaceFnSource("aten::nextafter_", "flag_gems.nextafter_", "e5e4cbcbfc166a031ffb1e3b8563e1fd8892e34f6c0f209c971e5f26a8ad93d1", "{\"abi\": \"e5e4cbcbfc166a031ffb1e3b8563e1fd8892e34f6c0f209c971e5f26a8ad93d1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nextafter_\", \"op\": \"aten::nextafter_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & NextafterInplaceKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.nextafter_", {self, other});
+  auto result = NextafterInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nextafter_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot NllLoss2dBackwardFnSource("aten::nll_loss2d_backward", "flag_gems.nll_loss2d_backward", "7c5c2527164f893ce48f2febb8f15216fe24aa5cb5dafc806e025b561919b5b6", "{\"abi\": \"7c5c2527164f893ce48f2febb8f15216fe24aa5cb5dafc806e025b561919b5b6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nll_loss2d_backward\", \"op\": \"aten::nll_loss2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NllLoss2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
-  auto result = CallPythonOp_Generic("flag_gems.nll_loss2d_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight});
+  auto result = NllLoss2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss2d_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NllLoss2dForwardFnSource("aten::nll_loss2d_forward", "flag_gems.nll_loss2d_forward", "8afe536ada7aaa5b86fc6555a314dee2b465dd99eac0e4288f8824229a18a3ed", "{\"abi\": \"8afe536ada7aaa5b86fc6555a314dee2b465dd99eac0e4288f8824229a18a3ed\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.nll_loss2d_forward\", \"op\": \"aten::nll_loss2d_forward\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> NllLoss2dForwardKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.nll_loss2d_forward", {self, target, weight, reduction, ignore_index}, 2);
+  auto result = NllLoss2dForwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.nll_loss2d_forward", {self, target, weight, reduction, ignore_index}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot NllLossBackwardFnSource("aten::nll_loss_backward", "flag_gems.nll_loss_backward", "e7b74c7e7ceaec814e909049f876729b672a3acbeb84a7873405cef03d8f2041", "{\"abi\": \"e7b74c7e7ceaec814e909049f876729b672a3acbeb84a7873405cef03d8f2041\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nll_loss_backward\", \"op\": \"aten::nll_loss_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NllLossBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index, const at::Tensor & total_weight) {
-  auto result = CallPythonOp_Generic("flag_gems.nll_loss_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight});
+  auto result = NllLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nll_loss_backward", {grad_output, self, target, weight, reduction, ignore_index, total_weight}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index), static_cast<const at::Tensor&>(total_weight));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NllLossForwardFnSource("aten::nll_loss_forward", "flag_gems.nll_loss_forward", "33c9e1a699fbb2e7f6186a198e2046e5355af5fef77f959ec703266f7a714a89", "{\"abi\": \"33c9e1a699fbb2e7f6186a198e2046e5355af5fef77f959ec703266f7a714a89\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Tensor>\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.nll_loss_forward\", \"op\": \"aten::nll_loss_forward\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> NllLossForwardKernelPython(const at::Tensor & self, const at::Tensor & target, const ::std::optional<at::Tensor> & weight, int64_t reduction, int64_t ignore_index) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.nll_loss_forward", {self, target, weight, reduction, ignore_index}, 2);
+  auto result = NllLossForwardFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.nll_loss_forward", {self, target, weight, reduction, ignore_index}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const ::std::optional<at::Tensor>&>(weight), static_cast<const int64_t&>(reduction), static_cast<const int64_t&>(ignore_index));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot NonzeroFnSource("aten::nonzero", "flag_gems.nonzero", "93ab30f762b178906fe086c4e9a6b202461bde0b3fa79e4eac7efb944e84a15e", "{\"abi\": \"93ab30f762b178906fe086c4e9a6b202461bde0b3fa79e4eac7efb944e84a15e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.nonzero\", \"op\": \"aten::nonzero\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NonzeroKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.nonzero", {self});
+  auto result = NonzeroFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.nonzero", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NonzeroStaticFnSource("aten::nonzero_static", "flag_gems.nonzero_static", "66c11283bd151b2643f6ca80e8882ba6c3b230de2fc56d3a0674859e19571114", "{\"abi\": \"66c11283bd151b2643f6ca80e8882ba6c3b230de2fc56d3a0674859e19571114\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"size\", \"type\": \"int64_t\"}, {\"keyword\": \"fill_value\", \"type\": \"int64_t\"}], \"host\": \"flag_gems.nonzero_static\", \"op\": \"aten::nonzero_static\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NonzeroStaticKernelPython(const at::Tensor & self, int64_t size, int64_t fill_value) {
-  auto result = CallPythonOp_GenericKw("flag_gems.nonzero_static", {self}, {PyKwarg{"size", size}, PyKwarg{"fill_value", fill_value}});
+  auto result = NonzeroStaticFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.nonzero_static", {self}, {PyKwarg{"size", size}, PyKwarg{"fill_value", fill_value}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(size), static_cast<const int64_t&>(fill_value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NormScalarFnSource("aten::norm.Scalar", "flag_gems.norm_scalar", "7734e9bf7f85b179ec6e8b089abfaeb31cbdce18199e9b3359a6f3ac6cbff203", "{\"abi\": \"7734e9bf7f85b179ec6e8b089abfaeb31cbdce18199e9b3359a6f3ac6cbff203\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.norm_scalar\", \"op\": \"aten::norm.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NormScalarKernelPython(const at::Tensor & self, const at::Scalar & p) {
-  auto result = CallPythonOp_Generic("flag_gems.norm_scalar", {self, p});
+  auto result = NormScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.norm_scalar", {self, p}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(p));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot NormScalaroptDimFnSource("aten::norm.ScalarOpt_dim", "flag_gems.norm_scalaropt_dim", "9fba43f76ba8227b4a59f42b84ab7feec0973d567307a88576d654a288f18634", "{\"abi\": \"9fba43f76ba8227b4a59f42b84ab7feec0973d567307a88576d654a288f18634\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"::std::optional<at::Scalar>\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.norm_scalaropt_dim\", \"op\": \"aten::norm.ScalarOpt_dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor NormScalaroptDimKernelPython(const at::Tensor & self, const ::std::optional<at::Scalar> & p, at::IntArrayRef dim, bool keepdim) {
-  auto result = CallPythonOp_Generic("flag_gems.norm_scalaropt_dim", {self, p, dim, keepdim});
+  auto result = NormScalaroptDimFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.norm_scalaropt_dim", {self, p, dim, keepdim}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::Scalar>&>(p), static_cast<const at::IntArrayRef&>(dim), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot OnesFnSource("aten::ones", "flag_gems.ones", "a2498c264e64f15a366fdf540e45fdcdc661adfa41ba168489626663e924bebc", "{\"abi\": \"a2498c264e64f15a366fdf540e45fdcdc661adfa41ba168489626663e924bebc\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.ones\", \"op\": \"aten::ones\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor OnesKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.ones", {size}, dtype, device);
+  auto result = ([&]() { if (!OnesFnSource.Available()) return CallPythonOp_Factory("flag_gems.ones", {size}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return OnesFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.ones", {size}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot OnesLikeFnSource("aten::ones_like", "flag_gems.ones_like", "fd43d8f27f9a59da25a633f6ede59ce5fbb0ec2ed301f1a8288eae330bc75985", "{\"abi\": \"fd43d8f27f9a59da25a633f6ede59ce5fbb0ec2ed301f1a8288eae330bc75985\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}, {\"keyword\": \"memory_format\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.ones_like\", \"op\": \"aten::ones_like\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor OnesLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("flag_gems.ones_like", {self}, dtype, device);
+  auto result = ([&]() { if (!OnesLikeFnSource.Available()) return CallPythonOp_LikeFactory("flag_gems.ones_like", {self}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device, &self); return OnesLikeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_LikeFactory("flag_gems.ones_like", {self}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot OrmqrFnSource("aten::ormqr", "flag_gems.ormqr", "e4515204b669d873778097d2d15ca11e6d78c70dfaa4c2656c869f0b21977a32", "{\"abi\": \"e4515204b669d873778097d2d15ca11e6d78c70dfaa4c2656c869f0b21977a32\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.ormqr\", \"op\": \"aten::ormqr\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor OrmqrKernelPython(const at::Tensor & self, const at::Tensor & input2, const at::Tensor & input3, bool left, bool transpose) {
-  auto result = CallPythonOp_Generic("flag_gems.ormqr", {self, input2, input3, left, transpose});
+  auto result = OrmqrFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.ormqr", {self, input2, input3, left, transpose}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(input2), static_cast<const at::Tensor&>(input3), static_cast<const bool&>(left), static_cast<const bool&>(transpose));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PixelUnshuffleOutFnSource("aten::pixel_unshuffle.out", "flag_gems.pixel_unshuffle_out", "305664070a928c38e2a5b5c8ea5169ee562a486757868b302bab8e855e2e7311", "{\"abi\": \"305664070a928c38e2a5b5c8ea5169ee562a486757868b302bab8e855e2e7311\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.pixel_unshuffle_out\", \"op\": \"aten::pixel_unshuffle.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PixelUnshuffleOutKernelPython(const at::Tensor & self, int64_t downscale_factor, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.pixel_unshuffle_out", {self, downscale_factor, out});
+  PixelUnshuffleOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pixel_unshuffle_out", {self, downscale_factor, out}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(downscale_factor), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot PolarFnSource("aten::polar", "flag_gems.polar", "fe315df7060bc2fdf24d69d00050bfb54b5d2e687231a0ab83713f628eabf92e", "{\"abi\": \"fe315df7060bc2fdf24d69d00050bfb54b5d2e687231a0ab83713f628eabf92e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.polar\", \"op\": \"aten::polar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PolarKernelPython(const at::Tensor & abs, const at::Tensor & angle) {
-  auto result = CallPythonOp_Generic("flag_gems.polar", {abs, angle});
+  auto result = PolarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.polar", {abs, angle}); }, static_cast<const at::Tensor&>(abs), static_cast<const at::Tensor&>(angle));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PolygammaFnSource("aten::polygamma", "flag_gems.polygamma", "5c985282ef42979ca4da6da8ff5fa59cef1b94740c7cff393b49bb1ae4ec6a1e", "{\"abi\": \"5c985282ef42979ca4da6da8ff5fa59cef1b94740c7cff393b49bb1ae4ec6a1e\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.polygamma\", \"op\": \"aten::polygamma\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PolygammaKernelPython(int64_t n, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.polygamma", {n, self});
+  auto result = PolygammaFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.polygamma", {n, self}); }, static_cast<const int64_t&>(n), static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PolygammaOutFnSource("aten::polygamma.out", "flag_gems.polygamma_out", "21510ba8000359e985617a6cd6e7a5657f260818e011dfc3f13ca14eebb1dd0e", "{\"abi\": \"21510ba8000359e985617a6cd6e7a5657f260818e011dfc3f13ca14eebb1dd0e\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.polygamma_out\", \"op\": \"aten::polygamma.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PolygammaOutKernelPython(int64_t n, const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.polygamma_out", {n, self, out});
+  PolygammaOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.polygamma_out", {n, self, out}); }, static_cast<const int64_t&>(n), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot PolygammaInplaceFnSource("aten::polygamma_", "flag_gems.polygamma_", "580b1b89b5fa1b2d054ff45cf942e826c0de26638ba9666cf9974fafd9d644f6", "{\"abi\": \"580b1b89b5fa1b2d054ff45cf942e826c0de26638ba9666cf9974fafd9d644f6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.polygamma_\", \"op\": \"aten::polygamma_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PolygammaInplaceKernelPython(at::Tensor & self, int64_t n) {
-  auto result = CallPythonOp_Generic("flag_gems.polygamma_", {self, n});
+  auto result = PolygammaInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.polygamma_", {self, n}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(n));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot PowScalarFnSource("aten::pow.Scalar", "flag_gems.pow_scalar", "d197ecedbe47684b4c58921f3ff349638f5b42634bcf8b60569a5f234f74833d", "{\"abi\": \"d197ecedbe47684b4c58921f3ff349638f5b42634bcf8b60569a5f234f74833d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.pow_scalar\", \"op\": \"aten::pow.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PowScalarKernelPython(const at::Scalar & self, const at::Tensor & exponent) {
-  auto result = CallPythonOp_Generic("flag_gems.pow_scalar", {self, exponent});
+  auto result = PowScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_scalar", {self, exponent}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(exponent));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PowTensorScalarFnSource("aten::pow.Tensor_Scalar", "flag_gems.pow_tensor_scalar", "16bf27f73e9f912188b5fa351fce8a83d819ab07d8c949bbdc1555c5f6de5522", "{\"abi\": \"16bf27f73e9f912188b5fa351fce8a83d819ab07d8c949bbdc1555c5f6de5522\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.pow_tensor_scalar\", \"op\": \"aten::pow.Tensor_Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar & exponent) {
-  auto result = CallPythonOp_Generic("flag_gems.pow_tensor_scalar", {self, exponent});
+  auto result = PowTensorScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_scalar", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(exponent));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PowTensorTensorFnSource("aten::pow.Tensor_Tensor", "flag_gems.pow_tensor_tensor", "aae6f1e9d00927b2f1d0f480a19027ff5b023ab2cd4a134bb5e241dd58278b5b", "{\"abi\": \"aae6f1e9d00927b2f1d0f480a19027ff5b023ab2cd4a134bb5e241dd58278b5b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.pow_tensor_tensor\", \"op\": \"aten::pow.Tensor_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PowTensorTensorKernelPython(const at::Tensor & self, const at::Tensor & exponent) {
-  auto result = CallPythonOp_Generic("flag_gems.pow_tensor_tensor", {self, exponent});
+  auto result = PowTensorTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_tensor", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(exponent));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot PowInplaceScalarFnSource("aten::pow_.Scalar", "flag_gems.pow_tensor_scalar_", "646e1b8b5437f4721842ce241d723005c22299bb0caa12ea56477adca26d7ae1", "{\"abi\": \"646e1b8b5437f4721842ce241d723005c22299bb0caa12ea56477adca26d7ae1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.pow_tensor_scalar_\", \"op\": \"aten::pow_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PowInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & exponent) {
-  auto result = CallPythonOp_Generic("flag_gems.pow_tensor_scalar_", {self, exponent});
+  auto result = PowInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_scalar_", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(exponent));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot PowInplaceTensorFnSource("aten::pow_.Tensor", "flag_gems.pow_tensor_tensor_", "0a7cbab90661e048d6c0be4a387d81168c3d7e423248c31bb4fcf2b7ded1af70", "{\"abi\": \"0a7cbab90661e048d6c0be4a387d81168c3d7e423248c31bb4fcf2b7ded1af70\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.pow_tensor_tensor_\", \"op\": \"aten::pow_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & PowInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & exponent) {
-  auto result = CallPythonOp_Generic("flag_gems.pow_tensor_tensor_", {self, exponent});
+  auto result = PowInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_tensor_", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(exponent));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ProdFnSource("aten::prod", "flag_gems.prod", "d5ed3eaef8c46f10d0a653887ddbba5bf6b83591c3fb28dadde94ce4a9fd4c54", "{\"abi\": \"d5ed3eaef8c46f10d0a653887ddbba5bf6b83591c3fb28dadde94ce4a9fd4c54\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.prod\", \"op\": \"aten::prod\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ProdKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.prod", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = ProdFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.prod", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ProdDimIntFnSource("aten::prod.dim_int", "flag_gems.prod_dim", "e75d9a098357368fd56c49a3a75de8273d7d7aa83db1fd306371cceee1f14580", "{\"abi\": \"e75d9a098357368fd56c49a3a75de8273d7d7aa83db1fd306371cceee1f14580\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.prod_dim\", \"op\": \"aten::prod.dim_int\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ProdDimIntKernelPython(const at::Tensor & self, int64_t dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.prod_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = ProdDimIntFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.prod_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Rad2degFnSource("aten::rad2deg", "flag_gems.rad2deg", "ffd6d1c4ea819263bcc2253ae8821e7a7f287ed678bb8ad8e260799cc2c51486", "{\"abi\": \"ffd6d1c4ea819263bcc2253ae8821e7a7f287ed678bb8ad8e260799cc2c51486\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.rad2deg\", \"op\": \"aten::rad2deg\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Rad2degKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.rad2deg", {self});
+  auto result = Rad2degFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rad2deg", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Rad2degInplaceFnSource("aten::rad2deg_", "flag_gems.rad2deg_", "5f194778a8db826efd10449b06f8e56c38f70d852345b93ea9c80129e2b9fa45", "{\"abi\": \"5f194778a8db826efd10449b06f8e56c38f70d852345b93ea9c80129e2b9fa45\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.rad2deg_\", \"op\": \"aten::rad2deg_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & Rad2degInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.rad2deg_", {self});
+  auto result = Rad2degInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rad2deg_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RandFnSource("aten::rand", "flag_gems.rand", "c50d719248de8051212092c38d8da9fa54f1ee4cc7bec36c8d2dda936048c8fe", "{\"abi\": \"c50d719248de8051212092c38d8da9fa54f1ee4cc7bec36c8d2dda936048c8fe\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.rand\", \"op\": \"aten::rand\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.rand", {size}, dtype, device);
+  auto result = ([&]() { if (!RandFnSource.Available()) return CallPythonOp_Factory("flag_gems.rand", {size}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return RandFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.rand", {size}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RandLikeFnSource("aten::rand_like", "flag_gems.rand_like", "73f81aa5461aea63852809524dfedd0c4f7eba22c2e8e8e26f3de3d83287b7df", "{\"abi\": \"73f81aa5461aea63852809524dfedd0c4f7eba22c2e8e8e26f3de3d83287b7df\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}, {\"keyword\": \"memory_format\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.rand_like\", \"op\": \"aten::rand_like\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("flag_gems.rand_like", {self}, dtype, device);
+  auto result = ([&]() { if (!RandLikeFnSource.Available()) return CallPythonOp_LikeFactory("flag_gems.rand_like", {self}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device, &self); return RandLikeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_LikeFactory("flag_gems.rand_like", {self}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RandintFnSource("aten::randint", "flag_gems.randint", "0d0f82514a6d24a318a7f2225b3a44495d17e6ee3b4e89af47ab1b82b3624b5c", "{\"abi\": \"0d0f82514a6d24a318a7f2225b3a44495d17e6ee3b4e89af47ab1b82b3624b5c\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.randint\", \"op\": \"aten::randint\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandintKernelPython(int64_t high, at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.randint", {high, size}, dtype, device);
+  auto result = ([&]() { if (!RandintFnSource.Available()) return CallPythonOp_Factory("flag_gems.randint", {high, size}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return RandintFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.randint", {high, size}, dtype, device); }, static_cast<const int64_t&>(high), static_cast<const at::IntArrayRef&>(size), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RandintLikeFnSource("aten::randint_like", "flag_gems.randint_like", "6e11305d6509469f77582b21dc992ec64c131f52c2c7aa339c02fadc701862d0", "{\"abi\": \"6e11305d6509469f77582b21dc992ec64c131f52c2c7aa339c02fadc701862d0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}, {\"keyword\": \"memory_format\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.randint_like\", \"op\": \"aten::randint_like\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandintLikeKernelPython(const at::Tensor & self, int64_t high, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("flag_gems.randint_like", {self, high}, dtype, device);
+  auto result = ([&]() { if (!RandintLikeFnSource.Available()) return CallPythonOp_LikeFactory("flag_gems.randint_like", {self, high}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device, &self); return RandintLikeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_LikeFactory("flag_gems.randint_like", {self, high}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(high), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RandnFnSource("aten::randn", "flag_gems.randn", "b07b23ceab897dd2d250038b557843a9f77f3d9be80f63b0c61efbdf4d189452", "{\"abi\": \"b07b23ceab897dd2d250038b557843a9f77f3d9be80f63b0c61efbdf4d189452\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.randn\", \"op\": \"aten::randn\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandnKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.randn", {size}, dtype, device);
+  auto result = ([&]() { if (!RandnFnSource.Available()) return CallPythonOp_Factory("flag_gems.randn", {size}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return RandnFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.randn", {size}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RandnLikeFnSource("aten::randn_like", "flag_gems.randn_like", "a4336832dec2602d19713b27beaf4396a309f82512c4513d36a005a03f32887c", "{\"abi\": \"a4336832dec2602d19713b27beaf4396a309f82512c4513d36a005a03f32887c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}, {\"keyword\": \"memory_format\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.randn_like\", \"op\": \"aten::randn_like\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandnLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("flag_gems.randn_like", {self}, dtype, device);
+  auto result = ([&]() { if (!RandnLikeFnSource.Available()) return CallPythonOp_LikeFactory("flag_gems.randn_like", {self}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device, &self); return RandnLikeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_LikeFactory("flag_gems.randn_like", {self}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RandpermFnSource("aten::randperm", "flag_gems.randperm", "b03bc3c83903c12aa6c167d4a815d0d91fdf50f647016db866f23baf48dab438", "{\"abi\": \"b03bc3c83903c12aa6c167d4a815d0d91fdf50f647016db866f23baf48dab438\", \"arguments\": [{\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.randperm\", \"op\": \"aten::randperm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RandpermKernelPython(int64_t n, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.randperm", {n}, dtype, device);
+  auto result = ([&]() { if (!RandpermFnSource.Available()) return CallPythonOp_Factory("flag_gems.randperm", {n}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return RandpermFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.randperm", {n}, dtype, device); }, static_cast<const int64_t&>(n), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RangeFnSource("aten::range", "flag_gems.range", "f93e73f69ff9b0ec7064420c9452d89b75f908704994edbe8542f81af21adb32", "{\"abi\": \"f93e73f69ff9b0ec7064420c9452d89b75f908704994edbe8542f81af21adb32\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.range\", \"op\": \"aten::range\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RangeKernelPython(const at::Scalar & start, const at::Scalar & end, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.range", {start, end}, dtype, device);
+  auto result = ([&]() { if (!RangeFnSource.Available()) return CallPythonOp_Factory("flag_gems.range", {start, end}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return RangeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.range", {start, end}, dtype, device); }, static_cast<const at::Scalar&>(start), static_cast<const at::Scalar&>(end), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReciprocalFnSource("aten::reciprocal", "flag_gems.reciprocal", "18b006032b7640344dc59a0fc27057c11e527a4866faeb5db7fae09a60acade6", "{\"abi\": \"18b006032b7640344dc59a0fc27057c11e527a4866faeb5db7fae09a60acade6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.reciprocal\", \"op\": \"aten::reciprocal\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReciprocalKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.reciprocal", {self});
+  auto result = ReciprocalFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reciprocal", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReciprocalInplaceFnSource("aten::reciprocal_", "flag_gems.reciprocal_", "05b21e332f874d8155ee5cefe4c1a539af2dc5e3d418d491163383b7ab3427c9", "{\"abi\": \"05b21e332f874d8155ee5cefe4c1a539af2dc5e3d418d491163383b7ab3427c9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.reciprocal_\", \"op\": \"aten::reciprocal_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReciprocalInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.reciprocal_", {self});
+  auto result = ReciprocalInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reciprocal_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ReflectionPad1dFnSource("aten::reflection_pad1d", "flag_gems.reflection_pad1d", "ce8d45f9df426140333a0a5185cd4778f2622602a2f7cf3e469c8c31da54f5c8", "{\"abi\": \"ce8d45f9df426140333a0a5185cd4778f2622602a2f7cf3e469c8c31da54f5c8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad1d\", \"op\": \"aten::reflection_pad1d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReflectionPad1dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad1d", {self, padding});
+  auto result = ReflectionPad1dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad1d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReflectionPad1dOutFnSource("aten::reflection_pad1d.out", "flag_gems.reflection_pad1d_out", "5f7e56e43244d6d56c91e52639383a867d1504a454537bdaee1d9f16e938935f", "{\"abi\": \"5f7e56e43244d6d56c91e52639383a867d1504a454537bdaee1d9f16e938935f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.reflection_pad1d_out\", \"op\": \"aten::reflection_pad1d.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReflectionPad1dOutKernelPython(const at::Tensor & self, at::IntArrayRef padding, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.reflection_pad1d_out", {self, padding, out});
+  ReflectionPad1dOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad1d_out", {self, padding, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot ReflectionPad1dBackwardFnSource("aten::reflection_pad1d_backward", "flag_gems.reflection_pad1d_backward", "842bf84b38debc0dd67b29dab88041c84881ffde0679deaedc4e66a57ea52560", "{\"abi\": \"842bf84b38debc0dd67b29dab88041c84881ffde0679deaedc4e66a57ea52560\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad1d_backward\", \"op\": \"aten::reflection_pad1d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReflectionPad1dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad1d_backward", {grad_output, self, padding});
+  auto result = ReflectionPad1dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad1d_backward", {grad_output, self, padding}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReflectionPad2dFnSource("aten::reflection_pad2d", "flag_gems.reflection_pad2d", "d077da097fe55ab9f26c2ee4c2a0f0517ae0e26ed369d7720a673b62923346be", "{\"abi\": \"d077da097fe55ab9f26c2ee4c2a0f0517ae0e26ed369d7720a673b62923346be\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad2d\", \"op\": \"aten::reflection_pad2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReflectionPad2dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad2d", {self, padding});
+  auto result = ReflectionPad2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad2d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReflectionPad2dOutFnSource("aten::reflection_pad2d.out", "flag_gems.reflection_pad2d_out", "fe8a906ebe62ba2e781bdc2fd9d18074882572b7574421dd558522942499562f", "{\"abi\": \"fe8a906ebe62ba2e781bdc2fd9d18074882572b7574421dd558522942499562f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.reflection_pad2d_out\", \"op\": \"aten::reflection_pad2d.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReflectionPad2dOutKernelPython(const at::Tensor & self, at::IntArrayRef padding, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.reflection_pad2d_out", {self, padding, out});
+  ReflectionPad2dOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad2d_out", {self, padding, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot ReflectionPad2dBackwardFnSource("aten::reflection_pad2d_backward", "flag_gems.reflection_pad2d_backward", "a2c95416167bb42b368b4f336a6b8e7d3b6a9491b43b2cc8f5593589161859bb", "{\"abi\": \"a2c95416167bb42b368b4f336a6b8e7d3b6a9491b43b2cc8f5593589161859bb\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad2d_backward\", \"op\": \"aten::reflection_pad2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReflectionPad2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad2d_backward", {grad_output, self, padding});
+  auto result = ReflectionPad2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad2d_backward", {grad_output, self, padding}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReflectionPad3dFnSource("aten::reflection_pad3d", "flag_gems.reflection_pad3d", "0e67e2cd951889a151df7a10f3f204aafe000fd174a16a63845ff11eda799e73", "{\"abi\": \"0e67e2cd951889a151df7a10f3f204aafe000fd174a16a63845ff11eda799e73\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad3d\", \"op\": \"aten::reflection_pad3d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReflectionPad3dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad3d", {self, padding});
+  auto result = ReflectionPad3dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad3d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReflectionPad3dOutFnSource("aten::reflection_pad3d.out", "flag_gems.reflection_pad3d", "7d968b37a980b45e014ce66a316829ba29b781c78f25c459cdf7d3a2998c36ac", "{\"abi\": \"7d968b37a980b45e014ce66a316829ba29b781c78f25c459cdf7d3a2998c36ac\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad3d\", \"op\": \"aten::reflection_pad3d.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReflectionPad3dOutKernelPython(const at::Tensor & self, at::IntArrayRef padding, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad3d", {self, padding});
+  auto result = ReflectionPad3dOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad3d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot ReflectionPad3dBackwardFnSource("aten::reflection_pad3d_backward", "flag_gems.reflection_pad3d_backward", "bfb6407035151de884f9ee74c641f67e49ac687243ae0a6b67f999a0bfc6f3b2", "{\"abi\": \"bfb6407035151de884f9ee74c641f67e49ac687243ae0a6b67f999a0bfc6f3b2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.reflection_pad3d_backward\", \"op\": \"aten::reflection_pad3d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReflectionPad3dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.reflection_pad3d_backward", {grad_output, self, padding});
+  auto result = ReflectionPad3dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.reflection_pad3d_backward", {grad_output, self, padding}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReluFnSource("aten::relu", "flag_gems.relu", "29d234501d214a447abe2b6051572dd9801cb041a7ebb25ba5c467f0b069aa49", "{\"abi\": \"29d234501d214a447abe2b6051572dd9801cb041a7ebb25ba5c467f0b069aa49\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.relu\", \"op\": \"aten::relu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReluKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.relu", {self});
+  auto result = ReluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.relu", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReluInplaceFnSource("aten::relu_", "flag_gems.relu_", "bd639069d479f041a09607de640504dd403f5c677004daecc895eb00a2c66d63", "{\"abi\": \"bd639069d479f041a09607de640504dd403f5c677004daecc895eb00a2c66d63\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.relu_\", \"op\": \"aten::relu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReluInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.relu_", {self});
+  auto result = ReluInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.relu_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RemainderScalarFnSource("aten::remainder.Scalar", "flag_gems.remainder", "e4e1cdcccbd499c39d2e0187375e9e7561306ea30f705667152daf4f56d3b5ce", "{\"abi\": \"e4e1cdcccbd499c39d2e0187375e9e7561306ea30f705667152daf4f56d3b5ce\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.remainder\", \"op\": \"aten::remainder.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RemainderScalarKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.remainder", {self, other});
+  auto result = RemainderScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.remainder", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RemainderScalarTensorFnSource("aten::remainder.Scalar_Tensor", "flag_gems.remainder", "84b56e494978c4d2fc31e8734dc1830af0a47a28e8ec533ceb57950533b3625f", "{\"abi\": \"84b56e494978c4d2fc31e8734dc1830af0a47a28e8ec533ceb57950533b3625f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.remainder\", \"op\": \"aten::remainder.Scalar_Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RemainderScalarTensorKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.remainder", {self, other});
+  auto result = RemainderScalarTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.remainder", {self, other}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RemainderTensorFnSource("aten::remainder.Tensor", "flag_gems.remainder", "f2868834d0222588cef3e9095e616ac2b0f54fe2919cf033cdbc6de7ce63a658", "{\"abi\": \"f2868834d0222588cef3e9095e616ac2b0f54fe2919cf033cdbc6de7ce63a658\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.remainder\", \"op\": \"aten::remainder.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RemainderTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.remainder", {self, other});
+  auto result = RemainderTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.remainder", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RemainderInplaceScalarFnSource("aten::remainder_.Scalar", "flag_gems.remainder_", "bbd90a4aa6c03e270223be5e5535e7305111c5ec318fd8ca14a4338af444d661", "{\"abi\": \"bbd90a4aa6c03e270223be5e5535e7305111c5ec318fd8ca14a4338af444d661\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.remainder_\", \"op\": \"aten::remainder_.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & RemainderInplaceScalarKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.remainder_", {self, other});
+  auto result = RemainderInplaceScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.remainder_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RemainderInplaceTensorFnSource("aten::remainder_.Tensor", "flag_gems.remainder_", "09aa0c768c959350055ba2745428856dec1aca36bea7886caeb70427d545ca02", "{\"abi\": \"09aa0c768c959350055ba2745428856dec1aca36bea7886caeb70427d545ca02\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.remainder_\", \"op\": \"aten::remainder_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & RemainderInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.remainder_", {self, other});
+  auto result = RemainderInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.remainder_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RenormFnSource("aten::renorm", "flag_gems.renorm", "62625c672f08dd9ae26c313393502c64cf8367a0c526fc9246c2b0d89eee4323", "{\"abi\": \"62625c672f08dd9ae26c313393502c64cf8367a0c526fc9246c2b0d89eee4323\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.renorm\", \"op\": \"aten::renorm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RenormKernelPython(const at::Tensor & self, const at::Scalar & p, int64_t dim, const at::Scalar & maxnorm) {
-  auto result = CallPythonOp_Generic("flag_gems.renorm", {self, p, dim, maxnorm});
+  auto result = RenormFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.renorm", {self, p, dim, maxnorm}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(p), static_cast<const int64_t&>(dim), static_cast<const at::Scalar&>(maxnorm));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RenormInplaceFnSource("aten::renorm_", "flag_gems.renorm_", "686e33920f031a89ffbce174c26f44ff98cf94c650479fa59231e299196c6c22", "{\"abi\": \"686e33920f031a89ffbce174c26f44ff98cf94c650479fa59231e299196c6c22\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.renorm_\", \"op\": \"aten::renorm_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & RenormInplaceKernelPython(at::Tensor & self, const at::Scalar & p, int64_t dim, const at::Scalar & maxnorm) {
-  auto result = CallPythonOp_Generic("flag_gems.renorm_", {self, p, dim, maxnorm});
+  auto result = RenormInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.renorm_", {self, p, dim, maxnorm}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(p), static_cast<const int64_t&>(dim), static_cast<const at::Scalar&>(maxnorm));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RepeatInterleaveTensorFnSource("aten::repeat_interleave.Tensor", "flag_gems.repeat_interleave_tensor", "f7b9c2a92fe37006ab6e05b1b6c9496a13b42b178619a40f4fe19a55baed6fbf", "{\"abi\": \"f7b9c2a92fe37006ab6e05b1b6c9496a13b42b178619a40f4fe19a55baed6fbf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"output_size\", \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.repeat_interleave_tensor\", \"op\": \"aten::repeat_interleave.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RepeatInterleaveTensorKernelPython(const at::Tensor & repeats, ::std::optional<int64_t> output_size) {
-  auto result = CallPythonOp_GenericKw("flag_gems.repeat_interleave_tensor", {repeats}, {PyKwarg{"output_size", output_size}});
+  auto result = RepeatInterleaveTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.repeat_interleave_tensor", {repeats}, {PyKwarg{"output_size", output_size}}); }, static_cast<const at::Tensor&>(repeats), static_cast<const ::std::optional<int64_t>&>(output_size));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReplicationPad1dFnSource("aten::replication_pad1d", "flag_gems.replication_pad1d", "b82bfa439f508784ac0aa568c2a25c116459a4de7359576196357356bdceae9a", "{\"abi\": \"b82bfa439f508784ac0aa568c2a25c116459a4de7359576196357356bdceae9a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.replication_pad1d\", \"op\": \"aten::replication_pad1d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReplicationPad1dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.replication_pad1d", {self, padding});
+  auto result = ReplicationPad1dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad1d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReplicationPad1dOutFnSource("aten::replication_pad1d.out", "flag_gems.replication_pad1d_out", "ce67f50548ba60ef647cfb5b1eed25572da4c5a44588deef1cfc4576112df65d", "{\"abi\": \"ce67f50548ba60ef647cfb5b1eed25572da4c5a44588deef1cfc4576112df65d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.replication_pad1d_out\", \"op\": \"aten::replication_pad1d.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReplicationPad1dOutKernelPython(const at::Tensor & self, at::IntArrayRef padding, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.replication_pad1d_out", {self, padding, out});
+  ReplicationPad1dOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad1d_out", {self, padding, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot ReplicationPad2dFnSource("aten::replication_pad2d", "flag_gems.replication_pad2d", "733bfd97b4e577ddff0067e719a48c6765d0aebc320455e2070268205933a39e", "{\"abi\": \"733bfd97b4e577ddff0067e719a48c6765d0aebc320455e2070268205933a39e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.replication_pad2d\", \"op\": \"aten::replication_pad2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReplicationPad2dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.replication_pad2d", {self, padding});
+  auto result = ReplicationPad2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad2d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReplicationPad2dOutFnSource("aten::replication_pad2d.out", "flag_gems.replication_pad2d_out", "45c193166dfaaa2a55dcd2c5c647661afc836e8d0838cebcfeb9b36cd27eb5c7", "{\"abi\": \"45c193166dfaaa2a55dcd2c5c647661afc836e8d0838cebcfeb9b36cd27eb5c7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.replication_pad2d_out\", \"op\": \"aten::replication_pad2d.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReplicationPad2dOutKernelPython(const at::Tensor & self, at::IntArrayRef padding, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.replication_pad2d_out", {self, padding, out});
+  ReplicationPad2dOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad2d_out", {self, padding, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot ReplicationPad2dBackwardFnSource("aten::replication_pad2d_backward", "flag_gems.replication_pad2d_backward", "ce78f92b8f695008d6c5341d039406949cdb97bee863a91664b302f1f97a454f", "{\"abi\": \"ce78f92b8f695008d6c5341d039406949cdb97bee863a91664b302f1f97a454f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.replication_pad2d_backward\", \"op\": \"aten::replication_pad2d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReplicationPad2dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.replication_pad2d_backward", {grad_output, self, padding});
+  auto result = ReplicationPad2dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad2d_backward", {grad_output, self, padding}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReplicationPad2dBackwardGradInputFnSource("aten::replication_pad2d_backward.grad_input", "flag_gems.replication_pad2d_backward_grad_input", "7c9cb38cfc2905581669a20505ec8b5a16bbe3e19c963a878defae497862e717", "{\"abi\": \"7c9cb38cfc2905581669a20505ec8b5a16bbe3e19c963a878defae497862e717\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"grad_input\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.replication_pad2d_backward_grad_input\", \"op\": \"aten::replication_pad2d_backward.grad_input\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ReplicationPad2dBackwardGradInputKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef padding, at::Tensor & grad_input) {
-  CallPythonOp_GenericKw("flag_gems.replication_pad2d_backward_grad_input", {grad_output, self, padding}, {PyKwarg{"grad_input", grad_input}});
+  ReplicationPad2dBackwardGradInputFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.replication_pad2d_backward_grad_input", {grad_output, self, padding}, {PyKwarg{"grad_input", grad_input}}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding), static_cast<const at::Tensor&>(grad_input));
   return grad_input;
 }
 
+static TypedSourceSlot ReplicationPad3dFnSource("aten::replication_pad3d", "flag_gems.replication_pad3d", "0405bf33a1960b75eb6d9e8b31df0c07ebe03e9f857b04c5b30b7efee18504a9", "{\"abi\": \"0405bf33a1960b75eb6d9e8b31df0c07ebe03e9f857b04c5b30b7efee18504a9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.replication_pad3d\", \"op\": \"aten::replication_pad3d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReplicationPad3dKernelPython(const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.replication_pad3d", {self, padding});
+  auto result = ReplicationPad3dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad3d", {self, padding}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ReplicationPad3dBackwardFnSource("aten::replication_pad3d_backward", "flag_gems.replication_pad3d_backward", "529b5006f7270a0f924f5952f1fc82e85f057964e4213d9d2d263239cc930cc9", "{\"abi\": \"529b5006f7270a0f924f5952f1fc82e85f057964e4213d9d2d263239cc930cc9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.replication_pad3d_backward\", \"op\": \"aten::replication_pad3d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ReplicationPad3dBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, at::IntArrayRef padding) {
-  auto result = CallPythonOp_Generic("flag_gems.replication_pad3d_backward", {grad_output, self, padding});
+  auto result = ReplicationPad3dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.replication_pad3d_backward", {grad_output, self, padding}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(padding));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RollFnSource("aten::roll", "flag_gems.roll", "e1adecf4404aa94f283b30713b9fb00e693907a7554e8ccc7db4a4ff676a51ce", "{\"abi\": \"e1adecf4404aa94f283b30713b9fb00e693907a7554e8ccc7db4a4ff676a51ce\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.roll\", \"op\": \"aten::roll\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RollKernelPython(const at::Tensor & self, at::IntArrayRef shifts, at::IntArrayRef dims) {
-  auto result = CallPythonOp_Generic("flag_gems.roll", {self, shifts, dims});
+  auto result = RollFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.roll", {self, shifts, dims}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(shifts), static_cast<const at::IntArrayRef&>(dims));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot Rot90FnSource("aten::rot90", "flag_gems.rot90", "6ebac71ea8f914d2582257d4c15e6e0d4abf7eb4a119778b7997b650fad0ddf6", "{\"abi\": \"6ebac71ea8f914d2582257d4c15e6e0d4abf7eb4a119778b7997b650fad0ddf6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems.rot90\", \"op\": \"aten::rot90\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor Rot90KernelPython(const at::Tensor & self, int64_t k, at::IntArrayRef dims) {
-  auto result = CallPythonOp_Generic("flag_gems.rot90", {self, k, dims});
+  auto result = Rot90FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rot90", {self, k, dims}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(k), static_cast<const at::IntArrayRef&>(dims));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RoundFnSource("aten::round", "flag_gems.round", "3af3fdd4e2d14c4792a124af0efc21a99d3ce5953eac9ef69284f64bef1c6ef4", "{\"abi\": \"3af3fdd4e2d14c4792a124af0efc21a99d3ce5953eac9ef69284f64bef1c6ef4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.round\", \"op\": \"aten::round\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RoundKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.round", {self});
+  auto result = RoundFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.round", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RoundOutFnSource("aten::round.out", "flag_gems.round_out", "5a3f56f110b1d47e9af84aae0f37c85f03787af23b31ea3ad8b38ab19ab8c16c", "{\"abi\": \"5a3f56f110b1d47e9af84aae0f37c85f03787af23b31ea3ad8b38ab19ab8c16c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.round_out\", \"op\": \"aten::round.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & RoundOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.round_out", {self});
+  auto result = RoundOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.round_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot RoundInplaceFnSource("aten::round_", "flag_gems.round_", "b28c7c4eeda4c2f0b317bb1855a6f9d3c8cd5d6e71c9f6752d8ba1d73cf9d989", "{\"abi\": \"b28c7c4eeda4c2f0b317bb1855a6f9d3c8cd5d6e71c9f6752d8ba1d73cf9d989\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.round_\", \"op\": \"aten::round_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & RoundInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.round_", {self});
+  auto result = RoundInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.round_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RreluWithNoiseBackwardFnSource("aten::rrelu_with_noise_backward", "flag_gems.rrelu_with_noise_backward", "9ec92419bce61365a4e7ac0c84aeb8092ac4dac9998fa55277d5235e35eadde3", "{\"abi\": \"9ec92419bce61365a4e7ac0c84aeb8092ac4dac9998fa55277d5235e35eadde3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.rrelu_with_noise_backward\", \"op\": \"aten::rrelu_with_noise_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RreluWithNoiseBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & noise, const at::Scalar & lower, const at::Scalar & upper, bool training, bool self_is_result) {
-  auto result = CallPythonOp_Generic("flag_gems.rrelu_with_noise_backward", {grad_output, self, noise, lower, upper, training, self_is_result});
+  auto result = RreluWithNoiseBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rrelu_with_noise_backward", {grad_output, self, noise, lower, upper, training, self_is_result}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(noise), static_cast<const at::Scalar&>(lower), static_cast<const at::Scalar&>(upper), static_cast<const bool&>(training), static_cast<const bool&>(self_is_result));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RsqrtFnSource("aten::rsqrt", "flag_gems.rsqrt", "3bffec368790e2ce3cbdf8f3dc44041da3887c91c4414e5156e96c1a95c28a35", "{\"abi\": \"3bffec368790e2ce3cbdf8f3dc44041da3887c91c4414e5156e96c1a95c28a35\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.rsqrt\", \"op\": \"aten::rsqrt\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RsqrtKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.rsqrt", {self});
+  auto result = RsqrtFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rsqrt", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RsqrtInplaceFnSource("aten::rsqrt_", "flag_gems.rsqrt_", "e7ef96947c2fac162c293a857a6387bfdcc3a7be242a03a755c057e58f8e182d", "{\"abi\": \"e7ef96947c2fac162c293a857a6387bfdcc3a7be242a03a755c057e58f8e182d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.rsqrt_\", \"op\": \"aten::rsqrt_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & RsqrtInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.rsqrt_", {self});
+  auto result = RsqrtInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rsqrt_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot RsubScalarFnSource("aten::rsub.Scalar", "flag_gems.rsub_scalar", "649ed12b2d03876643ffa6307e3baf9d29caf3a722122debbf4dafb984ed023b", "{\"abi\": \"649ed12b2d03876643ffa6307e3baf9d29caf3a722122debbf4dafb984ed023b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.rsub_scalar\", \"op\": \"aten::rsub.Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RsubScalarKernelPython(const at::Tensor & self, const at::Scalar & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_Generic("flag_gems.rsub_scalar", {self, other, alpha});
+  auto result = RsubScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.rsub_scalar", {self, other, alpha}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot RsubTensorFnSource("aten::rsub.Tensor", "flag_gems.rsub_tensor", "b3c87a87fa1fb4d828e5edc2feb2f81b574be2bc381df2772d4742d269ca4daf", "{\"abi\": \"b3c87a87fa1fb4d828e5edc2feb2f81b574be2bc381df2772d4742d269ca4daf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.rsub_tensor\", \"op\": \"aten::rsub.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor RsubTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.rsub_tensor", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = RsubTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.rsub_tensor", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ScalarTensorFnSource("aten::scalar_tensor", "flag_gems.scalar_tensor", "1aa8bd7952fa7dd7bb94a03e0302b6b9358fa01d9ccc955511b619d25689ff48", "{\"abi\": \"1aa8bd7952fa7dd7bb94a03e0302b6b9358fa01d9ccc955511b619d25689ff48\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.scalar_tensor\", \"op\": \"aten::scalar_tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScalarTensorKernelPython(const at::Scalar & s, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.scalar_tensor", {s}, dtype, device);
+  auto result = ([&]() { if (!ScalarTensorFnSource.Available()) return CallPythonOp_Factory("flag_gems.scalar_tensor", {s}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return ScalarTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.scalar_tensor", {s}, dtype, device); }, static_cast<const at::Scalar&>(s), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ScatterReduceFnSource("aten::scatter.reduce", "flag_gems.scatter", "0a493e3275b6273392154126926730bfa52773d51e13b286418462d199c731b8", "{\"abi\": \"0a493e3275b6273392154126926730bfa52773d51e13b286418462d199c731b8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}], \"host\": \"flag_gems.scatter\", \"op\": \"aten::scatter.reduce\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterReduceKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce) {
-  auto result = CallPythonOp_Generic("flag_gems.scatter", {self, dim, index, src, reduce});
+  auto result = ScatterReduceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter", {self, dim, index, src, reduce}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src), static_cast<const c10::string_view&>(reduce));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ScatterSrcFnSource("aten::scatter.src", "flag_gems.scatter", "3f369f329b22f23826ebce77f7e2abb2d13615b0830598a7ee0120f8c2e922b5", "{\"abi\": \"3f369f329b22f23826ebce77f7e2abb2d13615b0830598a7ee0120f8c2e922b5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter\", \"op\": \"aten::scatter.src\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterSrcKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("flag_gems.scatter", {self, dim, index, src});
+  auto result = ScatterSrcFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ScatterInplaceReduceFnSource("aten::scatter_.reduce", "flag_gems.scatter_", "bb2fbc4906e5f3c5b0d508c3cdec307ba8d5eb76c7bb90e03b4e281bc7c847e7", "{\"abi\": \"bb2fbc4906e5f3c5b0d508c3cdec307ba8d5eb76c7bb90e03b4e281bc7c847e7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}], \"host\": \"flag_gems.scatter_\", \"op\": \"aten::scatter_.reduce\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterInplaceReduceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce) {
-  auto result = CallPythonOp_Generic("flag_gems.scatter_", {self, dim, index, src, reduce});
+  auto result = ScatterInplaceReduceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_", {self, dim, index, src, reduce}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src), static_cast<const c10::string_view&>(reduce));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ScatterInplaceSrcFnSource("aten::scatter_.src", "flag_gems.scatter_", "ad87dd534263a5161964c188ec28b5292c245c1c3ee2a40a38a20dae19bfa5c2", "{\"abi\": \"ad87dd534263a5161964c188ec28b5292c245c1c3ee2a40a38a20dae19bfa5c2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_\", \"op\": \"aten::scatter_.src\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterInplaceSrcKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("flag_gems.scatter_", {self, dim, index, src});
+  auto result = ScatterInplaceSrcFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ScatterAddFnSource("aten::scatter_add", "flag_gems.scatter_add", "279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf", "{\"abi\": \"279ddf38208195221ada1e161952cd97d8927faf1d2b8c517c697b028c9fabaf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add\", \"op\": \"aten::scatter_add\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterAddKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("flag_gems.scatter_add", {self, dim, index, src});
+  auto result = ScatterAddFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ScatterAddInplaceFnSource("aten::scatter_add_", "flag_gems.scatter_add_", "577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1", "{\"abi\": \"577b4d62d45b26437fbf27c5f461a528c2f93240ba68e804a3e90bb69ae47dd1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.scatter_add_\", \"op\": \"aten::scatter_add_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterAddInplaceKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src) {
-  auto result = CallPythonOp_Generic("flag_gems.scatter_add_", {self, dim, index, src});
+  auto result = ScatterAddInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.scatter_add_", {self, dim, index, src}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ScatterReduceTwoFnSource("aten::scatter_reduce.two", "flag_gems.scatter_reduce", "6680085e9a4532a7b676df70b3ac3a86722eec3e94c3f9bdbe79014f67ab2714", "{\"abi\": \"6680085e9a4532a7b676df70b3ac3a86722eec3e94c3f9bdbe79014f67ab2714\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}, {\"keyword\": \"include_self\", \"type\": \"bool\"}], \"host\": \"flag_gems.scatter_reduce\", \"op\": \"aten::scatter_reduce.two\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ScatterReduceTwoKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce, bool include_self) {
-  auto result = CallPythonOp_GenericKw("flag_gems.scatter_reduce", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = ScatterReduceTwoFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.scatter_reduce", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src), static_cast<const c10::string_view&>(reduce), static_cast<const bool&>(include_self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ScatterReduceTwoOutFnSource("aten::scatter_reduce.two_out", "flag_gems.scatter_reduce_out", "7dcd9dae92ead3eaecada75fc9412b5e3ac6f6598b8f6302210501ba87a537ce", "{\"abi\": \"7dcd9dae92ead3eaecada75fc9412b5e3ac6f6598b8f6302210501ba87a537ce\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}, {\"keyword\": \"include_self\", \"type\": \"bool\"}], \"host\": \"flag_gems.scatter_reduce_out\", \"op\": \"aten::scatter_reduce.two_out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterReduceTwoOutKernelPython(const at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce, bool include_self, at::Tensor & out) {
-  auto result = CallPythonOp_GenericKw("flag_gems.scatter_reduce_out", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = ScatterReduceTwoOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.scatter_reduce_out", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src), static_cast<const c10::string_view&>(reduce), static_cast<const bool&>(include_self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot ScatterReduceInplaceTwoFnSource("aten::scatter_reduce_.two", "flag_gems.scatter_reduce_", "1bfe528f11fc01cf0279afa0e66520655565930962cd0346f013958a58fc043e", "{\"abi\": \"1bfe528f11fc01cf0279afa0e66520655565930962cd0346f013958a58fc043e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"c10::string_view\"}, {\"keyword\": \"include_self\", \"type\": \"bool\"}], \"host\": \"flag_gems.scatter_reduce_\", \"op\": \"aten::scatter_reduce_.two\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ScatterReduceInplaceTwoKernelPython(at::Tensor & self, int64_t dim, const at::Tensor & index, const at::Tensor & src, c10::string_view reduce, bool include_self) {
-  auto result = CallPythonOp_GenericKw("flag_gems.scatter_reduce_", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}});
+  auto result = ScatterReduceInplaceTwoFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.scatter_reduce_", {self, dim, index, src, reduce}, {PyKwarg{"include_self", include_self}}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(src), static_cast<const c10::string_view&>(reduce), static_cast<const bool&>(include_self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SgnFnSource("aten::sgn", "flag_gems.sgn", "0bc99e70a28b76e368345ac262aa637434c468204f5ef8b09c26aaa6f034727d", "{\"abi\": \"0bc99e70a28b76e368345ac262aa637434c468204f5ef8b09c26aaa6f034727d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sgn\", \"op\": \"aten::sgn\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SgnKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sgn", {self});
+  auto result = SgnFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sgn", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SgnOutFnSource("aten::sgn.out", "flag_gems.sgn_out", "addf0fa89e1e7a4870b6eb4216e5afa1011f876293140a7db6cfd15c9306d541", "{\"abi\": \"addf0fa89e1e7a4870b6eb4216e5afa1011f876293140a7db6cfd15c9306d541\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sgn_out\", \"op\": \"aten::sgn.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SgnOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.sgn_out", {self}, {PyKwarg{"out", out}});
+  SgnOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sgn_out", {self}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SgnInplaceFnSource("aten::sgn_", "flag_gems.sgn_", "7db99000e8e19e2d7dbcb63c60174202e45b9b4553cbf9c17deb1cb1b59ee12b", "{\"abi\": \"7db99000e8e19e2d7dbcb63c60174202e45b9b4553cbf9c17deb1cb1b59ee12b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sgn_\", \"op\": \"aten::sgn_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SgnInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sgn_", {self});
+  auto result = SgnInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sgn_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SigmoidFnSource("aten::sigmoid", "flag_gems.sigmoid", "ba9f8fe70bce5f975dd9e66253006a30c94bb66e949f2b3059cedb4c65282b94", "{\"abi\": \"ba9f8fe70bce5f975dd9e66253006a30c94bb66e949f2b3059cedb4c65282b94\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sigmoid\", \"op\": \"aten::sigmoid\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SigmoidKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sigmoid", {self});
+  auto result = SigmoidFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sigmoid", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SigmoidInplaceFnSource("aten::sigmoid_", "flag_gems.sigmoid_", "0c3441beb5a1d8478d486697f1a2ae0e2c11972605bcb999621d7058912b848f", "{\"abi\": \"0c3441beb5a1d8478d486697f1a2ae0e2c11972605bcb999621d7058912b848f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sigmoid_\", \"op\": \"aten::sigmoid_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SigmoidInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sigmoid_", {self});
+  auto result = SigmoidInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sigmoid_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SigmoidBackwardFnSource("aten::sigmoid_backward", "flag_gems.sigmoid_backward", "308fb328d5464cc66bf7de1d5c0eb87760be92df93e3cb722d5058e6c47e3a5a", "{\"abi\": \"308fb328d5464cc66bf7de1d5c0eb87760be92df93e3cb722d5058e6c47e3a5a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sigmoid_backward\", \"op\": \"aten::sigmoid_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SigmoidBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & output) {
-  auto result = CallPythonOp_Generic("flag_gems.sigmoid_backward", {grad_output, output});
+  auto result = SigmoidBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sigmoid_backward", {grad_output, output}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SignFnSource("aten::sign", "flag_gems.sign", "9f1f897fc773d9f2a55c95e11b45dc7d7864756d73867789d8b9053aa262b005", "{\"abi\": \"9f1f897fc773d9f2a55c95e11b45dc7d7864756d73867789d8b9053aa262b005\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sign\", \"op\": \"aten::sign\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SignKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sign", {self});
+  auto result = SignFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sign", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SignOutFnSource("aten::sign.out", "flag_gems.sign_out", "950b507faf1ec33369e510dc7a5ccb41ecab916aa9bf0ff53777ebf2d9b87843", "{\"abi\": \"950b507faf1ec33369e510dc7a5ccb41ecab916aa9bf0ff53777ebf2d9b87843\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sign_out\", \"op\": \"aten::sign.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SignOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.sign_out", {self}, {PyKwarg{"out", out}});
+  SignOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sign_out", {self}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SignbitFnSource("aten::signbit", "flag_gems.signbit", "dcb1f747acf0eeb58579a48af2025c7a2cccc5bc6b029d9150fe958a481c2004", "{\"abi\": \"dcb1f747acf0eeb58579a48af2025c7a2cccc5bc6b029d9150fe958a481c2004\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.signbit\", \"op\": \"aten::signbit\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SignbitKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.signbit", {self});
+  auto result = SignbitFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.signbit", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SignbitOutFnSource("aten::signbit.out", "flag_gems.signbit_out", "02a5f402a1031ed900dfdc955e8c6265c9ba6a03f89183347e0e23b90dc8611f", "{\"abi\": \"02a5f402a1031ed900dfdc955e8c6265c9ba6a03f89183347e0e23b90dc8611f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.signbit_out\", \"op\": \"aten::signbit.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SignbitOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.signbit_out", {self});
+  auto result = SignbitOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.signbit_out", {self}); }, static_cast<const at::Tensor&>(self));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot SiluFnSource("aten::silu", "flag_gems.silu", "77ede37f10b7b913efee7aa0481df144a21be010fa9f631bc96aac6e8efdc723", "{\"abi\": \"77ede37f10b7b913efee7aa0481df144a21be010fa9f631bc96aac6e8efdc723\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.silu\", \"op\": \"aten::silu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SiluKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.silu", {self});
+  auto result = SiluFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.silu", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SiluInplaceFnSource("aten::silu_", "flag_gems.silu_", "485be0775946e5e2a1ef62379d70171363f03825852e127546a64032f8720116", "{\"abi\": \"485be0775946e5e2a1ef62379d70171363f03825852e127546a64032f8720116\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.silu_\", \"op\": \"aten::silu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SiluInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.silu_", {self});
+  auto result = SiluInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.silu_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SiluBackwardFnSource("aten::silu_backward", "flag_gems.silu_backward", "1091931221f058998a2c72b4d5d59194b754bede4dcd6ca451abba8a740b956f", "{\"abi\": \"1091931221f058998a2c72b4d5d59194b754bede4dcd6ca451abba8a740b956f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.silu_backward\", \"op\": \"aten::silu_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SiluBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.silu_backward", {grad_output, self});
+  auto result = SiluBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.silu_backward", {grad_output, self}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SinFnSource("aten::sin", "flag_gems.sin", "07f31fc28d7afbc5040944f8ab3ec955051a0694bbfd18a1946fb93c20a4b3b6", "{\"abi\": \"07f31fc28d7afbc5040944f8ab3ec955051a0694bbfd18a1946fb93c20a4b3b6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sin\", \"op\": \"aten::sin\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SinKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sin", {self});
+  auto result = SinFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sin", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SinInplaceFnSource("aten::sin_", "flag_gems.sin_", "4073d782750e4031b7fcc97144bb033b96b34239260ebe5d652392fe031faf67", "{\"abi\": \"4073d782750e4031b7fcc97144bb033b96b34239260ebe5d652392fe031faf67\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sin_\", \"op\": \"aten::sin_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SinInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sin_", {self});
+  auto result = SinInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sin_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SincFnSource("aten::sinc", "flag_gems.sinc", "3b0fab29efc0ccca3b18e72452c8d8e86e65a4aedbdcf41c8a145bc7e562bcb1", "{\"abi\": \"3b0fab29efc0ccca3b18e72452c8d8e86e65a4aedbdcf41c8a145bc7e562bcb1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sinc\", \"op\": \"aten::sinc\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SincKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sinc", {self});
+  auto result = SincFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sinc", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SincInplaceFnSource("aten::sinc_", "flag_gems.sinc_", "f90d50b4289b4a7205843acd945f6045abc8f69b2c84619ba3043c71fb64bb5e", "{\"abi\": \"f90d50b4289b4a7205843acd945f6045abc8f69b2c84619ba3043c71fb64bb5e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sinc_\", \"op\": \"aten::sinc_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SincInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sinc_", {self});
+  auto result = SincInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sinc_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SinhFnSource("aten::sinh", "flag_gems.sinh", "0a3734fdb525375cba6bbec68ea5b69f41750f44991c7998880571a6cc19f6ff", "{\"abi\": \"0a3734fdb525375cba6bbec68ea5b69f41750f44991c7998880571a6cc19f6ff\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sinh\", \"op\": \"aten::sinh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SinhKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sinh", {self});
+  auto result = SinhFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sinh", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SinhInplaceFnSource("aten::sinh_", "flag_gems.sinh_", "ee8f6f3a60f1ebeef8c79c049634f25f2ff182d024ce38091b1a38bdf9e39990", "{\"abi\": \"ee8f6f3a60f1ebeef8c79c049634f25f2ff182d024ce38091b1a38bdf9e39990\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sinh_\", \"op\": \"aten::sinh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SinhInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sinh_", {self});
+  auto result = SinhInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sinh_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SliceTensorFnSource("aten::slice.Tensor", "flag_gems.slice", "b95c118341a68b6e0f60b4953ab5d4593f864f5b4a243dd4ce31b0c8d4d2bf40", "{\"abi\": \"b95c118341a68b6e0f60b4953ab5d4593f864f5b4a243dd4ce31b0c8d4d2bf40\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.slice\", \"op\": \"aten::slice.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SliceTensorKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
-  auto result = CallPythonOp_Generic("flag_gems.slice", {self, dim, start, end, step});
+  auto result = SliceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.slice", {self, dim, start, end, step}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<int64_t>&>(start), static_cast<const ::std::optional<int64_t>&>(end), static_cast<const int64_t&>(step));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SliceBackwardFnSource("aten::slice_backward", "flag_gems.slice_backward", "2631da573a97281058a3e65106f2acafb5754fc0d2ec98d886e984dc1c018126", "{\"abi\": \"2631da573a97281058a3e65106f2acafb5754fc0d2ec98d886e984dc1c018126\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.slice_backward\", \"op\": \"aten::slice_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SliceBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef input_sizes, int64_t dim, int64_t start, int64_t end, int64_t step) {
-  auto result = CallPythonOp_Generic("flag_gems.slice_backward", {grad_output, input_sizes, dim, start, end, step});
+  auto result = SliceBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.slice_backward", {grad_output, input_sizes, dim, start, end, step}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(input_sizes), static_cast<const int64_t&>(dim), static_cast<const int64_t&>(start), static_cast<const int64_t&>(end), static_cast<const int64_t&>(step));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SmoothL1LossFnSource("aten::smooth_l1_loss", "flag_gems.smooth_l1_loss", "af9189b9d59ba2880674234feed713b631b0b141eab1c8f4ceccaca2a8be9637", "{\"abi\": \"af9189b9d59ba2880674234feed713b631b0b141eab1c8f4ceccaca2a8be9637\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.smooth_l1_loss\", \"op\": \"aten::smooth_l1_loss\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SmoothL1LossKernelPython(const at::Tensor & self, const at::Tensor & target, int64_t reduction, double beta) {
-  auto result = CallPythonOp_Generic("flag_gems.smooth_l1_loss", {self, target, reduction, beta});
+  auto result = SmoothL1LossFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.smooth_l1_loss", {self, target, reduction, beta}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction), static_cast<const double&>(beta));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SmoothL1LossOutFnSource("aten::smooth_l1_loss.out", "flag_gems.smooth_l1_loss_out", "b01086de4bee4d1fb9f6b8566644ce5de5a6fed1fd2679fd745aeec17e3604f5", "{\"abi\": \"b01086de4bee4d1fb9f6b8566644ce5de5a6fed1fd2679fd745aeec17e3604f5\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.smooth_l1_loss_out\", \"op\": \"aten::smooth_l1_loss.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SmoothL1LossOutKernelPython(const at::Tensor & self, const at::Tensor & target, int64_t reduction, double beta, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.smooth_l1_loss_out", {self, target, reduction, beta}, {PyKwarg{"out", out}});
+  SmoothL1LossOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.smooth_l1_loss_out", {self, target, reduction, beta}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction), static_cast<const double&>(beta), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SmoothL1LossBackwardFnSource("aten::smooth_l1_loss_backward", "flag_gems.smooth_l1_loss_backward", "5a610a875eac1a04f98f6dfa3e9ab906a5bfbb6490d077f4bc8722dc91dea0fe", "{\"abi\": \"5a610a875eac1a04f98f6dfa3e9ab906a5bfbb6490d077f4bc8722dc91dea0fe\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.smooth_l1_loss_backward\", \"op\": \"aten::smooth_l1_loss_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SmoothL1LossBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, int64_t reduction, double beta) {
-  auto result = CallPythonOp_Generic("flag_gems.smooth_l1_loss_backward", {grad_output, self, target, reduction, beta});
+  auto result = SmoothL1LossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.smooth_l1_loss_backward", {grad_output, self, target, reduction, beta}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction), static_cast<const double&>(beta));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SoftMarginLossFnSource("aten::soft_margin_loss", "flag_gems.soft_margin_loss", "52a7dad61ad6c016a8b689e7eb1423d91ee88347b05c8a56a096cfaa8ee4202a", "{\"abi\": \"52a7dad61ad6c016a8b689e7eb1423d91ee88347b05c8a56a096cfaa8ee4202a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.soft_margin_loss\", \"op\": \"aten::soft_margin_loss\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SoftMarginLossKernelPython(const at::Tensor & self, const at::Tensor & target, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.soft_margin_loss", {self, target, reduction});
+  auto result = SoftMarginLossFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.soft_margin_loss", {self, target, reduction}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SoftMarginLossBackwardFnSource("aten::soft_margin_loss_backward", "flag_gems.soft_margin_loss_backward", "12866dc10784485da843d62e606a5de48d93d5a7d6a5132b904266a18314a2d1", "{\"abi\": \"12866dc10784485da843d62e606a5de48d93d5a7d6a5132b904266a18314a2d1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.soft_margin_loss_backward\", \"op\": \"aten::soft_margin_loss_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SoftMarginLossBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Tensor & target, int64_t reduction) {
-  auto result = CallPythonOp_Generic("flag_gems.soft_margin_loss_backward", {grad_output, self, target, reduction});
+  auto result = SoftMarginLossBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.soft_margin_loss_backward", {grad_output, self, target, reduction}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(target), static_cast<const int64_t&>(reduction));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SoftplusFnSource("aten::softplus", "flag_gems.softplus", "5b3a9b7e86d66a9f6c5a0dea01ab03a9b5f3c04e11cf6711c01d0c8fa195f4fe", "{\"abi\": \"5b3a9b7e86d66a9f6c5a0dea01ab03a9b5f3c04e11cf6711c01d0c8fa195f4fe\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.softplus\", \"op\": \"aten::softplus\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SoftplusKernelPython(const at::Tensor & self, const at::Scalar & beta, const at::Scalar & threshold) {
-  auto result = CallPythonOp_Generic("flag_gems.softplus", {self, beta, threshold});
+  auto result = SoftplusFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.softplus", {self, beta, threshold}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(threshold));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SoftplusBackwardFnSource("aten::softplus_backward", "flag_gems.softplus_backward", "631b2025c71bdf1761e0b03fdb7302e9e41d01c0c735c383621536866cdf6348", "{\"abi\": \"631b2025c71bdf1761e0b03fdb7302e9e41d01c0c735c383621536866cdf6348\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.softplus_backward\", \"op\": \"aten::softplus_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SoftplusBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Scalar & beta, const at::Scalar & threshold) {
-  auto result = CallPythonOp_Generic("flag_gems.softplus_backward", {grad_output, self, beta, threshold});
+  auto result = SoftplusBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.softplus_backward", {grad_output, self, beta, threshold}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(beta), static_cast<const at::Scalar&>(threshold));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SoftshrinkFnSource("aten::softshrink", "flag_gems.softshrink", "3d986df52e79673eac051b3b52bea008d22fceee9fa0da8d41db52a907ae50fa", "{\"abi\": \"3d986df52e79673eac051b3b52bea008d22fceee9fa0da8d41db52a907ae50fa\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.softshrink\", \"op\": \"aten::softshrink\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SoftshrinkKernelPython(const at::Tensor & self, const at::Scalar & lambd) {
-  auto result = CallPythonOp_Generic("flag_gems.softshrink", {self, lambd});
+  auto result = SoftshrinkFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.softshrink", {self, lambd}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(lambd));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SoftshrinkOutFnSource("aten::softshrink.out", "flag_gems.softshrink_out", "f0822c5bff17df3b4a1877666fed556ba1dc09e584c974eb4ba95799ca0727a1", "{\"abi\": \"f0822c5bff17df3b4a1877666fed556ba1dc09e584c974eb4ba95799ca0727a1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.softshrink_out\", \"op\": \"aten::softshrink.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SoftshrinkOutKernelPython(const at::Tensor & self, const at::Scalar & lambd, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.softshrink_out", {self, lambd, out});
+  SoftshrinkOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.softshrink_out", {self, lambd, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(lambd), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SortFnSource("aten::sort", "flag_gems.sort", "5de43d7fe661d6fd8e6640ecd3a38cb0cfcadf4af27409497fd76207dd96dad3", "{\"abi\": \"5de43d7fe661d6fd8e6640ecd3a38cb0cfcadf4af27409497fd76207dd96dad3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.sort\", \"op\": \"aten::sort\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> SortKernelPython(const at::Tensor & self, int64_t dim, bool descending) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.sort", {self, dim, descending}, 2);
+  auto result = SortFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.sort", {self, dim, descending}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(descending));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot SortStableFnSource("aten::sort.stable", "flag_gems.sort_stable", "d5873babf3702ad4e23554065218f0a5c7e7ae808bed34f11c24ca4aa8ea02d9", "{\"abi\": \"d5873babf3702ad4e23554065218f0a5c7e7ae808bed34f11c24ca4aa8ea02d9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"stable\", \"type\": \"::std::optional<bool>\"}, {\"keyword\": \"dim\", \"type\": \"int64_t\"}, {\"keyword\": \"descending\", \"type\": \"bool\"}], \"host\": \"flag_gems.sort_stable\", \"op\": \"aten::sort.stable\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> SortStableKernelPython(const at::Tensor & self, ::std::optional<bool> stable, int64_t dim, bool descending) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.sort_stable", {self}, {PyKwarg{"stable", stable}, PyKwarg{"dim", dim}, PyKwarg{"descending", descending}}, 2);
+  auto result = SortStableFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.sort_stable", {self}, {PyKwarg{"stable", stable}, PyKwarg{"dim", dim}, PyKwarg{"descending", descending}}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<bool>&>(stable), static_cast<const int64_t&>(dim), static_cast<const bool&>(descending));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot SpecialAiryAiFnSource("aten::special_airy_ai", "flag_gems.special_airy_ai", "8b9553be8bad6a863578fde1c3906cde7d70570f4959d4231abda4817bf80baf", "{\"abi\": \"8b9553be8bad6a863578fde1c3906cde7d70570f4959d4231abda4817bf80baf\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_airy_ai\", \"op\": \"aten::special_airy_ai\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialAiryAiKernelPython(const at::Tensor & x) {
-  auto result = CallPythonOp_Generic("flag_gems.special_airy_ai", {x});
+  auto result = SpecialAiryAiFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_airy_ai", {x}); }, static_cast<const at::Tensor&>(x));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialAiryAiOutFnSource("aten::special_airy_ai.out", "flag_gems.special_airy_ai_out", "534e00f3b88fcfa3f143f6a163a23e8b468082b374feadf4b272f4ee151c6c7a", "{\"abi\": \"534e00f3b88fcfa3f143f6a163a23e8b468082b374feadf4b272f4ee151c6c7a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_airy_ai_out\", \"op\": \"aten::special_airy_ai.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialAiryAiOutKernelPython(const at::Tensor & x, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.special_airy_ai_out", {x});
+  auto result = SpecialAiryAiOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_airy_ai_out", {x}); }, static_cast<const at::Tensor&>(x));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot SpecialBesselJ0FnSource("aten::special_bessel_j0", "flag_gems.special_bessel_j0", "50bbfb97e02e6fbc6fc1ddd3d6d54864f1aa9133fc58294a14c434f9957bcee8", "{\"abi\": \"50bbfb97e02e6fbc6fc1ddd3d6d54864f1aa9133fc58294a14c434f9957bcee8\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_bessel_j0\", \"op\": \"aten::special_bessel_j0\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialBesselJ0KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_bessel_j0", {self});
+  auto result = SpecialBesselJ0FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_bessel_j0", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialBesselJ1FnSource("aten::special_bessel_j1", "flag_gems.special_bessel_j1", "9a0ebb2868a8d209e1f83fe2a962b323404e7210b19cf90215dcdb6265922f03", "{\"abi\": \"9a0ebb2868a8d209e1f83fe2a962b323404e7210b19cf90215dcdb6265922f03\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_bessel_j1\", \"op\": \"aten::special_bessel_j1\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialBesselJ1KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_bessel_j1", {self});
+  auto result = SpecialBesselJ1FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_bessel_j1", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialBesselY0FnSource("aten::special_bessel_y0", "flag_gems.special_bessel_y0", "e8df0c344b48f58282edf586af660fc411f21f56239e909d18b9f58300398126", "{\"abi\": \"e8df0c344b48f58282edf586af660fc411f21f56239e909d18b9f58300398126\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_bessel_y0\", \"op\": \"aten::special_bessel_y0\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialBesselY0KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_bessel_y0", {self});
+  auto result = SpecialBesselY0FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_bessel_y0", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialBesselY1FnSource("aten::special_bessel_y1", "flag_gems.special_bessel_y1", "d144694c38fbe1b7b792613def1c72a34afe8a9106a02640899db0a72a51e254", "{\"abi\": \"d144694c38fbe1b7b792613def1c72a34afe8a9106a02640899db0a72a51e254\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_bessel_y1\", \"op\": \"aten::special_bessel_y1\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialBesselY1KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_bessel_y1", {self});
+  auto result = SpecialBesselY1FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_bessel_y1", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialChebyshevPolynomialUFnSource("aten::special_chebyshev_polynomial_u", "flag_gems.special_chebyshev_polynomial_u", "44f50b279b1dc63b228270862ee9baefddb8887b78a2d33588281304f7b97a0c", "{\"abi\": \"44f50b279b1dc63b228270862ee9baefddb8887b78a2d33588281304f7b97a0c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_chebyshev_polynomial_u\", \"op\": \"aten::special_chebyshev_polynomial_u\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialChebyshevPolynomialUKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_u", {x, n});
+  auto result = SpecialChebyshevPolynomialUFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_u", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialChebyshevPolynomialUNScalarFnSource("aten::special_chebyshev_polynomial_u.n_scalar", "flag_gems.special_chebyshev_polynomial_u", "ed6d03349906eb137deeab452163b3d255c4a4f2de894cc5a138c7eb844a67db", "{\"abi\": \"ed6d03349906eb137deeab452163b3d255c4a4f2de894cc5a138c7eb844a67db\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.special_chebyshev_polynomial_u\", \"op\": \"aten::special_chebyshev_polynomial_u.n_scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialChebyshevPolynomialUNScalarKernelPython(const at::Tensor & x, const at::Scalar & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_u", {x, n});
+  auto result = SpecialChebyshevPolynomialUNScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_u", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Scalar&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialChebyshevPolynomialVFnSource("aten::special_chebyshev_polynomial_v", "flag_gems.special_chebyshev_polynomial_v", "c43f863f94fc0c3ac87d141255297394e127c7798f3d068f40c08e01bae24c4a", "{\"abi\": \"c43f863f94fc0c3ac87d141255297394e127c7798f3d068f40c08e01bae24c4a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_chebyshev_polynomial_v\", \"op\": \"aten::special_chebyshev_polynomial_v\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialChebyshevPolynomialVKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_v", {x, n});
+  auto result = SpecialChebyshevPolynomialVFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_v", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialChebyshevPolynomialWFnSource("aten::special_chebyshev_polynomial_w", "flag_gems.special_chebyshev_polynomial_w", "bdc8d4240c54ff11cdf6b077c58ffb95f5f54d79f00f96c13a2c33f56e6b2c20", "{\"abi\": \"bdc8d4240c54ff11cdf6b077c58ffb95f5f54d79f00f96c13a2c33f56e6b2c20\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_chebyshev_polynomial_w\", \"op\": \"aten::special_chebyshev_polynomial_w\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialChebyshevPolynomialWKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_w", {x, n});
+  auto result = SpecialChebyshevPolynomialWFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_w", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialChebyshevPolynomialWOutFnSource("aten::special_chebyshev_polynomial_w.out", "flag_gems.special_chebyshev_polynomial_w_out", "a617607630b93e2dfd75385c7bd150427fd8eff2bc3a6b686fc87f6b330d8834", "{\"abi\": \"a617607630b93e2dfd75385c7bd150427fd8eff2bc3a6b686fc87f6b330d8834\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_chebyshev_polynomial_w_out\", \"op\": \"aten::special_chebyshev_polynomial_w.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialChebyshevPolynomialWOutKernelPython(const at::Tensor & x, const at::Tensor & n, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_w_out", {x, n, out});
+  SpecialChebyshevPolynomialWOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_chebyshev_polynomial_w_out", {x, n, out}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialErfcxFnSource("aten::special_erfcx", "flag_gems.special_erfcx", "6432c2ff6d50228b17318d8df1656becb16c0fda70626431b762ff144721bd8d", "{\"abi\": \"6432c2ff6d50228b17318d8df1656becb16c0fda70626431b762ff144721bd8d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_erfcx\", \"op\": \"aten::special_erfcx\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialErfcxKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_erfcx", {self});
+  auto result = SpecialErfcxFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_erfcx", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialHermitePolynomialHFnSource("aten::special_hermite_polynomial_h", "flag_gems.special_hermite_polynomial_h", "5c36b4b6502d9d79cc49e08fcf2df41be22c5e8e24f0070d7f070524aaf47f45", "{\"abi\": \"5c36b4b6502d9d79cc49e08fcf2df41be22c5e8e24f0070d7f070524aaf47f45\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_hermite_polynomial_h\", \"op\": \"aten::special_hermite_polynomial_h\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialHermitePolynomialHKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_hermite_polynomial_h", {x, n});
+  auto result = SpecialHermitePolynomialHFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_hermite_polynomial_h", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialHermitePolynomialHNScalarFnSource("aten::special_hermite_polynomial_h.n_scalar", "flag_gems.special_hermite_polynomial_h", "c570112a73f2fc639f54286e8a852c94089e3723b396017443066cf3e5ecc2b7", "{\"abi\": \"c570112a73f2fc639f54286e8a852c94089e3723b396017443066cf3e5ecc2b7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.special_hermite_polynomial_h\", \"op\": \"aten::special_hermite_polynomial_h.n_scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialHermitePolynomialHNScalarKernelPython(const at::Tensor & x, const at::Scalar & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_hermite_polynomial_h", {x, n});
+  auto result = SpecialHermitePolynomialHNScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_hermite_polynomial_h", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Scalar&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialI0eFnSource("aten::special_i0e", "flag_gems.special_i0e", "7a019c92d89161789c8c5b2a596d908d74e0c1414cbfde71596f8145e9960022", "{\"abi\": \"7a019c92d89161789c8c5b2a596d908d74e0c1414cbfde71596f8145e9960022\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_i0e\", \"op\": \"aten::special_i0e\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialI0eKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_i0e", {self});
+  auto result = SpecialI0eFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_i0e", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialI0eOutFnSource("aten::special_i0e.out", "flag_gems.special_i0e_out", "95e37dbde8639e917e9e6a031d5eac7c89b593a58fd8379fb45bc24f0fa396fd", "{\"abi\": \"95e37dbde8639e917e9e6a031d5eac7c89b593a58fd8379fb45bc24f0fa396fd\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_i0e_out\", \"op\": \"aten::special_i0e.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialI0eOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_i0e_out", {self, out});
+  SpecialI0eOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_i0e_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialI1FnSource("aten::special_i1", "flag_gems.special_i1", "6c1ab9dcb262fee9120adc40e664e7c6261a05db255d8c2058f8839bcea41a41", "{\"abi\": \"6c1ab9dcb262fee9120adc40e664e7c6261a05db255d8c2058f8839bcea41a41\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_i1\", \"op\": \"aten::special_i1\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialI1KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_i1", {self});
+  auto result = SpecialI1FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_i1", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialI1OutFnSource("aten::special_i1.out", "flag_gems.special_i1_out", "705e80823f683c4a95e687d70cf525bfde6acfa539e4e091aafad0cc80db2f12", "{\"abi\": \"705e80823f683c4a95e687d70cf525bfde6acfa539e4e091aafad0cc80db2f12\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_i1_out\", \"op\": \"aten::special_i1.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialI1OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_i1_out", {self, out});
+  SpecialI1OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_i1_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialI1eFnSource("aten::special_i1e", "flag_gems.special_i1e", "8358a69e881708aa260b9497ccd0f138f2a50ec0dde07787aa93b513c40cb25c", "{\"abi\": \"8358a69e881708aa260b9497ccd0f138f2a50ec0dde07787aa93b513c40cb25c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_i1e\", \"op\": \"aten::special_i1e\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialI1eKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_i1e", {self});
+  auto result = SpecialI1eFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_i1e", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialI1eOutFnSource("aten::special_i1e.out", "flag_gems.special_i1e_out", "a1b01c57394c26d3e6e57ade3129e949a0f4a45e17a77967faca916514d9372a", "{\"abi\": \"a1b01c57394c26d3e6e57ade3129e949a0f4a45e17a77967faca916514d9372a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_i1e_out\", \"op\": \"aten::special_i1e.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialI1eOutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_i1e_out", {self, out});
+  SpecialI1eOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_i1e_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialLegendrePolynomialPFnSource("aten::special_legendre_polynomial_p", "flag_gems.special_legendre_polynomial_p", "d1f3aab62d55a3528ec89b7050f9f935e665ff7863e3a35749e687b4c2d8ed4a", "{\"abi\": \"d1f3aab62d55a3528ec89b7050f9f935e665ff7863e3a35749e687b4c2d8ed4a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_legendre_polynomial_p\", \"op\": \"aten::special_legendre_polynomial_p\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialLegendrePolynomialPKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_legendre_polynomial_p", {x, n});
+  auto result = SpecialLegendrePolynomialPFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_legendre_polynomial_p", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialLogNdtrFnSource("aten::special_log_ndtr", "flag_gems.special_log_ndtr", "642f9d948eb6cf6cb7a4371f3aa4e7f41139badec5595f38aa2ade7398eebe42", "{\"abi\": \"642f9d948eb6cf6cb7a4371f3aa4e7f41139badec5595f38aa2ade7398eebe42\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_log_ndtr\", \"op\": \"aten::special_log_ndtr\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialLogNdtrKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_log_ndtr", {self});
+  auto result = SpecialLogNdtrFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_log_ndtr", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialModifiedBesselI0FnSource("aten::special_modified_bessel_i0", "flag_gems.special_modified_bessel_i0", "537211319aa5ca30f20c0d1c8935382d1c799065251d53878e24ce9441c12360", "{\"abi\": \"537211319aa5ca30f20c0d1c8935382d1c799065251d53878e24ce9441c12360\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_modified_bessel_i0\", \"op\": \"aten::special_modified_bessel_i0\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialModifiedBesselI0KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_modified_bessel_i0", {self});
+  auto result = SpecialModifiedBesselI0FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_modified_bessel_i0", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialModifiedBesselI0OutFnSource("aten::special_modified_bessel_i0.out", "flag_gems.special_modified_bessel_i0_out", "3e4db31544ff767d6315bd9ea103914779212d246546bccc63af9ec3ee925534", "{\"abi\": \"3e4db31544ff767d6315bd9ea103914779212d246546bccc63af9ec3ee925534\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_modified_bessel_i0_out\", \"op\": \"aten::special_modified_bessel_i0.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialModifiedBesselI0OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_modified_bessel_i0_out", {self, out});
+  SpecialModifiedBesselI0OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_modified_bessel_i0_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialModifiedBesselK0FnSource("aten::special_modified_bessel_k0", "flag_gems.special_modified_bessel_k0", "14333e01ada0c8df94500bec78ce28df0322a7cda019c6327b6a6e51c27241ce", "{\"abi\": \"14333e01ada0c8df94500bec78ce28df0322a7cda019c6327b6a6e51c27241ce\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_modified_bessel_k0\", \"op\": \"aten::special_modified_bessel_k0\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialModifiedBesselK0KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_modified_bessel_k0", {self});
+  auto result = SpecialModifiedBesselK0FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_modified_bessel_k0", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialModifiedBesselK0OutFnSource("aten::special_modified_bessel_k0.out", "flag_gems.special_modified_bessel_k0_out", "3fea4a3e3afe3d9d214f1c30d48516c00d3d1b5736e21982c945839de8f24820", "{\"abi\": \"3fea4a3e3afe3d9d214f1c30d48516c00d3d1b5736e21982c945839de8f24820\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_modified_bessel_k0_out\", \"op\": \"aten::special_modified_bessel_k0.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialModifiedBesselK0OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_modified_bessel_k0_out", {self, out});
+  SpecialModifiedBesselK0OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_modified_bessel_k0_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialModifiedBesselK1FnSource("aten::special_modified_bessel_k1", "flag_gems.special_modified_bessel_k1", "25fdbdca7aaeca73e5e5de94bb16018ad4b53129646d42ce2d9ed9737887762a", "{\"abi\": \"25fdbdca7aaeca73e5e5de94bb16018ad4b53129646d42ce2d9ed9737887762a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_modified_bessel_k1\", \"op\": \"aten::special_modified_bessel_k1\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialModifiedBesselK1KernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_modified_bessel_k1", {self});
+  auto result = SpecialModifiedBesselK1FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_modified_bessel_k1", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialModifiedBesselK1OutFnSource("aten::special_modified_bessel_k1.out", "flag_gems.special_modified_bessel_k1_out", "396cb0af13356e68b92d2ad746a446a0f2f3b410f29e74f394653fd6be719e0a", "{\"abi\": \"396cb0af13356e68b92d2ad746a446a0f2f3b410f29e74f394653fd6be719e0a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_modified_bessel_k1_out\", \"op\": \"aten::special_modified_bessel_k1.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialModifiedBesselK1OutKernelPython(const at::Tensor & self, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_modified_bessel_k1_out", {self, out});
+  SpecialModifiedBesselK1OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_modified_bessel_k1_out", {self, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialNdtriFnSource("aten::special_ndtri", "flag_gems.special_ndtri", "c1abe486dd56e437701cbb7ab2910d700bdbb9c555a2611be43399a9ab5f2eb4", "{\"abi\": \"c1abe486dd56e437701cbb7ab2910d700bdbb9c555a2611be43399a9ab5f2eb4\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_ndtri\", \"op\": \"aten::special_ndtri\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialNdtriKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.special_ndtri", {self});
+  auto result = SpecialNdtriFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_ndtri", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialScaledModifiedBesselK1FnSource("aten::special_scaled_modified_bessel_k1", "flag_gems.special_scaled_modified_bessel_k1", "9493c3e7bea3816d1cf249d4acfec376463b17278a6e5f2470aff5d80f8b584a", "{\"abi\": \"9493c3e7bea3816d1cf249d4acfec376463b17278a6e5f2470aff5d80f8b584a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_scaled_modified_bessel_k1\", \"op\": \"aten::special_scaled_modified_bessel_k1\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialScaledModifiedBesselK1KernelPython(const at::Tensor & x) {
-  auto result = CallPythonOp_Generic("flag_gems.special_scaled_modified_bessel_k1", {x});
+  auto result = SpecialScaledModifiedBesselK1FnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_scaled_modified_bessel_k1", {x}); }, static_cast<const at::Tensor&>(x));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialScaledModifiedBesselK1OutFnSource("aten::special_scaled_modified_bessel_k1.out", "flag_gems.special_scaled_modified_bessel_k1_out", "89e87a4b2cf5d8a53875b30be0ea132abd8afae86848f92b9c57b7a69d724f04", "{\"abi\": \"89e87a4b2cf5d8a53875b30be0ea132abd8afae86848f92b9c57b7a69d724f04\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_scaled_modified_bessel_k1_out\", \"op\": \"aten::special_scaled_modified_bessel_k1.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SpecialScaledModifiedBesselK1OutKernelPython(const at::Tensor & x, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.special_scaled_modified_bessel_k1_out", {x, out});
+  SpecialScaledModifiedBesselK1OutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_scaled_modified_bessel_k1_out", {x, out}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SpecialShiftedChebyshevPolynomialTFnSource("aten::special_shifted_chebyshev_polynomial_t", "flag_gems.special_shifted_chebyshev_polynomial_t", "b5efdc8dc77075dcce980c1d27da5b537912101e2e1f8e84280b684749eec1ab", "{\"abi\": \"b5efdc8dc77075dcce980c1d27da5b537912101e2e1f8e84280b684749eec1ab\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_shifted_chebyshev_polynomial_t\", \"op\": \"aten::special_shifted_chebyshev_polynomial_t\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialShiftedChebyshevPolynomialTKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_t", {x, n});
+  auto result = SpecialShiftedChebyshevPolynomialTFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_t", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialShiftedChebyshevPolynomialUFnSource("aten::special_shifted_chebyshev_polynomial_u", "flag_gems.special_shifted_chebyshev_polynomial_u", "b79d480aee33a81aab856322075c2ba4bb186b0875546fbaeef81391e32a60f3", "{\"abi\": \"b79d480aee33a81aab856322075c2ba4bb186b0875546fbaeef81391e32a60f3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_shifted_chebyshev_polynomial_u\", \"op\": \"aten::special_shifted_chebyshev_polynomial_u\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialShiftedChebyshevPolynomialUKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_u", {x, n});
+  auto result = SpecialShiftedChebyshevPolynomialUFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_u", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialShiftedChebyshevPolynomialVFnSource("aten::special_shifted_chebyshev_polynomial_v", "flag_gems.special_shifted_chebyshev_polynomial_v", "1c113165b2f50182b0a42f6affc7a25ce74ccb007ec3195a752c4469a27e225c", "{\"abi\": \"1c113165b2f50182b0a42f6affc7a25ce74ccb007ec3195a752c4469a27e225c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_shifted_chebyshev_polynomial_v\", \"op\": \"aten::special_shifted_chebyshev_polynomial_v\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialShiftedChebyshevPolynomialVKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_v", {x, n});
+  auto result = SpecialShiftedChebyshevPolynomialVFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_v", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialShiftedChebyshevPolynomialWFnSource("aten::special_shifted_chebyshev_polynomial_w", "flag_gems.special_shifted_chebyshev_polynomial_w", "53c4185415c622bac4fc1e7ee2b0decc5d8cfee1d2788e0332db4908f47e604d", "{\"abi\": \"53c4185415c622bac4fc1e7ee2b0decc5d8cfee1d2788e0332db4908f47e604d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_shifted_chebyshev_polynomial_w\", \"op\": \"aten::special_shifted_chebyshev_polynomial_w\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialShiftedChebyshevPolynomialWKernelPython(const at::Tensor & x, const at::Tensor & n) {
-  auto result = CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_w", {x, n});
+  auto result = SpecialShiftedChebyshevPolynomialWFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_shifted_chebyshev_polynomial_w", {x, n}); }, static_cast<const at::Tensor&>(x), static_cast<const at::Tensor&>(n));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SpecialXlog1pyFnSource("aten::special_xlog1py", "flag_gems.special_xlog1py", "93ae5c1d0432c886a18bcc353fa130b4185943096eb394ed0daffbe94b42e7c3", "{\"abi\": \"93ae5c1d0432c886a18bcc353fa130b4185943096eb394ed0daffbe94b42e7c3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.special_xlog1py\", \"op\": \"aten::special_xlog1py\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SpecialXlog1pyKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.special_xlog1py", {self, other});
+  auto result = SpecialXlog1pyFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.special_xlog1py", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SqrtFnSource("aten::sqrt", "flag_gems.sqrt", "edf09cbc8203c2207f87e0ecf81d088987ddd6a38e09432e49978c0be644e891", "{\"abi\": \"edf09cbc8203c2207f87e0ecf81d088987ddd6a38e09432e49978c0be644e891\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sqrt\", \"op\": \"aten::sqrt\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SqrtKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sqrt", {self});
+  auto result = SqrtFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sqrt", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SqrtInplaceFnSource("aten::sqrt_", "flag_gems.sqrt_", "44a1a53c7591a909be7e2cedd804ec0cf6d4c07bc67342d6b0ae523a26eaaa44", "{\"abi\": \"44a1a53c7591a909be7e2cedd804ec0cf6d4c07bc67342d6b0ae523a26eaaa44\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sqrt_\", \"op\": \"aten::sqrt_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SqrtInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.sqrt_", {self});
+  auto result = SqrtInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.sqrt_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot StdCorrectionFnSource("aten::std.correction", "flag_gems.std", "4f5a1934ba8535da886c5fa89f19c4a9cedf6fe5faf8f9526d47624109120d8f", "{\"abi\": \"4f5a1934ba8535da886c5fa89f19c4a9cedf6fe5faf8f9526d47624109120d8f\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": \"correction\", \"type\": \"::std::optional<at::Scalar>\"}, {\"keyword\": \"keepdim\", \"type\": \"bool\"}], \"host\": \"flag_gems.std\", \"op\": \"aten::std.correction\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor StdCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  auto result = CallPythonOp_GenericKw("flag_gems.std", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}});
+  auto result = StdCorrectionFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.std", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const ::std::optional<at::Scalar>&>(correction), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SubTensorFnSource("aten::sub.Tensor", "flag_gems.sub", "91a4775c8b6ade3a6b35d5989964f9ab855c0b029bd262de2334903024b59d97", "{\"abi\": \"91a4775c8b6ade3a6b35d5989964f9ab855c0b029bd262de2334903024b59d97\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.sub\", \"op\": \"aten::sub.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SubTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.sub", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = SubTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sub", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SubInplaceTensorFnSource("aten::sub_.Tensor", "flag_gems.sub_", "d0c0af47b2d8c090bd45a6e413efdebc0c3681a08d7e95c05cd1d47c8cd7716e", "{\"abi\": \"d0c0af47b2d8c090bd45a6e413efdebc0c3681a08d7e95c05cd1d47c8cd7716e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.sub_\", \"op\": \"aten::sub_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SubInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
-  auto result = CallPythonOp_GenericKw("flag_gems.sub_", {self, other}, {PyKwarg{"alpha", alpha}});
+  auto result = SubInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sub_", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot SumFnSource("aten::sum", "flag_gems.sum", "74aa7650eff39ee2904fc5bb68796faa884bc70b1cbf1b8cf29fe236cf1209a2", "{\"abi\": \"74aa7650eff39ee2904fc5bb68796faa884bc70b1cbf1b8cf29fe236cf1209a2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.sum\", \"op\": \"aten::sum\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SumKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.sum", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = SumFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sum", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SumIntlistOutFnSource("aten::sum.IntList_out", "flag_gems.sum_dim_out", "ee97531510148ac1c9ebf4544c520a9bb7e023aa40e875d15faff9fe63208714", "{\"abi\": \"ee97531510148ac1c9ebf4544c520a9bb7e023aa40e875d15faff9fe63208714\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sum_dim_out\", \"op\": \"aten::sum.IntList_out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SumIntlistOutKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.sum_dim_out", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
+  SumIntlistOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sum_dim_out", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot SumDimIntlistFnSource("aten::sum.dim_IntList", "flag_gems.sum_dim", "ff7346e1b0b31523a8dff939eb7aafb90198e6a4ac5009746f15502da5af0f0d", "{\"abi\": \"ff7346e1b0b31523a8dff939eb7aafb90198e6a4ac5009746f15502da5af0f0d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.sum_dim\", \"op\": \"aten::sum.dim_IntList\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SumDimIntlistKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
-  auto result = CallPythonOp_GenericKw("flag_gems.sum_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}});
+  auto result = SumDimIntlistFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sum_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot SumOutFnSource("aten::sum.out", "flag_gems.sum_out", "05521d1626e3a333787358417fc3f001c6339c559f6f2852a915bed0d6db8de2", "{\"abi\": \"05521d1626e3a333787358417fc3f001c6339c559f6f2852a915bed0d6db8de2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.sum_out\", \"op\": \"aten::sum.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & SumOutKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.sum_out", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}});
+  SumOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.sum_out", {self}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}, PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const ::std::optional<at::ScalarType>&>(dtype), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot TakeFnSource("aten::take", "flag_gems.take", "5d54b43f4380c02b2b4d37ff41e5c591d982f3d889e4e821638f49d01d10273c", "{\"abi\": \"5d54b43f4380c02b2b4d37ff41e5c591d982f3d889e4e821638f49d01d10273c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.take\", \"op\": \"aten::take\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TakeKernelPython(const at::Tensor & self, const at::Tensor & index) {
-  auto result = CallPythonOp_Generic("flag_gems.take", {self, index});
+  auto result = TakeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.take", {self, index}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(index));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TakeOutFnSource("aten::take.out", "flag_gems.take_out", "a90dea59863cdc92d3b5fa5e4678aacb1ce61a86733da99ddca54a731b382d19", "{\"abi\": \"a90dea59863cdc92d3b5fa5e4678aacb1ce61a86733da99ddca54a731b382d19\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"out\", \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.take_out\", \"op\": \"aten::take.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TakeOutKernelPython(const at::Tensor & self, const at::Tensor & index, at::Tensor & out) {
-  CallPythonOp_GenericKw("flag_gems.take_out", {self, index}, {PyKwarg{"out", out}});
+  TakeOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.take_out", {self, index}, {PyKwarg{"out", out}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(index), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot TanFnSource("aten::tan", "flag_gems.tan", "a441beb5bbd2aaad365035034f061bed1a80bc71246792510eac4b9eeccf4b7c", "{\"abi\": \"a441beb5bbd2aaad365035034f061bed1a80bc71246792510eac4b9eeccf4b7c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.tan\", \"op\": \"aten::tan\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TanKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.tan", {self});
+  auto result = TanFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tan", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TanInplaceFnSource("aten::tan_", "flag_gems.tan_", "219e630c43123d13d3e1183a341c7904df6a329cccccc86257398d11a5a8a714", "{\"abi\": \"219e630c43123d13d3e1183a341c7904df6a329cccccc86257398d11a5a8a714\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.tan_\", \"op\": \"aten::tan_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TanInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.tan_", {self});
+  auto result = TanInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tan_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot TanhFnSource("aten::tanh", "flag_gems.tanh", "b919ced8bfe6de52040f9a1740a652e11822c155dea832d3557747db368755d6", "{\"abi\": \"b919ced8bfe6de52040f9a1740a652e11822c155dea832d3557747db368755d6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.tanh\", \"op\": \"aten::tanh\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TanhKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.tanh", {self});
+  auto result = TanhFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tanh", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TanhInplaceFnSource("aten::tanh_", "flag_gems.tanh_", "aba6c32feb9a271515376f2505fbf65c657bc52d0d92eef9543f4ef7345aaa91", "{\"abi\": \"aba6c32feb9a271515376f2505fbf65c657bc52d0d92eef9543f4ef7345aaa91\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.tanh_\", \"op\": \"aten::tanh_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TanhInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.tanh_", {self});
+  auto result = TanhInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tanh_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot TanhBackwardFnSource("aten::tanh_backward", "flag_gems.tanh_backward", "22a8b0968e0023a7618c4f1b9651a590a425ea0aadc6d99824c4240586af5208", "{\"abi\": \"22a8b0968e0023a7618c4f1b9651a590a425ea0aadc6d99824c4240586af5208\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.tanh_backward\", \"op\": \"aten::tanh_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TanhBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & output) {
-  auto result = CallPythonOp_Generic("flag_gems.tanh_backward", {grad_output, output});
+  auto result = TanhBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tanh_backward", {grad_output, output}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(output));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ThresholdFnSource("aten::threshold", "flag_gems.threshold", "d6e781bbce8f1b5774983624913132faf3ade050e1333fff5f8432e82e8af729", "{\"abi\": \"d6e781bbce8f1b5774983624913132faf3ade050e1333fff5f8432e82e8af729\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.threshold\", \"op\": \"aten::threshold\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ThresholdKernelPython(const at::Tensor & self, const at::Scalar & threshold, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.threshold", {self, threshold, value});
+  auto result = ThresholdFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.threshold", {self, threshold, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(threshold), static_cast<const at::Scalar&>(value));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ThresholdInplaceFnSource("aten::threshold_", "flag_gems.threshold_", "5a7e485ce83438ad7a8aa108d98df66e7d1d4292315e4a0b8471848d5e4e4214", "{\"abi\": \"5a7e485ce83438ad7a8aa108d98df66e7d1d4292315e4a0b8471848d5e4e4214\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.threshold_\", \"op\": \"aten::threshold_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ThresholdInplaceKernelPython(at::Tensor & self, const at::Scalar & threshold, const at::Scalar & value) {
-  auto result = CallPythonOp_Generic("flag_gems.threshold_", {self, threshold, value});
+  auto result = ThresholdInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.threshold_", {self, threshold, value}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(threshold), static_cast<const at::Scalar&>(value));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ThresholdBackwardFnSource("aten::threshold_backward", "flag_gems.threshold_backward", "40b8b79eca1870cdc0c718e1e4347f5b097066e82db22f39cb3d5217f1f666b3", "{\"abi\": \"40b8b79eca1870cdc0c718e1e4347f5b097066e82db22f39cb3d5217f1f666b3\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.threshold_backward\", \"op\": \"aten::threshold_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ThresholdBackwardKernelPython(const at::Tensor & grad_output, const at::Tensor & self, const at::Scalar & threshold) {
-  auto result = CallPythonOp_Generic("flag_gems.threshold_backward", {grad_output, self, threshold});
+  auto result = ThresholdBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.threshold_backward", {grad_output, self, threshold}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(threshold));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TopkFnSource("aten::topk", "flag_gems.topk", "74df9c68c31d90e5a9288f13f37f9f16ab65d4db2fcef5f2a57eb5322532aa96", "{\"abi\": \"74df9c68c31d90e5a9288f13f37f9f16ab65d4db2fcef5f2a57eb5322532aa96\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.topk\", \"op\": \"aten::topk\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> TopkKernelPython(const at::Tensor & self, int64_t k, int64_t dim, bool largest, bool sorted) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.topk", {self, k, dim, largest, sorted}, 2);
+  auto result = TopkFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.topk", {self, k, dim, largest, sorted}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(k), static_cast<const int64_t&>(dim), static_cast<const bool&>(largest), static_cast<const bool&>(sorted));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot TraceFnSource("aten::trace", "flag_gems.trace", "1424f890ba6463f7b32e33c2675042e6debe2d65a81c05c63f7c1f17fdd70044", "{\"abi\": \"1424f890ba6463f7b32e33c2675042e6debe2d65a81c05c63f7c1f17fdd70044\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.trace\", \"op\": \"aten::trace\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TraceKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.trace", {self});
+  auto result = TraceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.trace", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TransposeIntFnSource("aten::transpose.int", "flag_gems.transpose", "a691b511b3e6d9f9bc96631cd111e1473c3e822396c2a765a4fc013ee9c6d56d", "{\"abi\": \"a691b511b3e6d9f9bc96631cd111e1473c3e822396c2a765a4fc013ee9c6d56d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.transpose\", \"op\": \"aten::transpose.int\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TransposeIntKernelPython(const at::Tensor & self, int64_t dim0, int64_t dim1) {
-  auto result = CallPythonOp_Generic("flag_gems.transpose", {self, dim0, dim1});
+  auto result = TransposeIntFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.transpose", {self, dim0, dim1}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim0), static_cast<const int64_t&>(dim1));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TrilFnSource("aten::tril", "flag_gems.tril", "63bee90e5cfe417400d33130851d37e9ced9cf63e06918c8c91a89d054e9c30b", "{\"abi\": \"63bee90e5cfe417400d33130851d37e9ced9cf63e06918c8c91a89d054e9c30b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.tril\", \"op\": \"aten::tril\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TrilKernelPython(const at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("flag_gems.tril", {self, diagonal});
+  auto result = TrilFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tril", {self, diagonal}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(diagonal));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TrilOutFnSource("aten::tril.out", "flag_gems.tril_out", "71946a90e3944af62f536446b46f7620babf7cce2e6e35b809483fd341aa729e", "{\"abi\": \"71946a90e3944af62f536446b46f7620babf7cce2e6e35b809483fd341aa729e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.tril_out\", \"op\": \"aten::tril.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TrilOutKernelPython(const at::Tensor & self, int64_t diagonal, at::Tensor & out) {
-  auto result = CallPythonOp_Generic("flag_gems.tril_out", {self, diagonal});
+  auto result = TrilOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tril_out", {self, diagonal}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(diagonal));
   out.copy_(result);
   return out;
 }
 
+static TypedSourceSlot TrilInplaceFnSource("aten::tril_", "flag_gems.tril_", "6e682645882b2ec90ffb1a8b13784dcb014e82b59fba12411dce7e59ef6e0ca7", "{\"abi\": \"6e682645882b2ec90ffb1a8b13784dcb014e82b59fba12411dce7e59ef6e0ca7\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.tril_\", \"op\": \"aten::tril_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TrilInplaceKernelPython(at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("flag_gems.tril_", {self, diagonal});
+  auto result = TrilInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.tril_", {self, diagonal}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(diagonal));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot TriuFnSource("aten::triu", "flag_gems.triu", "4ce0c0c29a822e2ce4976a80f90dda912d29ef9d2665badc60fd85fb89d27c1e", "{\"abi\": \"4ce0c0c29a822e2ce4976a80f90dda912d29ef9d2665badc60fd85fb89d27c1e\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.triu\", \"op\": \"aten::triu\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TriuKernelPython(const at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("flag_gems.triu", {self, diagonal});
+  auto result = TriuFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.triu", {self, diagonal}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(diagonal));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TriuInplaceFnSource("aten::triu_", "flag_gems.triu_", "826c94f82199efae156c22b629ba3eb62951d37b117c6f844201a3ff6c5de619", "{\"abi\": \"826c94f82199efae156c22b629ba3eb62951d37b117c6f844201a3ff6c5de619\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.triu_\", \"op\": \"aten::triu_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TriuInplaceKernelPython(at::Tensor & self, int64_t diagonal) {
-  auto result = CallPythonOp_Generic("flag_gems.triu_", {self, diagonal});
+  auto result = TriuInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.triu_", {self, diagonal}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(diagonal));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot TruncFnSource("aten::trunc", "flag_gems.trunc", "5117431a33126ba761ac530df967df5e4e0503a25bd4f334611b6ed03fe04b4b", "{\"abi\": \"5117431a33126ba761ac530df967df5e4e0503a25bd4f334611b6ed03fe04b4b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.trunc\", \"op\": \"aten::trunc\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TruncKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.trunc", {self});
+  auto result = TruncFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.trunc", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot TruncInplaceFnSource("aten::trunc_", "flag_gems.trunc_", "35743ade79063be0a7e42d75456aa3129538a826d803aa00d646fbee1c717bd0", "{\"abi\": \"35743ade79063be0a7e42d75456aa3129538a826d803aa00d646fbee1c717bd0\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.trunc_\", \"op\": \"aten::trunc_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & TruncInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.trunc_", {self});
+  auto result = TruncInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.trunc_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot UnfoldBackwardFnSource("aten::unfold_backward", "flag_gems.unfold_backward", "83705ab766e89fe7a3f229f8d02e83ea1d80bc99fccce2363758cacfb4ab5644", "{\"abi\": \"83705ab766e89fe7a3f229f8d02e83ea1d80bc99fccce2363758cacfb4ab5644\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.unfold_backward\", \"op\": \"aten::unfold_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UnfoldBackwardKernelPython(const at::Tensor & grad_in, at::IntArrayRef input_sizes, int64_t dim, int64_t size, int64_t step) {
-  auto result = CallPythonOp_Generic("flag_gems.unfold_backward", {grad_in, input_sizes, dim, size, step});
+  auto result = UnfoldBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.unfold_backward", {grad_in, input_sizes, dim, size, step}); }, static_cast<const at::Tensor&>(grad_in), static_cast<const at::IntArrayRef&>(input_sizes), static_cast<const int64_t&>(dim), static_cast<const int64_t&>(size), static_cast<const int64_t&>(step));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot UniformInplaceFnSource("aten::uniform_", "flag_gems.uniform_", "d41f1754b6c50e1c88f820029f15072fad0fd4750d4497caab1452f336671a2d", "{\"abi\": \"d41f1754b6c50e1c88f820029f15072fad0fd4750d4497caab1452f336671a2d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"double\"}, {\"keyword\": null, \"type\": \"double\"}], \"host\": \"flag_gems.uniform_\", \"op\": \"aten::uniform_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & UniformInplaceKernelPython(at::Tensor & self, double from, double to, ::std::optional<at::Generator> generator) {
-  auto result = CallPythonOp_RandomInplace("flag_gems.uniform_", {self, from, to});
+  auto result = UniformInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_RandomInplace("flag_gems.uniform_", {self, from, to}); }, static_cast<const at::Tensor&>(self), static_cast<const double&>(from), static_cast<const double&>(to));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot UniqueConsecutiveFnSource("aten::unique_consecutive", "flag_gems.unique_consecutive", "292cb9a98e50c66d2283404262cbc58316693953328ab73a0b748c0bcb8e2685", "{\"abi\": \"292cb9a98e50c66d2283404262cbc58316693953328ab73a0b748c0bcb8e2685\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}], \"host\": \"flag_gems.unique_consecutive\", \"op\": \"aten::unique_consecutive\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> UniqueConsecutiveKernelPython(const at::Tensor & self, bool return_inverse, bool return_counts, ::std::optional<int64_t> dim) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.unique_consecutive", {self, return_inverse, return_counts, dim}, 3);
+  auto result = UniqueConsecutiveFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.unique_consecutive", {self, return_inverse, return_counts, dim}, 3); }, static_cast<const at::Tensor&>(self), static_cast<const bool&>(return_inverse), static_cast<const bool&>(return_counts), static_cast<const ::std::optional<int64_t>&>(dim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot UniqueDimFnSource("aten::unique_dim", "flag_gems.unique_dim", "c26bbfeb95af9deb4e225ab8a3ecd6e3d216950f6036ad536f01e40dbab15ba2", "{\"abi\": \"c26bbfeb95af9deb4e225ab8a3ecd6e3d216950f6036ad536f01e40dbab15ba2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"bool\"}], \"host\": \"flag_gems.unique_dim\", \"op\": \"aten::unique_dim\", \"outputs\": 3, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> UniqueDimKernelPython(const at::Tensor & self, int64_t dim, bool sorted, bool return_inverse, bool return_counts) {
-  auto result = CallPythonOp_GenericTuple("flag_gems.unique_dim", {self, dim, sorted, return_inverse, return_counts}, 3);
+  auto result = UniqueDimFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericTuple("flag_gems.unique_dim", {self, dim, sorted, return_inverse, return_counts}, 3); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const bool&>(sorted), static_cast<const bool&>(return_inverse), static_cast<const bool&>(return_counts));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   UnboxToFlagos(result[2]);
   return {result[0], result[1], result[2]};
 }
 
+static TypedSourceSlot UnsqueezeFnSource("aten::unsqueeze", "flag_gems.unsqueeze", "90ed4ac6933e2d84868d6938fb7180aa58dc4b8e8e8a14759e01722fe81e9ac2", "{\"abi\": \"90ed4ac6933e2d84868d6938fb7180aa58dc4b8e8e8a14759e01722fe81e9ac2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.unsqueeze\", \"op\": \"aten::unsqueeze\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UnsqueezeKernelPython(const at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_Generic("flag_gems.unsqueeze", {self, dim});
+  auto result = UnsqueezeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.unsqueeze", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot UnsqueezeInplaceFnSource("aten::unsqueeze_", "flag_gems.unsqueeze_", "12a44eeac8ee93064c5645069d7c30cabcb24a8d8c7de788f5380fcfa75729c9", "{\"abi\": \"12a44eeac8ee93064c5645069d7c30cabcb24a8d8c7de788f5380fcfa75729c9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.unsqueeze_\", \"op\": \"aten::unsqueeze_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & UnsqueezeInplaceKernelPython(at::Tensor & self, int64_t dim) {
-  auto result = CallPythonOp_Generic("flag_gems.unsqueeze_", {self, dim});
+  auto result = UnsqueezeInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.unsqueeze_", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot UpsampleBicubic2dFnSource("aten::upsample_bicubic2d", "flag_gems.upsample_bicubic2d", "cf7ffbbd794317d9fbf2896df1a7969fa7b662a7e0a31922ed9f1a2170a7ac1d", "{\"abi\": \"cf7ffbbd794317d9fbf2896df1a7969fa7b662a7e0a31922ed9f1a2170a7ac1d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.upsample_bicubic2d\", \"op\": \"aten::upsample_bicubic2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UpsampleBicubic2dKernelPython(const at::Tensor & self, at::IntArrayRef output_size, bool align_corners, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems.upsample_bicubic2d", {self, output_size, align_corners, scales_h, scales_w});
+  auto result = UpsampleBicubic2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.upsample_bicubic2d", {self, output_size, align_corners, scales_h, scales_w}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot UpsampleBilinear2dFnSource("aten::upsample_bilinear2d", "flag_gems.upsample_bilinear2d", "1707af197e20b71b83d898f6e2001fb56b78e290152d7ed22bb17c6c4abdae8a", "{\"abi\": \"1707af197e20b71b83d898f6e2001fb56b78e290152d7ed22bb17c6c4abdae8a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.upsample_bilinear2d\", \"op\": \"aten::upsample_bilinear2d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UpsampleBilinear2dKernelPython(const at::Tensor & self, at::IntArrayRef output_size, bool align_corners, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems.upsample_bilinear2d", {self, output_size, align_corners, scales_h, scales_w});
+  auto result = UpsampleBilinear2dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.upsample_bilinear2d", {self, output_size, align_corners, scales_h, scales_w}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot UpsampleLinear1dBackwardFnSource("aten::upsample_linear1d_backward", "flag_gems.upsample_linear1d_backward", "81f3447fa400cee786d8ee6de1bfc153abbb99d42e5812502e3ba2d76895e094", "{\"abi\": \"81f3447fa400cee786d8ee6de1bfc153abbb99d42e5812502e3ba2d76895e094\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.upsample_linear1d_backward\", \"op\": \"aten::upsample_linear1d_backward\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UpsampleLinear1dBackwardKernelPython(const at::Tensor & grad_output, at::IntArrayRef output_size, at::IntArrayRef input_size, bool align_corners, ::std::optional<double> scales) {
-  auto result = CallPythonOp_Generic("flag_gems.upsample_linear1d_backward", {grad_output, output_size, input_size, align_corners, scales});
+  auto result = UpsampleLinear1dBackwardFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.upsample_linear1d_backward", {grad_output, output_size, input_size, align_corners, scales}); }, static_cast<const at::Tensor&>(grad_output), static_cast<const at::IntArrayRef&>(output_size), static_cast<const at::IntArrayRef&>(input_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot UpsampleTrilinear3dFnSource("aten::upsample_trilinear3d", "flag_gems.upsample_trilinear3d", "20f30b0d47ff75a058fac0f3fd6c451127794a56e6c311858389893fbc6d077a", "{\"abi\": \"20f30b0d47ff75a058fac0f3fd6c451127794a56e6c311858389893fbc6d077a\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}, {\"keyword\": null, \"type\": \"::std::optional<double>\"}], \"host\": \"flag_gems.upsample_trilinear3d\", \"op\": \"aten::upsample_trilinear3d\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UpsampleTrilinear3dKernelPython(const at::Tensor & self, at::IntArrayRef output_size, bool align_corners, ::std::optional<double> scales_d, ::std::optional<double> scales_h, ::std::optional<double> scales_w) {
-  auto result = CallPythonOp_Generic("flag_gems.upsample_trilinear3d", {self, output_size, align_corners, scales_d, scales_h, scales_w});
+  auto result = UpsampleTrilinear3dFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.upsample_trilinear3d", {self, output_size, align_corners, scales_d, scales_h, scales_w}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(output_size), static_cast<const bool&>(align_corners), static_cast<const ::std::optional<double>&>(scales_d), static_cast<const ::std::optional<double>&>(scales_h), static_cast<const ::std::optional<double>&>(scales_w));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot VarCorrectionFnSource("aten::var.correction", "flag_gems.var_correction", "28f3827f9ee1782632ccd8fac2b6b5761947ecbfd8e35ae31a6cd1110848141c", "{\"abi\": \"28f3827f9ee1782632ccd8fac2b6b5761947ecbfd8e35ae31a6cd1110848141c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": \"correction\", \"type\": \"::std::optional<at::Scalar>\"}, {\"keyword\": \"keepdim\", \"type\": \"bool\"}], \"host\": \"flag_gems.var_correction\", \"op\": \"aten::var.correction\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor VarCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  auto result = CallPythonOp_GenericKw("flag_gems.var_correction", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}});
+  auto result = VarCorrectionFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.var_correction", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const ::std::optional<at::Scalar>&>(correction), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot VarMeanCorrectionFnSource("aten::var_mean.correction", "flag_gems.var_mean", "81900e7274d1ea5702b9ea285a826c5bddf25e5256a6e431e65ce0f02eeb3abe", "{\"abi\": \"81900e7274d1ea5702b9ea285a826c5bddf25e5256a6e431e65ce0f02eeb3abe\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": \"correction\", \"type\": \"::std::optional<at::Scalar>\"}, {\"keyword\": \"keepdim\", \"type\": \"bool\"}], \"host\": \"flag_gems.var_mean\", \"op\": \"aten::var_mean.correction\", \"outputs\": 2, \"result_type\": \"std::vector<at::Tensor>\"}");
 ::std::tuple<at::Tensor,at::Tensor> VarMeanCorrectionKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, const ::std::optional<at::Scalar> & correction, bool keepdim) {
-  auto result = CallPythonOp_GenericKwTuple("flag_gems.var_mean", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}}, 2);
+  auto result = VarMeanCorrectionFnSource.Call<std::vector<at::Tensor>>([&]() { return CallPythonOp_GenericKwTuple("flag_gems.var_mean", {self, dim}, {PyKwarg{"correction", correction}, PyKwarg{"keepdim", keepdim}}, 2); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const ::std::optional<at::Scalar>&>(correction), static_cast<const bool&>(keepdim));
   UnboxToFlagos(result[0]);
   UnboxToFlagos(result[1]);
   return {result[0], result[1]};
 }
 
+static TypedSourceSlot VdotFnSource("aten::vdot", "flag_gems.vdot", "3a89725663e60af3faaf2881730d62087044dc7dcaad51b6abace286c9ed3dce", "{\"abi\": \"3a89725663e60af3faaf2881730d62087044dc7dcaad51b6abace286c9ed3dce\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.vdot\", \"op\": \"aten::vdot\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor VdotKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.vdot", {self, other});
+  auto result = VdotFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.vdot", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ViewAsComplexFnSource("aten::view_as_complex", "flag_gems.view_as_complex", "b33fc94f774667e78a9ce50663f4c07084409717ffc2b63472482c59164f6b10", "{\"abi\": \"b33fc94f774667e78a9ce50663f4c07084409717ffc2b63472482c59164f6b10\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.view_as_complex\", \"op\": \"aten::view_as_complex\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ViewAsComplexKernelPython(const at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.view_as_complex", {self});
+  auto result = ViewAsComplexFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.view_as_complex", {self}); }, static_cast<const at::Tensor&>(self));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot WhereSelfFnSource("aten::where.self", "flag_gems.where_self", "f69f3ba394d3daae50d5ef5aa0345e3078530a74d0092b35cdb1ff2483b99393", "{\"abi\": \"f69f3ba394d3daae50d5ef5aa0345e3078530a74d0092b35cdb1ff2483b99393\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.where_self\", \"op\": \"aten::where.self\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor WhereSelfKernelPython(const at::Tensor & condition, const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.where_self", {condition, self, other});
+  auto result = WhereSelfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.where_self", {condition, self, other}); }, static_cast<const at::Tensor&>(condition), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot WhereSelfOutFnSource("aten::where.self_out", "flag_gems.where_self_out", "3d862b5014f81770d835d342474cce501c0f4c71af21a9cc37bf93ab92b255b1", "{\"abi\": \"3d862b5014f81770d835d342474cce501c0f4c71af21a9cc37bf93ab92b255b1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.where_self_out\", \"op\": \"aten::where.self_out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & WhereSelfOutKernelPython(const at::Tensor & condition, const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.where_self_out", {condition, self, other, out});
+  WhereSelfOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.where_self_out", {condition, self, other, out}); }, static_cast<const at::Tensor&>(condition), static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot XlogyOutscalarOtherFnSource("aten::xlogy.OutScalar_Other", "flag_gems.xlogy_tensor_scalar_out", "596f94ab023449844c3f390d4ac68a4aa3dea48b3508bbd31c0e6c3d7ddd93f1", "{\"abi\": \"596f94ab023449844c3f390d4ac68a4aa3dea48b3508bbd31c0e6c3d7ddd93f1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.xlogy_tensor_scalar_out\", \"op\": \"aten::xlogy.OutScalar_Other\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & XlogyOutscalarOtherKernelPython(const at::Tensor & self, const at::Scalar & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.xlogy_tensor_scalar_out", {self, other, out});
+  XlogyOutscalarOtherFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_tensor_scalar_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot XlogyOutscalarSelfFnSource("aten::xlogy.OutScalar_Self", "flag_gems.xlogy_scalar_tensor_out", "43f4253c5a74e597ef6cd4ce3383c1c012e9cfa581c015e5ecca68b633efefc9", "{\"abi\": \"43f4253c5a74e597ef6cd4ce3383c1c012e9cfa581c015e5ecca68b633efefc9\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.xlogy_scalar_tensor_out\", \"op\": \"aten::xlogy.OutScalar_Self\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & XlogyOutscalarSelfKernelPython(const at::Scalar & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.xlogy_scalar_tensor_out", {self, other, out});
+  XlogyOutscalarSelfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_scalar_tensor_out", {self, other, out}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot XlogyOuttensorFnSource("aten::xlogy.OutTensor", "flag_gems.xlogy_out", "121eb2ca6c7acfe0f143478db3579f1c91ce4323858a3aa0a474d420ec2ca2ac", "{\"abi\": \"121eb2ca6c7acfe0f143478db3579f1c91ce4323858a3aa0a474d420ec2ca2ac\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.xlogy_out\", \"op\": \"aten::xlogy.OutTensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & XlogyOuttensorKernelPython(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
-  CallPythonOp_Generic("flag_gems.xlogy_out", {self, other, out});
+  XlogyOuttensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_out", {self, other, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Tensor&>(out));
   return out;
 }
 
+static TypedSourceSlot XlogyScalarOtherFnSource("aten::xlogy.Scalar_Other", "flag_gems.xlogy_tensor_scalar", "8cd97267b33a625d9cce224c1a20b2d4d4b1af6d7fe09c2f4c1bb9ddb6807c61", "{\"abi\": \"8cd97267b33a625d9cce224c1a20b2d4d4b1af6d7fe09c2f4c1bb9ddb6807c61\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.xlogy_tensor_scalar\", \"op\": \"aten::xlogy.Scalar_Other\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor XlogyScalarOtherKernelPython(const at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.xlogy_tensor_scalar", {self, other});
+  auto result = XlogyScalarOtherFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_tensor_scalar", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot XlogyScalarSelfFnSource("aten::xlogy.Scalar_Self", "flag_gems.xlogy_scalar_tensor", "f598d42aa25564ae4906016c9b6eb9c9bc39f0c0e22707a3ec89dadace04a970", "{\"abi\": \"f598d42aa25564ae4906016c9b6eb9c9bc39f0c0e22707a3ec89dadace04a970\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Scalar\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.xlogy_scalar_tensor\", \"op\": \"aten::xlogy.Scalar_Self\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor XlogyScalarSelfKernelPython(const at::Scalar & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.xlogy_scalar_tensor", {self, other});
+  auto result = XlogyScalarSelfFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_scalar_tensor", {self, other}); }, static_cast<const at::Scalar&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot XlogyTensorFnSource("aten::xlogy.Tensor", "flag_gems.xlogy", "846b08068dc63207b051b255bb562a28958d25287ceab20a3dec933ca0dc267b", "{\"abi\": \"846b08068dc63207b051b255bb562a28958d25287ceab20a3dec933ca0dc267b\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.xlogy\", \"op\": \"aten::xlogy.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor XlogyTensorKernelPython(const at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.xlogy", {self, other});
+  auto result = XlogyTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot XlogyInplaceScalarOtherFnSource("aten::xlogy_.Scalar_Other", "flag_gems.xlogy_tensor_scalar_", "98bc860272cfd085c92f4a47cef742627ccac6e8e37d30d969b6df14cafebac6", "{\"abi\": \"98bc860272cfd085c92f4a47cef742627ccac6e8e37d30d969b6df14cafebac6\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.xlogy_tensor_scalar_\", \"op\": \"aten::xlogy_.Scalar_Other\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & XlogyInplaceScalarOtherKernelPython(at::Tensor & self, const at::Scalar & other) {
-  auto result = CallPythonOp_Generic("flag_gems.xlogy_tensor_scalar_", {self, other});
+  auto result = XlogyInplaceScalarOtherFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_tensor_scalar_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot XlogyInplaceTensorFnSource("aten::xlogy_.Tensor", "flag_gems.xlogy_", "d0c772b78347396cffd925f26bfa8c068adddfa3f1dace90b55fdaa7ad2da6af", "{\"abi\": \"d0c772b78347396cffd925f26bfa8c068adddfa3f1dace90b55fdaa7ad2da6af\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.xlogy_\", \"op\": \"aten::xlogy_.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & XlogyInplaceTensorKernelPython(at::Tensor & self, const at::Tensor & other) {
-  auto result = CallPythonOp_Generic("flag_gems.xlogy_", {self, other});
+  auto result = XlogyInplaceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.xlogy_", {self, other}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ZeroInplaceFnSource("aten::zero_", "flag_gems.zero_", "a3d9de42982b9569f962739a097f8e9a4711621f4375de5532eb264328e77274", "{\"abi\": \"a3d9de42982b9569f962739a097f8e9a4711621f4375de5532eb264328e77274\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.zero_\", \"op\": \"aten::zero_\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & ZeroInplaceKernelPython(at::Tensor & self) {
-  auto result = CallPythonOp_Generic("flag_gems.zero_", {self});
+  auto result = ZeroInplaceFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.zero_", {self}); }, static_cast<const at::Tensor&>(self));
   self.copy_(result);
   return self;
 }
 
+static TypedSourceSlot ZerosFnSource("aten::zeros", "flag_gems.zeros", "17ad9a8e1a7bb68f2b1fe9e30d03d06d5bbc37fcf9618d17b6ba89a85b34ee81", "{\"abi\": \"17ad9a8e1a7bb68f2b1fe9e30d03d06d5bbc37fcf9618d17b6ba89a85b34ee81\", \"arguments\": [{\"keyword\": null, \"type\": \"at::IntArrayRef\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.zeros\", \"op\": \"aten::zeros\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ZerosKernelPython(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory) {
-  auto result = CallPythonOp_Factory("flag_gems.zeros", {size}, dtype, device);
+  auto result = ([&]() { if (!ZerosFnSource.Available()) return CallPythonOp_Factory("flag_gems.zeros", {size}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device); return ZerosFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Factory("flag_gems.zeros", {size}, dtype, device); }, static_cast<const at::IntArrayRef&>(size), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }
 
+static TypedSourceSlot ZerosLikeFnSource("aten::zeros_like", "flag_gems.zeros_like", "4d8a2054626b536ce9c041db710bebc549925a104f3820fdca81a6e097e21147", "{\"abi\": \"4d8a2054626b536ce9c041db710bebc549925a104f3820fdca81a6e097e21147\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"dtype\", \"type\": \"std::optional<at::ScalarType>\"}, {\"keyword\": \"device\", \"type\": \"c10::Device\"}, {\"keyword\": \"layout\", \"type\": \"at::Layout\"}, {\"keyword\": \"pin_memory\", \"type\": \"std::nullopt_t\"}, {\"keyword\": \"memory_format\", \"type\": \"std::nullopt_t\"}], \"host\": \"flag_gems.zeros_like\", \"op\": \"aten::zeros_like\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor ZerosLikeKernelPython(const at::Tensor & self, ::std::optional<at::ScalarType> dtype, ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, ::std::optional<bool> pin_memory, ::std::optional<at::MemoryFormat> memory_format) {
-  auto result = CallPythonOp_LikeFactory("flag_gems.zeros_like", {self}, dtype, device);
+  auto result = ([&]() { if (!ZerosLikeFnSource.Available()) return CallPythonOp_LikeFactory("flag_gems.zeros_like", {self}, dtype, device); const auto _native_target = TypedSourceFactoryDevice(device, &self); return ZerosLikeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_LikeFactory("flag_gems.zeros_like", {self}, dtype, device); }, static_cast<const at::Tensor&>(self), static_cast<const std::optional<at::ScalarType>&>(dtype), static_cast<const c10::Device&>(_native_target), static_cast<const at::Layout&>(at::kStrided), static_cast<const std::nullopt_t&>(std::nullopt), static_cast<const std::nullopt_t&>(std::nullopt)); }());
   UnboxToFlagos(result);
   return result;
 }

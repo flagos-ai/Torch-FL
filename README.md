@@ -148,6 +148,11 @@ FLAGOS_BUILD_TILEOPS=0 FLAGOS_BUILD_BOXING=0 python setup.py bdist_wheel
 This opt-in build uses Cython 3.2.4 and a CUDA toolkit. The generated hosts and
 the common launcher are installed with the wheel and activated on import.
 Eager inference uses the generated operator hosts under `torch.no_grad()`.
+Generated ATen entries bind directly to matching typed hosts at import time;
+warm admitted calls avoid generic argument packing and host-name lookup.
+Tensor and fixed Tensor-tuple results, scalar/optional/list inputs and existing
+out/in-place adapters are supported. Other signatures retain the original
+FlagGems path and are reported as compiler gaps, not vendor coverage.
 The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
 This target has not yet been demonstrated without model graph compilation.

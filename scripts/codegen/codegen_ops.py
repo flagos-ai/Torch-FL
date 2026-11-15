@@ -64,6 +64,7 @@ from collections import defaultdict
 # key is an annotation rather than a default route.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_coverage import TILEOPS_OPS  # noqa: E402
+from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
 
 
 # TensorList C++ spelling (IListRef vs ArrayRef) must match what PyTorch itself
@@ -1280,7 +1281,7 @@ def _flaggems_kwarg_cpp(kwargs):
 
 
 def gen_flaggems_python_kernel(
-    op, fn_type, ret_type, args, gems_func, category, func, kwargs=None
+    op, fn_type, ret_type, args, gems_func, category, func, kwargs=None, *, typed=False
 ):
     """Generate a <Name>KernelPython forwarding to the FlagGems Python op.
 
@@ -1298,6 +1299,28 @@ def gen_flaggems_python_kernel(
     s = func.func
     aten_args = list(s.arguments.flat_all)
     out_args = list(s.arguments.out) if hasattr(s.arguments, "out") else []
+    declarations = []
+    cpp_types = {name: t for t, name in args}
+
+    def native_call(
+        call, positional, keywords=(), outputs=1, preparation="", types=None
+    ):
+        if not typed:
+            return call
+        types = {**cpp_types, **(types or {})}
+        arguments = [(types[name], expr, None) for name, expr in positional]
+        arguments.extend((types[name], expr, name) for name, expr in keywords)
+        declaration, expression = wrap_native_source_call(
+            op, gems_func, fn_type + "Source", call, arguments, outputs, preparation
+        )
+        declarations.append(declaration)
+        return expression
+
+    def finish(body, prelude=""):
+        return (
+            "".join(declarations)
+            + f"{ret_type} {kn}({args_decl(args)}) {{\n{prelude}{body}\n}}"
+        )
 
     if category == "factory":
         # Factory: pass only the shape/scalar positionals; the factory caller
@@ -1331,14 +1354,34 @@ def gen_flaggems_python_kernel(
                 f": at::kLong;\n"
             )
             dtype_expr = "_dt"
+        call = (
+            f'CallPythonOp_Factory("{gems_func}", '
+            f"{pos_init}, {dtype_expr}, {device_expr})"
+        )
+        call = native_call(
+            call,
+            [(n, n) for n in pos_names],
+            [
+                ("dtype", dtype_expr),
+                ("device", "_native_target"),
+                ("layout", "at::kStrided"),
+                ("pin_memory", "std::nullopt"),
+            ],
+            preparation=f"const auto _native_target = TypedSourceFactoryDevice({device_expr});",
+            types={
+                "dtype": "std::optional<at::ScalarType>",
+                "device": "c10::Device",
+                "layout": "at::Layout",
+                "pin_memory": "std::nullopt_t",
+            },
+        )
         body = (
             f"{infer}"
-            f'  auto result = CallPythonOp_Factory("{gems_func}", '
-            f"{pos_init}, {dtype_expr}, {device_expr});\n"
+            f"  auto result = {call};\n"
             f"  UnboxToFlagos(result);\n"
             f"  return result;"
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        return finish(body)
 
     if category == "like_factory":
         # *_like: pass the source tensor (+ full_like's fill_value); the caller
@@ -1354,13 +1397,31 @@ def gen_flaggems_python_kernel(
         device_name = next((a.name for a in aten_args if a.name == "device"), None)
         device_expr = device_name if device_name else "::std::nullopt"
         pos_init = "{" + ", ".join(pos_names) + "}"
-        body = (
-            f'  auto result = CallPythonOp_LikeFactory("{gems_func}", '
-            f"{pos_init}, {dtype_expr}, {device_expr});\n"
-            f"  UnboxToFlagos(result);\n"
-            f"  return result;"
+        call = (
+            f'CallPythonOp_LikeFactory("{gems_func}", '
+            f"{pos_init}, {dtype_expr}, {device_expr})"
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        call = native_call(
+            call,
+            [(n, n) for n in pos_names],
+            [
+                ("dtype", dtype_expr),
+                ("device", "_native_target"),
+                ("layout", "at::kStrided"),
+                ("pin_memory", "std::nullopt"),
+                ("memory_format", "std::nullopt"),
+            ],
+            preparation=f"const auto _native_target = TypedSourceFactoryDevice({device_expr}, &{pos_names[0]});",
+            types={
+                "dtype": "std::optional<at::ScalarType>",
+                "device": "c10::Device",
+                "layout": "at::Layout",
+                "pin_memory": "std::nullopt_t",
+                "memory_format": "std::nullopt_t",
+            },
+        )
+        body = f"  auto result = {call};\n  UnboxToFlagos(result);\n  return result;"
+        return finish(body)
 
     if category == "random_inplace":
         # Random in-place: pass self + scalar params (generator dropped); the
@@ -1371,12 +1432,12 @@ def gen_flaggems_python_kernel(
         self_name = pos_names[0]
         pos_init = "{" + ", ".join(pos_names) + "}"
         ret_line = "" if ret_type == "void" else f"\n  return {self_name};"
-        body = (
-            f'  auto result = CallPythonOp_RandomInplace("{gems_func}", '
-            f"{pos_init});\n"
-            f"  {self_name}.copy_(result);{ret_line}"
+        call = native_call(
+            f'CallPythonOp_RandomInplace("{gems_func}", {pos_init})',
+            [(n, n) for n in pos_names],
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        body = f"  auto result = {call};\n  {self_name}.copy_(result);{ret_line}"
+        return finish(body)
 
     if category == "rng_dropgen":
         # RNG functional with the aten Generator? dropped: pass the remaining
@@ -1385,12 +1446,12 @@ def gen_flaggems_python_kernel(
         positional = kwargs or []
         pos_names = [n for _t, n in positional]
         pos_init = "{" + ", ".join(pos_names) + "}"
-        body = (
-            f'  auto result = CallPythonOp_Generic("{gems_func}", {pos_init});\n'
-            f"  UnboxToFlagos(result);\n"
-            f"  return result;"
+        call = native_call(
+            f'CallPythonOp_Generic("{gems_func}", {pos_init})',
+            [(n, n) for n in pos_names],
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        body = f"  auto result = {call};\n  UnboxToFlagos(result);\n  return result;"
+        return finish(body)
 
     kwargs = kwargs or []
     kw_names = {name for _t, name in kwargs}
@@ -1412,6 +1473,7 @@ def gen_flaggems_python_kernel(
         passed_names = [a.name for a in aten_args if a.name not in kw_names]
     # Widen a contracted axis the platform's triton will not compile, before the
     # operands are packed for the call. See _DOT_CONTRACT_PADDED_OPS.
+    native_names = passed_names[:]
     dotpad_lines, dotpad_rename = _dot_contract_prelude(op, args)
     passed_names = [dotpad_rename.get(n, n) for n in passed_names]
     if op == "embedding":
@@ -1512,12 +1574,33 @@ def gen_flaggems_python_kernel(
     else:
         raise ValueError(f"unsupported flaggems-python category {category} for {op}")
 
+    if category == "tensorlist_dim":
+        original_call = f'CallPythonOp_ListI("{gems_func}", {list_name}, {dim_name})'
+        replacement = native_call(
+            original_call, [(list_name, list_name), (dim_name, dim_name)]
+        )
+    else:
+        outputs = (
+            ret_type.count(",") + 1
+            if category == "tuple_return"
+            else len(out_args)
+            if category in ("out_variant", "out_variant_gemskwout")
+            and len(out_args) > 1
+            else 1
+        )
+        original_call = tuple_call(outputs) if outputs > 1 else gen_call
+        replacement = native_call(
+            original_call,
+            list(zip(native_names, passed_names)),
+            [(name, name) for _, name in kwargs],
+            outputs,
+        )
+    body = body.replace(original_call, replacement)
+
     # Ordered: the host escape returns before the padding runs, because a dtype
     # this route cannot serve at all should not pay for a pad it will not use.
     host_lines = _host_matmul_prelude(op, args, ret_type)
-    return (
-        f"{ret_type} {kn}({args_decl(args)}) {{\n{host_lines}{dotpad_lines}{body}\n}}"
-    )
+    return finish(body, host_lines + dotpad_lines)
 
 
 # ============================================================================
@@ -2921,6 +3004,7 @@ def main():
         '#include "ops.h"',
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
+        '#include "../backends/flagos/typed_source_host.h"',
         "",
         "namespace at::native::flagos {",
         "namespace {",
@@ -2939,6 +3023,7 @@ def main():
                 category,
                 i["func"],
                 kwargs,
+                typed=True,
             )
         )
         lines.append("")

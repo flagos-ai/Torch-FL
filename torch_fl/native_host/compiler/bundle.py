@@ -17,6 +17,7 @@ from .frontend import Frontend
 from .ir import emit, HEADER
 from .hooks import compile_hook
 from .coverage import discover_variants, write_coverage
+from .entries import emit_entries, HEADER as TYPED_HEADER
 
 
 class Recorder:
@@ -197,6 +198,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         names,
         torch._C._jit_get_schemas_for_operator,
     )
+    catalog = json.loads(torch.ops.flagos.native_source_typed_catalog())
     cohort = {
         "vendor": _build_config.ACCELERATOR,
         "torch": hosts.manifest["torch"],
@@ -308,7 +310,14 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
                 {"name": name, "signature": signature, "namespace": namespace}
             )
             native_groups.setdefault(name, []).append(
-                (namespace, public, graph_args, types, jit_types)
+                (
+                    namespace,
+                    public,
+                    graph_args,
+                    types,
+                    jit_types,
+                    list(graph.outputs())[0].type(),
+                )
             )
             if sample is None:
                 sample = emit(graph, grid_slots=frontend.kernel_slots)
@@ -326,6 +335,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     native_code = []
     callback_bindings = []
     for number, (name, group) in enumerate(native_groups.items()):
+        group = [entry for entry in group if entry[-1].kind() == "TensorType"]
+        if not group:
+            continue
         callback = "NativeEntry" + str(number)
         public = group[0][1]
         names = [p["name"] for p in public]
@@ -384,7 +396,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             + " && ".join("present" + str(i) for i in range(len(public)))
             + "))return false;"
         )
-        for namespace, _, graph_args, types, jit_types in group:
+        for namespace, _, graph_args, types, jit_types, _ in group:
             checks = [
                 argument_check(jit_types[p["name"]], "a" + str(i))
                 for i, p in enumerate(public)
@@ -415,6 +427,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             + callback
             + "));"
         )
+    typed_code, typed_entries, typed_rejected = emit_entries(catalog, native_groups)
+    native_code.extend(typed_code)
     init = sample[sample.index("PYBIND11_MODULE(") :].replace(
         "source_host_ir,", "_source_hosts,"
     )
@@ -444,11 +458,26 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         + "\n".join(callback_bindings)
         + '\nmodule.attr("callbacks")=callbacks;\n}\n'
     )
+    init = (
+        init[:-2]
+        + "\npy::dict typed_callbacks;\n"
+        + "\n".join(
+            "typed_callbacks["
+            + json.dumps(entry["op"])
+            + "]=py::int_(reinterpret_cast<uintptr_t>(&"
+            + entry["symbol"]
+            + "));"
+            for entry in typed_entries
+        )
+        + '\nmodule.attr("typed_callbacks")=typed_callbacks;\n}\n'
+    )
     path = build_temp / "source_hosts.cpp"
     path.write_text(
         HEADER
         + "\n"
         + NATIVE_HEADER
+        + "\n"
+        + TYPED_HEADER
         + "\n"
         + "\n".join(hook_declarations + declarations + native_code)
         + "\n"
@@ -460,6 +489,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             "fallback": failed,
             "source": str(path),
             "coverage": coverage["summary"],
+            "typed_entries": typed_entries,
+            "typed_rejected": typed_rejected,
         }
     torch_dir = Path(torch.__file__).parent
     extension = Extension(
@@ -504,6 +535,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     )
     manifest = {
         "source_abi": 2,
+        "typed_entry_abi": 1,
+        "typed_entries": typed_entries,
+        "typed_rejected": typed_rejected,
         "global_abi": 1,
         "foreign_abi": 1,
         "metadata_sources": metadata_sources,
