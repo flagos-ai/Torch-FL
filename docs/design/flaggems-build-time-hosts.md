@@ -193,9 +193,9 @@ handwritten dispatcher bridges and unlowered host variants remain work under
 silently rerouted to vendor kernels.
 
 For example, the pinned `var_mean` source assigns `1.0` when `correction` is
-`None`. TorchScript rejects its Optional[int] variant at that assignment, while
-Optional[float] lowers. Integer arguments retain the original FlagGems path;
-admission never coerces them to float to hide the compiler gap. Separately,
+`None`. TorchScript rejects its Optional[int] variant at that assignment without
+the scalar binding normalization described below. Admission must not coerce
+present integers to float to hide the compiler gap. Separately,
 schema-required parameters keep their schema type when a Python helper has a
 `None` default; generated facades pass all arguments explicitly.
 
@@ -222,8 +222,9 @@ unrelated schema keyword: for example, the default `step=1` on the helper for
 `arange.start` remains an integer default rather than acquiring dtype's optional
 type. A positional-or-keyword Python parameter can still bind an ATen keyword
 by name, preserving scalar variants such as `alpha`. This signature repair is
-separate from host-language lowering: `arange` device defaults and scalar_tensor
-optional comparisons still have compiler gaps under #829.
+separate from host-language lowering: `arange` device defaults remain a compiler
+gap under #829. The scalar normalization below addresses scalar_tensor's
+optional comparisons and bool conversion together.
 
 The build binds 404 typed entries from 1,008 lowered signatures, with 553
 signature fallbacks. The two emitted bridge functions are `copy_` and
@@ -253,6 +254,77 @@ original FlagGems oracle bitwise, model-capture calls and legacy plans are zero,
 and the separate trace still contains 3,814 original FlagGems launches with no
 unmatched kernels. The [source-bridge evidence](../../benchmarks/host_compiler/results/qwen3_source_bridges_h100.json)
 retains the raw round timings, tail distributions, cohort and artifact hashes.
+
+## Scalar bindings and Optional comparisons
+
+Python names can refer to different scalar types along different branches.
+TorchScript can reject such a reassignment or silently widen it: a float
+parameter assigned `bool(value)` may become a float again at the branch merge.
+That changes the scalar type passed to the original FlagGems kernel even when
+a tensor-value check happens to pass.
+
+The shared source frontend assigns fresh names to supported numeric bindings
+and places the remaining statements inside each affected branch. All source
+branches remain in the generated host. This transformation runs at wheel build
+time, without executing example inputs, specializing shapes or capturing model
+paths. Exact scalar admission remains unchanged. Optional same-type atomic
+equality uses generated helpers that narrow None before comparing values;
+both operand expressions execute once, in their original order.
+
+A declined helper with a dtype argument also declines its typed caller.
+TorchScript represents dtype values as integers, so the untyped object bridge
+cannot reconstruct an Optional dtype safely. This keeps arange on its original
+FlagGems host instead of admitting a facade that fails on a present dtype. The
+same guard removes the previously lowered nansum and sum_dim_out signatures.
+Their original compiled FlagGems hosts preserve explicit dtypes. nansum keeps
+its existing ATen route; sum.IntList_out is still `none` in the default conf,
+so its GPU regression calls the compiled FlagGems host directly and does not
+establish default-route support.
+
+The transformation is deliberately bounded. Unknown value types, mixed scalar
+conditional expressions, general float-to-int conversion, captured bindings,
+loop/protected-scope rebinding and namespace introspection retain the original
+compiled FlagGems host. Expansion beyond the source-size budget also declines
+before execution. Diagnostics report the concrete reason. This does not claim
+arbitrary-precision Python arithmetic, general closure semantics or training
+support, and a compiler fallback does not authorize another numerical provider.
+
+Metadata-only tests compile and execute the emitted C++ and assert scalar type
+identity as well as values, including large integers, None, NaN and infinity.
+GPU tests require typed-entry hits for integer/bool `var_mean` corrections and
+scalar_tensor, compare with the original FlagGems source, and cover current
+streams, fresh outputs and changes to the default dtype.
+
+The pinned build now lowers 1,013 signatures with 548 fallbacks. Seven signatures
+are newly lowered and two unsafe Optional dtype signatures are removed. It binds
+403 typed entries: scalar_tensor is added, while nansum and sum.IntList_out are
+removed. var/var_mean still retain compiled object helpers within their typed
+hosts; an admitted entry is not a claim that every transitive helper is typed C++.
+
+A fresh paired H100 run uses the same complete eager workload and methodology
+as the source-bridge measurement above:
+
+| Synchronized complete forward | #837 wheel | Scalar semantics | Vendor PyTorch |
+|---|---:|---:|---:|
+| Prefill median | 32.65 ms | 32.22 ms | 25.01 ms |
+| Decode median | 30.96 ms | 30.51 ms | 23.31 ms |
+| Decode p99 | 32.88 ms | 32.12 ms | 24.93 ms |
+
+Both medians still exceed 30 ms. These are whole-wheel observations, not an
+isolated attribution of the small end-to-end difference. Interleaved A-B-B-A
+scalar_tensor submission medians improve from 15.70–16.22 us to 6.13–6.82 us;
+each new-wheel process records 1,430 typed hits for that case, versus zero before.
+The model uses this factory only once per forward, so this improvement does not
+resolve its larger host-overhead gap. Cold first prefill remains about 21.2 s
+for both FlagOS wheels versus 0.37 s for vendor Torch, with existing device caches.
+
+All 513 logits match original FlagGems bitwise. Model capture and legacy plans
+remain zero, 773 host-library hashes remain unchanged, and the separate trace
+contains 3,814 original FlagGems launches / 25 names with no unmatched kernels.
+Vendor numerical equivalence remains a separate unpassed gate: 505/513 top-1
+matches and 0/513 recorded full-logit allclose checks. The
+[scalar-semantics evidence](../../benchmarks/host_compiler/results/qwen3_scalar_semantics_h100.json)
+records cohort/source/wheel hashes, distributions, interleaved rounds and audits.
 
 ## Typed-entry eager measurement: target not met
 

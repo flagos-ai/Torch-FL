@@ -141,6 +141,46 @@ def nested_shape(value, width=None):
     return torch.empty([width], device=value.device, dtype=value.dtype)
 
 
+def scalar_rebind_host(value, flag):
+    if flag:
+        value = bool(value)
+    return value
+
+
+def optional_default_host(value):
+    if value is None:
+        value = 1.0
+    return value
+
+
+def optional_comparison_host(left, right):
+    return left == right, left != right
+
+
+def optional_comparison_effects(left, right):
+    order = [0]
+
+    def first(value, order):
+        order.append(1)
+        return value
+
+    def second(value, order):
+        order.append(2)
+        return value
+
+    equal = first(left, order) == second(right, order)
+    return equal, order
+
+
+def unsupported_dtype_helper(value, dtype):
+    value = int(value)
+    return torch.empty([value], dtype=dtype)
+
+
+def optional_dtype_fallback_host(value, dtype):
+    return unsupported_dtype_helper(value, dtype)
+
+
 PROGRAMS = (
     ReadOnly,
     Aliased,
@@ -181,7 +221,10 @@ def compiled_hosts(tmp_path_factory):
         graph = torch.jit.script(program()).forward.graph.copy()
         torch._C._jit_pass_inline(graph)
         pieces.append(ir.emit(graph, function_name=program.__name__, binding=False))
-    hosts = SimpleNamespace(originals={__name__: sys.modules[__name__]})
+    hosts = SimpleNamespace(
+        originals={__name__: sys.modules[__name__]}, resolve=lambda fn: fn
+    )
+    generated_names = []
     for name, function, signature in (
         (
             "AppendedShape",
@@ -198,9 +241,44 @@ def compiled_hosts(tmp_path_factory):
             initialized_global_host,
             "def f(value: torch.Tensor) -> torch.Tensor: pass",
         ),
+        (
+            "ScalarRebind",
+            scalar_rebind_host,
+            "def f(value: float, flag: bool) -> Any: pass",
+        ),
+        (
+            "OptionalDefault",
+            optional_default_host,
+            "def f(value: Optional[int]) -> Any: pass",
+        ),
+        (
+            "OptionalIntCompare",
+            optional_comparison_host,
+            "def f(left: Optional[int], right: Optional[int]) -> Tuple[bool, bool]: pass",
+        ),
+        (
+            "OptionalFloatCompare",
+            optional_comparison_host,
+            "def f(left: Optional[float], right: float) -> Tuple[bool, bool]: pass",
+        ),
+        (
+            "OptionalStrCompare",
+            optional_comparison_host,
+            "def f(left: str, right: Optional[str]) -> Tuple[bool, bool]: pass",
+        ),
+        (
+            "OptionalCompareEffects",
+            optional_comparison_effects,
+            "def f(left: Optional[int], right: int) -> Tuple[bool, List[int]]: pass",
+        ),
     ):
-        recorder = SimpleNamespace(register_global=lambda module, name, kind: 0)
-        generated = frontend.Frontend(hosts, recorder).source(function, signature)
+        recorder = SimpleNamespace(
+            register_global=lambda module, name, kind: 0,
+            register_foreign=lambda *args: 0,
+        )
+        compiler = frontend.Frontend(hosts, recorder)
+        generated = compiler.source(function, signature)
+        assert not compiler.fallback_functions, compiler.fallback_reasons
         path = directory / (name + ".py")
         path.write_text(generated)
         spec = importlib.util.spec_from_file_location("native_shape_test_" + name, path)
@@ -210,11 +288,20 @@ def compiled_hosts(tmp_path_factory):
         graph = torch.jit.script(shape_module.Host()).forward.graph.copy()
         torch._C._jit_pass_inline(graph)
         pieces.append(ir.emit(graph, function_name=name, binding=False))
+        generated_names.append(name)
+    pieces.append("""
+#include <torch/csrc/jit/python/pybind_utils.h>
+template <typename R, typename... A>
+void BindMetadataHost(py::module_& module, const char* name, R (*function)(A...)) {
+  module.def(name, [function](A... args) {
+    return torch::jit::toPyObject(c10::IValue(function(args...)));
+  });
+}
+""")
     pieces.append(
         "PYBIND11_MODULE(native_host_ir_test, m) {"
         + "".join(f'm.def("{p.__name__}", &{p.__name__});' for p in PROGRAMS)
-        + 'm.def("AppendedShape", &AppendedShape);m.def("NestedShape", &NestedShape);'
-        + 'm.def("InitializedShape", &InitializedShape);'
+        + "".join(f'BindMetadataHost(m,"{name}",&{name});' for name in generated_names)
         + 'm.def("bind_global", [](int64_t value){module_globals={c10::IValue(value)};});}'
     )
     source = directory / "host.cpp"
@@ -340,6 +427,10 @@ def test_local_helper_keeps_optional_refinement(compiled_hosts, width):
             "def f(value: torch.Tensor, flag: bool) -> torch.Tensor: pass",
         ),
         (mutable_default_host, "def f(value: torch.Tensor) -> torch.Tensor: pass"),
+        (
+            optional_dtype_fallback_host,
+            "def f(value: float, dtype: Optional[torch.dtype]) -> torch.Tensor: pass",
+        ),
     ],
 )
 def test_runtime_state_retains_compiled_object_semantics(
@@ -360,3 +451,60 @@ def test_initialized_globals_bind_without_recompilation(compiled_hosts):
     for width in (11, 23):
         compiled_hosts.bind_global(width)
         assert compiled_hosts.InitializedShape(value).shape == (width,)
+
+
+@pytest.mark.parametrize("value", [0.0, -0.0, 3.5, float("inf"), float("nan")])
+@pytest.mark.parametrize("flag", [False, True])
+def test_compiled_scalar_binding_keeps_python_type(compiled_hosts, value, flag):
+    actual = compiled_hosts.ScalarRebind(value, flag)
+    expected = scalar_rebind_host(value, flag)
+    assert type(actual) is type(expected)
+    assert repr(actual) == repr(expected)
+
+
+@pytest.mark.parametrize("value", [None, 0, 7, 2**63 - 1, -(2**63)])
+def test_compiled_optional_default_does_not_widen_ints(compiled_hosts, value):
+    actual = compiled_hosts.OptionalDefault(value)
+    expected = optional_default_host(value)
+    assert type(actual) is type(expected)
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "left,right", [(None, None), (None, 3), (3, None), (3, 3), (2**63 - 1, 2**63 - 2)]
+)
+def test_compiled_optional_integer_comparison(compiled_hosts, left, right):
+    assert compiled_hosts.OptionalIntCompare(left, right) == optional_comparison_host(
+        left, right
+    )
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (None, 0.0),
+        (0.0, -0.0),
+        (float("nan"), float("nan")),
+        (float("inf"), float("inf")),
+    ],
+)
+def test_compiled_optional_float_comparison(compiled_hosts, left, right):
+    assert compiled_hosts.OptionalFloatCompare(left, right) == optional_comparison_host(
+        left, right
+    )
+
+
+@pytest.mark.parametrize(
+    "left,right", [("", None), ("", ""), ("a", "b"), ("\u03bb", "\u03bb")]
+)
+def test_compiled_optional_string_comparison(compiled_hosts, left, right):
+    assert compiled_hosts.OptionalStrCompare(left, right) == optional_comparison_host(
+        left, right
+    )
+
+
+@pytest.mark.parametrize("left,right", [(None, 3), (3, 3), (2, 3)])
+def test_optional_comparison_evaluates_both_operands_once(compiled_hosts, left, right):
+    assert compiled_hosts.OptionalCompareEffects(
+        left, right
+    ) == optional_comparison_effects(left, right)

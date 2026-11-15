@@ -267,7 +267,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             source = frontend.source(function, signature)
             if function in frontend.fallback_functions:
                 raise NotImplementedError(
-                    "root host requires compiled object semantics"
+                    "root host requires compiled object semantics: "
+                    + frontend.fallback_reasons.get(function, "unsupported source")
                 )
             path = build_temp / (namespace + ".py")
             path.write_text(source)
