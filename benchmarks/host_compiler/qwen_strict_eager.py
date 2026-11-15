@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import runpy
+import sys
 
 import torch
 import torch._dynamo
@@ -39,7 +40,19 @@ if __name__ == "__main__":
             if hasattr(owner, name):
                 setattr(owner, name, reject)
                 blocked.append(owner.__name__ + "." + name)
-    runpy.run_path(str(Path(__file__).with_name("qwen_eager.py")), run_name="__main__")
+    # runpy does not add the target's sibling helper directory to sys.path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from logits_validation import LogitsValidationFailed
+
+    exit_code = 0
+    try:
+        runpy.run_path(
+            str(Path(__file__).with_name("qwen_eager.py")), run_name="__main__"
+        )
+    except LogitsValidationFailed as error:
+        # Failed accuracy is still an audited result, never a successful run.
+        print(str(error), file=sys.stderr)
+        exit_code = 1
     report = json.loads(args.output.read_text())
     if report["execution"] != "eager" or called:
         raise RuntimeError("model graph capture occurred during strict eager execution")
@@ -50,3 +63,5 @@ if __name__ == "__main__":
         "calls": len(called),
     }
     args.output.write_text(json.dumps(report, indent=2))
+    if exit_code:
+        raise SystemExit(exit_code)

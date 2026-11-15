@@ -577,6 +577,74 @@ arguments. The 1032 generated entries have not all been correctness-tested.
 
 ## Validation gates
 
+### Vendor logit acceptance
+
+The reference is the accelerator manufacturer's native Torch distribution on
+that same physical card. Keep the same weights, prompt token IDs, teacher-forced
+decode inputs, model dtype, attention implementation and math settings. The
+current Qwen3 workload is BF16; switching both sides to FP32 is not an accepted
+solution. Float32 intermediates already used by the vendor model remain valid.
+
+Every logit must satisfy `abs(actual - reference) <= 1e-3 + 1e-3 * abs(reference)`.
+Check every prefill position and all 512 decode steps, not only top-1 tokens, cosine similarity
+or aggregate relative L2. The checker evaluates detached CPU tensors outside all
+timed forwards, rejects nonfinite values and mismatched dtypes/shapes, and records
+per-step violations. This precision gate remains unpassed by the #839 BF16 wheel;
+bitwise agreement with the original FlagGems path does not establish agreement
+with vendor Torch.
+
+Run the two environments sequentially on an otherwise idle accelerator. Use the
+same `--model`, `--prompt`, CPU affinity and visible physical device in both.
+Backend autoload must be disabled in the vendor process, which must not activate
+torch-fl or FlagGems. For this NVIDIA benchmark, using each environment's Python:
+
+```bash
+# Native vendor Torch. The optional input oracle preserves an existing traversal;
+# without it the vendor generates the teacher-forced inputs itself.
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python benchmarks/host_compiler/qwen_strict_eager.py \
+  --model /path/to/Qwen3-0.6B --device cuda:0 --dtype bfloat16 --mode plain \
+  --steps 512 --rounds 3 --skip-sampling --prompt "The held-out prompt" \
+  --output /path/to/vendor.json
+
+# Native-host wheel. Use the newly generated vendor artifact, not the original
+# FlagGems oracle. A failed gate exits with status 1 after writing both reports.
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python benchmarks/host_compiler/qwen_strict_eager.py \
+  --model /path/to/Qwen3-0.6B --device flagos:0 --dtype bfloat16 --mode plain \
+  --steps 512 --rounds 3 --skip-sampling --prompt "The held-out prompt" \
+  --reference /path/to/vendor.pt --check-logits --output /path/to/candidate.json
+```
+
+References include checkpoint/config hashes, prompt tokens, dtype, math settings
+and producer identity. Strict acceptance rejects legacy or non-vendor references,
+incompatible settings and incomplete traversals before running model forwards.
+Regenerate old references with this harness. `--reference` without `--check-logits`
+still accepts legacy artifacts for input-oracle diagnostics and reports numerical
+differences without making an acceptance claim. `--logits-atol` and `--logits-rtol`
+support other diagnostic tolerances; the project acceptance values remain 1e-3.
+The wrapper retains its no-capture audit even when logit acceptance fails.
+
+The [BF16 evidence record](../../benchmarks/host_compiler/results/qwen3_vendor_logits_h100.json)
+records the unchanged #839 wheel against native vendor Torch 2.10.0+cu130.
+None of 513 comparisons pass. Full prefill has 8,385,847 violating elements out
+of 9,116,160 (maximum absolute difference 1.0625); the maximum decode difference
+is 1.34375. Synchronized medians are 30.33 ms prefill / 28.65 ms decode, versus
+25.96 / 24.38 ms for the vendor. A fresh vendor self-check passes all prefill
+positions and eight decode steps, and the failed FlagGems run preserves its
+capture/provenance audits. These measurements validate the checker, not a
+numerical repair or a new speedup.
+
+[Issue #840](https://github.com/flagos-ai/Torch-FL/issues/840) tracks the numerical
+gap separately from host lowering and performance. Isolated original-kernel
+schedule probes remove some early divergences, but the tested published paths
+still fail the full model. They are diagnostics only; no shape-specific policy
+or dependency patch is installed. Further work is restricted to published
+FlagGems wheels at the vendor workload's precision. The maintainer permits a
+temporary, explicitly audited vendor-native route for an operator whose
+published FlagGems implementation demonstrably fails precision. Passing
+operators remain on FlagGems; tensor boxing and CUDA redispatch remain forbidden.
+
+### Execution and performance
+
 - Freeze the generator and installed dependency versions before introducing
   held-out shapes, strides, scalar values and decode lengths.
 - Record all host binaries and compiler invocations. New inputs may add kernel

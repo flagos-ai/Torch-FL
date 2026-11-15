@@ -162,6 +162,11 @@ original tail; existing metadata regions retain their native remainder.
 The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
 Repeated full-model eager validation still exceeds this limit for prefill.
+Logit acceptance separately requires elementwise `atol=rtol=1e-3` against the
+accelerator manufacturer's native Torch at the same precision. The current
+BF16 model does not pass this gate. Use the strict-eager benchmark's
+`--check-logits --reference <vendor-reference.pt>` to enforce it; see the
+[paired validation procedure](docs/design/flaggems-build-time-hosts.md#vendor-logit-acceptance).
 
 Native-host builds write `native_host/_generated/typed/coverage.json`, accounting
 for every FlagGems registry row, excluded signatures and lowering outcomes.
