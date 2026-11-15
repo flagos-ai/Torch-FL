@@ -111,6 +111,52 @@ TileOPs are disabled for this build. A missing numerical route is an error.
 This work does not add new vendor-native fallback operators or claim coverage
 for other accelerator backends.
 
+## Registry coverage and generalization
+
+[Project 14](https://github.com/orgs/flagos-ai/projects/14) and
+[issue #822](https://github.com/flagos-ai/Torch-FL/issues/822) track full registry
+coverage, typed eager entries, shared host-language semantics, portable launching
+and per-vendor validation. Domestic accelerators must reach at least 80% of their
+manufacturer's native PyTorch performance on the same physical card, model and
+settings. For fixed work this means latency at most 1.25 times that baseline;
+for throughput it means at least 0.80 times the baseline. Record the actual
+vendor PyTorch distribution/version, SDK, precision, attention implementation,
+inputs, batch/context/decode lengths and CPU placement. NVIDIA's existing Qwen
+workload retains its explicit 30 ms eager limit. Graph-mode comparisons do not
+qualify for either gate.
+
+Each typed build writes `coverage.json` beside `diagnostics.json` and the typed
+manifest. The versioned report contains every installed `_FULL_CONFIG` row,
+including schema aliases and duplicate registrations. It records the ATen
+operator/overload, registered and resolved host identities, inspected source
+hash, candidate signatures, exclusion reason and lowering outcomes. The cohort
+records the vendor, Torch/FlagGems/FlagTree/Triton versions, selected host names
+and a hash of the source-host manifest. Selection refers to the host bundle; it
+does not assert that an excluded operator is unsupported by the device.
+
+Rows have these states:
+
+- `not_selected`: the callable is outside this host bundle, including filtered
+  development builds. The full registry remains the denominator.
+- `excluded`: no candidate signature could be generated, with an explicit reason
+  such as missing schema/host, unsupported return/type/default, variadic parameters
+  or unavailable source.
+- `pending`: lowering has not completed for every candidate signature.
+- `lowered`: all generated signatures for the row passed typed host lowering.
+- `partial`: some signatures lowered and others retained compiled object semantics.
+- `compiler_fallback`: every candidate retained compiled object semantics; detailed
+  errors remain in `diagnostics.json`.
+
+Summary counts distinguish registry rows, unique operator names and unique host
+signatures. Aliases retain separate rows but share a compilation result. Missing,
+duplicate or unknown signature results prevent a completed report. The initial
+report is written before lowering, and even a build with zero successful roots
+retains diagnostics. `native_artifact_built` becomes true only after the C++
+extension builds; emit-only reports keep it false. Manifest summaries carry the
+same reconciled counts. None of these states establishes numerical correctness,
+all-input coverage, warm native execution or performance. Genuine FlagGems gaps
+and compiler limitations must remain separate when selecting vendor-native routes.
+
 ## Current eager baseline: target not met
 
 The same installed wheel was rerun with the original model forward and no

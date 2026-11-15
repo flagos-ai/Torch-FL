@@ -709,6 +709,7 @@ def main():
         manifest["typed_hosts"] = {
             "compiled": len(typed["compiled"]),
             "fallback": len(typed["fallback"]),
+            "coverage": typed["coverage"],
         }
         (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"output": str(output), "host_modules": len(extensions)}))
