@@ -14,9 +14,9 @@ class Descriptor {
   explicit Descriptor(c10::IValue value) : value_(std::move(value)) {}
   static bool Is(const c10::IValue& value) {
     if (value.isList()) {
-      const auto list = value.toList();
+      const auto list = value.toListRef();
       if (list.size() != 6) return false;
-      const auto tag = list.get(0);
+      const auto& tag = list[0];
       return tag.isString() && tag.toStringRef() == "__flagos_descriptor_v2__";
     }
     if (!value.isGenericDict()) return false;

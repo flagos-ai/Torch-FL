@@ -1,6 +1,6 @@
 # Build-time FlagGems hosts
 
-Status: experimental; the eager performance target has not been met. Acceptance
+Status: experimental; repeated eager measurements still miss the target. Acceptance
 requires synchronized warm prefill and decode latency at most 30 ms against the
 approximately 24 ms vendor workload, with the original model remaining eager.
 The approximately 26 ms measurements below use Dynamo model graph capture and
@@ -325,6 +325,86 @@ Vendor numerical equivalence remains a separate unpassed gate: 505/513 top-1
 matches and 0/513 recorded full-logit allclose checks. The
 [scalar-semantics evidence](../../benchmarks/host_compiler/results/qwen3_scalar_semantics_h100.json)
 records cohort/source/wheel hashes, distributions, interleaved rounds and audits.
+
+## Guarded exception continuations and launch arguments
+
+An exception-bearing helper need not send its entire guard through Python object
+dispatch. The source generator can export a top-level `try` and the rest of its
+function as a continuation after an early-return guard. The typed prefix tests
+current arguments on every call. A reached continuation executes the original
+`try`/`except`/`else`/`finally` and return statements in its compiled Cython host.
+It does not repeat the prefix or retry failed calls. This is a shared source
+transformation with no operator-name or observed-input matching.
+Existing metadata regions take precedence, keeping subsequent operations native
+instead of moving an already supported remainder into an object continuation.
+
+Only definitely bound, faithfully represented inputs may cross this boundary:
+Tensor, bool, int, float, str and device. Optional or opaque metadata objects,
+including dtype's TorchScript integer encoding, keep the original whole host.
+Nested functions, captures, namespace introspection and conditionally bound
+inputs also decline. An admitted typed entry can still call a compiled object
+continuation; it does not imply an entirely Python-free transitive call graph.
+
+Static API-reference bindings use the existing restricted metadata evaluator and
+dependency hashes. Dynamic module attributes, custom metaclasses, dynamic
+descriptors and shadowed builtins are not evaluated at build time. Runtime
+capability queries in the exception tail remain runtime queries.
+
+The common launcher decodes signature kinds and maximum argument-slot capacity
+when a device specialization is registered. Each warm call still reads its
+current tensor metadata, scalar values, keyword values, descriptors, grid,
+prehooks, output addresses and stream. Key serialization and argument packing
+borrow values only for the duration of that call; nested references and sorted
+keyword pointers never become cache contents. The original device-specialization
+key remains byte-for-byte compatible with its Python counterpart.
+
+The pinned build lowers 1,017 signatures with 544 fallbacks and still binds 403
+typed entries. Four additional roots lower because dynamic attribute queries
+now fall back at their helper boundary instead of poisoning the caller's typed
+compilation. They retain object helpers and have no new typed entry or default
+route; this is generation coverage, not an execution-coverage claim.
+
+Two independent candidate processes repeat the unchanged complete eager Qwen3
+workload on the same H100: BF16 eager attention, batch 1, a 60-token prompt,
+512 identical teacher-forced inputs, CPU affinity 8-15, normal allocations and
+three timed traversals per process. Each forward is synchronized. Tokenization,
+token selection, correctness comparison and the separate profiler pass remain
+outside timing. The baseline wheel is merged #838; the vendor baseline is native
+Torch 2.10.0+cu130 with backend autoload disabled.
+
+| Synchronized complete forward | #838 wheel | Candidate | Candidate repeat | Vendor Torch |
+|---|---:|---:|---:|---:|
+| Prefill median | 31.80 ms | 29.96 ms | 30.74 ms | 24.94 ms |
+| Decode median | 29.91 ms | 28.13 ms | 29.03 ms | 23.33 ms |
+
+**The 30 ms gate remains unmet under repetition.** The first process crosses the
+median threshold, but the repeat exceeds it for prefill. The first candidate's
+decode p99 is 31.05 ms; these medians are not an all-samples latency bound. Both
+processes and their sample distributions are retained rather than selecting the
+faster process as the acceptance result. The reductions against the fresh #838
+baseline range from 3.35% to 5.80% for prefill and 2.93% to 5.97% for decode;
+this is a whole-wheel comparison of launcher and compiler changes together.
+Across both candidate processes, the six prefill samples have a 30.64 ms median;
+the 3,072 decode samples have a 28.73 ms median and 31.35 ms p99.
+
+Interleaved A-B-B-A operator submission medians are 22.62-23.08 us before versus
+18.85-18.93 us after for BF16 matmul, and 8.44-8.45 us versus 7.89-8.15 us for the
+representative BF16-to-FP32 cast. Each process records 1,430 typed hits per case.
+The cast retains its native remainder; the exception-continuation boundary does
+not replace its already supported metadata region.
+
+Each candidate process matches all 513 original FlagGems logits bitwise and
+records zero model-capture calls and legacy host plans. The separate two-forward
+trace contains 3,814 original FlagGems launches / 25 names with no unmatched
+kernels. All 773 host-library hashes remain fixed during each run. Vendor
+numerical equivalence is still an independent unpassed gate (505/513 top-1
+matches and 0/513 recorded full-logit allclose checks). Domestic-card acceptance
+still requires that manufacturer's native Torch on the same physical card.
+
+The [launch-overhead evidence](../../benchmarks/host_compiler/results/qwen3_launch_overhead_h100.json)
+contains both candidate processes, interleaved operator measurements, cohort,
+source/wheel hashes, generated coverage and kernel provenance. This slice keeps
+#829 and #830 open.
 
 ## Typed-entry eager measurement: target not met
 
