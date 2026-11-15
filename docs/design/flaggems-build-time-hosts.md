@@ -295,6 +295,37 @@ GPU tests require typed-entry hits for integer/bool `var_mean` corrections and
 scalar_tensor, compare with the original FlagGems source, and cover current
 streams, fresh outputs and changes to the default dtype.
 
+The pinned build now lowers 1,013 signatures with 548 fallbacks. Seven signatures
+are newly lowered and two unsafe Optional dtype signatures are removed. It binds
+403 typed entries: scalar_tensor is added, while nansum and sum.IntList_out are
+removed. var/var_mean still retain compiled object helpers within their typed
+hosts; an admitted entry is not a claim that every transitive helper is typed C++.
+
+A fresh paired H100 run uses the same complete eager workload and methodology
+as the source-bridge measurement above:
+
+| Synchronized complete forward | #837 wheel | Scalar semantics | Vendor PyTorch |
+|---|---:|---:|---:|
+| Prefill median | 32.65 ms | 32.22 ms | 25.01 ms |
+| Decode median | 30.96 ms | 30.51 ms | 23.31 ms |
+| Decode p99 | 32.88 ms | 32.12 ms | 24.93 ms |
+
+Both medians still exceed 30 ms. These are whole-wheel observations, not an
+isolated attribution of the small end-to-end difference. Interleaved A-B-B-A
+scalar_tensor submission medians improve from 15.70–16.22 us to 6.13–6.82 us;
+each new-wheel process records 1,430 typed hits for that case, versus zero before.
+The model uses this factory only once per forward, so this improvement does not
+resolve its larger host-overhead gap. Cold first prefill remains about 21.2 s
+for both FlagOS wheels versus 0.37 s for vendor Torch, with existing device caches.
+
+All 513 logits match original FlagGems bitwise. Model capture and legacy plans
+remain zero, 773 host-library hashes remain unchanged, and the separate trace
+contains 3,814 original FlagGems launches / 25 names with no unmatched kernels.
+Vendor numerical equivalence remains a separate unpassed gate: 505/513 top-1
+matches and 0/513 recorded full-logit allclose checks. The
+[scalar-semantics evidence](../../benchmarks/host_compiler/results/qwen3_scalar_semantics_h100.json)
+records cohort/source/wheel hashes, distributions, interleaved rounds and audits.
+
 ## Typed-entry eager measurement: target not met
 
 The paired H100 rerun uses the same complete Qwen3-0.6B model, 60-token prompt,
