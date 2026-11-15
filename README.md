@@ -157,9 +157,11 @@ Existing NVIDIA device-copy plumbing also uses a generated source bridge, so
 supported casts can reach the same typed hosts without generic argument packing.
 Supported scalar rebindings preserve Python bool/int/float types across branches,
 including Optional defaults; unsafe constructs retain the original host path.
+Guarded exception helpers keep supported prefixes native and run only the reached
+original tail; existing metadata regions retain their native remainder.
 The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
-This target has not yet been demonstrated without model graph compilation.
+Repeated full-model eager validation still exceeds this limit for prefill.
 
 Native-host builds write `native_host/_generated/typed/coverage.json`, accounting
 for every FlagGems registry row, excluded signatures and lowering outcomes.
