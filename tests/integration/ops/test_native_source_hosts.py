@@ -205,11 +205,11 @@ def test_pointwise_keeps_preallocated_output_dtype():
 
 def _published_source_module():
     hosts = torch_fl.native_host._hosts
-    if not hosts.manifest.get("source_variants"):
-        pytest.skip("wheel has no measured published source selections")
+    assert hosts.manifest.get("source_variants"), "missing published source policy"
     return importlib.import_module(hosts.package + ".typed._source_hosts")
 
 
+@pytest.mark.native_vendor_precision
 @pytest.mark.parametrize("left_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("right_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
@@ -252,6 +252,7 @@ def test_published_mul_keeps_values_dtypes_and_storage(left_dtype, right_dtype, 
         assert actual.data_ptr() != retained.data_ptr()
 
 
+@pytest.mark.native_vendor_precision
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])
 def test_published_mul_keeps_unmeasured_dtypes_on_original_source(dtype):
     module = _published_source_module()
@@ -263,6 +264,7 @@ def test_published_mul_keeps_unmeasured_dtypes_on_original_source(dtype):
     torch.testing.assert_close(actual.cpu(), a.cpu() * a.cpu(), atol=0, rtol=0)
 
 
+@pytest.mark.native_vendor_precision
 def test_published_mul_does_not_replace_scalar_or_grad_enabled_routes():
     module = _published_source_module()
     a = torch.ones(9, dtype=torch.float32, device="flagos")
@@ -280,6 +282,7 @@ def test_published_mul_does_not_replace_scalar_or_grad_enabled_routes():
 
 
 @pytest.mark.min_devices(2)
+@pytest.mark.native_vendor_precision
 def test_published_mul_preserves_ambient_device_and_current_stream():
     module = _published_source_module()
     initial = torch_fl.flagos.current_device()

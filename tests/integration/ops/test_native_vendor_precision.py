@@ -9,13 +9,18 @@ import pytest
 import torch
 import torch_fl
 
-pytestmark = [pytest.mark.nvidia, pytest.mark.native_source_host]
+pytestmark = [
+    pytest.mark.nvidia,
+    pytest.mark.native_source_host,
+    pytest.mark.native_vendor_precision,
+    pytest.mark.flaggems,
+    pytest.mark.main_ops,
+]
 
 
 @pytest.fixture(autouse=True)
 def require_native_vendor():
-    if not getattr(torch_fl._build_config, "NATIVE_VENDOR", False):
-        pytest.skip("wheel has no published native vendor precision adapters")
+    assert torch_fl._build_config.NATIVE_VENDOR
 
 
 def exercise(device):
