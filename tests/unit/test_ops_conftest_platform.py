@@ -292,17 +292,20 @@ def test_every_non_mps_platform_skips_the_mps_mark():
         ("2.9.0+cpu", None, ("flaggems", "vendor"), False),
     ],
 )
+@pytest.mark.parametrize("native_hosts", [False, True])
 def test_host_compiler_gate_reads_the_installed_build(
-    monkeypatch, version, cuda, kernels, expected
+    monkeypatch, version, cuda, kernels, expected, native_hosts
 ):
     torch = ModuleType("torch")
     torch.__version__ = version
     torch.version = SimpleNamespace(cuda=cuda)
     package = ModuleType("torch_fl")
     package._env = SimpleNamespace(build_kernels=lambda: kernels)
+    package._build_config = SimpleNamespace(NATIVE_HOSTS=native_hosts)
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "torch_fl", package)
-    assert ops_conftest._host_compiler_enabled() is expected
+    assert ops_conftest._host_compiler_enabled() is (expected and not native_hosts)
+    assert ops_conftest._native_source_host_enabled() is native_hosts
 
 
 @pytest.mark.parametrize(
@@ -313,6 +316,10 @@ def test_host_compiler_gate_reads_the_installed_build(
         ("cuda", False, ("nvidia",), None),
         ("mps", False, ("nvidia",), "platform_support"),
         ("ppu", True, ("host_compiler",), "platform_support"),
+        ("cuda", True, ("nvidia", "native_source_host"), None),
+        ("cuda", False, ("nvidia", "native_source_host"), "build_record"),
+        ("mps", True, ("native_source_host",), "platform_support"),
+        ("ppu", True, ("native_source_host",), "platform_support"),
     ],
 )
 def test_native_host_cases_keep_one_collection_shape(
@@ -330,8 +337,60 @@ def test_native_host_cases_keep_one_collection_shape(
 
     monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: platform)
     monkeypatch.setattr(ops_conftest, "_host_compiler_enabled", lambda: compiler)
+    monkeypatch.setattr(ops_conftest, "_native_source_host_enabled", lambda: compiler)
     monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
     monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
+    item = Item()
+    ops_conftest.pytest_collection_modifyitems(None, [item])
+    marker = item.get_closest_marker("flagos_platform_gate")
+    assert (marker.kwargs["gate"] if marker else None) == gate
+    assert bool(item.get_closest_marker("skip")) == (gate is not None)
+
+
+@pytest.mark.parametrize(
+    "enabled,devices,implementation,version,gate",
+    [
+        (True, 2, "cpython", (3, 12), None),
+        (True, 1, "cpython", (3, 12), "device_count"),
+        (True, 2, "cpython", (3, 11), "platform_support"),
+        (True, 2, "pypy", (3, 12), "platform_support"),
+        (False, 0, "cpython", (3, 11), "build_record"),
+    ],
+)
+def test_source_host_runtime_requirements_are_collection_gates(
+    monkeypatch, enabled, devices, implementation, version, gate
+):
+    class Item:
+        own_markers = [
+            pytest.mark.native_source_host.mark,
+            pytest.mark.min_devices(2).mark,
+            pytest.mark.cpython_dict_watchers.mark,
+        ]
+
+        def get_closest_marker(self, name):
+            return next((m for m in self.own_markers if m.name == name), None)
+
+        def add_marker(self, marker):
+            self.own_markers.append(marker.mark)
+
+    def device_count():
+        assert enabled, "ordinary builds must skip before device discovery"
+        return devices
+
+    package = ModuleType("torch_fl")
+    package.flagos = SimpleNamespace(device_count=device_count)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: "cuda")
+    monkeypatch.setattr(ops_conftest, "_native_source_host_enabled", lambda: enabled)
+    monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
+    monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
+    monkeypatch.setattr(
+        ops_conftest,
+        "sys",
+        SimpleNamespace(
+            implementation=SimpleNamespace(name=implementation), version_info=version
+        ),
+    )
     item = Item()
     ops_conftest.pytest_collection_modifyitems(None, [item])
     marker = item.get_closest_marker("flagos_platform_gate")

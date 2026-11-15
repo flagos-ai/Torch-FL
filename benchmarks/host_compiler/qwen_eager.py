@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Full official Qwen3 eager prefill/decode, with a separate vendor reference.
+"""Full official Qwen3 prefill/decode, with a separate vendor reference.
 
-No torch.compile, CUDA graphs, layer truncation, replacement model or output
-pooling is used. Run each backend in its own process on an otherwise idle GPU.
+Eager execution is the default. --model-host compiles only the model's host
+graph through ATen; all numerical kernels remain FlagGems. Neither mode uses
+CUDA graphs, layer truncation, a replacement model or output pooling. Run each
+backend in its own process on an otherwise idle GPU.
 """
 
 import argparse
 from collections import Counter
 import json
+import importlib.util
 from pathlib import Path
 import statistics
 import sys
@@ -55,20 +58,52 @@ def main():
         "--mode", choices=["plain", "collect", "compile", "load"], default="plain"
     )
     parser.add_argument("--cache", type=Path)
+    parser.add_argument("--hosts", type=Path, help="Prebuilt FlagGems source hosts")
+    parser.add_argument(
+        "--model-host", action="store_true", help="Use the generic FlagGems model host"
+    )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--profile-kernels", type=Path, help="Export a separate kernel-provenance trace"
+    )
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument("--progress-every", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument(
+        "--skip-sampling",
+        action="store_true",
+        help="Omit the separate autoregressive demonstration",
+    )
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--snapshot-layers", action="store_true")
+    parser.add_argument(
+        "--prompt", default="Explain in one sentence why the sky is blue."
+    )
     args = parser.parse_args()
+    if args.model_host and (args.device != "flagos:0" or args.mode != "plain"):
+        parser.error("--model-host requires --device flagos:0 --mode plain")
+    if args.profile_kernels and args.device != "flagos:0":
+        parser.error("--profile-kernels audits FlagGems launches on --device flagos:0")
+    hosts = None
     report = {
         "torch": torch.__version__,
         "device": args.device,
         "mode": args.mode,
         "dtype": args.dtype,
+        "execution": "flaggems-model-host" if args.model_host else "eager",
     }
     if args.device.startswith("flagos"):
+        if args.hosts:
+            sys.path.insert(0, str(args.hosts.resolve().parent))
+            loader_path = (
+                Path(__file__).resolve().parents[2] / "torch_fl/native_host/load.py"
+            )
+            spec = importlib.util.spec_from_file_location("host_loader", loader_path)
+            loader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(loader)
+            loader.install_launcher()
+        import_started = time.perf_counter()
         import torch_fl
         from torch_fl import _build_config, host_compiler
 
@@ -76,6 +111,14 @@ def main():
         synchronize = torch_fl.flagos.synchronize
         report["kernels"] = list(_build_config.KERNELS)
         report["config"] = torch_fl.backend_config_path()
+        if getattr(_build_config, "NATIVE_HOSTS", False):
+            report["torch_fl_import_ms"] = (time.perf_counter() - import_started) * 1000
+            hosts = torch_fl.native_host._hosts
+        if args.hosts:
+            started = time.perf_counter()
+            hosts = loader.Hosts(args.hosts)
+            hosts.activate()
+            report["source_host_load_ms"] = (time.perf_counter() - started) * 1000
     else:
         synchronize = torch.cuda.synchronize
 
@@ -90,8 +133,10 @@ def main():
         .eval()
         .to(args.device)
     )
+    if args.model_host:
+        model = torch_fl.native_host.compile(model)
     prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "Explain in one sentence why the sky is blue."}],
+        [{"role": "user", "content": args.prompt}],
         tokenize=False,
         add_generation_prompt=True,
         enable_thinking=False,
@@ -152,6 +197,11 @@ def main():
             out = model(token, past_key_values=out.past_key_values, use_cache=True)
             synchronize()
             logits.append(out.logits[:, -1, :].cpu())
+            if args.progress_every and (step + 1) % args.progress_every == 0:
+                print(
+                    json.dumps({"decode_step": step + 1, "steps": args.steps}),
+                    flush=True,
+                )
         report["teacher_forced_predictions"] = [int(t.item()) for t in predictions]
         if reference:
             report["reference_comparison"] = [
@@ -165,14 +215,17 @@ def main():
 
         # A separate, genuinely autoregressive sample; teacher-forced predictions
         # above must never be concatenated and reported as generated text.
-        out = model(ids, use_cache=True)
         generated = []
-        for _ in range(args.steps):
-            token = out.logits[:, -1, :].argmax(-1, keepdim=True)
-            generated.append(int(token.item()))
-            out = model(token, past_key_values=out.past_key_values, use_cache=True)
-        report["generated_tokens"] = generated
-        report["generated_text"] = tokenizer.decode(generated, skip_special_tokens=True)
+        if not args.skip_sampling:
+            out = model(ids, use_cache=True)
+            for _ in range(args.steps):
+                token = out.logits[:, -1, :].argmax(-1, keepdim=True)
+                generated.append(int(token.item()))
+                out = model(token, past_key_values=out.past_key_values, use_cache=True)
+            report["generated_tokens"] = generated
+            report["generated_text"] = tokenizer.decode(
+                generated, skip_special_tokens=True
+            )
 
         timings = {
             "prefill_submit_ms": [],
@@ -181,7 +234,7 @@ def main():
             "decode_complete_ms": [],
         }
         device_inputs = [token.to(args.device) for token in inputs]
-        for repetition in range(args.rounds + 1):
+        for repetition in range(args.rounds + 1 if args.rounds else 0):
             synchronize()
             t0 = time.perf_counter()
             out = model(ids, use_cache=True)
@@ -203,7 +256,9 @@ def main():
                     timings["decode_complete_ms"].append((t2 - t0) * 1000)
         report["timings"] = timings
         report["medians"] = {
-            name: statistics.median(values) for name, values in timings.items()
+            name: statistics.median(values)
+            for name, values in timings.items()
+            if values
         }
         calls = Counter()
 
@@ -222,8 +277,48 @@ def main():
         finally:
             sys.setprofile(None)
         report["warm_python_calls"] = dict(calls)
+        if args.profile_kernels:
+            if hosts is None:
+                raise RuntimeError("kernel provenance requires the native-host wheel")
+            from torch.profiler import ProfilerActivity, profile as torch_profile
+
+            with torch_profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
+            ) as profiler:
+                out = model(ids, use_cache=True)
+                out = model(
+                    device_inputs[0],
+                    past_key_values=out.past_key_values,
+                    use_cache=True,
+                )
+                synchronize()
+            args.profile_kernels.parent.mkdir(parents=True, exist_ok=True)
+            profiler.export_chrome_trace(str(args.profile_kernels))
+            trace = json.loads(args.profile_kernels.read_text())
+            events = trace["traceEvents"]
+            kernels = [event for event in events if event.get("cat") == "kernel"]
+            counts = Counter(event["name"] for event in kernels)
+            admitted = hosts.audit()["launched_kernels"]
+            unmatched = sorted(set(counts) - set(admitted))
+            if not counts or unmatched:
+                raise RuntimeError(f"GPU kernel provenance audit failed: {unmatched}")
+            report["gpu_kernel_audit"] = {
+                "model_calls": 2,
+                "counts": dict(counts),
+                "unmatched": unmatched,
+                "summed_device_ms": sum(event["dur"] for event in kernels) / 1000,
+            }
+        if hosts is not None:
+            report["kernel_sources"] = hosts.provenance
+            report["native_audit"] = hosts.audit()
+            if hasattr(hosts, "typed"):
+                report["native_source_stats"] = torch.ops.flagos.native_source_stats()
+                report["typed_variants"] = len(hosts.typed["compiled"])
+                report["typed_fallbacks"] = len(hosts.typed["fallback"])
         if args.device == "flagos:0":
             report["host_program_stats"] = torch.ops.flagos.host_program_stats()
+        if args.model_host:
+            report["model_host_graphs"] = model.forward._flagos_host_backend.graphs
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"logits": logits, "inputs": inputs, "layers": layers},

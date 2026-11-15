@@ -597,6 +597,11 @@ def _reachable_test_files() -> set[str]:
 # mounts stand. None of them is waiting on a code change, so the entry *is* the
 # decision and is written as one, rather than as a task someone forgot.
 _KNOWN_UNREACHABLE: dict[str, str] = {
+    "tests/integration/ops/test_native_source_hosts.py": (
+        "requires an opt-in FLAGOS_BUILD_NATIVE_HOST=1 NVIDIA CPU-Torch wheel; "
+        "current CI lanes build ordinary wheels. Validated separately on H100 "
+        "until a lane builds the precompiled source hosts"
+    ),
     "tests/integration/test_apex_compat.py": (
         "needs NVIDIA apex and its amp_C extension, and no CI platform is "
         "NVIDIA: flagos boxes its device onto CUDA while carrying a CPU "

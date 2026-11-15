@@ -76,7 +76,11 @@ def _function_body(source: str, signature: str) -> str:
     indentation match early. Line comments and string literals are skipped so
     their braces do not count.
     """
-    start = source.index(signature)
+    # Match parameter types as well as the name, without depending on wrapping.
+    pattern = r"\s+".join(re.escape(part) for part in signature.split())
+    match = re.search(pattern, source)
+    assert match is not None, f"missing function signature: {signature!r}"
+    start = match.start()
     open_at = source.index("{", start)
     depth = 0
     i = open_at
@@ -142,11 +146,29 @@ def test_both_keyword_call_forms_use_the_shared_lookup():
     """
     source = _source()
     for signature in (
-        "at::Tensor CallPythonOp_GenericKw(",
+        "at::Tensor CallPythonOp_GenericKw(const char* func_name, "
+        "const std::vector<c10::IValue>& args,",
         "CallPythonOp_GenericKwTuple(",
     ):
         body = _function_body(source, signature)
         assert "cache.GetFuncBare(func_name)" in body
+
+
+def test_keyword_initializer_list_miss_keeps_the_shared_python_lookup():
+    """The native fast path must delegate unmatched calls with all kwargs."""
+    body = _function_body(
+        _source(),
+        "at::Tensor CallPythonOp_GenericKw(const char* func_name, "
+        "std::initializer_list<c10::IValue> args,",
+    )
+    assert body.index("TrySourceHostTensor(") < body.index(
+        "return CallPythonOp_GenericKw("
+    )
+    compact = re.sub(r"\s+", "", body)
+    assert (
+        "returnCallPythonOp_GenericKw(func_name,std::vector<c10::IValue>(args),"
+        "std::vector<PyKwarg>(kwargs),python_dtype_for_fp8);"
+    ) in compact
 
 
 def test_generated_targets_are_qualified_so_the_cache_key_is_unambiguous():

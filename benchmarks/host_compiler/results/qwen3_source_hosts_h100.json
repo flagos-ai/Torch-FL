@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "cohort": {
+    "torch": "2.10.0+cpu",
+    "flag_gems": "5.4.0",
+    "flagtree": "0.7.0",
+    "cython": "3.2.4",
+    "hardware": "NVIDIA H100 80GB",
+    "sdk": "13.1.115"
+  },
+  "model": {
+    "name": "Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "layers": 28,
+    "parameters": 596049920,
+    "dtype": "bfloat16",
+    "prompt_tokens": 60,
+    "decode_steps": 512
+  },
+  "held_out_source_build": {
+    "inputs_equal": true,
+    "logits_count": 513,
+    "logits_bitwise_equal": true,
+    "prompt_tokens": 60,
+    "cold_prefill_ms": 17920.403219759464,
+    "host_load_ms": 59.683818370103836,
+    "warm_python_calls": {},
+    "host_count": 63,
+    "subprocess_count": 3224,
+    "host_hashes_unchanged": true,
+    "runtime_host_libraries": [],
+    "kernel_binaries": 3222,
+    "cpu_fallbacks": 0
+  },
+  "packaged_build": {
+    "host_libraries": 772,
+    "host_artifact_manifest_sha256": "c5f75e3998f19f1a71f62dec3d21831e4a1a1f57a261eb79e5b451cbceac7b12",
+    "import_ms": 4828.113654628396,
+    "logits_count": 513,
+    "all_logits_bitwise_equal_to_flaggems": true,
+    "warm_python_calls": {},
+    "subprocess_commands": [
+      [
+        "/usr/local/cuda/bin/ptxas",
+        "--version"
+      ],
+      [
+        "/usr/local/cuda/bin/ptxas",
+        "--version"
+      ]
+    ],
+    "medians": {
+      "prefill_submit_ms": 172.36269265413284,
+      "prefill_complete_ms": 172.3808441311121,
+      "decode_submit_ms": 167.35173109918833,
+      "decode_complete_ms": 167.41170268505812
+    }
+  },
+  "vendor_baseline": {
+    "torch": "2.10.0+cu130",
+    "medians": {
+      "prefill_submit_ms": 25.91250091791153,
+      "prefill_complete_ms": 25.949180126190186,
+      "decode_submit_ms": 24.038534611463547,
+      "decode_complete_ms": 24.120395071804523
+    }
+  },
+  "submission_ratios": {
+    "prefill_submit_ms": 6.651719693138163,
+    "decode_submit_ms": 6.961810850956834
+  },
+  "vendor_operator_submission": {
+    "torch": "2.10.0+cu130",
+    "device": "NVIDIA H100 80GB HBM3",
+    "cpu_us": {
+      "cos": 6.78859,
+      "add": 7.42528,
+      "mm": 13.30536,
+      "bmm": 13.545459999999999,
+      "softmax": 6.7576
+    }
+  },
+  "launched_kernel_sources": {
+    "embedding_kernel": {
+      "kernel": "embedding_kernel",
+      "sha256": "fcd43804572bc1c8ea8362ed3a69c3232097b4ce9a2d6e8cd40b24d6c0bcb46b",
+      "jit_sha256": "0f82a3ba0801b3692aaf25cda25530d7f5e1ffa4f834a8a84f163df91277ca4a",
+      "source": "flag_gems/ops/embedding.py"
+    },
+    "arange_func": {
+      "kernel": "arange_func",
+      "sha256": "136facf402fbbad25c846615a1bacb800870014faf137b2b554e817f62969332",
+      "jit_sha256": "16561a88c4047c7f41f52cd6c56bd6e8707562903febf92f06272c4724786462",
+      "source": "flag_gems/ops/arange.py"
+    },
+    "add_func_tensor_scalar_kernel_rank_1": {
+      "kernel": "add_func_tensor_scalar_kernel_rank_1",
+      "sha256": "42e37e4da2a0c7d6ed6ab463e3ec74b793e4243f1174f9eae50040fa2541a060",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "add_func_tensor_scalar",
+      "jit_sha256": "f473fc80a9140b5da7ec2f7010d7109bdaa44f7fcdaeaeb4a71b6014579f4353",
+      "source": "generated/native_host_kernel_42e37e4da2a0c7d6ed6ab463e3ec74b793e4243f1174f9eae50040fa2541a060.py"
+    },
+    "le_func_kernel_rank_4": {
+      "kernel": "le_func_kernel_rank_4",
+      "sha256": "3899a09bbfa93ca10456df0bca2f3320ba2cb6fa9514a6fb599516d7141ec609",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "le_func",
+      "jit_sha256": "fdba0f599223d866b96d3b5211557cfa6e0a2fe7db1c4bc090d3cf55de86bc15",
+      "source": "generated/native_host_kernel_3899a09bbfa93ca10456df0bca2f3320ba2cb6fa9514a6fb599516d7141ec609.py"
+    },
+    "scalar_tensor_kernel": {
+      "kernel": "scalar_tensor_kernel",
+      "sha256": "227eff57c09c28d53defc4d6c7d6eea95e77ed8d211301aa64b7cde23e15086a",
+      "jit_sha256": "d98ec000eba32f0f464fe5c101ba04ab842b7f60c53f0186718f3cf406294bed",
+      "source": "flag_gems/ops/scalar_tensor.py"
+    },
+    "where_inner_kernel_rank_4": {
+      "kernel": "where_inner_kernel_rank_4",
+      "sha256": "94bd1ad6c551fd32f51231794a82e054a3091e0e6b3e3a550826e452aa257cbf",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "where_inner",
+      "jit_sha256": "c32446d5e423764a0849243fa40c891d3258c713082cb42cb40271389a800b7f",
+      "source": "generated/native_host_kernel_94bd1ad6c551fd32f51231794a82e054a3091e0e6b3e3a550826e452aa257cbf.py"
+    },
+    "_copy_kernel_kernel_rank_3": {
+      "kernel": "_copy_kernel_kernel_rank_3",
+      "sha256": "e8074061121ee5162cee79eac568aeb9a6703eb6181186f83e30198596737a15",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "_copy_kernel",
+      "jit_sha256": "88c99f6250f57c7fc8a1d34f7545e76a8f2fe0b07da09c9b37ecf338e2160d7c",
+      "source": "generated/native_host_kernel_e8074061121ee5162cee79eac568aeb9a6703eb6181186f83e30198596737a15.py"
+    },
+    "bmm_kernel": {
+      "kernel": "bmm_kernel",
+      "sha256": "e07964330ae4b2a4fffea5144d5382e275bc5f4b11deab9cea714705b5e7e509",
+      "jit_sha256": "2f3a269eb126c013a0341708018d93db7cbb16fb4e16601b8c551dc4a6ac3f3f",
+      "source": "flag_gems/ops/bmm.py"
+    },
+    "cat_copy_func_kernel_4": {
+      "kernel": "cat_copy_func_kernel_4",
+      "sha256": "0ccc55b9dac8a171ffcf2c51d5ceffa32a0ae43896db22b49007b3f9bb302ee6",
+      "jit_sha256": "43a315e812e2c420fd0455fa81b07ffdff35bc314bc4461ed54e25c51f41386b",
+      "source": "flag_gems/ops/cat.py"
+    },
+    "cos_func_kernel_rank_1": {
+      "kernel": "cos_func_kernel_rank_1",
+      "sha256": "e88fb8d04343f489d0cbf23e9e05746942ba505c277f033e693594d9d4617f8d",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "cos_func",
+      "jit_sha256": "08cfb4f2de9c4da41a850c59e565dd08dc2c8a1d60301694f2eaef4090e0939f",
+      "source": "generated/native_host_kernel_e88fb8d04343f489d0cbf23e9e05746942ba505c277f033e693594d9d4617f8d.py"
+    },
+    "mul_scalar_kernel": {
+      "kernel": "mul_scalar_kernel",
+      "sha256": "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348",
+      "jit_sha256": "825eacc6eff3d231d7fda49a8aed0016e8a3c757a47595fdb4d7afa1f960484a",
+      "source": "flag_gems/ops/mul.py"
+    },
+    "sin_func_kernel_rank_1": {
+      "kernel": "sin_func_kernel_rank_1",
+      "sha256": "89ca39a76048bb8e62606ad17e1150181627587bb28a195aa53c83ceeff4ccfd",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "sin_func",
+      "jit_sha256": "b9f0f83462b988b0f31e6d27061a70f168f4e72cc37ff6ff612d69010a1859ef",
+      "source": "generated/native_host_kernel_89ca39a76048bb8e62606ad17e1150181627587bb28a195aa53c83ceeff4ccfd.py"
+    },
+    "pow_func_tensor_scalar_kernel_rank_1": {
+      "kernel": "pow_func_tensor_scalar_kernel_rank_1",
+      "sha256": "c757133441977032a709921cedbc3b89f658e058df9f76868cc00565a37653b8",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "pow_func_tensor_scalar",
+      "jit_sha256": "c20500b04ddde346e35f87a775dcc50250a0143e453aad79f0fe7be918490def",
+      "source": "generated/native_host_kernel_c757133441977032a709921cedbc3b89f658e058df9f76868cc00565a37653b8.py"
+    },
+    "mean_dim_kernel_inner": {
+      "kernel": "mean_dim_kernel_inner",
+      "sha256": "c968ad14d3ba76ed87c29e5e9346a0e392cdaeaeb01c0774cfd7c5c489394d1c",
+      "jit_sha256": "dc361d1b88f9d7e607dfdceb1772e5ff286dc97040536030f45813b57172c8ac",
+      "source": "flag_gems/ops/mean.py"
+    },
+    "rsqrt_func_kernel_rank_1": {
+      "kernel": "rsqrt_func_kernel_rank_1",
+      "sha256": "17cb051d838b000fc9e6d91d789d8b71e170e2affd1553e1cf05666a814c2b9d",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "rsqrt_func",
+      "jit_sha256": "0bc1e4674b9c5f253d4a3ccc329675fa3121f0ae2656922b580cd66b3f998da4",
+      "source": "generated/native_host_kernel_17cb051d838b000fc9e6d91d789d8b71e170e2affd1553e1cf05666a814c2b9d.py"
+    },
+    "mul_generic_nd_kernel": {
+      "kernel": "mul_generic_nd_kernel",
+      "sha256": "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348",
+      "jit_sha256": "d179fe4123c8e161161672582302089fa6659bb538d5f93c0e299e075d71aea3",
+      "source": "flag_gems/ops/mul.py"
+    },
+    "mm_kernel_general_host_tma": {
+      "kernel": "mm_kernel_general_host_tma",
+      "sha256": "97447f493cb2962575640d6efca03aac9bfd7ee031ec3ac2c2ff1dd282392e5b",
+      "jit_sha256": "fb2577f35665f67c1f58e5052bf3e3baff9b15d5f000ee0ae81a8982b9fb02b7",
+      "source": "flag_gems/runtime/backend/_nvidia/hopper/ops/mm.py"
+    },
+    "_copy_kernel_kernel_rank_4": {
+      "kernel": "_copy_kernel_kernel_rank_4",
+      "sha256": "06cd17b53e5166c0d9a46ee6759c3743d6704aad70808d71c14b4aea6aac8b37",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "_copy_kernel",
+      "jit_sha256": "ee7aa3b7f91030a80f421836ec17fb5e62c1f213a1116950067a66ae820f2f37",
+      "source": "generated/native_host_kernel_06cd17b53e5166c0d9a46ee6759c3743d6704aad70808d71c14b4aea6aac8b37.py"
+    },
+    "neg_func_kernel_rank_4": {
+      "kernel": "neg_func_kernel_rank_4",
+      "sha256": "ff3a0deb4c950f3976b32e54e7dadf5e904bac3e0883a5ac9cdf4bba2fe66a74",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "neg_func",
+      "jit_sha256": "f9bf58cc4ca5b2224b8b86802d849f0de3636bfd9ead0de9248c1f09b5483461",
+      "source": "generated/native_host_kernel_ff3a0deb4c950f3976b32e54e7dadf5e904bac3e0883a5ac9cdf4bba2fe66a74.py"
+    },
+    "add_func_kernel_rank_1": {
+      "kernel": "add_func_kernel_rank_1",
+      "sha256": "9b3c32d24bed7752cf476e1e401b39d9764ff5162e1f5632c12f8562762af350",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "add_func",
+      "jit_sha256": "6ca135c282207705161354b48d5d3f1be740c92d0fdb26af087a826a00bd9dfb",
+      "source": "generated/native_host_kernel_9b3c32d24bed7752cf476e1e401b39d9764ff5162e1f5632c12f8562762af350.py"
+    },
+    "_copy_kernel_kernel_rank_5": {
+      "kernel": "_copy_kernel_kernel_rank_5",
+      "sha256": "a9ba626604079173ce505ba368d9a78cf0c42c29e726e9f2ef508f1608502b5d",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "_copy_kernel",
+      "jit_sha256": "a95ff89b806c678dcc300947f9bec33e2f6dd1b65f6da7841a6f50364ebbdfaa",
+      "source": "generated/native_host_kernel_a9ba626604079173ce505ba368d9a78cf0c42c29e726e9f2ef508f1608502b5d.py"
+    },
+    "add_func_kernel_rank_4": {
+      "kernel": "add_func_kernel_rank_4",
+      "sha256": "93ee1c61b197a725327d26c9044567645b1189b1ed1af8dc2b815dfa09c9f116",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "add_func",
+      "jit_sha256": "eb0b07f3722fc40f69025963ba5b872eab2a24ef5095e6f0c63f09bb39119c1f",
+      "source": "generated/native_host_kernel_93ee1c61b197a725327d26c9044567645b1189b1ed1af8dc2b815dfa09c9f116.py"
+    },
+    "softmax_kernel_inner": {
+      "kernel": "softmax_kernel_inner",
+      "sha256": "d7c6eef628fba956403c1f43f4a2c94dea1142ec8fa532359de5016e3bf9488d",
+      "jit_sha256": "03d51abb7e826dcafcbd330ad230c185c3d4e28483e58426a41b8b099a50f319",
+      "source": "flag_gems/ops/softmax.py"
+    },
+    "silu_forward_kernel_rank_1": {
+      "kernel": "silu_forward_kernel_rank_1",
+      "sha256": "85b4c80a0a09ada0e91ba3f1078c3f065c6614b7e68cebbdd543892d385857a3",
+      "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
+      "scalar_kernel": "silu_forward",
+      "jit_sha256": "e0e395d0d5769c63257987506452159afac77916591fe84a7d65dfa943c9fe5a",
+      "source": "generated/native_host_kernel_85b4c80a0a09ada0e91ba3f1078c3f065c6614b7e68cebbdd543892d385857a3.py"
+    },
+    "mul_kernel": {
+      "kernel": "mul_kernel",
+      "sha256": "df1d9068fbe35596b74bad406446b39901deb6777e2439cc09bb2b6d1de0f348",
+      "jit_sha256": "4f5f69ad1b4b3c317fec2463a2958e680a78c506f520dfd235bf86af743ed9f9",
+      "source": "flag_gems/ops/mul.py"
+    },
+    "argmax_kernel_inner": {
+      "kernel": "argmax_kernel_inner",
+      "sha256": "646a6e1cf1a8b1b9d24fb772b3e09e1f7bdea2f0449167ba9abfafaaf23576c8",
+      "jit_sha256": "d5430cda1788a46b537494b9cadbc5a1deedab28c620e4b666c2b2447cfe2c2d",
+      "source": "flag_gems/ops/argmax.py"
+    }
+  },
+  "final_validation": {
+    "integration_cases_passed": 11,
+    "operator_oracle_cases_bitwise_equal": 16,
+    "model_smoke_logits_bitwise_equal": 9,
+    "host_libraries": 772,
+    "warm_python_calls": {},
+    "runtime_compiler_commands": "two ptxas version queries only",
+    "licenses": ["flag_gems-LICENSE", "flagtree-LICENSE", "torch-LICENSE", "torch-NOTICE"],
+    "wheel_scratch_files": []
+  },
+  "raw_evidence_sha256": {
+    "qwen-final-phase.json": "cde3fc00d3c37d42fca4c188559694c4c674443c268b42aa9b2cd3df574d5267",
+    "wheel-integration-phase.log": "d186a6ccda4dd25c7d768e4e5b2115918b2c336c58e3320c43658418f6785301",
+    "probe-oracle-final.json": "4324c98fddc95e08db54c7744aee57f1b7d7193c9ac7a6cd93619505efbafc4a",
+    "probe-native-final.json": "424046bf9991fde6e4eff9a831766082f74a1653473e2e9cba49d292ae341ced",
+    "wheel-preflight-phase.log": "a6ad4d298c9a8bd4684b1a60a372da0c11b1ecb3a71eddb8077df411b7f5f915",
+    "qwen-aot-heldout.json": "e16aa7034a8936b03fc196f87d0cd1b5966d3d294121a6bc28c075c65f2adbea",
+    "qwen-oracle-long.json": "413fd20fc20a235a3189784f71d71f3b98afc3c9591d565ce770d029c9e19404",
+    "qwen-aot-long-warm.json": "273e4bea97be5384aacd9ef6ec3e43573a676e867389e93f995584cecf1a2e91",
+    "qwen-packaged-long.json": "cfe458e028439b3aa3380bdc79584855a42e7f058e7c4893926b29927ef4dbe6",
+    "qwen-vendor-long.json": "9543044c2e7d8ed486421645e333389b7fadbb4a551e59c2bf4644b61ffe5126",
+    "frozen-hosts-before-heldout.json": "5aa3424a4dce5ce98b65c5e978ba308b77ecb74738bfe8b79d6ea381a9e3ef80",
+    "wheel-integration.log": "3689488c4c05aec7c89176be0aaf0791b2f5c7ebc7ca3bf8fc35402c28d93990"
+  }
+}

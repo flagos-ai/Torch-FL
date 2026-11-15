@@ -63,7 +63,14 @@ at::Tensor empty_strided(
   TORCH_CHECK(
       !c10::pinned_memory_or_default(pin_memory_opt),
       "Pin memory can only be on CPU");
-  const c10::DeviceGuard device_guard(device);
+  // Match empty_memory_format: preserve the current device when it already
+  // owns the allocation, including an unindexed current-device request.
+  int current_device = -1;
+  ::GetDevice(&current_device);
+  std::optional<c10::DeviceGuard> device_guard;
+  if (device.has_index() && device.index() != current_device) {
+    device_guard.emplace(device);
+  }
   constexpr c10::DispatchKeySet pu1_dks(c10::DispatchKey::PrivateUse1);
   auto allocator = at::GetAllocator(at::kPrivateUse1);
   return at::detail::empty_strided_generic(

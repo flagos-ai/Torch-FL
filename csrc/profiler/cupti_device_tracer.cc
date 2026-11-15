@@ -1321,6 +1321,21 @@ bool armDeviceActivities(CuptiShim& shim) {
   }
 }
 
+void pauseIdleDeviceActivities(CuptiShim& shim) {
+  if (!shim.ActivityDisable) return;
+  try {
+    shim.ActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
+    shim.ActivityDisable(CUPTI_ACTIVITY_KIND_KERNEL);
+    shim.ActivityDisable(CUPTI_ACTIVITY_KIND_MEMCPY);
+    shim.ActivityDisable(CUPTI_ACTIVITY_KIND_MEMSET);
+  } catch (const std::exception& e) {
+    FLAGOS_CUPTI_LOG("[flagos] vendor CUPTI refused idle pause: "
+                     << e.what() << "\n");
+  } catch (...) {
+    FLAGOS_CUPTI_LOG("[flagos] vendor CUPTI refused idle pause\n");
+  }
+}
+
 // Static initialization: arm CUPTI at module load.
 struct CuptiTracerInit {
   CuptiTracerInit() {
@@ -1336,8 +1351,11 @@ struct CuptiTracerInit {
     // RegisterCallbacks *and* ActivityEnable together at module-load time,
     // matching a manual ctypes probe that reliably captured kernels. Enabling
     // only in start() (long after libtorch_cuda has initialized its own CUPTI
-    // state) captured nothing. We enable here and keep the enables in start()
-    // as a harmless re-assertion.
+    // state) captured nothing. Establish that registration here, then return
+    // to the same idle state as stop(). start() enables the activity kinds for
+    // each real session. Keeping device activity collection enabled between
+    // sessions adds launch overhead even though bufferCompleted discards the
+    // records when no tracer is active.
     //
     // Device-side kinds only (KERNEL/MEMCPY/MEMSET). RUNTIME and
     // EXTERNAL_CORRELATION are armed in start() instead, because they are NOT
@@ -1350,6 +1368,7 @@ struct CuptiTracerInit {
     // activity kind be armed at import.
     FLAGOS_CUPTI_LOG("[flagos] Registering CUPTI activity callbacks...\n");
     g_cupti_armed = armDeviceActivities(shim);
+    if (g_cupti_armed) pauseIdleDeviceActivities(shim);
   }
 };
 static CuptiTracerInit g_tracer_init;
