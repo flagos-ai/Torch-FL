@@ -193,9 +193,9 @@ handwritten dispatcher bridges and unlowered host variants remain work under
 silently rerouted to vendor kernels.
 
 For example, the pinned `var_mean` source assigns `1.0` when `correction` is
-`None`. TorchScript rejects its Optional[int] variant at that assignment, while
-Optional[float] lowers. Integer arguments retain the original FlagGems path;
-admission never coerces them to float to hide the compiler gap. Separately,
+`None`. TorchScript rejects its Optional[int] variant at that assignment without
+the scalar binding normalization described below. Admission must not coerce
+present integers to float to hide the compiler gap. Separately,
 schema-required parameters keep their schema type when a Python helper has a
 `None` default; generated facades pass all arguments explicitly.
 
@@ -222,8 +222,9 @@ unrelated schema keyword: for example, the default `step=1` on the helper for
 `arange.start` remains an integer default rather than acquiring dtype's optional
 type. A positional-or-keyword Python parameter can still bind an ATen keyword
 by name, preserving scalar variants such as `alpha`. This signature repair is
-separate from host-language lowering: `arange` device defaults and scalar_tensor
-optional comparisons still have compiler gaps under #829.
+separate from host-language lowering: `arange` device defaults remain a compiler
+gap under #829. The scalar normalization below addresses scalar_tensor's
+optional comparisons and bool conversion together.
 
 The build binds 404 typed entries from 1,008 lowered signatures, with 553
 signature fallbacks. The two emitted bridge functions are `copy_` and
@@ -253,6 +254,46 @@ original FlagGems oracle bitwise, model-capture calls and legacy plans are zero,
 and the separate trace still contains 3,814 original FlagGems launches with no
 unmatched kernels. The [source-bridge evidence](../../benchmarks/host_compiler/results/qwen3_source_bridges_h100.json)
 retains the raw round timings, tail distributions, cohort and artifact hashes.
+
+## Scalar bindings and Optional comparisons
+
+Python names can refer to different scalar types along different branches.
+TorchScript can reject such a reassignment or silently widen it: a float
+parameter assigned `bool(value)` may become a float again at the branch merge.
+That changes the scalar type passed to the original FlagGems kernel even when
+a tensor-value check happens to pass.
+
+The shared source frontend assigns fresh names to supported numeric bindings
+and places the remaining statements inside each affected branch. All source
+branches remain in the generated host. This transformation runs at wheel build
+time, without executing example inputs, specializing shapes or capturing model
+paths. Exact scalar admission remains unchanged. Optional same-type atomic
+equality uses generated helpers that narrow None before comparing values;
+both operand expressions execute once, in their original order.
+
+A declined helper with a dtype argument also declines its typed caller.
+TorchScript represents dtype values as integers, so the untyped object bridge
+cannot reconstruct an Optional dtype safely. This keeps arange on its original
+FlagGems host instead of admitting a facade that fails on a present dtype. The
+same guard removes the previously lowered nansum and sum_dim_out signatures.
+Their original compiled FlagGems hosts preserve explicit dtypes. nansum keeps
+its existing ATen route; sum.IntList_out is still `none` in the default conf,
+so its GPU regression calls the compiled FlagGems host directly and does not
+establish default-route support.
+
+The transformation is deliberately bounded. Unknown value types, mixed scalar
+conditional expressions, general float-to-int conversion, captured bindings,
+loop/protected-scope rebinding and namespace introspection retain the original
+compiled FlagGems host. Expansion beyond the source-size budget also declines
+before execution. Diagnostics report the concrete reason. This does not claim
+arbitrary-precision Python arithmetic, general closure semantics or training
+support, and a compiler fallback does not authorize another numerical provider.
+
+Metadata-only tests compile and execute the emitted C++ and assert scalar type
+identity as well as values, including large integers, None, NaN and infinity.
+GPU tests require typed-entry hits for integer/bool `var_mean` corrections and
+scalar_tensor, compare with the original FlagGems source, and cover current
+streams, fresh outputs and changes to the default dtype.
 
 ## Typed-entry eager measurement: target not met
 

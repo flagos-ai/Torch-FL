@@ -16,6 +16,7 @@ import sys
 import types
 
 from .constants import Evaluator
+from .bindings import preserve_scalar_bindings
 
 
 def type_text(value):
@@ -87,6 +88,8 @@ class Frontend:
         self.counter = 0
         self.descriptor_constructors = {}
         self.fallback_functions = set()
+        self.fallback_reasons = {}
+        self.optional_comparisons = {}
         metadata_modules = {
             name: module
             for name, module in tuple(sys.modules.items())
@@ -223,11 +226,16 @@ class Frontend:
                 transformer.return_type = "torch.Tensor"
         original = copy.deepcopy(node)
         try:
+            node = preserve_scalar_bindings(node, function.__globals__)
+            if node is not transformer.root:
+                transformer = Transform(self, function, node)
+                transformer.containers.update(argument_containers or {})
             node = transformer.visit(node)
-        except NotImplementedError:
+        except NotImplementedError as error:
             if definition is not None:
                 raise
             self.fallback_functions.add(function)
+            self.fallback_reasons[function] = str(error)
             returns = [n.value for n in ast.walk(original) if isinstance(n, ast.Return)]
             result = return_hint or (
                 ast.unparse(original.returns) if original.returns else None
@@ -252,7 +260,12 @@ class Frontend:
                 ):
                     raise
                 result = "bool"
-            if any(v == "torch.dtype" for v in (argument_types or {}).values()):
+            # TorchScript stores dtypes as integers. The untyped object bridge
+            # cannot reconstruct an optional dtype from an ordinary integer.
+            if any(
+                v in ("torch.dtype", "Optional[torch.dtype]")
+                for v in (argument_types or {}).values()
+            ):
                 raise
             slot = self.launcher.register_foreign(self.hosts.resolve(function), ())
             node = original
@@ -1226,7 +1239,71 @@ class Transform(ast.NodeTransformer):
                 return ast.BoolOp(
                     ast.And() if equal else ast.Or(), [test, self.generic_visit(node)]
                 )
-        return self.generic_visit(node)
+        node = self.generic_visit(node)
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+            left, right = (
+                self.annotation(node.left),
+                self.annotation(node.comparators[0]),
+            )
+            atoms = {"bool", "int", "float", "str", "torch.dtype", "torch.device"}
+
+            def element(kind):
+                return kind[9:-1] if kind and kind.startswith("Optional[") else kind
+
+            equal = isinstance(node.ops[0], ast.Eq)
+            if (
+                left == "None"
+                and right
+                and right.startswith("Optional[")
+                and element(right) in atoms
+                or right == "None"
+                and left
+                and left.startswith("Optional[")
+                and element(left) in atoms
+            ):
+                node.ops = [ast.Is() if equal else ast.IsNot()]
+                return node
+            if (
+                left
+                and right
+                and element(left) == element(right)
+                and element(left) in atoms
+                and (left.startswith("Optional[") or right.startswith("Optional["))
+            ):
+                key = (left, right, equal)
+                name = self.frontend.optional_comparisons.get(key)
+                if name is None:
+                    name = "_host_optional_compare_" + str(
+                        len(self.frontend.optional_comparisons)
+                    )
+                    self.frontend.optional_comparisons[key] = name
+                    lines = [f"def {name}(left: {left}, right: {right}) -> bool:"]
+                    if left.startswith("Optional["):
+                        missing = (
+                            ("right is None" if equal else "right is not None")
+                            if right.startswith("Optional[")
+                            else str(not equal)
+                        )
+                        lines.extend(
+                            ["    if left is None:", "        return " + missing]
+                        )
+                    if right.startswith("Optional["):
+                        lines.extend(
+                            [
+                                "    if right is None:",
+                                "        return " + str(not equal),
+                            ]
+                        )
+                    lines.append(
+                        "    return left " + ("==" if equal else "!=") + " right"
+                    )
+                    self.frontend.functions[name] = ast.parse("\n".join(lines)).body[0]
+                # A helper evaluates both operands once, in their original order,
+                # including effectful operands when the optional value is None.
+                return ast.Call(
+                    ast.Name(name, ast.Load()), [node.left, node.comparators[0]], []
+                )
+        return node
 
     def visit_AugAssign(self, node):
         if isinstance(node.target, ast.Name) and self.annotation(node.target) == "int":

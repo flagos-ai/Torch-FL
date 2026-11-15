@@ -458,33 +458,136 @@ def test_typed_tuple_optional_list_and_scalar(dim, correction):
     assert torch_fl.native_host.audit()["host_artifacts"] == before
 
 
-@pytest.mark.parametrize("correction", [0, 1])
-def test_typed_tuple_preserves_unlowered_scalar_fallback(correction):
+@pytest.mark.parametrize("correction", [0, 1, False, True])
+@pytest.mark.parametrize(
+    "op,host", [("var_mean", "var_mean"), ("var", "var_correction")]
+)
+def test_typed_reduction_preserves_exact_scalar_variant(correction, op, host):
     value = torch.arange(21, dtype=torch.float32).reshape(3, 7).to("flagos")
     hosts = torch_fl.native_host._hosts
-    entry = next(
-        r
-        for r in hosts.typed["typed_entries"]
-        if r["op"] == "aten::var_mean.correction"
-    )
-    integer_lowered = any(
-        row["namespace"] in entry["variants"]
-        and (
-            "correction: Optional[int]" in row["signature"]
-            or "correction: int" in row["signature"]
-        )
-        for row in hosts.typed["compiled"]
-    )
-    # A compiled float variant must not accept an integer by coercion. When a
-    # cohort gains the integer variant, require that native path instead.
     with torch.no_grad():
-        expected = hosts.original_ops["var_mean"](value, dim=[0], correction=correction)
-        before = _typed_hits("var_mean.correction")
-        actual = torch.var_mean(value, dim=[0], correction=correction)
-        assert _typed_hits("var_mean.correction") == before + int(integer_lowered)
+        expected = hosts.original_ops[host](value, dim=[0], correction=correction)
+        before = _typed_hits(op + ".correction")
+        actual = getattr(torch, op)(value, dim=[0], correction=correction)
+        assert _typed_hits(op + ".correction") == before + 1
     torch_fl.flagos.synchronize()
-    for got, original in zip(actual, expected):
-        torch.testing.assert_close(got.cpu(), original.cpu(), rtol=0, atol=0)
+    if isinstance(actual, tuple):
+        for got, original in zip(actual, expected):
+            torch.testing.assert_close(got.cpu(), original.cpu(), rtol=0, atol=0)
+    else:
+        torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("end,dtype", [(7.5, None), (7.5, torch.int64), (0.0, None)])
+def test_factory_retains_original_helper_dtype(end, dtype):
+    # arange_start needs object semantics for float-to-int conversion. A typed
+    # facade must not pass a raw dtype integer into that untyped helper.
+    with torch.no_grad():
+        expected = torch_fl.native_host._hosts.original_ops["arange"](
+            end,
+            dtype=dtype or torch.get_default_dtype(),
+            device=torch.device("flagos:0"),
+        )
+        hits = _typed_hits("arange")
+        actual = torch.arange(end, dtype=dtype, device="flagos:0")
+        assert _typed_hits("arange") == hits
+    torch_fl.flagos.synchronize()
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [None, torch.float64])
+@pytest.mark.parametrize("op", ["nansum", "sum.IntList_out"])
+def test_object_reduction_helper_preserves_optional_dtype(op, dtype):
+    cpu = torch.tensor([[1.0, float("nan"), 3.0], [4.0, 5.0, 6.0]])
+    value = cpu.to("flagos")
+    hosts = torch_fl.native_host._hosts
+    with torch.no_grad():
+        if op == "nansum":
+            expected = hosts.original_ops["nansum"](value, dim=[0], dtype=dtype)
+            hits = _typed_hits(op)
+            actual = torch.nansum(value, dim=[0], dtype=dtype)
+            reference = torch.nansum(cpu, dim=[0], dtype=dtype)
+        else:
+            out = torch.empty(3, device="flagos", dtype=dtype or cpu.dtype)
+            expected = hosts.original_ops["sum_dim_out"](
+                value, dim=[0], dtype=dtype, out=torch.empty_like(out)
+            )
+            hits = _typed_hits(op)
+            # This schema is not enabled in the default conf. Validate its
+            # compiled original host without claiming a new ATen route.
+            assert not any(
+                r["op"] == "aten::" + op for r in hosts.typed["typed_entries"]
+            )
+            actual = hosts.op("sum_dim_out")(value, dim=[0], dtype=dtype, out=out)
+            assert actual is out
+            reference = torch.sum(cpu, dim=[0], dtype=dtype)
+        assert _typed_hits(op) == hits
+    torch_fl.flagos.synchronize()
+    torch.testing.assert_close(
+        actual.cpu(), expected.cpu(), rtol=0, atol=0, equal_nan=True
+    )
+    torch.testing.assert_close(actual.cpu(), reference, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize(
+    "value,dtype",
+    [
+        (False, torch.bool),
+        (True, None),
+        (0, torch.bool),
+        (2**53 + 3, torch.int64),
+        (-(2**63), torch.int64),
+        (0.0, torch.bool),
+        (-0.0, torch.bool),
+        (0.25, torch.bool),
+        (float("inf"), torch.bool),
+        (float("nan"), torch.bool),
+        (0.25, None),
+        (float("nan"), torch.float32),
+        (float("inf"), torch.float64),
+    ],
+)
+def test_typed_scalar_factory_keeps_values_dtypes_and_streams(value, dtype):
+    before = torch_fl.native_host.audit()["host_artifacts"]
+    stream = torch.Stream(device="flagos:0")
+    with torch.no_grad(), stream:
+        expected = torch_fl.native_host._hosts.original_ops["scalar_tensor"](
+            value, dtype=dtype, device=torch.device("flagos:0")
+        )
+        hits = _typed_hits("scalar_tensor")
+        actual = torch.scalar_tensor(value, dtype=dtype, device="flagos:0")
+        assert _typed_hits("scalar_tensor") == hits + 1
+    stream.synchronize()
+    assert actual.device == expected.device == torch.device("flagos:0")
+    assert actual.shape == expected.shape == ()
+    assert actual.dtype == expected.dtype
+    assert actual.data_ptr() != expected.data_ptr()
+    torch.testing.assert_close(
+        actual.cpu(), expected.cpu(), rtol=0, atol=0, equal_nan=True
+    )
+    torch.testing.assert_close(
+        actual.cpu(),
+        torch.scalar_tensor(value, dtype=dtype),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
+    assert torch_fl.native_host.audit()["host_artifacts"] == before
+
+
+def test_typed_scalar_factory_reads_current_default_dtype():
+    original = torch.get_default_dtype()
+    try:
+        with torch.no_grad():
+            for dtype in (torch.float32, torch.float64, torch.float32):
+                torch.set_default_dtype(dtype)
+                hits = _typed_hits("scalar_tensor")
+                actual = torch.scalar_tensor(0.25, device="flagos:0")
+                assert _typed_hits("scalar_tensor") == hits + 1
+                assert actual.dtype == dtype
+                torch.testing.assert_close(actual.cpu(), torch.tensor(0.25))
+    finally:
+        torch.set_default_dtype(original)
 
 
 def test_typed_tensorlist_keeps_borrowed_inputs_and_live_results():

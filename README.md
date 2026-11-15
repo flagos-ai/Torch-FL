@@ -155,6 +155,8 @@ out/in-place adapters are supported. Other signatures retain the original
 FlagGems path and are reported as compiler gaps, not vendor coverage.
 Existing NVIDIA device-copy plumbing also uses a generated source bridge, so
 supported casts can reach the same typed hosts without generic argument packing.
+Supported scalar rebindings preserve Python bool/int/float types across branches,
+including Optional defaults; unsafe constructs retain the original host path.
 The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
 This target has not yet been demonstrated without model graph compilation.
