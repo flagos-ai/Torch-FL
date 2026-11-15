@@ -3,11 +3,10 @@
 
 """Compile the installed FlagGems registry into shape-independent host programs."""
 
-import ast
 import hashlib
+import importlib.metadata
 import importlib.util
 import inspect
-import itertools
 import json
 from pathlib import Path
 import sys
@@ -17,6 +16,7 @@ import flag_gems
 from .frontend import Frontend
 from .ir import emit, HEADER
 from .hooks import compile_hook
+from .coverage import discover_variants, write_coverage
 
 
 class Recorder:
@@ -113,123 +113,6 @@ class Recorder:
         )
 
 
-def annotation(t, name, scalar):
-    kind = t.kind()
-    if name == "dtype":
-        return "Optional[torch.dtype]" if kind == "OptionalType" else "torch.dtype"
-    if kind == "OptionalType":
-        return "Optional[" + annotation(t.getElementType(), name, scalar) + "]"
-    if kind == "ListType":
-        return "List[" + annotation(t.getElementType(), name, scalar) + "]"
-    return {
-        "TensorType": "torch.Tensor",
-        "IntType": "int",
-        "SymIntType": "int",
-        "FloatType": "float",
-        "BoolType": "bool",
-        "StringType": "str",
-        "DeviceObjType": "torch.device",
-        "NumberType": scalar,
-    }[kind]
-
-
-def variants(hosts, names):
-    seen = set()
-    for op, function, *_ in flag_gems._FULL_CONFIG:
-        name = function.__name__
-        if name not in names or name not in hosts.original_ops:
-            continue
-        function = hosts.original_ops[name]
-        base, _, overload = op.partition(".")
-        schemas = torch._C._jit_get_schemas_for_operator("aten::" + base)
-        schema = next((s for s in schemas if s.overload_name == overload), None)
-        if (
-            schema is None
-            or len(schema.returns) != 1
-            or schema.returns[0].type.kind() != "TensorType"
-        ):
-            continue
-        signature = inspect.signature(function)
-        parameters = list(signature.parameters.values())
-        if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in parameters):
-            continue
-        syntax = ast.parse(inspect.getsource(function))
-        flexible = sorted(
-            {
-                call.args[0].id
-                for call in ast.walk(syntax)
-                if isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Name)
-                and call.func.id == "isinstance"
-                and call.args
-                and isinstance(call.args[0], ast.Name)
-                and call.args[0].id in signature.parameters
-            }
-        )
-        for scalar, scalarized, number in itertools.product(
-            ("bool", "int", "float"), [None] + flexible, ("bool", "int", "float")
-        ):
-            fields = []
-            public = []
-            position = 0
-            valid = True
-            for p in parameters:
-                if p.kind == p.KEYWORD_ONLY:
-                    argument = next(
-                        (a for a in schema.arguments if a.name == p.name), None
-                    )
-                else:
-                    argument = (
-                        schema.arguments[position]
-                        if position < len(schema.arguments)
-                        else None
-                    )
-                    position += 1
-                if argument is None and p.name == "out" and p.default is None:
-                    kind = "Optional[torch.Tensor]"
-                elif argument is None:
-                    valid = False
-                    break
-                else:
-                    try:
-                        kind = annotation(argument.type, p.name, number)
-                    except KeyError:
-                        valid = False
-                        break
-                default = p.default
-                if p.name == scalarized and kind == "torch.Tensor":
-                    kind = scalar
-                if default is None and not kind.startswith("Optional["):
-                    kind = "Optional[" + kind + "]"
-                if default is not p.empty and not (
-                    default is None or type(default) in (bool, int, float, str)
-                ):
-                    valid = False
-                    break
-                text = p.name + ": " + kind
-                if default is not p.empty:
-                    text += "=" + repr(default)
-                if p.kind == p.KEYWORD_ONLY and not any(item == "*" for item in fields):
-                    fields.append("*")
-                fields.append(text)
-                public.append(
-                    {
-                        "name": p.name,
-                        "type": kind,
-                        "keyword": p.kind == p.KEYWORD_ONLY,
-                        "has_default": default is not p.empty,
-                        "default": None if default is p.empty else default,
-                    }
-                )
-            if not valid:
-                continue
-            header = "def f(" + ", ".join(fields) + ") -> torch.Tensor: pass"
-            key = (name, header)
-            if key not in seen:
-                seen.add(key)
-                yield name, function, header, public
-
-
 def cpp_type(t):
     kind = t.kind()
     if kind == "OptionalType":
@@ -301,12 +184,31 @@ inline c10::IValue SourceValue(c10::IValue value) {
 
 def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     from setuptools import Extension, Distribution
+    from torch_fl import _build_config
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source_root = Path(source_root)
     build_temp = Path(build_temp)
     build_temp.mkdir(parents=True, exist_ok=True)
+    variants, entries = discover_variants(
+        flag_gems._FULL_CONFIG,
+        hosts.original_ops,
+        names,
+        torch._C._jit_get_schemas_for_operator,
+    )
+    cohort = {
+        "vendor": _build_config.ACCELERATOR,
+        "torch": hosts.manifest["torch"],
+        "triton": hosts.manifest["triton"],
+        "flagtree": importlib.metadata.version("flagtree"),
+        "flag_gems": importlib.metadata.version("flag_gems"),
+        "host_manifest_sha256": hashlib.sha256(
+            json.dumps(hosts.manifest, sort_keys=True).encode()
+        ).hexdigest(),
+        "selected_hosts": sorted(names),
+    }
+    write_coverage(directory, entries, [], [], cohort=cohort)
     recorder = Recorder(hosts)
     library = torch.library.Library("flagos_script_host", "DEF")
     library.define(
@@ -355,7 +257,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
                     ).hexdigest(),
                 }
             )
-    for index, (name, function, signature, public) in enumerate(variants(hosts, names)):
+    for index, (name, function, signature, public) in enumerate(variants):
         namespace = "Host" + str(index)
         checkpoints = {kind: len(records) for kind, records in recorder.records.items()}
         try:
@@ -416,10 +318,10 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
                 del recorder.records[kind][length:]
             failed.append({"name": name, "signature": signature, "error": str(error)})
             print("FALLBACK", name, str(error).splitlines()[-1][:180], flush=True)
+    coverage = write_coverage(
+        directory, entries, successful, failed, cohort=cohort, complete=True
+    )
     if not successful:
-        (directory / "diagnostics.json").write_text(
-            json.dumps({"compiled": successful, "fallback": failed}, indent=2) + "\n"
-        )
         raise RuntimeError("no native roots compiled")
     native_code = []
     callback_bindings = []
@@ -552,11 +454,13 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         + "\n"
         + init
     )
-    (directory / "diagnostics.json").write_text(
-        json.dumps({"compiled": successful, "fallback": failed}, indent=2) + "\n"
-    )
     if emit_only:
-        return {"compiled": successful, "fallback": failed, "source": str(path)}
+        return {
+            "compiled": successful,
+            "fallback": failed,
+            "source": str(path),
+            "coverage": coverage["summary"],
+        }
     torch_dir = Path(torch.__file__).parent
     extension = Extension(
         "_source_hosts",
@@ -589,6 +493,15 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     for old in directory.glob("*.so"):
         if old.resolve() != expected:
             old.unlink()
+    coverage = write_coverage(
+        directory,
+        entries,
+        successful,
+        failed,
+        cohort=cohort,
+        complete=True,
+        artifact_built=True,
+    )
     manifest = {
         "source_abi": 2,
         "global_abi": 1,
@@ -601,6 +514,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         "records": recorder.records,
         "compiled": successful,
         "fallback": failed,
+        "coverage": coverage["summary"],
         "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "abi": 2,
     }

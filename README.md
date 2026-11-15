@@ -152,6 +152,14 @@ The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
 This target has not yet been demonstrated without model graph compilation.
 
+Native-host builds write `native_host/_generated/typed/coverage.json`, accounting
+for every FlagGems registry row, excluded signatures and lowering outcomes.
+Its counts describe build coverage, not operator correctness or performance.
+The [generalization project](https://github.com/orgs/flagos-ai/projects/14)
+tracks broader eager and accelerator support. Domestic accelerator acceptance
+compares against the manufacturer's native PyTorch on the same card and workload:
+at least 80% of its throughput, or at most 1.25 times its latency for fixed work.
+
 An optional graph-mode comparison uses Dynamo to capture the model and
 TorchScript to execute its ATen graph:
 
