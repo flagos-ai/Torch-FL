@@ -643,13 +643,131 @@ temporary, explicitly audited vendor-native route for an operator whose
 published FlagGems implementation demonstrably fails precision. Passing
 operators remain on FlagGems; tensor boxing and CUDA redispatch remain forbidden.
 
+### Native vendor precision exceptions
+
+An optional NVIDIA native-host wheel accepts `FLAGOS_VENDOR_TORCH_LIB` pointing
+to the `torch/lib` directory of the published `torch==2.10.0+cu130` wheel. It
+requires CPU Torch from the same Git revision, published FlagGems 5.4.0, the
+vendor kernel set and boxing disabled. The vendor metadata supplies exact
+runtime dependencies; the build bundles the original numerical libraries and
+licenses. The compatibility manifest records the verified vendor Torch version.
+No SDK version is inferred from a wheel suffix.
+
+`torch_fl/native_host/vendor_precision.json` records measured operator/dtype
+exceptions and their removal condition. `codegen_native_vendor.py` derives
+typed entry signatures, structured meta/implementation classes and ABI hashes
+from the installed Torch schemas. Regeneration followed by `--check` must leave
+the generated core catalog, extension source and JSON catalog unchanged.
+
+| Operation | Input dtype | Published vendor implementation |
+| --- | --- | --- |
+| `pow.Tensor_Scalar`, `rsqrt` | FP32 | Original structured CUDA implementation |
+| `mean.dim` | FP32 | Original meta, reduction iterator and CUDA reduction stub |
+| `_softmax` | FP32 | Original structured CUDA softmax implementation |
+| `mm`, `bmm` | BF16 | cuBLAS with vendor layout and workspace conventions |
+
+The shared host templates contain metadata, allocation, stream and library-call
+logic. They do not implement GPU arithmetic. Real input/output tensors retain
+PrivateUse1 devices and dispatch keys. CUDA TensorIterator kernels receive CUDA
+pointer descriptors for the NVIDIA memory; no TensorImpl is retagged and no ATen
+CUDA redispatch or DeviceBoxingGuard is used. BLAS handles and workspaces are
+resources associated with a thread/device/stream, independent of model shapes.
+
+The existing eager dispatcher checks the generated dtype mask only on FlagGems
+routes. An exception cannot become a general fallback for other dtypes. The
+prebuilt module is registered at import with schema/policy ABI checks; model
+execution contains no Python routing mode. The adapter checks the selected
+cuBLAS backend and uses the vendor precision flags rather than changing them.
+This first policy covers functional inference operations; it does not claim
+out/in-place variants or other vendors have passed this numerical gate.
+The `nvidia` route key now means the native NVIDIA slot. Custom boxing configs
+that used `nvidia` as an alias must use `boxing`; legacy `cuda` remains accepted
+for the opt-in boxing build.
+
+Runtime activation and audit verify hashes of bundled artifacts and the actual
+loaded numerical libraries. Profiler scopes identify every generated vendor
+entry. GPU provenance accepts a non-FlagGems kernel only when its correlation ID
+connects to a launch on the same CPU thread inside an approved vendor entry.
+Kernel names alone cannot establish vendor provenance.
+The NVIDIA profiler collects Driver API activities during a profiling session
+as well as Runtime API activities, because cuBLAS can launch directly through
+the driver. Both kinds are disabled outside profiling; driver callback names
+are resolved through CUPTI after draining its buffers.
+
+`vendor_precision_check.py` compares paired vendor/native operations across
+shapes, strides, empty inputs, scalar values, reduction dtypes and default and
+nondefault streams. It checks input pointers, devices, dispatch keys and version
+counters. The full strict-eager Qwen gate remains the acceptance criterion; these
+operator checks do not replace full-model precision and performance results.
+
+The shared pointwise host reuses strides for validated dense layouts when
+allocating a fresh output; named tensors and non-dense layouts retain the
+original Preserve path. Its promotion lookup keeps the complete output-index/default-dtype/input-
+type/scalar-rank key in a binary representation. Cache misses still invoke the
+published FlagGems promotion rule. The Python promotion cache also distinguishes
+zero-dimensional tensors, equal Python scalars of different types and changes to
+the default dtype. These changes affect metadata and allocation, without changing
+a numerical kernel or specializing a model path.
+
+The optional precision cohort also records a published FlagGems source selection
+in `native_host/source_variants.json`. For `aten::mul.Tensor`, when all operands
+are FP32/BF16 tensors on the same PrivateUse1 device, the compiler lowers the
+released `flag_gems.runtime.backend._sunrise.ops.mul.mul` host and its original
+pointwise generator. The source file is pinned by package version and SHA-256;
+neither its host source nor its GPU arithmetic is edited. Its simpler host path
+reduces eager overhead in the paired model workload.
+
+Selections are schema-specific, without shape or model conditions. The generated
+callback checks the dtype/device predicate and retains the ordinary generated
+FlagGems callback after it. Other dtypes, mixed-device operands, scalar overloads
+and grad-enabled dispatch retain their original routes. The build fails if a
+declared selection cannot lower. Primary registry coverage remains separate from
+alternative source compilation, so an alternative cannot inflate operator counts.
+The wheel manifest and runtime audit include source identities and selection hit
+counts. Public FlagGems functions are not replaced with a different backend's API.
+
+### Installed-wheel acceptance
+
+The [measured optional cohort](../../benchmarks/host_compiler/results/qwen3_native_precision_h100.json)
+uses the same official BF16 Qwen3-0.6B checkpoint, 60-token prompt, 512 frozen
+decode inputs and vendor math settings as the failed #839 reference. Two
+independent installed-wheel processes each pass all **513 comparisons**, including
+all 9,116,160 prefill logits, with **maximum absolute difference 0.0**.
+
+| Process | Prefill complete median | Decode complete median |
+| --- | ---: | ---: |
+| Installed wheel, first run | 29.147111 ms | 27.337441 ms |
+| Paired native vendor Torch | 25.091415 ms | 23.397871 ms |
+| Installed wheel, independent repeat | 29.235253 ms | 27.280052 ms |
+
+Each process records three full timing traversals after a discarded warm
+traversal. Timing includes the complete model forward and synchronization;
+token sampling, correctness checks, loading, kernel tuning and profiling are
+excluded equally from both backends. All six native prefill samples are below
+30 ms; native decode p99 is 29.70/29.08 ms. This is evidence for this workload
+and published cohort, not a claim of coverage or latency on other accelerators.
+
+Both native processes have zero capture calls, legacy plans and warm
+FlagGems/Triton Python frames. The separate two-forward GPU trace attributes
+all **3,898 launches**: 2,602 to admitted FlagGems kernels and 1,296 to the six
+approved vendor entries, with no unmatched kernels. All 775 host artifact hashes
+remain unchanged during execution; the only observed subprocess commands are
+two `ptxas --version` probes. No runtime host compilation occurs.
+
+The installed wheel passes 122 GPU host/device/stream tests and 198 paired
+operator cases on each of three streams, including a nonblocking stream with
+queued producers. CPU schema/cohort/logit/compiler checks pass 151 cases. Wheel
+preflight, isolated installation and both Torch/Torch-FL import orders pass.
+The evidence file records the wheel, numerical-library and raw-result hashes.
+
 ### Execution and performance
 
 - Freeze the generator and installed dependency versions before introducing
   held-out shapes, strides, scalar values and decode lengths.
 - Record all host binaries and compiler invocations. New inputs may add kernel
   binaries, but must leave the host binary set and hashes unchanged.
-- Audit every numerical launch back to its FlagGems JIT source. Fail on
+- Audit every numerical launch back to its FlagGems JIT source or an approved
+  measured vendor precision exception. Fail on
   handwritten or Inductor-generated substitute kernels.
 - Profile warm execution for Python host frames, including transitive helpers
   and pointwise wrappers. A compiled outer function alone is insufficient.
@@ -668,9 +786,11 @@ operators remain on FlagGems; tensor boxing and CUDA redispatch remain forbidden
 - Compare actual GPU trace kernel names against admitted FlagGems specializations,
   including kernels emitted by its original pointwise generator. Keep the trace
   outside the timed measurement.
-- Require the model's numerical operators to use FlagGems. Any missing route is
+- Require the model's numerical operators to use FlagGems except for the audited
+  precision policy above. Any missing route is
   an explicit failure; boxing, vendor Torch redispatch and CPU fallback cannot
   be counted as coverage. The general routing design may use an actual vendor
   native API for an operator absent from FlagGems, as previously specified.
 
-The implementation stays opt-in until all gates have measured evidence.
+The native-host build remains opt-in. This cohort's acceptance does not establish
+all-signature compiler coverage or results on other accelerators.

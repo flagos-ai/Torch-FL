@@ -388,6 +388,13 @@ nor the legacy `cuda` spelling of it.
 - A CUDA-ABI platform with no native operator library of its own (NVIDIA, MetaX,
   Hygon DCU, T-Head PPU on this tree) therefore has no vendor key in its default
   conf: everything FlagGems does not cover is `none`.
+- The optional NVIDIA native-host precision module is a dtype-scoped exception
+  policy, not a default-conf coverage claim. Generate its entries from
+  `torch_fl/native_host/vendor_precision.json`; require measured published-wheel
+  failures, paired vendor precision/performance evidence and an explicit removal
+  condition. `nvidia` names this native slot; only `boxing` and legacy `cuda`
+  name CUDA boxing. Do not expand a measured dtype exception into an unmeasured
+  vendor fallback or change the default conf to imply general native coverage.
 - `scripts/codegen/gen_vendor_confs.py` enforces this — `build_all()` exits if any
   default conf would emit `boxing`/`cuda`. Do not relax that check; if a route is
   wrong, fix the route.

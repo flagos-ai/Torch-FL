@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "scope": "Installed optional NVIDIA native-host precision wheel; published dependency wheels only",
+  "implementation_commit": "36ee02e01329e7ed40cf449e1181721633fdc59f",
+  "base_commit": "20c1f77b0c1b7e1a856d50bcf23f865146b3c8e1",
+  "model": "Qwen3-0.6B",
+  "model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+  "hardware": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "physical_gpu": 1,
+    "cpu_affinity": "8-15"
+  },
+  "cohort": {
+    "python": "3.12.14",
+    "torch": "2.10.0+cpu",
+    "vendor_torch": "2.10.0+cu130",
+    "torch_git_version": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+    "flag_gems": "5.4.0",
+    "flagtree": "0.7.0",
+    "triton": "3.6.0",
+    "transformers": "5.17.0",
+    "cuda_toolkit": "13.1.115",
+    "wheel_sdk_version": null
+  },
+  "wheel": {
+    "wheel": "torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl",
+    "sha256": "e064e97816027b1d078e8fefc31e6a449590097e145da627e9890cfc2a5461c5",
+    "size": 469695757
+  },
+  "protocol": {
+    "execution": "strict eager",
+    "precision": "same BF16 model and math settings as vendor",
+    "batch": 1,
+    "prompt_tokens": 60,
+    "layers": 28,
+    "parameters": 596049920,
+    "decode_steps": 512,
+    "teacher_forced_inputs": "identical frozen vendor reference inputs",
+    "latency": "synchronized complete forward; token sampling, validation, loading, JIT/tuning and profiling excluded from timing in both processes",
+    "cold_start_reported_separately": true,
+    "rounds_per_process": 3,
+    "warm_traversals_discarded_per_process": 1,
+    "native_processes": 2,
+    "model_capture": "compile/Dynamo/export/trace/script entry points blocked",
+    "latency_gate_ms": 30,
+    "latency_statistic": "per-process median"
+  },
+  "contract": {
+    "version": 1,
+    "checkpoint_sha256": {
+      "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+    },
+    "config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "dtype": "bfloat16",
+    "attention": "eager",
+    "math_settings": {
+      "float32_matmul_precision": "high",
+      "allow_tf32": true,
+      "allow_bf16_reduced_precision_reduction": true,
+      "allow_fp16_reduced_precision_reduction": true,
+      "environment": {
+        "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": "1",
+        "NVIDIA_TF32_OVERRIDE": null,
+        "CUBLAS_WORKSPACE_CONFIG": null
+      }
+    }
+  },
+  "reference_sha256": "578c2de8529af415ac90d71866f330a9e887bcb023fc4d9c07babe5f44aa8a04",
+  "runs": {
+    "final-wheel-model-long": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "steps": 512,
+      "rounds": 3,
+      "logits": {
+        "atol": 0.001,
+        "rtol": 0.001,
+        "comparisons": 513,
+        "passed_comparisons": 513,
+        "failed_steps": [],
+        "violations": 0,
+        "passed": true
+      },
+      "max_abs": 0.0,
+      "medians_ms": {
+        "prefill_submit_ms": 29.1106216609478,
+        "prefill_complete_ms": 29.147110879421234,
+        "decode_submit_ms": 27.257030829787254,
+        "decode_complete_ms": 27.337441220879555
+      },
+      "prefill_samples_ms": [
+        28.796233236789703,
+        29.391013085842133,
+        29.147110879421234
+      ],
+      "decode_distribution_ms": {
+        "samples": 1536,
+        "p50": 27.337441220879555,
+        "p95": 27.74976333603263,
+        "p99": 29.70327287912369
+      },
+      "capture_calls": 0,
+      "legacy_plans": [
+        0,
+        0,
+        0
+      ],
+      "warm_python_calls": {}
+    },
+    "final-vendor-paired-long": {
+      "torch": "2.10.0+cu130",
+      "device": "cuda:0",
+      "steps": 512,
+      "rounds": 3,
+      "logits": {
+        "atol": 0.001,
+        "rtol": 0.001,
+        "comparisons": 513,
+        "passed_comparisons": 513,
+        "failed_steps": [],
+        "violations": 0,
+        "passed": true
+      },
+      "max_abs": 0.0,
+      "medians_ms": {
+        "prefill_submit_ms": 25.053756311535835,
+        "prefill_complete_ms": 25.091415271162987,
+        "decode_submit_ms": 23.31614214926958,
+        "decode_complete_ms": 23.397871293127537
+      },
+      "prefill_samples_ms": [
+        25.091415271162987,
+        24.95492249727249,
+        25.09378455579281
+      ],
+      "decode_distribution_ms": {
+        "samples": 1536,
+        "p50": 23.397871293127537,
+        "p95": 23.669276386499405,
+        "p99": 24.535000137984756
+      },
+      "capture_calls": 0,
+      "legacy_plans": null,
+      "warm_python_calls": {}
+    },
+    "final-wheel-model-repeat": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "steps": 512,
+      "rounds": 3,
+      "logits": {
+        "atol": 0.001,
+        "rtol": 0.001,
+        "comparisons": 513,
+        "passed_comparisons": 513,
+        "failed_steps": [],
+        "violations": 0,
+        "passed": true
+      },
+      "max_abs": 0.0,
+      "medians_ms": {
+        "prefill_submit_ms": 29.187167063355446,
+        "prefill_complete_ms": 29.235253110527992,
+        "decode_submit_ms": 27.199224568903446,
+        "decode_complete_ms": 27.280052192509174
+      },
+      "prefill_samples_ms": [
+        28.935225680470467,
+        29.302608221769333,
+        29.235253110527992
+      ],
+      "decode_distribution_ms": {
+        "samples": 1536,
+        "p50": 27.280052192509174,
+        "p95": 27.65799965709448,
+        "p99": 29.080887045711293
+      },
+      "capture_calls": 0,
+      "legacy_plans": [
+        0,
+        0,
+        0
+      ],
+      "warm_python_calls": {}
+    }
+  },
+  "acceptance": {
+    "all_logits_pass": true,
+    "native_medians_under_30ms": true,
+    "native_prefill_samples_under_30ms": true
+  },
+  "gpu_provenance": {
+    "model_calls": 2,
+    "total_launches": 3898,
+    "flaggems_launches": 2602,
+    "vendor_launches": 1296,
+    "vendor_entry_launches": {
+      "flagos::nvidia::pow.Tensor_Scalar": 226,
+      "flagos::nvidia::mean.dim": 226,
+      "flagos::nvidia::rsqrt": 226,
+      "flagos::nvidia::mm": 450,
+      "flagos::nvidia::bmm": 112,
+      "flagos::nvidia::_softmax": 56
+    },
+    "unmatched": []
+  },
+  "vendor_precision": {
+    "catalog": [
+      {
+        "op": "_softmax",
+        "dtypes": [
+          "Float"
+        ],
+        "abi": "f2469f98e42b9621bdf4604ba34c7c15e989e835af2dab18950e8acfbd28b55b"
+      },
+      {
+        "op": "bmm",
+        "dtypes": [
+          "BFloat16"
+        ],
+        "abi": "f3e803fbfc82e8c224dc7243a478796e7f02b3ed0249b32cf8e63ca32a891244"
+      },
+      {
+        "op": "mean.dim",
+        "dtypes": [
+          "Float"
+        ],
+        "abi": "3ee2608c6f4068601a6227a220733d7dde2e032837a63070114a78cce7d55c8f"
+      },
+      {
+        "op": "mm",
+        "dtypes": [
+          "BFloat16"
+        ],
+        "abi": "e9e07eea36b5b7b5867bd4e304d72fb4d87d4e1d34b7e925d039058db022298c"
+      },
+      {
+        "op": "pow.Tensor_Scalar",
+        "dtypes": [
+          "Float"
+        ],
+        "abi": "4603619a7121cb2006f187f2a89b7ac670a5d5ba797923497577888ef8ebafe4"
+      },
+      {
+        "op": "rsqrt",
+        "dtypes": [
+          "Float"
+        ],
+        "abi": "e36a8b3c11b4122e980cafc8646d40773556ddea0e11ba0430ddee231a4658fe"
+      }
+    ],
+    "artifacts": {
+      "lib/libtorch_nvshmem.so": "c4f75981ef9814b29e0d561c19b337810633bfea8639e101bfecb818de1111a1",
+      "lib/libc10_cuda.so": "d61548fae97498e6f0e99418a1d1218ce209ba0be66aaba7da1ee6fac8f506ad",
+      "lib/libtorch_cuda.so": "2c28bf7f912baa8c1849f1c3eda6f90f2fc6c9dfd22326d183c6f6daabab4fd2",
+      "native_host/_generated/_vendor.so": "e5f6f6e9948b1b7404cfe7c1cf4d9eb129d13653c31d7d142f13d1a099346d0d"
+    },
+    "loaded_numerical_libraries": {
+      "torch_cuda": "2c28bf7f912baa8c1849f1c3eda6f90f2fc6c9dfd22326d183c6f6daabab4fd2",
+      "c10_cuda": "d61548fae97498e6f0e99418a1d1218ce209ba0be66aaba7da1ee6fac8f506ad",
+      "cublas": "e70f38efabe986acd5eb683497c62f0f1730a6176ee291d9d24c6e339d1fbf86",
+      "cublas_lt": "656298c804f5adbb0df930545c17911b9584ab4e5101c0eeb65d1fe881d880f8"
+    }
+  },
+  "source_variants": {
+    "schema_version": 1,
+    "vendor": "nvidia",
+    "flag_gems": "5.4.0",
+    "requires_native_vendor": true,
+    "entries": [
+      {
+        "id": "published_mul",
+        "op": "aten::mul.Tensor",
+        "module": "flag_gems.runtime.backend._sunrise.ops.mul",
+        "function": "mul",
+        "sha256": "35a2059ab4f4f80f0e5bd7d09c190e3a5008811fa9cff4a5f6621e4851d0190b",
+        "dtypes": [
+          "Float",
+          "BFloat16"
+        ],
+        "reason": "The published pointwise implementation preserves vendor logits while reducing eager host overhead in the paired BF16 workload."
+      }
+    ]
+  },
+  "source_variant_hits": {
+    "published_mul": 940254
+  },
+  "host_artifacts": {
+    "count": 775,
+    "sha256_of_sorted_hash_map": "df8b03846989e3c07044b286013844eac3d2bca72cc54b4d045c7f826b06a611",
+    "unchanged_during_execution": true,
+    "runtime_host_compilations": 0,
+    "observed_subprocess_commands": [
+      [
+        "/usr/local/cuda/bin/ptxas",
+        "--version"
+      ],
+      [
+        "/usr/local/cuda/bin/ptxas",
+        "--version"
+      ]
+    ]
+  },
+  "operator_validation": {
+    "streams": [
+      {
+        "cases": 198,
+        "stream": 94660226726656,
+        "passed": true
+      },
+      {
+        "cases": 198,
+        "stream": 94660209448800,
+        "passed": true
+      },
+      {
+        "cases": 198,
+        "stream": 94660209448912,
+        "passed": true
+      }
+    ],
+    "unmeasured_dtypes_stay_flaggems": true,
+    "nonblocking_producer_dependency_passed": true,
+    "pointer_device_key_and_version_checks_passed": true
+  },
+  "checks": {
+    "cpu_contract_tests": "151 passed, 43 warnings in 43.36s",
+    "installed_gpu_tests": "122 passed, 4 warnings in 39.58s",
+    "local_package_and_source_tests": "106 passed, 1 skipped in 0.78s",
+    "ruff_check": "All checks passed!",
+    "ruff_format_check": "618 files already formatted",
+    "vendor_codegen_check": "native vendor entries are current",
+    "preflight_exit": 0,
+    "install_exit": 0,
+    "torch_first_import": "passed by strict-eager model process",
+    "torch_fl_first_import": "passed"
+  },
+  "raw_artifact_root": "/public-nvme/lvyufeng/sandbox/codex-fg-handoff-20261114/vendor-precision-probe",
+  "raw_artifact_sha256": {
+    "final-wheel-model-long.json": "67798ec7279e27ead739e76aabbdb0067cc068745f43bf32b694fff799767ea6",
+    "final-wheel-model-long.pt": "bc92ee443d5e29176942066335c8e11dfd81dddd80554bb4b5f985e0b9dc00b4",
+    "final-vendor-paired-long.json": "dac92b6affaf6ed8085230c97613cc8f98627d7449577f7c2e237cd86c0c695c",
+    "final-vendor-paired-long.pt": "e3e47894140250332f2b5d80a4504d7b520d55df23a92bc059c207d35f3183f1",
+    "final-wheel-model-repeat.json": "82ab339e2dd8c9e1a1853e282a15f0fd25e863074872df4e924ca0a103196aa7",
+    "final-wheel-model-repeat.pt": "066d7ddf69bfe86c15dac54aecdaaad6e12310ca2868d2cf51eebc65e6d63a61",
+    "final-wheel-model-long-trace.json": "d80c3583a826630f03019f7c6383baf9f400ab44d3153527b706b0a3dbec7939",
+    "final-wheel-edge.json": "81ff3bea575fe3fef4d34d7560faf5ce3c7d302550ab68fc2e9ad808b9631566",
+    "final-wheel-edge.pt": "3662a816ac2854dfa2b939b21b8b8d54ca4b3db89a55d76ee203a80fa58a7533",
+    "edge-vendor-math.json": "1bdf5ace782966f3efa5fa212889679d7b046146ded72a77666e01520dde438e",
+    "edge-vendor-math.pt": "a2f6f03857a41be22381c6710ab04b776ab8d787a6c4bf677ecce6670a96782a",
+    "final-cpu-contracts.log": "6c851b755a8a807a08e424168ba3396ac7c68a967c97824bc0bc4a3eafa1aa71",
+    "final-wheel-gpu-tests.log": "18796f0ed919cbb6c8cacb76b6ebfa65ef58565ea0de908723fb2b99a1ca81c1",
+    "final-wheel-preflight.log": "84c917fd0db2f62c8ac63a09e51cfc78cc9a678ed7d2baf7dd3c726a00e546e7",
+    "final-wheel-install.log": "286a3b30863032ad56c5a62abd89c0163dfe5384d537d50331a101d850ff3bba",
+    "final-wheel-import-first.log": "81af00370f99869a0bfc5ad6f4a16b6f296204d8d91cbfc785f07702ea1d0f33"
+  }
+}
