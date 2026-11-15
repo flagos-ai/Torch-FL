@@ -199,6 +199,61 @@ admission never coerces them to float to hide the compiler gap. Separately,
 schema-required parameters keep their schema type when a Python helper has a
 `None` default; generated facades pass all arguments explicitly.
 
+## Generated source-call bridges
+
+Some ATen operators, including copy and view plumbing, are registered manually
+because they coordinate device transfers, aliases or storage. The operator
+generator now examines those schemas against the same installed FlagGems
+registry and argument-admission rules as ordinary generated entries. Eligible
+single-Tensor source calls are emitted into `flaggems_source_bridges.h/.cc`.
+These are callable adapters, not new ATen registrations or routing entries.
+
+The NVIDIA device-copy helper calls the generated `copy_` adapter. Its existing
+device, dtype, conjugate/negative, overlap, alias, empty-input and recursion
+checks remain in the helper. The adapter borrows input handles and calls the
+original FlagGems host once; it does not copy the returned tensor back into the
+destination, rewrite its device metadata or re-enter the dispatcher. Ordinary
+wrapper code still supplies the original return identity and version increments.
+Unsupported typed variants and GradMode-enabled calls retain the original FlagGems path.
+
+Host signature discovery also respects ATen's positional/keyword boundary.
+A Python helper's extra defaulted positional parameter must not consume an
+unrelated schema keyword: for example, the default `step=1` on the helper for
+`arange.start` remains an integer default rather than acquiring dtype's optional
+type. A positional-or-keyword Python parameter can still bind an ATen keyword
+by name, preserving scalar variants such as `alpha`. This signature repair is
+separate from host-language lowering: `arange` device defaults and scalar_tensor
+optional comparisons still have compiler gaps under #829.
+
+The build binds 404 typed entries from 1,008 lowered signatures, with 553
+signature fallbacks. The two emitted bridge functions are `copy_` and
+`_reshape_alias`; only the existing copy helper is connected in this change.
+The schema repair also admits `round` and `round_`, whose extra `decimals=0`
+helper default previously had no schema argument. The default-argument paths
+are checked against the original FlagGems implementation in three floating
+dtypes, including ties, infinities, NaNs and in-place identity. The pinned
+registry does not expose `aten::round.decimals`; this change does not add that
+route or claim its coverage.
+
+The fresh paired H100 run retains the complete workload described below:
+
+| Synchronized complete forward | Prior typed-entry wheel | Source bridges | Vendor PyTorch |
+|---|---:|---:|---:|
+| Prefill median | 33.24 ms | 32.15 ms | 25.25 ms |
+| Decode median | 31.14 ms | 30.31 ms | 23.71 ms |
+| Decode p99 | 32.64 ms | 31.98 ms | 24.57 ms |
+
+The medians are lower in this run, but both still exceed 30 ms. These are
+whole-wheel measurements with process-level variation, not an isolated ABI
+speedup. In an interleaved A-B-B-A microbenchmark, cast submission medians range
+from 8.61–8.65 us before and 8.42–8.95 us after, so no reliable cast latency
+improvement is established. Every measured cast in the new wheel hits the typed
+bridge; the old wheel records zero typed cast hits. All 513 logits match the
+original FlagGems oracle bitwise, model-capture calls and legacy plans are zero,
+and the separate trace still contains 3,814 original FlagGems launches with no
+unmatched kernels. The [source-bridge evidence](../../benchmarks/host_compiler/results/qwen3_source_bridges_h100.json)
+retains the raw round timings, tail distributions, cohort and artifact hashes.
+
 ## Typed-entry eager measurement: target not met
 
 The paired H100 rerun uses the same complete Qwen3-0.6B model, 60-token prompt,

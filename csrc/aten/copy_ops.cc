@@ -89,7 +89,7 @@
 #endif
 
 #if defined(FLAGOS_NVIDIA_GEMS_COPY)
-#include "backends/flagos/python_op_caller.h"
+#include "generated/flaggems_source_bridges.h"
 #endif
 
 namespace at::native::flagos {
@@ -113,7 +113,7 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
-  CallPythonOp_Generic("flag_gems.copy_", {dst, src});
+  CopyInplaceSourceHost(dst, src, /*non_blocking=*/false);
   return true;
 #else
   return false;
