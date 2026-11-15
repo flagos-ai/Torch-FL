@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // The launch ABI is data. No signature-specific C/C++ is generated at runtime.
+#include <ATen/EmptyTensor.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_like.h>
 #include <Python.h>
@@ -1373,15 +1374,19 @@ class PointwiseSpec {
         }
     for (size_t i = 0; i < prepared.outputs.size(); ++i)
       if (!prepared.outputs[i].defined()) {
-        std::string key =
-            std::to_string(i) + ":" + std::to_string(int(c10::get_default_dtype_as_scalartype()));
+        // Promotion depends on types and scalar rank, not tensor values. Keep
+        // the complete existing key without formatting integers on every call.
+        std::string key(reinterpret_cast<const char*>(&i), sizeof(i));
+        key.push_back(static_cast<char>(c10::get_default_dtype_as_scalartype()));
         for (auto index : promotion_indices_[i]) {
           const auto value = args.get(index);
-          if (value.isTensor())
-            key += ":T" + std::to_string(int(value.toTensor().scalar_type())) + ":" +
-                   std::to_string(value.toTensor().dim() == 0);
-          else
-            key += value.isBool() ? ":b" : value.isInt() ? ":i" : ":f";
+          if (value.isTensor()) {
+            const auto& tensor = value.toTensor();
+            key.push_back('T');
+            key.push_back(static_cast<char>(tensor.scalar_type()));
+            key.push_back(tensor.dim() == 0);
+          } else
+            key.push_back(value.isBool() ? 'b' : value.isInt() ? 'i' : 'f');
         }
         std::optional<at::ScalarType> dtype;
         {
@@ -1403,9 +1408,20 @@ class PointwiseSpec {
           std::lock_guard<std::mutex> lock(dtype_mutex_);
           native_dtypes_.emplace(key, *dtype);
         }
-        prepared.outputs[i] =
-            like ? at::empty_like(*like, like->options().dtype(*dtype), at::MemoryFormat::Preserve)
-                 : at::empty(prepared.shape, first.options().dtype(*dtype));
+        // The surrounding device scope already selected the allocation device.
+        // Use the same constructors as FlagOS empty/empty_strided for ordinary
+        // dense results; empty_like retains the general Preserve/names rules.
+        auto* allocator = at::GetAllocator(at::kPrivateUse1);
+        constexpr c10::DispatchKeySet keys(c10::DispatchKey::PrivateUse1);
+        if (like && like->is_non_overlapping_and_dense() && !like->has_names())
+          prepared.outputs[i] = at::detail::empty_strided_generic(
+              like->sizes(), like->strides(), allocator, keys, *dtype);
+        else if (like)
+          prepared.outputs[i] =
+              at::empty_like(*like, like->options().dtype(*dtype), at::MemoryFormat::Preserve);
+        else
+          prepared.outputs[i] = at::detail::empty_generic(
+              prepared.shape, allocator, keys, *dtype, at::MemoryFormat::Contiguous);
       }
     return prepared;
   }

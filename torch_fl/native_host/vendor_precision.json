@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "vendor": "nvidia",
+  "flag_gems": "5.4.0",
+  "vendor_torch": "2.10.0+cu130",
+  "torch_git_version": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+  "issue": "https://github.com/flagos-ai/Torch-FL/issues/840",
+  "retirement": "Remove an exception after a published FlagGems wheel passes the paired vendor logit gate and repeated eager performance checks.",
+  "operators": [
+    {
+      "op": "_softmax",
+      "family": "structured",
+      "dtypes": ["Float"],
+      "reason": "FP32 softmax differences cross a BF16 rounding boundary and propagate into failing logits."
+    },
+    {
+      "op": "bmm",
+      "family": "blas",
+      "rank": 3,
+      "dtypes": ["BFloat16"],
+      "reason": "An isolated decode attention product differs before error propagation."
+    },
+    {
+      "op": "mean.dim",
+      "family": "reduction",
+      "stub": "mean_stub",
+      "empty": "nan",
+      "dtypes": ["Float"],
+      "reason": "Reduction order changes BF16 rounding in normalization."
+    },
+    {
+      "op": "mm",
+      "family": "blas",
+      "rank": 2,
+      "dtypes": ["BFloat16"],
+      "reason": "The original matrix reduction differs from the vendor BLAS result at identical inputs."
+    },
+    {
+      "op": "pow.Tensor_Scalar",
+      "family": "structured",
+      "dtypes": ["Float"],
+      "reason": "The general power intrinsic differs from the vendor scalar-square path in normalization."
+    },
+    {
+      "op": "rsqrt",
+      "family": "structured",
+      "dtypes": ["Float"],
+      "reason": "Reciprocal of square root differs from the vendor reciprocal-square-root instruction."
+    }
+  ]
+}

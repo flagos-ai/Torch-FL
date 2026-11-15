@@ -46,6 +46,7 @@ enum class Backend {
   // the operator library named by FLAGOS_BPU_OPLIB; without it every kernel
   // takes the CPU round-trip. Conf key: drobotics.
   kDrobotics,
+  kNvidia,         // Published vendor-native precision entries; never boxing.
   // No accelerated implementation on this platform. The op is deliberately not
   // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
   // arriving here with an empty kernel slot. Recorded explicitly (rather than

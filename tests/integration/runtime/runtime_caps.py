@@ -67,7 +67,7 @@ _LOG_NAME = {
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
-    "nvidia": "boxing",
+    "nvidia": "nvidia",
     # The day-0 variant spells the same slot `boxing` (setup.py's day-0 name is
     # the log name), and the log prints `boxing` for it.
     "boxing": "boxing",

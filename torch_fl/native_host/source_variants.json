@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "vendor": "nvidia",
+  "flag_gems": "5.4.0",
+  "requires_native_vendor": true,
+  "entries": [
+    {
+      "id": "published_mul",
+      "op": "aten::mul.Tensor",
+      "module": "flag_gems.runtime.backend._sunrise.ops.mul",
+      "function": "mul",
+      "sha256": "35a2059ab4f4f80f0e5bd7d09c190e3a5008811fa9cff4a5f6621e4851d0190b",
+      "dtypes": ["Float", "BFloat16"],
+      "reason": "The published pointwise implementation preserves vendor logits while reducing eager host overhead in the paired BF16 workload."
+    }
+  ]
+}

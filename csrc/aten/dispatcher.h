@@ -4,6 +4,7 @@
 
 #include "common.h"
 #include <c10/util/Exception.h>
+#include <atomic>
 #include <cstdio>
 #include <flagos_env.h>
 #include <optional>
@@ -38,6 +39,22 @@ namespace at::native::flagos {
 //   mm_dispatcher.DispatchAs("mm.out", self, mat2, out);
 
 namespace detail {
+
+inline bool PrecisionRejectsArg(uint64_t mask, const at::Tensor& value) {
+  if (!value.defined()) return false;
+  const auto dtype = static_cast<unsigned>(value.scalar_type());
+  return dtype < 64 && (mask & (uint64_t{1} << dtype));
+}
+
+template <typename T>
+inline bool PrecisionRejectsArg(uint64_t, const T&) {
+  return false;
+}
+
+template <typename... Args>
+inline bool PrecisionRejectsArgs(uint64_t mask, const Args&... args) {
+  return (... || PrecisionRejectsArg(mask, args));
+}
 
 // Does this argument, for this op, force the call off the FlagGems route?
 //
@@ -136,6 +153,9 @@ class Dispatcher {
       case Backend::kCambricon:     cambricon_fn_ = fn;        break;
       case Backend::kTileOps:       tileops_fn_ = fn;          break;
       case Backend::kApple:         apple_fn_ = fn;           break;
+      case Backend::kNvidia:
+        nvidia_fn_.store(fn, std::memory_order_release);
+        break;
       // Neither names a kernel set, so there is no slot to fill. kNone is the
       // conf's "no accelerated impl here" verdict; kUncached is the sentinel
       // operator() uses before it has resolved the op. Listed explicitly rather
@@ -144,6 +164,13 @@ class Dispatcher {
       case Backend::kUncached:
         break;
     }
+  }
+
+  // Installed once from a schema-checked, prebuilt vendor module. The mask is
+  // generated from measured precision exceptions, never from model shapes.
+  void RegisterNvidiaPrecisionKernel(FnPtr fn, uint64_t dtype_mask) {
+    nvidia_precision_mask_ = dtype_mask;
+    nvidia_fn_.store(fn, std::memory_order_release);
   }
 
   // The kernel `device` resolves to, including GetFn's own degradation, or
@@ -371,6 +398,12 @@ class Dispatcher {
                   const Args&... args) const {
     FnPtr fn = GetFn(backend);
     if (backend != Backend::kFlagGems || fn == nullptr) return fn;
+    if (auto native = nvidia_fn_.load(std::memory_order_acquire)) {
+      if (detail::PrecisionRejectsArgs(nvidia_precision_mask_, args...)) {
+        backend = Backend::kNvidia;
+        return native;
+      }
+    }
     if (!detail::FlagGemsRejectsArgs(op_name, args...)) return fn;
 
     auto [vendor_fn, vendor_backend] = VendorSlot();
@@ -427,6 +460,7 @@ class Dispatcher {
       case Backend::kIluvatar:      return iluvatar_fn_;
       case Backend::kCambricon:     return cambricon_fn_;
       case Backend::kApple:         return apple_fn_;
+      case Backend::kNvidia:        return nvidia_fn_.load(std::memory_order_acquire);
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
       // entry of "tileops" therefore only lands here when that registration did
@@ -482,6 +516,7 @@ class Dispatcher {
     switch (backend) {
       case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
       case Backend::kBoxing:      return cuda_fn_;
+      case Backend::kNvidia:      return nvidia_fn_.load(std::memory_order_acquire);
       default:                    return nullptr;
     }
   }
@@ -491,7 +526,8 @@ class Dispatcher {
   // the two that can answer a decoded pair: a C++ FlagGems kernel (real, and
   // does not run Python), or boxing.
   static Backend ParseBackendName(const std::string& raw) {
-    const char* boxing[] = {"boxing", "cuda", "nvidia"};
+    if (flagos_env::EnvIs(raw.c_str(), "nvidia")) return Backend::kNvidia;
+    const char* boxing[] = {"boxing", "cuda"};
     for (const char* name : boxing) {
       if (flagos_env::EnvIs(raw.c_str(), name)) return Backend::kBoxing;
     }
@@ -559,6 +595,7 @@ class Dispatcher {
       case Backend::kCambricon:   return "vendor";
       case Backend::kApple:       return "vendor";
       case Backend::kDrobotics:   return "vendor";
+      case Backend::kNvidia:     return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -595,6 +632,7 @@ class Dispatcher {
       case Backend::kTileOps:       name = "tileops"; break;
       case Backend::kApple:         name = "mps"; break;
       case Backend::kDrobotics:     name = "drobotics"; break;
+      case Backend::kNvidia:        name = "nvidia"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }
@@ -609,6 +647,8 @@ class Dispatcher {
   FnPtr cuda_fn_           = nullptr;
   FnPtr flaggems_cpp_fn_   = nullptr;
   FnPtr flaggems_fn_       = nullptr;
+  std::atomic<FnPtr> nvidia_fn_{nullptr};
+  uint64_t nvidia_precision_mask_ = 0;
   FnPtr ascend_fn_         = nullptr;
   FnPtr mthreads_fn_       = nullptr;
   FnPtr metax_fn_          = nullptr;

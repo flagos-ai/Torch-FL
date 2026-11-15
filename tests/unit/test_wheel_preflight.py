@@ -61,6 +61,7 @@ def test_manifest_builder_works_without_source_root_on_import_path(
         "_BUNDLE_LIBDIR": "lib",
         "_platform_entry": lambda _: {"vendor_torch_libraries": True},
         "_install_requires": lambda: ["torch>=2.10,<2.11"],
+        "_native_vendor_cohort": lambda: None,
     }
     exec(
         compile(ast.Module(body=[function], type_ignores=[]), "setup.py", "exec"),

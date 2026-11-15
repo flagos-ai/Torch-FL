@@ -55,7 +55,7 @@ _LOG_NAME = {
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
-    "nvidia": "boxing",
+    "nvidia": "nvidia",
 }
 
 

@@ -141,6 +141,164 @@ def test_pointwise_promotion_matches_source_across_default_dtypes():
         torch.set_default_dtype(original)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "layout",
+    ["dense", "transpose", "channels_last", "slice", "expand", "scalar", "empty"],
+)
+def test_pointwise_output_preserves_layout_and_ownership(dtype, layout):
+    def view(value):
+        if layout == "transpose":
+            return value.transpose(1, 2)
+        if layout == "channels_last":
+            return value.contiguous(memory_format=torch.channels_last)
+        if layout == "slice":
+            return value[:, :, ::2, ::2]
+        if layout == "expand":
+            return value[:1, :1].expand(3, 5, 7, 11)
+        if layout == "scalar":
+            return value[0, 0, 0, 0]
+        if layout == "empty":
+            return value[:, :0]
+        return value
+
+    cpu = torch.arange(3 * 5 * 7 * 11).reshape(3, 5, 7, 11).to(dtype)
+    value = view(cpu.to("flagos"))
+    cpu = view(cpu)
+    with torch.no_grad():
+        actual = torch.add(value, 0.5)
+        retained = torch.add(value, 1.0)
+    torch_fl.flagos.synchronize()
+    assert actual.stride() == torch.empty_like(cpu).stride()
+    torch.testing.assert_close(actual.cpu(), cpu + 0.5, rtol=0, atol=0)
+    if actual.numel():
+        assert actual.data_ptr() != retained.data_ptr()
+
+
+def test_pointwise_promotion_distinguishes_scalar_rank():
+    value = torch.arange(7, dtype=torch.float16, device="flagos")
+    with torch.no_grad():
+        for shape in ((), (1,), ()):
+            other = torch.ones(shape, dtype=torch.float32, device="flagos")
+            actual = value + other
+            expected = value.cpu() + other.cpu()
+            assert actual.dtype == expected.dtype
+            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+def test_pointwise_keeps_preallocated_output_dtype():
+    hosts = torch_fl.native_host._hosts
+    launcher = importlib.import_module(hosts.package + "._launcher")
+    owner = hosts.resolve(hosts.original_ops["frexp"].__globals__["_frexp_func"])
+    slot = launcher.register_pointwise(owner)
+    value = torch.arange(7, dtype=torch.float32, device="flagos")
+    exponent = torch.empty_like(value, dtype=torch.int32)
+    actual = torch.ops.flagos_source_native.pointwise_apply(
+        slot, [value], {"out1": exponent}
+    )
+    expected = torch.frexp(value.cpu())
+    assert actual[1].data_ptr() == exponent.data_ptr()
+    for result, reference in zip(actual, expected):
+        assert result.dtype == reference.dtype
+        torch.testing.assert_close(result.cpu(), reference, rtol=0, atol=0)
+
+
+def _published_source_module():
+    hosts = torch_fl.native_host._hosts
+    if not hosts.manifest.get("source_variants"):
+        pytest.skip("wheel has no measured published source selections")
+    return importlib.import_module(hosts.package + ".typed._source_hosts")
+
+
+@pytest.mark.parametrize("left_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("right_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "layout", ["dense", "transpose", "slice", "expand", "broadcast", "scalar", "empty"]
+)
+def test_published_mul_keeps_values_dtypes_and_storage(left_dtype, right_dtype, layout):
+    module = _published_source_module()
+    left = (torch.arange(35).reshape(5, 7) / 8 - 2).to(left_dtype)
+    right = (torch.arange(35).reshape(5, 7) / 16 + 0.5).to(right_dtype)
+
+    def views(left, right):
+        if layout == "transpose":
+            return left.t(), right.t()
+        if layout == "slice":
+            return left[:, ::2], right[:, ::2]
+        if layout == "expand":
+            return left[:1].expand(5, 7), right
+        if layout == "broadcast":
+            return left[:, :1], right[:1]
+        if layout == "scalar":
+            return left, right[0, 0]
+        if layout == "empty":
+            return left[:0], right[:0]
+        return left, right
+
+    a, b = views(left.to("flagos"), right.to("flagos"))
+    left, right = views(left, right)
+    identity = [(v.data_ptr(), v.device, v.stride(), v._version) for v in (a, b)]
+    before = module.source_variant_hits()["published_mul"]
+    with torch.no_grad():
+        actual = a * b
+        retained = a * b
+    assert module.source_variant_hits()["published_mul"] == before + 2
+    assert identity == [
+        (v.data_ptr(), v.device, v.stride(), v._version) for v in (a, b)
+    ]
+    torch.testing.assert_close(actual.cpu(), left * right, atol=0, rtol=0)
+    torch.testing.assert_close(retained.cpu(), actual.cpu(), atol=0, rtol=0)
+    if actual.numel():
+        assert actual.data_ptr() != retained.data_ptr()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])
+def test_published_mul_keeps_unmeasured_dtypes_on_original_source(dtype):
+    module = _published_source_module()
+    a = torch.arange(9, dtype=dtype, device="flagos")
+    before = module.source_variant_hits()["published_mul"]
+    with torch.no_grad():
+        actual = a * a
+    assert module.source_variant_hits()["published_mul"] == before
+    torch.testing.assert_close(actual.cpu(), a.cpu() * a.cpu(), atol=0, rtol=0)
+
+
+def test_published_mul_does_not_replace_scalar_or_grad_enabled_routes():
+    module = _published_source_module()
+    a = torch.ones(9, dtype=torch.float32, device="flagos")
+    before = module.source_variant_hits()["published_mul"]
+    with torch.no_grad():
+        scalar = a * 2.0
+        mixed = a * torch.ones(9, dtype=torch.int32, device="flagos")
+    with torch.enable_grad():
+        grad_enabled = a * a
+    assert module.source_variant_hits()["published_mul"] == before
+    for actual, value in ((scalar, 2.0), (mixed, 1.0), (grad_enabled, 1.0)):
+        torch.testing.assert_close(
+            actual.cpu(), torch.full((9,), value), atol=0, rtol=0
+        )
+
+
+@pytest.mark.min_devices(2)
+def test_published_mul_preserves_ambient_device_and_current_stream():
+    module = _published_source_module()
+    initial = torch_fl.flagos.current_device()
+    other = (initial + 1) % torch_fl.flagos.device_count()
+    device = torch.device(f"flagos:{other}")
+    stream = torch.Stream(device=device)
+    before = module.source_variant_hits()["published_mul"]
+    with stream, torch.no_grad():
+        a = torch.full((5, 7), 2.0, dtype=torch.bfloat16, device=device)
+        b = torch.full((5, 7), 3.0, dtype=torch.float32, device=device)
+        torch_fl.flagos.set_device(initial)
+        actual = a * b
+        assert torch_fl.flagos.current_device() == initial
+        assert torch.accelerator.current_stream(device).stream_id == stream.stream_id
+    assert actual.device == device
+    assert module.source_variant_hits()["published_mul"] == before + 1
+    torch.testing.assert_close(actual.cpu(), torch.full((5, 7), 6.0), atol=0, rtol=0)
+
+
 @pytest.mark.min_devices(2)
 def test_empty_strided_preserves_current_device():
     initial = torch_fl.flagos.current_device()

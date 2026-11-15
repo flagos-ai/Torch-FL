@@ -10,6 +10,7 @@ import inspect
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import torch
 import flag_gems
@@ -198,6 +199,19 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         names,
         torch._C._jit_get_schemas_for_operator,
     )
+    selections = hosts.manifest.get("source_variants", {}).get("entries", [])
+    selected_names = {row["id"] for row in selections}
+    if selected_names & hosts.original_ops.keys():
+        raise ValueError("published source identifier shadows an existing host")
+    for row in selections:
+        function = getattr(hosts.originals[row["module"]], row["function"])
+        alternatives, _ = discover_variants(
+            [(row["op"].removeprefix("aten::"), SimpleNamespace(__name__=row["id"]))],
+            {row["id"]: function},
+            {row["id"]},
+            torch._C._jit_get_schemas_for_operator,
+        )
+        variants.extend(alternatives)
     catalog = json.loads(torch.ops.flagos.native_source_typed_catalog())
     cohort = {
         "vendor": _build_config.ACCELERATOR,
@@ -328,14 +342,29 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
                 del recorder.records[kind][length:]
             failed.append({"name": name, "signature": signature, "error": str(error)})
             print("FALLBACK", name, str(error).splitlines()[-1][:180], flush=True)
+    primary_successful = [
+        row for row in successful if row["name"] not in selected_names
+    ]
+    primary_failed = [row for row in failed if row["name"] not in selected_names]
+    selection_results = {
+        "compiled": [row for row in successful if row["name"] in selected_names],
+        "fallback": [row for row in failed if row["name"] in selected_names],
+    }
     coverage = write_coverage(
-        directory, entries, successful, failed, cohort=cohort, complete=True
+        directory,
+        entries,
+        primary_successful,
+        primary_failed,
+        cohort=cohort,
+        complete=True,
     )
     if not successful:
         raise RuntimeError("no native roots compiled")
     native_code = []
     callback_bindings = []
     for number, (name, group) in enumerate(native_groups.items()):
+        if name in selected_names:
+            continue
         group = [entry for entry in group if entry[-1].kind() == "TensorType"]
         if not group:
             continue
@@ -428,7 +457,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             + callback
             + "));"
         )
-    typed_code, typed_entries, typed_rejected = emit_entries(catalog, native_groups)
+    typed_code, typed_entries, typed_rejected = emit_entries(
+        catalog, native_groups, selections
+    )
     native_code.extend(typed_code)
     init = sample[sample.index("PYBIND11_MODULE(") :].replace(
         "source_host_ir,", "_source_hosts,"
@@ -436,6 +467,13 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     init = init.replace(
         'module.def("forward", &Forward, py::call_guard<py::gil_scoped_release>());', ""
     )
+    if selections:
+        init = init[:-2] + '\nmodule.def("source_variant_hits", [] { py::dict result;\n'
+        init += "\n".join(
+            f"result[{json.dumps(row['id'])}]=SourceVariantHits_{row['id']}.load();"
+            for row in selections
+        )
+        init += "\nreturn result; });\n}\n"
     init = init.replace(
         '  module.def("bind_api",',
         '  module.def("bind_slots", [](std::vector<int64_t> k,std::vector<int64_t> p,std::vector<int64_t> f) { kernel_slots=std::move(k);pointwise_slots=std::move(p);foreign_slots=std::move(f); });\n  module.def("bind_api",',
@@ -486,8 +524,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     )
     if emit_only:
         return {
-            "compiled": successful,
-            "fallback": failed,
+            "compiled": primary_successful,
+            "fallback": primary_failed,
+            "source_variant_compilation": selection_results,
             "source": str(path),
             "coverage": coverage["summary"],
             "typed_entries": typed_entries,
@@ -528,8 +567,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     coverage = write_coverage(
         directory,
         entries,
-        successful,
-        failed,
+        primary_successful,
+        primary_failed,
         cohort=cohort,
         complete=True,
         artifact_built=True,
@@ -539,6 +578,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         "typed_entry_abi": 1,
         "typed_entries": typed_entries,
         "typed_rejected": typed_rejected,
+        "source_variants": selections,
+        "source_variant_compilation": selection_results,
         "global_abi": 1,
         "foreign_abi": 1,
         "metadata_sources": metadata_sources,
@@ -547,8 +588,8 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         "hook_abi": 2,
         "native_hooks": hook_records,
         "records": recorder.records,
-        "compiled": successful,
-        "fallback": failed,
+        "compiled": primary_successful,
+        "fallback": primary_failed,
         "coverage": coverage["summary"],
         "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "abi": 2,

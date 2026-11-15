@@ -663,6 +663,8 @@ def main():
     }
     if not args.launcher_only:
         import flag_gems
+        from torch_fl import _build_config
+        from torch_fl.native_host import source_variants
         from Cython.Build import cythonize
         from Cython.Compiler import Options
 
@@ -685,7 +687,13 @@ def main():
             for _, function, *_ in flag_gems._FULL_CONFIG
             if isinstance(function, types.FunctionType)
         ]
-        modules = collect_modules(functions + registry_functions)
+        policy = source_variants.selected(_build_config)
+        alternatives = source_variants.load(policy)
+        if policy is not None:
+            manifest["source_variants"] = policy
+        modules = collect_modules(
+            functions + registry_functions + list(alternatives.values())
+        )
         cython_extensions = []
         runtime = source_dir / "runtime.pyx"
         write_changed(

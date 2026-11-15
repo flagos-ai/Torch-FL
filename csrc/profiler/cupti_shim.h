@@ -193,6 +193,11 @@ struct CuptiShim {
       CUpti_ActivityKind, uint32_t, const char**) = nullptr;
 #endif
   CUptiResult (*GetTimestamp)(uint64_t*) = nullptr;
+#if defined(FLAGOS_ACCEL_CUDA)
+  // Optional driver-domain name resolver. Called after buffer collection, never
+  // recursively from a CUPTI callback. Domain 1 is CUPTI_CB_DOMAIN_DRIVER_API.
+  CUptiResult (*GetCallbackName)(uint32_t, uint32_t, const char**) = nullptr;
+#endif
   // Optional: only used for diagnostics, so a failure to resolve it is not fatal.
   CUptiResult (*GetVersion)(uint32_t*) = nullptr;
 
@@ -293,6 +298,9 @@ struct CuptiShim {
     LOAD_SYM(ActivityGetApiName, "mcptiActivityGetApiName");
 #endif
     LOAD_SYM(GetTimestamp, "cuptiGetTimestamp");
+#if defined(FLAGOS_ACCEL_CUDA)
+    LOAD_SYM(GetCallbackName, "cuptiGetCallbackName");
+#endif
     LOAD_SYM(GetVersion, "cuptiGetVersion");
 
 #undef LOAD_SYM

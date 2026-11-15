@@ -208,6 +208,7 @@ def test_build_ext_stages_generated_build_config(
         'ACCELERATOR = "mthreads"\n'
         'KERNELS = ("flaggems", "vendor")\n'
         "NATIVE_HOSTS = False\n"
+        "NATIVE_VENDOR = False\n"
     )
     compatibility = json.loads(
         (tmp_path / "wheel" / "torch_fl" / "compatibility.json").read_text()
@@ -329,6 +330,69 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
     command.ensure_finalized()
     with pytest.raises(RuntimeError, match="boxing"):
         command._build_native_hosts()
+
+
+def test_native_vendor_records_the_verified_cohort(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    namespace, _ = _load_setup(monkeypatch)
+    globals_ = namespace["_write_compatibility_manifest"].__globals__
+    record = {
+        "version": "2.10.0+cu130",
+        "flag_gems": "5.4.0",
+        "requirements": ["nvidia-cublas==13.1.0.3"],
+    }
+    monkeypatch.setitem(globals_, "_native_vendor_cohort", lambda: (None, record))
+    monkeypatch.setitem(globals_, "BASE_DIR", str(tmp_path))
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True)),
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "2.10.0+cpu" if name == "torch" else None,
+    )
+    (tmp_path / "torch_fl").mkdir()
+    namespace["_write_build_config"]()
+    namespace["_write_compatibility_manifest"]("2.10.0+cuda13.3")
+    manifest = json.loads((tmp_path / "torch_fl/compatibility.json").read_text())
+    assert (
+        "NATIVE_VENDOR = True" in (tmp_path / "torch_fl/_build_config.py").read_text()
+    )
+    assert manifest["build"]["vendor_torch_libraries"] is True
+    assert manifest["build"]["vendor_torch_version"] == "2.10.0+cu130"
+    requirements = namespace["_install_requires"]()
+    assert "torch==2.10.0+cpu" in requirements
+    assert "flag_gems==5.4.0" in requirements
+    assert requirements.count("flag_gems==5.4.0") == 1
+    assert "nvidia-cublas==13.1.0.3" in requirements
+    assert not any("cu12" in value for value in requirements)
+    record["flag_gems"] = "5.4.1"
+    with pytest.raises(RuntimeError, match="revalidate the native vendor policy"):
+        namespace["_install_requires"]()
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("FLAGOS_BUILD_BOXING", "1"),
+        ("FLAGOS_BUILD_VENDOR", "0"),
+        ("FLAGOS_SKIP_CUDA_ASSETS", "1"),
+    ],
+)
+def test_native_vendor_refuses_incompatible_build(
+    monkeypatch, tmp_path, clean_kernel_env, flag, value
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    namespace, _ = _load_setup(monkeypatch)
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(tmp_path / "torch/lib"))
+    monkeypatch.setenv(flag, value)
+    with pytest.raises(RuntimeError, match="bundled non-boxing vendor libraries"):
+        namespace["_native_vendor_cohort"]()
 
 
 def _switches(namespace, accelerator):

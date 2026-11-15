@@ -332,7 +332,7 @@ _LOG_NAME = {
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
-    "nvidia": "boxing",
+    "nvidia": "nvidia",
 }
 
 #: The backend names that mean "this operator took a FlagGems route".

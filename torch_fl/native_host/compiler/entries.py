@@ -156,12 +156,21 @@ def bind_parameters(record, public):
     return bound
 
 
-def emit_entries(catalog, groups):
+def emit_entries(catalog, groups, selections=()):
     """Generate schema-specific callbacks; unsupported conversions stay visible."""
     declarations, records, rejected = [], [], []
+    declarations.extend(
+        f"std::atomic<int64_t> SourceVariantHits_{row['id']}{{0}};"
+        for row in selections
+    )
+    admitted_selections = set()
     for record in catalog:
         name = record["host"].removeprefix("flag_gems.")
         group = groups.get(name, [])
+        alternatives = [row for row in selections if row["op"] == record["op"]]
+        candidates = [
+            (entry, row) for row in alternatives for entry in groups.get(row["id"], [])
+        ] + [(entry, None) for entry in group]
         symbol = "TypedEntry" + str(len(records))
         lines = [
             "bool "
@@ -175,10 +184,26 @@ def emit_entries(catalog, groups):
             + ") {"
         ]
         accepted = []
-        for namespace, public, graph_args, types, jit_types, result_type in group:
+        selected = []
+        for entry, selection in candidates:
+            namespace, public, graph_args, types, jit_types, result_type = entry
             try:
                 bound = bind_parameters(record, public)
                 checks, values = [], {}
+                if selection is not None:
+                    mask = " | ".join(
+                        "(uint64_t{1} << static_cast<unsigned>(at::ScalarType::"
+                        + dtype
+                        + "))"
+                        for dtype in selection["dtypes"]
+                    )
+                    checks.append(
+                        "PublishedSourceAccepts("
+                        + mask
+                        + ", "
+                        + ", ".join(f"a{i}" for i in range(len(record["arguments"])))
+                        + ")"
+                    )
                 for argument in graph_args:
                     source, expression = bound[argument.name]
                     check, expression = convert(
@@ -221,9 +246,17 @@ def emit_entries(catalog, groups):
                     + " && ".join(checks or ["true"])
                     + ") {"
                     + result
+                    + (
+                        f"++SourceVariantHits_{selection['id']};"
+                        if selection is not None
+                        else ""
+                    )
                     + "return true;}"
                 )
                 accepted.append(namespace)
+                if selection is not None:
+                    admitted_selections.add(selection["id"])
+                    selected.append({**selection, "namespace": namespace})
             except NotImplementedError as error:
                 rejected.append(
                     {"op": record["op"], "namespace": namespace, "reason": str(error)}
@@ -236,11 +269,51 @@ def emit_entries(catalog, groups):
             continue
         lines.append("return false; }")
         declarations.append("\n".join(lines))
-        records.append({**record, "symbol": symbol, "variants": accepted})
+        entry = {**record, "symbol": symbol, "variants": accepted}
+        if selected:
+            entry["source_variants"] = selected
+        records.append(entry)
+    missing = {row["id"] for row in selections} - admitted_selections
+    if missing:
+        raise ValueError(
+            f"published source selections did not lower: {sorted(missing)}"
+        )
     return declarations, records, rejected
 
 
 HEADER = r"""
+#include <atomic>
+class PublishedSourceGuard {
+ uint64_t mask_;
+ std::optional<c10::Device> device_;
+ public:
+ explicit PublishedSourceGuard(uint64_t mask):mask_(mask){}
+ bool Check(const at::Tensor& value) {
+  if(!value.defined() || !value.device().is_privateuseone() ||
+     !(mask_ & (uint64_t{1} << static_cast<unsigned>(value.scalar_type()))))return false;
+  if(device_ && *device_!=value.device())return false;
+  device_=value.device();return true;
+ }
+ template<class T> bool Check(const T&){return true;}
+ template<class T> bool Check(const std::optional<T>& value){return !value || Check(*value);}
+ template<class T> bool Check(const c10::List<T>& values){
+  for(const auto& value:values)if(!Check(static_cast<T>(value)))return false;
+  return true;
+ }
+ template<class T> bool Check(at::ArrayRef<T> values){
+  for(const auto& value:values)if(!Check(value))return false;
+  return true;
+ }
+ bool Check(const at::ITensorListRef& values){
+  for(const auto& value:values)if(!Check(value))return false;
+  return true;
+ }
+ bool HasTensor() const{return device_.has_value();}
+};
+template<class... Args> bool PublishedSourceAccepts(uint64_t mask,const Args&... args){
+ PublishedSourceGuard guard(mask);
+ return (guard.Check(args) && ...) && guard.HasTensor();
+}
 inline bool TypedWrappedNumber(const at::Tensor& value) {
  return value.defined() && value.device().is_cpu() && value.unsafeGetTensorImpl()->is_wrapped_number();
 }

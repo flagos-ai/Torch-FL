@@ -15,7 +15,8 @@
 """Full official Qwen3 prefill/decode, with a separate vendor reference.
 
 Eager execution is the default. --model-host compiles only the model's host
-graph through ATen; all numerical kernels remain FlagGems. Neither mode uses
+graph through ATen. Numerical kernels come from FlagGems or audited, measured
+vendor precision exceptions. Neither mode uses
 CUDA graphs, layer truncation, a replacement model or output pooling. Run each
 backend in its own process on an otherwise idle GPU.
 """
@@ -58,6 +59,16 @@ def compare(actual, expected):
         ),
         "allclose_rtol_003_atol_01": bool(torch.allclose(a, b, rtol=0.03, atol=0.1)),
     }
+
+
+def vendor_audit():
+    from torch_fl import _build_config
+
+    if not getattr(_build_config, "NATIVE_VENDOR", False):
+        return None
+    from torch_fl.native_host import vendor
+
+    return vendor.audit()
 
 
 def main():
@@ -371,21 +382,14 @@ def main():
             profiler.export_chrome_trace(str(args.profile_kernels))
             trace = json.loads(args.profile_kernels.read_text())
             events = trace["traceEvents"]
-            kernels = [event for event in events if event.get("cat") == "kernel"]
-            counts = Counter(event["name"] for event in kernels)
+            from kernel_provenance import audit_kernels
+
             admitted = hosts.audit()["launched_kernels"]
-            unmatched = sorted(set(counts) - set(admitted))
-            if not counts or unmatched:
-                raise RuntimeError(f"GPU kernel provenance audit failed: {unmatched}")
-            report["gpu_kernel_audit"] = {
-                "model_calls": 2,
-                "counts": dict(counts),
-                "unmatched": unmatched,
-                "summed_device_ms": sum(event["dur"] for event in kernels) / 1000,
-            }
+            report["gpu_kernel_audit"] = audit_kernels(events, admitted, vendor_audit())
         if hosts is not None:
             report["kernel_sources"] = hosts.provenance
             report["native_audit"] = hosts.audit()
+            report["vendor_precision_audit"] = vendor_audit()
             if hasattr(hosts, "typed"):
                 report["native_source_stats"] = torch.ops.flagos.native_source_stats()
                 report["typed_variants"] = len(hosts.typed["compiled"])
@@ -406,7 +410,7 @@ def main():
             if args.device == "cuda:0"
             and "torch_fl" not in sys.modules
             and "flag_gems" not in sys.modules
-            else "flaggems"
+            else "torch_fl"
         ),
         "torch": str(torch.__version__),
         "math_settings_after": report["math_settings_after"],

@@ -1,0 +1,80 @@
+[
+  {
+    "vendor": "nvidia",
+    "op": "_softmax",
+    "schema": "_softmax(Tensor self, int dim, bool half_to_float) -> Tensor",
+    "pointer": "at::Tensor (*)(const at::Tensor &, int64_t, bool)",
+    "parent": "at::native::structured_softmax_cuda_out",
+    "family": "structured",
+    "dtypes": [
+      "Float"
+    ],
+    "policy_sha256": "e414b664d46a8d0f3887b248db19acf7ba7fba66aa0f92f4597b6edef786c499",
+    "abi": "f2469f98e42b9621bdf4604ba34c7c15e989e835af2dab18950e8acfbd28b55b"
+  },
+  {
+    "vendor": "nvidia",
+    "op": "bmm",
+    "schema": "bmm(Tensor self, Tensor mat2) -> Tensor",
+    "pointer": "at::Tensor (*)(const at::Tensor &, const at::Tensor &)",
+    "parent": "at::native::structured_bmm_out_cuda",
+    "family": "blas",
+    "dtypes": [
+      "BFloat16"
+    ],
+    "policy_sha256": "e414b664d46a8d0f3887b248db19acf7ba7fba66aa0f92f4597b6edef786c499",
+    "abi": "f3e803fbfc82e8c224dc7243a478796e7f02b3ed0249b32cf8e63ca32a891244"
+  },
+  {
+    "vendor": "nvidia",
+    "op": "mean.dim",
+    "schema": "mean.dim(Tensor self, int[1]? dim, bool keepdim=False, *, ScalarType? dtype=None) -> Tensor",
+    "pointer": "at::Tensor (*)(const at::Tensor &, at::OptionalIntArrayRef, bool, ::std::optional<at::ScalarType>)",
+    "parent": "at::native::structured_mean_out",
+    "family": "reduction",
+    "dtypes": [
+      "Float"
+    ],
+    "policy_sha256": "e414b664d46a8d0f3887b248db19acf7ba7fba66aa0f92f4597b6edef786c499",
+    "abi": "3ee2608c6f4068601a6227a220733d7dde2e032837a63070114a78cce7d55c8f"
+  },
+  {
+    "vendor": "nvidia",
+    "op": "mm",
+    "schema": "mm(Tensor self, Tensor mat2) -> Tensor",
+    "pointer": "at::Tensor (*)(const at::Tensor &, const at::Tensor &)",
+    "parent": "at::native::structured_mm_out_cuda",
+    "family": "blas",
+    "dtypes": [
+      "BFloat16"
+    ],
+    "policy_sha256": "e414b664d46a8d0f3887b248db19acf7ba7fba66aa0f92f4597b6edef786c499",
+    "abi": "e9e07eea36b5b7b5867bd4e304d72fb4d87d4e1d34b7e925d039058db022298c"
+  },
+  {
+    "vendor": "nvidia",
+    "op": "pow.Tensor_Scalar",
+    "schema": "pow.Tensor_Scalar(Tensor self, Scalar exponent) -> Tensor",
+    "pointer": "at::Tensor (*)(const at::Tensor &, const at::Scalar &)",
+    "parent": "at::native::structured_pow_Tensor_Scalar_out",
+    "family": "structured",
+    "dtypes": [
+      "Float"
+    ],
+    "policy_sha256": "e414b664d46a8d0f3887b248db19acf7ba7fba66aa0f92f4597b6edef786c499",
+    "abi": "4603619a7121cb2006f187f2a89b7ac670a5d5ba797923497577888ef8ebafe4"
+  },
+  {
+    "vendor": "nvidia",
+    "op": "rsqrt",
+    "schema": "rsqrt(Tensor self) -> Tensor",
+    "pointer": "at::Tensor (*)(const at::Tensor &)",
+    "parent": "at::native::structured_rsqrt_out",
+    "family": "structured",
+    "dtypes": [
+      "Float"
+    ],
+    "policy_sha256": "e414b664d46a8d0f3887b248db19acf7ba7fba66aa0f92f4597b6edef786c499",
+    "abi": "e36a8b3c11b4122e980cafc8646d40773556ddea0e11ba0430ddee231a4658fe"
+  }
+]
