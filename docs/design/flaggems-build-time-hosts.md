@@ -646,7 +646,8 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 python benchmarks/host_compiler/qwen_strict_eage
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 python benchmarks/host_compiler/qwen_strict_eager.py \
   --model /path/to/Qwen3-0.6B --device flagos:0 --dtype bfloat16 --mode plain \
   --steps 512 --rounds 3 --skip-sampling --prompt "The held-out prompt" \
-  --reference /path/to/vendor.pt --check-logits --output /path/to/candidate.json
+  --reference /path/to/vendor.pt --logits-policy bf16-v2 --check-logits \
+  --output /path/to/candidate.json
 ```
 
 References include checkpoint/config hashes, prompt tokens, dtype, math settings
@@ -655,7 +656,8 @@ incompatible settings and incomplete traversals before running model forwards.
 Regenerate old references with this harness. `--reference` without `--check-logits`
 still accepts legacy artifacts for input-oracle diagnostics and reports numerical
 differences without making an acceptance claim. `--logits-atol` and `--logits-rtol`
-support other diagnostic tolerances; the project acceptance values remain 1e-3.
+only configure the historical `elementwise` policy. The fixed `bf16-v2` policy
+rejects custom elementwise tolerances and uses the limits above.
 The wrapper retains its no-capture audit even when logit acceptance fails.
 
 The [BF16 evidence record in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840)

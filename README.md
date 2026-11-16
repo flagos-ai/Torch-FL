@@ -163,8 +163,8 @@ The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
 BF16 logit acceptance uses the versioned `bf16-v2` policy against the
 accelerator manufacturer's native Torch at the same precision: separate
-prefill/decode relative L2 limits, every-token vector limits, and P99/maximum
-error guards. Select it with
+prefill/decode relative L2 limits, exact top-1 equality at every token,
+every-token vector limits, and P99/maximum error guards. Select it with
 `--logits-policy bf16-v2 --check-logits --reference <vendor-reference.pt>`.
 The benchmark also retains the original elementwise `atol=rtol=1e-3` mode as
 its default for reproducing earlier records. See the
