@@ -468,7 +468,12 @@ faster_cpu_torch_index() {
 install_cpu_torch() {
   local mirror="${TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL-${CPU_TORCH_MIRROR_INDEX_URL_DEFAULT:-}}"
   local index="$CPU_TORCH_INDEX_URL"
+  # The Ascend proxy moved only 9.9/146.5 MB before the two-hour timeout.
+  # Probe direct routes before measuring either index, as for FlagTree, and
+  # keep their NO_PROXY changes in this shell for pip and the pinned fallback.
+  prefer_direct_route "$CPU_TORCH_INDEX_URL" "CPU torch wheel" >&2
   if [[ -n "$mirror" && "$mirror" != "$CPU_TORCH_INDEX_URL" ]]; then
+    prefer_direct_route "$mirror" "CPU torch mirror" >&2
     index="$(faster_cpu_torch_index "$CPU_TORCH_INDEX_URL" "$mirror")"
   fi
   if [[ "$index" != "$CPU_TORCH_INDEX_URL" ]]; then
