@@ -96,7 +96,9 @@ def _load_setup(monkeypatch):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_cython_is_only_a_native_host_build_requirement(monkeypatch, enabled):
+def test_cython_is_only_a_native_host_build_requirement(
+    monkeypatch, enabled, clean_kernel_env
+):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", str(int(enabled)))
     monkeypatch.setattr(sys, "argv", ["setup.py", "egg_info"])
@@ -184,9 +186,15 @@ def test_iluvatar_manifest_records_official_cpu_runtime(
 
 @pytest.fixture
 def clean_kernel_env(monkeypatch):
-    """No build switch inherited from the ambient environment."""
+    """No build switch or vendor cohort inherited from the runner."""
     monkeypatch.delenv("FLAGOS_ACCELERATOR", raising=False)
-    for name in KERNEL_SWITCHES:
+    for name in (
+        *KERNEL_SWITCHES,
+        "FLAGOS_BUILD_NATIVE_HOST",
+        "FLAGOS_VENDOR_TORCH_LIB",
+        "FLAGOS_VENDOR_TORCH_VERSION",
+        "FLAGOS_SKIP_CUDA_ASSETS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
