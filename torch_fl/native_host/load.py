@@ -82,45 +82,26 @@ def function_identity(function):
 
 def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
     global _audit_installed, _launcher_module
-    import triton.backends.nvidia.driver as driver
+    import triton
+    from torch_fl import _build_config
+    from torch_fl.native_host.backend import get_backend, validate_record
 
+    package_module = importlib.import_module(package)
+    manifest = json.loads(
+        (Path(package_module.__file__).parent / "manifest.json").read_text()
+    )
+    backend = get_backend(_build_config.ACCELERATOR)
     _launcher_module = importlib.import_module(package + "._launcher")
-    cuda_utils = importlib.import_module(package + ".cuda_utils")
-
-    driver.CudaUtils = lambda: cuda_utils
-    driver.PyCUtensorMap = cuda_utils.PyCUtensorMap
-    driver.CudaLauncher = kernel_launcher
+    validate_record(
+        manifest.get("backend"),
+        backend,
+        Path(triton.__file__).parent,
+        _launcher_module.backend_contract(),
+    )
+    backend.install(package, _launcher_module, kernel_launcher)
     if enforce_native_compilation and not _audit_installed:
         sys.addaudithook(audit_native_compilers)
         _audit_installed = True
-
-    # Refuse an accidental return to either runtime-generated native module.
-    def reject(*args, **kwargs):
-        raise RuntimeError("runtime C/C++ launcher compilation is forbidden")
-
-    driver.compile_module_from_src = reject
-    from triton.runtime import driver as runtime_driver
-
-    # Driver creation happens after the CPU-Torch CUDA compatibility setup.
-    # Bind both future and existing drivers to the same live stream provider
-    # used by native launches, without forcing early driver initialization.
-    if not getattr(driver.CudaDriver.__init__, "_flagos_stream_provider", False):
-        original_init = driver.CudaDriver.__init__
-
-        def initialize(instance, *args, **kwargs):
-            original_init(instance, *args, **kwargs)
-            instance.get_current_stream = _launcher_module.current_stream
-
-        initialize._flagos_stream_provider = True
-        driver.CudaDriver.__init__ = initialize
-    for active in (
-        getattr(runtime_driver, "_active", None),
-        getattr(runtime_driver, "_default", None),
-    ):
-        if active is not None:
-            active.utils = cuda_utils
-            active.launcher_cls = kernel_launcher
-            active.get_current_stream = _launcher_module.current_stream
 
 
 class Hosts:
@@ -155,16 +136,17 @@ class Hosts:
             raise RuntimeError(
                 "native hosts require their build-time Torch/FlagTree cohort"
             )
-        driver_source = Path(triton.__file__).parent / "backends/nvidia/driver.c"
-        if (
-            hashlib.sha256(driver_source.read_bytes()).hexdigest()
-            != self.manifest["driver_sha256"]
-        ):
-            raise RuntimeError(
-                "FlagTree CUDA driver ABI changed since the native-host build"
-            )
+        from torch_fl import _build_config
+        from torch_fl.native_host.backend import get_backend, validate_record
+
         self.package = self.manifest.get("package", "fg_aot")
         _launcher = importlib.import_module(self.package + "._launcher")
+        validate_record(
+            self.manifest.get("backend"),
+            get_backend(_build_config.ACCELERATOR),
+            Path(triton.__file__).parent,
+            _launcher.backend_contract(),
+        )
         runtime = importlib.import_module(self.package + ".runtime")
         self.modules = {}
         self.originals = {}
@@ -363,6 +345,7 @@ class Hosts:
             hits = dict(module.source_variant_hits())
         return {
             "host_artifacts": self.artifacts,
+            "backend": self.manifest["backend"],
             "source_variants": self.manifest.get("source_variants"),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,

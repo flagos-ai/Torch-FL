@@ -10,7 +10,6 @@
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
 #include <c10/util/SmallVector.h>
-#include <cuda.h>
 #include <dlfcn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -36,11 +35,24 @@
 #include <vector>
 
 #include "host_abi.h"
+#include "backend_api.h"
 
 namespace py = pybind11;
 using namespace pybind11::literals;
 
 namespace {
+
+namespace backend = flagos::native_host::backend;
+const backend::Api* backend_api = nullptr;
+using backend::CheckedProduct;
+
+const backend::Api& Backend() { return *backend_api; }
+
+bool IsCapturing(uint64_t stream) {
+  if (!Backend().is_capturing)
+    throw std::runtime_error("backend cannot query stream capture state");
+  return Backend().is_capturing(stream);
+}
 
 using CurrentStream = void* (*)(int);
 CurrentStream current_stream = nullptr;
@@ -180,14 +192,6 @@ uint64_t Stream(int device) {
   return reinterpret_cast<uint64_t>(current_stream(device));
 }
 
-void Check(CUresult status) {
-  if (status != CUDA_SUCCESS) {
-    const char* error = nullptr;
-    cuGetErrorString(status, &error);
-    throw std::runtime_error(error ? error : "CUDA driver operation failed");
-  }
-}
-
 class CurrentDeviceScope {
  public:
   explicit CurrentDeviceScope(c10::Device device) {
@@ -262,29 +266,22 @@ uint64_t Pointer(py::handle value) {
     const auto& buffer = py::cast<const StridedBuffer&>(value);
     if (THPVariable_CheckExact(buffer.base.ptr()) &&
         THPVariable_Unpack(buffer.base.ptr()).device().is_cpu())
-      throw std::invalid_argument("CPU tensor cannot be passed to a FlagGems CUDA kernel");
+      throw std::invalid_argument("CPU tensor cannot be passed to a FlagGems device kernel");
     return buffer.pointer;
   }
   if (THPVariable_CheckExact(value.ptr())) {
     const auto& tensor = THPVariable_Unpack(value.ptr());
     if (tensor.device().is_cpu())
-      throw std::invalid_argument("CPU tensor cannot be passed to a FlagGems CUDA kernel");
+      throw std::invalid_argument("CPU tensor cannot be passed to a FlagGems device kernel");
     return reinterpret_cast<uint64_t>(tensor.const_data_ptr());
   }
   if (py::hasattr(value, "device") &&
       py::cast<std::string>(value.attr("device").attr("type")) == "cpu")
-    throw std::invalid_argument("CPU tensor cannot be passed to a FlagGems CUDA kernel");
+    throw std::invalid_argument("CPU tensor cannot be passed to a FlagGems device kernel");
   return py::cast<uint64_t>(value.attr("data_ptr")());
 }
 
-struct alignas(128) Slot {
-  Slot() {}
-  std::array<unsigned char, 128> bytes;
-  template <typename T>
-  void Set(T value) {
-    std::memcpy(bytes.data(), &value, sizeof(T));
-  }
-};
+using Slot = backend::Slot;
 
 struct Argument {
   enum class Kind {
@@ -292,17 +289,15 @@ struct Argument {
   };
   std::vector<size_t> path;
   std::string type;
-  py::object descriptor_metadata;
-  std::vector<uint32_t> block;
-  uint64_t element_size = 0;
-  int element_type = 0, swizzle = 0;
-  bool fp4_padded = false;
+  std::shared_ptr<const backend::Descriptor> descriptor;
   Kind kind = Kind::Other;
 };
 
 class Launcher {
  public:
-  Launcher(py::object source, py::object metadata) : metadata_(metadata) {
+  Launcher(py::object source, py::object metadata)
+      : metadata_(metadata), kernel_(Backend().kernel(metadata.ptr())) {
+    slot_capacity_ = kernel_->scratch_slots;
     const auto signatures = py::cast<py::dict>(source.attr("signature"));
     py::object descriptors = py::getattr(metadata, "tensordesc_meta", py::none());
     size_t index = 0, descriptor = 0;
@@ -312,18 +307,7 @@ class Launcher {
     if (!descriptors.is_none() && descriptor != py::len(descriptors))
       throw std::invalid_argument("Triton descriptor metadata arity mismatch");
     num_args_ = index;
-    num_warps_ = py::cast<unsigned>(metadata.attr("num_warps"));
-    num_ctas_ = py::cast<unsigned>(py::getattr(metadata, "num_ctas", py::int_(1)));
-    shared_ = py::cast<unsigned>(metadata.attr("shared"));
-    cluster_ = py::cast<std::array<unsigned, 3>>(
-        py::getattr(metadata, "cluster_dims", py::make_tuple(1, 1, 1)));
-    cooperative_ =
-        py::cast<bool>(py::getattr(metadata, "launch_cooperative_grid", py::bool_(false)));
-    pdl_ = py::cast<bool>(py::getattr(metadata, "launch_pdl", py::bool_(false)));
-    global_size_ = py::cast<uint64_t>(metadata.attr("global_scratch_size"));
-    global_align_ = py::cast<uint64_t>(metadata.attr("global_scratch_align"));
-    profile_size_ = py::cast<uint64_t>(metadata.attr("profile_scratch_size"));
-    profile_align_ = py::cast<uint64_t>(metadata.attr("profile_scratch_align"));
+
   }
 
   // Matches CompiledKernel.run; callers pass metadata and optional profiler hooks.
@@ -343,7 +327,7 @@ class Launcher {
       throw std::invalid_argument("Triton launch argument arity mismatch");
     if (!enter.is_none()) enter(launch_metadata);
     std::vector<Slot> slots;
-    slots.reserve(arguments_.size() * 22 + 2);
+    slots.reserve(arguments_.size() * 22 + kernel_->scratch_slots);
     for (const auto& argument : arguments_) {
       PyObject* value = args[argument.path.front()].ptr();
       for (size_t depth = 1; depth < argument.path.size(); ++depth) {
@@ -360,60 +344,19 @@ class Launcher {
     }
 
     const uint64_t grid = CheckedProduct(CheckedProduct(x, y), z);
-    py::object global =
-        Scratch(CheckedProduct(CheckedProduct(grid, num_ctas_), global_size_), global_align_);
-    py::object profile =
-        Scratch(CheckedProduct(CheckedProduct(grid, num_ctas_), profile_size_), profile_align_);
+    const auto programs = CheckedProduct(grid, kernel_->scratch_multiplier);
+    const auto global_bytes = CheckedProduct(programs, kernel_->global.bytes);
+    const auto profile_bytes = CheckedProduct(programs, kernel_->profile.bytes);
+    py::object global = Scratch(global_bytes, kernel_->global.alignment);
+    py::object profile = Scratch(profile_bytes, kernel_->profile.alignment);
     const uint64_t global_ptr = Pointer(global), profile_ptr = Pointer(profile);
-    slots.emplace_back();
-    slots.back().Set(global_ptr);
-    slots.emplace_back();
-    slots.back().Set(profile_ptr);
+    PackScratch(global_ptr, profile_ptr, slots);
     std::vector<void*> pointers;
     pointers.reserve(slots.size());
     for (auto& slot : slots) pointers.push_back(slot.bytes.data());
-    if (grid) {
-      auto handle = reinterpret_cast<CUfunction>(function);
-      auto cuda_stream = reinterpret_cast<CUstream>(stream);
-      if (cooperative_ && global_ptr)
-        Check(cuMemsetD8Async(global_ptr, 0,
-                              CheckedProduct(CheckedProduct(grid, num_ctas_), global_size_),
-                              cuda_stream));
-      CUlaunchAttribute attributes[4]{};
-      unsigned count = 0;
-      if (pdl_) {
-        attributes[count].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
-        attributes[count++].value.programmaticStreamSerializationAllowed = 1;
-      }
-      if (cooperative_) {
-        attributes[count].id = CU_LAUNCH_ATTRIBUTE_COOPERATIVE;
-        attributes[count++].value.cooperative = 1;
-      }
-      const uint64_t cluster_size =
-          CheckedProduct(CheckedProduct(cluster_[0], cluster_[1]), cluster_[2]);
-      if (cluster_size != 1) {
-        attributes[count].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
-        attributes[count].value.clusterDim.x = cluster_[0];
-        attributes[count].value.clusterDim.y = cluster_[1];
-        attributes[count++].value.clusterDim.z = cluster_[2];
-        attributes[count].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE;
-        attributes[count++].value.clusterSchedulingPolicyPreference =
-            CU_CLUSTER_SCHEDULING_POLICY_SPREAD;
-      }
-      if (num_ctas_ == 16 || cluster_size == 16)
-        Check(cuFuncSetAttribute(handle, CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED, 1));
-      CUlaunchConfig config{};
-      config.gridDimX = GridSize(CheckedProduct(CheckedProduct(x, num_ctas_), cluster_[0]));
-      config.gridDimY = GridSize(CheckedProduct(y, cluster_[1]));
-      config.gridDimZ = GridSize(CheckedProduct(z, cluster_[2]));
-      config.blockDimX = GridSize(CheckedProduct(num_warps_, 32));
-      config.blockDimY = config.blockDimZ = 1;
-      config.sharedMemBytes = shared_;
-      config.hStream = cuda_stream;
-      config.attrs = attributes;
-      config.numAttrs = count;
-      Check(cuLaunchKernelEx(&config, handle, pointers.data(), nullptr));
-    }
+    if (grid)
+      kernel_->Enqueue({{x, y, z}, stream, function, pointers.data(), global_ptr,
+                        global_bytes, true});
     if (!leave.is_none()) leave(launch_metadata);
   }
 
@@ -424,7 +367,7 @@ class Launcher {
   }
 
   bool NativeSafe() const {
-    if (global_size_ || profile_size_) return false;
+    if (kernel_->global.bytes || kernel_->profile.bytes) return false;
     for (const auto& arg : arguments_)
       if (arg.type == "fp16" || arg.type == "bf16") return false;
     return true;
@@ -461,7 +404,7 @@ class Launcher {
         if (value.isTensor()) {
           const auto& tensor = value.toTensor();
           TORCH_CHECK(!tensor.device().is_cpu(),
-                      "CPU tensor cannot be passed to a FlagGems CUDA kernel");
+                      "CPU tensor cannot be passed to a FlagGems device kernel");
           pointer = reinterpret_cast<uint64_t>(tensor.const_data_ptr());
         } else if (!value.isNone())
           pointer = static_cast<uint64_t>(value.toInt());
@@ -493,73 +436,31 @@ class Launcher {
         throw std::invalid_argument("unsupported native scalar ABI");
       }
     }
-    slots.emplace_back();
-    slots.back().Set(uint64_t(0));
-    slots.emplace_back();
-    slots.back().Set(uint64_t(0));
+    PackScratch(0, 0, slots);
     c10::SmallVector<void*, 32> pointers;
     for (auto& slot : slots) pointers.push_back(slot.bytes.data());
     TORCH_CHECK(!grid.empty() && grid.size() <= 3, "invalid launch grid");
-    uint64_t dims[3]{1, 1, 1};
+    std::array<uint64_t, 3> dims{1, 1, 1};
     for (size_t i = 0; i < grid.size(); ++i) {
       TORCH_CHECK(grid[i] >= 0, "negative launch dimension");
       dims[i] = grid[i];
     }
     if (!CheckedProduct(CheckedProduct(dims[0], dims[1]), dims[2])) return;
-    CUlaunchAttribute attrs[4]{};
-    unsigned count = 0;
-    if (pdl_) {
-      attrs[count].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
-      attrs[count++].value.programmaticStreamSerializationAllowed = 1;
-    }
-    if (cooperative_) {
-      attrs[count].id = CU_LAUNCH_ATTRIBUTE_COOPERATIVE;
-      attrs[count++].value.cooperative = 1;
-    }
-    const auto cluster = CheckedProduct(CheckedProduct(cluster_[0], cluster_[1]), cluster_[2]);
-    if (cluster != 1) {
-      attrs[count].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
-      attrs[count].value.clusterDim.x = cluster_[0];
-      attrs[count].value.clusterDim.y = cluster_[1];
-      attrs[count++].value.clusterDim.z = cluster_[2];
-      attrs[count].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE;
-      attrs[count++].value.clusterSchedulingPolicyPreference = CU_CLUSTER_SCHEDULING_POLICY_SPREAD;
-    }
-    auto handle = reinterpret_cast<CUfunction>(function);
-    if (num_ctas_ == 16 || cluster == 16)
-      Check(cuFuncSetAttribute(handle, CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED, 1));
-    CUlaunchConfig config{};
-    config.gridDimX = GridSize(CheckedProduct(CheckedProduct(dims[0], num_ctas_), cluster_[0]));
-    config.gridDimY = GridSize(CheckedProduct(dims[1], cluster_[1]));
-    config.gridDimZ = GridSize(CheckedProduct(dims[2], cluster_[2]));
-    config.blockDimX = GridSize(CheckedProduct(num_warps_, 32));
-    config.blockDimY = config.blockDimZ = 1;
-    config.sharedMemBytes = shared_;
-    config.hStream = reinterpret_cast<CUstream>(Stream(device));
-    config.attrs = attrs;
-    config.numAttrs = count;
-    if (count == 0) {
-      Check(cuLaunchKernel(handle, config.gridDimX, config.gridDimY, config.gridDimZ,
-                           config.blockDimX, config.blockDimY, config.blockDimZ,
-                           config.sharedMemBytes, config.hStream, pointers.data(), nullptr));
-    } else
-      Check(cuLaunchKernelEx(&config, handle, pointers.data(), nullptr));
+    kernel_->Enqueue({dims, Stream(device), function, pointers.data()});
   }
 
  private:
-  static uint64_t CheckedProduct(uint64_t a, uint64_t b) {
-    if (b && a > std::numeric_limits<uint64_t>::max() / b)
-      throw std::overflow_error("Triton launch size overflow");
-    return a * b;
+  template <class Slots>
+  void PackScratch(uint64_t global, uint64_t profile, Slots& slots) const {
+    if (!kernel_->scratch_slots) return;
+    const auto start = slots.size();
+    slots.resize(start + kernel_->scratch_slots);
+    kernel_->PackScratch(global, profile, slots.data() + start);
   }
-  static unsigned GridSize(uint64_t value) {
-    if (value > std::numeric_limits<unsigned>::max())
-      throw std::overflow_error("Triton grid dimension overflow");
-    return static_cast<unsigned>(value);
-  }
+
   static py::object Scratch(uint64_t size, uint64_t alignment) {
     if (!size) return py::none();
-    if (alignment > 256)
+    if (alignment > Backend().scratch_alignment)
       throw std::invalid_argument("scratch alignment exceeds allocator guarantee");
     auto torch = py::module_::import("torch");
     return torch.attr("empty")(py::make_tuple(size), "dtype"_a = torch.attr("uint8"),
@@ -577,19 +478,14 @@ class Launcher {
     }
     const std::string name = py::cast<std::string>(type);
     if (name == "constexpr") return;
-    Argument argument{std::move(path), name, py::none()};
+    Argument argument{std::move(path), name, nullptr};
     if (name.rfind("tensordesc", 0) == 0) {
       argument.kind = Argument::Kind::Descriptor;
-      if (!descriptors.is_none()) argument.descriptor_metadata = descriptors[py::int_(descriptor)];
+      auto metadata = descriptors.is_none() ? py::none() : py::object(descriptors[py::int_(descriptor)]);
       ++descriptor;
-      if (!argument.descriptor_metadata.is_none()) {
-        auto meta = py::cast<py::dict>(argument.descriptor_metadata);
-        argument.block = py::cast<std::vector<uint32_t>>(meta["block_size"]);
-        argument.element_size = py::cast<uint64_t>(meta["elem_size"]);
-        argument.element_type = py::cast<int>(meta["elem_type"]);
-        argument.swizzle = py::cast<int>(meta["swizzle"]);
-        argument.fp4_padded = py::cast<bool>(meta["fp4_padded"]);
-      }
+      if (!Backend().descriptor)
+        throw std::invalid_argument("backend does not support tensor descriptors");
+      argument.descriptor = Backend().descriptor(metadata.ptr());
     } else if (!name.empty() && name[0] == '*')
       argument.kind = Argument::Kind::Pointer;
     else if (name == "fp64") argument.kind = Argument::Kind::Float64;
@@ -600,7 +496,7 @@ class Launcher {
     else if (name == "i32" || name == "u32") argument.kind = Argument::Kind::Int32;
     else if (name == "i64" || name == "u64") argument.kind = Argument::Kind::Int64;
     slot_capacity_ += argument.kind == Argument::Kind::Descriptor
-                          ? (argument.block.empty() ? 22 : 1 + 2 * argument.block.size())
+                          ? argument.descriptor->Capacity()
                           : 1;
     arguments_.push_back(std::move(argument));
   }
@@ -674,143 +570,46 @@ class Launcher {
     throw std::invalid_argument("unsupported Triton parameter ABI: " + a.type);
   }
 
-  static void PackDescriptorNative(const Argument& a, const c10::IValue& value,
+  template <class Slots>
+  static void PackDescriptor(const Argument& argument, uint64_t pointer,
+                             c10::ArrayRef<uint64_t> shape,
+                             c10::ArrayRef<uint64_t> strides, bool nan, Slots& slots) {
+    if (shape.empty() || shape.size() != strides.size())
+      throw std::invalid_argument("invalid tensor descriptor dimensions");
+    const size_t start = slots.size(), capacity = argument.descriptor->Capacity();
+    slots.resize(start + capacity);
+    auto count = argument.descriptor->Pack(
+        {pointer, shape.size(), shape.data(), strides.data(), nan}, slots.data() + start);
+    if (count > capacity) throw std::runtime_error("backend descriptor exceeds argument capacity");
+    slots.resize(start + count);
+  }
+
+  static void PackDescriptorNative(const Argument& argument, const c10::IValue& value,
                                    c10::SmallVectorImpl<Slot>& slots) {
     TORCH_CHECK(IsDescriptor(value), "native tensor descriptor was not admitted");
     const flagos::native_host::Descriptor data(value);
     const auto tensor = data.at("base").toTensor();
-    TORCH_CHECK(!tensor.device().is_cpu(), "CPU descriptor cannot launch on CUDA");
-    const auto shape = data.at("shape").toIntList(), strides = data.at("strides").toIntList();
-    const auto rank = shape.size();
-    TORCH_CHECK(rank >= 1 && rank <= 5 && strides.size() == rank && strides.get(rank - 1) == 1,
-                "invalid native descriptor dimensions");
-    uint64_t dimensions[5]{}, steps[5]{};
-    for (size_t i = 0; i < rank; ++i) {
-      dimensions[i] = shape.get(i);
-      steps[i] = strides.get(i);
-    }
-    const bool nan = data.at("padding").toStringRef() == "nan";
-    const auto pointer = reinterpret_cast<uint64_t>(tensor.const_data_ptr());
-    if (a.descriptor_metadata.is_none()) {
-      slots.emplace_back();
-      slots.back().Set(pointer);
-      for (size_t i = 0; i < rank; ++i) {
-        slots.emplace_back();
-        slots.back().Set(dimensions[i]);
-      }
-      for (size_t i = 0; i < rank; ++i) {
-        slots.emplace_back();
-        slots.back().Set(steps[i]);
-      }
-      slots.emplace_back();
-      slots.back().Set(uint8_t(nan));
-    } else {
-      if (a.fp4_padded) dimensions[rank - 1] = CheckedProduct(dimensions[rank - 1], 2);
-      TORCH_CHECK(a.block.size() == rank, "TMA descriptor block rank mismatch");
-      uint64_t reversed_shape[5]{}, reversed_stride[5]{};
-      uint32_t reversed_block[5]{}, element_stride[5]{1, 1, 1, 1, 1};
-      for (size_t i = 0; i < rank; ++i) {
-        reversed_shape[rank - i - 1] = dimensions[i];
-        reversed_block[rank - i - 1] = a.block[i];
-        if (i + 1 < rank) reversed_stride[rank - i - 2] = CheckedProduct(steps[i], a.element_size);
-      }
-      int element_type = a.element_type;
-      if (element_type == 8)
-        element_type = 10;
-      else if (element_type == 9)
-        element_type = 8;
-      else if (element_type == 10)
-        element_type = 9;
-      slots.emplace_back();
-      Check(cuTensorMapEncodeTiled(
-          reinterpret_cast<CUtensorMap*>(slots.back().bytes.data()),
-          static_cast<CUtensorMapDataType>(element_type), rank, reinterpret_cast<void*>(pointer),
-          reversed_shape, reversed_stride, reversed_block, element_stride,
-          CU_TENSOR_MAP_INTERLEAVE_NONE, static_cast<CUtensorMapSwizzle>(a.swizzle),
-          CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-          nan ? CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA
-              : CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
-    }
-    for (size_t i = 0; i < rank; ++i) {
-      TORCH_CHECK(dimensions[i] <= INT32_MAX, "descriptor dimension exceeds kernel ABI");
-      slots.emplace_back();
-      slots.back().Set(int32_t(dimensions[i]));
-    }
-    for (size_t i = 0; i < rank; ++i) {
-      slots.emplace_back();
-      slots.back().Set(steps[i]);
-    }
+    TORCH_CHECK(!tensor.device().is_cpu(), "CPU descriptor cannot launch on the device");
+    const auto dimensions = data.at("shape").toIntList();
+    const auto steps = data.at("strides").toIntList();
+    c10::SmallVector<uint64_t, 8> shape(dimensions.begin(), dimensions.end());
+    c10::SmallVector<uint64_t, 8> strides(steps.begin(), steps.end());
+    PackDescriptor(argument, reinterpret_cast<uint64_t>(tensor.const_data_ptr()), shape, strides,
+                   data.at("padding").toStringRef() == "nan", slots);
   }
-  static void Descriptor(const Argument& a, py::handle value, std::vector<Slot>& slots) {
-    auto shape = py::cast<std::vector<uint64_t>>(value.attr("shape"));
-    const auto strides = py::cast<std::vector<uint64_t>>(value.attr("strides"));
-    const bool nan = py::cast<std::string>(value.attr("padding")) == "nan";
-    const size_t rank = shape.size();
-    if (rank < 1 || rank > 5 || strides.size() != rank || strides.back() != 1)
-      throw std::invalid_argument("invalid Triton tensor descriptor dimensions");
-    if (a.descriptor_metadata.is_none()) {
-      slots.emplace_back();
-      slots.back().Set(Pointer(value.attr("base")));
-      for (uint64_t s : shape) {
-        slots.emplace_back();
-        slots.back().Set(s);
-      }
-      for (uint64_t s : strides) {
-        slots.emplace_back();
-        slots.back().Set(s);
-      }
-      slots.emplace_back();
-      slots.back().Set(static_cast<uint8_t>(nan));
-    } else {
-      auto meta = py::cast<py::dict>(a.descriptor_metadata);
-      if (py::cast<bool>(meta["fp4_padded"])) shape.back() = CheckedProduct(shape.back(), 2);
-      auto block = py::cast<std::vector<uint32_t>>(meta["block_size"]);
-      if (block.size() != rank) throw std::invalid_argument("TMA block rank mismatch");
-      const auto elem_size = py::cast<uint64_t>(meta["elem_size"]);
-      int elem_type = py::cast<int>(meta["elem_type"]);
-      if (elem_type == 8)
-        elem_type = 10;
-      else if (elem_type == 9)
-        elem_type = 8;
-      else if (elem_type == 10)
-        elem_type = 9;
-      uint64_t reversed_shape[5]{}, reversed_stride[5]{};
-      uint32_t reversed_block[5]{}, element_stride[5]{1, 1, 1, 1, 1};
-      for (size_t i = 0; i < rank; ++i) {
-        reversed_shape[rank - i - 1] = shape[i];
-        reversed_block[rank - i - 1] = block[i];
-        if (i + 1 < rank) reversed_stride[rank - i - 2] = CheckedProduct(strides[i], elem_size);
-      }
-      slots.emplace_back();
-      Check(cuTensorMapEncodeTiled(reinterpret_cast<CUtensorMap*>(slots.back().bytes.data()),
-                                   static_cast<CUtensorMapDataType>(elem_type), rank,
-                                   reinterpret_cast<void*>(Pointer(value.attr("base"))),
-                                   reversed_shape, reversed_stride, reversed_block, element_stride,
-                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
-                                   static_cast<CUtensorMapSwizzle>(py::cast<int>(meta["swizzle"])),
-                                   CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-                                   nan ? CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA
-                                       : CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
-    }
-    for (uint64_t s : shape) {
-      if (s > INT32_MAX) throw std::overflow_error("descriptor dimension exceeds kernel ABI");
-      slots.emplace_back();
-      slots.back().Set(static_cast<int32_t>(s));
-    }
-    for (uint64_t s : strides) {
-      slots.emplace_back();
-      slots.back().Set(s);
-    }
+
+  static void Descriptor(const Argument& argument, py::handle value, std::vector<Slot>& slots) {
+    PackDescriptor(argument, Pointer(value.attr("base")),
+                   py::cast<std::vector<uint64_t>>(value.attr("shape")),
+                   py::cast<std::vector<uint64_t>>(value.attr("strides")),
+                   py::cast<std::string>(value.attr("padding")) == "nan", slots);
   }
 
   std::vector<Argument> arguments_;
-  size_t slot_capacity_ = 2;
+  size_t slot_capacity_ = 0;
   py::object metadata_;
   size_t num_args_;
-  unsigned num_warps_, num_ctas_, shared_;
-  std::array<unsigned, 3> cluster_;
-  bool cooperative_, pdl_;
-  uint64_t global_size_, global_align_, profile_size_, profile_align_;
+  std::unique_ptr<backend::Kernel> kernel_;
 };
 
 // Device-specialization metadata only. Every hit still binds this call's tensors,
@@ -1325,10 +1124,7 @@ class PointwiseSpec {
     const auto& first = tensors.front();
     if (first.device().type() != c10::DeviceType::PrivateUse1) return std::nullopt;
     CurrentDeviceScope device_scope(first.device());
-    CUstreamCaptureStatus capture;
-    Check(
-        cuStreamIsCapturing(reinterpret_cast<CUstream>(Stream(first.device().index())), &capture));
-    if (capture != CU_STREAM_CAPTURE_STATUS_NONE) return std::nullopt;
+    if (IsCapturing(Stream(first.device().index()))) return std::nullopt;
     bool same_shape = true, same_stride = true, contiguous = true;
     for (const auto& tensor : tensors) {
       if (tensor.device().type() != c10::DeviceType::PrivateUse1 || tensor.is_complex() ||
@@ -1427,9 +1223,7 @@ class PointwiseSpec {
   }
   py::object Prepare(py::tuple args, py::dict kwargs, int device, py::object owner = py::none()) {
     if (args.size() != inputs_.size()) return py::none();
-    CUstreamCaptureStatus capture;
-    Check(cuStreamIsCapturing(reinterpret_cast<CUstream>(Stream(device)), &capture));
-    if (capture != CU_STREAM_CAPTURE_STATUS_NONE) return py::none();
+    if (IsCapturing(Stream(device))) return py::none();
     std::vector<py::object> outputs(keys_.size(), py::none());
     std::vector<py::object> tensors;
     for (size_t i = 0; i < keys_.size(); ++i) {
@@ -2226,6 +2020,17 @@ TORCH_LIBRARY_FRAGMENT(flagos_source_native, m) {
 }  // namespace
 
 PYBIND11_MODULE(_launcher, module) {
+  backend_api = &backend::Validate(backend::CompiledBackend());
+  module.def("backend_contract", [] {
+    const auto& api = Backend();
+    return py::dict("abi_version"_a = api.abi_version, "vendor"_a = api.vendor,
+                    "compiler_backend"_a = api.compiler_backend,
+                    "capabilities"_a = api.capabilities,
+                    "scratch_alignment"_a = api.scratch_alignment,
+                    "slot_bytes"_a = backend::kSlotBytes,
+                    "slot_alignment"_a = backend::kSlotAlignment,
+                    "native_source_sha256"_a = FLAGOS_NATIVE_HOST_BACKEND_SHA256);
+  });
   module.attr("foreign_packed_api") =
       py::capsule(reinterpret_cast<void*>(&CallForeignPacked), "flagos.native_host.foreign.v1");
   module.attr("pointwise_launch_api") = py::capsule(reinterpret_cast<void*>(&LaunchPointwisePacked),
@@ -2318,9 +2123,7 @@ PYBIND11_MODULE(_launcher, module) {
   });
   module.def("current_stream", &Stream);
   module.def("is_capturing", [](int device) {
-    CUstreamCaptureStatus status;
-    Check(cuStreamIsCapturing(reinterpret_cast<CUstream>(Stream(device)), &status));
-    return status != CU_STREAM_CAPTURE_STATUS_NONE;
+    return IsCapturing(Stream(device));
   });
   py::class_<Launcher>(module, "Launcher")
       .def(py::init<py::object, py::object>())

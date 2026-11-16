@@ -16,12 +16,14 @@
 """Inspect a torch_fl wheel without importing torch_fl or its native extension."""
 
 import argparse
+import ast
+import hashlib
 import json
 import sys
 import zipfile
 from email.parser import Parser
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MANIFEST_PATH = "torch_fl/compatibility.json"
 SCHEMA_VERSION = 1
@@ -185,7 +187,136 @@ def _check_shape(manifest):
         raise ValueError("Compatibility manifest has invalid requirements")
 
 
-def load_wheel(path):
+def check_native_backend(
+    manifest, read, exists, has_extension, *, required=False, check_driver=False
+):
+    """Inspect optional native-host artifacts without importing package code."""
+    prefix = "torch_fl/native_host/"
+    path = prefix + "_generated/manifest.json"
+    if not exists(path):
+        if required:
+            raise ValueError("Wheel has no native-host backend manifest")
+        return
+    bundle = json.loads(read(path))
+    if not isinstance(bundle, dict):
+        raise ValueError("Invalid native-host bundle manifest")
+    record = bundle.get("backend")
+    if record is None and not required:
+        return  # Historical experimental wheels predate this optional contract.
+    if (
+        not isinstance(record, dict)
+        or record.get("schema_version") != 1
+        or record.get("abi_version") != 1
+    ):
+        raise ValueError("Unsupported or missing native-host backend ABI")
+    build_path = "torch_fl/_build_config.py"
+    if not exists(build_path):
+        raise ValueError("Native-host backend has no build config")
+    config = {}
+    for statement in ast.parse(read(build_path)).body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id in {
+                    "ACCELERATOR",
+                    "NATIVE_HOSTS",
+                }:
+                    config[target.id] = ast.literal_eval(statement.value)
+    if config.get("NATIVE_HOSTS") is not True or config.get(
+        "ACCELERATOR"
+    ) != record.get("vendor"):
+        raise ValueError("Native-host backend target differs from the wheel build")
+    if "boxing" in manifest["build"]["kernels"]:
+        raise ValueError("Native-host backend cannot use boxing")
+    provider = record.get("compiler_distribution", {})
+    if (
+        not isinstance(provider, dict)
+        or not provider.get("name")
+        or not provider.get("version")
+    ):
+        raise ValueError("Native-host backend has no compiler distribution")
+    recorded = manifest["build"]["distributions"].get(provider["name"])
+    if recorded is not None and recorded != provider["version"]:
+        raise ValueError("Native-host compiler differs from the wheel build")
+    fields = (
+        "abi_version",
+        "vendor",
+        "compiler_backend",
+        "capabilities",
+        "scratch_alignment",
+        "slot_bytes",
+        "slot_alignment",
+    )
+    if any(name not in record for name in fields) or not record["compiler_backend"]:
+        raise ValueError("Incomplete native-host backend contract")
+    if record["slot_bytes"] != 128 or record["slot_alignment"] != 128:
+        raise ValueError("Unsupported native-host argument slot ABI")
+    capabilities, alignment = record["capabilities"], record["scratch_alignment"]
+    if (
+        type(capabilities) is not int
+        or capabilities < 0
+        or capabilities & ~255
+        or type(alignment) is not int
+        or alignment < 1
+        or alignment & (alignment - 1)
+    ):
+        raise ValueError("Invalid native-host backend capabilities")
+    for category in ("native_sources", "adapter_sources", "driver_sources"):
+        values = record.get(category)
+        if not isinstance(values, dict) or not values:
+            raise ValueError("Native-host backend source hashes are missing")
+        for name, checksum in values.items():
+            parts = PurePosixPath(name)
+            if (
+                parts.is_absolute()
+                or ".." in parts.parts
+                or not isinstance(checksum, str)
+                or len(checksum) != 64
+                or any(character not in "0123456789abcdef" for character in checksum)
+            ):
+                raise ValueError("Invalid native-host backend source hash")
+            if category != "driver_sources":
+                if (
+                    not exists(prefix + name)
+                    or hashlib.sha256(read(prefix + name)).hexdigest() != checksum
+                ):
+                    raise ValueError(
+                        "Native-host backend source differs from its manifest: " + name
+                    )
+    expected = hashlib.sha256(
+        json.dumps(
+            {
+                "contract": {name: record[name] for name in fields},
+                "sources": record["native_sources"],
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    if expected != record.get("native_source_sha256"):
+        raise ValueError("Native-host backend source fingerprint is inconsistent")
+    utilities = record.get("utility_modules")
+    if not isinstance(utilities, list) or not all(
+        isinstance(name, str) and name.isidentifier() for name in utilities
+    ):
+        raise ValueError("Invalid native-host backend utility list")
+    for name in ("_launcher", *utilities):
+        if not has_extension(prefix + "_generated/" + name):
+            raise ValueError("Native-host compiled utility is missing: " + name)
+    if check_driver:
+        if installed_version(provider["name"]) != provider["version"]:
+            raise ValueError(
+                "Native-host compiler differs from the installed distribution"
+            )
+        distribution = metadata.distribution(provider["name"])
+        for name, checksum in record["driver_sources"].items():
+            path = Path(distribution.locate_file("triton/" + name))
+            if (
+                not path.is_file()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != checksum
+            ):
+                raise ValueError("Native-host compiler driver ABI differs: " + name)
+
+
+def load_wheel(path, *, native_backend=False, check_driver=False):
     """Read and validate the embedded record against wheel METADATA."""
     with zipfile.ZipFile(path) as wheel:
         matches = [name for name in wheel.namelist() if name == MANIFEST_PATH]
@@ -198,7 +329,23 @@ def load_wheel(path):
         if len(meta_paths) != 1:
             raise ValueError("Wheel must contain exactly one dist-info/METADATA")
         wheel_metadata = Parser().parsestr(wheel.read(meta_paths[0]).decode("utf-8"))
-    _check_shape(manifest)
+        names = set(wheel.namelist())
+
+        def has_extension(prefix):
+            return any(
+                name.startswith(prefix + ".") and name.endswith((".so", ".pyd"))
+                for name in names
+            )
+
+        _check_shape(manifest)
+        check_native_backend(
+            manifest,
+            wheel.read,
+            names.__contains__,
+            has_extension,
+            required=native_backend,
+            check_driver=check_driver,
+        )
     if wheel_metadata.get("Name", "").replace("-", "_").lower() != "torch_fl":
         raise ValueError("Wheel metadata is not for torch_fl")
     if wheel_metadata.get("Version") != manifest["wheel_version"]:
@@ -241,7 +388,7 @@ def load_wheel(path):
     return manifest
 
 
-def load_installed():
+def load_installed(*, native_backend=False, check_driver=False):
     """Locate an installed manifest without importing the torch_fl package."""
     distribution = metadata.distribution("torch_fl")
     path = distribution.locate_file(MANIFEST_PATH)
@@ -249,6 +396,22 @@ def load_installed():
     _check_shape(manifest)
     if distribution.version != manifest["wheel_version"]:
         raise ValueError("Installed manifest version differs from package metadata")
+
+    def has_extension(name):
+        base = Path(distribution.locate_file(name))
+        return any(
+            item.suffix in {".so", ".pyd"}
+            for item in base.parent.glob(base.name + ".*")
+        )
+
+    check_native_backend(
+        manifest,
+        lambda name: Path(distribution.locate_file(name)).read_bytes(),
+        lambda name: Path(distribution.locate_file(name)).is_file(),
+        has_extension,
+        required=native_backend,
+        check_driver=check_driver,
+    )
     return manifest
 
 
@@ -391,6 +554,11 @@ def main(argv=None):
         help="require exact build distributions",
     )
     parser.add_argument(
+        "--check-native-host-backend",
+        action="store_true",
+        help="require the versioned native-host backend artifact contract",
+    )
+    parser.add_argument(
         "--strict-tested", action="store_true", help="reject untested optional versions"
     )
     parser.add_argument(
@@ -401,9 +569,21 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         manifests = (
-            [load_wheel(path) for path in args.wheel]
+            [
+                load_wheel(
+                    path,
+                    native_backend=args.check_native_host_backend,
+                    check_driver=args.check_build_env,
+                )
+                for path in args.wheel
+            ]
             if args.wheel
-            else [load_installed()]
+            else [
+                load_installed(
+                    native_backend=args.check_native_host_backend,
+                    check_driver=args.check_build_env,
+                )
+            ]
         )
         if args.wheel_name:
             if not args.wheel or not args.platform:

@@ -11,7 +11,7 @@ _prepared = False
 
 
 def _bootstrap_launcher():
-    """Install prebuilt CUDA utilities before FlagGems initializes Triton."""
+    """Install the prebuilt backend before FlagGems initializes its compiler driver."""
     global _prepared
     from torch_fl import _build_config
 
@@ -19,8 +19,11 @@ def _bootstrap_launcher():
         return
     if not getattr(_build_config, "NATIVE_HOSTS", False):
         return
-    if _build_config.ACCELERATOR != "nvidia" or "boxing" in _build_config.KERNELS:
-        raise RuntimeError("native hosts require the NVIDIA vendor build")
+    if "boxing" in _build_config.KERNELS:
+        raise RuntimeError("native hosts require a non-boxing build")
+    from .backend import get_backend
+
+    get_backend(_build_config.ACCELERATOR)
     manifest = Path(__file__).parent / "_generated/manifest.json"
     if not manifest.is_file():
         raise RuntimeError("this wheel's precompiled FlagGems hosts are missing")
