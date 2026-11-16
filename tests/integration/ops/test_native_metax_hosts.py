@@ -121,6 +121,11 @@ def test_metax_software_descriptor_and_workspace_failure_cleanup():
     "layout", ["dense", "transpose", "slice", "expand", "scalar", "empty"]
 )
 def test_metax_source_hosts_preserve_layout_values_and_live_outputs(dtype, layout):
+    import flag_gems
+
+    hosts = torch_fl.native_host._hosts
+    assert flag_gems.add is hosts.op("add")
+    assert flag_gems.add is not hosts.original_ops["add"]
     cpu = torch.arange(3 * 5 * 7, dtype=torch.float32).reshape(3, 5, 7).to(dtype) / 16
     if layout == "transpose":
         cpu = cpu.transpose(0, 2)
@@ -134,12 +139,14 @@ def test_metax_source_hosts_preserve_layout_values_and_live_outputs(dtype, layou
         cpu = cpu[:, :0, :]
     value = cpu.to("flagos")
     artifacts = torch_fl.native_host.audit()["host_artifacts"]
+    # The ATen add route is gapped for MetaX's wrapped-scalar f64 -> bf16
+    # compilation defect. Test the compiled original host with tensor operands.
     with torch.no_grad():
-        first = value + 0.5
-        second = value + 1.0
+        first = flag_gems.add(value, value)
+        second = flag_gems.add(first, value)
     torch_fl.flagos.synchronize()
-    torch.testing.assert_close(first.cpu(), cpu + 0.5, atol=0, rtol=0)
-    torch.testing.assert_close(second.cpu(), cpu + 1.0, atol=0, rtol=0)
+    torch.testing.assert_close(first.cpu(), cpu + cpu, atol=0, rtol=0)
+    torch.testing.assert_close(second.cpu(), (cpu + cpu) + cpu, atol=0, rtol=0)
     if cpu.numel():
         assert first.data_ptr() != second.data_ptr()
     assert torch_fl.native_host.audit()["host_artifacts"] == artifacts
