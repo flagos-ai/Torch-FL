@@ -370,6 +370,37 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
         command._build_native_hosts()
 
 
+@pytest.mark.parametrize("vendor", ["metax", "ascend"])
+def test_native_host_build_requires_a_validated_backend_adapter(
+    monkeypatch, clean_kernel_env, vendor
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    monkeypatch.setenv("FLAGOS_BUILD_FLAGGEMS", "1")
+    for name in (
+        "FLAGOS_BUILD_BOXING",
+        "FLAGOS_BUILD_FLAGGEMS_CPP",
+        "FLAGOS_BUILD_TILEOPS",
+    ):
+        monkeypatch.setenv(name, "0")
+    namespace, kwargs = _load_setup(monkeypatch)
+    monkeypatch.setitem(
+        namespace["BuildExtWithCmake"]._build_native_hosts.__globals__,
+        "FLAGOS_ACCELERATOR",
+        vendor,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "check_call",
+        lambda *args, **kwargs: pytest.fail("unvalidated backend reached the compiler"),
+    )
+    assert "native_host/csrc/backends/*.cc" in kwargs["package_data"]["torch_fl"]
+    command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
+    command.ensure_finalized()
+    with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
+        command._build_native_hosts()
+
+
 def test_native_vendor_records_the_verified_cohort(
     monkeypatch, tmp_path, clean_kernel_env
 ):

@@ -1215,21 +1215,24 @@ class BuildExtWithCmake(_build_ext):
         if not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST"):
             return
         kernels = _kernel_switches(FLAGOS_ACCELERATOR)
-        if (
-            FLAGOS_ACCELERATOR != "cuda"
-            or not kernels["FLAGOS_BUILD_FLAGGEMS"]
-            or any(
-                kernels[key]
-                for key in (
-                    "FLAGOS_BUILD_BOXING",
-                    "FLAGOS_BUILD_FLAGGEMS_CPP",
-                    "FLAGOS_BUILD_TILEOPS",
-                )
+        if not kernels["FLAGOS_BUILD_FLAGGEMS"] or any(
+            kernels[key]
+            for key in (
+                "FLAGOS_BUILD_BOXING",
+                "FLAGOS_BUILD_FLAGGEMS_CPP",
+                "FLAGOS_BUILD_TILEOPS",
             )
         ):
             raise RuntimeError(
-                "native hosts require NVIDIA FlagGems with boxing, FlagGems C++ and TileOPs disabled"
+                "native hosts require FlagGems with boxing, FlagGems C++ and TileOPs disabled"
             )
+        spec = importlib.util.spec_from_file_location(
+            "native_host_backend_build",
+            os.path.join(SOURCE_DIR, "torch_fl/native_host/backend.py"),
+        )
+        backend_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(backend_module)
+        backend_module.get_backend(_platform_entry(FLAGOS_ACCELERATOR)["vendor"])
         destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         env = os.environ.copy()
         _setup_cuda_build_env(env)
@@ -1465,6 +1468,7 @@ def _get_setup_kwargs():
         "torch_fl": [
             "native_host/csrc/*.cc",
             "native_host/csrc/*.h",
+            "native_host/csrc/backends/*.cc",
             "native_host/_generated/*.so",
             "native_host/_generated/*.json",
             "native_host/_generated/*.py",

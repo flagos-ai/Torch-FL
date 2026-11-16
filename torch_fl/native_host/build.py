@@ -13,7 +13,6 @@ import importlib
 import importlib.metadata
 import inspect
 import json
-import os
 from pathlib import Path
 import types
 import textwrap
@@ -624,43 +623,18 @@ def main():
     package.mkdir(parents=True, exist_ok=True)
     (package / "__init__.py").write_text("")
     root = Path(__file__).resolve().parent
-    cuda = Path(
-        os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "/usr/local/cuda"
-    )
-    torch_include = Path(torch.__file__).parent / "include"
-    driver = Path(triton.__file__).parent / "backends/nvidia/driver.c"
-    extensions = [
-        Extension(
-            namespace + "._launcher",
-            [str(root / "csrc/launcher.cc")],
-            include_dirs=[str(torch_include), str(cuda / "include")],
-            library_dirs=[
-                str(cuda / "lib64/stubs"),
-                str(cuda / "lib/stubs"),
-                str(Path(torch.__file__).parent / "lib"),
-            ],
-            libraries=["cuda", "torch_python", "torch_cpu", "c10"],
-            language="c++",
-            extra_compile_args=[
-                "-O3",
-                "-std=c++17",
-                f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
-            ],
-        ),
-        Extension(
-            namespace + ".cuda_utils",
-            [str(driver)],
-            include_dirs=[str(cuda / "include")],
-            library_dirs=[str(cuda / "lib64/stubs"), str(cuda / "lib/stubs")],
-            libraries=["cuda"],
-            extra_compile_args=["-O3"],
-        ),
-    ]
+    from torch_fl import _build_config
+    from torch_fl.native_host.backend import build_record, get_backend
+
+    backend = get_backend(_build_config.ACCELERATOR)
+    triton_root = Path(triton.__file__).parent
+    backend_record = build_record(backend, triton_root)
+    extensions = backend.extensions(namespace, root, torch, backend_record, triton_root)
     manifest = {
         "package": namespace,
         "torch": torch.__version__,
         "triton": triton.__version__,
-        "driver_sha256": hashlib.sha256(driver.read_bytes()).hexdigest(),
+        "backend": backend_record,
         "modules": {},
         "closures": {},
     }

@@ -25,6 +25,144 @@ def _metadata():
     )
 
 
+def test_installed_backend_contract_matches_the_built_adapter():
+    from torch_fl.native_host.backend import COMPILED_FIELDS
+
+    hosts = torch_fl.native_host._hosts
+    launcher = importlib.import_module(hosts.package + "._launcher")
+    record = hosts.manifest["backend"]
+    assert launcher.backend_contract() == {
+        name: record[name] for name in COMPILED_FIELDS
+    }
+    assert record["vendor"] == "nvidia" and record["compiler_backend"] == "cuda"
+    assert torch_fl.native_host.audit()["backend"] == record
+
+
+@pytest.mark.parametrize(
+    "kind,value",
+    [
+        ("i1", True),
+        ("i8", -128),
+        ("u8", 255),
+        ("i16", -32768),
+        ("u16", 65535),
+        ("i32", -(2**31)),
+        ("u32", 2**32 - 1),
+        ("i64", -(2**63)),
+        ("u64", 2**64 - 1),
+        ("fp16", 1.5),
+        ("bf16", 1.5),
+        ("fp32", -1.5),
+        ("fp64", 1.25),
+    ],
+)
+def test_backend_packs_scalar_widths_without_submitting_a_zero_grid(kind, value):
+    launcher = importlib.import_module(
+        torch_fl.native_host._hosts.package + "._launcher"
+    )
+    call = launcher.Launcher(SimpleNamespace(signature={"value": kind}), _metadata())
+    call(0, 1, 1, 0, 0, None, None, None, None, value)
+
+
+def test_backend_refuses_invalid_workspace_before_any_kernel_submission():
+    launcher = importlib.import_module(
+        torch_fl.native_host._hosts.package + "._launcher"
+    )
+    metadata = _metadata()
+    metadata.global_scratch_size = 1
+    metadata.global_scratch_align = 512
+    call = launcher.Launcher(SimpleNamespace(signature={}), metadata)
+    with pytest.raises(ValueError, match="scratch alignment"):
+        call(1, 1, 1, 0, 0, None, None, None, None)
+    metadata = _metadata()
+    metadata.num_warps = 0
+    with pytest.raises(ValueError, match="launch geometry"):
+        launcher.Launcher(SimpleNamespace(signature={}), metadata)
+
+
+def test_backend_releases_global_workspace_when_profile_workspace_is_rejected():
+    launcher = importlib.import_module(
+        torch_fl.native_host._hosts.package + "._launcher"
+    )
+    metadata = _metadata()
+    metadata.global_scratch_size = 64
+    metadata.global_scratch_align = 256
+    metadata.profile_scratch_size = 64
+    metadata.profile_scratch_align = 512
+    call = launcher.Launcher(SimpleNamespace(signature={}), metadata)
+    allocated = torch_fl.flagos.memory_allocated()
+    for _ in range(3):
+        with pytest.raises(ValueError, match="scratch alignment"):
+            call(1, 1, 1, 0, 0, None, None, None, None)
+        assert torch_fl.flagos.memory_allocated() == allocated
+
+
+@pytest.mark.parametrize("padding", ["zero", "nan"])
+def test_backend_encodes_hardware_descriptors_before_zero_grid_submission(padding):
+    from triton.tools.tensor_descriptor import TensorDescriptor
+
+    launcher = importlib.import_module(
+        torch_fl.native_host._hosts.package + "._launcher"
+    )
+    value = torch.empty(3, 16, device="flagos")
+    descriptor = TensorDescriptor(value, [3, 16], [16, 1], [1, 16], padding=padding)
+    metadata = _metadata()
+    metadata.tensordesc_meta = [
+        {
+            "block_size": [1, 16],
+            "elem_size": 4,
+            "elem_type": 7,  # Published backend's float32 tensor-map type.
+            "swizzle": 0,
+            "fp4_padded": False,
+        }
+    ]
+    call = launcher.Launcher(
+        SimpleNamespace(signature={"descriptor": "tensordesc<fp32[2]>"}), metadata
+    )
+    call(0, 1, 1, 0, 0, None, None, None, None, descriptor)
+    invalid = dict(metadata.tensordesc_meta[0], block_size=[1, 1, 16])
+    metadata.tensordesc_meta = [invalid]
+    bad_call = launcher.Launcher(
+        SimpleNamespace(signature={"descriptor": "tensordesc<fp32[2]>"}), metadata
+    )
+    with pytest.raises(ValueError, match="block rank mismatch"):
+        bad_call(0, 1, 1, 0, 0, None, None, None, None, descriptor)
+    call(0, 1, 1, 0, 0, None, None, None, None, descriptor)
+
+
+@pytest.mark.min_devices(2)
+def test_backend_uses_the_tensor_device_and_current_nondefault_stream():
+    hosts = torch_fl.native_host._hosts
+    artifacts = hosts.audit()["host_artifacts"]
+    initial = torch_fl.flagos.current_device()
+    target = (initial + 1) % torch_fl.flagos.device_count()
+    stream = torch.Stream(device=f"flagos:{target}")
+    retained = []
+    hits = torch.ops.flagos.native_source_typed_hits("aten::cos")
+    try:
+        with stream, torch.no_grad():
+            torch_fl.flagos.set_device(initial)
+            for shape in ((17,), (3, 5, 7), (19, 31)):
+                cpu = torch.randn(shape)
+                value = cpu.to(f"flagos:{target}")
+                expected = torch.cos(cpu)
+                actual = torch.cos(value)
+                retained.append((actual, expected))
+                assert torch_fl.flagos.current_device() == initial
+                assert (
+                    torch.accelerator.current_stream(target).stream_id
+                    == stream.stream_id
+                )
+        stream.synchronize()
+        for actual, expected in retained:
+            torch.testing.assert_close(actual.cpu(), expected, atol=1e-6, rtol=1e-6)
+        assert len({value.data_ptr() for value, _ in retained}) == len(retained)
+        assert torch.ops.flagos.native_source_typed_hits("aten::cos") == hits + 3
+        assert hosts.audit()["host_artifacts"] == artifacts
+    finally:
+        torch_fl.flagos.set_device(initial)
+
+
 def _cache(signature, args, kwargs):
     launcher = importlib.import_module(
         torch_fl.native_host._hosts.package + "._launcher"

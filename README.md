@@ -196,6 +196,11 @@ The [generalization project](https://github.com/orgs/flagos-ai/projects/14)
 tracks broader eager and accelerator support. Domestic accelerator acceptance
 compares against the manufacturer's native PyTorch on the same card and workload:
 at least 80% of its throughput, or at most 1.25 times its latency for fixed work.
+The shared host launcher uses a versioned backend contract. Only NVIDIA's adapter
+is currently admitted; other vendors require separate validation. New native-host
+wheels fingerprint their adapter, published compiler driver and native ABI before
+activation. See the [backend launch contract](docs/design/flaggems-build-time-hosts.md#backend-launch-contract)
+for its boundary and wheel preflight command.
 
 An optional graph-mode comparison uses Dynamo to capture the model and
 TorchScript to execute its ATen graph:

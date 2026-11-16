@@ -1,11 +1,12 @@
 # Build-time FlagGems hosts
 
-Status: experimental; repeated eager measurements still miss the target. Acceptance
-requires synchronized warm prefill and decode latency at most 30 ms against the
-approximately 24 ms vendor workload, with the original model remaining eager.
-The approximately 26 ms measurements below use Dynamo model graph capture and
-cannot count toward that requirement. The measurements are also separate from
-the capture-based operator prototype merged in PR #824.
+Status: experimental. The optional vendor-precision cohort passes the recorded
+NVIDIA eager acceptance below; broader registry and accelerator coverage remain
+open. Acceptance requires synchronized warm prefill and decode latency at most
+30 ms against the approximately 24 ms vendor workload, with the original model
+remaining eager. Historical Dynamo measurements below cannot count toward that
+requirement. The measurements are also separate from the capture-based operator
+prototype merged in PR #824.
 
 The installed FlagGems wheel is the source of both host semantics and numerical
 kernels. The build generates native host code from its source, including shape
@@ -46,12 +47,13 @@ KernelGenerator specializes device code for a new rank. No Python host wrapper
 is generated for that rank. The source-derived preparation code retains the
 wheel's schema, promotion, broadcasting and layout decisions.
 
-The CUDA launcher is compiled once. Signature, scalar widths, descriptor layout,
-shared memory, scratch requirements and cluster launch configuration are data
-provided by kernel compilation. The installed FlagTree wheel's CUDA utility
-source is also compiled at build time. Runtime native compiler invocations from
-the host/kernel path are rejected, and each launch must refer to an admitted
-FlagGems JIT source hash. Unrelated application subprocesses are unaffected.
+The common launcher and its selected backend adapter are compiled once. Signature,
+scalar widths, descriptor layout, shared memory, scratch requirements and cluster
+launch configuration are data provided by kernel compilation. The NVIDIA adapter
+also compiles the installed FlagTree wheel's unchanged CUDA utility source at
+build time. Runtime native compiler invocations from the host/kernel path are
+rejected, and each launch must refer to an admitted FlagGems JIT source hash.
+Unrelated application subprocesses are unaffected.
 
 The native launch ABI takes borrowed argument views. It reads current tensor
 addresses and streams, reevaluates grids and hooks, and allocates fresh outputs.
@@ -60,6 +62,60 @@ generator's rank definitions. They contain no output tensors, captured launch
 sequences, or shape-specific host programs. On CPython 3.12, dictionary watchers
 invalidate rank definitions when configuration or overload definitions change;
 without watcher support the original instantiation path runs on every call.
+
+## Backend launch contract
+
+[Issue #831](https://github.com/flagos-ai/Torch-FL/issues/831) separates the shared
+host language from device submission. `csrc/backend_api.h` defines ABI version 1
+without including a vendor SDK. The common launcher retains scalar packing,
+current-call tensor pointers, device guards, stream selection, workspace allocation
+and the generated host callbacks. A selected adapter owns immutable kernel launch
+metadata, descriptor encoding, hidden scratch arguments and device enqueue calls.
+The generated host ABI is unchanged. Each warm kernel launch makes one backend
+enqueue call; it does not interpret another host program or replay earlier calls.
+
+Argument slots are 128 bytes with 128-byte alignment. Stream and function handles
+are opaque borrowed values. The original compiler's `CompiledKernel` remains
+alive in its cache entry and owns the loaded device module. Argument, descriptor
+and workspace storage remain valid through submission. Outputs and workspaces
+are allocated for the current call; they are not cached by the adapter. Device
+failures propagate as errors, and unsupported workspace alignment is rejected
+before submission.
+
+Capabilities declare software and hardware descriptors, global and profile
+scratch, cooperative, cluster and programmatic launches, and stream-capture
+queries. NVIDIA preserves its existing CUDA submission geometry, two hidden
+scratch arguments, tensor-map encoding and published FlagTree module loader.
+This adapter contains no numerical kernels. Other adapters must describe their
+own compiler metadata and loader instead of inheriting CUDA behavior.
+
+`backend.py` is the single admission registry. Only `nvidia` is admitted in this
+change. A native-host build or activation for another vendor fails explicitly;
+it cannot select a CUDA adapter, boxing route or alternate host implementation.
+MetaX and Ascend admission requires separate validation under
+[issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) and
+[issue #833](https://github.com/flagos-ai/Torch-FL/issues/833).
+
+The generated wheel manifest records the vendor, compiler backend and distribution
+version, capability and slot ABI, utility modules, published driver source hashes,
+adapter hashes and native source hashes. The compiled launcher embeds the native
+source fingerprint and reports its contract. Loading compares all three sources
+of evidence before installing the driver adapter. Changes require rebuilding the
+wheel. These are generated artifact records, not checked-in measurement files.
+
+The standalone preflight reads the wheel without importing `torch_fl`, Torch or
+the compiler. It checks packaged sources and utility extensions against the
+manifest. `--check-build-env` also checks the installed compiler distribution and
+driver hashes. Require the versioned contract explicitly with:
+
+```bash
+python scripts/tools/torch-fl-preflight --wheel dist/<wheel>.whl \
+  --check-build-env --check-native-host-backend
+```
+
+Historical native-host wheels without this contract remain accepted by the
+ordinary compatibility preflight; the explicit flag rejects them. Runtime loading
+always requires a matching contract for this implementation.
 
 ## Optional Dynamo model-graph comparison
 
