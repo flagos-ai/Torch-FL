@@ -70,8 +70,7 @@ def test_every_vendor_has_a_backend_enumerator_named_after_it():
             assert names.get(expected) == vendor, (
                 f"{expected} reports {names.get(expected)!r}, not {vendor!r}"
             )
-        # A vendor with no kernel of its own (nvidia here routes through kBoxing;
-        # hygon and thead have no slot) is not expected to have one.
+        # A vendor with no native slot (hygon and thead) need not have one.
 
 
 def test_no_enumerator_still_names_an_sdk():
@@ -97,9 +96,10 @@ def test_shipped_confs_route_to_vendor_keys_only():
             if "=" not in body:
                 continue
             _op, _, value = body.partition("=")
-            key = value.strip()
-            if key and key not in allowed:
-                offenders.setdefault(conf.name, set()).add(key)
+            for part in value.split(";"):
+                key = part.rsplit(":", 1)[-1].strip()
+                if key and key not in allowed:
+                    offenders.setdefault(conf.name, set()).add(key)
     assert not offenders, (
         f"conf route keys outside the vendor names: {offenders}. `cuda` is the "
         "pre-rename spelling of the boxing key and is still parsed, but nothing "

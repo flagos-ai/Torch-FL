@@ -713,6 +713,11 @@ class CuptiDeviceTracer : public DeviceTracer {
     CUptiResult res2 = shim.ActivityEnable(CUPTI_ACTIVITY_KIND_MEMCPY);
     CUptiResult res_ms = shim.ActivityEnable(CUPTI_ACTIVITY_KIND_MEMSET);
     CUptiResult res_rt = shim.ActivityEnable(CUPTI_ACTIVITY_KIND_RUNTIME);
+#if defined(FLAGOS_ACCEL_CUDA)
+    // cuBLAS can launch through the driver directly. Without DRIVER records,
+    // its kernel correlation IDs have no CPU launch to attach to.
+    shim.ActivityEnable(CUPTI_ACTIVITY_KIND_DRIVER);
+#endif
     CUptiResult res_ec =
         shim.ActivityEnable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
     FLAGOS_CUPTI_LOG("[flagos] Activity setup results: CALLBACKS=" << res_cb
@@ -749,6 +754,9 @@ class CuptiDeviceTracer : public DeviceTracer {
     shim.ActivityDisable(CUPTI_ACTIVITY_KIND_MEMCPY);
     shim.ActivityDisable(CUPTI_ACTIVITY_KIND_MEMSET);
     shim.ActivityDisable(CUPTI_ACTIVITY_KIND_RUNTIME);
+#if defined(FLAGOS_ACCEL_CUDA)
+    shim.ActivityDisable(CUPTI_ACTIVITY_KIND_DRIVER);
+#endif
     shim.ActivityDisable(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
 
     std::lock_guard<std::mutex> lock(g_tracer_mutex);
@@ -765,13 +773,22 @@ class CuptiDeviceTracer : public DeviceTracer {
   // stop()'s blocking flush, so by then every record has been seen.
   std::vector<DeviceEvent> drain() override {
     std::lock_guard<std::mutex> lock(g_tracer_mutex);
-#if defined(FLAGOS_METAX_MCPTI)
+#if defined(FLAGOS_METAX_MCPTI) || defined(FLAGOS_ACCEL_CUDA)
     auto& shim = CuptiShim::get();
 #endif
     for (auto& ev : events_) {
       ev.start_ns = toRealtime(ev.start_ns);
       ev.end_ns = toRealtime(ev.end_ns);
       ev.external_correlation_id = lookupExternalCorrelation(ev.correlation_id);
+#if defined(FLAGOS_ACCEL_CUDA)
+      if (ev.kind == EventKind::Runtime && ev.metadata.count("driver_api") &&
+          shim.GetCallbackName) {
+        const char* name = nullptr;
+        const auto cbid = static_cast<uint32_t>(std::stoul(ev.metadata.at("cbid")));
+        if (shim.GetCallbackName(1, cbid, &name) == CUPTI_SUCCESS && name && *name)
+          ev.name = name;
+      }
+#endif
 #if defined(FLAGOS_METAX_MCPTI)
       // mcptiActivityGetApiName is not reentrant from bufferCompleted, so resolve
       // runtime names only after stop() has flushed and disabled all activities.
@@ -1090,7 +1107,11 @@ class CuptiDeviceTracer : public DeviceTracer {
         }
         events_.push_back(std::move(ev));
 
-      } else if (record->kind == CUPTI_ACTIVITY_KIND_RUNTIME) {
+      } else if (record->kind == CUPTI_ACTIVITY_KIND_RUNTIME
+#if defined(FLAGOS_ACCEL_CUDA)
+                 || record->kind == CUPTI_ACTIVITY_KIND_DRIVER
+#endif
+      ) {
         // Runtime API calls (cudaLaunchKernel etc.) -- the correlation pivot that
         // lets kineto link a CPU op to the device kernel it launched.
         auto* rt = reinterpret_cast<CUpti_ActivityAPI_Compat*>(record);
@@ -1122,7 +1143,12 @@ class CuptiDeviceTracer : public DeviceTracer {
 #if defined(FLAGOS_METAX_MCPTI)
         ev.name = mcptiRuntimeCbidToName(rt->cbid);
 #else
-        ev.name = cuptiRuntimeCbidToName(rt->cbid);
+        if (record->kind == CUPTI_ACTIVITY_KIND_DRIVER) {
+          ev.name = "cudaDriver";
+          ev.metadata["driver_api"] = "true";
+        } else {
+          ev.name = cuptiRuntimeCbidToName(rt->cbid);
+        }
 #endif
         // torch-cuda's cuda_runtime args are exactly {External id, cbid,
         // correlation}; kineto supplies External id itself. The raw numeric cbid

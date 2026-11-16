@@ -42,7 +42,7 @@ TABLES = (
 DISPATCHER = ROOT / "csrc" / "aten" / "dispatcher.h"
 
 #: conf value -> the name LogDispatch prints for the backend it parses to.
-#: `nvidia` is the NVIDIA kernel set's key; the kernel logs as `boxing`.
+#: Native NVIDIA precision entries are distinct from CUDA boxing.
 LOGGED_AS = {
     "flaggems": "flagos_python",
     "flaggems_python": "flagos_python",
@@ -57,7 +57,7 @@ LOGGED_AS = {
     "gcu": "gcu",
     "mthreads": "musa",
     "musa": "musa",
-    "nvidia": "boxing",
+    "nvidia": "nvidia",
     "boxing": "boxing",
     "ascend": "ascend",
     "metax": "metax",
@@ -76,7 +76,9 @@ def _conf_values():
         for line in conf.read_text(encoding="utf-8").splitlines():
             _name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                values.add(value.strip())
+                values.update(
+                    part.rsplit(":", 1)[-1].strip() for part in value.split(";")
+                )
     return values
 
 

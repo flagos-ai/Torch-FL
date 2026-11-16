@@ -15,7 +15,8 @@
 """Full official Qwen3 prefill/decode, with a separate vendor reference.
 
 Eager execution is the default. --model-host compiles only the model's host
-graph through ATen; all numerical kernels remain FlagGems. Neither mode uses
+graph through ATen. Numerical kernels come from FlagGems or audited, measured
+vendor precision exceptions. Neither mode uses
 CUDA graphs, layer truncation, a replacement model or output pooling. Run each
 backend in its own process on an otherwise idle GPU.
 """
@@ -31,6 +32,16 @@ import time
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from logits_validation import (
+    LogitsValidationFailed,
+    file_sha256,
+    math_settings,
+    summarize_accuracy,
+    tensor_accuracy,
+    validate_reference,
+    validate_tolerances,
+)
 
 
 def compare(actual, expected):
@@ -50,6 +61,16 @@ def compare(actual, expected):
     }
 
 
+def vendor_audit():
+    from torch_fl import _build_config
+
+    if not getattr(_build_config, "NATIVE_VENDOR", False):
+        return None
+    from torch_fl.native_host import vendor
+
+    return vendor.audit()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
@@ -67,6 +88,13 @@ def main():
         "--profile-kernels", type=Path, help="Export a separate kernel-provenance trace"
     )
     parser.add_argument("--reference", type=Path)
+    parser.add_argument("--logits-atol", type=float, default=1e-3)
+    parser.add_argument("--logits-rtol", type=float, default=1e-3)
+    parser.add_argument(
+        "--check-logits",
+        action="store_true",
+        help="Fail after reporting if any logit misses tolerance",
+    )
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--progress-every", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=3)
@@ -81,17 +109,27 @@ def main():
         "--prompt", default="Explain in one sentence why the sky is blue."
     )
     args = parser.parse_args()
+    if args.steps < 1 or args.rounds < 0:
+        parser.error("steps must be positive and rounds must be nonnegative")
+    if args.check_logits and args.reference is None:
+        parser.error("--check-logits requires a vendor --reference")
+    try:
+        validate_tolerances(args.logits_atol, args.logits_rtol)
+    except ValueError as error:
+        parser.error(str(error))
     if args.model_host and (args.device != "flagos:0" or args.mode != "plain"):
         parser.error("--model-host requires --device flagos:0 --mode plain")
     if args.profile_kernels and args.device != "flagos:0":
         parser.error("--profile-kernels audits FlagGems launches on --device flagos:0")
     hosts = None
     report = {
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "device": args.device,
         "mode": args.mode,
         "dtype": args.dtype,
         "execution": "flaggems-model-host" if args.model_host else "eager",
+        "steps": args.steps,
+        "rounds": args.rounds,
     }
     if args.device.startswith("flagos"):
         if args.hosts:
@@ -122,6 +160,8 @@ def main():
     else:
         synchronize = torch.cuda.synchronize
 
+    report["math_settings"] = math_settings()
+
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
     model = (
         AutoModelForCausalLM.from_pretrained(
@@ -150,6 +190,28 @@ def main():
     reference = (
         torch.load(args.reference, weights_only=True) if args.reference else None
     )
+    checkpoint_files = sorted(args.model.glob("*.safetensors"))
+    if args.check_logits and not checkpoint_files:
+        raise ValueError("logit acceptance requires local safetensors checkpoint files")
+    contract = {
+        "version": 1,
+        "checkpoint_sha256": {
+            path.name: file_sha256(path) for path in checkpoint_files
+        },
+        "config_sha256": file_sha256(args.model / "config.json"),
+        "dtype": args.dtype,
+        "attention": "eager",
+        "math_settings": report["math_settings"],
+    }
+    report["contract"] = contract
+    if reference is not None:
+        validate_reference(
+            reference,
+            args.steps,
+            contract=contract if args.check_logits else None,
+            prompt_ids=ids,
+        )
+        report["reference_sha256"] = file_sha256(args.reference)
     if args.mode != "plain":
         if args.device != "flagos:0" or args.cache is None:
             raise ValueError(
@@ -185,7 +247,8 @@ def main():
         report["cold_prefill_ms"] = (time.perf_counter() - started) * 1000
         for hook in hooks:
             hook.remove()
-        logits = [out.logits[:, -1, :].cpu()]
+        prefill_logits = out.logits.cpu()
+        logits = [prefill_logits[:, -1, :]]
         predictions, inputs = [], []
         for step in range(args.steps):
             predicted = out.logits[:, -1, :].argmax(-1, keepdim=True)
@@ -207,6 +270,29 @@ def main():
             report["reference_comparison"] = [
                 compare(a, b) for a, b in zip(logits, reference["logits"])
             ]
+            accuracy = [
+                tensor_accuracy(a, b, atol=args.logits_atol, rtol=args.logits_rtol)
+                for a, b in zip(logits, reference["logits"])
+            ]
+            if "prefill_logits" in reference:
+                accuracy[0] = tensor_accuracy(
+                    prefill_logits,
+                    reference["prefill_logits"],
+                    atol=args.logits_atol,
+                    rtol=args.logits_rtol,
+                )
+            report["logits_scope"] = {
+                "prefill": (
+                    "all_positions"
+                    if "prefill_logits" in reference
+                    else "last_position_legacy_reference"
+                ),
+                "decode": "every_requested_step",
+            }
+            report["logits_comparison"] = accuracy
+            report["logits_validation"] = summarize_accuracy(
+                accuracy, args.steps + 1, atol=args.logits_atol, rtol=args.logits_rtol
+            )
             if layers and reference.get("layers"):
                 report["layer_comparison"] = {
                     name: compare(value, reference["layers"][name])
@@ -296,21 +382,14 @@ def main():
             profiler.export_chrome_trace(str(args.profile_kernels))
             trace = json.loads(args.profile_kernels.read_text())
             events = trace["traceEvents"]
-            kernels = [event for event in events if event.get("cat") == "kernel"]
-            counts = Counter(event["name"] for event in kernels)
+            from kernel_provenance import audit_kernels
+
             admitted = hosts.audit()["launched_kernels"]
-            unmatched = sorted(set(counts) - set(admitted))
-            if not counts or unmatched:
-                raise RuntimeError(f"GPU kernel provenance audit failed: {unmatched}")
-            report["gpu_kernel_audit"] = {
-                "model_calls": 2,
-                "counts": dict(counts),
-                "unmatched": unmatched,
-                "summed_device_ms": sum(event["dur"] for event in kernels) / 1000,
-            }
+            report["gpu_kernel_audit"] = audit_kernels(events, admitted, vendor_audit())
         if hosts is not None:
             report["kernel_sources"] = hosts.provenance
             report["native_audit"] = hosts.audit()
+            report["vendor_precision_audit"] = vendor_audit()
             if hasattr(hosts, "typed"):
                 report["native_source_stats"] = torch.ops.flagos.native_source_stats()
                 report["typed_variants"] = len(hosts.typed["compiled"])
@@ -324,8 +403,29 @@ def main():
         if args.model_host:
             report["model_host_graphs"] = model.forward._flagos_host_backend.graphs
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    report["math_settings_after"] = math_settings()
+    producer = {
+        "backend": (
+            "vendor"
+            if args.device == "cuda:0"
+            and "torch_fl" not in sys.modules
+            and "flag_gems" not in sys.modules
+            else "torch_fl"
+        ),
+        "torch": str(torch.__version__),
+        "math_settings_after": report["math_settings_after"],
+    }
+    report["producer"] = producer
     torch.save(
-        {"logits": logits, "inputs": inputs, "layers": layers},
+        {
+            "logits": logits,
+            "prefill_logits": prefill_logits,
+            "inputs": inputs,
+            "layers": layers,
+            "contract": contract,
+            "prompt_ids": ids.cpu(),
+            "producer": producer,
+        },
         args.output.with_suffix(".pt"),
     )
     args.output.write_text(json.dumps(report, indent=2))
@@ -340,6 +440,13 @@ def main():
         ),
         flush=True,
     )
+    if args.check_logits and (
+        not report["logits_validation"]["passed"]
+        or report["math_settings_after"] != report["math_settings"]
+    ):
+        raise LogitsValidationFailed(
+            f"logit acceptance failed; full accuracy and timing report: {args.output}"
+        )
 
 
 if __name__ == "__main__":

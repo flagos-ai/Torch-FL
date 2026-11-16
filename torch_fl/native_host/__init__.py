@@ -38,6 +38,9 @@ def _activate():
 
     _hosts = Hosts(Path(__file__).parent / "_generated")
     _hosts.activate()
+    from . import vendor
+
+    vendor.activate()
 
 
 def audit():

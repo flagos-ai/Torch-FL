@@ -599,6 +599,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--source-root", type=Path, default=Path(__file__).resolve().parents[2]
+    )
+    parser.add_argument(
         "--functions", nargs="+", help="Restrict seed functions for development probes"
     )
     parser.add_argument("--package", default="fg_aot")
@@ -663,6 +666,9 @@ def main():
     }
     if not args.launcher_only:
         import flag_gems
+        from torch_fl import _build_config
+        from torch_fl.native_host import source_variants
+        from torch_fl.native_host.vendor_cohort import source_policy_for_build
         from Cython.Build import cythonize
         from Cython.Compiler import Options
 
@@ -685,7 +691,13 @@ def main():
             for _, function, *_ in flag_gems._FULL_CONFIG
             if isinstance(function, types.FunctionType)
         ]
-        modules = collect_modules(functions + registry_functions)
+        policy = source_policy_for_build(_build_config, args.source_root)
+        alternatives = source_variants.load(policy)
+        if policy is not None:
+            manifest["source_variants"] = policy
+        modules = collect_modules(
+            functions + registry_functions + list(alternatives.values())
+        )
         cython_extensions = []
         runtime = source_dir / "runtime.pyx"
         write_changed(

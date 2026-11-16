@@ -135,6 +135,14 @@ class Hosts:
         self.path = Path(path)
         self.artifacts = self._artifacts()
         self.manifest = json.loads((self.path / "manifest.json").read_text())
+        if "source_variants" in self.manifest:
+            from torch_fl.native_host.source_variants import (
+                load as load_source_variants,
+            )
+
+            load_source_variants(
+                self.manifest["source_variants"], self.manifest["modules"]
+            )
         self.original_ops = {
             name: getattr(flag_gems, name)
             for name in self.manifest["ops"]
@@ -349,8 +357,14 @@ class Hosts:
     def audit(self):
         if self._artifacts() != self.artifacts:
             raise RuntimeError("host artifacts changed during execution")
+        hits = {}
+        if self.manifest.get("source_variants"):
+            module = importlib.import_module(self.package + ".typed._source_hosts")
+            hits = dict(module.source_variant_hits())
         return {
             "host_artifacts": self.artifacts,
+            "source_variants": self.manifest.get("source_variants"),
+            "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "launched_kernels": _launched_kernels,
         }

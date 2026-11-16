@@ -77,11 +77,28 @@ jobs:
         run: >-
           python3 -m pytest tests/unit/test_native_host_ir.py
           tests/unit/test_native_host_constants.py tests/unit/test_native_source_bridges.py
-          tests/unit/test_native_continuation_ir.py -q --tb=short
+          tests/unit/test_native_continuation_ir.py tests/unit/test_pointwise_type_promotion.py
+          tests/unit/test_native_source_variants.py
+          -q --tb=short
+
+      - name: Verify model logit acceptance checks
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: python3 -m pytest tests/unit/test_logits_validation.py -q --tb=short
+
+      - name: Verify native vendor precision contracts
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: >-
+          python3 -m pytest tests/unit/test_native_vendor_codegen.py
+          tests/unit/test_native_vendor_cohort.py tests/unit/test_kernel_provenance.py
+          tests/unit/test_configured_dtype_routes.py -q --tb=short
 
       - name: Run generator --check modes
         run: |
           set -euo pipefail
+          python3 scripts/codegen/codegen_native_vendor.py --check
+          python3 scripts/codegen/codegen_ops.py --check-native-routes
           # Regenerates the per-platform FlagGems register lists that a
           # FlagGems-primary CUDA-ABI build (FLAGOS_BUILD_BOXING=OFF) compiles
           # instead of the full generated/register.inc. Reads only committed

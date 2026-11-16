@@ -175,6 +175,12 @@ def _native_source_host_enabled() -> bool:
     return bool(getattr(_build_config, "NATIVE_HOSTS", False))
 
 
+def _native_vendor_precision_enabled() -> bool:
+    from torch_fl import _build_config
+
+    return bool(getattr(_build_config, "NATIVE_VENDOR", False))
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -203,6 +209,7 @@ def pytest_collection_modifyitems(
             item.get_closest_marker("nvidia")
             or item.get_closest_marker("host_compiler")
             or item.get_closest_marker("native_source_host")
+            or item.get_closest_marker("native_vendor_precision")
         ) and platform != "cuda":
             add_platform_skip(
                 item,
@@ -220,6 +227,17 @@ def pytest_collection_modifyitems(
                 gate="build_record",
                 detail="source hosts require FLAGOS_BUILD_NATIVE_HOST",
                 reason="precompiled source host build contract",
+            )
+            continue
+        if (
+            item.get_closest_marker("native_vendor_precision")
+            and not _native_vendor_precision_enabled()
+        ):
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="wheel has no published native vendor precision module",
+                reason="native vendor precision build contract",
             )
             continue
         if item.get_closest_marker("host_compiler") and not _host_compiler_enabled():
@@ -303,6 +321,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "native_source_host: requires precompiled FlagGems source hosts"
+    )
+    config.addinivalue_line(
+        "markers",
+        "native_vendor_precision: requires the published vendor precision cohort",
     )
     config.addinivalue_line("markers", "min_devices(count): minimum visible devices")
     config.addinivalue_line(

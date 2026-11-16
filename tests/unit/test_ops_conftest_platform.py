@@ -308,6 +308,14 @@ def test_host_compiler_gate_reads_the_installed_build(
     assert ops_conftest._native_source_host_enabled() is native_hosts
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_vendor_precision_gate_reads_the_installed_build(monkeypatch, enabled):
+    package = ModuleType("torch_fl")
+    package._build_config = SimpleNamespace(NATIVE_VENDOR=enabled)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    assert ops_conftest._native_vendor_precision_enabled() is enabled
+
+
 @pytest.mark.parametrize(
     "platform,compiler,marks,gate",
     [
@@ -320,6 +328,10 @@ def test_host_compiler_gate_reads_the_installed_build(
         ("cuda", False, ("nvidia", "native_source_host"), "build_record"),
         ("mps", True, ("native_source_host",), "platform_support"),
         ("ppu", True, ("native_source_host",), "platform_support"),
+        ("cuda", True, ("native_vendor_precision",), None),
+        ("cuda", False, ("native_vendor_precision",), "build_record"),
+        ("mps", True, ("native_vendor_precision",), "platform_support"),
+        ("ppu", True, ("native_vendor_precision",), "platform_support"),
     ],
 )
 def test_native_host_cases_keep_one_collection_shape(
@@ -338,6 +350,9 @@ def test_native_host_cases_keep_one_collection_shape(
     monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: platform)
     monkeypatch.setattr(ops_conftest, "_host_compiler_enabled", lambda: compiler)
     monkeypatch.setattr(ops_conftest, "_native_source_host_enabled", lambda: compiler)
+    monkeypatch.setattr(
+        ops_conftest, "_native_vendor_precision_enabled", lambda: compiler
+    )
     monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
     monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
     item = Item()

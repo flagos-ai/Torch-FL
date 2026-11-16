@@ -161,7 +161,33 @@ Guarded exception helpers keep supported prefixes native and run only the reache
 original tail; existing metadata regions retain their native remainder.
 The acceptance target is synchronized complete-model latency at most 30 ms
 against the roughly 24 ms vendor workload, with the model remaining eager.
-Repeated full-model eager validation still exceeds this limit for prefill.
+Logit acceptance separately requires elementwise `atol=rtol=1e-3` against the
+accelerator manufacturer's native Torch at the same precision. The unchanged
+#839 BF16 cohort fails this gate; the optional precision cohort below passes it.
+Use the strict-eager benchmark's
+`--check-logits --reference <vendor-reference.pt>` to enforce it; see the
+[paired validation procedure](docs/design/flaggems-build-time-hosts.md#vendor-logit-acceptance).
+
+An optional native-host build adds measured vendor precision exceptions. Set
+`FLAGOS_VENDOR_TORCH_LIB` to the `torch/lib` directory from the published vendor
+Torch wheel when running the build command above. The build validates the exact
+cohort, bundles its numerical libraries and generates typed eager entries from
+ATen schemas. The policy currently covers FP32 power, mean, reciprocal square
+root and softmax, plus BF16 matrix products on NVIDIA; other routes remain
+FlagGems. No model-code change, Dynamo capture or tensor boxing is involved.
+The generated conf states the dtype conditions explicitly, such as
+`mm = flaggems; BFloat16:nvidia`; registering a vendor entry cannot override
+a plain FlagGems route or an explicit FlagGems environment override.
+This cohort also selects an unchanged published FlagGems pointwise host for
+measured `mul.Tensor` dtypes through the same build-time compiler.
+On H100, two independent installed-wheel Qwen3-0.6B BF16 runs pass all prefill
+positions and 512 decode steps with maximum logit error 0. Synchronized
+prefill/decode medians are **29.15/27.34 ms** and **29.24/27.28 ms**, versus
+**25.09/23.40 ms** for paired vendor Torch. These are complete forward timings
+with identical teacher-forced inputs; loading, tuning and sampling are excluded
+on both sides. See the [recorded acceptance evidence in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840).
+See the [precision policy](docs/design/flaggems-build-time-hosts.md#native-vendor-precision-exceptions)
+for cohort requirements, audit evidence and limitations.
 
 Native-host builds write `native_host/_generated/typed/coverage.json`, accounting
 for every FlagGems registry row, excluded signatures and lowering outcomes.

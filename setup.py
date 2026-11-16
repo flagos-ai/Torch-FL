@@ -890,6 +890,7 @@ def _write_build_config() -> None:
         f'ACCELERATOR = "{_PLATFORM_TO_VENDOR.get(FLAGOS_ACCELERATOR, FLAGOS_ACCELERATOR)}"\n'
         f"KERNELS = ({body})\n"
         f"NATIVE_HOSTS = {_env_module().flag('FLAGOS_BUILD_NATIVE_HOST')}\n"
+        f"NATIVE_VENDOR = {_native_vendor_cohort() is not None}\n"
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -991,17 +992,22 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
     # vendor provenance at release time.
     entry = _platform_entry(FLAGOS_ACCELERATOR)
     gate = entry.get("vendor_torch_gate")
+    native_vendor = _native_vendor_cohort()
     manifest = preflight.make_manifest(
         platform=FLAGOS_ACCELERATOR,
         wheel_version=wheel_version,
         kernels=compiled,
         bundle_libdir=_BUNDLE_LIBDIR,
-        vendor_torch_libraries=entry["vendor_torch_libraries"]
-        and (gate is None or kernels[gate]),
+        vendor_torch_libraries=native_vendor is not None
+        or (entry["vendor_torch_libraries"] and (gate is None or kernels[gate])),
         requirements=_install_requires(),
         torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
         sdk_version=os.environ.get("FLAGOS_SDK_VERSION"),
-        vendor_torch_version=os.environ.get("FLAGOS_VENDOR_TORCH_VERSION"),
+        vendor_torch_version=(
+            native_vendor[1]["version"]
+            if native_vendor is not None
+            else os.environ.get("FLAGOS_VENDOR_TORCH_VERSION")
+        ),
     )
     if manifest["build"]["distributions"]["torch"] is None:
         raise RuntimeError("Build-time PyTorch distribution is missing")
@@ -1009,6 +1015,40 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def _native_vendor_cohort():
+    """Resolve the optional precision module's published binary cohort."""
+    library = os.environ.get("FLAGOS_VENDOR_TORCH_LIB")
+    if (
+        FLAGOS_ACCELERATOR != "cuda"
+        or not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST")
+        or not library
+    ):
+        return None
+    kernels = _kernel_switches(FLAGOS_ACCELERATOR)
+    if (
+        kernels["FLAGOS_BUILD_BOXING"]
+        or not kernels["FLAGOS_BUILD_VENDOR"]
+        or _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
+    ):
+        raise RuntimeError(
+            "native vendor precision requires bundled non-boxing vendor libraries"
+        )
+    source = os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_cohort.py")
+    spec = importlib.util.spec_from_file_location("torch_fl_vendor_cohort", source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load vendor cohort reader from {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    policy = module.load_build_policy(SOURCE_DIR).precision_policy("nvidia")
+    cohort = module.describe(library, policy)
+    declared = os.environ.get("FLAGOS_VENDOR_TORCH_VERSION")
+    if declared and declared != cohort["version"]:
+        raise RuntimeError(
+            "FLAGOS_VENDOR_TORCH_VERSION differs from the published vendor wheel"
+        )
+    return module, cohort
 
 
 def _bundle_cuda_assets() -> None:
@@ -1026,6 +1066,11 @@ def _bundle_cuda_assets() -> None:
     supplies libtorch_cuda.so out-of-band).
     """
     if FLAGOS_ACCELERATOR != "cuda":
+        return
+    native_vendor = _native_vendor_cohort()
+    if native_vendor is not None:
+        module, cohort = native_vendor
+        module.bundle(cohort, os.path.join(BASE_DIR, "torch_fl"))
         return
     # A FlagGems-primary CUDA wheel is built with FLAGOS_BUILD_BOXING=OFF (the
     # default). It compiles no boxing kernels and has no vendor torch to feed, so
@@ -1196,6 +1241,8 @@ class BuildExtWithCmake(_build_ext):
             [
                 sys.executable,
                 os.path.join(BASE_DIR, "torch_fl/native_host/build.py"),
+                "--source-root",
+                SOURCE_DIR,
                 "--output",
                 destination,
                 "--package",
@@ -1208,6 +1255,24 @@ class BuildExtWithCmake(_build_ext):
             env=env,
             cwd=destination,
         )
+        native_vendor = _native_vendor_cohort()
+        if native_vendor is not None:
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_build.py"),
+                    "--source-root",
+                    SOURCE_DIR,
+                    "--output",
+                    destination,
+                    "--build-temp",
+                    os.path.abspath(os.path.join(self.build_temp, "native_vendor")),
+                    "--vendor-library",
+                    native_vendor[1]["library_dir"],
+                ],
+                env=env,
+                cwd=destination,
+            )
         # A previous build may have imported the staging tree before this flag
         # was set. Bytecode is interpreter-local scratch, never a wheel artifact.
         for current, directories, _ in os.walk(os.path.join(destination, "torch_fl")):
@@ -1673,6 +1738,15 @@ TORCH_PIN = "torch>=2.10,<2.11"
 def _install_requires():
     reqs = [TORCH_PIN, "packaging>=23"]
     reqs += _flagos_sibling_requires()
+    native_vendor = _native_vendor_cohort()
+    if native_vendor is not None:
+        cohort = native_vendor[1]
+        reqs[0] = "torch==" + cohort["version"].split("+", 1)[0] + "+cpu"
+        if "flag_gems==" + cohort["flag_gems"] not in reqs:
+            raise RuntimeError(
+                "revalidate the native vendor policy for the configured FlagGems pin"
+            )
+        return reqs + cohort["requirements"]
     # For a CUDA wheel we bundle libtorch_cuda.so and preload it at import; it
     # needs the NVIDIA runtime libs present, so make them hard deps. Ascend/MetaX
     # builds do not (they supply their own runtime), so keep it CUDA-only.
