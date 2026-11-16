@@ -40,20 +40,36 @@ namespace at::native::flagos {
 
 namespace detail {
 
-inline bool PrecisionRejectsArg(uint64_t mask, const at::Tensor& value) {
+inline bool ConfiguredDtypeMatchesArg(uint64_t mask, const at::Tensor& value) {
   if (!value.defined()) return false;
   const auto dtype = static_cast<unsigned>(value.scalar_type());
   return dtype < 64 && (mask & (uint64_t{1} << dtype));
 }
 
+inline bool ConfiguredDtypeMatchesArg(uint64_t mask, const std::optional<at::Tensor>& value) {
+  return value.has_value() && ConfiguredDtypeMatchesArg(mask, *value);
+}
+
+inline bool ConfiguredDtypeMatchesArg(uint64_t mask, const at::TensorList& values) {
+  for (const auto& value : values) if (ConfiguredDtypeMatchesArg(mask, value)) return true;
+  return false;
+}
+
+inline bool ConfiguredDtypeMatchesArg(uint64_t mask, const at::ITensorListRef& values) {
+  for (const auto& value : values) if (ConfiguredDtypeMatchesArg(mask, value)) return true;
+  return false;
+}
+
 template <typename T>
-inline bool PrecisionRejectsArg(uint64_t, const T&) {
+inline bool ConfiguredDtypeMatchesArg(uint64_t, const T&) {
+  // ScalarType arguments can describe an output (mean.dim's dtype), so input
+  // dtype clauses inspect tensors only, including optional/list operands.
   return false;
 }
 
 template <typename... Args>
-inline bool PrecisionRejectsArgs(uint64_t mask, const Args&... args) {
-  return (... || PrecisionRejectsArg(mask, args));
+inline bool ConfiguredDtypeMatchesArgs(uint64_t mask, const Args&... args) {
+  return (... || ConfiguredDtypeMatchesArg(mask, args));
 }
 
 // Does this argument, for this op, force the call off the FlagGems route?
@@ -166,13 +182,6 @@ class Dispatcher {
     }
   }
 
-  // Installed once from a schema-checked, prebuilt vendor module. The mask is
-  // generated from measured precision exceptions, never from model shapes.
-  void RegisterNvidiaPrecisionKernel(FnPtr fn, uint64_t dtype_mask) {
-    nvidia_precision_mask_ = dtype_mask;
-    nvidia_fn_.store(fn, std::memory_order_release);
-  }
-
   // The kernel `device` resolves to, including GetFn's own degradation, or
   // nullptr. Lets a kernel set claim an empty slot without displacing the set
   // the conf's key actually names (soft_lowp/dispatch.cc).
@@ -191,12 +200,13 @@ class Dispatcher {
     // avoids constructing a std::string from op_name_ and hashing it in the
     // BackendTable on EVERY op call — measured as a significant per-op cost in
     // the Ascend eager decode loop (thousands of ops/token).
-    Backend backend = cached_backend_;
-    if (__builtin_expect(backend == Backend::kUncached, 0)) {
-      backend = GetBackendForOp(op_name_);
-      cached_backend_ = backend;
+    const auto* configured = cached_config_.load(std::memory_order_acquire);
+    if (__builtin_expect(configured == nullptr, 0)) {
+      configured = &GetBackendConfigForOp(op_name_);
+      cached_config_.store(configured, std::memory_order_release);
     }
-    auto fn = ResolveFn(op_name_, backend, args...);
+    Backend backend = configured->backend;
+    auto fn = ResolveFn(op_name_, *configured, backend, args...);
     LogDispatch(op_name_, backend);
 
     if (!fn) ThrowIfForcedBackendMissing(op_name_, backend);
@@ -314,8 +324,9 @@ class Dispatcher {
   template <typename... Args>
   decltype(auto) DispatchAs(const char* op, Args&&... args) const {
     const std::string op_name(op);
-    auto backend = GetBackendForOp(op_name);
-    auto fn = ResolveFn(op_name.c_str(), backend, args...);
+    const auto& configured = GetBackendConfigForOp(op_name);
+    auto backend = configured.backend;
+    auto fn = ResolveFn(op_name.c_str(), configured, backend, args...);
     LogDispatch(op_name, backend);
 
     if (!fn) ThrowIfForcedBackendMissing(op_name, backend);
@@ -355,8 +366,8 @@ class Dispatcher {
 
   // GetFn, plus the dtype escape from the FlagGems route.
   //
-  // A conf routes per op, so it cannot say "FlagGems, except for float64" --
-  // but on Ascend FlagGems' pointwise codegen simply does not compile for
+  // Existing platform capability guards predate configured dtype clauses.
+  // On Ascend FlagGems' pointwise codegen simply does not compile for
   // float64, and the vendor kernels do. The same is true of gaps that are the
   // intersection of one op and one dtype (bool `neg`), which is why the op
   // name is part of the question rather than a filter on it. See
@@ -394,16 +405,18 @@ class Dispatcher {
   }
 
   template <typename... Args>
-  FnPtr ResolveFn(const char* op_name, Backend& backend,
+  FnPtr ResolveFn(const char* op_name, const BackendConfigEntry& configured, Backend& backend,
                   const Args&... args) const {
-    FnPtr fn = GetFn(backend);
-    if (backend != Backend::kFlagGems || fn == nullptr) return fn;
-    if (auto native = nvidia_fn_.load(std::memory_order_acquire)) {
-      if (detail::PrecisionRejectsArgs(nvidia_precision_mask_, args...)) {
-        backend = Backend::kNvidia;
-        return native;
+    for (const auto& candidate : configured.dtypes) {
+      if (detail::ConfiguredDtypeMatchesArgs(candidate.dtype_mask, args...)) {
+        if (auto fn = GetFn(candidate.backend)) {
+          backend = candidate.backend;
+          return fn;
+        }
       }
     }
+    FnPtr fn = GetFn(backend);
+    if (backend != Backend::kFlagGems || fn == nullptr) return fn;
     if (!detail::FlagGemsRejectsArgs(op_name, args...)) return fn;
 
     auto [vendor_fn, vendor_backend] = VendorSlot();
@@ -641,14 +654,12 @@ class Dispatcher {
 
   const char* op_name_ = nullptr;
   // Per-op backend cache for the hot operator() path (see comment there).
-  // mutable: operator() is const but memoizes on first call. Benign data race
-  // under concurrent first-use — all threads compute the same immutable value.
-  mutable Backend cached_backend_ = Backend::kUncached;
+  // Publish the immutable entry as one pointer, including its dtype clauses.
+  mutable std::atomic<const BackendConfigEntry*> cached_config_{nullptr};
   FnPtr cuda_fn_           = nullptr;
   FnPtr flaggems_cpp_fn_   = nullptr;
   FnPtr flaggems_fn_       = nullptr;
   std::atomic<FnPtr> nvidia_fn_{nullptr};
-  uint64_t nvidia_precision_mask_ = 0;
   FnPtr ascend_fn_         = nullptr;
   FnPtr mthreads_fn_       = nullptr;
   FnPtr metax_fn_          = nullptr;

@@ -190,13 +190,15 @@ CONF_MATCHES_REGISTRATION_PLATFORMS = [
 ]
 
 
-def _parse_conf(path: Path) -> dict[str, str]:
-    """Read ``<op> = <key>`` routes from a conf, stripping comments."""
+def _parse_conf(path: Path, *, conditions=False) -> dict[str, str]:
+    """Read base routes for coverage, optionally retaining dtype clauses."""
     routes: dict[str, str] = {}
     for line in path.read_text().splitlines():
         name, sep, value = line.split("#", 1)[0].partition("=")
         if sep:
-            routes[name.strip()] = value.split("#", 1)[0].strip()
+            routes[name.strip()] = (
+                value.strip() if conditions else value.split(";", 1)[0].strip()
+            )
     return routes
 
 
@@ -435,9 +437,8 @@ def test_every_route_uses_an_allowed_backend_key(platform):
     Anything else is a generator bug or a hand-edit that will not match a
     ``Backend`` enum value at runtime.
     """
-    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
-    # A conf's route key is the vendor whose kernels serve it -- `nvidia` for
-    # the CUDA boxing kernel, like every other vendor key.
+    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf", conditions=True)
+    # A native route names its vendor. Boxing has its own explicit key.
     vendor_key = platform
     allowed = {
         "flaggems_cpp",
@@ -450,7 +451,9 @@ def test_every_route_uses_an_allowed_backend_key(platform):
     unexpected = {
         op: value
         for op, value in routes.items()
-        if value.split("#", 1)[0].strip() not in allowed
+        if any(
+            part.rsplit(":", 1)[-1].strip() not in allowed for part in value.split(";")
+        )
     }
     assert not unexpected, (
         f"{platform}: {len(unexpected)} routes use an unexpected key "

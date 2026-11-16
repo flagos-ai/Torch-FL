@@ -12,13 +12,15 @@
 #include <flagos.h>
 
 #include <string>
+#include <cstdint>
+#include <vector>
 
 namespace at::native::flagos {
 
 // Backend selector for unified op wrappers.
 // Determines which physical backend impl() dispatches to.
-// kUncached is a sentinel used by Dispatcher's per-op backend cache; it is
-// never stored in the BackendTable and never returned by GetBackendForOp.
+// kUncached is a reserved sentinel, never stored in the BackendTable or
+// returned by GetBackendForOp. Dispatcher caches a complete immutable entry.
 // Keep it last so the real backends stay contiguous.
 enum class Backend {
   // The CUDA-ABI boxing kernel: re-dispatch PrivateUse1 to CUDA into a vendor's
@@ -56,17 +58,35 @@ enum class Backend {
   kUncached
 };
 
-// Returns the backend for a given op name, loaded once from config file at startup.
+struct ConditionalBackend {
+  uint64_t dtype_mask;
+  Backend backend;
+};
+
+struct BackendConfigEntry {
+  Backend backend = Backend::kFlagGems;
+  std::vector<ConditionalBackend> dtypes;
+};
+
+// Optional input-dtype clauses share the op's config row, e.g.
+// "mm = flaggems; BFloat16:nvidia". A clause applies when an input matches and
+// its kernel is registered; otherwise the unconditional backend remains.
+// Clauses name kernel backends; `none` is only an unconditional coverage value.
+const BackendConfigEntry& GetBackendConfigForOp(const std::string& op_name);
+
+// Returns the unconditional backend for an op, before input-dtype resolution.
+// The full entry is exposed by GetBackendConfigForOp and loaded once at startup.
 // Config file path, in order of precedence:
 //   1. SetBackendConfigPath(), called by torch_fl._select_backend_config()
 //   2. $FLAGOS_BACKEND_CONFIG
 //   3. torch_fl/configs/backends_nvidia.conf, located from this library's own path
-// Format: "op_name = backend"
+// Format: "op_name = backend[; dtype[,dtype]:backend ...]"
 //   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
 //            "flaggems"     -- FlagGems Python (Triton) path
 //            "tileops"      -- TileOps Triton shims
-//            "<vendor>"     -- vendor-native kernel (cuda | ascend | musa |
-//                              metax | gcu | tsingmicro | kunlunxin | iluvatar)
+//            "<vendor>"     -- vendor-native kernel (nvidia | ascend | mthreads |
+//                              metax | enflame | tsingmicro | kunlunxin | iluvatar)
+//            "boxing"       -- opt-in CUDA boxing (legacy spelling: cuda)
 //            "none"         -- no accelerated impl; reaches cpu_fallback
 // Default when op is not listed: kFlagGems.
 Backend GetBackendForOp(const std::string& op_name);
@@ -118,8 +138,8 @@ bool LogEnabled(const char* item);
 // asking. Consulted by Dispatcher so a `flaggems` route falls back to the
 // vendor kernel for those dtypes instead of failing inside the compiler.
 //
-// A vendor conf is a per-op routing table, so it cannot express "FlagGems,
-// except for dtype X" -- and on Ascend that exception is real and broad.
+// These platform capability guards predate configurable dtype clauses and
+// remain unchanged for existing vendors. On Ascend the gap is real and broad.
 // BiShengHIR rejects the float64 instantiation of nearly every kernel
 // FlagGems' pointwise codegen produces: on Ascend910 with CANN 9.0.0 and
 // FlagTree 0.6.2a1+ascend3.5, add/sub/div/neg/abs/exp/log/sqrt/reciprocal/

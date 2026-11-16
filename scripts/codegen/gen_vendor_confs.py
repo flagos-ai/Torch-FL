@@ -3414,7 +3414,7 @@ def parse_conf(path: Path) -> dict:
         if not line or "=" not in line:
             continue
         op, backend = line.split("=", 1)
-        op, backend = op.strip(), backend.strip()
+        op, backend = op.strip(), backend.split(";", 1)[0].strip()
         if op and backend:
             table[op] = backend
     return table
@@ -4268,14 +4268,18 @@ def _reject_boxing_routes(name: str, routes: dict) -> None:
     """Refuse a default conf that names the boxing kernel for any op.
 
     Both spellings that reach ``Backend::kBoxing`` in ``csrc/aten/common.cc``:
-    ``boxing`` and the legacy ``cuda``, plus ``nvidia`` -- which that parser
-    also maps to the boxing kernel, so a conf naming it is routing boxing
-    whatever the key looks like.
+    ``boxing`` and the legacy ``cuda``. The native ``nvidia`` slot is distinct.
+    Conditional dtype clauses must obey the same prohibition as the base route.
     """
+    from native_host_policy import route_backends
+
     boxed = sorted(
         op
         for op, v in routes.items()
-        if v.split("#")[0].strip() in (BOXING_FALLBACK, "cuda", "nvidia")
+        if any(
+            backend.lower() in (BOXING_FALLBACK, "cuda")
+            for backend in route_backends(v)
+        )
     )
     if boxed:
         raise SystemExit(

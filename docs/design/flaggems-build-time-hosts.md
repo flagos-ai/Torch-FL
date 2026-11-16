@@ -680,10 +680,26 @@ pointer descriptors for the NVIDIA memory; no TensorImpl is retagged and no ATen
 CUDA redispatch or DeviceBoxingGuard is used. BLAS handles and workspaces are
 resources associated with a thread/device/stream, independent of model shapes.
 
-The existing eager dispatcher checks the generated dtype mask only on FlagGems
-routes. An exception cannot become a general fallback for other dtypes. The
-prebuilt module is registered at import with schema/policy ABI checks; model
-execution contains no Python routing mode. The adapter checks the selected
+The generated `backends_nvidia.conf` is the source of backend selection. Its
+measured exceptions are explicit, for example `mm = flaggems; BFloat16:nvidia`
+and `mean.dim = flaggems; Float:nvidia`. Conditional input-dtype clauses apply
+only when the target kernel is registered; unmatched inputs and builds without
+the native module retain the base route. A plain `mm = flaggems`, the per-op
+`FLAGOS_OP_mm=flaggems` override, or `FLAGOS_FORCE_BACKEND=flaggems` suppresses
+the conditional vendor route. Registering the module only installs typed
+functions; it does not override config choices. Each vendor entry also rejects
+dtypes outside its validated capability boundary.
+`none` remains an unconditional coverage verdict; dtype clauses must name a
+kernel backend. This cohort keeps the existing registered FlagGems base routes.
+
+The C++ dispatcher caches the immutable config entry and evaluates its generic
+dtype clauses without Python or shape-dependent plans. Refresh the clauses
+with `python scripts/codegen/codegen_ops.py --native-routes-only`; use
+`--check-native-routes` for staleness checks. Both the full generator and this
+refresh use the same policy and renderer, and the conf retains one writer.
+Existing platform capability guards outside this optional NVIDIA cohort are
+unchanged. The prebuilt module is registered at import with schema/policy ABI
+checks; model execution contains no Python routing mode. The adapter checks the selected
 cuBLAS backend and uses the vendor precision flags rather than changing them.
 This first policy covers functional inference operations; it does not claim
 out/in-place variants or other vendors have passed this numerical gate.

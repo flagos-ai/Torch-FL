@@ -385,7 +385,7 @@ nor the legacy `cuda` spelling of it.
   the only allowed outcome is `none`, which reaches `cpu_fallback`. A `boxing`
   entry would hide the missing route behind the vendor's borrowed CUDA kernel and
   report coverage the vendor + FlagGems story does not have.
-- A CUDA-ABI platform with no native operator library of its own (NVIDIA, MetaX,
+- A CUDA-ABI platform with no native operator library of its own (MetaX,
   Hygon DCU, T-Head PPU on this tree) therefore has no vendor key in its default
   conf: everything FlagGems does not cover is `none`.
 - The optional NVIDIA native-host precision module is a dtype-scoped exception
@@ -395,6 +395,13 @@ nor the legacy `cuda` spelling of it.
   condition. `nvidia` names this native slot; only `boxing` and legacy `cuda`
   name CUDA boxing. Do not expand a measured dtype exception into an unmeasured
   vendor fallback or change the default conf to imply general native coverage.
+  Backend selection must be explicit in the generated conf, for example
+  `mm = flaggems; BFloat16:nvidia`. A dtype clause applies only when an input
+  matches and its target kernel is registered; otherwise the base route applies.
+  Registering a vendor entry must never install a separate routing policy in
+  Dispatcher. An explicit FlagGems config/env override removes the conditions.
+  `codegen_ops.py --native-routes-only` refreshes NVIDIA's dtype clauses without
+  rediscovering its FlagGems coverage; `--check-native-routes` checks staleness.
   Keep precision exceptions and published source choices in that single build
   policy. Generate ABI catalogs into wheel manifests; do not duplicate the
   policy or its generated catalog as source JSON under `torch_fl/native_host/`.

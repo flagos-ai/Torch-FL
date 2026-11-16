@@ -175,6 +175,9 @@ cohort, bundles its numerical libraries and generates typed eager entries from
 ATen schemas. The policy currently covers FP32 power, mean, reciprocal square
 root and softmax, plus BF16 matrix products on NVIDIA; other routes remain
 FlagGems. No model-code change, Dynamo capture or tensor boxing is involved.
+The generated conf states the dtype conditions explicitly, such as
+`mm = flaggems; BFloat16:nvidia`; registering a vendor entry cannot override
+a plain FlagGems route or an explicit FlagGems environment override.
 This cohort also selects an unchanged published FlagGems pointwise host for
 measured `mul.Tensor` dtypes through the same build-time compiler.
 On H100, two independent installed-wheel Qwen3-0.6B BF16 runs pass all prefill

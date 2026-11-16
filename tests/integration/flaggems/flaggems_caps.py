@@ -351,14 +351,14 @@ def load_routes() -> dict[str, str]:
 
     Parsed the same way the C++ reader does: drop anything after ``#`` and split
     the remainder on the first ``=``. The value is the raw conf backend, before
-    the log-name mapping ``route_reason`` applies.
+    input-dtype clauses and the log-name mapping ``route_reason`` apply.
     """
     routes: dict[str, str] = {}
     with open(conf_path()) as f:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                routes[name.strip()] = value.strip()
+                routes[name.strip()] = value.split(";", 1)[0].strip()
     return routes
 
 

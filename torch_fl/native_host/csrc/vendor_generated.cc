@@ -10,6 +10,7 @@
 namespace at::native::flagos::vendor {
 std::atomic<int64_t> hits[6]{};
 at::Tensor Entry_0(const at::Tensor & self, int64_t dim, bool half_to_float) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: _softmax");
   ++hits[0];
   RECORD_FUNCTION("flagos::nvidia::_softmax", std::vector<c10::IValue>());
   VendorScope scope(self);
@@ -17,6 +18,7 @@ at::Tensor Entry_0(const at::Tensor & self, int64_t dim, bool half_to_float) {
 }
 
 at::Tensor Entry_1(const at::Tensor & self, const at::Tensor & mat2) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::BFloat16, "unmeasured native vendor dtype: bmm");
   ++hits[1];
   RECORD_FUNCTION("flagos::nvidia::bmm", std::vector<c10::IValue>());
   VendorDeviceScope scope(self);
@@ -24,6 +26,7 @@ at::Tensor Entry_1(const at::Tensor & self, const at::Tensor & mat2) {
 }
 
 at::Tensor Entry_2(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: mean.dim");
   ++hits[2];
   RECORD_FUNCTION("flagos::nvidia::mean.dim", std::vector<c10::IValue>());
   VendorScope scope(self);
@@ -31,6 +34,7 @@ at::Tensor Entry_2(const at::Tensor & self, at::OptionalIntArrayRef dim, bool ke
 }
 
 at::Tensor Entry_3(const at::Tensor & self, const at::Tensor & mat2) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::BFloat16, "unmeasured native vendor dtype: mm");
   ++hits[3];
   RECORD_FUNCTION("flagos::nvidia::mm", std::vector<c10::IValue>());
   VendorDeviceScope scope(self);
@@ -38,6 +42,7 @@ at::Tensor Entry_3(const at::Tensor & self, const at::Tensor & mat2) {
 }
 
 at::Tensor Entry_4(const at::Tensor & self, const at::Scalar & exponent) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: pow.Tensor_Scalar");
   ++hits[4];
   RECORD_FUNCTION("flagos::nvidia::pow.Tensor_Scalar", std::vector<c10::IValue>());
   VendorScope scope(self);
@@ -45,6 +50,7 @@ at::Tensor Entry_4(const at::Tensor & self, const at::Scalar & exponent) {
 }
 
 at::Tensor Entry_5(const at::Tensor & self) {
+  TORCH_CHECK(self.scalar_type() == at::ScalarType::Float, "unmeasured native vendor dtype: rsqrt");
   ++hits[5];
   RECORD_FUNCTION("flagos::nvidia::rsqrt", std::vector<c10::IValue>());
   VendorScope scope(self);

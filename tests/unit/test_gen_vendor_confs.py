@@ -485,6 +485,25 @@ def test_generation_is_idempotent():
     assert first == second
 
 
+@pytest.mark.parametrize(
+    "route",
+    [
+        "boxing",
+        "cuda",
+        "flaggems; Float:boxing",
+        "flaggems; BFloat16:cuda",
+        "flaggems; Float:CUDA",
+    ],
+)
+def test_default_boxing_guard_checks_dtype_branches(route):
+    with pytest.raises(SystemExit, match="to boxing"):
+        g._reject_boxing_routes("backends_nvidia.conf", {"mm": route})
+
+
+def test_native_nvidia_dtype_route_is_distinct_from_boxing():
+    g._reject_boxing_routes("backends_nvidia.conf", {"mm": "flaggems; BFloat16:nvidia"})
+
+
 @pytest.mark.parametrize("vendor", sorted(g.VENDORS))
 def test_every_vendor_conf_covers_the_whole_op_list(vendor):
     built = g.build_all(CONF_DIR)

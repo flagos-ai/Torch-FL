@@ -117,14 +117,10 @@ def render(policy):
         ).hexdigest()
         catalog.append(record)
         fn_type, dispatcher = schema_to_cpp_name(name)
-        mask = " | ".join(
-            f"(uint64_t{{1}} << static_cast<unsigned>(at::ScalarType::{dtype}))"
-            for dtype in sorted(row["dtypes"])
-        )
         encoded = json.dumps(json.dumps(record, sort_keys=True, separators=(",", ":")))
         entries.append(
             f'NATIVE_VENDOR_ENTRY("nvidia", {json.dumps(name)}, '
-            f"{json.dumps(record['abi'])}, {encoded}, {fn_type}, {dispatcher}, ({mask}))"
+            f"{json.dumps(record['abi'])}, {encoded}, {fn_type}, {dispatcher})"
         )
         arguments = ", ".join(f"{kind} {arg_name}" for kind, arg_name in args)
         call_args = ", ".join(names)
@@ -139,8 +135,13 @@ def render(policy):
         else:
             call = f"StructuredCall<{parent}>({call_args})"
         scope = "VendorDeviceScope" if row["family"] == "blas" else "VendorScope"
+        admitted = " || ".join(
+            f"self.scalar_type() == at::ScalarType::{dtype}"
+            for dtype in sorted(row["dtypes"])
+        )
         functions.append(
             f"at::Tensor Entry_{index}({arguments}) {{\n"
+            f'  TORCH_CHECK({admitted}, "unmeasured native vendor dtype: {name}");\n'
             f"  ++hits[{index}];\n"
             f'  RECORD_FUNCTION("flagos::nvidia::{name}", std::vector<c10::IValue>());\n'
             f"  {scope} scope(self);\n"

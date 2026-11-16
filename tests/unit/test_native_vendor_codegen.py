@@ -31,6 +31,21 @@ def test_committed_entries_match_published_schemas(generator):
         assert path.read_text() == content, path
 
 
+def test_conf_dtype_routes_match_generated_vendor_capabilities(generator):
+    conf = (ROOT / "torch_fl/configs/backends_nvidia.conf").read_text()
+    clauses = {}
+    for line in conf.splitlines():
+        name, assignment, value = line.split("#", 1)[0].partition("=")
+        if assignment and ";" in value:
+            base, clause = value.split(";", 1)
+            dtypes, backend = clause.strip().split(":")
+            assert base.strip() == "flaggems"
+            assert backend == "nvidia"
+            clauses[name.strip()] = sorted(dtypes.split(","))
+    catalog = generator.render(generator.load_policy())[1]
+    assert clauses == {row["op"]: row["dtypes"] for row in catalog}
+
+
 @pytest.mark.parametrize("field,value", [("vendor", "other"), ("schema_version", 2)])
 def test_unknown_policy_is_rejected(generator, field, value):
     policy = generator.load_policy()

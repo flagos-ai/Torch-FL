@@ -187,6 +187,51 @@ const char* BackendName(Backend b) {
   }
 }
 
+bool ParseConfiguredBackend(const std::string& text, BackendConfigEntry* result) {
+  const auto first = text.find(';');
+  if (!ParseBackendName(TrimStr(text.substr(0, first)), &result->backend)) return false;
+  result->dtypes.clear();
+  uint64_t seen = 0;
+  auto pos = first;
+  while (pos != std::string::npos) {
+    const auto end = text.find(';', pos + 1);
+    const auto clause = TrimStr(text.substr(pos + 1, end - pos - 1));
+    const auto colon = clause.find(':');
+    TORCH_CHECK(colon != std::string::npos && clause.find(':', colon + 1) == std::string::npos,
+                "flagos: invalid dtype route '", clause, "'");
+    Backend backend;
+    TORCH_CHECK(ParseBackendName(TrimStr(clause.substr(colon + 1)), &backend),
+                "flagos: unknown dtype-route backend in '", clause, "'");
+    TORCH_CHECK(backend != Backend::kNone,
+                "flagos: a dtype route requires a kernel backend, not none");
+    uint64_t mask = 0;
+    const auto type_names = TrimStr(clause.substr(0, colon));
+    TORCH_CHECK(!type_names.empty() && type_names.back() != ',',
+                "flagos: empty route dtype in '", clause, "'");
+    std::istringstream names(type_names);
+    std::string name;
+    while (std::getline(names, name, ',')) {
+      name = LowerStr(TrimStr(name));
+      uint64_t bit = 0;
+      for (unsigned i = 0; i < static_cast<unsigned>(at::ScalarType::NumOptions) && i < 64; ++i) {
+        if (i != static_cast<unsigned>(at::ScalarType::Undefined) &&
+            LowerStr(c10::toString(static_cast<at::ScalarType>(i))) == name) {
+          bit = uint64_t{1} << i;
+          break;
+        }
+      }
+      TORCH_CHECK(bit && !(mask & bit) && !(seen & bit),
+                  "flagos: unknown or repeated route dtype '", name, "'");
+      mask |= bit;
+    }
+    TORCH_CHECK(mask, "flagos: empty route dtype in '", clause, "'");
+    seen |= mask;
+    result->dtypes.push_back({mask, backend});
+    pos = end;
+  }
+  return true;
+}
+
 // Parse one conf file into `table`. Later assignments win, so a caller that
 // wants to override an inherited route just restates the op after the
 // `include`.
@@ -208,7 +253,7 @@ const char* BackendName(Backend b) {
 // annotation; FLAGOS_FORCE_BACKEND=vendor needs it to know which ops may
 // legally be pinned back to the vendor kernel.
 void ParseConfigInto(const std::string& path,
-                     std::unordered_map<std::string, Backend>& table,
+                     std::unordered_map<std::string, BackendConfigEntry>& table,
                      std::unordered_map<std::string, Backend>& alt,
                      int depth = 0) {
   if (depth > 8) {
@@ -262,12 +307,12 @@ void ParseConfigInto(const std::string& path,
 
     if (op.empty() || val.empty()) continue;
 
-    Backend parsed;
-    if (ParseBackendName(val, &parsed)) {
+    BackendConfigEntry parsed;
+    if (ParseConfiguredBackend(val, &parsed)) {
       table[op] = parsed;
     } else {
       fprintf(stderr, "[flagos] unknown backend '%s' for op '%s', using flaggems\n", val.c_str(), op.c_str());
-      table[op] = Backend::kFlagGems;
+      table[op] = {};
     }
 
     Backend annotated;
@@ -316,7 +361,7 @@ bool IsFlagGems(Backend b) {
 // candidate are stated on one line, and the same `alt` map the other modes read
 // carries it. Ops it misses are simply not TileOPs candidates; there is nothing
 // to report.
-void ApplyForcedBackend(std::unordered_map<std::string, Backend>& table,
+void ApplyForcedBackend(std::unordered_map<std::string, BackendConfigEntry>& table,
                         const std::unordered_map<std::string, Backend>& alt) {
   const std::string& mode = ForcedBackendMode();
   if (mode.empty()) return;
@@ -326,13 +371,15 @@ void ApplyForcedBackend(std::unordered_map<std::string, Backend>& table,
 
   std::vector<std::string> unsupported;
   size_t moved = 0;
-  for (auto& [op, backend] : table) {
+  for (auto& [op, route] : table) {
+    auto& backend = route.backend;
     auto it = alt.find(op);
     Backend annotated = it != alt.end() ? it->second : Backend::kNone;
 
     if (to_tileops) {
       if (annotated != Backend::kTileOps || backend == Backend::kTileOps) continue;
       backend = Backend::kTileOps;
+      route.dtypes.clear();
       ++moved;
       continue;
     }
@@ -348,11 +395,17 @@ void ApplyForcedBackend(std::unordered_map<std::string, Backend>& table,
     }
 
     if (target == Backend::kNone) {
+      if (!to_flaggems && std::any_of(route.dtypes.begin(), route.dtypes.end(),
+                                    [](const auto& candidate) {
+          return !IsFlagGems(candidate.backend) && candidate.backend != Backend::kNone;
+        })) continue;  // Keep measured dtype limits instead of widening them.
       unsupported.push_back(op);
       continue;
     }
+    if (to_flaggems) route.dtypes.clear();
     if (target != backend) {
       backend = target;
+      route.dtypes.clear();
       ++moved;
     }
   }
@@ -404,8 +457,8 @@ std::string ResolveBackendConfigPath() {
   return path;
 }
 
-std::unordered_map<std::string, Backend> LoadBackendConfig() {
-  std::unordered_map<std::string, Backend> table;
+std::unordered_map<std::string, BackendConfigEntry> LoadBackendConfig() {
+  std::unordered_map<std::string, BackendConfigEntry> table;
 
   std::string path = ResolveBackendConfigPath();
 
@@ -446,11 +499,11 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
     }
     std::string override_val = flagos_env::EnvValue(key.c_str());
     if (override_val.empty()) continue;
-    Backend parsed;
-    if (ParseBackendName(override_val, &parsed)) {
+    BackendConfigEntry parsed;
+    if (ParseConfiguredBackend(override_val, &parsed)) {
       table[op] = parsed;
       fprintf(stderr, "[flagos] env override: %s -> %s\n", op.c_str(),
-              BackendName(parsed));
+              BackendName(parsed.backend));
     } else {
       fprintf(stderr, "[flagos] env override: unknown backend '%s' for op '%s', ignored\n",
               override_val.c_str(), op.c_str());
@@ -460,9 +513,12 @@ std::unordered_map<std::string, Backend> LoadBackendConfig() {
   return table;
 }
 
-const std::unordered_map<std::string, Backend>& BackendTable() {
-  static const auto table = LoadBackendConfig();
-  return table;
+const std::unordered_map<std::string, BackendConfigEntry>& BackendTable() {
+  // Dispatchers retain entry pointers. Keep the immutable table alive through
+  // native-library teardown rather than depending on static destructor order.
+  static const auto* table =
+      new std::unordered_map<std::string, BackendConfigEntry>(LoadBackendConfig());
+  return *table;
 }
 
 } // namespace
@@ -532,6 +588,10 @@ bool LogEnabled(const char* item) {
 }
 
 Backend GetBackendForOp(const std::string& op_name) {
+  return GetBackendConfigForOp(op_name).backend;
+}
+
+const BackendConfigEntry& GetBackendConfigForOp(const std::string& op_name) {
   const auto& table = BackendTable();
   auto it = table.find(op_name);
   // kFlagGems is the answer for an op the conf does not mention. In a healthy
@@ -544,7 +604,8 @@ Backend GetBackendForOp(const std::string& op_name) {
   // (it is the broadest route, so the op usually still runs), and
   // LoadBackendConfig above makes the one disagreement it can detect -- an
   // unreadable file -- fatal instead of silent.
-  return it != table.end() ? it->second : Backend::kFlagGems;
+  static const auto* unlisted = new BackendConfigEntry;
+  return it != table.end() ? it->second : *unlisted;
 }
 
 bool HasBackendForOp(const std::string& op_name) {

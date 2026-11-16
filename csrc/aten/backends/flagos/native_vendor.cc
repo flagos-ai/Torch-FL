@@ -20,10 +20,9 @@ struct VendorEntry {
   uintptr_t address = 0;
 };
 
-#define NATIVE_VENDOR_ENTRY(vendor, op, abi, catalog, type, dispatcher, mask) \
+#define NATIVE_VENDOR_ENTRY(vendor, op, abi, catalog, type, dispatcher) \
   {vendor, op, abi, catalog, [](uintptr_t address) {                         \
-     dispatcher.RegisterNvidiaPrecisionKernel(                            \
-         reinterpret_cast<type>(address), mask);                            \
+     dispatcher.RegisterKernel(Backend::kNvidia, reinterpret_cast<type>(address)); \
    }},
 VendorEntry entries[] = {
 #include "../../generated/native_vendor_entries.inc"

@@ -295,7 +295,7 @@ def conf_routes(platform):
     for line in path.read_text().splitlines():
         name, sep, rest = line.split("#", 1)[0].partition("=")
         if sep:
-            routes[name.strip()] = rest.strip()
+            routes[name.strip()] = rest.split(";", 1)[0].strip()
     return routes
 
 

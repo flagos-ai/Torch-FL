@@ -76,7 +76,9 @@ def _conf_values():
         for line in conf.read_text(encoding="utf-8").splitlines():
             _name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                values.add(value.strip())
+                values.update(
+                    part.rsplit(":", 1)[-1].strip() for part in value.split(";")
+                )
     return values
 
 
