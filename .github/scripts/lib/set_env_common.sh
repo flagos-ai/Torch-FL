@@ -494,6 +494,20 @@ faster_cpu_torch_index() {
 # mirror.nju.edu.cn, which serves the wheel directly; see version-pins.env for
 # the side-by-side measurement.
 install_cpu_torch() {
+  if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+    # Hosted CI fetches the original pinned wheel when hardware runners cannot
+    # reach its index. Verify every delivered wheel before an offline install.
+    local checksum_var="" verifier=""
+    checksum_var="CPU_TORCH_WHEEL_SHA256_${FLAGOS_ACCELERATOR:?accelerator is required}"
+    verifier="$(dirname "${BASH_SOURCE[0]}")/../prepare_cpu_torch.py"
+    "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" "$verifier" verify \
+      --directory "$TORCH_FL_CPU_TORCH_WHEELHOUSE" \
+      --version "$CPU_TORCH_VERSION" --index-url "$CPU_TORCH_INDEX_URL" \
+      --sha256 "${!checksum_var:?CPU Torch artifact checksum is required}" || return 1
+    pip_retry --no-index --find-links "$TORCH_FL_CPU_TORCH_WHEELHOUSE" \
+      "$@" "torch==${CPU_TORCH_VERSION}"
+    return $?
+  fi
   local mirror="${TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL-${CPU_TORCH_MIRROR_INDEX_URL_DEFAULT:-}}"
   local index="$CPU_TORCH_INDEX_URL"
   # The Ascend proxy moved only 9.9/146.5 MB before the two-hour timeout.
