@@ -4,7 +4,6 @@
 """Published vendor assets must be identified without importing torch_fl."""
 
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -19,26 +18,39 @@ SPEC.loader.exec_module(cohort)
 
 @pytest.fixture
 def published(tmp_path):
-    policy = ROOT / "torch_fl/native_host/vendor_precision.json"
-    values = json.loads(policy.read_text())
+    policy = cohort.load_build_policy(ROOT).precision_policy("nvidia")
     library = tmp_path / "torch/lib"
     library.mkdir(parents=True)
     (library.parent / "version.py").write_text(
-        f"__version__: str = {values['vendor_torch']!r}\n"
-        f"git_version = {values['torch_git_version']!r}\ncuda = '13.0'\n"
+        f"__version__: str = {policy['vendor_torch']!r}\n"
+        f"git_version = {policy['torch_git_version']!r}\ncuda = '13.0'\n"
     )
     for name in cohort.LIBRARIES:
         (library / name).write_bytes(name.encode())
     info = tmp_path / "torch-2.10.0+cu130.dist-info"
     info.mkdir()
     (info / "METADATA").write_text(
-        f"Name: torch\nVersion: {values['vendor_torch']}\n"
+        f"Name: torch\nVersion: {policy['vendor_torch']}\n"
         'Requires-Dist: nvidia-cublas==13.1.0.3; platform_system == "Linux"\n'
         "Requires-Dist: packaging>=23\n"
     )
     (info / "licenses").mkdir()
     (info / "licenses/LICENSE").write_text("published license")
     return library, policy, info
+
+
+def test_build_policy_views_share_cohort_and_do_not_mutate_registry():
+    policy = cohort.load_build_policy(ROOT)
+    precision = policy.precision_policy("nvidia")
+    sources = policy.source_policy("nvidia")
+    for key in ("schema_version", "vendor", "flag_gems"):
+        assert precision[key] == sources[key]
+    precision["operators"].clear()
+    sources["entries"].clear()
+    assert policy.precision_policy("nvidia")["operators"]
+    assert policy.source_policy("nvidia")["entries"]
+    with pytest.raises(ValueError, match="unmeasured native-host vendor"):
+        policy.precision_policy("mthreads")
 
 
 def test_bundle_uses_content_identity_and_preserves_license(published, tmp_path):

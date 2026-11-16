@@ -6,7 +6,6 @@
 import hashlib
 import importlib.metadata
 import importlib.util
-import json
 from pathlib import Path
 import re
 import sys
@@ -36,16 +35,6 @@ def validate(policy):
             or not row.get("reason")
         ):
             raise ValueError("invalid published source selection")
-    return policy
-
-
-def selected(build_config):
-    """Read the opt-in cohort's policy during wheel construction."""
-    if not getattr(build_config, "NATIVE_VENDOR", False):
-        return None
-    policy = validate(json.loads(Path(__file__).with_suffix(".json").read_text()))
-    if build_config.ACCELERATOR != policy["vendor"]:
-        raise RuntimeError("published source policy vendor mismatch")
     return policy
 
 

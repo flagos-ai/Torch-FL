@@ -30,6 +30,7 @@ except ModuleNotFoundError:  # Python 3.10, the DCU/MUSA interpreter
     tomllib = None
 from setuptools import Distribution, Extension
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -104,6 +105,34 @@ def test_cython_is_only_a_native_host_build_requirement(monkeypatch, enabled):
     source = (ROOT / "pyproject.toml").read_text()
     build_system = source.split("[build-system]", 1)[1].split("[project]", 1)[0]
     assert "Cython" not in build_system
+
+
+def test_native_host_package_data_only_includes_generated_manifests(
+    monkeypatch, tmp_path
+):
+    _, kwargs = _load_setup(monkeypatch)
+    package = tmp_path / "torch_fl"
+    generated = package / "native_host/_generated"
+    generated.mkdir(parents=True)
+    for name in (
+        "source_variants.json",
+        "vendor_catalog.json",
+        "vendor_precision.json",
+    ):
+        (generated.parent / name).write_text("{}")
+    manifest = generated / "vendor_manifest.json"
+    manifest.write_text("{}")
+    command = build_py(
+        Distribution(
+            {
+                "package_data": kwargs["package_data"],
+                "include_package_data": kwargs["include_package_data"],
+            }
+        )
+    )
+    command.ensure_finalized()
+    command.analyze_manifest()
+    assert command.find_data_files("torch_fl", str(package)) == [str(manifest)]
 
 
 def test_iluvatar_native_build_uses_active_cpu_torch(monkeypatch, tmp_path):
@@ -313,6 +342,7 @@ def test_native_host_build_uses_staged_package(monkeypatch, tmp_path, clean_kern
     args, options = calls[0]
     assert args[args.index("--package") + 1] == "torch_fl.native_host._generated"
     assert args[args.index("--output") + 1] == command.build_lib
+    assert args[args.index("--source-root") + 1] == str(ROOT)
     assert args[args.index("--build-temp") + 1] == str(
         tmp_path / "objects/native_hosts"
     )

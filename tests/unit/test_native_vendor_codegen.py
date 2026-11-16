@@ -5,7 +5,6 @@
 
 import copy
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -28,22 +27,20 @@ def test_committed_entries_match_published_schemas(generator):
     first = generator.render(generator.load_policy())
     second = generator.render(generator.load_policy())
     assert first == second
-    for path, content in first.items():
+    for path, content in first[0].items():
         assert path.read_text() == content, path
 
 
 @pytest.mark.parametrize("field,value", [("vendor", "other"), ("schema_version", 2)])
-def test_unknown_policy_is_rejected(generator, tmp_path, field, value):
+def test_unknown_policy_is_rejected(generator, field, value):
     policy = generator.load_policy()
     policy[field] = value
-    path = tmp_path / "policy.json"
-    path.write_text(json.dumps(policy))
     with pytest.raises(ValueError, match="unsupported vendor precision policy"):
-        generator.load_policy(path)
+        generator.validate_policy(policy)
 
 
 @pytest.mark.parametrize("mutation", ["duplicate", "dtype", "family", "evidence"])
-def test_unmeasured_policy_is_rejected(generator, tmp_path, mutation):
+def test_unmeasured_policy_is_rejected(generator, mutation):
     policy = generator.load_policy()
     row = policy["operators"][0]
     if mutation == "duplicate":
@@ -54,10 +51,8 @@ def test_unmeasured_policy_is_rejected(generator, tmp_path, mutation):
         row["family"] = "handwritten"
     else:
         row["reason"] = ""
-    path = tmp_path / "policy.json"
-    path.write_text(json.dumps(policy))
     with pytest.raises(ValueError):
-        generator.load_policy(path)
+        generator.validate_policy(policy)
 
 
 def test_unknown_schema_fails_before_emission(generator):
@@ -69,7 +64,38 @@ def test_unknown_schema_fails_before_emission(generator):
 
 def test_policy_change_invalidates_all_entry_abis(generator):
     policy = generator.load_policy()
-    original = json.loads(generator.render(policy)[generator.CATALOG_PATH])
+    original = generator.render(policy)[1]
     policy["operators"][0]["dtypes"] = ["BFloat16"]
-    changed = json.loads(generator.render(policy)[generator.CATALOG_PATH])
+    changed = generator.render(policy)[1]
     assert {row["abi"] for row in original}.isdisjoint(row["abi"] for row in changed)
+
+
+def test_wheel_builder_generates_catalog_without_source_json(generator, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "torch_fl/native_host"))
+    spec = importlib.util.spec_from_file_location(
+        "vendor_builder_test", ROOT / "torch_fl/native_host/vendor_build.py"
+    )
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    assert (
+        builder.generate_catalog(ROOT) == generator.render(generator.load_policy())[1]
+    )
+    for name in (
+        "source_variants.json",
+        "vendor_precision.json",
+        "vendor_catalog.json",
+    ):
+        assert not (ROOT / "torch_fl/native_host" / name).exists()
+
+
+def test_catalog_emission_rejects_stale_core_sources(
+    generator, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(generator, "SOURCE_PATH", tmp_path / "stale.cc")
+    monkeypatch.setattr(generator, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        generator.sys, "argv", ["codegen", "--check", "--print-catalog"]
+    )
+    with pytest.raises(SystemExit, match="stale native vendor entries"):
+        generator.main()
+    assert not capsys.readouterr().out

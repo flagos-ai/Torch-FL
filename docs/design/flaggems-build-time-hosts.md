@@ -653,11 +653,18 @@ runtime dependencies; the build bundles the original numerical libraries and
 licenses. The compatibility manifest records the verified vendor Torch version.
 No SDK version is inferred from a wheel suffix.
 
-`torch_fl/native_host/vendor_precision.json` records measured operator/dtype
-exceptions and their removal condition. `codegen_native_vendor.py` derives
+`scripts/codegen/native_host_policy.py` is the single build-time source for
+measured operator/dtype exceptions, published source selections and their shared
+dependency cohort. It records the exceptions' removal condition.
+`codegen_native_vendor.py` derives
 typed entry signatures, structured meta/implementation classes and ABI hashes
 from the installed Torch schemas. Regeneration followed by `--check` must leave
-the generated core catalog, extension source and JSON catalog unchanged.
+the generated core entries and extension source unchanged. The wheel builder
+uses `--check --print-catalog` to derive the ABI catalog from the same schemas
+and policy, checks it against the compiled core, and embeds it together with the
+precision policy in `vendor_manifest.json`. No separate catalog JSON is kept in
+the source tree. Runtime activation reads only the installed wheel manifests;
+the codegen policy is not imported or required from a source checkout.
 
 | Operation | Input dtype | Published vendor implementation |
 | --- | --- | --- |
@@ -709,8 +716,8 @@ zero-dimensional tensors, equal Python scalars of different types and changes to
 the default dtype. These changes affect metadata and allocation, without changing
 a numerical kernel or specializing a model path.
 
-The optional precision cohort also records a published FlagGems source selection
-in `native_host/source_variants.json`. For `aten::mul.Tensor`, when all operands
+The same build policy records the optional cohort's published FlagGems source
+selection, which the builder embeds in the host manifest. For `aten::mul.Tensor`, when all operands
 are FP32/BF16 tensors on the same PrivateUse1 device, the compiler lowers the
 released `flag_gems.runtime.backend._sunrise.ops.mul.mul` host and its original
 pointwise generator. The source file is pinned by package version and SHA-256;

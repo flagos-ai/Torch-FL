@@ -6,7 +6,6 @@
 import copy
 import hashlib
 import importlib.util
-import json
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -19,11 +18,16 @@ spec = importlib.util.spec_from_file_location(
 )
 variants = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(variants)
+spec = importlib.util.spec_from_file_location(
+    "source_variant_cohort_test", ROOT / "torch_fl/native_host/vendor_cohort.py"
+)
+cohort = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cohort)
 
 
 @pytest.fixture
 def policy():
-    return json.loads((ROOT / "torch_fl/native_host/source_variants.json").read_text())
+    return cohort.load_build_policy(ROOT).source_policy("nvidia")
 
 
 @pytest.fixture
@@ -48,14 +52,21 @@ def published(tmp_path, monkeypatch, policy):
     sys.modules.pop(row["module"], None)
 
 
-def test_policy_is_opt_in_to_the_validated_vendor_build(policy):
-    assert variants.selected(SimpleNamespace(NATIVE_VENDOR=False)) is None
+def test_policy_is_opt_in_to_the_validated_vendor_build(policy, tmp_path):
     assert (
-        variants.selected(SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="nvidia"))
+        cohort.source_policy_for_build(SimpleNamespace(NATIVE_VENDOR=False), tmp_path)
+        is None
+    )
+    assert (
+        cohort.source_policy_for_build(
+            SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="nvidia"), ROOT
+        )
         == policy
     )
-    with pytest.raises(RuntimeError, match="vendor mismatch"):
-        variants.selected(SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="mthreads"))
+    with pytest.raises(ValueError, match="unmeasured native-host vendor"):
+        cohort.source_policy_for_build(
+            SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="mthreads"), ROOT
+        )
 
 
 def test_load_keeps_public_operator_and_published_source_unchanged(policy, published):

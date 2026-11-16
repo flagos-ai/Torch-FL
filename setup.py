@@ -1041,9 +1041,8 @@ def _native_vendor_cohort():
         raise RuntimeError(f"Cannot load vendor cohort reader from {source}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    cohort = module.describe(
-        library, os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_precision.json")
-    )
+    policy = module.load_build_policy(SOURCE_DIR).precision_policy("nvidia")
+    cohort = module.describe(library, policy)
     declared = os.environ.get("FLAGOS_VENDOR_TORCH_VERSION")
     if declared and declared != cohort["version"]:
         raise RuntimeError(
@@ -1242,6 +1241,8 @@ class BuildExtWithCmake(_build_ext):
             [
                 sys.executable,
                 os.path.join(BASE_DIR, "torch_fl/native_host/build.py"),
+                "--source-root",
+                SOURCE_DIR,
                 "--output",
                 destination,
                 "--package",
@@ -1463,7 +1464,6 @@ def _get_setup_kwargs():
     package_data = {
         "torch_fl": [
             "native_host/csrc/*.cc",
-            "native_host/*.json",
             "native_host/csrc/*.h",
             "native_host/_generated/*.so",
             "native_host/_generated/*.json",

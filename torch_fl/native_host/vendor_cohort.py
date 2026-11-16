@@ -6,13 +6,28 @@
 import ast
 from email.parser import Parser
 import hashlib
-import json
+import importlib.util
 from pathlib import Path
 import shutil
 
 from packaging.requirements import Requirement
 
 LIBRARIES = ("libtorch_nvshmem.so", "libc10_cuda.so", "libtorch_cuda.so")
+
+
+def load_build_policy(source_root):
+    """Read the codegen policy during a build, without importing torch_fl."""
+    path = Path(source_root) / "scripts/codegen/native_host_policy.py"
+    spec = importlib.util.spec_from_file_location("native_host_build_policy", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def source_policy_for_build(build_config, source_root):
+    if not getattr(build_config, "NATIVE_VENDOR", False):
+        return None
+    return load_build_policy(source_root).source_policy(build_config.ACCELERATOR)
 
 
 def digest(path):
@@ -43,9 +58,8 @@ def version_fields(path):
     return values
 
 
-def describe(library_dir, policy_path):
+def describe(library_dir, policy):
     library_dir = Path(library_dir).resolve()
-    policy = json.loads(Path(policy_path).read_text())
     fields = version_fields(library_dir.parent / "version.py")
     if (
         fields.get("__version__") != policy["vendor_torch"]

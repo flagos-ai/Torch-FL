@@ -390,11 +390,14 @@ nor the legacy `cuda` spelling of it.
   conf: everything FlagGems does not cover is `none`.
 - The optional NVIDIA native-host precision module is a dtype-scoped exception
   policy, not a default-conf coverage claim. Generate its entries from
-  `torch_fl/native_host/vendor_precision.json`; require measured published-wheel
+  `scripts/codegen/native_host_policy.py`; require measured published-wheel
   failures, paired vendor precision/performance evidence and an explicit removal
   condition. `nvidia` names this native slot; only `boxing` and legacy `cuda`
   name CUDA boxing. Do not expand a measured dtype exception into an unmeasured
   vendor fallback or change the default conf to imply general native coverage.
+  Keep precision exceptions and published source choices in that single build
+  policy. Generate ABI catalogs into wheel manifests; do not duplicate the
+  policy or its generated catalog as source JSON under `torch_fl/native_host/`.
 - `scripts/codegen/gen_vendor_confs.py` enforces this — `build_all()` exits if any
   default conf would emit `boxing`/`cuda`. Do not relax that check; if a route is
   wrong, fix the route.

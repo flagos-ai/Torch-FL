@@ -11,8 +11,9 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
-from vendor_cohort import bundle, describe, digest
+from vendor_cohort import bundle, describe, digest, load_build_policy
 
 
 def dispatch_definitions(torch_library):
@@ -26,6 +27,20 @@ def dispatch_definitions(torch_library):
     return definitions
 
 
+def generate_catalog(source_root):
+    return json.loads(
+        subprocess.check_output(
+            [
+                sys.executable,
+                str(Path(source_root) / "scripts/codegen/codegen_native_vendor.py"),
+                "--check",
+                "--print-catalog",
+            ],
+            text=True,
+        )
+    )
+
+
 def build(source_root, output, build_temp, vendor_library):
     if os.environ.get("_TORCH_FL_BUILDING_NATIVE_HOST") != "1":
         raise RuntimeError("native vendor compilation is a wheel-build operation")
@@ -35,8 +50,8 @@ def build(source_root, output, build_temp, vendor_library):
     source_root, output, build_temp = map(Path, (source_root, output, build_temp))
     package = output / "torch_fl"
     sources = source_root / "torch_fl/native_host"
-    policy = json.loads((sources / "vendor_precision.json").read_text())
-    cohort = describe(vendor_library, sources / "vendor_precision.json")
+    policy = load_build_policy(source_root).precision_policy("nvidia")
+    cohort = describe(vendor_library, policy)
     if (
         str(torch.__version__).split("+", 1)[0] != cohort["version"].split("+", 1)[0]
         or torch.version.git_version != cohort["git_version"]
@@ -55,7 +70,7 @@ def build(source_root, output, build_temp, vendor_library):
 
     if "boxing" in torch_fl._build_config.KERNELS:
         raise RuntimeError("native vendor precision cannot be built with boxing")
-    catalog = json.loads((sources / "vendor_catalog.json").read_text())
+    catalog = generate_catalog(source_root)
     if json.loads(torch.ops.flagos.native_vendor_catalog()) != catalog:
         raise RuntimeError(
             "rebuild the core library after generating native vendor entries"
@@ -113,15 +128,16 @@ def build(source_root, output, build_temp, vendor_library):
         "vendor_metadata_sha256": cohort["metadata_sha256"],
         "cpu_dispatch_definitions": definitions,
         "catalog": catalog,
+        "policy": policy,
         "artifacts": artifacts,
         "numerical_libraries": {name: digest(path) for name, path in libraries.items()},
         "sources": {
-            name: digest(sources / name)
+            name: digest(source_root / name)
             for name in (
-                "vendor_precision.json",
-                "vendor_catalog.json",
-                "csrc/vendor_generated.cc",
-                "csrc/vendor_runtime.h",
+                "scripts/codegen/native_host_policy.py",
+                "scripts/codegen/codegen_native_vendor.py",
+                "torch_fl/native_host/csrc/vendor_generated.cc",
+                "torch_fl/native_host/csrc/vendor_runtime.h",
             )
         },
     }
