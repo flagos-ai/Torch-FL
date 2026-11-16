@@ -157,6 +157,95 @@ def test_summary_requires_every_requested_step():
         validation.summarize_accuracy([row], 2, atol=1e-3, rtol=1e-3)
 
 
+def test_bf16_policy_checks_every_token_without_centering():
+    expected = torch.ones(100, 1000, dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[42] += 0.125
+    result = validation.bf16_vector_accuracy(actual, expected)
+    assert result["failed_positions"] == [42]
+    assert result["passed_positions"] == 99
+    assert "relative_l2" in result["rows"][42]["failed_checks"]
+    assert validation.bf16_vector_policy()["center_logits"] is False
+
+
+def test_bf16_maximum_error_guard_catches_a_single_bad_logit():
+    expected = torch.ones(1, 10000, dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[0, 42] += 0.75
+    result = validation.bf16_vector_accuracy(actual, expected)
+    assert result["rows"][0]["failed_checks"] == ["max_scaled_abs"]
+
+
+def test_bf16_p99_guard_catches_a_regional_tail():
+    expected = torch.ones(1, 10000, dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[0, :200] += 0.5
+    result = validation.bf16_vector_accuracy(actual, expected)
+    assert result["rows"][0]["failed_checks"] == ["p99_scaled_abs"]
+
+
+def test_bf16_phase_limit_is_separate_from_per_token_limits():
+    expected = torch.ones(1, 1000, dtype=torch.bfloat16)
+    prefill = validation.bf16_vector_accuracy(expected, expected)
+    decode = validation.bf16_vector_accuracy(expected + 0.03125, expected)
+    assert prefill["passed"] and decode["passed"]
+    result = validation.summarize_bf16_accuracy([prefill, decode], 2)
+    assert not result["passed"] and result["failed_phases"] == ["decode"]
+    assert result["failed_steps"] == []
+
+
+def test_bf16_prefill_covers_all_positions_including_batch():
+    expected = torch.ones(2, 3, 1000, dtype=torch.bfloat16)
+    prefill = validation.bf16_vector_accuracy(expected, expected)
+    decode = validation.bf16_vector_accuracy(expected[:, 0], expected[:, 0])
+    result = validation.summarize_bf16_accuracy([prefill, decode], 2)
+    assert result["passed"]
+    assert result["phases"]["prefill"]["positions"] == 6
+    assert result["phases"]["decode"]["positions"] == 2
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_bf16_nonfinite_rows_fail_and_remain_json_serializable(value):
+    expected = torch.ones(2, 4, dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[0, 0] = value
+    row = validation.bf16_vector_accuracy(actual, expected)
+    good = validation.bf16_vector_accuracy(expected, expected)
+    result = validation.summarize_bf16_accuracy([row, good], 2)
+    assert not result["passed"] and result["failed_phases"] == ["prefill"]
+    assert row["failed_positions"] == [0]
+    json.dumps(result, allow_nan=False)
+    json.dumps(row, allow_nan=False)
+
+
+def test_bf16_zero_reference_has_a_bounded_scale_floor():
+    expected = torch.zeros(1, 1000, dtype=torch.bfloat16)
+    same = validation.bf16_vector_accuracy(expected, expected)
+    changed = validation.bf16_vector_accuracy(expected + 1e-5, expected)
+    assert same["passed"] and not changed["passed"]
+
+
+def test_bf16_gate_rejects_dtype_shape_and_incomplete_phase_changes():
+    with pytest.raises(ValueError, match="bfloat16"):
+        validation.bf16_vector_accuracy(torch.ones(1, 4), torch.ones(1, 4))
+    with pytest.raises(ValueError, match="shapes"):
+        validation.bf16_vector_accuracy(
+            torch.ones(1, 4, dtype=torch.bfloat16),
+            torch.ones(4, dtype=torch.bfloat16),
+        )
+    with pytest.raises(ValueError, match="dimensions"):
+        validation.bf16_vector_accuracy(
+            torch.ones(4, dtype=torch.bfloat16), torch.ones(4, dtype=torch.bfloat16)
+        )
+    row = validation.bf16_vector_accuracy(
+        torch.ones(1, 4, dtype=torch.bfloat16), torch.ones(1, 4, dtype=torch.bfloat16)
+    )
+    with pytest.raises(ValueError, match="prefill and decode"):
+        validation.summarize_bf16_accuracy([row], 1)
+    with pytest.raises(ValueError, match="policies"):
+        validation.summarize_bf16_accuracy([row, {"policy": "different"}], 2)
+
+
 @pytest.mark.parametrize("accuracy_failure", [False, True])
 def test_strict_wrapper_keeps_failure_and_only_audits_a_fresh_report(
     tmp_path, accuracy_failure

@@ -585,13 +585,42 @@ decode inputs, model dtype, attention implementation and math settings. The
 current Qwen3 workload is BF16; switching both sides to FP32 is not an accepted
 solution. Float32 intermediates already used by the vendor model remain valid.
 
-Every logit must satisfy `abs(actual - reference) <= 1e-3 + 1e-3 * abs(reference)`.
-Check every prefill position and all 512 decode steps, not only top-1 tokens, cosine similarity
-or aggregate relative L2. The checker evaluates detached CPU tensors outside all
-timed forwards, rejects nonfinite values and mismatched dtypes/shapes, and records
-per-step violations. This precision gate remains unpassed by the #839 BF16 wheel;
-bitwise agreement with the original FlagGems path does not establish agreement
-with vendor Torch.
+The versioned `bf16-v1` gate compares raw logits at every prefill position and
+all 512 teacher-forced decode steps. For each token, let `s` be the reference
+logit RMS, floored at `1e-6`. Evaluate these independent limits:
+
+| Scope | Metric | Limit |
+| --- | --- | ---: |
+| Prefill and decode separately | `norm(actual-reference) / norm(reference)` | 2% |
+| Every token | `RMS(actual-reference) / s` | 10% |
+| Every token | `quantile(abs(actual-reference), 0.99) / s` | 25% |
+| Every token | `max(abs(actual-reference)) / s` | 50% |
+
+The phase denominator uses the same RMS floor. Shape, BF16 dtype, finite
+values, reference identity and unchanged vendor math settings are mandatory.
+The checker uses detached CPU FP64 tensors outside timed forwards. It neither
+centers logits nor changes production precision. A bad position fails even if
+the phase average passes; the P99 and maximum guards prevent a small set of
+large errors from hiding in a vector norm. Scores retain all per-token rows,
+failed steps and separate failed phases.
+
+These are fixed engineering limits for the measured BF16 cohort, calibrated
+before the FlagGems retirement retests. Replacing vendor BF16 `bmm` with a loop
+of vendor `mm` calls, with identical inputs and math flags, produces decode
+relative L2 1.4195%, a worst-token relative L2 of 7.6422%, a worst-token P99
+scaled error of 16.8850%, and a maximum scaled error of 33.0197%. The fixed
+limits round above that vendor-only envelope. Contiguous and batch-one vendor
+`mm` comparisons remain bitwise equal. This calibration does not establish a
+universal model-quality guarantee; other dtypes/cohorts require their own
+versioned validation. Thresholds are not selected per operator or expanded
+after looking at FlagGems candidates.
+
+Use `--logits-policy bf16-v1 --check-logits` for this gate. The original
+elementwise `abs(actual-reference) <= 1e-3 + 1e-3*abs(reference)` gate remains
+available as `--logits-policy elementwise`, the command-line default, to
+reproduce historical records. The original #839 wheel's failure under that
+stricter gate remains recorded separately. Changing the policy does not mark
+an old run accepted; rerun each candidate and its final combined configuration.
 
 Run the two environments sequentially on an otherwise idle accelerator. Use the
 same `--model`, `--prompt`, CPU affinity and visible physical device in both.
