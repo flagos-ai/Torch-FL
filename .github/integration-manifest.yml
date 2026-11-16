@@ -815,6 +815,7 @@ steps:
     name: Native FlagGems host conformance
     platforms: [metax]
     vendor_only: true
+    min_passed: 34
     command: >-
       python -m pytest tests/integration/ops/test_native_metax_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"

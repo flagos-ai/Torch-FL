@@ -13,7 +13,8 @@ export FLAGOS_BUILD_NATIVE_HOST=1 FLAGOS_BUILD_BOXING=0
 export FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
 unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 
-python -m pip install 'Cython==3.2.4'
+source "$GITHUB_WORKSPACE/.github/scripts/lib/set_env_common.sh"
+PIP_RETRY_PYTHON="$(command -v python)" pip_retry 'Cython==3.2.4'
 python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
 python scripts/tools/torch-fl-preflight --wheel "$evidence"/*.whl \
   --platform "$FLAGOS_ACCELERATOR" --check-build-env --check-native-host-backend \
