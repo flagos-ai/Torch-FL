@@ -7,6 +7,7 @@ import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -128,6 +129,52 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(monkeypatch, contr
     assert not any("/unrelated-cuda" in path for path in launcher.include_dirs)
     assert utilities.name == "test_hosts.maca_utils"
     assert adapter.capabilities == 141
+
+
+@pytest.mark.parametrize("contract", ["metax"], indirect=True)
+def test_metax_reinstallation_updates_existing_and_future_driver_streams(
+    monkeypatch, contract
+):
+    adapter, _, _, _ = contract
+    driver = SimpleNamespace()
+
+    class Driver:
+        def __init__(self):
+            self.utils = driver.MacaUtils()
+            self.launcher_cls = driver.MacaLauncher
+            self.get_current_stream = lambda device: -1
+
+    driver.MacaDriver = Driver
+    active = object.__new__(Driver)
+    default = object.__new__(Driver)
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.runtime",
+        SimpleNamespace(driver=SimpleNamespace(_active=active, _default=default)),
+    )
+    modules = {
+        "triton.backends.metax.driver": driver,
+        "first.maca_utils": object(),
+        "second.maca_utils": object(),
+    }
+    monkeypatch.setitem(
+        adapter.install.__globals__,
+        "importlib",
+        SimpleNamespace(import_module=modules.__getitem__),
+    )
+    for offset, package in ((100, "first"), (200, "second")):
+
+        def provider(device, offset=offset):
+            return device + offset
+
+        kernel = object()
+        adapter.install(package, SimpleNamespace(current_stream=provider), kernel)
+        for instance in (active, default, Driver()):
+            assert instance.utils is modules[package + ".maca_utils"]
+            assert instance.launcher_cls is kernel
+            assert instance.get_current_stream(3) == offset + 3
+        with pytest.raises(RuntimeError, match="compilation is forbidden"):
+            driver.compile_module_from_src("unused")
 
 
 def test_backend_api_compiles_without_torch_or_a_vendor_sdk(tmp_path):

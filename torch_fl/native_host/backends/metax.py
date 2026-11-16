@@ -85,6 +85,7 @@ class Backend:
             raise RuntimeError("runtime C/C++ launcher compilation is forbidden")
 
         driver.compile_module_from_src = reject
+        driver._flagos_native_stream = launcher.current_stream
         from triton.runtime import driver as runtime_driver
 
         if not getattr(driver.MacaDriver.__init__, "_flagos_stream_provider", False):
@@ -92,7 +93,7 @@ class Backend:
 
             def initialize(instance, *args, **kwargs):
                 original_init(instance, *args, **kwargs)
-                instance.get_current_stream = launcher.current_stream
+                instance.get_current_stream = driver._flagos_native_stream
 
             initialize._flagos_stream_provider = True
             driver.MacaDriver.__init__ = initialize
