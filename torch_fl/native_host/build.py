@@ -609,8 +609,9 @@ def main():
     parser.add_argument("--emit-only", action="store_true")
     parser.add_argument("--launcher-only", action="store_true")
     args = parser.parse_args()
-    import torch
+    # The vendor core must be selected before Torch loads its native libraries.
     import torch_fl  # noqa: F401
+    import torch
     import triton
     from setuptools import Distribution, Extension
 
@@ -639,6 +640,9 @@ def main():
         "closures": {},
     }
     if not args.launcher_only:
+        # Install platform policies and optional-dependency shims before the
+        # published operators import Triton extensions at module scope.
+        torch_fl.flagos.init()
         import flag_gems
         from torch_fl import _build_config
         from torch_fl.native_host import source_variants

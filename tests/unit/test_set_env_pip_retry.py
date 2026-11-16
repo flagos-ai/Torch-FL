@@ -555,7 +555,9 @@ def test_index_download_bps_reads_a_listing_with_hash_fragments(tmp_path):
     server, base = _serve(tmp_path)
     try:
         done = _run_bash(
-            f'index_download_bps "{base}/cpu" 10 200000\n', real_wheel_index=True
+            f'index_download_bps "{base}/cpu" 10 200000\n',
+            env={"NO_PROXY": "*", "no_proxy": "*"},
+            real_wheel_index=True,
         )
     finally:
         server.shutdown()
@@ -569,7 +571,9 @@ def test_index_download_bps_reports_zero_for_a_missing_index(tmp_path):
     server, base = _serve(tmp_path)
     try:
         done = _run_bash(
-            f'index_download_bps "{base}/absent" 5 1000\n', real_wheel_index=True
+            f'index_download_bps "{base}/absent" 5 1000\n',
+            env={"NO_PROXY": "*", "no_proxy": "*"},
+            real_wheel_index=True,
         )
     finally:
         server.shutdown()
@@ -577,8 +581,31 @@ def test_index_download_bps_reports_zero_for_a_missing_index(tmp_path):
     assert done.stdout.strip() == "0"
 
 
-def test_cpu_torch_routes_the_pinned_wheels_separate_download_host(tmp_path):
-    """torch.org indexes the pinned CPU wheel on download-r2.pytorch.org."""
+def test_cpu_torch_routes_the_pinned_wheels_separate_download_host():
+    """Check both route exemptions without resolving a runner hostname."""
+    done = _run_bash(
+        f'source "{PROXY_LIB}"\n'
+        "CPU_TORCH_INDEX_URL=https://pin.example/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=\n"
+        "direct_route_reachable() { return 0; }\n"
+        "cpu_torch_wheel_url() {\n"
+        '  printf "%s\\n" "https://cdn.example/wheels/torch-2.10.0.whl"\n'
+        "}\n"
+        'pip_retry() { printf "PIP route=%s %s\\n" "$NO_PROXY" "$*"; }\n'
+        "install_cpu_torch\n",
+        env={"TORCH_FL_PROXY_ROUTE": "auto", "NO_PROXY": "", "no_proxy": ""},
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _pip_calls(done) == [
+        "PIP route=pin.example,cdn.example "
+        "--index-url https://pin.example/cpu torch==2.10.0"
+    ]
+    assert "Bypassing the runner proxy for cdn.example" in done.stderr
+
+
+def test_index_download_bps_selects_pinned_wheel_in_listing(tmp_path):
+    """Exercise real parsing and transfer using numeric loopback only."""
     torch_dir = tmp_path / "cpu" / "torch"
     torch_dir.mkdir(parents=True)
     files = tmp_path / "wheels"
@@ -588,32 +615,23 @@ def test_cpu_torch_routes_the_pinned_wheels_separate_download_host(tmp_path):
     wheel = f"torch-2.10.0+cpu-{tag}-{tag}-linux_{machine}.whl"
     (files / wheel).write_bytes(b"0" * 65536)
     server, base = _serve(tmp_path)
-    blob = base.replace("127.0.0.1", "localhost")
     (torch_dir / "index.html").write_text(
-        '<a href="https://wrong.invalid/torch-1.0.0-cp311-cp311-linux_aarch64.whl">old</a>\n'
-        f'<a href="{blob}/wheels/{wheel}#sha256=deadbeef">pinned</a>\n'
+        f'<a href="{base}/wheels/torch-1.0.0-{tag}-{tag}-linux_{machine}.whl">old</a>\n'
+        f'<a href="{base}/wheels/{wheel}#sha256=deadbeef">pinned</a>\n'
     )
     try:
         done = _run_bash(
-            f'source "{PROXY_LIB}"\n'
-            f'CPU_TORCH_INDEX_URL="{base}/cpu"\n'
             "CPU_TORCH_VERSION=2.10.0\n"
-            "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=\n"
-            "direct_route_reachable() { return 0; }\n"
-            'pip_retry() { printf "PIP route=%s %s\\n" "$NO_PROXY" "$*"; }\n'
-            "install_cpu_torch\n"
-            'printf "BPS=%s\\n" "$(index_download_bps "$CPU_TORCH_INDEX_URL" 5 1000)"\n',
-            env={"TORCH_FL_PROXY_ROUTE": "auto", "NO_PROXY": "", "no_proxy": ""},
+            f'printf "URL=%s\\n" "$(cpu_torch_wheel_url "{base}/cpu" 5)"\n'
+            f'printf "BPS=%s\\n" "$(index_download_bps "{base}/cpu" 5 1000)"\n',
+            env={"NO_PROXY": "*", "no_proxy": "*"},
             real_wheel_index=True,
         )
     finally:
         server.shutdown()
         server.server_close()
     assert done.returncode == 0, done.stdout + done.stderr
-    assert _pip_calls(done) == [
-        f"PIP route=127.0.0.1,localhost --index-url {base}/cpu torch==2.10.0"
-    ]
-    assert "Bypassing the runner proxy for localhost" in done.stderr
+    assert f"URL={base}/wheels/{wheel}#sha256=deadbeef" in done.stdout.splitlines()
     bps = next(
         line.removeprefix("BPS=")
         for line in done.stdout.splitlines()

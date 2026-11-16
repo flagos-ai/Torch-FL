@@ -110,6 +110,7 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
             return self.npu_utils_mod.arch
 
     driver = SimpleNamespace(NPUUtils=OriginalUtils)
+    compiler_utils_alias = driver.NPUUtils
 
     class Driver:
         def __init__(self):
@@ -154,6 +155,8 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
             factory,
         )
         assert active.utils.npu_utils_mod is modules[package + ".npu_utils"]
+        assert driver.NPUUtils is compiler_utils_alias
+        assert compiler_utils_alias() is active.utils
         future = Driver()
         assert future.utils.get_arch() == modules[package + ".npu_utils"].arch
         assert active.get_current_stream() == 103
@@ -165,6 +168,62 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
             driver.make_npu_launcher_stub("unused")
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
             driver._build_npu_ext("unused")
+
+
+@pytest.mark.parametrize("layout", ["legacy", "package"])
+@pytest.mark.parametrize("module", ["_launcher", "npu_utils"])
+def test_sdk_runtime_headers_find_their_profiling_dependency(
+    tmp_path, monkeypatch, layout, module
+):
+    compiler = shutil.which("c++")
+    if compiler is None:
+        pytest.skip("SDK include conformance requires a host C++ compiler")
+    cann = tmp_path / "cann"
+    runtime = cann / (
+        "include/experiment/runtime/runtime"
+        if layout == "legacy"
+        else "pkg_inc/runtime/runtime"
+    )
+    profiling = cann / (
+        "include/experiment/msprof" if layout == "legacy" else "pkg_inc/profiling"
+    )
+    runtime.mkdir(parents=True)
+    profiling.mkdir(parents=True)
+    (runtime / "rt.h").write_text("#include <prof_common.h>\n")
+    (profiling / "prof_common.h").write_text(
+        "#pragma once\n#define FLAGOS_PROFILING_HEADER 1\n"
+    )
+    monkeypatch.setenv("ASCEND_HOME", str(cann))
+    torch = SimpleNamespace(
+        __file__=str(tmp_path / "torch/__init__.py"),
+        _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+    )
+    extensions = adapter.Backend().extensions(
+        "probe",
+        ROOT / "torch_fl/native_host",
+        torch,
+        {"native_source_sha256": "0" * 64},
+        tmp_path / "triton",
+    )
+    extension = next(e for e in extensions if e.name == "probe." + module)
+    source = tmp_path / "probe.cc"
+    source.write_text(
+        "#include <runtime/runtime/rt.h>\n"
+        "static_assert(FLAGOS_PROFILING_HEADER == 1);\n"
+    )
+    result = subprocess.run(
+        [
+            compiler,
+            "-std=c++17",
+            "-fsyntax-only",
+            *["-I" + path for path in extension.include_dirs],
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_packed_arguments_match_the_published_launcher_struct(tmp_path):

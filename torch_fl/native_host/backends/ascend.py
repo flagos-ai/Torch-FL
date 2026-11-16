@@ -74,6 +74,11 @@ class Backend:
     scratch_alignment = 512
     sources = ("csrc/backends/ascend.cc", "csrc/ascend_abi.h")
 
+    def prepare_runtime(self):
+        from torch_fl import _patch_flaggems_codegen_config
+
+        _patch_flaggems_codegen_config()
+
     def driver_sources(self, triton_root):
         return {
             name: triton_root / name
@@ -93,9 +98,18 @@ class Backend:
             or os.environ.get("ASCEND_HOME_PATH")
             or "/usr/local/Ascend/ascend-toolkit/latest"
         )
-        includes = [str(cann / name) for name in ("include", "include/experiment")]
+        includes = [
+            str(cann / name)
+            for name in (
+                "include",
+                "include/experiment",
+                "include/experiment/msprof",
+            )
+        ]
         if not (cann / "include/experiment/runtime/runtime/rt.h").is_file():
-            includes.append(str(cann / "pkg_inc"))
+            includes.extend(
+                str(cann / name) for name in ("pkg_inc", "pkg_inc/profiling")
+            )
         libraries = [str(cann / "lib64")]
         return [
             Extension(
@@ -149,7 +163,12 @@ class Backend:
         driver._flagos_npu_utils_class = original
         runtime = object.__new__(original)
         runtime.npu_utils_mod = utilities
-        driver.NPUUtils = lambda: runtime
+        # compiler.py imports this class before installation. Preserve its
+        # identity so those aliases also use the prebuilt utility singleton.
+        original.instance = runtime
+        original.__new__ = staticmethod(lambda cls: cls.instance)
+        original.__init__ = lambda self: None
+        driver.NPUUtils = original
 
         def create(source, metadata):
             source, metadata = prepare(source, metadata, utils, runtime)
