@@ -364,51 +364,68 @@ venv_is_usable() {
 # are the steps that were byte-for-byte the same modulo the pins, so they live
 # here too; the platform scripts call them instead of repeating the command.
 
-# Throughput $1 delivers for a large wheel, in bytes per second, as pip's own
-# HTTP stack would see it: the probe inherits the probe process's proxy
-# environment and reads the wheel the interpreter in this venv would actually
-# install, so the number is comparable with the download it is choosing between.
-# Bounded to ${2:-12}s and ${3:-4000000} bytes, and prints 0 when the index does
-# not answer at all.
-index_download_bps() {
-  "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" - "$1" "${2:-12}" "${3:-4000000}" <<'PY'
+# Resolve the pinned wheel rather than measuring an older index entry. Its
+# download host can differ from the index (download-r2.pytorch.org on torch.org).
+cpu_torch_wheel_url() {
+  "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" - "$1" "${2:-12}" "${CPU_TORCH_VERSION:-}" <<'PY'
 import re
 import sys
 import sysconfig
-import time
 import urllib.parse
 import urllib.request
 
-index, budget, target = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+index, budget, version = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 listing_url = index.rstrip("/") + "/torch/"
-
-
-def open_url(url, headers=None):
-    request = urllib.request.Request(url, headers=headers or {})
-    return urllib.request.urlopen(request, timeout=budget)
-
-
 try:
-    with open_url(listing_url) as response:
+    with urllib.request.urlopen(listing_url, timeout=budget) as response:
         listing = response.read().decode("utf-8", "replace")
-    # A torch.org-style index appends a "#sha256=..." fragment and the mirror
-    # uses root-relative hrefs, so match the wheel path and resolve it against
-    # the listing URL rather than string-concatenating.
-    hrefs = re.findall(r'href="([^"]*torch-[^"]*\.whl)(?:#[^"]*)?"', listing)
+    hrefs = re.findall(r'href="([^"]*torch-[^"]*\.whl(?:#[^"]*)?)"', listing)
     wheels = [urllib.parse.urljoin(listing_url, href) for href in hrefs]
+    wheels = [
+        url for url in wheels
+        if urllib.parse.urlsplit(url).scheme in {"http", "https"}
+    ]
+    if version:
+
+        def matches(url):
+            name = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+            candidate = name.split("-", 2)[1]
+            if "+" in version:
+                return candidate == version
+            return candidate.split("+", 1)[0] == version
+
+        wheels = [url for url in wheels if matches(url)]
     if not wheels:
-        print(f"{index} lists no torch wheel", file=sys.stderr)
-        print(0)
-        sys.exit(0)
+        raise ValueError(f"no torch wheel for {version or 'this index'}")
     # Prefer the wheel for this interpreter and architecture; fall back to any
     # wheel, because the probe only needs a large file to read bytes from.
     cp_tag = "cp" + sysconfig.get_python_version().replace(".", "")
     machine = sysconfig.get_platform().split("-")[-1]
     preferred = [w for w in wheels if f"-{cp_tag}-" in w and machine in w]
-    url = preferred[0] if preferred else wheels[0]
+    print(preferred[0] if preferred else wheels[0])
+except Exception as exc:
+    print(f"{index} wheel lookup failed: {exc!r}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# Throughput of a pinned wheel through the same environment pip will inherit.
+# Uses ${2:-12}s socket timeouts and a ${3:-4000000}-byte target; failures are 0.
+index_download_bps() {
+  local url=""
+  url="$(cpu_torch_wheel_url "$1" "${2:-12}")" || { echo 0; return 0; }
+  [[ -n "$url" ]] || { echo 0; return 0; }
+  "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" - "$url" "${2:-12}" "${3:-4000000}" <<'PY'
+import sys
+import time
+import urllib.request
+
+url, budget, target = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+try:
     started = time.monotonic()
     read = 0
-    with open_url(url, {"Range": f"bytes=0-{target - 1}"}) as response:
+    request = urllib.request.Request(url, headers={"Range": f"bytes=0-{target - 1}"})
+    with urllib.request.urlopen(request, timeout=budget) as response:
         while read < target and time.monotonic() - started < budget:
             chunk = response.read(262144)
             if not chunk:
@@ -417,9 +434,20 @@ try:
     elapsed = time.monotonic() - started
     print(int(read / elapsed) if elapsed > 0 and read else 0)
 except Exception as exc:  # any transport failure means "do not prefer this"
-    print(f"{index} probe failed: {exc!r}", file=sys.stderr)
+    print(f"{url} probe failed: {exc!r}", file=sys.stderr)
     print(0)
 PY
+}
+
+# Keep both index and artifact routes in the installing shell. The filename
+# stays index-resolved and pip still performs its normal wheel hash checks.
+prepare_cpu_torch_index_route() {
+  local index="$1" wheel=""
+  prefer_direct_route "$index" "CPU torch index" >&2
+  wheel="$(cpu_torch_wheel_url "$index")" || return 0
+  if [[ -n "$wheel" && "$(host_of_url "$wheel")" != "$(host_of_url "$index")" ]]; then
+    prefer_direct_route "$wheel" "CPU torch wheel" >&2
+  fi
 }
 
 # Print whichever of the two CPU-torch indexes measured faster. Both serve the
@@ -471,9 +499,9 @@ install_cpu_torch() {
   # The Ascend proxy moved only 9.9/146.5 MB before the two-hour timeout.
   # Probe direct routes before measuring either index, as for FlagTree, and
   # keep their NO_PROXY changes in this shell for pip and the pinned fallback.
-  prefer_direct_route "$CPU_TORCH_INDEX_URL" "CPU torch wheel" >&2
+  prepare_cpu_torch_index_route "$CPU_TORCH_INDEX_URL"
   if [[ -n "$mirror" && "$mirror" != "$CPU_TORCH_INDEX_URL" ]]; then
-    prefer_direct_route "$mirror" "CPU torch mirror" >&2
+    prepare_cpu_torch_index_route "$mirror"
     index="$(faster_cpu_torch_index "$CPU_TORCH_INDEX_URL" "$mirror")"
   fi
   if [[ "$index" != "$CPU_TORCH_INDEX_URL" ]]; then
