@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Copyright 2026 FlagOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Run after the default wheel's suites. Keep that artifact in dist/; build and
+# retain the opt-in wheel separately, then test it from the wheel-only workspace.
+set -euo pipefail
+cd "${GITHUB_WORKSPACE:?}"
+evidence="${RUNNER_TEMP:?}/torch-fl-native-host-evidence"
+mkdir -p "$evidence"
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+export FLAGOS_BUILD_NATIVE_HOST=1 FLAGOS_BUILD_BOXING=0
+export FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
+unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
+
+python -m pip install 'Cython==3.2.4'
+python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
+python scripts/tools/torch-fl-preflight --wheel "$evidence"/*.whl \
+  --platform "$FLAGOS_ACCELERATOR" --check-build-env --check-native-host-backend \
+  | tee "$evidence/preflight.log"
+python -m pip install --force-reinstall --no-deps "$evidence"/*.whl
+
+# Read the wheel without importing the source package. Reports are artifacts,
+# not source-controlled policy or claims of measured operator correctness.
+python - "$evidence" <<'PY'
+from pathlib import Path
+import sys
+import zipfile
+
+directory = Path(sys.argv[1])
+with zipfile.ZipFile(next(directory.glob("*.whl"))) as wheel:
+    names = ["torch_fl/_build_config.py", "torch_fl/compatibility.json"]
+    names += [name for name in wheel.namelist()
+              if name.startswith("torch_fl/native_host/_generated/")
+              and name.endswith(("manifest.json", "coverage.json", "diagnostics.json"))]
+    for name in names:
+        path = directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(wheel.read(name))
+PY

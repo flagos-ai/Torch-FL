@@ -169,8 +169,9 @@ at::DataPtr CachingDeviceAllocator::allocate(size_t nbytes) {
   }
 
   Stream_t stream = nullptr;
-#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
-  // Keep native CUDA pools separate per stream. Same-stream reuse is ordered by
+#if !defined(FLAGOS_BOXING_BUILD) && \
+    (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_ASCEND))
+  // Keep native runtime pools separate per stream. Same-stream reuse is ordered by
   // the queue; a free block must not be handed to a different queue prematurely.
   stream = ::GetCurrentStreamForDevice(device);
 #endif

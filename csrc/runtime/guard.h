@@ -35,7 +35,9 @@
 #include <cstdint>
 
 #ifdef USE_ASCEND
+#include <c10/core/DeviceGuard.h>
 #include "runtime/accelerator/ascend/acl_stream.h"
+#include "runtime/allocator/caching_device_allocator.h"
 #endif
 
 // Real c10::cuda:: stream/event plumbing. Gated the same way as
@@ -498,7 +500,14 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void recordDataPtrOnStream(
       const c10::DataPtr& data_ptr,
       const c10::Stream& stream) const override {
-#if FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM
+#if defined(USE_ASCEND)
+    if (CachingDeviceAllocator::is_enabled()) {
+      c10::OptionalDeviceGuard device_guard;
+      if (getDevice() != stream.device()) device_guard.reset_device(stream.device());
+      GetCachingAllocator()->record_stream(
+          data_ptr, reinterpret_cast<Stream_t>(AscendStreamHandle(stream)));
+    }
+#elif FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM
     if (CachingDeviceAllocator::is_enabled()) {
       c10::OptionalDeviceGuard device_guard;
       if (getDevice() != stream.device()) device_guard.reset_device(stream.device());

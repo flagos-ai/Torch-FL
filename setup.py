@@ -1232,10 +1232,13 @@ class BuildExtWithCmake(_build_ext):
         )
         backend_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(backend_module)
-        backend_module.get_backend(_platform_entry(FLAGOS_ACCELERATOR)["vendor"])
+        backend = backend_module.get_backend(
+            _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
+        )
         destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         env = os.environ.copy()
-        _setup_cuda_build_env(env)
+        if backend.vendor == "nvidia":
+            _setup_cuda_build_env(env)
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         env["_TORCH_FL_BUILDING_NATIVE_HOST"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
