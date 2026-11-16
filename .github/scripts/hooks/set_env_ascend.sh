@@ -220,7 +220,7 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   # found first as a namespace package and the step dies with the misleading
   # "No module named build.__main__; 'build' is a package and cannot be directly
   # executed".
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" --upgrade \
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --index-url "$PIP_INDEX_URL" --upgrade \
     pip setuptools wheel cmake build
   install_cpu_torch
   # Unconditional, unlike the other vendors: Ascend's job builds the wheel and
@@ -229,7 +229,7 @@ if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
   # this by shipping a prebuilt /opt/torch-fl-ascend-venv that already had it;
   # the FlagTree image does not, and the flagtree wheel is cp311-only anyway, so
   # that Python 3.12 venv could not have been reused here.
-  "$VENV_PYTHON" -m pip install --index-url "$PIP_INDEX_URL" pytest
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry --index-url "$PIP_INDEX_URL" pytest
 fi
 
 export VIRTUAL_ENV="$VENV_ROOT"
