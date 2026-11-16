@@ -433,6 +433,31 @@ def test_native_host_programs_run_in_the_default_nvidia_lane(profile):
             assert "test_nvidia_metadata_views.py" in selected[0]["command"]
 
 
+@pytest.mark.parametrize("profile", ["pr", "nightly"])
+def test_native_source_hosts_require_the_installed_nonboxing_cohort(profile):
+    vendor = "ascend"
+    config = platform_config(vendor)
+    modes = (False, True) if vendor in boxing_platforms() else (False,)
+    for boxing_lane in modes:
+        groups = composer.compose(
+            manifest(),
+            config,
+            vendor,
+            platform_names(),
+            boxing_lane=boxing_lane,
+            environment_check=config.get("boxing_environment_check")
+            if boxing_lane
+            else None,
+            boxing=boxing_platforms(),
+            profile=profile,
+        )
+        selected = [g for g in groups if g["manifest_id"] == "native_source_hosts"]
+        assert len(selected) == (0 if boxing_lane else 1)
+        if selected:
+            assert selected[0]["min_passed"] == 27
+            assert "test_native_ascend_hosts.py" in selected[0]["command"]
+
+
 def test_the_only_substitution_is_the_display_name():
     """A second token would be a variable nothing expands, or a shell accident.
 
