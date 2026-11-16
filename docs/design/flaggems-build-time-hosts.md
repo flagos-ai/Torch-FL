@@ -628,6 +628,13 @@ reproduce historical records. The original #839 wheel's failure under that
 stricter gate remains recorded separately. Changing the policy does not mark
 an old run accepted; rerun each candidate and its final combined configuration.
 
+[Issue #842](https://github.com/flagos-ai/Torch-FL/issues/842) records the fresh
+independent reassessment under `bf16-v2`. Every one of the six restorations
+changes top-1 at 8–13 of the 572 checked positions (60 prefill, 512 decode),
+so all six measured dtype-scoped vendor exceptions remain. Four restorations
+pass the numerical guards and fail token identity; `mm` and `rsqrt` also
+exceed the prefill phase limit. No passing restoration is claimed.
+
 Run the two environments sequentially on an otherwise idle accelerator. Use the
 same `--model`, `--prompt`, CPU affinity and visible physical device in both.
 Backend autoload must be disabled in the vendor process, which must not activate
