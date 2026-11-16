@@ -95,7 +95,7 @@ def main():
     parser.add_argument("--logits-rtol", type=float, default=1e-3)
     parser.add_argument(
         "--logits-policy",
-        choices=["elementwise", "bf16-v1"],
+        choices=["elementwise", "bf16-v2"],
         default="elementwise",
         help="Select strict elementwise or fixed per-token BF16 vector acceptance",
     )
@@ -122,11 +122,11 @@ def main():
         parser.error("steps must be positive and rounds must be nonnegative")
     if args.check_logits and args.reference is None:
         parser.error("--check-logits requires a vendor --reference")
-    if args.logits_policy == "bf16-v1":
+    if args.logits_policy == "bf16-v2":
         if args.dtype != "bfloat16":
-            parser.error("bf16-v1 requires the vendor bfloat16 workload")
+            parser.error("bf16-v2 requires the vendor bfloat16 workload")
         if (args.logits_atol, args.logits_rtol) != (1e-3, 1e-3):
-            parser.error("bf16-v1 has fixed limits; atol/rtol apply to elementwise")
+            parser.error("bf16-v2 has fixed limits; atol/rtol apply to elementwise")
     try:
         validate_tolerances(args.logits_atol, args.logits_rtol)
     except ValueError as error:
@@ -146,7 +146,7 @@ def main():
         "rounds": args.rounds,
         "logits_policy": (
             bf16_vector_policy()
-            if args.logits_policy == "bf16-v1"
+            if args.logits_policy == "bf16-v2"
             else {
                 "name": "elementwise",
                 "atol": args.logits_atol,
@@ -295,7 +295,7 @@ def main():
             ]
 
             def accuracy_check(actual, expected):
-                if args.logits_policy == "bf16-v1":
+                if args.logits_policy == "bf16-v2":
                     return bf16_vector_accuracy(actual, expected)
                 return tensor_accuracy(
                     actual, expected, atol=args.logits_atol, rtol=args.logits_rtol
@@ -319,7 +319,7 @@ def main():
             report["logits_comparison"] = accuracy
             report["logits_validation"] = (
                 summarize_bf16_accuracy(accuracy, args.steps + 1)
-                if args.logits_policy == "bf16-v1"
+                if args.logits_policy == "bf16-v2"
                 else summarize_accuracy(
                     accuracy,
                     args.steps + 1,

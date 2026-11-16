@@ -170,6 +170,7 @@ def test_bf16_policy_checks_every_token_without_centering():
 
 def test_bf16_maximum_error_guard_catches_a_single_bad_logit():
     expected = torch.ones(1, 10000, dtype=torch.bfloat16)
+    expected[0, -1] = 2
     actual = expected.clone()
     actual[0, 42] += 0.75
     result = validation.bf16_vector_accuracy(actual, expected)
@@ -178,10 +179,31 @@ def test_bf16_maximum_error_guard_catches_a_single_bad_logit():
 
 def test_bf16_p99_guard_catches_a_regional_tail():
     expected = torch.ones(1, 10000, dtype=torch.bfloat16)
+    expected[0, -1] = 2
     actual = expected.clone()
     actual[0, :200] += 0.5
     result = validation.bf16_vector_accuracy(actual, expected)
     assert result["rows"][0]["failed_checks"] == ["p99_scaled_abs"]
+
+
+def test_bf16_tiny_top1_flip_fails_without_a_near_tie_exemption():
+    expected = torch.ones(1, 1000, dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[0, 42] += 0.0078125
+    row = validation.bf16_vector_accuracy(actual, expected)
+    assert row["rows"][0]["failed_checks"] == ["top1"]
+    assert row["rows"][0]["actual_top1"] == 42
+    assert row["rows"][0]["reference_top1"] == 0
+    assert row["top1_matches"] == 0
+
+
+def test_bf16_prefill_top1_checks_earlier_positions_in_every_batch():
+    expected = torch.ones(2, 3, 1000, dtype=torch.bfloat16)
+    actual = expected.clone()
+    actual[1, 1, 42] += 0.0078125
+    row = validation.bf16_vector_accuracy(actual, expected)
+    assert row["failed_top1_positions"] == [4]
+    assert row["top1_matches"] == 5
 
 
 def test_bf16_phase_limit_is_separate_from_per_token_limits():

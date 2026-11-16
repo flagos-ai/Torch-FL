@@ -89,12 +89,14 @@ def tensor_accuracy(actual, expected, *, atol=1e-3, rtol=1e-3):
 def bf16_vector_policy():
     """Return the fixed raw-logit policy; no per-operator tolerance overrides."""
     return {
-        "name": "bf16-v1",
+        "name": "bf16-v2",
         "limits": dict(BF16_VECTOR_LIMITS),
         "scale": "max(reference token RMS, 1e-6)",
         "scale_floor": BF16_SCALE_FLOOR,
         "vocabulary_axis": -1,
         "center_logits": False,
+        "require_top1_equal": True,
+        "ties": "first maximum index, matching torch.argmax; no near-tie exemption",
         "checker_dtype": "float64",
         "scope": "all prefill positions and every teacher-forced decode step",
     }
@@ -105,7 +107,7 @@ def bf16_vector_accuracy(actual, expected):
     if actual.shape != expected.shape or actual.numel() == 0:
         raise ValueError("logit shapes must match exactly and be nonempty")
     if actual.dtype != torch.bfloat16 or expected.dtype != torch.bfloat16:
-        raise ValueError("bf16-v1 requires the vendor's bfloat16 logit dtype")
+        raise ValueError("bf16-v2 requires the vendor's bfloat16 logit dtype")
     if actual.ndim < 2:
         raise ValueError("logits require token and vocabulary dimensions")
     vocabulary = actual.shape[-1]
@@ -128,6 +130,9 @@ def bf16_vector_accuracy(actual, expected):
                     "p99_scaled_abs": None,
                     "max_scaled_abs": None,
                     "max_abs": None,
+                    "top1_equal": False,
+                    "actual_top1": None,
+                    "reference_top1": None,
                 }
             )
             continue
@@ -146,11 +151,18 @@ def bf16_vector_accuracy(actual, expected):
             for name in ("relative_l2", "p99_scaled_abs", "max_scaled_abs")
             if metrics[name] > limits["token_" + name]
         ]
+        actual_top1 = int(a[index].argmax())
+        reference_top1 = int(b[index].argmax())
+        if actual_top1 != reference_top1:
+            failed.append("top1")
         rows.append(
             {
                 "position": index,
                 "passed": not failed,
                 "failed_checks": failed,
+                "top1_equal": actual_top1 == reference_top1,
+                "actual_top1": actual_top1,
+                "reference_top1": reference_top1,
                 **metrics,
             }
         )
@@ -159,11 +171,15 @@ def bf16_vector_accuracy(actual, expected):
     failed = [row["position"] for row in rows if not row["passed"]]
     nonfinite = int((~finite).sum())
     return {
-        "policy": "bf16-v1",
+        "policy": "bf16-v2",
         "passed": not failed,
         "positions": positions,
         "passed_positions": positions - len(failed),
         "failed_positions": failed,
+        "top1_matches": sum(row["top1_equal"] for row in rows),
+        "failed_top1_positions": [
+            row["position"] for row in rows if not row["top1_equal"]
+        ],
         "elements": a.numel(),
         "nonfinite": nonfinite,
         "squared_error": None if nonfinite else squared_error,
@@ -176,7 +192,7 @@ def summarize_bf16_accuracy(comparisons, expected_count):
     """Require per-token limits and separate prefill/decode aggregate limits."""
     if len(comparisons) != expected_count or expected_count < 2:
         raise ValueError("logit comparison count must include prefill and decode")
-    if any(row.get("policy") != "bf16-v1" for row in comparisons):
+    if any(row.get("policy") != "bf16-v2" for row in comparisons):
         raise ValueError("mixed or missing logit acceptance policies")
     limits = dict(BF16_VECTOR_LIMITS)
     phases = {}
@@ -202,6 +218,7 @@ def summarize_bf16_accuracy(comparisons, expected_count):
             "relative_l2": relative,
             "positions": sum(row["positions"] for row in groups),
             "passed_positions": sum(row["passed_positions"] for row in groups),
+            "top1_matches": sum(row["top1_matches"] for row in groups),
         }
     return {
         "policy": bf16_vector_policy(),
@@ -211,6 +228,7 @@ def summarize_bf16_accuracy(comparisons, expected_count):
         "failed_phases": [name for name, row in phases.items() if not row["passed"]],
         "positions": sum(row["positions"] for row in comparisons),
         "passed_positions": sum(row["passed_positions"] for row in comparisons),
+        "top1_matches": sum(row["top1_matches"] for row in comparisons),
         "phases": phases,
         "passed": all(row["passed"] for row in phases.values()),
     }
