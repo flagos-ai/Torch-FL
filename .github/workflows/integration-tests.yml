@@ -101,9 +101,18 @@ jobs:
       execution_plan_artifact: ${{ inputs.execution_plan_artifact }}
       execution_plan_context: ${{ inputs.execution_plan_context }}
 
+  cpu-torch:
+    needs: configuration
+    if: needs.configuration.outputs.platform == 'ascend'
+    uses: ./.github/workflows/prepare-cpu-torch.yml
+    with:
+      checkout_repository: ${{ inputs.checkout_repository }}
+      checkout_ref: ${{ inputs.checkout_ref }}
+
   integration-tests:
     name: Build and test (${{ needs.configuration.outputs.display_name }})
-    needs: configuration
+    needs: [configuration, cpu-torch]
+    if: ${{ !cancelled() && needs.configuration.result == 'success' && (needs.cpu-torch.result == 'success' || needs.cpu-torch.result == 'skipped') }}
     outputs:
       stages: ${{ steps.execution.outputs.stages }}
       run_attempt: ${{ steps.execution.outputs.run_attempt }}
@@ -181,6 +190,14 @@ jobs:
           size="$(du -sh "$PIP_CACHE_DIR" 2>/dev/null | cut -f1 || true)"
           echo "pip download cache: $PIP_CACHE_DIR (${size:-empty}, $(find "$PIP_CACHE_DIR" -type f | wc -l) files)"
 
+      - name: Receive verified CPU Torch wheels
+        if: needs.cpu-torch.outputs.artifact_name != ''
+        uses: actions/download-artifact@v4
+        timeout-minutes: 20
+        with:
+          name: ${{ needs.cpu-torch.outputs.artifact_name }}
+          path: ${{ runner.temp }}/cpu-torch-wheelhouse
+
       # The stage is the platform's, not the pipeline's: Ascend and Kunlunxin
       # prebuild the native library in place only at `build`, and this job needs
       # that library before it builds the wheel. Every other platform provisions
@@ -195,6 +212,7 @@ jobs:
         env:
           CI_STAGE: ${{ needs.configuration.outputs.setup_stage }}
           BOXING_LANE: ${{ needs.configuration.outputs.boxing_lane }}
+          TORCH_FL_CPU_TORCH_WHEELHOUSE: ${{ needs.cpu-torch.outputs.artifact_name != '' && format('{0}/cpu-torch-wheelhouse', runner.temp) || '' }}
         run: bash "${{ needs.configuration.outputs.setup_script }}" --platform "${{ needs.configuration.outputs.setup_platform }}"
 
       # Kunlunxin's image ships no `build` module, and a missing one does not
