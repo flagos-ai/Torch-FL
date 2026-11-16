@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 import sys
 import types
 
@@ -12,6 +14,55 @@ SOURCE = Path(__file__).resolve().parents[2] / "torch_fl/native_host/build.py"
 SPEC = importlib.util.spec_from_file_location("native_host_build", SOURCE)
 build = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(build)
+
+
+@pytest.mark.parametrize("accelerator", ["metax", "cuda", "ascend"])
+def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerator):
+    """Exercise the real CLI entry point without loading accelerator libraries."""
+    package = tmp_path / "torch_fl"
+    backend = package / "native_host"
+    backend.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "import sys\n"
+        "if 'torch' in sys.modules:\n"
+        "    raise RuntimeError('vendor core must be selected before torch')\n"
+    )
+    (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
+    (backend / "__init__.py").write_text("")
+    (backend / "backend.py").write_text(
+        "from pathlib import Path\n"
+        "def build_record(*args):\n"
+        "    raise AssertionError('startup fixture must not compile')\n"
+        "def get_backend(accelerator):\n"
+        "    (Path(__file__).parents[2] / 'selected-backend').write_text(accelerator)\n"
+        "    raise SystemExit(0)\n"
+    )
+    (tmp_path / "torch.py").write_text(
+        "import sys\n"
+        "if 'torch_fl' not in sys.modules:\n"
+        "    raise RuntimeError('torch loaded before the vendor bootstrap')\n"
+    )
+    (tmp_path / "triton.py").write_text("")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SOURCE),
+            "--output",
+            str(tmp_path / "out"),
+            "--launcher-only",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(tmp_path),
+            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "selected-backend").read_text() == accelerator
 
 
 @pytest.fixture
