@@ -182,7 +182,7 @@ positions and 512 decode steps with maximum logit error 0. Synchronized
 prefill/decode medians are **29.15/27.34 ms** and **29.24/27.28 ms**, versus
 **25.09/23.40 ms** for paired vendor Torch. These are complete forward timings
 with identical teacher-forced inputs; loading, tuning and sampling are excluded
-on both sides. See the [recorded acceptance evidence](benchmarks/host_compiler/results/qwen3_native_precision_h100.json).
+on both sides. See the [recorded acceptance evidence in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840).
 See the [precision policy](docs/design/flaggems-build-time-hosts.md#native-vendor-precision-exceptions)
 for cohort requirements, audit evidence and limitations.
 

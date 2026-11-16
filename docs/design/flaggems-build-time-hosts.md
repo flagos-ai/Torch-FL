@@ -623,7 +623,7 @@ differences without making an acceptance claim. `--logits-atol` and `--logits-rt
 support other diagnostic tolerances; the project acceptance values remain 1e-3.
 The wrapper retains its no-capture audit even when logit acceptance fails.
 
-The [BF16 evidence record](../../benchmarks/host_compiler/results/qwen3_vendor_logits_h100.json)
+The [BF16 evidence record in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840)
 records the unchanged #839 wheel against native vendor Torch 2.10.0+cu130.
 None of 513 comparisons pass. Full prefill has 8,385,847 violating elements out
 of 9,116,160 (maximum absolute difference 1.0625); the maximum decode difference
@@ -728,7 +728,7 @@ counts. Public FlagGems functions are not replaced with a different backend's AP
 
 ### Installed-wheel acceptance
 
-The [measured optional cohort](../../benchmarks/host_compiler/results/qwen3_native_precision_h100.json)
+The [measured optional cohort recorded in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840)
 uses the same official BF16 Qwen3-0.6B checkpoint, 60-token prompt, 512 frozen
 decode inputs and vendor math settings as the failed #839 reference. Two
 independent installed-wheel processes each pass all **513 comparisons**, including
