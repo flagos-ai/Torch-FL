@@ -365,6 +365,14 @@ jobs:
             ${{ env.FLAGCICD_COVERAGE_DIR }}/
           if-no-files-found: warn
 
+      - name: Retain native-host build and conformance evidence
+        if: ${{ !cancelled() && inputs.platform == 'metax' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-host-metax-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/torch-fl-native-host-evidence/
+          if-no-files-found: warn
+
       # A fork diagnostic run still retains reports, without giving its tested
       # code an upload credential in the same job. Missing tokens are optional.
       - name: Check FlagCICD upload availability

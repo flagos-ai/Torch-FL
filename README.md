@@ -196,11 +196,20 @@ The [generalization project](https://github.com/orgs/flagos-ai/projects/14)
 tracks broader eager and accelerator support. Domestic accelerator acceptance
 compares against the manufacturer's native PyTorch on the same card and workload:
 at least 80% of its throughput, or at most 1.25 times its latency for fixed work.
-The shared host launcher uses a versioned backend contract. Only NVIDIA's adapter
-is currently admitted; other vendors require separate validation. New native-host
+The shared host launcher uses a versioned backend contract. NVIDIA and the
+experimental MetaX adapter are available; other vendors require separate validation. New native-host
 wheels fingerprint their adapter, published compiler driver and native ABI before
 activation. See the [backend launch contract](docs/design/flaggems-build-time-hosts.md#backend-launch-contract)
 for its boundary and wheel preflight command.
+
+For the MetaX pilot, use the same native-host build switches with
+`FLAGOS_ACCELERATOR=metax` and `MACA_PATH` pointing at the installed MACA SDK.
+The adapter submits the original published MetaX FlagGems kernels directly through
+MACA, with boxing disabled. MetaX CI builds a separate opt-in wheel and retains
+its generated coverage, preflight and launch-conformance evidence. Full-model
+accuracy and the 80% vendor-performance gate remain tracked in
+[issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
+does not establish those results. NVIDIA's existing precision policy is unchanged.
 
 An optional graph-mode comparison uses Dynamo to capture the model and
 TorchScript to execute its ATen graph:

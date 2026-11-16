@@ -453,24 +453,28 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
             assert verify_at < install_at, path
 
 
-@pytest.fixture
-def native_wheel(tmp_path, manifest, monkeypatch):
+@pytest.fixture(params=["nvidia", "metax"])
+def native_wheel(tmp_path, manifest, monkeypatch, request):
     spec = importlib.util.spec_from_file_location(
         "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"
     )
     backend = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(backend)
     driver_root = tmp_path / "compiler"
-    driver = driver_root / "backends/nvidia"
+    vendor = request.param
+    driver = driver_root / "backends" / vendor
     driver.mkdir(parents=True)
     (driver / "driver.c").write_text("// published loader\n")
     (driver / "driver.py").write_text("# published driver\n")
+    if vendor == "metax":
+        (driver / "compiler.py").write_text("# published metadata ABI\n")
     monkeypatch.setattr(
         backend.importlib.metadata,
         "version",
         lambda name: manifest["build"]["distributions"][name],
     )
-    record = backend.build_record(backend.get_backend("nvidia"), driver_root)
+    record = backend.build_record(backend.get_backend(vendor), driver_root)
+    manifest["platform"] = "cuda" if vendor == "nvidia" else vendor
     manifest["build"]["kernels"] = ["vendor", "flaggems"]
     path = _wheel(tmp_path, manifest)
     prefix = "torch_fl/native_host/"
@@ -479,7 +483,8 @@ def native_wheel(tmp_path, manifest, monkeypatch):
             prefix + "_generated/manifest.json", json.dumps({"backend": record})
         )
         wheel.writestr(
-            "torch_fl/_build_config.py", 'ACCELERATOR = "nvidia"\nNATIVE_HOSTS = True\n'
+            "torch_fl/_build_config.py",
+            f'ACCELERATOR = "{vendor}"\nNATIVE_HOSTS = True\n',
         )
         for category in ("native_sources", "adapter_sources"):
             for name in record[category]:
@@ -489,7 +494,9 @@ def native_wheel(tmp_path, manifest, monkeypatch):
         wheel.writestr(
             prefix + "_generated/_launcher.cpython-312-test.so", b"not loaded"
         )
-        wheel.writestr(prefix + "_generated/cuda_utils.so", b"not loaded")
+        wheel.writestr(
+            prefix + "_generated/" + record["utility_modules"][0] + ".so", b"not loaded"
+        )
     return path, record, driver_root
 
 
@@ -520,13 +527,17 @@ def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
     prefix = "torch_fl/native_host/"
     if change == "source":
         _replace_wheel_entry(
-            path, prefix + "csrc/backends/nvidia.cc", b"changed source"
+            path,
+            prefix + "csrc/backends/" + record["vendor"] + ".cc",
+            b"changed source",
         )
     elif change == "utility":
-        _replace_wheel_entry(path, prefix + "_generated/cuda_utils.so", None)
+        _replace_wheel_entry(
+            path, prefix + "_generated/" + record["utility_modules"][0] + ".so", None
+        )
     else:
         if change == "target":
-            record["vendor"] = "metax"
+            record["vendor"] = "ascend"
         elif change == "version":
             record["abi_version"] = 2
         else:
@@ -548,7 +559,7 @@ def test_native_backend_verifies_installed_driver_sources(native_wheel, monkeypa
     # The distribution root contains triton/, as in the actual published wheel.
     (root.parent / "triton").symlink_to(root, target_is_directory=True)
     preflight.load_wheel(path, native_backend=True, check_driver=True)
-    (root / "backends/nvidia/driver.py").write_text("# changed ABI\n")
+    (root / "backends" / record["vendor"] / "driver.py").write_text("# changed ABI\n")
     with pytest.raises(ValueError, match="driver ABI differs"):
         preflight.load_wheel(path, native_backend=True, check_driver=True)
     assert record["compiler_distribution"]["name"] == "flagtree"

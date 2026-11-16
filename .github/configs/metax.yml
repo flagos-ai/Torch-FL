@@ -69,6 +69,7 @@ container_options: >-
   --cap-add=SYS_PTRACE
 
 timeout_minutes: 60
+integration_timeout_minutes: 120
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-metax
 

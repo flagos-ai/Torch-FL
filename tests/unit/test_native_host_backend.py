@@ -19,15 +19,17 @@ backend = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(backend)
 
 
-@pytest.fixture
-def contract(tmp_path, monkeypatch):
-    adapter = backend.get_backend("nvidia")
+@pytest.fixture(params=["nvidia", "metax"])
+def contract(tmp_path, monkeypatch, request):
+    adapter = backend.get_backend(request.param)
     root = tmp_path / "native_host"
     shutil.copytree(SOURCE.parent, root, ignore=shutil.ignore_patterns("__pycache__"))
-    driver = tmp_path / "triton/backends/nvidia"
+    driver = tmp_path / "triton/backends" / adapter.vendor
     driver.mkdir(parents=True)
     (driver / "driver.py").write_text("# published driver\n")
     (driver / "driver.c").write_text("// published loader\n")
+    if adapter.vendor == "metax":
+        (driver / "compiler.py").write_text("# published metadata ABI\n")
     monkeypatch.setattr(backend, "_ROOT", root)
     monkeypatch.setattr(backend.importlib.metadata, "version", lambda name: "0.7.0")
     record = backend.build_record(adapter, driver.parents[1])
@@ -38,10 +40,11 @@ def contract(tmp_path, monkeypatch):
 def test_backend_record_and_compiled_extension_agree(contract):
     adapter, root, record, compiled = contract
     backend.validate_record(record, adapter, root, compiled)
-    assert record["vendor"] == "nvidia" and record["compiler_backend"] == "cuda"
+    assert record["vendor"] == adapter.vendor
+    assert record["compiler_backend"] == adapter.compiler_backend
 
 
-@pytest.mark.parametrize("vendor", ["metax", "ascend", "hygon", "cuda", "../nvidia"])
+@pytest.mark.parametrize("vendor", ["ascend", "hygon", "cuda", "../nvidia"])
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
         backend.get_backend(vendor)
@@ -52,7 +55,7 @@ def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     [
         ("schema_version", 2),
         ("abi_version", 0),
-        ("vendor", "metax"),
+        ("vendor", "ascend"),
         ("compiler_backend", "hip"),
         ("capabilities", 0),
         ("compiler_distribution", {"name": "flagtree", "version": "0.8.0"}),
@@ -69,9 +72,9 @@ def test_changed_contract_is_rejected(contract, field, value):
 def test_patched_loader_or_native_source_is_rejected(contract, kind):
     adapter, root, record, compiled = contract
     paths = {
-        "driver": root / "backends/nvidia/driver.py",
-        "adapter": backend._ROOT / "backends/nvidia.py",
-        "native": backend._ROOT / "csrc/backends/nvidia.cc",
+        "driver": root / "backends" / adapter.vendor / "driver.py",
+        "adapter": backend._ROOT / "backends" / (adapter.vendor + ".py"),
+        "native": backend._ROOT / adapter.sources[0],
     }
     with paths[kind].open("a") as output:
         output.write("\n// changed\n")
@@ -95,9 +98,36 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(contra
     launcher, utilities = adapter.extensions(
         "test_hosts", backend._ROOT, torch, record, root
     )
-    assert str(backend._ROOT / "csrc/backends/nvidia.cc") in launcher.sources
+    assert str(backend._ROOT / adapter.sources[0]) in launcher.sources
     assert str(backend._ROOT / "csrc/backend_api.h") in launcher.depends
-    assert utilities.sources == [str(root / "backends/nvidia/driver.c")]
+    assert utilities.sources == [str(root / "backends" / adapter.vendor / "driver.c")]
+
+
+@pytest.mark.parametrize("contract", ["metax"], indirect=True)
+def test_metax_metadata_packing_is_part_of_the_backend_contract(contract):
+    adapter, root, record, compiled = contract
+    (root / "backends/metax/compiler.py").write_text("# changed metadata ABI\n")
+    with pytest.raises(RuntimeError, match="ABI changed"):
+        backend.validate_record(record, adapter, root, compiled)
+
+
+@pytest.mark.parametrize("contract", ["metax"], indirect=True)
+def test_metax_extensions_use_the_native_runtime_without_cuda(monkeypatch, contract):
+    adapter, root, record, _ = contract
+    monkeypatch.setenv("MACA_PATH", "/published-maca")
+    monkeypatch.setenv("CUDA_HOME", "/unrelated-cuda")
+    torch = SimpleNamespace(
+        __file__="/cpu-torch/torch/__init__.py",
+        _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+    )
+    launcher, utilities = adapter.extensions(
+        "test_hosts", backend._ROOT, torch, record, root
+    )
+    assert "mcruntime" in launcher.libraries and "cuda" not in launcher.libraries
+    assert "/published-maca/include" in launcher.include_dirs
+    assert not any("/unrelated-cuda" in path for path in launcher.include_dirs)
+    assert utilities.name == "test_hosts.maca_utils"
+    assert adapter.capabilities == 141
 
 
 def test_backend_api_compiles_without_torch_or_a_vendor_sdk(tmp_path):
