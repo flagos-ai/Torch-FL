@@ -9,7 +9,8 @@ cd "${GITHUB_WORKSPACE:?}"
 evidence="${RUNNER_TEMP:?}/torch-fl-native-host-evidence"
 mkdir -p "$evidence"
 build_source="$(mktemp -d "$RUNNER_TEMP/torch-fl-native-host-source.XXXXXX")"
-git archive HEAD | tar -x -C "$build_source"
+# The container user can differ from the checkout owner; trust only this read.
+git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$build_source"
 cd "$build_source"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export FLAGOS_BUILD_NATIVE_HOST=1 FLAGOS_BUILD_BOXING=0

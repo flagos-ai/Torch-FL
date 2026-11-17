@@ -406,8 +406,9 @@ def test_native_metax_rejects_staged_vendor_libtorch(
 
 
 @pytest.mark.parametrize("vendor", ["metax", "ascend"])
+@pytest.mark.parametrize("different_owner", [False, True])
 def test_native_host_ci_build_excludes_the_default_build(
-    tmp_path, clean_kernel_env, vendor
+    tmp_path, clean_kernel_env, vendor, different_owner
 ):
     if shutil.which("git") is None or shutil.which("bash") is None:
         pytest.skip("the CI build script requires Git and Bash")
@@ -472,10 +473,32 @@ def test_native_host_ci_build_excludes_the_default_build(
     runner_temp = tmp_path / "runner"
     runner_temp.mkdir()
     receipt = tmp_path / "receipt"
+    git_config = tmp_path / "gitconfig"
+    git_config.write_text("")
+    git_environment = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(git_config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1" if different_owner else "0",
+    }
+    ownership_check = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+        env=git_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if different_owner:
+        if ownership_check.returncode == 0:
+            pytest.skip("Git does not support synthetic ownership checks")
+        assert ownership_check.returncode != 0
+        assert "dubious ownership" in ownership_check.stderr
+    else:
+        assert ownership_check.returncode == 0
     result = subprocess.run(
         ["bash", str(ROOT / ".github/scripts/build_native_hosts_ci.sh")],
         env={
-            **os.environ,
+            **git_environment,
             "GITHUB_WORKSPACE": str(workspace),
             "RUNNER_TEMP": str(runner_temp),
             "FLAGOS_ACCELERATOR": vendor,
@@ -487,6 +510,7 @@ def test_native_host_ci_build_excludes_the_default_build(
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert git_config.read_text() == ""
     assert Path(receipt.read_text()).parent == runner_temp
     assert (workspace / "dist/default.whl").read_text() == "previous default build\n"
     assert (workspace / "torch_fl/lib_metax/libtorch_cuda.so").is_file()
