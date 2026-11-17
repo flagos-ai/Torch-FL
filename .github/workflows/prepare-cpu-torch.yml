@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-name: Prepare published CPU Torch
+name: Prepare published Ascend wheels
 
 on:
   workflow_call:
@@ -21,9 +21,9 @@ permissions:
 
 jobs:
   prepare:
-    name: Prefetch original Ascend CPU Torch
+    name: Prefetch pinned Ascend wheels
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     outputs:
       artifact_name: ${{ steps.download.outputs.artifact_name }}
     steps:
@@ -47,9 +47,12 @@ jobs:
             --python-version "$FLAGTREE_PYTHON_VERSION_ascend" \
             --index-url "$CPU_TORCH_INDEX_URL_DEFAULT" \
             --torch-wheel "$CPU_TORCH_WHEEL_ascend" \
-            --sha256 "$CPU_TORCH_WHEEL_SHA256_ascend"
+            --sha256 "$CPU_TORCH_WHEEL_SHA256_ascend" \
+            --release-wheel flagtree "$FLAGTREE_VERSION_ascend" "$FLAGTREE_INDEX_URL_DEFAULT" "$FLAGTREE_WHEEL_ascend" "$FLAGTREE_WHEEL_SHA256_ascend" \
+            --release-wheel flag-gems "$FLAGGEMS_VERSION_DEFAULT" "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "$FLAGGEMS_WHEEL_ascend" "$FLAGGEMS_WHEEL_SHA256_ascend" \
+            --release-wheel flagcx "$FLAGCX_VERSION_ascend" "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "$FLAGCX_WHEEL_ascend" "$FLAGCX_WHEEL_SHA256_ascend"
           suffix="$(python -c 'import uuid; print(uuid.uuid4().hex)')"
-          printf 'artifact_name=cpu-torch-ascend-%s\n' "$suffix" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=published-wheels-ascend-%s\n' "$suffix" >> "$GITHUB_OUTPUT"
           printf 'directory=%s\n' "$directory" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:

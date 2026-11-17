@@ -2,7 +2,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prefetch published CPU wheels on a hosted runner and verify their delivery."""
+"""Prefetch original CPU and accelerator release wheels and verify delivery."""
 
 import argparse
 import hashlib
@@ -20,7 +20,7 @@ def digest(path):
     return result.hexdigest()
 
 
-def verify(directory, version, expected_sha=None, index_url=None):
+def verify(directory, version, expected_sha=None, index_url=None, pinned_wheels=()):
     record = json.loads((directory / "cohort.json").read_text())
     if record.get("schema_version") != 1:
         raise ValueError("Unsupported CPU wheelhouse schema")
@@ -43,40 +43,62 @@ def verify(directory, version, expected_sha=None, index_url=None):
             raise ValueError(f"CPU wheelhouse checksum mismatch: {name}")
     if expected_sha and files[record["torch_wheel"]] != expected_sha:
         raise ValueError("CPU Torch wheel differs from the pinned artifact")
+    for name, expected in pinned_wheels:
+        if files.get(name) != expected:
+            raise ValueError(
+                f"Published wheel differs from the pinned artifact: {name}"
+            )
     return record
 
 
-def download(directory, version, python_version, index_url, torch_wheel, sha256):
+def download(
+    directory,
+    version,
+    python_version,
+    index_url,
+    torch_wheel,
+    sha256,
+    release_wheels=(),
+):
     directory.mkdir(parents=True, exist_ok=True)
     if any(directory.iterdir()):
         raise ValueError("CPU wheelhouse output must be empty")
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "download",
+        "--only-binary=:all:",
+        "--platform",
+        "linux_aarch64",
+        "--platform",
+        "manylinux2014_aarch64",
+        "--platform",
+        "manylinux_2_28_aarch64",
+        "--python-version",
+        python_version,
+        "--implementation",
+        "cp",
+        "--abi",
+        "cp" + python_version.replace(".", ""),
+        "--dest",
+        str(directory),
+    ]
     subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "download",
-            "--only-binary=:all:",
-            "--platform",
-            "linux_aarch64",
-            "--platform",
-            "manylinux2014_aarch64",
-            "--platform",
-            "manylinux_2_28_aarch64",
-            "--python-version",
-            python_version,
-            "--implementation",
-            "cp",
-            "--abi",
-            "cp" + python_version.replace(".", ""),
-            "--index-url",
-            index_url,
-            "--dest",
-            str(directory),
-            "torch==" + version,
-        ],
+        [*command, "--index-url", index_url, "torch==" + version],
         check=True,
     )
+    for distribution, release, index, _wheel, _checksum in release_wheels:
+        subprocess.run(
+            [
+                *command,
+                "--no-deps",
+                "--index-url",
+                index,
+                distribution + "===" + release,
+            ],
+            check=True,
+        )
     record = {
         "schema_version": 1,
         "index_url": index_url,
@@ -84,7 +106,13 @@ def download(directory, version, python_version, index_url, torch_wheel, sha256)
         "files": {p.name: digest(p) for p in sorted(directory.glob("*.whl"))},
     }
     (directory / "cohort.json").write_text(json.dumps(record, indent=2) + "\n")
-    verify(directory, version, sha256, index_url)
+    verify(
+        directory,
+        version,
+        sha256,
+        index_url,
+        [(wheel, checksum) for _, _, _, wheel, checksum in release_wheels],
+    )
     return record
 
 
@@ -97,6 +125,20 @@ def main():
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--python-version")
     parser.add_argument("--torch-wheel")
+    parser.add_argument(
+        "--release-wheel",
+        action="append",
+        nargs=5,
+        default=[],
+        metavar=("DIST", "VERSION", "INDEX", "WHEEL", "SHA256"),
+    )
+    parser.add_argument(
+        "--pinned-wheel",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("WHEEL", "SHA256"),
+    )
     args = parser.parse_args()
     if args.action == "download":
         if not args.python_version or not args.torch_wheel:
@@ -108,9 +150,12 @@ def main():
             args.index_url,
             args.torch_wheel,
             args.sha256,
+            args.release_wheel,
         )
     else:
-        record = verify(args.directory, args.version, args.sha256, args.index_url)
+        record = verify(
+            args.directory, args.version, args.sha256, args.index_url, args.pinned_wheel
+        )
     print(
         f"Verified CPU Torch artifact: {record['torch_wheel']} "
         f"({len(record['files'])} published wheels)"

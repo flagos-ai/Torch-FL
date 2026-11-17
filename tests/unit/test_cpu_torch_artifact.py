@@ -103,6 +103,117 @@ def test_hosted_download_targets_the_hardware_python_and_original_index(
     assert "linux_aarch64" in command
 
 
+@pytest.mark.parametrize("wrong_hash", [False, True])
+def test_accelerator_download_keeps_its_exact_release_and_original_bytes(
+    tmp_path, monkeypatch, wrong_hash
+):
+    commands = []
+    wheel = "flagtree-0.7.0+ascend3.5-cp311-cp311-linux_aarch64.whl"
+    payload = b"published compiler wheel"
+    checksum = hashlib.sha256(payload).hexdigest()
+
+    def run(command, *, check):
+        assert check
+        commands.append(command)
+        if command[-1] == "torch==2.10.0":
+            _cohort(tmp_path)
+        else:
+            (tmp_path / wheel).write_bytes(payload)
+
+    monkeypatch.setattr(CPU.subprocess, "run", run)
+    args = (
+        tmp_path,
+        VERSION,
+        "3.11",
+        INDEX,
+        TORCH,
+        hashlib.sha256(b"original published wheel").hexdigest(),
+        [
+            (
+                "flagtree",
+                "0.7.0+ascend3.5",
+                "https://published.invalid/simple",
+                wheel,
+                "0" * 64 if wrong_hash else checksum,
+            )
+        ],
+    )
+    if wrong_hash:
+        with pytest.raises(ValueError, match="Published wheel differs"):
+            CPU.download(*args)
+    else:
+        result = CPU.download(*args)
+        assert result["files"][wheel] == checksum
+    assert len(commands) == 2
+    command = commands[-1]
+    assert "--no-deps" in command
+    assert command[-1] == "flagtree===0.7.0+ascend3.5"
+    assert (
+        command[command.index("--index-url") + 1] == "https://published.invalid/simple"
+    )
+
+
+@pytest.mark.parametrize(
+    "function,distribution,prefix",
+    [
+        ("install_flagtree", "flagtree", "FLAGTREE"),
+        ("install_flag_gems", "flag-gems", "FLAGGEMS"),
+        ("install_flagcx", "flagcx", "FLAGCX"),
+    ],
+)
+@pytest.mark.parametrize("changed", [False, True])
+def test_accelerator_install_uses_pinned_delivery_even_when_preinstalled(
+    tmp_path, function, distribution, prefix, changed
+):
+    checksum = _cohort(tmp_path)
+    wheel = f"{distribution.replace('-', '_')}-1.0-py3-none-any.whl"
+    original = hashlib.sha256(b"published release").hexdigest()
+    payload = b"changed release" if changed else b"published release"
+    (tmp_path / wheel).write_bytes(payload)
+    record_path = tmp_path / "cohort.json"
+    record = json.loads(record_path.read_text())
+    record["files"][wheel] = hashlib.sha256(payload).hexdigest()
+    record_path.write_text(json.dumps(record))
+    done = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set -euo pipefail\nsource "{ROOT}/.github/scripts/lib/set_env_common.sh"\n'
+            "prefer_direct_route() { echo UNEXPECTED-NETWORK; return 1; }\n"
+            "flag_gems_installed() { return 0; }\n"
+            'pip_retry() { printf "PIP %s\\n" "$*"; }\n'
+            f"{function}\n",
+        ],
+        env={
+            **os.environ,
+            "TORCH_FL_CPU_TORCH_WHEELHOUSE": str(tmp_path),
+            "CPU_TORCH_VERSION": VERSION,
+            "CPU_TORCH_INDEX_URL": INDEX,
+            "CPU_TORCH_WHEEL_SHA256_ascend": checksum,
+            "FLAGOS_ACCELERATOR": "ascend",
+            "PIP_RETRY_PYTHON": sys.executable,
+            f"{prefix}_VERSION": "1.0",
+            f"{prefix}_WHEEL_ascend": wheel,
+            f"{prefix}_WHEEL_SHA256_ascend": original,
+        },
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert "UNEXPECTED-NETWORK" not in done.stdout
+    if changed:
+        assert done.returncode != 0
+        assert "PIP " not in done.stdout
+        assert "Published wheel differs" in done.stderr
+    else:
+        assert done.returncode == 0, done.stderr
+        assert f"--no-index --find-links {tmp_path}" in done.stdout
+        assert (
+            f"--force-reinstall --no-deps --only-binary=:all: {distribution}===1.0"
+            in done.stdout
+        )
+
+
 @pytest.mark.parametrize("changed", [False, True])
 def test_install_uses_only_verified_delivery_without_index_probes(tmp_path, changed):
     checksum = _cohort(tmp_path)

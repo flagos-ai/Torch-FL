@@ -165,10 +165,10 @@ jobs:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
 
-      - name: Receive verified CPU Torch wheels
+      - name: Receive verified published wheels
         if: needs.cpu-torch.outputs.artifact_name != ''
         uses: actions/download-artifact@v4
-        timeout-minutes: 20
+        timeout-minutes: 45
         with:
           name: ${{ needs.cpu-torch.outputs.artifact_name }}
           path: ${{ runner.temp }}/cpu-torch-wheelhouse

@@ -312,16 +312,16 @@ PY
 
 # Install only the binary release, never a source distribution or Git checkout.
 install_flag_gems() {
-  if flag_gems_installed; then
+  if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+    install_ci_release flag-gems "$FLAGGEMS_VERSION" FLAGGEMS || return 1
+  elif flag_gems_installed; then
     echo "Using preinstalled FlagGems $FLAGGEMS_VERSION"
     return 0
+  else
+    prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
+    pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+      "flag-gems===$FLAGGEMS_VERSION" || return 1
   fi
-  # Same index, same proxy trap as install_flagtree; the probe is repeated
-  # because FLAGGEMS_INDEX_URL is often a per-vendor lane that FlagTree's
-  # hosted index does not cover.
-  prefer_direct_route "$FLAGGEMS_INDEX_URL" "FlagGems wheel"
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
-    "flag-gems===$FLAGGEMS_VERSION"
   if ! flag_gems_installed; then
     echo "::error::FlagGems $FLAGGEMS_VERSION is not importable after wheel installation"
     return 1
@@ -493,17 +493,30 @@ faster_cpu_torch_index() {
 # filelock and failed 6 of 14 consecutive thead runs. The default is now
 # mirror.nju.edu.cn, which serves the wheel directly; see version-pins.env for
 # the side-by-side measurement.
+# Verify original release bytes before any offline install, including when a
+# same-version package is already present in a prebuilt environment.
+verify_ci_wheelhouse() {
+  local checksum_var="" verifier=""
+  checksum_var="CPU_TORCH_WHEEL_SHA256_${FLAGOS_ACCELERATOR:?accelerator is required}"
+  verifier="$(dirname "${BASH_SOURCE[0]}")/../prepare_cpu_torch.py"
+  "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" "$verifier" verify \
+    --directory "$TORCH_FL_CPU_TORCH_WHEELHOUSE" \
+    --version "$CPU_TORCH_VERSION" --index-url "$CPU_TORCH_INDEX_URL" \
+    --sha256 "${!checksum_var:?CPU Torch artifact checksum is required}" "$@"
+}
+
+install_ci_release() {
+  local wheel_var="" checksum_var=""
+  wheel_var="${3}_WHEEL_${FLAGOS_ACCELERATOR:?}"
+  checksum_var="${3}_WHEEL_SHA256_${FLAGOS_ACCELERATOR}"
+  verify_ci_wheelhouse --pinned-wheel "${!wheel_var:?}" "${!checksum_var:?}" || return 1
+  pip_retry --no-index --find-links "$TORCH_FL_CPU_TORCH_WHEELHOUSE" \
+    --force-reinstall --no-deps --only-binary=:all: "${1}===${2}"
+}
+
 install_cpu_torch() {
   if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
-    # Hosted CI fetches the original pinned wheel when hardware runners cannot
-    # reach its index. Verify every delivered wheel before an offline install.
-    local checksum_var="" verifier=""
-    checksum_var="CPU_TORCH_WHEEL_SHA256_${FLAGOS_ACCELERATOR:?accelerator is required}"
-    verifier="$(dirname "${BASH_SOURCE[0]}")/../prepare_cpu_torch.py"
-    "${PIP_RETRY_PYTHON:-${VENV_PYTHON:-python}}" "$verifier" verify \
-      --directory "$TORCH_FL_CPU_TORCH_WHEELHOUSE" \
-      --version "$CPU_TORCH_VERSION" --index-url "$CPU_TORCH_INDEX_URL" \
-      --sha256 "${!checksum_var:?CPU Torch artifact checksum is required}" || return 1
+    verify_ci_wheelhouse || return 1
     pip_retry --no-index --find-links "$TORCH_FL_CPU_TORCH_WHEELHOUSE" \
       "$@" "torch==${CPU_TORCH_VERSION}"
     return $?
@@ -574,6 +587,10 @@ install_with_pypi_fallback() {
 
 # Install the published FlagTree wheel for this platform (its Triton build).
 install_flagtree() {
+  if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+    install_ci_release flagtree "$FLAGTREE_VERSION" FLAGTREE
+    return $?
+  fi
   # resource.flagos.net is not on every vendor pod's proxy allowlist, and the
   # proxy answers a refused CONNECT with a tunnel 503 that pip retries for
   # 35 minutes before reporting it as a missing wheel. Probing the unproxied
@@ -602,8 +619,12 @@ install_flagtree() {
 
 # Install the published FlagCX wheel and point torch at the flagos backend.
 install_flagcx() {
-  pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
-    "flagcx===${FLAGCX_VERSION}"
+  if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+    install_ci_release flagcx "$FLAGCX_VERSION" FLAGCX || return 1
+  else
+    pip_retry --no-deps --only-binary=:all: --index-url "$FLAGGEMS_INDEX_URL" \
+      "flagcx===${FLAGCX_VERSION}" || return 1
+  fi
   export FLAGCX_TORCH_BACKEND=flagos
 }
 
