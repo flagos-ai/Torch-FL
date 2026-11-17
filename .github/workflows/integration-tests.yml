@@ -190,10 +190,10 @@ jobs:
           size="$(du -sh "$PIP_CACHE_DIR" 2>/dev/null | cut -f1 || true)"
           echo "pip download cache: $PIP_CACHE_DIR (${size:-empty}, $(find "$PIP_CACHE_DIR" -type f | wc -l) files)"
 
-      - name: Receive verified CPU Torch wheels
+      - name: Receive verified published wheels
         if: needs.cpu-torch.outputs.artifact_name != ''
         uses: actions/download-artifact@v4
-        timeout-minutes: 20
+        timeout-minutes: 45
         with:
           name: ${{ needs.cpu-torch.outputs.artifact_name }}
           path: ${{ runner.temp }}/cpu-torch-wheelhouse
