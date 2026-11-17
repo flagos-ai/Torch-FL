@@ -40,10 +40,15 @@ def _activate():
     global _hosts
     if not _prepared:
         return
-    from torch_fl import flagos
+    from torch_fl import _build_config
+    from .backend import get_backend
     from .load import Hosts
 
-    flagos.init()
+    initialize = getattr(
+        get_backend(_build_config.ACCELERATOR), "initialize_runtime", None
+    )
+    if initialize is not None:
+        initialize()
     _hosts = Hosts(Path(__file__).parent / "_generated")
     _hosts.activate()
     from . import vendor

@@ -43,9 +43,12 @@ def test_native_startup_prepares_platform_and_launcher_before_device_init(
         assert calls[-1] == "launcher"
         calls.append("device")
 
+    if prepare_hook:
+        adapter.initialize_runtime = initialize
+
     class Hosts:
         def __init__(self, path):
-            assert calls[-1] == "device"
+            assert calls[-1] == ("device" if prepare_hook else "launcher")
             calls.append("hosts")
 
         def activate(self):
@@ -70,8 +73,10 @@ def test_native_startup_prepares_platform_and_launcher_before_device_init(
         monkeypatch.setitem(sys.modules, name, value)
     module._bootstrap_launcher()
     module._activate()
-    expected = ["launcher", "device", "hosts", "activate", "vendor"]
-    assert calls == (["compat", *expected] if prepare_hook else expected)
+    expected = ["launcher", "hosts", "activate", "vendor"]
+    assert calls == (
+        ["compat", "launcher", "device", *expected[1:]] if prepare_hook else expected
+    )
 
 
 @pytest.mark.parametrize("major", [0, 8, 9])

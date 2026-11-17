@@ -66,7 +66,7 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
 
 
 @pytest.mark.parametrize("accelerator", ["cuda", "ascend"])
-def test_builder_initializes_platform_before_loading_published_ops(
+def test_builder_initializes_only_platforms_that_require_early_setup(
     tmp_path, accelerator
 ):
     package = tmp_path / "torch_fl"
@@ -84,7 +84,11 @@ def test_builder_initializes_platform_before_loading_published_ops(
     (backend / "backend.py").write_text(
         "from types import SimpleNamespace\n"
         "def get_backend(accelerator):\n"
-        "    return SimpleNamespace(extensions=lambda *args: [])\n"
+        "    import torch_fl\n"
+        "    result = SimpleNamespace(extensions=lambda *args: [])\n"
+        "    if accelerator == 'ascend':\n"
+        "        result.initialize_runtime = torch_fl.flagos.init\n"
+        "    return result\n"
         "def build_record(*args):\n"
         f"    return dict(vendor={accelerator!r})\n"
     )
@@ -92,8 +96,9 @@ def test_builder_initializes_platform_before_loading_published_ops(
     (tmp_path / "triton.py").write_text("__version__ = '3.5.0'\n")
     (tmp_path / "flag_gems.py").write_text(
         "from pathlib import Path\n"
-        "assert (Path(__file__).parent / 'torch_fl/initialized').exists(), "
-        "'published operators imported before platform compatibility setup'\n"
+        "assert (Path(__file__).parent / 'torch_fl/initialized').exists() "
+        f"== {accelerator == 'ascend'}, "
+        "'platform initialization changed outside its backend hook'\n"
         "raise SystemExit(0)\n"
     )
     result = subprocess.run(
@@ -109,7 +114,7 @@ def test_builder_initializes_platform_before_loading_published_ops(
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (package / "initialized").exists()
+    assert (package / "initialized").exists() == (accelerator == "ascend")
 
 
 @pytest.fixture

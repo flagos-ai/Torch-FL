@@ -79,6 +79,11 @@ class Backend:
 
         _patch_flaggems_codegen_config()
 
+    def initialize_runtime(self):
+        from torch_fl import flagos
+
+        flagos.init()
+
     def driver_sources(self, triton_root):
         return {
             name: triton_root / name
