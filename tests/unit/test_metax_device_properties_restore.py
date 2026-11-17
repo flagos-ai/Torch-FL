@@ -29,7 +29,9 @@ device -- only that the sequence of calls is the one that avoids it.
 import ctypes
 import importlib.util
 from pathlib import Path
+import sys
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -38,7 +40,10 @@ MODULE = REPO_ROOT / "torch_fl" / "accelerator" / "metax" / "_metax_compat.py"
 
 _spec = importlib.util.spec_from_file_location("metax_compat_under_test", MODULE)
 metax = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(metax)
+# Only annotation identity is needed; these protocol tests never load Torch or
+# accelerator libraries, including in the platform-agnostic CI environment.
+with patch.dict(sys.modules, {"torch": SimpleNamespace(device=type("Device", (), {}))}):
+    _spec.loader.exec_module(metax)
 
 # Attribute ids the function reads, and the values this fake reports for them.
 _ATTRS = {16: 64, 10: 32, 39: 1024, 8: 49152, 81: 131072, 21: 8, 22: 0}
