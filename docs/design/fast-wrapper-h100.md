@@ -1194,8 +1194,7 @@ allocates per call).
 
 ### 10.4 Prototype status: the pooled C++ replay works
 
-A companion prototype (submitted as a follow-up PR, not part of this change)
-implements it end to end for one Triton kernel (`mul`, 1M fp32): Python registers a
+`benchmarks/fast_launch_cpp/` implements it end to end for one Triton kernel (`mul`, 1M fp32): Python registers a
 plan once (cubin, kernel name, grid/block/shared,
 argument kinds, pool size); C++ then owns a `CUfunction`, a prebuilt argument array and
 a pool of output buffers. The per-call path is pointer stores plus `cuLaunchKernel` -
@@ -1261,8 +1260,8 @@ is ~2× cheaper, before the PrivateUse1 hop.
 
 ### 10.7 A real FlagGems operator, end to end
 
-The companion prototype's FlagGems driver captures `torch.mul[1M fp32]` on the flagos
-device through the FlagGems route, exports the compiled kernel to C++, and replays it.
+The same code captures `torch.mul[1M fp32]` on the flagos device through the FlagGems
+route, exports the compiled kernel to C++, and replays it.
 Capture prints the whole mapping, which is also the check that the argument list is right:
 
 ```
@@ -1293,25 +1292,97 @@ remaining constexprs, and zero-fill the scratch pointers. Getting this wrong is 
 crash but a plausible-looking wrong answer, which is why the capture prints both lists
 side by side.
 
-### 10.8 What remains before this replaces the `flaggems` route
+### 10.8 What shipped, and what is left
 
-* **Register the plan lazily per signature.** Today the capture is explicit; production
-  should do it on the first call of a signature (where libtuner also runs) and route the
-  rest through the replay, with `flaggems` untouched as the fallback.
-* **Cover the argument shapes the mapping cannot yet express**: strided/`StridedBuffer`
-  operands, multi-output ops (each output needs its own pooled slot in the same launch),
-  and in-place variants.
-* **Wire it behind a route name.** The mechanism now has the numbers; the remaining work
-  is the dispatch plumbing (`flaggems_fast` backend key or an internal fast path of
-  `flaggems`) and its fallback contract.
-* **Wire it as `flaggems_fast`.** The plan registration belongs on the first call of a
-  signature (where libtuner also runs); the C++ replay then sits behind a new backend
-  key, with `flaggems` untouched as the fallback.
-* **The graph variant is optional.** `cuGraphExecKernelNodeSetParams` is rejected on this
-  stack even with byte-identical parameters, so a graph cannot yet be repointed at each
-  call's inputs. Graphs would take the mechanism from 4.2 µs to the measured 4.39 µs
-  replay floor - no gain over the pooled launch, which is why the pooled path is the one
-  to productise.
+`benchmarks/fast_launch_cpp/` contains the mechanism described above: the CUDA extension
+(`fast_launch_ext.cu`, a `CUfunction` per plan, a prebuilt argument array, a
+refcount-driven output pool, `cuLaunchKernel`), the Python capture and replay layer
+(`fast_launch_cpp.py`), and the hardware gate (`fast_launch_cpp_gate.py`). It is opt-in:
+`enable()` replaces the FlagGems bindings for the operators it can prove and declines the
+rest by name.
+
+Three arms of the gate on H100 at the same shapes: the vendor operator on `cuda`, the
+untouched FlagGems route on `flagos`, and the replay. Error is relative to a CPU
+reference. This is a single fresh measurement set and **supersedes the wrapper-only
+numbers quoted earlier in this section**; the ratios in the last three columns are
+computed from the three columns beside them, not carried over from another campaign.
+
+| operator | vendor | wrapper | replay | replay / vendor | wrapper / vendor | wrapper / replay |
+|---|---:|---:|---:|---:|---:|---:|
+| `mul` 512x512 | 7.27 | 82.55 | **14.60** | 2.01x | 11.35x | **5.66x** |
+| `softmax` 1024x1024 | 7.09 | 30.52 | **14.44** | 2.04x | 4.31x | **2.11x** |
+| `add` 512x512 | 7.08 | 90.41 | 91.09 (declined) | 12.87x | 12.77x | 0.99x |
+| `relu` 512x512 | 7.19 | 76.10 | 76.04 (declined) | 10.57x | 10.58x | 1.00x |
+| `sum_dim` 1024x1024 | 8.86 | 10.79 | 10.58 (declined) | 1.19x | 1.22x | 1.02x |
+| `max.dim` 1024x1024 | 10.73 | 112.96 | 111.97 (declined) | 10.43x | 10.52x | 1.01x |
+| `sort` 1024x1024 | 29.81 | 1307.26 | 1312.92 (declined) | 44.04x | 43.85x | 1.00x |
+
+The gate passes on all three arms, with `hits` 2038, `fallbacks` 0 and every declined
+operator keeping its untouched cost.
+
+**Calling the replay from C++ is what closes the gap.** The table above measures the
+replay driven from Python, which is not where it ends up. With the replay installed inside
+the plugin's caller - so the launch happens before the operator would re-enter the
+interpreter - the same three arms read:
+
+| operator | vendor | wrapper | replay from Python | replay inside the plugin caller |
+|---|---:|---:|---:|---:|
+| `mul` 512x512 | 7.27 | 82.55 | 14.60 | **6.81** (0.94x vendor) |
+| `softmax` 1024x1024 | 7.09 | 30.52 | 14.44 | **7.01** (0.99x vendor) |
+
+`max_err` is 0.0 (or 7.5e-09 for `softmax`) in every arm, and the capture statistics show
+the Python wrapper was not called at all after the plan was installed (`hits` 0,
+`misses` 0): the caller replays and returns before the cached FlagGems callable is
+reached. That is the mechanism this design argued for, measured end to end: **the FlagGems
+Triton kernel within a third of the vendor-operator cost**, from 11.4x and 4.3x for the
+untouched wrapper.
+
+**What safe reuse costs, and where it is paid.** Reusing a pooled output as soon as the
+last host reference drops measured 6.57 us, and was wrong: the buffer's producing kernel, or
+a queued consumer on another stream, may still be running. Gating every reuse on a recorded
+event fixed that and cost 3 us - 6.57 to 9.67 - which is the whole gap back to the vendor
+operator.
+
+That cost is only owed where the hardware does not already provide the guarantee. Reusing a
+buffer on the stream that wrote it needs no event at all: the stream orders the new launch
+after the old one by itself. So the gate is stream-aware:
+
+| case | behaviour | driver calls |
+|---|---|---|
+| same stream as the last writer | reuse immediately, nothing recorded | 0 |
+| other stream, slot has an event | reuse only once the event has completed | 1 query |
+| other stream, slot has no event | no proof, so allocate a fresh slot | 0 |
+| plan never replayed on a second stream | nothing is ever recorded | 0 |
+
+A plan therefore pays nothing until it is actually replayed on a second stream, and from
+then on every launch records an event so a buffer written on one stream can be proven safe
+to reuse on another. The measured cost of the same-stream path is 0.24 us - 6.57 to 6.81,
+which is a stream id and a lock, not a driver call - and it buys the correctness the
+stream-blind version did not have.
+
+The remaining gap to the vendor operator is therefore closed for the operators whose
+layout is proven, and the work that remains is coverage, not speed.
+
+**A verified-operator allowlist is part of the design, not a limitation of it.****A verified-operator allowlist is part of the design, not a limitation of it.****A verified-operator allowlist is part of the design, not a limitation of it.** `relu`
+captures a seven-parameter layout with three scalars whose replay does not reproduce the
+wrapper's result (relative error 1.36), and the cause is not yet explained. A wrong
+layout does not crash - it returns a plausible wrong answer - so the module refuses any
+operator outside `VERIFIED_OPS` instead of trusting the mapping, and adding a name
+requires a gate run that proves exactness. The remaining work is therefore precise:
+
+* **Explain `relu`'s three-scalar layout.** Its PTX has more scalar parameters than the
+  pointwise operators do, and the mapping that works for `mul` does not reproduce its
+  results. Until that is understood, `relu` stays out of `VERIFIED_OPS`.
+* **Key plans on keyword arguments** so `add` (`alpha`) and `sum_dim` (`dtype`) can be
+  captured; today a call carrying keywords is passed through, which is why both are
+  declined.
+* **Multi-output and multi-launch plans.** `max.dim` needs two pooled slots in one
+  launch; full-reduce `sum` needs two launches in one plan; `sort` is out of scope
+  (kernel-bound, 21 launches).
+* **Wire it behind a route name.** The mechanism has the numbers now; the remaining work
+  is the dispatch plumbing (`flaggems_fast` key or an internal fast path of `flaggems`),
+  which also decides packaging: today the extension is built at first use through
+  `torch.utils.cpp_extension`, and a shipped route should build it with the wheel.
 
 ## Appendix A — how the measurements were produced
 

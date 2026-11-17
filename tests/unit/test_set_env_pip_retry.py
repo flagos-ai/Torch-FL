@@ -38,17 +38,23 @@ so its listing parser is exercised without leaving the machine.
 
 import http.server
 import os
+import platform
 import subprocess
 import sys
 import threading
 from functools import partial
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIB = REPO_ROOT / ".github" / "scripts" / "lib" / "set_env_common.sh"
+PROXY_LIB = LIB.with_name("proxy_route.sh")
 
 
-def _run_bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
+def _run_bash(
+    script: str, env: dict | None = None, *, real_wheel_index: bool = False
+) -> subprocess.CompletedProcess:
     """Source the library and run ``script`` with its stdout/stderr captured."""
     # The library falls back to `python`, which is not on PATH on every host;
     # the tests that need a stub interpreter export PIP_RETRY_PYTHON themselves.
@@ -59,8 +65,17 @@ def _run_bash(script: str, env: dict | None = None) -> subprocess.CompletedProce
     }
     if env:
         merged.update(env)
+    wheel_resolver = "" if real_wheel_index else "cpu_torch_wheel_url() { :; }\n"
     return subprocess.run(
-        ["bash", "-c", f'set -euo pipefail\nsource "{LIB}"\n{script}'],
+        [
+            "bash",
+            "-c",
+            f'set -euo pipefail\nsource "{LIB}"\n'
+            # Most cases isolate retries or index selection. Route tests use
+            # the real proxy helper; local HTTP cases enable the index parser.
+            "prefer_direct_route() { :; }\n"
+            f"{wheel_resolver}{script}",
+        ],
         capture_output=True,
         text=True,
         env=merged,
@@ -326,6 +341,89 @@ def test_install_cpu_torch_skips_the_probe_when_the_mirror_is_disabled():
     assert done.stdout == "PIP --index-url https://pin.example/whl/cpu torch==2.10.0\n"
 
 
+def test_install_cpu_torch_routes_before_measuring_and_keeps_fallback():
+    """A reachable direct pin survives selection and a proxied mirror failure."""
+    done = _run_bash(
+        f'source "{PROXY_LIB}"\n'
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        'direct_route_reachable() { [[ "$1" != *mirror* ]]; }\n'
+        "index_download_bps() {\n"
+        '  [[ "$NO_PROXY" == localhost,pin.example ]] || return 1\n'
+        '  [[ "$no_proxy" == "$NO_PROXY" ]] || return 1\n'
+        '  case "$1" in *mirror*) echo 9000000;; *) echo 400000;; esac\n'
+        "}\n"
+        "pip_retry() {\n"
+        '  printf "PIP route=%s %s\\n" "$NO_PROXY" "$*"\n'
+        '  [[ "$*" != *mirror* ]]\n'
+        "}\n"
+        "install_cpu_torch\n",
+        env={
+            "TORCH_FL_PROXY_ROUTE": "auto",
+            "NO_PROXY": "localhost",
+            "no_proxy": "localhost",
+        },
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _pip_calls(done) == [
+        "PIP route=localhost,pin.example --index-url https://mirror.example/cpu torch==2.10.0",
+        "PIP route=localhost,pin.example --index-url https://pin.example/whl/cpu torch==2.10.0",
+    ]
+    assert "Bypassing the runner proxy for pin.example" in done.stderr
+    assert "Using the runner proxy for mirror.example" in done.stderr
+
+
+@pytest.mark.parametrize("mode", ["auto", "proxy"])
+def test_install_cpu_torch_preserves_proxy_when_direct_is_unavailable(mode):
+    done = _run_bash(
+        f'source "{PROXY_LIB}"\n'
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=https://mirror.example/cpu\n"
+        "direct_route_reachable() { echo DIRECT-PROBE >&2; return 1; }\n"
+        "index_download_bps() { echo 0; }\n"
+        'pip_retry() { printf "PIP route=%s/%s %s\\n" "$NO_PROXY" "$no_proxy" "$*"; }\n'
+        "install_cpu_torch\n",
+        env={
+            "TORCH_FL_PROXY_ROUTE": mode,
+            "NO_PROXY": "localhost",
+            "no_proxy": "localhost",
+        },
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout == (
+        "PIP route=localhost/localhost --index-url https://pin.example/whl/cpu torch==2.10.0\n"
+    )
+    if mode == "proxy":
+        assert "DIRECT-PROBE" not in done.stderr
+
+
+def test_install_cpu_torch_does_not_route_a_disabled_mirror():
+    done = _run_bash(
+        f'source "{PROXY_LIB}"\n'
+        "CPU_TORCH_INDEX_URL=https://pin.example/whl/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "CPU_TORCH_MIRROR_INDEX_URL_DEFAULT=https://mirror.example/cpu\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=\n"
+        'direct_route_reachable() { printf "ROUTE %s\\n" "$1" >&2; }\n'
+        "index_download_bps() { return 1; }\n"
+        'pip_retry() { printf "PIP route=%s %s\\n" "$NO_PROXY" "$*"; }\n'
+        "install_cpu_torch\n",
+        env={
+            "TORCH_FL_PROXY_ROUTE": "auto",
+            "NO_PROXY": "localhost",
+            "no_proxy": "localhost",
+        },
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout == (
+        "PIP route=localhost,pin.example --index-url https://pin.example/whl/cpu torch==2.10.0\n"
+    )
+    assert "ROUTE https://pin.example/whl/cpu" in done.stderr
+    assert "mirror.example" not in done.stderr
+
+
 def _pip_calls(done: subprocess.CompletedProcess) -> list[str]:
     """The stub pip_retry's lines, without the ::warning:: the fallback prints."""
     return [ln for ln in done.stdout.splitlines() if ln.startswith("PIP ")]
@@ -456,7 +554,11 @@ def test_index_download_bps_reads_a_listing_with_hash_fragments(tmp_path):
 
     server, base = _serve(tmp_path)
     try:
-        done = _run_bash(f'index_download_bps "{base}/cpu" 10 200000\n')
+        done = _run_bash(
+            f'index_download_bps "{base}/cpu" 10 200000\n',
+            env={"NO_PROXY": "*", "no_proxy": "*"},
+            real_wheel_index=True,
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -468,11 +570,74 @@ def test_index_download_bps_reads_a_listing_with_hash_fragments(tmp_path):
 def test_index_download_bps_reports_zero_for_a_missing_index(tmp_path):
     server, base = _serve(tmp_path)
     try:
-        done = _run_bash(f'index_download_bps "{base}/absent" 5 1000\n')
+        done = _run_bash(
+            f'index_download_bps "{base}/absent" 5 1000\n',
+            env={"NO_PROXY": "*", "no_proxy": "*"},
+            real_wheel_index=True,
+        )
     finally:
         server.shutdown()
         server.server_close()
     assert done.stdout.strip() == "0"
+
+
+def test_cpu_torch_routes_the_pinned_wheels_separate_download_host():
+    """Check both route exemptions without resolving a runner hostname."""
+    done = _run_bash(
+        f'source "{PROXY_LIB}"\n'
+        "CPU_TORCH_INDEX_URL=https://pin.example/cpu\n"
+        "CPU_TORCH_VERSION=2.10.0\n"
+        "TORCH_FL_CPU_TORCH_MIRROR_INDEX_URL=\n"
+        "direct_route_reachable() { return 0; }\n"
+        "cpu_torch_wheel_url() {\n"
+        '  printf "%s\\n" "https://cdn.example/wheels/torch-2.10.0.whl"\n'
+        "}\n"
+        'pip_retry() { printf "PIP route=%s %s\\n" "$NO_PROXY" "$*"; }\n'
+        "install_cpu_torch\n",
+        env={"TORCH_FL_PROXY_ROUTE": "auto", "NO_PROXY": "", "no_proxy": ""},
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _pip_calls(done) == [
+        "PIP route=pin.example,cdn.example "
+        "--index-url https://pin.example/cpu torch==2.10.0"
+    ]
+    assert "Bypassing the runner proxy for cdn.example" in done.stderr
+
+
+def test_index_download_bps_selects_pinned_wheel_in_listing(tmp_path):
+    """Exercise real parsing and transfer using numeric loopback only."""
+    torch_dir = tmp_path / "cpu" / "torch"
+    torch_dir.mkdir(parents=True)
+    files = tmp_path / "wheels"
+    files.mkdir()
+    tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    machine = platform.machine()
+    wheel = f"torch-2.10.0+cpu-{tag}-{tag}-linux_{machine}.whl"
+    (files / wheel).write_bytes(b"0" * 65536)
+    server, base = _serve(tmp_path)
+    (torch_dir / "index.html").write_text(
+        f'<a href="{base}/wheels/torch-1.0.0-{tag}-{tag}-linux_{machine}.whl">old</a>\n'
+        f'<a href="{base}/wheels/{wheel}#sha256=deadbeef">pinned</a>\n'
+    )
+    try:
+        done = _run_bash(
+            "CPU_TORCH_VERSION=2.10.0\n"
+            f'printf "URL=%s\\n" "$(cpu_torch_wheel_url "{base}/cpu" 5)"\n'
+            f'printf "BPS=%s\\n" "$(index_download_bps "{base}/cpu" 5 1000)"\n',
+            env={"NO_PROXY": "*", "no_proxy": "*"},
+            real_wheel_index=True,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"URL={base}/wheels/{wheel}#sha256=deadbeef" in done.stdout.splitlines()
+    bps = next(
+        line.removeprefix("BPS=")
+        for line in done.stdout.splitlines()
+        if line.startswith("BPS=")
+    )
+    assert int(bps) > 0, done.stdout + done.stderr
 
 
 def test_install_cpu_torch_gives_the_mirror_one_attempt():

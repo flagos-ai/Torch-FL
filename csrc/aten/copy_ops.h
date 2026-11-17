@@ -11,6 +11,10 @@
 
 namespace at::native::flagos {
 
+// Shared on-device strided/dtype copy capability; declines unsupported cases
+// before invoking the original FlagGems implementation.
+bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst);
+
 at::Tensor _copy_from(
     const at::Tensor& self,
     const at::Tensor& dst,

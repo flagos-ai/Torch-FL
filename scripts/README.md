@@ -19,6 +19,12 @@ installed as a console script.
 
 Run every script from the repository root; the examples below assume that.
 
+For the optional native precision cohort, `python scripts/codegen/codegen_ops.py
+--native-routes-only` refreshes NVIDIA's generated input-dtype clauses while
+preserving its base operator coverage. `--check-native-routes` verifies those
+clauses and the shared conf header without importing FlagGems. Vendor entry
+signatures are regenerated separately with `codegen_native_vendor.py`.
+
 ## codegen/
 
 | Script | What it generates | Run |

@@ -154,6 +154,33 @@ def _boxing_enabled() -> bool:
     return "boxing" in _env.build_kernels()
 
 
+def _host_compiler_enabled() -> bool:
+    """The experimental compiler targets NVIDIA's CPU-Torch FlagGems build."""
+    import torch
+    from torch_fl import _env, _build_config
+
+    kernels = _env.build_kernels()
+    return (
+        torch.__version__.split("+")[0] == "2.10.0"
+        and torch.version.cuda is None
+        and "flaggems" in kernels
+        and "boxing" not in kernels
+        and not getattr(_build_config, "NATIVE_HOSTS", False)
+    )
+
+
+def _native_source_host_enabled() -> bool:
+    from torch_fl import _build_config
+
+    return bool(getattr(_build_config, "NATIVE_HOSTS", False))
+
+
+def _native_vendor_precision_enabled() -> bool:
+    from torch_fl import _build_config
+
+    return bool(getattr(_build_config, "NATIVE_VENDOR", False))
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -178,6 +205,81 @@ def pytest_collection_modifyitems(
     if not _boxing_enabled():
         markers_to_skip.append("cuda")
     for item in items:
+        if (
+            item.get_closest_marker("nvidia")
+            or item.get_closest_marker("host_compiler")
+            or item.get_closest_marker("native_vendor_precision")
+        ) and platform != "cuda":
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="case requires the NVIDIA runtime",
+                reason="NVIDIA runtime contract",
+            )
+            continue
+        if item.get_closest_marker("native_source_host") and platform not in {
+            "cuda",
+            "ascend",
+        }:
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="case requires an admitted native-host backend",
+                reason="native-host backend contract",
+            )
+            continue
+        if (
+            item.get_closest_marker("native_source_host")
+            and not _native_source_host_enabled()
+        ):
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="source hosts require FLAGOS_BUILD_NATIVE_HOST",
+                reason="precompiled source host build contract",
+            )
+            continue
+        if (
+            item.get_closest_marker("native_vendor_precision")
+            and not _native_vendor_precision_enabled()
+        ):
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="wheel has no published native vendor precision module",
+                reason="native vendor precision build contract",
+            )
+            continue
+        if item.get_closest_marker("host_compiler") and not _host_compiler_enabled():
+            add_platform_skip(
+                item,
+                gate="build_record",
+                detail="host compiler requires CPU Torch 2.10.0 and FlagGems without boxing",
+                reason="native host compiler build contract",
+            )
+            continue
+        if minimum := item.get_closest_marker("min_devices"):
+            import torch_fl
+
+            required = minimum.args[0]
+            if torch_fl.flagos.device_count() < required:
+                add_platform_skip(
+                    item,
+                    gate="device_count",
+                    detail=f"case requires {required} visible devices",
+                    reason=f"requires {required} visible devices",
+                )
+                continue
+        if item.get_closest_marker("cpython_dict_watchers") and not (
+            sys.implementation.name == "cpython" and sys.version_info >= (3, 12)
+        ):
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="dictionary watchers require CPython 3.12 or newer",
+                reason="CPython dictionary watcher runtime contract",
+            )
+            continue
         if item.get_closest_marker("soft_lowp") and platform not in ("dcu", "metax"):
             add_platform_skip(
                 item,
@@ -223,6 +325,21 @@ def pytest_collection_modifyitems(
 def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
+    config.addinivalue_line("markers", "nvidia: requires the NVIDIA runtime")
+    config.addinivalue_line(
+        "markers", "host_compiler: requires the experimental native host compiler build"
+    )
+    config.addinivalue_line(
+        "markers", "native_source_host: requires precompiled FlagGems source hosts"
+    )
+    config.addinivalue_line(
+        "markers",
+        "native_vendor_precision: requires the published vendor precision cohort",
+    )
+    config.addinivalue_line("markers", "min_devices(count): minimum visible devices")
+    config.addinivalue_line(
+        "markers", "cpython_dict_watchers: requires CPython 3.12 dictionary watchers"
+    )
     config.addinivalue_line("markers", "metax: requires MetaX platform")
     config.addinivalue_line("markers", "ascend: requires Ascend platform")
     config.addinivalue_line("markers", "musa: requires Moore Threads MUSA platform")

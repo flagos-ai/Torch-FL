@@ -64,6 +64,8 @@ from collections import defaultdict
 # key is an annotation rather than a default route.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_coverage import TILEOPS_OPS  # noqa: E402
+from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
+from native_host_policy import render_config_routes  # noqa: E402
 
 
 # TensorList C++ spelling (IListRef vs ArrayRef) must match what PyTorch itself
@@ -910,7 +912,9 @@ def discover_flaggems_ops(codegen_ops, funcs):
     empty for the common all-positional case.
 
     Safety gates (see plan; validated in scratch analysis):
-      - op must have a generated dispatcher (op in codegen_ops) and a schema.
+      - op must be selected by the caller (op in codegen_ops) and have a schema.
+        Selection includes generated dispatchers and manual source-call bridges;
+        only the former contributes a backend registration.
       - flag_gems function arity must be inspectable (no *args/**kwargs).
       - category in {functional_pure, inplace, tuple_return, out_variant}, or the
         op is listed in _FLAGGEMS_TENSORLIST_DIM, whose arity gate is the
@@ -1280,24 +1284,59 @@ def _flaggems_kwarg_cpp(kwargs):
 
 
 def gen_flaggems_python_kernel(
-    op, fn_type, ret_type, args, gems_func, category, func, kwargs=None
+    op,
+    fn_type,
+    ret_type,
+    args,
+    gems_func,
+    category,
+    func,
+    kwargs=None,
+    *,
+    typed=False,
+    function_name=None,
 ):
     """Generate a <Name>KernelPython forwarding to the FlagGems Python op.
 
-    Signature matches the generated `*Fn` typedef exactly. The body packs the
+    Dispatcher signatures match the generated `*Fn` typedef exactly. Source
+    bridges borrow the same argument types and leave result adaptation to their
+    existing composite caller. The generic fallback packs the
     aten positional args (faithful order) into a std::vector<c10::IValue> and any
     keyword-only gems args (dtype/alpha/correction/...) into a
     std::vector<PyKwarg>, then calls the generic caller by qualname and adapts
     the result to the category's return convention:
       functional_pure -> UnboxToFlagos(result); return result;
+      source_call     -> return the original result without adaptation;
       inplace         -> self.copy_(result); return self;  (or void)
       tuple_return    -> GenericTuple(...); unbox each; return make_tuple(...)
       out_variant     -> Generic/GenericTuple over NON-out args; out_i.copy_(res_i)
     """
-    kn = python_kernel_name(fn_type)
+    kn = function_name or python_kernel_name(fn_type)
     s = func.func
     aten_args = list(s.arguments.flat_all)
     out_args = list(s.arguments.out) if hasattr(s.arguments, "out") else []
+    declarations = []
+    cpp_types = {name: t for t, name in args}
+
+    def native_call(
+        call, positional, keywords=(), outputs=1, preparation="", types=None
+    ):
+        if not typed:
+            return call
+        types = {**cpp_types, **(types or {})}
+        arguments = [(types[name], expr, None) for name, expr in positional]
+        arguments.extend((types[name], expr, name) for name, expr in keywords)
+        declaration, expression = wrap_native_source_call(
+            op, gems_func, fn_type + "Source", call, arguments, outputs, preparation
+        )
+        declarations.append(declaration)
+        return expression
+
+    def finish(body, prelude=""):
+        return (
+            "".join(declarations)
+            + f"{ret_type} {kn}({args_decl(args)}) {{\n{prelude}{body}\n}}"
+        )
 
     if category == "factory":
         # Factory: pass only the shape/scalar positionals; the factory caller
@@ -1331,14 +1370,34 @@ def gen_flaggems_python_kernel(
                 f": at::kLong;\n"
             )
             dtype_expr = "_dt"
+        call = (
+            f'CallPythonOp_Factory("{gems_func}", '
+            f"{pos_init}, {dtype_expr}, {device_expr})"
+        )
+        call = native_call(
+            call,
+            [(n, n) for n in pos_names],
+            [
+                ("dtype", dtype_expr),
+                ("device", "_native_target"),
+                ("layout", "at::kStrided"),
+                ("pin_memory", "std::nullopt"),
+            ],
+            preparation=f"const auto _native_target = TypedSourceFactoryDevice({device_expr});",
+            types={
+                "dtype": "std::optional<at::ScalarType>",
+                "device": "c10::Device",
+                "layout": "at::Layout",
+                "pin_memory": "std::nullopt_t",
+            },
+        )
         body = (
             f"{infer}"
-            f'  auto result = CallPythonOp_Factory("{gems_func}", '
-            f"{pos_init}, {dtype_expr}, {device_expr});\n"
+            f"  auto result = {call};\n"
             f"  UnboxToFlagos(result);\n"
             f"  return result;"
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        return finish(body)
 
     if category == "like_factory":
         # *_like: pass the source tensor (+ full_like's fill_value); the caller
@@ -1354,13 +1413,31 @@ def gen_flaggems_python_kernel(
         device_name = next((a.name for a in aten_args if a.name == "device"), None)
         device_expr = device_name if device_name else "::std::nullopt"
         pos_init = "{" + ", ".join(pos_names) + "}"
-        body = (
-            f'  auto result = CallPythonOp_LikeFactory("{gems_func}", '
-            f"{pos_init}, {dtype_expr}, {device_expr});\n"
-            f"  UnboxToFlagos(result);\n"
-            f"  return result;"
+        call = (
+            f'CallPythonOp_LikeFactory("{gems_func}", '
+            f"{pos_init}, {dtype_expr}, {device_expr})"
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        call = native_call(
+            call,
+            [(n, n) for n in pos_names],
+            [
+                ("dtype", dtype_expr),
+                ("device", "_native_target"),
+                ("layout", "at::kStrided"),
+                ("pin_memory", "std::nullopt"),
+                ("memory_format", "std::nullopt"),
+            ],
+            preparation=f"const auto _native_target = TypedSourceFactoryDevice({device_expr}, &{pos_names[0]});",
+            types={
+                "dtype": "std::optional<at::ScalarType>",
+                "device": "c10::Device",
+                "layout": "at::Layout",
+                "pin_memory": "std::nullopt_t",
+                "memory_format": "std::nullopt_t",
+            },
+        )
+        body = f"  auto result = {call};\n  UnboxToFlagos(result);\n  return result;"
+        return finish(body)
 
     if category == "random_inplace":
         # Random in-place: pass self + scalar params (generator dropped); the
@@ -1371,12 +1448,12 @@ def gen_flaggems_python_kernel(
         self_name = pos_names[0]
         pos_init = "{" + ", ".join(pos_names) + "}"
         ret_line = "" if ret_type == "void" else f"\n  return {self_name};"
-        body = (
-            f'  auto result = CallPythonOp_RandomInplace("{gems_func}", '
-            f"{pos_init});\n"
-            f"  {self_name}.copy_(result);{ret_line}"
+        call = native_call(
+            f'CallPythonOp_RandomInplace("{gems_func}", {pos_init})',
+            [(n, n) for n in pos_names],
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        body = f"  auto result = {call};\n  {self_name}.copy_(result);{ret_line}"
+        return finish(body)
 
     if category == "rng_dropgen":
         # RNG functional with the aten Generator? dropped: pass the remaining
@@ -1385,12 +1462,12 @@ def gen_flaggems_python_kernel(
         positional = kwargs or []
         pos_names = [n for _t, n in positional]
         pos_init = "{" + ", ".join(pos_names) + "}"
-        body = (
-            f'  auto result = CallPythonOp_Generic("{gems_func}", {pos_init});\n'
-            f"  UnboxToFlagos(result);\n"
-            f"  return result;"
+        call = native_call(
+            f'CallPythonOp_Generic("{gems_func}", {pos_init})',
+            [(n, n) for n in pos_names],
         )
-        return f"{ret_type} {kn}({args_decl(args)}) {{\n{body}\n}}"
+        body = f"  auto result = {call};\n  UnboxToFlagos(result);\n  return result;"
+        return finish(body)
 
     kwargs = kwargs or []
     kw_names = {name for _t, name in kwargs}
@@ -1412,8 +1489,14 @@ def gen_flaggems_python_kernel(
         passed_names = [a.name for a in aten_args if a.name not in kw_names]
     # Widen a contracted axis the platform's triton will not compile, before the
     # operands are packed for the call. See _DOT_CONTRACT_PADDED_OPS.
+    native_names = passed_names[:]
     dotpad_lines, dotpad_rename = _dot_contract_prelude(op, args)
     passed_names = [dotpad_rename.get(n, n) for n in passed_names]
+    if op == "embedding":
+        # sparse only selects the ATen backward representation. The forward
+        # gather is identical; FlagGems rejects sparse=True unnecessarily.
+        # Autograd retains the original schema argument above this backend.
+        passed_names = ["false" if n == "sparse" else n for n in passed_names]
     ivalues = "{" + ", ".join(passed_names) + "}"
 
     # kwarg call selects the *Kw caller variant; positional-only uses the plain one.
@@ -1431,7 +1514,11 @@ def gen_flaggems_python_kernel(
         def tuple_call(n):
             return f'CallPythonOp_GenericTuple("{gems_func}", {ivalues}, {n})'
 
-    if category == "functional_pure":
+    if category == "source_call":
+        # Composite plumbing already owns the device and alias contract. A
+        # source call must return the original result without retagging it.
+        body = f"  return {gen_call};"
+    elif category == "functional_pure":
         body = (
             f"  auto result = {gen_call};\n  UnboxToFlagos(result);\n  return result;"
         )
@@ -1507,12 +1594,98 @@ def gen_flaggems_python_kernel(
     else:
         raise ValueError(f"unsupported flaggems-python category {category} for {op}")
 
+    if category == "tensorlist_dim":
+        original_call = f'CallPythonOp_ListI("{gems_func}", {list_name}, {dim_name})'
+        replacement = native_call(
+            original_call, [(list_name, list_name), (dim_name, dim_name)]
+        )
+    else:
+        outputs = (
+            ret_type.count(",") + 1
+            if category == "tuple_return"
+            else len(out_args)
+            if category in ("out_variant", "out_variant_gemskwout")
+            and len(out_args) > 1
+            else 1
+        )
+        original_call = tuple_call(outputs) if outputs > 1 else gen_call
+        replacement = native_call(
+            original_call,
+            list(zip(native_names, passed_names)),
+            [(name, name) for _, name in kwargs],
+            outputs,
+        )
+    body = body.replace(original_call, replacement)
+
     # Ordered: the host escape returns before the padding runs, because a dtype
     # this route cannot serve at all should not pay for a pad it will not use.
     host_lines = _host_matmul_prelude(op, args, ret_type)
-    return (
-        f"{ret_type} {kn}({args_decl(args)}) {{\n{host_lines}{dotpad_lines}{body}\n}}"
-    )
+    return finish(body, host_lines + dotpad_lines)
+
+
+def gen_flaggems_source_bridges(funcs, discovered):
+    """Generate source calls for manually registered dispatcher plumbing.
+
+    These functions do not register ATen kernels or change routing. They expose
+    the same source-derived ABI to existing composite/device-copy callers, which
+    keep their own admission and alias contracts. Discovery and argument mapping
+    use exactly the same gates as the generated dispatcher entries.
+    """
+    declarations, definitions = [], []
+    for op in sorted(MANUAL_REGISTERED_OPS & discovered.keys()):
+        host, category, kwargs = discovered[op]
+        func = funcs[op]
+        if category not in ("functional_pure", "inplace") or (
+            len(func.func.returns) != 1 or str(func.func.returns[0].type) != "Tensor"
+        ):
+            continue
+        with local.parametrize(
+            use_const_ref_for_mutable_tensors=True,
+            use_ilistref_for_tensor_lists=not should_use_arrayref(func),
+        ):
+            _, _, args = unified_sig(func)
+        fn_type, _ = schema_to_cpp_name(op)
+        name = fn_type[:-2] + "SourceHost"
+        declarations.append(f"at::Tensor {name}({args_decl(args)});")
+        definitions.append(
+            gen_flaggems_python_kernel(
+                op,
+                fn_type,
+                "at::Tensor",
+                args,
+                host,
+                "source_call",
+                func,
+                kwargs,
+                typed=True,
+                function_name=name,
+            )
+        )
+    prefix = [
+        "// Copyright (c) 2026, BAAI. All rights reserved.",
+        "// AUTO-GENERATED by scripts/codegen/codegen_ops.py - DO NOT EDIT",
+        "",
+    ]
+    header = prefix + [
+        "#pragma once",
+        "#include <ATen/ATen.h>",
+        "",
+        "namespace at::native::flagos {",
+        *declarations,
+        "} // namespace at::native::flagos",
+    ]
+    source = prefix + [
+        "#ifdef FLAGOS_FLAGGEMS_PYTHON",
+        '#include "flaggems_source_bridges.h"',
+        '#include "../backends/flagos/python_op_caller.h"',
+        '#include "../backends/flagos/typed_source_host.h"',
+        "",
+        "namespace at::native::flagos {",
+        "\n\n".join(definitions),
+        "} // namespace at::native::flagos",
+        "#endif // FLAGOS_FLAGGEMS_PYTHON",
+    ]
+    return "\n".join(header) + "\n", "\n".join(source) + "\n"
 
 
 # ============================================================================
@@ -2627,9 +2800,105 @@ FLAGGEMS_RUNTIME_BROKEN = {
 }
 
 
+def nvidia_conf_header():
+    conf_license = [
+        "# Copyright 2026 FlagOS Contributors",
+        "#",
+        '# Licensed under the Apache License, Version 2.0 (the "License");',
+        "# you may not use this file except in compliance with the License.",
+        "# You may obtain a copy of the License at",
+        "#",
+        "#     http://www.apache.org/licenses/LICENSE-2.0",
+        "#",
+        "# Unless required by applicable law or agreed to in writing, software",
+        '# distributed under the License is distributed on an "AS IS" BASIS,',
+        "# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
+        "# See the License for the specific language governing permissions and",
+        "# limitations under the License.",
+        "",
+    ]
+    conf_lines = conf_license + [
+        "# flagos op backend config -- AUTO-GENERATED (full CUDA mode)",
+        "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
+        "# FlagGems-first: discovered compatible ops use the flaggems Python",
+        "# backend; every remaining generated op is `none` and reaches",
+        "# cpu_fallback, as do the ops not listed here at all.",
+        "#",
+        "# This conf never routes `boxing` -- no default conf may (AGENTS.md,",
+        '# "Default confs never route boxing"). Optional native NVIDIA entries',
+        "# serve only the explicit measured dtype clauses. Uncovered base routes",
+        "# remain `none`, as on the other CUDA-ABI platforms (MetaX, Hygon",
+        "# DCU, T-Head PPU). The boxed routing lives in the opt-in day-0 file",
+        "# backends_nvidia_boxing.conf, selected with FLAGOS_BACKEND_CONFIG on",
+        "# a FLAGOS_BUILD_BOXING=1 wheel.",
+        "#",
+        "# Exceptions: ops that pass the static discovery gates but cannot use",
+        "# the FlagGems route here are held off it",
+        "# (scripts/codegen/codegen_ops.py:flaggems_route_exceptions). `_conj`",
+        "# is there because flag_gems materializes the value and torch.conj has",
+        "# to stay lazy; `_unsafe_view` because flag_gems implements it as",
+        "# `reshape`, which returns a copy where ATen returns a view or raises;",
+        "# the addmm family because FlagTree AABS shrinks its tl.dot K tile",
+        "# below Triton's K >= 16 minimum for small matmuls.",
+        "#",
+        "# Each exception is a measured result, not a guess: the ops in",
+        "# flaggems_route_exceptions are contract/compile exceptions, and the",
+        "# additional ops in measured_flaggems_rollback failed a case on the",
+        "# FlagGems route that the CUDA boxing route answers correctly (or",
+        "# crashed, hung, or recursed) when both were measured with",
+        "# tests/manual/flaggems_overload_survey.py on 8x A100. See",
+        "# docs/reference/operator-support.md for the per-op failure signatures.",
+        "# Those measurements are why the op must stay off FlagGems; on this",
+        "# conf the answer is CPU, and the boxed answer they name is in the",
+        "# day-0 variant above.",
+        "#",
+        "# metadata_route_overrides holds a third, cost-only group: ops that do",
+        "# no computation on either route, where flag_gems' implementation is a",
+        "# Python function calling the same metadata operation back. Routing",
+        "# them to flaggems buys no kernel -- there is none to buy -- and costs a",
+        "# Python hop per call (measured: ~3 us/call more than the boxing route",
+        "# on A100, which itself is within 0.3 us of native torch).",
+        "#",
+        "# A trailing `# tileops` marks an op that also has a TileOPs Triton",
+        "# shim (scripts/codegen/backend_coverage.py:TILEOPS_OPS, regenerated by",
+        "# scripts/codegen/codegen_tileops.py). It does not affect default routing --",
+        "# TileOPs needs FLAGOS_BUILD_TILEOPS=ON plus an SM90 device, so naming it by",
+        "# default would route at an empty slot. FLAGOS_FORCE_BACKEND=tileops",
+        "# repins exactly these ops at load time (ApplyForcedBackend in",
+        "# csrc/aten/common.cc).",
+        "# The annotation replaces the former backends_tileops.conf, which was a",
+        "# 2060-line copy of this file differing only in those 60 lines.",
+        "#",
+        "# Format: op_name = backend[; dtype[,dtype]:backend ...]",
+        "",
+    ]
+    return conf_lines
+
+
 def main():
     repo_root = Path(__file__).parent.parent.parent
     conf_path = repo_root / "torch_fl/configs/backends_nvidia.conf"
+    # Refresh only the deterministic dtype clauses without rediscovering the
+    # installed FlagGems operator surface or changing unrelated base routes.
+    if "--native-routes-only" in sys.argv or "--check-native-routes" in sys.argv:
+        current = conf_path.read_text()
+        lines = current.splitlines()
+        first_op = next(
+            index for index, line in enumerate(lines) if "=" in line.split("#", 1)[0]
+        )
+        expected = render_config_routes(
+            "\n".join(nvidia_conf_header() + lines[first_op:]) + "\n", "nvidia"
+        )
+        if "--check-native-routes" in sys.argv:
+            if current != expected:
+                raise SystemExit(
+                    "stale native dtype routes; run codegen_ops.py --native-routes-only"
+                )
+            print("native dtype routes are current")
+        elif current != expected:
+            conf_path.write_text(expected)
+            print("native dtype routes generated")
+        return
     out_dir = repo_root / "csrc/aten/generated"
     out_dir.mkdir(exist_ok=True)
 
@@ -2749,11 +3018,14 @@ def main():
         print(f"  {cat:20s} {len(categories[cat]):3d} ops")
 
     # ---- discover FlagGems Python-path ops ----
-    # Only meaningful in full-CUDA mode (all generated ops have dispatchers).
-    # discover_flaggems_ops returns {op: (gems_func_qualname, category)}; keep
-    # only ops that are actually in op_info (have a generated dispatcher slot).
-    flaggems_py = discover_flaggems_ops(set(op_info), funcs)
-    flaggems_py = {op: v for op, v in flaggems_py.items() if op in op_info}
+    # Discover both dispatcher entries and source-call bridges in one registry
+    # pass. Only op_info contributes backend registrations and coverage routes;
+    # manually registered operators keep their existing dispatch implementation.
+    discovered = discover_flaggems_ops(set(op_info) | MANUAL_REGISTERED_OPS, funcs)
+    flaggems_py = {op: v for op, v in discovered.items() if op in op_info}
+    bridge_header, bridge_source = gen_flaggems_source_bridges(funcs, discovered)
+    (out_dir / "flaggems_source_bridges.h").write_text(bridge_header)
+    (out_dir / "flaggems_source_bridges.cc").write_text(bridge_source)
     py_cat_counts = defaultdict(int)
     for _op, (_q, _c, _kw) in flaggems_py.items():
         py_cat_counts[_c] += 1
@@ -2916,6 +3188,7 @@ def main():
         '#include "ops.h"',
         '#include "../device_boxing.h"',
         '#include "../backends/flagos/python_op_caller.h"',
+        '#include "../backends/flagos/typed_source_host.h"',
         "",
         "namespace at::native::flagos {",
         "namespace {",
@@ -2934,6 +3207,7 @@ def main():
                 category,
                 i["func"],
                 kwargs,
+                typed=True,
             )
         )
         lines.append("")
@@ -3047,22 +3321,6 @@ def main():
         flaggems_forced_off = flaggems_recursive_fallback | flaggems_runtime_broken
         # Every generated conf carries the repo's Apache header; without it each
         # regeneration would strip the header off the checked-in files.
-        conf_license = [
-            "# Copyright 2026 FlagOS Contributors",
-            "#",
-            '# Licensed under the Apache License, Version 2.0 (the "License");',
-            "# you may not use this file except in compliance with the License.",
-            "# You may obtain a copy of the License at",
-            "#",
-            "#     http://www.apache.org/licenses/LICENSE-2.0",
-            "#",
-            "# Unless required by applicable law or agreed to in writing, software",
-            '# distributed under the License is distributed on an "AS IS" BASIS,',
-            "# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
-            "# See the License for the specific language governing permissions and",
-            "# limitations under the License.",
-            "",
-        ]
         # Route exceptions that only apply to this conf. `flag_gems` defects
         # that any device can hit live in flaggems_recursive_fallback /
         # flaggems_runtime_broken below, which the metax and dcu confs also fold
@@ -3120,9 +3378,9 @@ def main():
         # What "off the FlagGems route" resolves to is the day-0 split, not this
         # file's choice. A default conf may only name the vendor's own kernels,
         # FlagGems or `none` (AGENTS.md, "Default confs never route boxing"), and
-        # NVIDIA has no native CUDA operator library on this tree yet -- the
-        # boxing kernel borrows the vendor's libtorch -- so an op held back here
-        # is `none`, i.e. cpu_fallback. The boxed answer for the same op lives in
+        # NVIDIA's optional precision entries do not widen unconditional
+        # coverage, so an op held back here is `none`, i.e. cpu_fallback.
+        # The boxed answer for the same op lives in
         # `backends_nvidia_boxing.conf`, which is what the boxing lane and a
         # boxing user select by FLAGOS_BACKEND_CONFIG.
         #
@@ -3246,7 +3504,6 @@ def main():
             "cosh.out",
             "dequantize.self",
             "elu_backward",
-            "embedding",
             "mul_.Tensor",
             "nanmedian.dim_values",
             "norm.Scalar",
@@ -3327,61 +3584,7 @@ def main():
             "native_dropout_backward",
         }
 
-        conf_lines = conf_license + [
-            "# flagos op backend config -- AUTO-GENERATED (full CUDA mode)",
-            "# Regenerated by scripts/codegen/codegen_ops.py with FLAGOS_CODEGEN_ALL=1.",
-            "# FlagGems-first: discovered compatible ops use the flaggems Python",
-            "# backend; every remaining generated op is `none` and reaches",
-            "# cpu_fallback, as do the ops not listed here at all.",
-            "#",
-            "# This conf never routes `boxing` -- no default conf may (AGENTS.md,",
-            '# "Default confs never route boxing"). NVIDIA has no native CUDA',
-            "# operator library on this tree yet, so what FlagGems does not cover",
-            "# is `none`, exactly as on the other CUDA-ABI platforms (MetaX, Hygon",
-            "# DCU, T-Head PPU). The boxed routing lives in the opt-in day-0 file",
-            "# backends_nvidia_boxing.conf, selected with FLAGOS_BACKEND_CONFIG on",
-            "# a FLAGOS_BUILD_BOXING=1 wheel.",
-            "#",
-            "# Exceptions: ops that pass the static discovery gates but cannot use",
-            "# the FlagGems route here are held off it",
-            "# (scripts/codegen/codegen_ops.py:flaggems_route_exceptions). `_conj`",
-            "# is there because flag_gems materializes the value and torch.conj has",
-            "# to stay lazy; `_unsafe_view` because flag_gems implements it as",
-            "# `reshape`, which returns a copy where ATen returns a view or raises;",
-            "# the addmm family because FlagTree AABS shrinks its tl.dot K tile",
-            "# below Triton's K >= 16 minimum for small matmuls.",
-            "#",
-            "# Each exception is a measured result, not a guess: the ops in",
-            "# flaggems_route_exceptions are contract/compile exceptions, and the",
-            "# additional ops in measured_flaggems_rollback failed a case on the",
-            "# FlagGems route that the CUDA boxing route answers correctly (or",
-            "# crashed, hung, or recursed) when both were measured with",
-            "# tests/manual/flaggems_overload_survey.py on 8x A100. See",
-            "# docs/reference/operator-support.md for the per-op failure signatures.",
-            "# Those measurements are why the op must stay off FlagGems; on this",
-            "# conf the answer is CPU, and the boxed answer they name is in the",
-            "# day-0 variant above.",
-            "#",
-            "# metadata_route_overrides holds a third, cost-only group: ops that do",
-            "# no computation on either route, where flag_gems' implementation is a",
-            "# Python function calling the same metadata operation back. Routing",
-            "# them to flaggems buys no kernel -- there is none to buy -- and costs a",
-            "# Python hop per call (measured: ~3 us/call more than the boxing route",
-            "# on A100, which itself is within 0.3 us of native torch).",
-            "#",
-            "# A trailing `# tileops` marks an op that also has a TileOPs Triton",
-            "# shim (scripts/codegen/backend_coverage.py:TILEOPS_OPS, regenerated by",
-            "# scripts/codegen/codegen_tileops.py). It does not affect default routing --",
-            "# TileOPs needs FLAGOS_BUILD_TILEOPS=ON plus an SM90 device, so naming it by",
-            "# default would route at an empty slot. FLAGOS_FORCE_BACKEND=tileops",
-            "# repins exactly these ops at load time (ApplyForcedBackend in",
-            "# csrc/aten/common.cc).",
-            "# The annotation replaces the former backends_tileops.conf, which was a",
-            "# 2060-line copy of this file differing only in those 60 lines.",
-            "#",
-            "# Format: op_name = backend   (backend: flaggems | flagos_python | none)",
-            "",
-        ]
+        conf_lines = nvidia_conf_header()
         # Every op held off the FlagGems route by codegen_ops' own exclusion
         # sets routes to `none` here. The union used to be computed 300 lines
         # below this writer, so the writer could not see it and emitted
@@ -3439,7 +3642,9 @@ def main():
                 n_flaggems_routes += 1
             suffix = "  # tileops" if op in TILEOPS_OPS else ""
             conf_lines.append(f"{op} = {backend}{suffix}")
-        conf_path.write_text("\n".join(conf_lines) + "\n")
+        conf_path.write_text(
+            render_config_routes("\n".join(conf_lines) + "\n", "nvidia")
+        )
         tileops_annotated = sum(1 for op in op_info if op in TILEOPS_OPS)
         print(
             f"   regenerated {conf_path.name} with {n_flaggems_routes} flaggems "

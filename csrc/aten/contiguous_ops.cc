@@ -133,6 +133,7 @@ void copy_strided_via_host(
     const at::Tensor& self,
     const at::Tensor& result,
     c10::MemoryFormat memory_format) {
+  if (TryGemsDeviceCopy(self, result)) return;
   size_t storage_size = self.storage().nbytes();
   at::Tensor storage_cpu = at::empty(
       {static_cast<int64_t>(storage_size)},

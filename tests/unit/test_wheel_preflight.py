@@ -16,6 +16,7 @@
 
 import ast
 import importlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -61,6 +62,7 @@ def test_manifest_builder_works_without_source_root_on_import_path(
         "_BUNDLE_LIBDIR": "lib",
         "_platform_entry": lambda _: {"vendor_torch_libraries": True},
         "_install_requires": lambda: ["torch>=2.10,<2.11"],
+        "_native_vendor_cohort": lambda: None,
     }
     exec(
         compile(ast.Module(body=[function], type_ignores=[]), "setup.py", "exec"),
@@ -449,3 +451,145 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
         install_at = source.find("python -m pip install", build_at)
         if install_at >= 0:
             assert verify_at < install_at, path
+
+
+@pytest.fixture(params=["nvidia", "ascend"])
+def native_wheel(tmp_path, manifest, monkeypatch, request):
+    spec = importlib.util.spec_from_file_location(
+        "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"
+    )
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+    driver_root = tmp_path / "compiler"
+    vendor = request.param
+    adapter = backend.get_backend(vendor)
+    for path in adapter.driver_sources(driver_root).values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// published backend source\n")
+    monkeypatch.setattr(
+        backend.importlib.metadata,
+        "version",
+        lambda name: manifest["build"]["distributions"][name],
+    )
+    record = backend.build_record(backend.get_backend(vendor), driver_root)
+    manifest["platform"] = "cuda" if vendor == "nvidia" else vendor
+    manifest["build"]["kernels"] = ["vendor", "flaggems"]
+    path = _wheel(tmp_path, manifest)
+    prefix = "torch_fl/native_host/"
+    with zipfile.ZipFile(path, "a") as wheel:
+        wheel.writestr(
+            prefix + "_generated/manifest.json", json.dumps({"backend": record})
+        )
+        wheel.writestr(
+            "torch_fl/_build_config.py",
+            f'ACCELERATOR = "{vendor}"\nNATIVE_HOSTS = True\n',
+        )
+        for category in ("native_sources", "adapter_sources"):
+            for name in record[category]:
+                wheel.writestr(
+                    prefix + name, (SOURCE_ROOT / prefix / name).read_bytes()
+                )
+        wheel.writestr(
+            prefix + "_generated/_launcher.cpython-312-test.so", b"not loaded"
+        )
+        wheel.writestr(
+            prefix + "_generated/" + record["utility_modules"][0] + ".so", b"not loaded"
+        )
+    return path, record, driver_root
+
+
+def _replace_wheel_entry(path, name, value):
+    with zipfile.ZipFile(path) as wheel:
+        contents = {entry: wheel.read(entry) for entry in wheel.namelist()}
+    if value is None:
+        del contents[name]
+    else:
+        contents[name] = value
+    with zipfile.ZipFile(path, "w") as wheel:
+        for entry, content in contents.items():
+            wheel.writestr(entry, content)
+
+
+def test_versioned_native_backend_is_verified_without_imports(native_wheel):
+    path, _, _ = native_wheel
+    before = _snapshot_modules()
+    preflight.load_wheel(path, native_backend=True)
+    _assert_imported_no_torch_fl(before)
+
+
+@pytest.mark.parametrize(
+    "change", ["target", "version", "source", "utility", "compiler"]
+)
+def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
+    path, record, _ = native_wheel
+    prefix = "torch_fl/native_host/"
+    if change == "source":
+        _replace_wheel_entry(
+            path,
+            prefix + "csrc/backends/" + record["vendor"] + ".cc",
+            b"changed source",
+        )
+    elif change == "utility":
+        _replace_wheel_entry(
+            path, prefix + "_generated/" + record["utility_modules"][0] + ".so", None
+        )
+    else:
+        if change == "target":
+            record["vendor"] = "unregistered"
+        elif change == "version":
+            record["abi_version"] = 2
+        else:
+            record["compiler_distribution"]["version"] = "0.8.0"
+        _replace_wheel_entry(
+            path, prefix + "_generated/manifest.json", json.dumps({"backend": record})
+        )
+    with pytest.raises(ValueError, match="backend|Native-host|native-host"):
+        preflight.load_wheel(path, native_backend=True)
+
+
+def test_native_backend_verifies_installed_driver_sources(native_wheel, monkeypatch):
+    path, record, root = native_wheel
+    monkeypatch.setattr(
+        preflight.metadata,
+        "distribution",
+        lambda name: types.SimpleNamespace(locate_file=lambda name: root.parent / name),
+    )
+    # The distribution root contains triton/, as in the actual published wheel.
+    (root.parent / "triton").symlink_to(root, target_is_directory=True)
+    preflight.load_wheel(path, native_backend=True, check_driver=True)
+    (root / "backends" / record["vendor"] / "driver.py").write_text("# changed ABI\n")
+    with pytest.raises(ValueError, match="driver ABI differs"):
+        preflight.load_wheel(path, native_backend=True, check_driver=True)
+    assert record["compiler_distribution"]["name"] == "flagtree"
+
+
+def test_native_backend_requirement_is_explicit_for_historical_wheels(
+    tmp_path, manifest
+):
+    path = _wheel(tmp_path, manifest)
+    preflight.load_wheel(path)
+    with pytest.raises(ValueError, match="no native-host backend manifest"):
+        preflight.load_wheel(path, native_backend=True)
+
+
+def test_native_backend_cli_does_not_import_package(native_wheel, tmp_path):
+    path, _, _ = native_wheel
+    poisoned = tmp_path / "poison/torch_fl"
+    poisoned.mkdir(parents=True)
+    (poisoned / "__init__.py").write_text(
+        'raise AssertionError("preflight imported torch_fl")\n'
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PREFLIGHT_PATH),
+            "--wheel",
+            str(path),
+            "--check-native-host-backend",
+        ],
+        env={**os.environ, "PYTHONPATH": str(poisoned.parent)},
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

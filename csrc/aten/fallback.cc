@@ -8,10 +8,24 @@
 
 #include <ATen/native/CPUFallback.h>
 #include <flagos_env.h>
+#include <torch/library.h>
+#include <atomic>
 
 namespace at::native::flagos {
 
+namespace {
+std::atomic<bool> strict_host_routes{false};
+}
+
+TORCH_LIBRARY_FRAGMENT(flagos, m) {
+  m.def("strict_host_routes(bool enabled) -> ()", [](bool enabled) {
+    strict_host_routes.store(enabled, std::memory_order_relaxed);
+  });
+}
+
 void cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  TORCH_CHECK(!strict_host_routes.load(std::memory_order_relaxed),
+              "native FlagGems hosts do not permit CPU fallback: ", op.schema());
   static const bool log_enabled = LogEnabled("fallback");
   if (log_enabled) {
     const auto& schema = op.schema();

@@ -477,7 +477,9 @@ PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry 'packaging>=26.0' 'PyYAML==6.0.1' 'sql
 install_flag_gems
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers
+  # The host-program tests use torch.utils.cpp_extension.load, which requires
+  # Ninja even though the wheel itself can be built with CMake/Make.
+  PIP_RETRY_PYTHON="$VENV_PYTHON" pip_retry pytest transformers ninja
 fi
 
 CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'

@@ -272,7 +272,13 @@ def _conf_routes_to_flaggems() -> bool:
         with open(conf) as f:
             for line in f:
                 value = line.split("#")[0].partition("=")[2].strip()
-                if value in ("flaggems", "flaggems_python", "flagos_python"):
+                backends = [
+                    part.rsplit(":", 1)[-1].strip() for part in value.split(";")
+                ]
+                if any(
+                    backend in ("flaggems", "flaggems_python", "flagos_python")
+                    for backend in backends
+                ):
                     return True
     except OSError:
         return False
@@ -389,6 +395,7 @@ def _preload_cuda_assets() -> None:
         "libcudart.so*",
         "libnvrtc.so*",
         "libnvjitlink.so*",
+        "libnvJitLink.so*",
         "libcublasLt.so*",
         "libcublas.so*",
         "libcudnn*.so*",
@@ -398,6 +405,7 @@ def _preload_cuda_assets() -> None:
         "libcusparseLt.so*",
         "libcusolver.so*",
         "libnccl.so*",
+        "libcufile.so*",
         "libnvshmem_host.so*",
         "libnvToolsExt.so*",
         "libcupti.so*",
@@ -2723,6 +2731,9 @@ def _phase_vendor_compat() -> None:
     One phase of the import-time pipeline below; the order is
     load-bearing, so the constraints are documented at the runner.
     """
+    from . import native_host
+
+    native_host._bootstrap_launcher()
     _install_musa_flaggems_compat()
     _install_tsingmicro_flaggems_compat()
 
@@ -2844,6 +2855,10 @@ def _phase_ecosystem() -> None:
         )
         if _build_accelerator() == "bpu":
             activate_optional_integrations("bpu", strict=False)
+
+    from . import native_host
+
+    native_host._activate()
 
 
 # ===========================================================================

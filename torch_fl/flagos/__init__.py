@@ -1971,30 +1971,25 @@ def _cached_libentry_key(entry, key_for_entry):
 
 
 def _memoized_type_promotion(original):
-    """``pointwise_dynamic.type_promotion`` for the dtype tuples it has seen.
+    """Reuse promotion results without conflating scalar rank or default dtype.
 
-    Every FlagGems pointwise op asks its ``prepare_args`` for the result dtype on
-    every call, and that runs ``torch._prims_common.elementwise_dtypes`` -- a
-    pure table over the operands' *dtypes*. The answer cannot depend on values,
-    shapes or device, so a process recomputes the same handful of keys for its
-    whole life. Profiled on an H100 in the Qwen-Image-2.1 denoise loop, with the
-    other patches in this section already applied, it is the largest single entry
-    left inside ``prepare_args``.
-
-    Keyed on each operand's dtype (or the argument itself when it is not a
-    tensor, so a scalar or ``None`` keys its own entry) plus the promotion kind.
-    A key that will not hash falls through to the original rather than raising.
-    Verified bitwise neutral against the unmemoized function over 81 cases --
-    nine ops across three shapes and three dtypes, outputs and dtypes compared.
+    Torch gives zero-dimensional tensors different promotion precedence from
+    dimensioned tensors. Python scalar types and the current default dtype also
+    affect the result; equal values such as True, 1 and 1.0 must remain distinct.
+    Unhashable arguments retain the original function's behavior.
     """
     cache = {}
 
     def type_promotion(*args, type_promotion):
         key = []
         for arg in args:
-            key.append(arg.dtype if isinstance(arg, torch.Tensor) else arg)
+            key.append(
+                (arg.dtype, arg.ndim == 0)
+                if isinstance(arg, torch.Tensor)
+                else (type(arg), arg)
+            )
         try:
-            lookup = (tuple(key), type_promotion)
+            lookup = (tuple(key), type_promotion, torch.get_default_dtype())
             hit = cache.get(lookup)
             if hit is None:
                 hit = cache[lookup] = original(*args, type_promotion=type_promotion)
@@ -2436,8 +2431,8 @@ def _patch_flaggems_pointwise_dispatch():
             key.__wrapped__ = original_key
             libentry.LibEntry.key = key
 
-        # The result dtype is a pure function of the operand dtypes and the
-        # promotion kind, and every pointwise launch asks for it; see the helper.
+        # Reuse the complete promotion signature; every pointwise launch asks
+        # for it, including native-host specialization misses.
         pointwise = importlib.import_module("flag_gems.utils.pointwise_dynamic")
         original_promotion = pointwise.type_promotion
         if not getattr(original_promotion, "_torch_fl_memo", False):

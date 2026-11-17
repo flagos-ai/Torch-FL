@@ -77,7 +77,7 @@ def _conf_routes():
         if not line or "=" not in line:
             continue
         op, backend = (part.strip() for part in line.split("=", 1))
-        routes[op] = backend
+        routes[op] = backend.split(";", 1)[0].strip()
     return routes
 
 

@@ -10,7 +10,7 @@
 // claim without a route raises "routed to 'none' ... but the op is registered
 // on PrivateUse1" instead of reaching cpu_fallback.
 //
-// Total: 549 ops registered here.
+// Total: 550 ops registered here.
 //
 // Held back from the boxing claim: the conf routes them to `none`, or
 // `register.inc` has no wrapper for them:
@@ -748,7 +748,6 @@
 //   - elu_
 //   - elu_backward
 //   - elu_backward.grad_input
-//   - embedding
 //   - embedding.out
 //   - embedding_dense_backward
 //   - embedding_dense_backward.out
@@ -1680,6 +1679,7 @@
   m.impl("div_.Tensor", WrapperDivInplaceTensor);
   m.impl("div_.Tensor_mode", WrapperDivInplaceTensorMode);
   m.impl("dot", WrapperDot);
+  m.impl("embedding", WrapperEmbedding);
   m.impl("embedding_renorm_", WrapperEmbeddingRenormInplace);
   m.impl("empty_permuted", WrapperEmptyPermuted);
   m.impl("eq.Scalar", WrapperEqScalar);

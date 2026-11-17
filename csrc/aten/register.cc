@@ -301,6 +301,9 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   // Convert at::Stream to flagos Stream_t.
   // The stream id encodes the underlying device stream pointer.
   Stream_t stream = reinterpret_cast<Stream_t>(s.id());
+#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
+  c10::OptionalDeviceGuard device_guard(s.device());
+#endif
   alloc->record_stream(self.storage().data_ptr(), stream);
 }
 
@@ -442,6 +445,16 @@ FlagosWrapperConvolutionBackwardOverrideable(
 // runs and mm/bmm reach the appropriate backend kernels.
 static at::Tensor WrapperMatmul(
     const at::Tensor& self, const at::Tensor& other) {
+#if !defined(USE_ASCEND)
+  // Symbolic inference must reach Python/FakeTensor dispatch before the C++
+  // composite reads concrete sizes. Real tensors keep the existing path.
+  if (!c10::GradMode::is_enabled() &&
+      (self.unsafeGetTensorImpl()->has_symbolic_sizes_strides() ||
+       other.unsafeGetTensorImpl()->has_symbolic_sizes_strides())) {
+    c10::impl::ExcludeDispatchKeyGuard guard(c10::DispatchKey::AutogradPrivateUse1);
+    return at::matmul(self, other);
+  }
+#endif
 #if defined(USE_ASCEND)
   // aten::matmul is CompositeImplicitAutograd: normally it decomposes into
   // mm/bmm/view, and autograd records the backward through those sub-ops. Taking
@@ -588,6 +601,31 @@ at::Tensor& FlagosWrapperPrivDivInplace(
   const auto cpu_out = at::div(cpu_self, cpu_other);
   self.copy_(cpu_out);
   return self;
+}
+
+// The landing the runtime dtype escape sends `add.Tensor`/`add.Scalar`'s
+// complex operands to (FlagGemsRejectsDtype, USE_ILUVATAR): FlagGems' complex
+// `add` returns zeros for complex128. These are out-of-place kernels, not the
+// in-place pair above -- add.Tensor's schema returns a new tensor, and an out=
+// m.impl under it aborts at load with "Mismatch in kernel C++ signatures"
+// (measured on u180) -- so they compute on the host and copy the result back.
+// That is the answer cpu_fallback would have produced, reached without the
+// boxed fallback's problem of writing into a CPU copy.
+//
+// They are registered in the kIluvatar dispatcher slot rather than as an
+// m.impl: the op's m.impl on PrivateUse1 belongs to the FlagGems wrapper (the
+// conf routes it there), and a second one for the same op and key is a
+// duplicate registration.
+at::Tensor FlagosPrivAddTensor(
+    const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  const auto cpu_out = at::add(self.to(c10::kCPU), other.to(c10::kCPU), alpha);
+  return cpu_out.to(self.device());
+}
+
+at::Tensor FlagosPrivAddScalar(
+    const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  const auto cpu_out = at::add(self.to(c10::kCPU), other, alpha);
+  return cpu_out.to(self.device());
 }
 #endif
 
@@ -767,6 +805,25 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
     m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
     m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
+    // The landing for the runtime dtype escape `add.Tensor`/`add.Scalar` rely
+    // on after moving to the FlagGems route; see FlagosPrivAddTensor above and
+    // the USE_ILUVATAR arm of FlagGemsRejectsDtype. The dispatcher names have to
+    // be brought in unqualified: REGISTER_IMPL_TO_DISPATCHER pastes them into
+    // the registrar's identifier, which a qualified-id cannot be.
+    using at::native::flagos::AddScalarFn;
+    using at::native::flagos::AddTensorFn;
+    using at::native::flagos::add_scalar_dispatcher;
+    using at::native::flagos::add_tensor_dispatcher;
+    REGISTER_IMPL_TO_DISPATCHER(
+        AddTensorFn,
+        add_tensor_dispatcher,
+        at::native::flagos::Backend::kIluvatar,
+        FlagosPrivAddTensor);
+    REGISTER_IMPL_TO_DISPATCHER(
+        AddScalarFn,
+        add_scalar_dispatcher,
+        at::native::flagos::Backend::kIluvatar,
+        FlagosPrivAddScalar);
   #elif defined(USE_CAMBRICON)
     // Cambricon MLU is FlagGems-primary with a short CNNL vendor half. An op in
     // neither register file stays unregistered, which is what lets a `none`

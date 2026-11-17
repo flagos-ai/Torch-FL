@@ -156,3 +156,48 @@ def test_ascend_final_dependency_check_precedes_report_and_build(
         not broken_dependencies
     )
     assert ("build" in rows) == (not broken_dependencies)
+
+
+@pytest.mark.parametrize(
+    "delivered,install_status", [(False, 0), (True, 0), (True, 43)]
+)
+def test_delivered_ascend_cohort_takes_precedence_over_runtime_seed(
+    tmp_path, delivered, install_status
+):
+    script = HOOK[HOOK.index("\nVENV_ROOT=") + 1 :]
+    script = script.split("# Install the published Python wheel;", 1)[0]
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\nexit 0\n")
+    python.chmod(0o755)
+    calls = tmp_path / "calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            'create_runtime_venv() { VENV_PYTHON="$VENDOR_PYTHON"; }\n'
+            'install_cpu_torch() { echo torch >> "$CALL_LOG"; return "$INSTALL_STATUS"; }\n'
+            'install_flagtree() { echo flagtree >> "$CALL_LOG"; }\n' + script,
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "VENDOR_PYTHON": str(python),
+            "VENV_ROOT": str(tmp_path / "venv"),
+            "TORCH_FL_VENV_ROOT": str(tmp_path / "venv"),
+            "REPO_ROOT": str(ROOT),
+            "CPU_TORCH_VERSION": "2.10.0",
+            "FLAGTREE_VERSION_ascend": "0.7.0+ascend3.5",
+            "FLAGGEMS_VERSION_DEFAULT": "5.4.0",
+            "TORCH_FL_CPU_TORCH_WHEELHOUSE": str(tmp_path) if delivered else "",
+            "CALL_LOG": str(calls),
+            "INSTALL_STATUS": str(install_status),
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == install_status, result.stderr
+    expected = ["torch", "flagtree"] if delivered else []
+    if install_status:
+        expected = ["torch"]
+    assert (calls.read_text().splitlines() if calls.exists() else []) == expected

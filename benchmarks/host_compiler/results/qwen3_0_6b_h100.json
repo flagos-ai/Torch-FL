@@ -1,0 +1,913 @@
+{
+  "schema_version": 1,
+  "hardware": "NVIDIA H100 80 GB",
+  "environment": {
+    "torch": "2.10.0+cpu",
+    "flag_gems": "5.4.0",
+    "flagtree": "0.7.0",
+    "transformers": "5.17.0",
+    "sdk": "13.1",
+    "reference_torch": "2.10.0+cu130",
+    "kernels": [
+      "flaggems",
+      "vendor"
+    ]
+  },
+  "checkpoint": {
+    "model": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "safetensors_bytes": 1503300328,
+    "safetensors_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+  },
+  "workload": {
+    "layers": 28,
+    "parameters": 596049920,
+    "prompt_tokens": 23,
+    "decode_steps": 8,
+    "dtype": "bfloat16",
+    "attention": "eager",
+    "prompt": "Explain in one sentence why the sky is blue.",
+    "enable_thinking": false
+  },
+  "method": {
+    "prefill_samples": 3,
+    "decode_samples": 24,
+    "operator_warmups": 30,
+    "operator_batches": 7,
+    "operator_calls_per_batch": 200,
+    "submission_ends_before_synchronization": true,
+    "model_compiled": false,
+    "cuda_graphs": false
+  },
+  "summary": {
+    "model": {
+      "layers": 28,
+      "parameters": 596049920,
+      "prompt_tokens": 23,
+      "decode_steps": 8
+    },
+    "medians": {
+      "vendor-full": {
+        "prefill_submit_ms": 24.42644163966179,
+        "prefill_complete_ms": 24.45927821099758,
+        "decode_submit_ms": 22.956295870244503,
+        "decode_complete_ms": 23.035921156406403
+      },
+      "plain-full": {
+        "prefill_submit_ms": 211.5137204527855,
+        "prefill_complete_ms": 211.52874641120434,
+        "decode_submit_ms": 203.91634292900562,
+        "decode_complete_ms": 203.97397316992283
+      },
+      "native-full-clean": {
+        "prefill_submit_ms": 28.464779257774353,
+        "prefill_complete_ms": 28.500450775027275,
+        "decode_submit_ms": 27.1522281691432,
+        "decode_complete_ms": 27.228728868067265
+      }
+    },
+    "submission_ratios": {
+      "prefill_submit_ms": 1.1653264801187997,
+      "decode_submit_ms": 1.1827791522907396
+    },
+    "submission_speedup": {
+      "prefill_submit_ms": 7.430717046401,
+      "decode_submit_ms": 7.5101145165222105
+    },
+    "bitwise_equal_outputs": 9,
+    "host_program_stats": [
+      188,
+      10943784,
+      108236
+    ],
+    "admitted_artifacts": 188,
+    "cold_load_prefill_ms": 832.2479967027903,
+    "operator_comparison": {
+      "mm_bf16_23_1024_3072": {
+        "native_us": 9.457195,
+        "vendor_us": 12.957195,
+        "ratio": 0.7298798080911802,
+        "native_hits": 1430
+      },
+      "cast_bf16_to_fp32_1_1_1024": {
+        "native_us": 8.757584999999999,
+        "vendor_us": 8.20914,
+        "ratio": 1.066809068915867,
+        "native_hits": 1430
+      },
+      "silu_bf16_1_23_3072": {
+        "native_us": 7.721100000000001,
+        "vendor_us": 6.996985,
+        "ratio": 1.1034895744381332,
+        "native_hits": 1430
+      },
+      "softmax_fp32_1_16_1_24": {
+        "native_us": 7.925405,
+        "vendor_us": 6.69217,
+        "ratio": 1.1842802857667991,
+        "native_hits": 1430
+      },
+      "arange_int64_24": {
+        "native_us": 23.000735,
+        "vendor_us": 8.05604,
+        "ratio": 2.855091955849276,
+        "native_hits": 0
+      },
+      "scalar_tensor_fp32": {
+        "native_us": 28.24036,
+        "vendor_us": 7.658005,
+        "ratio": 3.6876915071222856,
+        "native_hits": 0
+      }
+    },
+    "runtime_package_integrity": {
+      "flag_gems": {
+        "version": "5.4.0",
+        "checked_runtime_files": 4545,
+        "mismatches": []
+      },
+      "flagtree": {
+        "version": "0.7.0",
+        "checked_runtime_files": 497,
+        "mismatches": []
+      },
+      "torch_fl": {
+        "version": "2.10.0+cuda13.3",
+        "checked_runtime_files": 106,
+        "mismatches": []
+      }
+    }
+  },
+  "model_runs": {
+    "vendor-full": {
+      "torch": "2.10.0+cu130",
+      "device": "cuda:0",
+      "mode": "plain",
+      "dtype": "bfloat16",
+      "layers": 28,
+      "parameters": 596049920,
+      "prompt_tokens": 23,
+      "cold_prefill_ms": 393.15399900078773,
+      "timings": {
+        "prefill_submit_ms": [
+          24.42644163966179,
+          24.528248235583305,
+          24.241631850600243
+        ],
+        "prefill_complete_ms": [
+          24.45927821099758,
+          24.563303217291832,
+          24.27668310701847
+        ],
+        "decode_submit_ms": [
+          23.093698546290398,
+          22.974545136094093,
+          22.935181856155396,
+          23.21438491344452,
+          22.960806265473366,
+          23.041022941470146,
+          22.971782833337784,
+          23.6457958817482,
+          23.123031482100487,
+          22.89668098092079,
+          23.093964904546738,
+          22.957919165492058,
+          22.8500347584486,
+          22.88851886987686,
+          22.822726517915726,
+          22.77224324643612,
+          23.08792993426323,
+          22.88326807320118,
+          22.893400862812996,
+          22.95467257499695,
+          22.863058373332024,
+          23.062586784362793,
+          22.943606600165367,
+          22.87297323346138
+        ],
+        "decode_complete_ms": [
+          23.172589018940926,
+          23.055393248796463,
+          23.014655336737633,
+          23.295434191823006,
+          23.040466010570526,
+          23.121563717722893,
+          23.05242046713829,
+          23.723939433693886,
+          23.20319041609764,
+          22.97785133123398,
+          23.175368085503578,
+          23.037279024720192,
+          22.93006330728531,
+          22.96815626323223,
+          22.904308512806892,
+          22.85313419997692,
+          23.167282342910767,
+          22.96425588428974,
+          22.973081097006798,
+          23.034563288092613,
+          22.94381894171238,
+          23.141618818044662,
+          23.023836314678192,
+          22.953327745199203
+        ]
+      },
+      "medians": {
+        "prefill_submit_ms": 24.42644163966179,
+        "prefill_complete_ms": 24.45927821099758,
+        "decode_submit_ms": 22.956295870244503,
+        "decode_complete_ms": 23.035921156406403
+      },
+      "generated_tokens": [
+        785,
+        12884,
+        7952,
+        6303,
+        1576,
+        315,
+        279,
+        1616
+      ],
+      "generated_text": "The sky appears blue because of the way",
+      "teacher_forced_predictions": [
+        785,
+        12884,
+        7952,
+        6303,
+        1576,
+        315,
+        279,
+        1616
+      ]
+    },
+    "plain-full": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "mode": "plain",
+      "dtype": "bfloat16",
+      "layers": 28,
+      "parameters": 596049920,
+      "prompt_tokens": 23,
+      "cold_prefill_ms": 1293.2943347841501,
+      "timings": {
+        "prefill_submit_ms": [
+          209.08274687826633,
+          211.5137204527855,
+          212.40098029375076
+        ],
+        "prefill_complete_ms": [
+          209.09811928868294,
+          211.52874641120434,
+          212.42506988346577
+        ],
+        "decode_submit_ms": [
+          207.76288956403732,
+          202.6394922286272,
+          202.32504419982433,
+          207.42501690983772,
+          203.22608202695847,
+          202.20996998250484,
+          203.91181856393814,
+          203.1019888818264,
+          207.86056853830814,
+          203.9208672940731,
+          209.16526392102242,
+          203.63268442451954,
+          204.78219911456108,
+          203.26964184641838,
+          203.2575961202383,
+          202.2635079920292,
+          207.76379853487015,
+          203.81342060863972,
+          208.18673633038998,
+          204.7953326255083,
+          203.06934602558613,
+          204.03609797358513,
+          205.74797689914703,
+          205.8786153793335
+        ],
+        "decode_complete_ms": [
+          207.81940408051014,
+          202.69772224128246,
+          202.38264836370945,
+          207.4745874851942,
+          203.28615605831146,
+          202.26681791245937,
+          203.97059433162212,
+          203.15854996442795,
+          207.91715383529663,
+          203.97735200822353,
+          209.21288430690765,
+          203.69183272123337,
+          204.83359321951866,
+          203.32477428019047,
+          203.31459119915962,
+          202.32100039720535,
+          207.82322250306606,
+          203.87193001806736,
+          208.21554027497768,
+          204.85219359397888,
+          203.12771201133728,
+          204.0946837514639,
+          205.7996280491352,
+          205.935500562191
+        ]
+      },
+      "medians": {
+        "prefill_submit_ms": 211.5137204527855,
+        "prefill_complete_ms": 211.52874641120434,
+        "decode_submit_ms": 203.91634292900562,
+        "decode_complete_ms": 203.97397316992283
+      },
+      "generated_tokens": [
+        785,
+        12884,
+        7952,
+        6303,
+        1576,
+        432,
+        5610,
+        264
+      ],
+      "generated_text": "The sky appears blue because it contains a",
+      "teacher_forced_predictions": [
+        785,
+        12884,
+        7952,
+        6303,
+        1576,
+        432,
+        279,
+        1616
+      ],
+      "reference_comparison": [
+        {
+          "max_abs": 0.375,
+          "relative_l2": 0.018891427665948868,
+          "cosine": 0.9998422861099243,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.625,
+          "relative_l2": 0.02357417717576027,
+          "cosine": 0.9998721480369568,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.5,
+          "relative_l2": 0.01447221264243126,
+          "cosine": 0.9998923540115356,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.625,
+          "relative_l2": 0.014046793803572655,
+          "cosine": 0.9999113082885742,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.625,
+          "relative_l2": 0.026920581236481667,
+          "cosine": 0.9998815655708313,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.5625,
+          "relative_l2": 0.014449583366513252,
+          "cosine": 0.999890923500061,
+          "top1_equal": false,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.5,
+          "relative_l2": 0.012987109832465649,
+          "cosine": 0.9999055862426758,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.4375,
+          "relative_l2": 0.011065580882132053,
+          "cosine": 0.9999344348907471,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        },
+        {
+          "max_abs": 0.375,
+          "relative_l2": 0.009281344711780548,
+          "cosine": 0.9999510645866394,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        }
+      ],
+      "layer_comparison": {
+        "model.embed_tokens": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.rotary_emb": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.input_layernorm": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn.q_proj": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn.q_norm": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn.k_proj": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn.k_norm": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn.v_proj": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn.o_proj": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.self_attn": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.post_attention_layernorm": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.mlp.gate_proj": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.mlp.act_fn": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.mlp.up_proj": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.mlp.down_proj": {
+          "max_abs": 0.001953125,
+          "relative_l2": 7.19162417226471e-05,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.layers.0.mlp": {
+          "max_abs": 0.001953125,
+          "relative_l2": 7.19162417226471e-05,
+          "cosine": 1.0,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": true
+        },
+        "model.norm": {
+          "max_abs": 1.75,
+          "relative_l2": 0.029819132760167122,
+          "cosine": 0.999173104763031,
+          "top1_equal": true,
+          "bitwise_equal": false,
+          "allclose_rtol_003_atol_01": false
+        }
+      },
+      "host_program_stats": [
+        0,
+        0,
+        0
+      ]
+    },
+    "native-full-clean": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "mode": "load",
+      "dtype": "bfloat16",
+      "layers": 28,
+      "parameters": 596049920,
+      "prompt_tokens": 23,
+      "cold_prefill_ms": 832.2479967027903,
+      "timings": {
+        "prefill_submit_ms": [
+          28.420809656381607,
+          28.464779257774353,
+          28.478702530264854
+        ],
+        "prefill_complete_ms": [
+          28.455929830670357,
+          28.500450775027275,
+          28.518399223685265
+        ],
+        "decode_submit_ms": [
+          27.314061298966408,
+          27.196230366826057,
+          27.283059433102608,
+          27.044178918004036,
+          27.07747183740139,
+          27.132190763950348,
+          27.09599770605564,
+          27.15466357767582,
+          27.382520958781242,
+          27.14979276061058,
+          29.29413504898548,
+          27.37591043114662,
+          27.163619175553322,
+          27.2000003606081,
+          27.217034250497818,
+          27.076322585344315,
+          27.287816628813744,
+          26.959097012877464,
+          27.154671028256416,
+          27.002079412341118,
+          26.92977339029312,
+          26.912672445178032,
+          26.956066489219666,
+          27.105452492833138
+        ],
+        "decode_complete_ms": [
+          27.39063836634159,
+          27.273109182715416,
+          27.360249310731888,
+          27.12143212556839,
+          27.15391479432583,
+          27.209356427192688,
+          27.172483503818512,
+          27.231430634856224,
+          27.459876611828804,
+          27.226360514760017,
+          29.37548980116844,
+          27.453061193227768,
+          27.241477742791176,
+          27.27738954126835,
+          27.295172214508057,
+          27.15269848704338,
+          27.365099638700485,
+          27.036890387535095,
+          27.23109722137451,
+          27.078967541456223,
+          27.007730677723885,
+          26.989394798874855,
+          27.03186683356762,
+          27.183569967746735
+        ]
+      },
+      "medians": {
+        "prefill_submit_ms": 28.464779257774353,
+        "prefill_complete_ms": 28.500450775027275,
+        "decode_submit_ms": 27.1522281691432,
+        "decode_complete_ms": 27.228728868067265
+      },
+      "generated_tokens": [
+        785,
+        12884,
+        7952,
+        6303,
+        1576,
+        432,
+        5610,
+        264
+      ],
+      "generated_text": "The sky appears blue because it contains a",
+      "teacher_forced_predictions": [
+        785,
+        12884,
+        7952,
+        6303,
+        1576,
+        432,
+        279,
+        1616
+      ],
+      "reference_comparison": [
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.999998152256012,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999935030937195,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999901652336121,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999936819076538,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999908804893494,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999920129776001,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999858140945435,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.999995231628418,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        },
+        {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 0.9999940395355225,
+          "top1_equal": true,
+          "bitwise_equal": true,
+          "allclose_rtol_003_atol_01": true
+        }
+      ],
+      "host_program_stats": [
+        188,
+        10943784,
+        108236
+      ]
+    }
+  },
+  "operator_runs": {
+    "native-operator-clean": {
+      "torch": "2.10.0+cpu",
+      "device": "flagos:0",
+      "cases": {
+        "mm_bf16_23_1024_3072": {
+          "median_us": 9.457195,
+          "rounds_us": [
+            9.508575,
+            9.45457,
+            9.47358,
+            9.47224,
+            9.457195,
+            9.13556,
+            9.19821
+          ],
+          "native_hits": 1430
+        },
+        "cast_bf16_to_fp32_1_1_1024": {
+          "median_us": 8.757584999999999,
+          "rounds_us": [
+            8.71641,
+            8.796915,
+            8.73886,
+            8.740565,
+            8.757584999999999,
+            8.758025,
+            8.77634
+          ],
+          "native_hits": 1430
+        },
+        "silu_bf16_1_23_3072": {
+          "median_us": 7.721100000000001,
+          "rounds_us": [
+            7.70556,
+            7.766805000000001,
+            7.784965000000001,
+            7.7392449999999995,
+            7.721100000000001,
+            7.694465,
+            7.704675
+          ],
+          "native_hits": 1430
+        },
+        "softmax_fp32_1_16_1_24": {
+          "median_us": 7.925405,
+          "rounds_us": [
+            7.925405,
+            7.954745,
+            7.925225,
+            7.90097,
+            7.945065,
+            7.952545,
+            7.913465
+          ],
+          "native_hits": 1430
+        },
+        "arange_int64_24": {
+          "median_us": 23.000735,
+          "rounds_us": [
+            22.90094,
+            22.651925,
+            23.000735,
+            31.272585,
+            25.015695,
+            23.934445,
+            22.544240000000002
+          ],
+          "native_hits": 0
+        },
+        "scalar_tensor_fp32": {
+          "median_us": 28.24036,
+          "rounds_us": [
+            26.793950000000002,
+            71.52728,
+            45.196955,
+            34.630199999999995,
+            28.24036,
+            26.693895,
+            26.37414
+          ],
+          "native_hits": 0
+        }
+      }
+    },
+    "vendor-operator-clean": {
+      "torch": "2.10.0+cu130",
+      "device": "cuda:0",
+      "cases": {
+        "mm_bf16_23_1024_3072": {
+          "median_us": 12.957195,
+          "rounds_us": [
+            13.404215,
+            12.983235,
+            12.99629,
+            12.957195,
+            12.670435,
+            12.592325,
+            12.704735000000001
+          ]
+        },
+        "cast_bf16_to_fp32_1_1_1024": {
+          "median_us": 8.20914,
+          "rounds_us": [
+            8.218219999999999,
+            8.263765,
+            8.18662,
+            8.20914,
+            8.18951,
+            8.16301,
+            8.21761
+          ]
+        },
+        "silu_bf16_1_23_3072": {
+          "median_us": 6.996985,
+          "rounds_us": [
+            7.08545,
+            6.98963,
+            6.996985,
+            6.948135000000001,
+            7.01201,
+            7.033425,
+            6.986225
+          ]
+        },
+        "softmax_fp32_1_16_1_24": {
+          "median_us": 6.69217,
+          "rounds_us": [
+            6.71083,
+            6.69217,
+            6.69697,
+            6.65198,
+            6.621255,
+            6.70188,
+            6.617255
+          ]
+        },
+        "arange_int64_24": {
+          "median_us": 8.05604,
+          "rounds_us": [
+            8.11743,
+            8.085485,
+            8.042035,
+            8.07466,
+            8.03832,
+            8.048635,
+            8.05604
+          ]
+        },
+        "scalar_tensor_fp32": {
+          "median_us": 7.658005,
+          "rounds_us": [
+            7.624775,
+            7.60639,
+            7.58665,
+            7.705345,
+            7.658005,
+            7.66958,
+            7.705965
+          ]
+        }
+      }
+    }
+  },
+  "artifact_audit": {
+    "programs": 188,
+    "source_and_library_checked": true,
+    "foreign_kernel_markers": 0,
+    "cpu_fallback_messages": 0,
+    "raw_evidence_sha256": "d9525a6512a7085f9f933879edc4c6c66e5806a08b111835dc4a593d3d2fb91f"
+  }
+}

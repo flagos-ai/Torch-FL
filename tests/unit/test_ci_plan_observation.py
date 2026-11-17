@@ -721,7 +721,7 @@ def test_real_consumer_cli_executes_ordered_groups_without_yaml_or_composition(
         ("runner_labels", [42]),
         ("runner_labels", [""]),
         ("runner_labels", [" \t"]),
-        ("runner_labels", ["torch-fl-nv", ""]),
+        ("runner_labels", ["flagcicd-a100", ""]),
         ("container_volumes", None),
         ("integration_build_tools", [42]),
         ("timeout_minutes", True),
@@ -1006,7 +1006,7 @@ def test_real_workflow_commands_keep_control_isolated_from_source_symlinks(
     assert consumer.returncode == 0, consumer.stderr
     outputs = parse_outputs(tmp_path / "configuration-outputs")
     assert outputs["platform"] == "nvidia"
-    assert outputs["runner_labels"] == '["torch-fl-nv"]'
+    assert outputs["runner_labels"] == '["flagcicd-a100"]'
     assert git(source, "rev-parse", "HEAD") == source_sha
     assert git(control, "rev-parse", "HEAD") == control_sha
     assert sentinel.read_text() == "untouched"

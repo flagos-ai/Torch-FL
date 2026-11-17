@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "measurement": {
+    "target_ms": 30,
+    "metric": "synchronized complete-model forward latency",
+    "scope": "warm eager inference; no model graph capture",
+    "eligible_for_eager_acceptance": true,
+    "target_met": false,
+    "excluded_on_both_sides": [
+      "tokenization",
+      "token selection",
+      "oracle comparison",
+      "profiler"
+    ],
+    "warmup": "one correctness traversal and one untimed timing traversal",
+    "fresh_device_cache": false,
+    "rounds": 3,
+    "decode_steps": 512,
+    "percentile_method": "sorted samples, floor(p * (n - 1))"
+  },
+  "cohort": {
+    "torch": "2.10.0+cpu",
+    "vendor_torch": "2.10.0+cu130",
+    "flag_gems": "5.4.0",
+    "flagtree": "0.7.0",
+    "cython": "3.2.4",
+    "transformers": "5.17.0",
+    "python": "3.12.14",
+    "hardware": "NVIDIA H100 80GB",
+    "physical_gpu": 1,
+    "cpu_affinity": "8-15",
+    "sdk": "13.1.115",
+    "artifact_type": "development wheel; not a release artifact"
+  },
+  "model": {
+    "name": "Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "checkpoint_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
+    "layers": 28,
+    "parameters": 596049920,
+    "dtype": "bfloat16",
+    "attention": "eager",
+    "input_protocol": "teacher-forced original FlagGems tokens; identical inputs for vendor timing"
+  },
+  "prompt": "Explain in one sentence why the sky is blue. blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue blue ",
+  "oracle_sha256": "dba911e506759edf0c43c156e8138734d696475203c79b52a369f588e63c59f5",
+  "model_capture_audit": {
+    "blocked_entry_points": [
+      "torch.compile",
+      "torch._dynamo.optimize",
+      "torch._dynamo.export",
+      "torch._dynamo.optimize_assert",
+      "torch._dynamo.eval_frame.optimize",
+      "torch._dynamo.eval_frame._optimize",
+      "torch._dynamo.eval_frame.optimize_assert",
+      "torch.jit.script",
+      "torch.jit.trace",
+      "torch.jit.trace_module"
+    ],
+    "calls": 0
+  },
+  "prefill_complete_ms": [
+    35.650139674544334,
+    36.4345982670784,
+    35.188134759664536
+  ],
+  "decode_complete": {
+    "count": 1536,
+    "median_ms": 33.53737760335207,
+    "mean_ms": 33.58099034327703,
+    "p95_ms": 33.967310562729836,
+    "p99_ms": 34.93556007742882,
+    "max_ms": 39.33988884091377
+  },
+  "medians": {
+    "prefill_submit_ms": 35.61132214963436,
+    "prefill_complete_ms": 35.650139674544334,
+    "decode_submit_ms": 33.46200566738844,
+    "decode_complete_ms": 33.53737760335207
+  },
+  "torch_fl_import_ms": 5184.388767927885,
+  "first_prefill_ms": 1122.8308901190758,
+  "logits_count": 513,
+  "all_logits_bitwise_equal_to_flaggems": true,
+  "warm_python_calls": {},
+  "host_libraries": 773,
+  "host_hashes_unchanged": true,
+  "host_artifact_manifest_sha256": "50440acc2a344a52d96f31bcd40f28919e87e83bcc8a6ae9f92de057387c9ff4",
+  "runtime_subprocess_commands": [
+    [
+      "/usr/local/cuda/bin/ptxas",
+      "--version"
+    ],
+    [
+      "/usr/local/cuda/bin/ptxas",
+      "--version"
+    ]
+  ],
+  "native_source_stats": [
+    521,
+    5097694
+  ],
+  "legacy_host_program_stats": [
+    0,
+    0,
+    0
+  ],
+  "gpu_kernel_audit": {
+    "model_calls": 2,
+    "counts": {
+      "embedding_kernel": 2,
+      "arange_func": 10,
+      "add_func_tensor_scalar_kernel_rank_1": 232,
+      "le_func_kernel_rank_4": 2,
+      "scalar_tensor_kernel": 2,
+      "where_inner_kernel_rank_4": 2,
+      "_copy_kernel_kernel_rank_3": 236,
+      "bmm_kernel": 114,
+      "cat_copy_func_kernel_4": 170,
+      "cos_func_kernel_rank_1": 2,
+      "mul_scalar_kernel": 60,
+      "sin_func_kernel_rank_1": 2,
+      "pow_func_tensor_scalar_kernel_rank_1": 226,
+      "mean_dim_kernel_inner": 226,
+      "rsqrt_func_kernel_rank_1": 226,
+      "mul_generic_nd_kernel": 676,
+      "mm_kernel_general_host_tma": 394,
+      "_copy_kernel_kernel_rank_4": 560,
+      "neg_func_kernel_rank_4": 112,
+      "add_func_kernel_rank_1": 224,
+      "_copy_kernel_kernel_rank_5": 112,
+      "add_func_kernel_rank_4": 56,
+      "softmax_kernel_inner": 56,
+      "silu_forward_kernel_rank_1": 56,
+      "mul_kernel": 56
+    },
+    "unmatched": [],
+    "summed_device_ms": 7.191768,
+    "total_launches": 3814,
+    "distinct_names": 25,
+    "trace_is_outside_timed_pass": true
+  },
+  "numerical_kernel_provenance": "Original FlagGems JIT source or original KernelGenerator; same cohort and kernel-name source records as qwen3_model_hosts_h100.json",
+  "wheel": {
+    "name": "torch_fl-2.10.0+cuda13.3-cp312-cp312-linux_x86_64.whl",
+    "sha256": "d53de998f67892d5a9bb9bc5b5e76b59a40fa8f0cb71ad74beccfa17ea419972",
+    "manifests": {
+      "torch_fl/native_host/_generated/manifest.json": "f1a9d37055882e8faa2c61e3e9ab3cfafd935c9e87248a9ec8b0c0bbf8ee1023",
+      "torch_fl/native_host/_generated/typed/manifest.json": "add2fc11ef902a691bd2cfdbbacae63fecaaafa577c9d214917bbcd30b8498e5"
+    },
+    "scratch_files": []
+  },
+  "raw_evidence_sha256": {
+    "installed-v11-strict-eager-long.json": "37091763f0cd98aebab79718df64ca739951a65579926821e0c5acd3ab12d933",
+    "installed-v11-strict-eager-trace.json": "bb029597be1ffe26f8dfe74201b500add89169b542b79a7e97e46f981f69113b"
+  }
+}

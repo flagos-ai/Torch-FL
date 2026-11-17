@@ -207,7 +207,10 @@ create_runtime_venv "$VENDOR_PYTHON"
   --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
   --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
   --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
-if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+# A delivered cohort must pass its checksum gate even when seeding succeeded.
+if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+  install_cpu_torch
+elif "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
     --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
   echo "Using prepared CPU torch $CPU_TORCH_VERSION"
 else
@@ -228,7 +231,9 @@ export PATH="$VENV_ROOT/bin:$PATH"
 # and the Triton minor (3.5) has to match the backend the wheel was built for.
 # From the FlagTree user manual ("ascend", Triton 3.5 row).
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}"
-if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+  install_flagtree
+elif "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
 from importlib import metadata, util
 from pathlib import Path
 import sys

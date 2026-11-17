@@ -63,8 +63,6 @@
 //   - _batch_norm_no_update
 //   - _conj_copy.out
 //   - _native_batch_norm_legit.no_stats
-//   - add.Scalar
-//   - add.Tensor
 //   - add_.Scalar
 //   - add_.Tensor
 //   - addmm
@@ -124,7 +122,7 @@
 //   - view_as_real
 //   - where.self_out
 //
-// Total: 584 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
+// Total: 585 ops registered here, 9 further FlagGems ops already claimed by iluvatar_register.inc.
 
   m.impl("_adaptive_avg_pool2d", WrapperPrivAdaptiveAvgPool2d);
   m.impl("_adaptive_avg_pool2d_backward", WrapperPrivAdaptiveAvgPool2dBackward);
@@ -188,6 +186,7 @@
   m.impl("adaptive_max_pool2d", WrapperAdaptiveMaxPool2d);
   m.impl("adaptive_max_pool2d_backward", WrapperAdaptiveMaxPool2dBackward);
   m.impl("adaptive_max_pool3d", WrapperAdaptiveMaxPool3d);
+  m.impl("add.Tensor", WrapperAddTensor);
   m.impl("addbmm", WrapperAddbmm);
   m.impl("addbmm_", WrapperAddbmmInplace);
   m.impl("addcdiv", WrapperAddcdiv);

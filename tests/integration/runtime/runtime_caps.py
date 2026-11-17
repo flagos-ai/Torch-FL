@@ -67,7 +67,7 @@ _LOG_NAME = {
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
-    "nvidia": "boxing",
+    "nvidia": "nvidia",
     # The day-0 variant spells the same slot `boxing` (setup.py's day-0 name is
     # the log name), and the log prints `boxing` for it.
     "boxing": "boxing",
@@ -91,14 +91,14 @@ def load_routes() -> dict[str, str]:
 
     Parsed the same way the C++ reader does: drop anything after ``#`` and
     split the remainder on the first ``=``. The returned value is the raw conf
-    backend, before the log-name mapping ``route_reason`` applies.
+    base backend, before input-dtype clauses or the log-name mapping apply.
     """
     routes: dict[str, str] = {}
     with open(conf_path()) as f:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                routes[name.strip()] = value.strip()
+                routes[name.strip()] = value.split(";", 1)[0].strip()
     return routes
 
 

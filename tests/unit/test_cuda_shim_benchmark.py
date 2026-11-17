@@ -28,6 +28,7 @@ available, and which benchmarker reaches triton -- with the capability stubbed.
 
 import pytest
 import torch
+import torch_fl
 import triton
 
 from torch_fl.accelerator.nvidia import _cuda_compat
@@ -113,10 +114,48 @@ def test_graph_benchmarker_is_kept_where_torch_can_capture(
     assert triton.testing.do_bench_cudagraph is sentinel_benchmarker
 
 
-def test_stream_shim_answers_under_the_name_the_vendor_streams_use():
+def test_stream_shim_answers_under_the_name_the_vendor_streams_use(monkeypatch):
     """`flagos.Stream` reads `.handle` off its delegate; `.cuda_stream` is not it."""
+    monkeypatch.delattr(torch_fl._C, "_get_nvidia_current_raw_stream", raising=False)
+    monkeypatch.setattr(_cuda_compat, "_real_stream", lambda index: None)
     shim = _cuda_compat._StreamShim(0)
     assert shim.handle == shim.cuda_stream == 0
+
+
+def test_cpu_stream_lookup_does_not_reenter_the_shim(monkeypatch):
+    monkeypatch.delattr(torch._C, "_cuda_getCurrentStream", raising=False)
+
+    def recurse(*args):
+        raise AssertionError("CPU CUDA lookup must not reenter flagos.current_stream")
+
+    monkeypatch.setattr(torch.flagos, "current_stream", recurse)
+    assert _cuda_compat._real_stream(0) is None
+
+
+def test_native_current_and_default_stream_snapshots(monkeypatch):
+    current = [101]
+    monkeypatch.setattr(
+        torch_fl._C,
+        "_get_nvidia_current_raw_stream",
+        lambda index: current[0] + index,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch_fl._C,
+        "_get_nvidia_default_raw_stream",
+        lambda index: 55 + index,
+        raising=False,
+    )
+    first = _cuda_compat._StreamShim(1)
+    current[0] = 202
+    second = _cuda_compat._StreamShim(1)
+    default = _cuda_compat._StreamShim(1, use_default=True)
+    assert (first.cuda_stream, second.cuda_stream, default.cuda_stream) == (
+        102,
+        203,
+        56,
+    )
+    assert first.stream_id == first.cuda_stream
 
 
 def test_cuda_runtime_is_read_from_the_shim_not_the_missing_symbol(monkeypatch):

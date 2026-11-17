@@ -209,7 +209,12 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # 582 since `mean` joined: the whole-tensor reduction re-measures clean on
     # u180 after the #570 gap. `mean.dim` stays on `none` -- its FlagGems
     # kernel returns NaN for a non-inner dimension ((8, 12), dim=0).
-    "iluvatar": 582,
+    #
+    # 583 since `add.Tensor` joined (PR #808): it was gapped only because
+    # FlagGems' complex `add` is wrong on this chip, which `FlagGemsRejectsDtype`
+    # now expresses at run time instead. `add.Scalar` stays on `none` -- FlagGems
+    # 5.4.0 ships no kernel for that overload.
+    "iluvatar": 583,
     # 256: two screens on a P800. The whole 618-op cohort first, at one profile
     # with the survey's default tolerance; then every survivor over ten profiles
     # (the survey's seven plus 13x7, 3x5x7 and 64x3) compared at atol=rtol=1e-4,
@@ -248,7 +253,7 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # All counts are `flaggems` only: `backends_metax.conf` also carries 15
     # `flaggems_cpp` routes and `backends_metax_boxing.conf` 12, which neither
     # metax number includes.
-    "nvidia": 548,
+    "nvidia": 549,
     "nvidia_boxing": 0,
     # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
     # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
@@ -327,7 +332,7 @@ _LOG_NAME = {
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
-    "nvidia": "boxing",
+    "nvidia": "nvidia",
 }
 
 #: The backend names that mean "this operator took a FlagGems route".
@@ -346,14 +351,14 @@ def load_routes() -> dict[str, str]:
 
     Parsed the same way the C++ reader does: drop anything after ``#`` and split
     the remainder on the first ``=``. The value is the raw conf backend, before
-    the log-name mapping ``route_reason`` applies.
+    input-dtype clauses and the log-name mapping ``route_reason`` apply.
     """
     routes: dict[str, str] = {}
     with open(conf_path()) as f:
         for line in f:
             name, sep, value = line.split("#")[0].partition("=")
             if sep:
-                routes[name.strip()] = value.strip()
+                routes[name.strip()] = value.split(";", 1)[0].strip()
     return routes
 
 
