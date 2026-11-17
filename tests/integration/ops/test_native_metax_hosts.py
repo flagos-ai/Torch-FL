@@ -4,6 +4,9 @@
 """Installed MACA launch conformance with original published FlagGems kernels."""
 
 import importlib
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +15,39 @@ import torch_fl
 
 
 pytestmark = [pytest.mark.metax, pytest.mark.native_source_host, pytest.mark.flaggems]
+
+
+@pytest.mark.parametrize("import_order", ["torch_first", "torch_fl_first"])
+def test_metax_import_order_preserves_the_installed_cpu_core(import_order):
+    imports = (
+        "import torch; import torch_fl"
+        if import_order == "torch_first"
+        else "import torch_fl; import torch"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            imports + "\nfrom pathlib import Path\n"
+            "import importlib.metadata, json\n"
+            "distribution = importlib.metadata.distribution('torch')\n"
+            "mapped = {Path(line.split()[-1]).resolve() "
+            "for line in Path('/proc/self/maps').read_text().splitlines() "
+            "if '/' in line}\n"
+            "for name in ('libc10.so', 'libtorch_cpu.so', 'libtorch_python.so'):\n"
+            "    expected = Path(distribution.locate_file('torch/lib/' + name)).resolve()\n"
+            "    actual = {path for path in mapped if path.name == name}\n"
+            "    assert actual == {expected}, (name, actual, expected)\n"
+            "assert torch_fl._build_config.NATIVE_HOSTS\n"
+            "assert 'boxing' not in torch_fl._build_config.KERNELS\n"
+            "print(json.dumps({'torch': torch.__version__, 'devices': torch_fl.flagos.device_count()}))\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1])["torch"] == "2.10.0+cpu"
 
 
 def _launcher():

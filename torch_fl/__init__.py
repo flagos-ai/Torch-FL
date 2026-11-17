@@ -301,9 +301,10 @@ def _relink_vendor_libtorch() -> None:
     no-op when its bundle dir is absent (a plain in-place build, where torch
     already IS the vendor wheel), so this is safe to call unconditionally.
 
-    MetaX is a boxing-only build: accel=="metax" selects its core unconditionally (an
-    in-place build reaches the vendor torch through FLAGOS_VENDOR_TORCH_LIB, a
-    self-contained wheel through lib_metax/).  DCU and PPU have no native-kernel
+    MetaX native-host wheels retain the official CPU core. Other MetaX builds
+    select the vendor core (an in-place build reaches it through
+    FLAGOS_VENDOR_TORCH_LIB, a self-contained wheel through lib_metax/).
+    DCU and PPU have no native-kernel
     mode, so bundle-dir presence alone decides.  The CUDA backend is not here:
     the official +cpu wheel's core .so ARE the upstream ones, so only the extra
     CUDA libs are missing and _preload_cuda_assets() below handles those with
@@ -312,6 +313,13 @@ def _relink_vendor_libtorch() -> None:
     accel = _build_accelerator()
 
     if accel == "metax":
+        from torch_fl import _build_config
+
+        # Native hosts link the official CPU core and submit through MACA's
+        # runtime. Selecting a discoverable vendor core here would make that
+        # contract depend on which package the application imports first.
+        if getattr(_build_config, "NATIVE_HOSTS", False):
+            return
         from torch_fl.accelerator.metax._metax_libtorch_link import (
             ensure_maca_libtorch_links,
         )
