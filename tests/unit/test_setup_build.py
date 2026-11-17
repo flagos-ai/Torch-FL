@@ -328,7 +328,10 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     assert generated["NATIVE_HOSTS"] is False
 
 
-def test_native_host_build_uses_staged_package(monkeypatch, tmp_path, clean_kernel_env):
+@pytest.mark.parametrize("vendor", ["nvidia", "ascend"])
+def test_native_host_build_uses_staged_package(
+    monkeypatch, tmp_path, clean_kernel_env, vendor
+):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
     for name in (
@@ -337,7 +340,17 @@ def test_native_host_build_uses_staged_package(monkeypatch, tmp_path, clean_kern
         "FLAGOS_BUILD_TILEOPS",
     ):
         monkeypatch.setenv(name, "0")
-    _, kwargs = _load_setup(monkeypatch)
+    namespace, kwargs = _load_setup(monkeypatch)
+    globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", vendor)
+    if vendor == "ascend":
+        monkeypatch.setitem(
+            globals_,
+            "_setup_cuda_build_env",
+            lambda env: pytest.fail(
+                "Ascend native hosts must not discover a CUDA toolkit"
+            ),
+        )
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
     command.ensure_finalized()
     command.build_lib = str(tmp_path / "staging")
@@ -370,7 +383,7 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
         command._build_native_hosts()
 
 
-@pytest.mark.parametrize("vendor", ["metax", "ascend"])
+@pytest.mark.parametrize("vendor", ["enflame", "hygon"])
 def test_native_host_build_requires_a_validated_backend_adapter(
     monkeypatch, clean_kernel_env, vendor
 ):

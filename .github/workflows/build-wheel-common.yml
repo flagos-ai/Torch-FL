@@ -78,8 +78,17 @@ on:
         required: false
 
 jobs:
+  cpu-torch:
+    if: inputs.setup_platform == 'ascend'
+    uses: ./.github/workflows/prepare-cpu-torch.yml
+    with:
+      checkout_repository: ${{ inputs.checkout_repository }}
+      checkout_ref: ${{ inputs.checkout_ref }}
+
   build:
     name: Build wheel (${{ inputs.display_name }})
+    needs: cpu-torch
+    if: ${{ !cancelled() && (needs.cpu-torch.result == 'success' || needs.cpu-torch.result == 'skipped') }}
     runs-on: ${{ fromJson(inputs.runs_on) }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     # A platform without a `ci_image` builds directly on its runner. MPS needs
@@ -156,10 +165,27 @@ jobs:
           path: ${{ env.PIP_CACHE_DIR }}
           key: ${{ steps.pip-cache-lookup.outputs.cache-matched-key }}
 
+      - name: Prepare isolated published-wheel directory
+        id: wheelhouse
+        if: needs.cpu-torch.outputs.artifact_name != ''
+        run: |
+          set -euo pipefail
+          directory="$(mktemp -d "$RUNNER_TEMP/published-wheels.XXXXXX")"
+          printf 'path=%s\n' "$directory" >> "$GITHUB_OUTPUT"
+
+      - name: Receive verified published wheels
+        if: needs.cpu-torch.outputs.artifact_name != ''
+        uses: actions/download-artifact@v4
+        timeout-minutes: 45
+        with:
+          name: ${{ needs.cpu-torch.outputs.artifact_name }}
+          path: ${{ steps.wheelhouse.outputs.path }}
+
       - name: Prepare platform environment
         env:
           CI_STAGE: build
           BOXING_LANE: ${{ inputs.boxing_lane }}
+          TORCH_FL_CPU_TORCH_WHEELHOUSE: ${{ steps.wheelhouse.outputs.path }}
         run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
 
       - name: Install build tools

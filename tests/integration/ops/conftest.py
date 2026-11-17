@@ -208,7 +208,6 @@ def pytest_collection_modifyitems(
         if (
             item.get_closest_marker("nvidia")
             or item.get_closest_marker("host_compiler")
-            or item.get_closest_marker("native_source_host")
             or item.get_closest_marker("native_vendor_precision")
         ) and platform != "cuda":
             add_platform_skip(
@@ -216,6 +215,17 @@ def pytest_collection_modifyitems(
                 gate="platform_support",
                 detail="case requires the NVIDIA runtime",
                 reason="NVIDIA runtime contract",
+            )
+            continue
+        if item.get_closest_marker("native_source_host") and platform not in {
+            "cuda",
+            "ascend",
+        }:
+            add_platform_skip(
+                item,
+                gate="platform_support",
+                detail="case requires an admitted native-host backend",
+                reason="native-host backend contract",
             )
             continue
         if (

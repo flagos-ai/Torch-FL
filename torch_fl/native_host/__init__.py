@@ -23,10 +23,13 @@ def _bootstrap_launcher():
         raise RuntimeError("native hosts require a non-boxing build")
     from .backend import get_backend
 
-    get_backend(_build_config.ACCELERATOR)
+    backend = get_backend(_build_config.ACCELERATOR)
     manifest = Path(__file__).parent / "_generated/manifest.json"
     if not manifest.is_file():
         raise RuntimeError("this wheel's precompiled FlagGems hosts are missing")
+    prepare = getattr(backend, "prepare_runtime", None)
+    if prepare is not None:
+        prepare()
     from .load import install_launcher
 
     install_launcher("torch_fl.native_host._generated")
@@ -37,8 +40,15 @@ def _activate():
     global _hosts
     if not _prepared:
         return
+    from torch_fl import _build_config
+    from .backend import get_backend
     from .load import Hosts
 
+    initialize = getattr(
+        get_backend(_build_config.ACCELERATOR), "initialize_runtime", None
+    )
+    if initialize is not None:
+        initialize()
     _hosts = Hosts(Path(__file__).parent / "_generated")
     _hosts.activate()
     from . import vendor
