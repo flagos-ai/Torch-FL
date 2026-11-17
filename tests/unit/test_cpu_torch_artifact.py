@@ -288,3 +288,49 @@ def test_only_ascend_prefetches_and_other_hardware_lanes_still_run(workflow, job
         for step in steps
         if step.get("name") == "Validate wheel compatibility manifest"
     )
+
+
+@pytest.mark.parametrize(
+    "workflow,job",
+    [
+        ("integration-tests.yml", "integration-tests"),
+        ("build-wheel-common.yml", "build"),
+    ],
+)
+def test_delivery_does_not_reuse_a_previous_jobs_wheels(tmp_path, workflow, job):
+    data = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
+    steps = data["jobs"][job]["steps"]
+    prepare = next(step for step in steps if step.get("id") == "wheelhouse")
+    old = tmp_path / "cpu-torch-wheelhouse"
+    old.mkdir()
+    (old / "old-release.whl").write_bytes(b"previous cohort")
+    output = tmp_path / "github-output"
+    directories = []
+    for _ in range(2):
+        output.write_text("")
+        subprocess.run(
+            ["bash", "-c", prepare["run"]],
+            env={
+                **os.environ,
+                "RUNNER_TEMP": str(tmp_path),
+                "GITHUB_OUTPUT": str(output),
+            },
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        path = Path(output.read_text().strip().removeprefix("path="))
+        assert path.parent == tmp_path
+        assert list(path.iterdir()) == []
+        directories.append(path)
+    assert directories[0] != directories[1]
+    assert (old / "old-release.whl").read_bytes() == b"previous cohort"
+    receive = next(
+        step for step in steps if step.get("uses") == "actions/download-artifact@v4"
+    )
+    setup = next(
+        step for step in steps if "TORCH_FL_CPU_TORCH_WHEELHOUSE" in step.get("env", {})
+    )
+    expected = "${{ steps.wheelhouse.outputs.path }}"
+    assert receive["with"]["path"] == expected
+    assert setup["env"]["TORCH_FL_CPU_TORCH_WHEELHOUSE"] == expected

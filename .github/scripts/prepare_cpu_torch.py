@@ -34,8 +34,13 @@ def verify(directory, version, expected_sha=None, index_url=None, pinned_wheels=
     if index_url and record["index_url"].rstrip("/") != index_url.rstrip("/"):
         raise ValueError("CPU wheelhouse index differs from the requested pin")
     files = record["files"]
-    if set(files) != {p.name for p in directory.glob("*.whl")}:
-        raise ValueError("CPU wheelhouse file set differs from its manifest")
+    actual = {p.name for p in directory.glob("*.whl")}
+    if set(files) != actual:
+        raise ValueError(
+            "CPU wheelhouse file set differs from its manifest: "
+            f"missing={sorted(set(files) - actual)}, "
+            f"unexpected={sorted(actual - set(files))}"
+        )
     if record["torch_wheel"] not in files:
         raise ValueError("CPU wheelhouse has no pinned Torch wheel")
     for name, expected in files.items():
