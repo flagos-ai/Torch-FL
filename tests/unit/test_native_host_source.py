@@ -65,6 +65,58 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
     assert (tmp_path / "selected-backend").read_text() == accelerator
 
 
+@pytest.mark.parametrize("accelerator", ["cuda", "ascend"])
+def test_builder_initializes_only_platforms_that_require_early_setup(
+    tmp_path, accelerator
+):
+    package = tmp_path / "torch_fl"
+    backend = package / "native_host"
+    backend.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "def initialize():\n"
+        "    (Path(__file__).parent / 'initialized').touch()\n"
+        "flagos = SimpleNamespace(init=initialize)\n"
+    )
+    (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
+    (backend / "__init__.py").write_text("")
+    (backend / "backend.py").write_text(
+        "from types import SimpleNamespace\n"
+        "def get_backend(accelerator):\n"
+        "    import torch_fl\n"
+        "    result = SimpleNamespace(extensions=lambda *args: [])\n"
+        "    if accelerator == 'ascend':\n"
+        "        result.initialize_runtime = torch_fl.flagos.init\n"
+        "    return result\n"
+        "def build_record(*args):\n"
+        f"    return dict(vendor={accelerator!r})\n"
+    )
+    (tmp_path / "torch.py").write_text("__version__ = '2.10.0+cpu'\n")
+    (tmp_path / "triton.py").write_text("__version__ = '3.5.0'\n")
+    (tmp_path / "flag_gems.py").write_text(
+        "from pathlib import Path\n"
+        "assert (Path(__file__).parent / 'torch_fl/initialized').exists() "
+        f"== {accelerator == 'ascend'}, "
+        "'platform initialization changed outside its backend hook'\n"
+        "raise SystemExit(0)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(SOURCE), "--output", str(tmp_path / "out")],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(tmp_path),
+            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (package / "initialized").exists() == (accelerator == "ascend")
+
+
 @pytest.fixture
 def source_module(tmp_path, monkeypatch):
     def load(source, name="sample_host"):

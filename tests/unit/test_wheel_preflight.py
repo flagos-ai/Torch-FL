@@ -453,7 +453,7 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
             assert verify_at < install_at, path
 
 
-@pytest.fixture(params=["nvidia", "metax"])
+@pytest.fixture(params=["nvidia", "metax", "ascend"])
 def native_wheel(tmp_path, manifest, monkeypatch, request):
     spec = importlib.util.spec_from_file_location(
         "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"
@@ -462,12 +462,10 @@ def native_wheel(tmp_path, manifest, monkeypatch, request):
     spec.loader.exec_module(backend)
     driver_root = tmp_path / "compiler"
     vendor = request.param
-    driver = driver_root / "backends" / vendor
-    driver.mkdir(parents=True)
-    (driver / "driver.c").write_text("// published loader\n")
-    (driver / "driver.py").write_text("# published driver\n")
-    if vendor == "metax":
-        (driver / "compiler.py").write_text("# published metadata ABI\n")
+    adapter = backend.get_backend(vendor)
+    for path in adapter.driver_sources(driver_root).values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// published backend source\n")
     monkeypatch.setattr(
         backend.importlib.metadata,
         "version",
@@ -537,7 +535,7 @@ def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
         )
     else:
         if change == "target":
-            record["vendor"] = "ascend"
+            record["vendor"] = "unregistered"
         elif change == "version":
             record["abi_version"] = 2
         else:

@@ -104,6 +104,21 @@ def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
         _audit_installed = True
 
 
+def _pointwise_helpers(modules):
+    from flag_gems.utils.device_info import get_device_capability
+
+    shape = modules["flag_gems.utils.shape_utils"]
+    pointwise = modules["flag_gems.utils.pointwise_dynamic"]
+    return (
+        shape.heuristics_for_tile_size,
+        shape.heuristics_for_num_warps,
+        shape.stride_order,
+        pointwise._balanced_grid_partition,
+        pointwise._tensor_inputs_all_complex,
+        get_device_capability()[0],
+    )
+
+
 class Hosts:
     def __init__(self, path):
         import torch_fl
@@ -178,19 +193,10 @@ class Hosts:
             module._bind(self.resolve)
         for module in self.closures.values():
             module._bind(self.resolve)
-        shape = self.modules["flag_gems.utils.shape_utils"]
-        pointwise = self.modules["flag_gems.utils.pointwise_dynamic"]
         runtime.configure(
             self.resolve,
             self.pointwise_kernel,
-            (
-                shape.heuristics_for_tile_size,
-                shape.heuristics_for_num_warps,
-                shape.stride_order,
-                pointwise._balanced_grid_partition,
-                pointwise._tensor_inputs_all_complex,
-                flag_gems.runtime.torch_device_fn.get_device_capability()[0],
-            ),
+            _pointwise_helpers(self.modules),
             self.modules,
         )
 

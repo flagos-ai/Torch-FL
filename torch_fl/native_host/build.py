@@ -640,6 +640,9 @@ def main():
         "closures": {},
     }
     if not args.launcher_only:
+        initialize = getattr(backend, "initialize_runtime", None)
+        if initialize is not None:
+            initialize()
         import flag_gems
         from torch_fl import _build_config
         from torch_fl.native_host import source_variants

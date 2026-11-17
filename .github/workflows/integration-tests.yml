@@ -392,10 +392,10 @@ jobs:
           if-no-files-found: warn
 
       - name: Retain native-host build and conformance evidence
-        if: ${{ !cancelled() && inputs.platform == 'metax' }}
+        if: ${{ !cancelled() && !needs.configuration.outputs.boxing_lane && contains(fromJSON('["metax", "ascend"]'), needs.configuration.outputs.platform) }}
         uses: actions/upload-artifact@v4
         with:
-          name: native-host-metax-${{ github.run_attempt }}
+          name: native-host-${{ inputs.platform }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/torch-fl-native-host-evidence/
           if-no-files-found: warn
 

@@ -228,6 +228,7 @@ def pytest_collection_modifyitems(
         if item.get_closest_marker("native_source_host") and platform not in {
             "cuda",
             "metax",
+            "ascend",
         }:
             add_platform_skip(
                 item,

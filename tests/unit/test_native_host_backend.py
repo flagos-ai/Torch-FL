@@ -20,17 +20,15 @@ backend = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(backend)
 
 
-@pytest.fixture(params=["nvidia", "metax"])
+@pytest.fixture(params=tuple(backend._ADAPTERS))
 def contract(tmp_path, monkeypatch, request):
     adapter = backend.get_backend(request.param)
     root = tmp_path / "native_host"
     shutil.copytree(SOURCE.parent, root, ignore=shutil.ignore_patterns("__pycache__"))
     driver = tmp_path / "triton/backends" / adapter.vendor
-    driver.mkdir(parents=True)
-    (driver / "driver.py").write_text("# published driver\n")
-    (driver / "driver.c").write_text("// published loader\n")
-    if adapter.vendor == "metax":
-        (driver / "compiler.py").write_text("# published metadata ABI\n")
+    for path in adapter.driver_sources(driver.parents[1]).values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// published backend source\n")
     monkeypatch.setattr(backend, "_ROOT", root)
     monkeypatch.setattr(backend.importlib.metadata, "version", lambda name: "0.7.0")
     record = backend.build_record(adapter, driver.parents[1])
@@ -45,7 +43,7 @@ def test_backend_record_and_compiled_extension_agree(contract):
     assert record["compiler_backend"] == adapter.compiler_backend
 
 
-@pytest.mark.parametrize("vendor", ["ascend", "hygon", "cuda", "../nvidia"])
+@pytest.mark.parametrize("vendor", ["unregistered", "cuda", "../nvidia"])
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
         backend.get_backend(vendor)
@@ -56,7 +54,7 @@ def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     [
         ("schema_version", 2),
         ("abi_version", 0),
-        ("vendor", "ascend"),
+        ("vendor", "unregistered"),
         ("compiler_backend", "hip"),
         ("capabilities", 0),
         ("compiler_distribution", {"name": "flagtree", "version": "0.8.0"}),
@@ -101,7 +99,11 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(contra
     )
     assert str(backend._ROOT / adapter.sources[0]) in launcher.sources
     assert str(backend._ROOT / "csrc/backend_api.h") in launcher.depends
-    assert utilities.sources == [str(root / "backends" / adapter.vendor / "driver.c")]
+    assert utilities.sources == [
+        str(path)
+        for path in adapter.driver_sources(root).values()
+        if path.suffix in {".c", ".cpp"}
+    ]
 
 
 @pytest.mark.parametrize("contract", ["metax"], indirect=True)
