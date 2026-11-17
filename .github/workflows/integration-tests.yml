@@ -339,6 +339,37 @@ jobs:
           fi
           python .github/scripts/run_integration_tests.py
 
+      # This experiment does not alter the baseline venv or its test verdict.
+      # Keep its failed/blocked result visible without accepting FlagCX support.
+      - name: Experiment with Ascend FlagCX (not required)
+        id: flagcx-experiment
+        if: ${{ !cancelled() && inputs.platform == 'ascend' && steps.integration-tests.outcome != 'skipped' && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          SOURCE_REF: ${{ inputs.checkout_ref || github.sha }}
+        run: |
+          source .github/version-pins.env
+          source .github/scripts/lib/proxy_route.sh
+          prefer_direct_route "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "FlagCX experiment"
+          python .github/scripts/run_flagcx_experiment.py \
+            --index-url "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" \
+            --wheel "$FLAGCX_WHEEL_ascend" \
+            --version "$FLAGCX_VERSION_ascend" \
+            --sha256 "$FLAGCX_WHEEL_SHA256_ascend" \
+            --workdir "$INTEGRATION_WORKDIR" \
+            --output "$FLAGCICD_REPORT_DIR/flagcx-experiment"
+
+      - name: Retain Ascend FlagCX experiment
+        if: ${{ !cancelled() && steps.flagcx-experiment.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          name: flagcx-experiment-ascend-${{ github.run_attempt }}
+          path: ${{ env.FLAGCICD_REPORT_DIR }}/flagcx-experiment/
+          if-no-files-found: warn
+
       # Preserve failed sessions too; reporting never changes the test verdict.
       - name: Merge pytest reports
         id: merge-report
@@ -387,6 +418,7 @@ jobs:
             pytest-${{ inputs.platform }}.json
             ${{ env.FLAGCICD_REPORT_DIR }}/
             !${{ env.FLAGCICD_REPORT_DIR }}/environment-*.json
+            !${{ env.FLAGCICD_REPORT_DIR }}/flagcx-experiment/
           if-no-files-found: warn
 
       - name: Merge Python line coverage

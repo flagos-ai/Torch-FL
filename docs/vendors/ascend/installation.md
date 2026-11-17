@@ -12,11 +12,23 @@ Ascend NPU uses native CANN ACLNN operator kernels, not CUDA boxing. The platfor
 
 CI uses `harbor.baai.ac.cn/flagos-runtime/flagos-runtime-ascend-cann9.0.0-910c:2.3.0@sha256:274909c4a51f99d7aef06349555cd8481e068f40b3213c3facc2d1c90cf155e4`
 directly. The Ascend setup hook creates an isolated venv and copies the runtime's
-CPU PyTorch, FlagTree, FlagGems, FlagCX and NumPy wheels when their versions match the
+CPU PyTorch, FlagTree, FlagGems and NumPy wheels when their versions match the
 CI requirements. Copies are limited to each distribution's recorded files;
 neither the runtime's site-packages directory nor its real `torch_npu` is exposed
 to the CI interpreter. Pip fills missing dependencies without upgrading already
 satisfied packages. The setup log reports reused wheels and local copy time.
+
+Baseline CI defers FlagCX. Ascend alone also runs a separate, non-required FlagCX
+experiment after the regular integration tests. The experiment verifies the
+published wheel's exact version and SHA256, inspects ELF dependencies, and blocks
+a wheel requiring `libtorch_npu.so` before importing it. A compatible wheel is
+installed into a temporary package overlay visible only to the experimental
+children, which require the actual FlagCX tier of Torch-FL's `flagos` process
+group and check two-device all-reduce/all-gather. No vendor Torch package is added
+to the baseline venv. The `flagcx-experiment-ascend-<attempt>` artifact and job
+summary retain passed, failed or blocked results; baseline success does not imply
+FlagCX support. The pinned `0.14.0+cann9.0.0.910c` wheel currently requires
+`libtorch_npu.so`, so a Torch-FL-compatible published build is still needed.
 After the image initializes its SDK environment, the hook
 sets and persists `BASH_ENV=/dev/null` so later workflow shells cannot replay
 the image's profile scripts and replace the CI Python or compiler paths. SDK
