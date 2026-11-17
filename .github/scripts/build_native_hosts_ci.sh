@@ -2,12 +2,15 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Run after the default wheel's suites. Keep that artifact in dist/; build and
-# retain the opt-in wheel separately, then test it from the wheel-only workspace.
+# Run after the default wheel's suites. Keep its artifact and generated vendor
+# libraries separate from the native build, then test the installed opt-in wheel.
 set -euo pipefail
 cd "${GITHUB_WORKSPACE:?}"
 evidence="${RUNNER_TEMP:?}/torch-fl-native-host-evidence"
 mkdir -p "$evidence"
+build_source="$(mktemp -d "$RUNNER_TEMP/torch-fl-native-host-source.XXXXXX")"
+git archive HEAD | tar -x -C "$build_source"
+cd "$build_source"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export FLAGOS_BUILD_NATIVE_HOST=1 FLAGOS_BUILD_BOXING=0
 export FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
