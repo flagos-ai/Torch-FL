@@ -339,9 +339,9 @@ jobs:
           fi
           python .github/scripts/run_integration_tests.py
 
-      # This experiment does not alter the baseline venv or its test verdict.
-      # Keep its failed/blocked result visible without accepting FlagCX support.
-      - name: Experiment with Ascend FlagCX (not required)
+      # Admission failure records an environment policy decision, not a failed
+      # import. Only an admitted wheel can reach the optional collective probe.
+      - name: Check Ascend FlagCX admission and optional collectives (not required)
         id: flagcx-experiment
         if: ${{ !cancelled() && inputs.platform == 'ascend' && steps.integration-tests.outcome != 'skipped' && steps.install.outcome == 'success' }}
         continue-on-error: true

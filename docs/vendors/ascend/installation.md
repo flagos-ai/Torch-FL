@@ -19,16 +19,22 @@ to the CI interpreter. Pip fills missing dependencies without upgrading already
 satisfied packages. The setup log reports reused wheels and local copy time.
 
 Baseline CI defers FlagCX. Ascend alone also runs a separate, non-required FlagCX
-experiment after the regular integration tests. The experiment verifies the
+admission check after the regular integration tests. This check verifies the
 published wheel's exact version and SHA256, inspects ELF dependencies, and blocks
-a wheel requiring `libtorch_npu.so` before importing it. A compatible wheel is
+a wheel requiring `libtorch_npu.so` before importing it. An admitted wheel is
 installed into a temporary package overlay visible only to the experimental
 children, which require the actual FlagCX tier of Torch-FL's `flagos` process
 group and check two-device all-reduce/all-gather. No vendor Torch package is added
 to the baseline venv. The `flagcx-experiment-ascend-<attempt>` artifact and job
 summary retain passed, failed or blocked results; baseline success does not imply
-FlagCX support. The pinned `0.14.0+cann9.0.0.910c` wheel currently requires
-`libtorch_npu.so`, so a Torch-FL-compatible published build is still needed.
+FlagCX support. `blocked` is an environment-policy decision: import and communication
+have not been attempted, and runtime compatibility remains untested. The pinned
+`0.14.0+cann9.0.0.910c` wheel currently requires `libtorch_npu.so` and is blocked
+under this policy. Expanding admission requires a suitable published build or an
+explicitly reviewed integration contract; CI does not supply replacement vendor
+libraries. Torch-FL's own Python `torch_npu` shim is allowed; real vendor modules
+and a loaded `libtorch_npu.so` are excluded from the collective probe.
+
 After the image initializes its SDK environment, the hook
 sets and persists `BASH_ENV=/dev/null` so later workflow shells cannot replay
 the image's profile scripts and replace the CI Python or compiler paths. SDK

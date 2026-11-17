@@ -2,7 +2,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Probe a published Ascend FlagCX wheel without changing the baseline venv."""
+"""Check Ascend FlagCX admission, then optionally validate collectives."""
 
 import argparse
 from email.parser import Parser
@@ -19,7 +19,7 @@ import zipfile
 
 
 def inspect_wheel(wheel, version, checksum, directory):
-    """Verify original bytes and reject a vendor Torch dependency before import."""
+    """Verify original bytes and report native dependencies for admission."""
     actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
     if actual != checksum:
         raise ValueError(f"FlagCX wheel SHA256 mismatch: {wheel.name}")
@@ -29,7 +29,7 @@ def inspect_wheel(wheel, version, checksum, directory):
         if len(metadata) != 1:
             raise ValueError("FlagCX wheel must have exactly one METADATA file")
         info = Parser().parsestr(archive.read(metadata[0]).decode())
-        if info["Name"].lower() != "flagcx" or info["Version"] != version:
+        if info.get("Name", "").lower() != "flagcx" or info.get("Version") != version:
             raise ValueError("FlagCX wheel metadata differs from the version pin")
         extensions = [
             n
@@ -59,6 +59,25 @@ def inspect_wheel(wheel, version, checksum, directory):
     }
 
 
+def assert_no_vendor_torch_npu():
+    """Allow Torch-FL's Python shim, but exclude real vendor modules/libraries."""
+    from check_platform_environment import assert_loaded_torch_libraries
+
+    root = sys.modules.get("torch_npu")
+    allowed = {}
+    if root is not None and getattr(root, "__torch_fl_shim__", False) is True:
+        allowed = {"torch_npu": root, "torch_npu._C": getattr(root, "_C", None)}
+    unexpected = [
+        name
+        for name, module in list(sys.modules.items())
+        if module is not None
+        and (name == "torch_npu" or name.startswith("torch_npu."))
+        and (module is not allowed.get(name) or getattr(module, "__file__", None))
+    ]
+    assert not unexpected, f"Real vendor torch_npu modules imported: {unexpected}"
+    assert_loaded_torch_libraries(Path("."), (), forbidden=("libtorch_npu.so",))
+
+
 def collective_worker():
     """Require Torch-FL's FlagCX tier, never a successful host fallback."""
     from datetime import timedelta
@@ -67,11 +86,13 @@ def collective_worker():
     import torch_fl
     import torch
     import torch.distributed as dist
+
+    assert_no_vendor_torch_npu()
     import flagcx  # noqa: F401 -- backend registration is part of this probe
 
+    assert_no_vendor_torch_npu()
     assert torch.version.cuda is None, torch.__version__
     assert torch.__version__.split("+")[0] == "2.10.0", torch.__version__
-    assert not any(n == "torch_npu" or n.startswith("torch_npu.") for n in sys.modules)
     assert metadata.version("flagcx") == os.environ["FLAGCX_EXPERIMENT_VERSION"]
     local_rank = int(os.environ["LOCAL_RANK"])
     torch_fl.flagos.set_device(local_rank)
@@ -138,6 +159,9 @@ def experiment(args):
         "platform": "ascend",
         "required": False,
         "status": "failed",
+        "admission_status": "not_evaluated",
+        "import_attempted": False,
+        "runtime_compatibility": "not_tested",
         "baseline_environment_modified": False,
         "source_ref": os.environ.get("SOURCE_REF", os.environ.get("GITHUB_SHA")),
         "python": sys.executable,
@@ -185,9 +209,12 @@ def experiment(args):
             ):
                 report.update(
                     status="blocked",
-                    reason="Published FlagCX requires libtorch_npu.so; a torch_npu-free Torch-FL build is required.",
+                    admission_status="blocked",
+                    reason_type="environment_policy",
+                    reason="CI admission policy excludes the required libtorch_npu.so. No import or collective was attempted; runtime compatibility was not tested.",
                 )
                 return 1
+            report["admission_status"] = "passed"
             overlay = scratch / "site-packages"
             result = subprocess.run(
                 [
@@ -221,6 +248,8 @@ def experiment(args):
             for name in ("PYTEST_PLUGINS", "COVERAGE_PROCESS_START"):
                 env.pop(name, None)
             report["collectives_started"] = True
+            report["import_attempted"] = True
+            report["runtime_compatibility"] = "unverified"
             with (args.output / "collectives.log").open("w") as log:
                 code = run_collectives(
                     [
@@ -241,6 +270,8 @@ def experiment(args):
             report.update(
                 status="passed" if code == 0 else "failed", collective_exit_code=code
             )
+            if code == 0:
+                report["runtime_compatibility"] = "validated"
             return int(code != 0)
     except (
         OSError,
@@ -256,15 +287,17 @@ def experiment(args):
         print(text)
         if report["status"] != "passed":
             print(
-                f"::warning::Ascend FlagCX experiment {report['status']}: {report.get('reason', 'see collective log')}"
+                f"::warning::Ascend FlagCX admission/collective check {report['status']}: {report.get('reason', 'see collective log')}"
             )
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
                 summary.write(
-                    f"\n### Ascend FlagCX experiment: {report['status']}\n\n"
-                    "This experiment is not required by baseline CI. A green baseline does not establish FlagCX support.\n\n"
+                    f"\n### Ascend FlagCX admission and optional collectives: {report['status']}\n\n"
+                    "This check is not required by baseline CI. A green baseline does not establish FlagCX support.\n\n"
                     + report.get("reason", "See the dedicated experiment artifact.")
-                    + "\n"
+                    + f"\n\nRuntime compatibility: {report['runtime_compatibility']}; "
+                    + f"import attempted: {report['import_attempted']}; "
+                    + f"collective probe started: {report['collectives_started']}.\n"
                 )
 
 

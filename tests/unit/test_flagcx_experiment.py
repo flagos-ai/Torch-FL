@@ -12,7 +12,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import zipfile
 
 import pytest
@@ -47,14 +47,17 @@ def wheel_fixture(tmp_path):
     )
 
 
-@pytest.mark.parametrize("vendor_library", [True, False])
+@pytest.mark.parametrize(
+    "vendor_library,probe_exit", [(True, None), (False, 0), (False, 7)]
+)
 def test_native_dependency_gate_precedes_install_and_import(
-    tmp_path, monkeypatch, vendor_library
+    tmp_path, monkeypatch, vendor_library, probe_exit
 ):
     args = wheel_fixture(tmp_path)
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "ascend")
     monkeypatch.setenv("PYTHONPATH", "/baseline/reporting")
     monkeypatch.setenv("FLAGCX_TORCH_BACKEND", "vendor")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
     calls = []
 
     def run(command, **kwargs):
@@ -73,19 +76,92 @@ def test_native_dependency_gate_precedes_install_and_import(
         assert env["PYTHONPATH"] != "/baseline/reporting"
         assert workdir == tmp_path
         assert "--nproc-per-node=2" in command
-        return 0
+        return probe_exit
 
     monkeypatch.setattr(EXPERIMENT.subprocess, "run", run)
     monkeypatch.setattr(EXPERIMENT, "run_collectives", collectives)
-    assert EXPERIMENT.experiment(args) == int(vendor_library)
+    assert EXPERIMENT.experiment(args) == int(vendor_library or probe_exit != 0)
     report = json.loads((args.output / "result.json").read_text())
-    assert report["status"] == ("blocked" if vendor_library else "passed")
+    assert report["status"] == (
+        "blocked" if vendor_library else "passed" if probe_exit == 0 else "failed"
+    )
+    assert report["admission_status"] == ("blocked" if vendor_library else "passed")
+    assert report["import_attempted"] == (not vendor_library)
+    assert report["runtime_compatibility"] == (
+        "not_tested"
+        if vendor_library
+        else "validated"
+        if probe_exit == 0
+        else "unverified"
+    )
+    if vendor_library:
+        assert report["reason_type"] == "environment_policy"
+        assert "No import or collective was attempted" in report["reason"]
+        assert (
+            "Runtime compatibility: not_tested" in (tmp_path / "summary.md").read_text()
+        )
     assert report["collectives_started"] == (not vendor_library)
     assert len(calls) == (1 if vendor_library else 2)
     assert report["required"] is False
     assert report["baseline_environment_modified"] is False
     assert os.environ["PYTHONPATH"] == "/baseline/reporting"
     assert os.environ["FLAGCX_TORCH_BACKEND"] == "vendor"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "absent",
+        "shim",
+        "vendor",
+        "orphan",
+        "foreign-child",
+        "native-extension",
+        "loaded-library",
+    ],
+)
+def test_python_shim_is_distinct_from_vendor_modules_and_native_library(
+    monkeypatch, case
+):
+    monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
+    import check_platform_environment as checks
+
+    for name in list(sys.modules):
+        if name == "torch_npu" or name.startswith("torch_npu."):
+            monkeypatch.delitem(sys.modules, name)
+    root = ModuleType("torch_npu")
+    root.__torch_fl_shim__ = True
+    root._C = ModuleType("torch_npu._C")
+    if case not in ("absent", "orphan"):
+        monkeypatch.setitem(sys.modules, "torch_npu", root)
+        monkeypatch.setitem(sys.modules, "torch_npu._C", root._C)
+    if case == "vendor":
+        root.__torch_fl_shim__ = False
+        root.__file__ = "/image/torch_npu/__init__.py"
+    elif case == "orphan":
+        monkeypatch.setitem(sys.modules, "torch_npu._C", root._C)
+    elif case == "foreign-child":
+        monkeypatch.setitem(
+            sys.modules, "torch_npu.vendor", ModuleType("torch_npu.vendor")
+        )
+    elif case == "native-extension":
+        root._C.__file__ = "/image/torch_npu/_C.so"
+    original = checks.assert_loaded_torch_libraries
+    mappings = (
+        "100-200 r-xp 0000 00:00 1 /image/libtorch_npu.so\n"
+        if case == "loaded-library"
+        else ""
+    )
+    monkeypatch.setattr(
+        checks,
+        "assert_loaded_torch_libraries",
+        lambda root, names, forbidden: original(root, names, forbidden, mappings),
+    )
+    if case in ("absent", "shim"):
+        EXPERIMENT.assert_no_vendor_torch_npu()
+    else:
+        with pytest.raises(AssertionError, match="vendor|Vendor"):
+            EXPERIMENT.assert_no_vendor_torch_npu()
 
 
 @pytest.mark.parametrize("damage", ["sha256", "version", "platform"])
@@ -160,6 +236,18 @@ def test_timed_out_collectives_clean_only_their_own_process_group(
 
 @pytest.mark.parametrize("backend", ["gloo", "nccl"])
 def test_successful_non_flagcx_fallback_is_rejected(monkeypatch, backend):
+    monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
+    import check_platform_environment as checks
+
+    monkeypatch.setattr(checks, "assert_loaded_torch_libraries", lambda *a, **k: {})
+    for name in list(sys.modules):
+        if name == "torch_npu" or name.startswith("torch_npu."):
+            monkeypatch.delitem(sys.modules, name)
+    shim = ModuleType("torch_npu")
+    shim.__torch_fl_shim__ = True
+    shim._C = ModuleType("torch_npu._C")
+    monkeypatch.setitem(sys.modules, "torch_npu", shim)
+    monkeypatch.setitem(sys.modules, "torch_npu._C", shim._C)
     calls = []
     dist = SimpleNamespace(
         init_process_group=lambda *a, **k: calls.append("init"),
