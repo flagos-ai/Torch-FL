@@ -607,10 +607,13 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
   endif()
 endif()
 
-if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR)
+if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR AND FLAGOS_BUILD_BOXING)
   # The CPU TorchConfig used for the isolated Python environment does not
   # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
   # symbols are resolved by ELF instead of being left to process-global lookup.
+  # A build without boxing has no consumer of that runtime. In particular,
+  # native hosts keep the official CPU core, which cannot resolve its at::maca
+  # dependencies. MACA's device runtime is linked independently above.
   set(_metax_torch_lib "$ENV{FLAGOS_VENDOR_TORCH_LIB}")
   if(IS_DIRECTORY "${_metax_torch_lib}")
     if(EXISTS "${_metax_torch_lib}/libtorch_cuda.so")
