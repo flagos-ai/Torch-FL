@@ -29,6 +29,7 @@ device -- only that the sequence of calls is the one that avoids it.
 import ctypes
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -164,3 +165,40 @@ def test_probe_leaves_the_device_alone_when_the_read_back_fails():
     metax._query_metax_device_properties(runtime, 2)
     assert runtime.set_device_calls == [2]
     assert runtime.current_device == 2
+
+
+@pytest.mark.parametrize("device_count", [0, 1, 2])
+@pytest.mark.parametrize("late_registration", [False, True])
+def test_cuda_device_count_uses_the_registered_runtime(
+    monkeypatch, device_count, late_registration
+):
+    count = SimpleNamespace(value=device_count)
+    flagos = SimpleNamespace(
+        device_count=lambda: count.value,
+        Event=object(),
+        manual_seed=lambda seed: None,
+        manual_seed_all=lambda seed: None,
+    )
+    cuda = SimpleNamespace(device_count=lambda: 0)
+    torch = SimpleNamespace(cuda=cuda, _C=SimpleNamespace(), device=metax.torch.device)
+    if not late_registration:
+        torch.flagos = flagos
+    monkeypatch.setattr(metax, "torch", torch)
+    monkeypatch.setattr(metax, "_patched", False)
+    monkeypatch.setattr(metax, "_mcruntime", None)
+    monkeypatch.setattr(metax, "_find_metax_path", lambda: "/maca")
+    monkeypatch.setattr(metax, "_load_mcruntime", lambda path: object())
+    monkeypatch.setattr(metax, "_patch_cuda_tensor_ops", lambda path: None)
+    monkeypatch.setattr(metax, "_patch_triton_do_bench", lambda: None)
+
+    assert metax.patch_torch_cuda_for_metax()
+    if late_registration:
+        assert cuda.device_count() == 0
+        torch.flagos = flagos
+        assert metax.patch_torch_cuda_for_metax()
+
+    # FlagGems snapshots this count when it creates its per-device kernel caches.
+    assert cuda.device_count() == device_count
+    assert cuda.Event is flagos.Event
+    count.value = 3
+    assert cuda.device_count() == 3

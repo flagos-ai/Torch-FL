@@ -33,9 +33,13 @@ def _metadata(**changes):
 
 
 def test_installed_metax_contract_and_routes_exclude_boxing():
+    import flag_gems
+
     from torch_fl.native_host.backend import COMPILED_FIELDS
 
     assert "boxing" not in torch_fl._build_config.KERNELS
+    assert torch.cuda.device_count() == torch_fl.flagos.device_count()
+    assert flag_gems.runtime.device.device_count == torch_fl.flagos.device_count()
     record = torch_fl.native_host.audit()["backend"]
     assert record["vendor"] == "metax" and record["compiler_backend"] == "maca"
     assert record["capabilities"] == 141
