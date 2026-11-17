@@ -144,6 +144,36 @@ class TestMulPythonNumberOperand:
         two = torch.tensor(2.0, device=DEVICE)
         torch.testing.assert_close((a * two).cpu(), (a * 2.0).cpu(), rtol=0, atol=0)
 
+    @pytest.mark.ascend
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("layout", ["dense", "transpose", "empty"])
+    @pytest.mark.parametrize("overload", ["python", "scalar"])
+    def test_scalar_precision_matches_vendor_arithmetic(self, dtype, layout, overload):
+        cpu = torch.arange(-127, 129, dtype=torch.float32).reshape(16, 16).to(dtype)
+        value = cpu.to(DEVICE)
+        if layout == "transpose":
+            cpu = cpu.t()
+            value = value.t()
+        elif layout == "empty":
+            cpu = cpu[:0]
+            value = value[:0]
+        # Alternating values also exercise the scalar in the executor-cache key.
+        for scalar in (128**-0.5, -0.1, 1.0001, 0.0, 128**-0.5):
+            actual = (
+                value * scalar
+                if overload == "python"
+                else torch.ops.aten.mul.Scalar(value, scalar)
+            )
+            # Paired torch-npu 2.10 uses FP32 scalars for BF16, FP16 for FP16.
+            scalar_value = (
+                torch.tensor(scalar, dtype=dtype).item()
+                if dtype == torch.float16
+                else scalar
+            )
+            expected = (cpu.float() * scalar_value).to(dtype)
+            assert actual.dtype == dtype
+            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
 
 class TestMulTensorDispatch:
     """Verify dispatch routing for mul.Tensor op."""

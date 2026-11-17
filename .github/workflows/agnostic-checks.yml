@@ -133,6 +133,7 @@ jobs:
             tests/unit/test_native_host_audit.py
             tests/unit/test_native_host_backend.py
             tests/unit/test_native_host_ascend.py
+            tests/unit/test_ascend_device_runtime.py
             tests/unit/test_native_host_coverage.py
             tests/unit/test_native_host_entries.py
             tests/unit/test_native_scalar_bindings.py

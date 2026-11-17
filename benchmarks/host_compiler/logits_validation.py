@@ -1,13 +1,22 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Elementwise logit acceptance, independent of timing and model execution."""
+"""Versioned logit acceptance, independent of timing and model execution."""
 
 import math
 import hashlib
 import os
 
 import torch
+
+
+BF16_VECTOR_LIMITS = (
+    ("phase_relative_l2", 0.02),
+    ("token_relative_l2", 0.10),
+    ("token_p99_scaled_abs", 0.25),
+    ("token_max_scaled_abs", 0.50),
+)
+BF16_SCALE_FLOOR = 1e-6
 
 
 class LogitsValidationFailed(RuntimeError):
@@ -74,6 +83,154 @@ def tensor_accuracy(actual, expected, *, atol=1e-3, rtol=1e-3):
         "nonfinite": nonfinite,
         "max_abs": None if nonfinite else float(difference.max()),
         "max_scaled_error": maximum if math.isfinite(maximum) else None,
+    }
+
+
+def bf16_vector_policy():
+    """Return the fixed raw-logit policy; no per-operator tolerance overrides."""
+    return {
+        "name": "bf16-v2",
+        "limits": dict(BF16_VECTOR_LIMITS),
+        "scale": "max(reference token RMS, 1e-6)",
+        "scale_floor": BF16_SCALE_FLOOR,
+        "vocabulary_axis": -1,
+        "center_logits": False,
+        "require_top1_equal": True,
+        "ties": "first maximum index, matching torch.argmax; no near-tie exemption",
+        "checker_dtype": "float64",
+        "scope": "all prefill positions and every teacher-forced decode step",
+    }
+
+
+def bf16_vector_accuracy(actual, expected):
+    """Check every raw BF16 logit vector, including its tail and worst element."""
+    if actual.shape != expected.shape or actual.numel() == 0:
+        raise ValueError("logit shapes must match exactly and be nonempty")
+    if actual.dtype != torch.bfloat16 or expected.dtype != torch.bfloat16:
+        raise ValueError("bf16-v2 requires the vendor's bfloat16 logit dtype")
+    if actual.ndim < 2:
+        raise ValueError("logits require token and vocabulary dimensions")
+    vocabulary = actual.shape[-1]
+    a = actual.detach().cpu().double().reshape(-1, vocabulary)
+    b = expected.detach().cpu().double().reshape(-1, vocabulary)
+    limits = dict(BF16_VECTOR_LIMITS)
+    finite = torch.isfinite(a) & torch.isfinite(b)
+    valid_rows = finite.all(-1)
+    positions = a.shape[0]
+    rows = []
+    squared_error = squared_reference = 0.0
+    for index in range(positions):
+        if not bool(valid_rows[index]):
+            rows.append(
+                {
+                    "position": index,
+                    "passed": False,
+                    "failed_checks": ["nonfinite"],
+                    "relative_l2": None,
+                    "p99_scaled_abs": None,
+                    "max_scaled_abs": None,
+                    "max_abs": None,
+                    "top1_equal": False,
+                    "actual_top1": None,
+                    "reference_top1": None,
+                }
+            )
+            continue
+        error = (a[index] - b[index]).abs()
+        reference_square = float(b[index].square().sum())
+        error_square = float(error.square().sum())
+        scale = max(math.sqrt(reference_square / vocabulary), BF16_SCALE_FLOOR)
+        metrics = {
+            "relative_l2": math.sqrt(error_square / vocabulary) / scale,
+            "p99_scaled_abs": float(torch.quantile(error, 0.99)) / scale,
+            "max_scaled_abs": float(error.max()) / scale,
+            "max_abs": float(error.max()),
+        }
+        failed = [
+            name
+            for name in ("relative_l2", "p99_scaled_abs", "max_scaled_abs")
+            if metrics[name] > limits["token_" + name]
+        ]
+        actual_top1 = int(a[index].argmax())
+        reference_top1 = int(b[index].argmax())
+        if actual_top1 != reference_top1:
+            failed.append("top1")
+        rows.append(
+            {
+                "position": index,
+                "passed": not failed,
+                "failed_checks": failed,
+                "top1_equal": actual_top1 == reference_top1,
+                "actual_top1": actual_top1,
+                "reference_top1": reference_top1,
+                **metrics,
+            }
+        )
+        squared_error += error_square
+        squared_reference += reference_square
+    failed = [row["position"] for row in rows if not row["passed"]]
+    nonfinite = int((~finite).sum())
+    return {
+        "policy": "bf16-v2",
+        "passed": not failed,
+        "positions": positions,
+        "passed_positions": positions - len(failed),
+        "failed_positions": failed,
+        "top1_matches": sum(row["top1_equal"] for row in rows),
+        "failed_top1_positions": [
+            row["position"] for row in rows if not row["top1_equal"]
+        ],
+        "elements": a.numel(),
+        "nonfinite": nonfinite,
+        "squared_error": None if nonfinite else squared_error,
+        "squared_reference": None if nonfinite else squared_reference,
+        "rows": rows,
+    }
+
+
+def summarize_bf16_accuracy(comparisons, expected_count):
+    """Require per-token limits and separate prefill/decode aggregate limits."""
+    if len(comparisons) != expected_count or expected_count < 2:
+        raise ValueError("logit comparison count must include prefill and decode")
+    if any(row.get("policy") != "bf16-v2" for row in comparisons):
+        raise ValueError("mixed or missing logit acceptance policies")
+    limits = dict(BF16_VECTOR_LIMITS)
+    phases = {}
+    for name, groups in (
+        ("prefill", comparisons[:1]),
+        ("decode", comparisons[1:]),
+    ):
+        finite = all(row["nonfinite"] == 0 for row in groups)
+        relative = None
+        if finite:
+            elements = sum(row["elements"] for row in groups)
+            denominator = max(
+                sum(row["squared_reference"] for row in groups),
+                elements * BF16_SCALE_FLOOR**2,
+            )
+            relative = math.sqrt(
+                sum(row["squared_error"] for row in groups) / denominator
+            )
+        phases[name] = {
+            "passed": finite
+            and all(row["passed"] for row in groups)
+            and relative <= limits["phase_relative_l2"],
+            "relative_l2": relative,
+            "positions": sum(row["positions"] for row in groups),
+            "passed_positions": sum(row["passed_positions"] for row in groups),
+            "top1_matches": sum(row["top1_matches"] for row in groups),
+        }
+    return {
+        "policy": bf16_vector_policy(),
+        "comparisons": len(comparisons),
+        "passed_comparisons": sum(row["passed"] for row in comparisons),
+        "failed_steps": [i for i, row in enumerate(comparisons) if not row["passed"]],
+        "failed_phases": [name for name, row in phases.items() if not row["passed"]],
+        "positions": sum(row["positions"] for row in comparisons),
+        "passed_positions": sum(row["passed_positions"] for row in comparisons),
+        "top1_matches": sum(row["top1_matches"] for row in comparisons),
+        "phases": phases,
+        "passed": all(row["passed"] for row in phases.values()),
     }
 
 

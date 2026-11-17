@@ -12,6 +12,36 @@ from copy import deepcopy
 
 
 _COHORTS = {
+    "ascend": {
+        "schema_version": 1,
+        "flag_gems": "5.4.0",
+        "vendor_torch": "2.10.0+cpu",
+        "torch_git_version": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+        "issue": "https://github.com/flagos-ai/Torch-FL/issues/833",
+        "retirement": "Remove the exception after a published FlagGems wheel passes the paired vendor BF16 logit gate and repeated eager performance checks.",
+        "operators": [
+            {
+                "op": "_softmax",
+                "family": "aclnn",
+                "dtypes": ["Float"],
+                "reason": "Published FP32 softmax fails the fixed BF16 vector-logit limits against torch-npu 2.10. Other FlagGems operators retain their routes.",
+            },
+        ],
+        "sources": [
+            {
+                "id": "published_concat",
+                "op": "aten::cat",
+                "module": "flag_gems.runtime.backend._tsingmicro.ops.cat",
+                "function": "cat",
+                "sha256": "a503aae481a31e6f428180722b7e11693fb8fac03ec516013ea88fd724f03534",
+                "dtypes": ["Float", "BFloat16"],
+                "same_tensor_metadata": True,
+                "min_tensors": 2,
+                "unit_stride_axis": True,
+                "reason": "The published pointwise concat implementation preserves homogeneous input values and avoids the Ascend strided-copy device bottleneck.",
+            },
+        ],
+    },
     "nvidia": {
         "schema_version": 1,
         "flag_gems": "5.4.0",
@@ -94,7 +124,7 @@ def source_policy(vendor):
         "schema_version": policy["schema_version"],
         "vendor": vendor,
         "flag_gems": policy["flag_gems"],
-        "requires_native_vendor": True,
+        "requires_native_vendor": vendor == "nvidia",
         "entries": policy["sources"],
     }
 

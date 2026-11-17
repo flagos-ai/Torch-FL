@@ -454,7 +454,7 @@ def test_native_source_hosts_require_the_installed_nonboxing_cohort(profile):
         selected = [g for g in groups if g["manifest_id"] == "native_source_hosts"]
         assert len(selected) == (0 if boxing_lane else 1)
         if selected:
-            assert selected[0]["min_passed"] == 27
+            assert selected[0]["min_passed"] == 94
             assert "test_native_ascend_hosts.py" in selected[0]["command"]
 
 

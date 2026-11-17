@@ -5,6 +5,8 @@
 
 import importlib.util
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +41,88 @@ class Type:
 
 TENSOR = Type("TensorType")
 INTEGER = Type("IntType")
+
+
+def test_published_source_metadata_guard_preserves_unrestricted_selections(tmp_path):
+    compiler = shutil.which("c++")
+    if compiler is None:
+        pytest.skip("C++ compiler is unavailable")
+    source = tmp_path / "guard.cc"
+    source.write_text(
+        r"""
+#include <optional>
+#include <vector>
+#include <cstdint>
+#include <cassert>
+namespace c10 {
+struct Device {
+  int index=0; bool cpu=false;
+  bool is_privateuseone() const {return !cpu;}
+  bool is_cpu() const {return cpu;}
+  bool operator!=(const Device& other) const {return index!=other.index || cpu!=other.cpu;}
+};
+template<class T> struct List:std::vector<T> {using std::vector<T>::vector;};
+}
+namespace at {
+enum class ScalarType {Float, BFloat16, Half};
+struct Tensor {
+  struct Impl {bool is_wrapped_number() const {return false;}} impl;
+  ScalarType type=ScalarType::Float; int64_t rank=4, inner=1; c10::Device dev{};
+  bool defined() const {return true;}
+  c10::Device device() const {return dev;}
+  ScalarType scalar_type() const {return type;}
+  int64_t dim() const {return rank;}
+  int64_t numel() const {return 16;}
+  int64_t size(int64_t) const {return 2;}
+  int64_t stride(int64_t) const {return inner;}
+  const Impl* unsafeGetTensorImpl() const {return &impl;}
+};
+template<class T> struct ArrayRef:std::vector<T> {using std::vector<T>::vector;};
+struct ITensorListRef:std::vector<Tensor> {using std::vector<Tensor>::vector;};
+}
+"""
+        + entries.HEADER
+        + r"""
+int main() {
+ const uint64_t mask=3;
+ at::Tensor first,second;
+ c10::List<at::Tensor> inputs{first,second};
+ assert(PublishedSourceAcceptsRestricted(mask,true,2,false,inputs,int64_t(-1)));
+ inputs[1].type=at::ScalarType::BFloat16;
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,false,inputs));
+ assert(PublishedSourceAccepts(mask,inputs));
+ inputs[1]=second; inputs[1].rank=2;
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,false,inputs));
+ assert(PublishedSourceAccepts(mask,inputs));
+ inputs[1]=second; inputs[1].dev.index=1;
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,false,inputs));
+ assert(!PublishedSourceAccepts(mask,inputs));
+ inputs[1]=second; inputs[1].dev.cpu=true;
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,false,inputs));
+ inputs.resize(1);
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,false,inputs,int64_t(7)));
+ assert(PublishedSourceAccepts(mask,inputs));
+ inputs.clear(); assert(!PublishedSourceAccepts(mask,inputs));
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,false,inputs));
+ inputs={first,second};
+ assert(PublishedSourceAcceptsRestricted(mask,true,2,true,inputs));
+ inputs[1].inner=2;
+ assert(!PublishedSourceAcceptsRestricted(mask,true,2,true,inputs));
+ assert(PublishedSourceAccepts(mask,inputs));
+ inputs[1]=second; std::optional<at::Tensor> absent;
+ assert(PublishedSourceAcceptsRestricted(mask,true,2,false,inputs,absent));
+}
+"""
+    )
+    executable = tmp_path / "guard"
+    compiled = subprocess.run(
+        [compiler, "-std=c++17", "-Werror", str(source), "-o", str(executable)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+    subprocess.run([str(executable)], check=True, timeout=10)
 
 
 def parameter(name, *, keyword=False, default=None, has_default=False):
@@ -182,6 +266,38 @@ def test_return_mismatch_and_missing_host_are_reported():
     assert entries.emit_entries([record([])], {})[2] == [
         {"op": "aten::test.Tensor", "reason": "no lowered host variant"}
     ]
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_published_selection_emits_its_guard_before_the_host(restricted):
+    selection = {
+        "id": "published_test",
+        "op": "aten::test.Tensor",
+        "dtypes": ["Float", "BFloat16"],
+    }
+    if restricted:
+        selection.update(
+            same_tensor_metadata=True, min_tensors=2, unit_stride_axis=True
+        )
+    code, records, rejected = entries.emit_entries(
+        [record([("at::TensorList", None)])],
+        {
+            "published_test": [
+                group([parameter("values")], {"values": Type("ListType", TENSOR)})
+            ]
+        },
+        [selection],
+    )
+    assert not rejected
+    body = code[-1]
+    guard = (
+        "PublishedSourceAcceptsRestricted(" if restricted else "PublishedSourceAccepts("
+    )
+    assert guard in body
+    assert (", true, 2, true, a0)" in body) is restricted
+    assert body.index(guard) < body.index("Host0::Forward")
+    assert "++SourceVariantHits_published_test" in body
+    assert records[0]["source_variants"][0]["id"] == "published_test"
 
 
 def test_partial_variant_binding_remains_observable():

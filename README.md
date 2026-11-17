@@ -164,6 +164,11 @@ against the roughly 24 ms vendor workload, with the model remaining eager.
 Logit acceptance separately requires elementwise `atol=rtol=1e-3` against the
 accelerator manufacturer's native Torch at the same precision. The unchanged
 #839 BF16 cohort fails this gate; the optional precision cohort below passes it.
+Current BF16 portability validation also supports the fixed `bf16-v2` policy:
+every prefill and decode position must preserve the vendor's exact top-1 token
+and satisfy independent raw-logit error limits. Select it with
+`--logits-policy bf16-v2` in both processes. The recorded NVIDIA elementwise
+results below are unchanged.
 Use the strict-eager benchmark's
 `--check-logits --reference <vendor-reference.pt>` to enforce it; see the
 [paired validation procedure](docs/design/flaggems-build-time-hosts.md#vendor-logit-acceptance).
@@ -211,6 +216,10 @@ after testing the ordinary wheel and retains coverage and conformance artifacts.
 Full-model accuracy and the 80% vendor-performance gate remain open in
 [issue #833](https://github.com/flagos-ai/Torch-FL/issues/833); build coverage is
 not evidence of those results. NVIDIA's existing precision policy is unchanged.
+The paired benchmark accepts `--device npu:0` for the separate original
+`torch-npu` environment and `--device flagos:0` for the installed native-host
+wheel. Both use the same BF16 checkpoint, inputs and math settings; HF32 matmul
+is rejected by this acceptance harness.
 
 An optional graph-mode comparison uses Dynamo to capture the model and
 TorchScript to execute its ATen graph:

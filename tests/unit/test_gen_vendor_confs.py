@@ -54,6 +54,7 @@ Run: pytest tests/unit/test_gen_vendor_confs.py
 import importlib.util
 from collections import Counter
 from pathlib import Path
+import re
 
 import pytest
 
@@ -70,6 +71,7 @@ def _load():
 
 
 g = pytest.importorskip("importlib") and _load()
+policy = importlib.import_module("native_host_policy")
 CONF_DIR = REPO_ROOT / "torch_fl" / "configs"
 
 
@@ -504,6 +506,19 @@ def test_native_nvidia_dtype_route_is_distinct_from_boxing():
     g._reject_boxing_routes("backends_nvidia.conf", {"mm": "flaggems; BFloat16:nvidia"})
 
 
+def test_ascend_softmax_precision_exception_preserves_flaggems_base():
+    text, routes, _ = g.build_all(CONF_DIR)["ascend"]
+    assert routes["_softmax"] == "flaggems; Float:ascend  # ascend"
+    assert "_softmax = flaggems; Float:ascend  # ascend" in text
+    assert policy.route_backends(routes["_softmax"]) == ["flaggems", "ascend"]
+    assert policy.route_backends(routes["rsqrt"])[0] == "flaggems"
+    assert policy.route_backends(routes["mean.dim"])[0] == "flaggems"
+    count = int(re.search(r"(?m)^#\s+flaggems\s+(\d+)$", text).group(1))
+    assert count == sum(
+        policy.route_backends(value)[0] == "flaggems" for value in routes.values()
+    )
+
+
 @pytest.mark.parametrize("vendor", sorted(g.VENDORS))
 def test_every_vendor_conf_covers_the_whole_op_list(vendor):
     built = g.build_all(CONF_DIR)
@@ -512,8 +527,8 @@ def test_every_vendor_conf_covers_the_whole_op_list(vendor):
     assert len(routes) == op_count
     allowed = {"flaggems_cpp", "flaggems", "tileops", vendor, "none"}
     for op, value in routes.items():
-        key = value.split("#", 1)[0].strip()
-        assert key in allowed, f"{vendor}: {op} routed to unexpected {key!r}"
+        for key in policy.route_backends(value):
+            assert key in allowed, f"{vendor}: {op} routed to unexpected {key!r}"
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
