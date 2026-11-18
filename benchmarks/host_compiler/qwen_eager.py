@@ -34,10 +34,13 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from logits_validation import (
+    bf16_vector_accuracy,
+    bf16_vector_policy,
     LogitsValidationFailed,
     file_sha256,
     math_settings,
     summarize_accuracy,
+    summarize_bf16_accuracy,
     tensor_accuracy,
     validate_reference,
     validate_tolerances,
@@ -91,9 +94,15 @@ def main():
     parser.add_argument("--logits-atol", type=float, default=1e-3)
     parser.add_argument("--logits-rtol", type=float, default=1e-3)
     parser.add_argument(
+        "--logits-policy",
+        choices=["elementwise", "bf16-v2"],
+        default="elementwise",
+        help="Select strict elementwise or fixed per-token BF16 vector acceptance",
+    )
+    parser.add_argument(
         "--check-logits",
         action="store_true",
-        help="Fail after reporting if any logit misses tolerance",
+        help="Fail after reporting if the selected logit acceptance policy fails",
     )
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--progress-every", type=int, default=0)
@@ -113,6 +122,11 @@ def main():
         parser.error("steps must be positive and rounds must be nonnegative")
     if args.check_logits and args.reference is None:
         parser.error("--check-logits requires a vendor --reference")
+    if args.logits_policy == "bf16-v2":
+        if args.dtype != "bfloat16":
+            parser.error("bf16-v2 requires the vendor bfloat16 workload")
+        if (args.logits_atol, args.logits_rtol) != (1e-3, 1e-3):
+            parser.error("bf16-v2 has fixed limits; atol/rtol apply to elementwise")
     try:
         validate_tolerances(args.logits_atol, args.logits_rtol)
     except ValueError as error:
@@ -130,6 +144,15 @@ def main():
         "execution": "flaggems-model-host" if args.model_host else "eager",
         "steps": args.steps,
         "rounds": args.rounds,
+        "logits_policy": (
+            bf16_vector_policy()
+            if args.logits_policy == "bf16-v2"
+            else {
+                "name": "elementwise",
+                "atol": args.logits_atol,
+                "rtol": args.logits_rtol,
+            }
+        ),
     }
     if args.device.startswith("flagos"):
         if args.hosts:
@@ -270,16 +293,20 @@ def main():
             report["reference_comparison"] = [
                 compare(a, b) for a, b in zip(logits, reference["logits"])
             ]
+
+            def accuracy_check(actual, expected):
+                if args.logits_policy == "bf16-v2":
+                    return bf16_vector_accuracy(actual, expected)
+                return tensor_accuracy(
+                    actual, expected, atol=args.logits_atol, rtol=args.logits_rtol
+                )
+
             accuracy = [
-                tensor_accuracy(a, b, atol=args.logits_atol, rtol=args.logits_rtol)
-                for a, b in zip(logits, reference["logits"])
+                accuracy_check(a, b) for a, b in zip(logits, reference["logits"])
             ]
             if "prefill_logits" in reference:
-                accuracy[0] = tensor_accuracy(
-                    prefill_logits,
-                    reference["prefill_logits"],
-                    atol=args.logits_atol,
-                    rtol=args.logits_rtol,
+                accuracy[0] = accuracy_check(
+                    prefill_logits, reference["prefill_logits"]
                 )
             report["logits_scope"] = {
                 "prefill": (
@@ -290,8 +317,15 @@ def main():
                 "decode": "every_requested_step",
             }
             report["logits_comparison"] = accuracy
-            report["logits_validation"] = summarize_accuracy(
-                accuracy, args.steps + 1, atol=args.logits_atol, rtol=args.logits_rtol
+            report["logits_validation"] = (
+                summarize_bf16_accuracy(accuracy, args.steps + 1)
+                if args.logits_policy == "bf16-v2"
+                else summarize_accuracy(
+                    accuracy,
+                    args.steps + 1,
+                    atol=args.logits_atol,
+                    rtol=args.logits_rtol,
+                )
             )
             if layers and reference.get("layers"):
                 report["layer_comparison"] = {

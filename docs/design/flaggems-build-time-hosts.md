@@ -641,13 +641,55 @@ decode inputs, model dtype, attention implementation and math settings. The
 current Qwen3 workload is BF16; switching both sides to FP32 is not an accepted
 solution. Float32 intermediates already used by the vendor model remain valid.
 
-Every logit must satisfy `abs(actual - reference) <= 1e-3 + 1e-3 * abs(reference)`.
-Check every prefill position and all 512 decode steps, not only top-1 tokens, cosine similarity
-or aggregate relative L2. The checker evaluates detached CPU tensors outside all
-timed forwards, rejects nonfinite values and mismatched dtypes/shapes, and records
-per-step violations. This precision gate remains unpassed by the #839 BF16 wheel;
-bitwise agreement with the original FlagGems path does not establish agreement
-with vendor Torch.
+The versioned `bf16-v2` gate compares raw logits at every prefill position and
+all 512 teacher-forced decode steps. For each token, let `s` be the reference
+logit RMS, floored at `1e-6`. Evaluate these independent limits:
+
+| Scope | Metric | Limit |
+| --- | --- | ---: |
+| Prefill and decode separately | `norm(actual-reference) / norm(reference)` | 2% |
+| Every token | `RMS(actual-reference) / s` | 10% |
+| Every token | `argmax(actual) == argmax(reference)` | Required |
+| Every token | `quantile(abs(actual-reference), 0.99) / s` | 25% |
+| Every token | `max(abs(actual-reference)) / s` | 50% |
+
+Top-1 equality is required independently at every position. Equal maxima use
+Torch argmax's first-index rule; a near tie never exempts a changed token. The
+phase denominator uses the same RMS floor. Shape, BF16 dtype, finite
+values, reference identity and unchanged vendor math settings are mandatory.
+The checker uses detached CPU FP64 tensors outside timed forwards. It neither
+centers logits nor changes production precision. A bad position fails even if
+the phase average passes; the P99 and maximum guards prevent a small set of
+large errors from hiding in a vector norm. Scores retain all per-token rows,
+failed steps and separate failed phases.
+
+These are fixed engineering limits for the measured BF16 cohort, calibrated
+before the FlagGems retirement retests. Replacing vendor BF16 `bmm` with a loop
+of vendor `mm` calls, with identical inputs and math flags, produces decode
+relative L2 1.4195%, a worst-token relative L2 of 7.6422%, a worst-token P99
+scaled error of 16.8850%, and a maximum scaled error of 33.0197%. The fixed
+numerical limits round above that vendor-only envelope. The sliced-BMM
+variant still fails the separately required exact top-1 criterion: it calibrates
+numerical scale, and is not an accepted substitute for the fixed vendor
+reference. Contiguous and batch-one vendor
+`mm` comparisons remain bitwise equal. This calibration does not establish a
+universal model-quality guarantee; other dtypes/cohorts require their own
+versioned validation. Thresholds are not selected per operator or expanded
+after looking at FlagGems candidates.
+
+Use `--logits-policy bf16-v2 --check-logits` for this gate. The original
+elementwise `abs(actual-reference) <= 1e-3 + 1e-3*abs(reference)` gate remains
+available as `--logits-policy elementwise`, the command-line default, to
+reproduce historical records. The original #839 wheel's failure under that
+stricter gate remains recorded separately. Changing the policy does not mark
+an old run accepted; rerun each candidate and its final combined configuration.
+
+[Issue #842](https://github.com/flagos-ai/Torch-FL/issues/842) records the fresh
+independent reassessment under `bf16-v2`. Every one of the six restorations
+changes top-1 at 8–13 of the 572 checked positions (60 prefill, 512 decode),
+so all six measured dtype-scoped vendor exceptions remain. Four restorations
+pass the numerical guards and fail token identity; `mm` and `rsqrt` also
+exceed the prefill phase limit. No passing restoration is claimed.
 
 Run the two environments sequentially on an otherwise idle accelerator. Use the
 same `--model`, `--prompt`, CPU affinity and visible physical device in both.
@@ -667,7 +709,8 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 python benchmarks/host_compiler/qwen_strict_eage
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 python benchmarks/host_compiler/qwen_strict_eager.py \
   --model /path/to/Qwen3-0.6B --device flagos:0 --dtype bfloat16 --mode plain \
   --steps 512 --rounds 3 --skip-sampling --prompt "The held-out prompt" \
-  --reference /path/to/vendor.pt --check-logits --output /path/to/candidate.json
+  --reference /path/to/vendor.pt --logits-policy bf16-v2 --check-logits \
+  --output /path/to/candidate.json
 ```
 
 References include checkpoint/config hashes, prompt tokens, dtype, math settings
@@ -676,7 +719,8 @@ incompatible settings and incomplete traversals before running model forwards.
 Regenerate old references with this harness. `--reference` without `--check-logits`
 still accepts legacy artifacts for input-oracle diagnostics and reports numerical
 differences without making an acceptance claim. `--logits-atol` and `--logits-rtol`
-support other diagnostic tolerances; the project acceptance values remain 1e-3.
+only configure the historical `elementwise` policy. The fixed `bf16-v2` policy
+rejects custom elementwise tolerances and uses the limits above.
 The wrapper retains its no-capture audit even when logit acceptance fails.
 
 The [BF16 evidence record in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840)
