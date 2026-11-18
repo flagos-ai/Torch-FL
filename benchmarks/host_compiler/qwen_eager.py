@@ -25,6 +25,7 @@ import argparse
 from collections import Counter
 import json
 import importlib.util
+import os
 from pathlib import Path
 import statistics
 import sys
@@ -34,10 +35,13 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from logits_validation import (
+    bf16_vector_accuracy,
+    bf16_vector_policy,
     LogitsValidationFailed,
     file_sha256,
     math_settings,
     summarize_accuracy,
+    summarize_bf16_accuracy,
     tensor_accuracy,
     validate_reference,
     validate_tolerances,
@@ -74,7 +78,9 @@ def vendor_audit():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--device", required=True, choices=["cuda:0", "flagos:0"])
+    parser.add_argument(
+        "--device", required=True, choices=["cuda:0", "npu:0", "flagos:0"]
+    )
     parser.add_argument(
         "--mode", choices=["plain", "collect", "compile", "load"], default="plain"
     )
@@ -91,9 +97,15 @@ def main():
     parser.add_argument("--logits-atol", type=float, default=1e-3)
     parser.add_argument("--logits-rtol", type=float, default=1e-3)
     parser.add_argument(
+        "--logits-policy",
+        choices=["elementwise", "bf16-v2"],
+        default="elementwise",
+        help="Select strict elementwise or fixed per-token BF16 vector acceptance",
+    )
+    parser.add_argument(
         "--check-logits",
         action="store_true",
-        help="Fail after reporting if any logit misses tolerance",
+        help="Fail after reporting if the selected logit acceptance policy fails",
     )
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--progress-every", type=int, default=0)
@@ -113,6 +125,11 @@ def main():
         parser.error("steps must be positive and rounds must be nonnegative")
     if args.check_logits and args.reference is None:
         parser.error("--check-logits requires a vendor --reference")
+    if args.logits_policy == "bf16-v2":
+        if args.dtype != "bfloat16":
+            parser.error("bf16-v2 requires the vendor bfloat16 workload")
+        if (args.logits_atol, args.logits_rtol) != (1e-3, 1e-3):
+            parser.error("bf16-v2 has fixed limits; atol/rtol apply to elementwise")
     try:
         validate_tolerances(args.logits_atol, args.logits_rtol)
     except ValueError as error:
@@ -130,6 +147,22 @@ def main():
         "execution": "flaggems-model-host" if args.model_host else "eager",
         "steps": args.steps,
         "rounds": args.rounds,
+        "routing_environment": {
+            name: value
+            for name, value in sorted(os.environ.items())
+            if name.startswith("FLAGOS_OP_")
+            or name
+            in {"FLAGOS_FORCE_BACKEND", "FLAGOS_BACKEND_CONFIG", "FLAGOS_ALIAS_CUDA"}
+        },
+        "logits_policy": (
+            bf16_vector_policy()
+            if args.logits_policy == "bf16-v2"
+            else {
+                "name": "elementwise",
+                "atol": args.logits_atol,
+                "rtol": args.logits_rtol,
+            }
+        ),
     }
     if args.device.startswith("flagos"):
         if args.hosts:
@@ -157,6 +190,20 @@ def main():
             hosts = loader.Hosts(args.hosts)
             hosts.activate()
             report["source_host_load_ms"] = (time.perf_counter() - started) * 1000
+    elif args.device == "npu:0":
+        import torch_npu
+
+        synchronize = torch.npu.synchronize
+        report["torch_npu"] = str(torch_npu.__version__)
+        report["npu_math_settings"] = {
+            "matmul_allow_hf32": torch.npu.matmul.allow_hf32,
+            "conv_allow_hf32": torch.npu.conv.allow_hf32,
+            "allow_internal_format": getattr(
+                torch.npu.config, "allow_internal_format", None
+            ),
+        }
+        if report["npu_math_settings"]["matmul_allow_hf32"]:
+            raise RuntimeError("paired native-host acceptance requires HF32 disabled")
     else:
         synchronize = torch.cuda.synchronize
 
@@ -222,6 +269,23 @@ def main():
     layers = {}
     hooks = []
     if args.snapshot_layers:
+        report["parameter_layouts"] = {}
+        for name, parameter in model.named_parameters():
+            if (
+                name.startswith("model.layers.0.")
+                or name == "model.embed_tokens.weight"
+            ):
+                layout = {
+                    "shape": list(parameter.shape),
+                    "stride": list(parameter.stride()),
+                    "dtype": str(parameter.dtype),
+                }
+                if args.device == "npu:0":
+                    get_format = getattr(torch_npu, "get_npu_format", None)
+                    layout["npu_format"] = (
+                        int(get_format(parameter)) if get_format is not None else None
+                    )
+                report["parameter_layouts"][name] = layout
 
         def save(name):
             def hook(module, inputs, output):
@@ -270,16 +334,20 @@ def main():
             report["reference_comparison"] = [
                 compare(a, b) for a, b in zip(logits, reference["logits"])
             ]
+
+            def accuracy_check(actual, expected):
+                if args.logits_policy == "bf16-v2":
+                    return bf16_vector_accuracy(actual, expected)
+                return tensor_accuracy(
+                    actual, expected, atol=args.logits_atol, rtol=args.logits_rtol
+                )
+
             accuracy = [
-                tensor_accuracy(a, b, atol=args.logits_atol, rtol=args.logits_rtol)
-                for a, b in zip(logits, reference["logits"])
+                accuracy_check(a, b) for a, b in zip(logits, reference["logits"])
             ]
             if "prefill_logits" in reference:
-                accuracy[0] = tensor_accuracy(
-                    prefill_logits,
-                    reference["prefill_logits"],
-                    atol=args.logits_atol,
-                    rtol=args.logits_rtol,
+                accuracy[0] = accuracy_check(
+                    prefill_logits, reference["prefill_logits"]
                 )
             report["logits_scope"] = {
                 "prefill": (
@@ -290,8 +358,15 @@ def main():
                 "decode": "every_requested_step",
             }
             report["logits_comparison"] = accuracy
-            report["logits_validation"] = summarize_accuracy(
-                accuracy, args.steps + 1, atol=args.logits_atol, rtol=args.logits_rtol
+            report["logits_validation"] = (
+                summarize_bf16_accuracy(accuracy, args.steps + 1)
+                if args.logits_policy == "bf16-v2"
+                else summarize_accuracy(
+                    accuracy,
+                    args.steps + 1,
+                    atol=args.logits_atol,
+                    rtol=args.logits_rtol,
+                )
             )
             if layers and reference.get("layers"):
                 report["layer_comparison"] = {
@@ -407,7 +482,7 @@ def main():
     producer = {
         "backend": (
             "vendor"
-            if args.device == "cuda:0"
+            if args.device in {"cuda:0", "npu:0"}
             and "torch_fl" not in sys.modules
             and "flag_gems" not in sys.modules
             else "torch_fl"

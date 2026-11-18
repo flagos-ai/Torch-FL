@@ -14,6 +14,7 @@ import importlib.metadata
 import inspect
 import json
 from pathlib import Path
+import symtable
 import types
 import textwrap
 
@@ -132,6 +133,139 @@ def metadata_regions(definition):
             ),
         ]
         regions.append((function, {"name": name, "inputs": inputs, "outputs": outputs}))
+    return regions
+
+
+def expression_regions(definition):
+    """Compile iterator consumers intact, including lazy filters and exceptions."""
+    if not isinstance(definition, ast.FunctionDef):
+        return []
+    locals_ = {
+        node.id
+        for node in ast.walk(definition)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    } | {a.arg for a in ast.walk(definition.args) if isinstance(a, ast.arg)}
+    regions = []
+    for node in ast.walk(definition):
+        if not isinstance(node, ast.Call):
+            continue
+        generator = any(isinstance(a, ast.GeneratorExp) for a in node.args)
+        materialized = (
+            ast.unparse(node.func) == "list"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Call)
+            and ast.unparse(node.args[0].func) == "itertools.accumulate"
+        )
+        if not (generator or materialized) or any(
+            isinstance(n, (ast.Lambda, ast.NamedExpr, ast.Await, ast.Yield))
+            or isinstance(n, ast.comprehension)
+            and n.is_async
+            for n in ast.walk(node)
+        ):
+            continue
+        # Python's symbol table respects comprehension scopes, including the
+        # first iterable being evaluated outside the generator's local scope.
+        table = symtable.symtable(
+            "def _expression():\n    return " + ast.unparse(node), "<host>", "exec"
+        ).get_children()[0]
+
+        def referenced(scope):
+            result = {
+                s.get_name()
+                for s in scope.get_symbols()
+                if s.is_referenced() and s.is_global()
+            }
+            for child in scope.get_children():
+                result.update(referenced(child))
+            return result
+
+        inputs = sorted(referenced(table) & locals_)
+        digest = hashlib.sha256(
+            (definition.name + "\n" + ast.dump(node, include_attributes=False)).encode()
+        ).hexdigest()[:16]
+        name = "_host_expression_" + digest
+        helper = ast.parse(f"def {name}({', '.join(inputs)}): pass").body[0]
+        helper.body = [ast.Return(copy.deepcopy(node))]
+        regions.append(
+            (
+                helper,
+                {"name": name, "inputs": inputs, "outputs": [], "kind": "expression"},
+            )
+        )
+    return regions
+
+
+def object_loop_regions(definition):
+    """Export terminal straight-line loops whose local bindings do not escape."""
+    if not isinstance(definition, ast.FunctionDef):
+        return []
+    locals_ = {
+        n.id
+        for n in ast.walk(definition)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+    } | {a.arg for a in ast.walk(definition.args) if isinstance(a, ast.arg)}
+    regions = []
+    for index, node in enumerate(definition.body):
+        if (
+            not isinstance(node, ast.For)
+            or node.orelse
+            or not all(isinstance(s, (ast.Assign, ast.Expr)) for s in node.body)
+        ):
+            continue
+        if any(
+            isinstance(n, (ast.NamedExpr, ast.Lambda, ast.Yield, ast.Await))
+            or isinstance(n, ast.Call)
+            and ast.unparse(n.func) in {"locals", "globals", "vars", "eval", "exec"}
+            for n in ast.walk(node)
+        ):
+            continue
+        written = {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+        inputs = {
+            n.id for n in ast.walk(node.iter) if isinstance(n, ast.Name)
+        } & locals_
+        for statement in node.body:
+            value = statement.value
+            inputs.update(
+                n.id
+                for n in ast.walk(value)
+                if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Load)
+                and n.id in locals_
+                and n.id not in written
+            )
+            if isinstance(statement, ast.Assign):
+                if not all(isinstance(t, ast.Name) for t in statement.targets):
+                    break
+                written.update(t.id for t in statement.targets)
+        else:
+            later = {
+                n.id
+                for statement in definition.body[index + 1 :]
+                for n in ast.walk(statement)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+            }
+            if written & later:
+                continue
+            inputs = sorted(inputs)
+            digest = hashlib.sha256(
+                (
+                    definition.name + "\n" + ast.dump(node, include_attributes=False)
+                ).encode()
+            ).hexdigest()[:16]
+            name = "_host_object_loop_" + digest
+            helper = ast.parse(f"def {name}({', '.join(inputs)}): pass").body[0]
+            helper.body = [copy.deepcopy(node)]
+            regions.append(
+                (
+                    helper,
+                    {
+                        "name": name,
+                        "inputs": inputs,
+                        "outputs": [],
+                        "kind": "object_loop",
+                    },
+                )
+            )
     return regions
 
 
@@ -400,7 +534,10 @@ def source_module(module, package, modules=()):
             or (
                 isinstance(value, type)
                 and value.__module__ == module.__name__
-                and module.__name__.startswith(("flag_gems", "hopper"))
+                and (
+                    module.__name__.startswith(("flag_gems", "hopper"))
+                    or "flag_gems" in path.resolve().parts
+                )
                 and not issubclass(value, (Enum, tuple))
             )
         ):
@@ -461,6 +598,8 @@ def source_module(module, package, modules=()):
             metadata_regions(definition)
             + closure_regions(definition)
             + continuation_regions(definition)
+            + expression_regions(definition)
+            + object_loop_regions(definition)
         )
     ]
     definitions.extend(function for function, _ in regions)

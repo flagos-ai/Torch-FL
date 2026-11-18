@@ -17,6 +17,58 @@ RUNTIME_FLAG = True
 INITIALIZED_WIDTH = int("11")
 
 
+class StridedBuffer:
+    """Metadata interface of the published wrapper, without a device kernel."""
+
+    def __init__(self, base, shape=None, strides=None, dtype=None, offset=0):
+        self.base = base
+        self.shape = tuple(base.shape if shape is None else shape)
+        self.strides = tuple(base.stride() if strides is None else strides)
+        self.offset = offset
+
+    def numel(self):
+        import math
+
+        return math.prod(self.shape)
+
+    def stride(self):
+        return self.strides
+
+    def data_ptr(self):
+        return self.base.data_ptr() + self.offset * self.base.element_size()
+
+
+StridedBuffer.__module__ = "flag_gems.utils.tensor_wrapper"
+
+
+def tensor_buffer_metadata(value, offset):
+    view = StridedBuffer(value, value.shape, value.stride(), offset=offset)
+    return view.numel(), list(view.stride()), view.data_ptr()
+
+
+def indexed_metadata_sort(values, lookup, reverse):
+    return sorted(values, key=lambda value: lookup[value], reverse=reverse)
+
+
+def compress_metadata_dimensions(value, dims):
+    rank = value.ndim
+    strides = value.stride()
+    batch = [axis for axis in range(rank) if axis not in dims]
+    reduction = sorted(dims, key=lambda axis: strides[axis], reverse=True)
+    return value.permute(batch + reduction).contiguous()
+
+
+def filtered_metadata_range(start, stop, step, excluded):
+    axis = "outer binding"
+    selected = [
+        axis
+        for axis in range(start, stop, step)
+        if axis not in excluded
+        if axis % 2 == 1
+    ]
+    return selected, axis
+
+
 def set_runtime_flag(value):
     global RUNTIME_FLAG
     RUNTIME_FLAG = value
@@ -216,6 +268,7 @@ def compiled_hosts(tmp_path_factory):
     frontend = importlib.import_module(package + ".frontend")
     schema = torch.library.Library("flagos_script_host", "FRAGMENT")
     schema.define("global_int(int slot) -> int")
+    schema.define("data_ptr(Tensor value) -> int")
     pieces = [ir.HEADER]
     for program in PROGRAMS:
         graph = torch.jit.script(program()).forward.graph.copy()
@@ -271,6 +324,26 @@ def compiled_hosts(tmp_path_factory):
             optional_comparison_effects,
             "def f(left: Optional[int], right: int) -> Tuple[bool, List[int]]: pass",
         ),
+        (
+            "TensorBufferMetadata",
+            tensor_buffer_metadata,
+            "def f(value: torch.Tensor, offset: int) -> Tuple[int, List[int], int]: pass",
+        ),
+        (
+            "IndexedMetadataSort",
+            indexed_metadata_sort,
+            "def f(values: List[int], lookup: List[int], reverse: bool) -> List[int]: pass",
+        ),
+        (
+            "CompressMetadataDimensions",
+            compress_metadata_dimensions,
+            "def f(value: torch.Tensor, dims: List[int]) -> torch.Tensor: pass",
+        ),
+        (
+            "FilteredMetadataRange",
+            filtered_metadata_range,
+            "def f(start: int, stop: int, step: int, excluded: List[int]) -> Tuple[List[int], str]: pass",
+        ),
     ):
         recorder = SimpleNamespace(
             register_global=lambda module, name, kind: 0,
@@ -291,6 +364,9 @@ def compiled_hosts(tmp_path_factory):
         generated_names.append(name)
     pieces.append("""
 #include <torch/csrc/jit/python/pybind_utils.h>
+namespace pybind11::detail {
+template <> struct type_caster<HostIntList> : list_caster<HostIntList, int64_t> {};
+}
 template <typename R, typename... A>
 void BindMetadataHost(py::module_& module, const char* name, R (*function)(A...)) {
   module.def(name, [function](A... args) {
@@ -346,6 +422,63 @@ def test_shape_aliases_and_fresh_copies(compiled_hosts, program):
     assert actual.shape == expected.shape
     assert actual.data_ptr() == value.data_ptr()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+@pytest.mark.parametrize("offset", [0, 1, -1])
+def test_tensor_backed_buffer_keeps_relative_pointer_and_metadata(
+    compiled_hosts, transpose, offset
+):
+    base = torch.arange(120.0).reshape(10, 12)
+    value = base[1:5, 2:8]
+    if transpose:
+        value = value.t()
+    actual = compiled_hosts.TensorBufferMetadata(value, offset)
+    expected = tensor_buffer_metadata(value, offset)
+    assert actual == expected
+    assert actual[2] == value.data_ptr() + offset * value.element_size()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("values", [[], [3, 1, 2, 0], [0, -1, 1, 2], [2, 2, 0]])
+def test_indexed_metadata_sort_preserves_ties_and_input(
+    compiled_hosts, values, reverse
+):
+    lookup = [2, 1, 2, 1]
+    original = values.copy()
+    actual = compiled_hosts.IndexedMetadataSort(values, lookup, reverse)
+    assert actual == indexed_metadata_sort(values, lookup, reverse)
+    actual.append(17)
+    assert values == original
+
+
+@pytest.mark.parametrize("dims", [[2], [1, 2], [0, 2], [2, 0]])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_dimension_compression_keeps_values_and_stride_order(
+    compiled_hosts, dims, transpose
+):
+    value = torch.arange(3 * 5 * 7).reshape(3, 5, 7)
+    if transpose:
+        value = value.transpose(0, 2)
+    actual = compiled_hosts.CompressMetadataDimensions(value, dims)
+    expected = compress_metadata_dimensions(value, dims)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.stride() == expected.stride()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [(0, 7, 1, [1, 4]), (7, -4, -2, [3]), (0, 0, 1, []), (2, 9, 2, [4])],
+)
+def test_filtered_metadata_range_keeps_scope_and_filters(compiled_hosts, args):
+    assert compiled_hosts.FilteredMetadataRange(*args) == filtered_metadata_range(*args)
+
+
+def test_filtered_metadata_range_preserves_zero_step_error(compiled_hosts):
+    with pytest.raises(ValueError):
+        filtered_metadata_range(0, 7, 0, [])
+    with pytest.raises(RuntimeError, match="zero"):
+        compiled_hosts.FilteredMetadataRange(0, 7, 0, [])
 
 
 def test_tuple_runtime_indices_and_bounds(compiled_hosts):

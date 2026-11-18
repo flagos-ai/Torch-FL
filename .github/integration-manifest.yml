@@ -815,7 +815,7 @@ steps:
     name: Native FlagGems host conformance
     platforms: [ascend]
     vendor_only: true
-    min_passed: 27
+    min_passed: 94
     command: >-
       python -m pytest tests/integration/ops/test_native_ascend_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"

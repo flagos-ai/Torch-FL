@@ -25,9 +25,18 @@ def load_build_policy(source_root):
 
 
 def source_policy_for_build(build_config, source_root):
-    if not getattr(build_config, "NATIVE_VENDOR", False):
+    native_vendor = getattr(build_config, "NATIVE_VENDOR", False)
+    if not native_vendor and not getattr(build_config, "NATIVE_HOSTS", False):
         return None
-    return load_build_policy(source_root).source_policy(build_config.ACCELERATOR)
+    try:
+        policy = load_build_policy(source_root).source_policy(build_config.ACCELERATOR)
+    except ValueError:
+        if native_vendor:
+            raise
+        return None
+    if policy["requires_native_vendor"] and not native_vendor:
+        return None
+    return policy if policy["entries"] else None
 
 
 def digest(path):
