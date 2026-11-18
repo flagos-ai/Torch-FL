@@ -185,7 +185,7 @@ def test_effective_route_does_not_translate_an_empty_conf_value(tmp_path, monkey
 def test_base_route_probes_do_not_match_configured_dtype_clauses(monkeypatch):
     """A base-route assertion must stay valid for every shipped precision policy."""
     monkeypatch.setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
-    torch = pytest.importorskip("torch")
+    import torch
     from torch.utils._pytree import tree_leaves
 
     from runtime_probe import _CHILD_SRC

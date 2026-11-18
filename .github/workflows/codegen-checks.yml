@@ -94,6 +94,13 @@ jobs:
           tests/unit/test_native_vendor_cohort.py tests/unit/test_kernel_provenance.py
           tests/unit/test_configured_dtype_routes.py -q --tb=short
 
+      - name: Verify runtime probe precision boundaries
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+        run: >-
+          python3 -m pytest tests/unit/test_runtime_conformance_report.py
+          -q -rA --tb=short
+
       - name: Run generator --check modes
         run: |
           set -euo pipefail
