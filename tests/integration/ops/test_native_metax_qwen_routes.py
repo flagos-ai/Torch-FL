@@ -159,3 +159,36 @@ def test_float64_matmul_rejects_the_explicit_cpu_escape():
         RuntimeError, match="CPU fallback: aten::mm .*host matmul escape"
     ):
         torch.mm(value, value)
+
+
+@pytest.mark.parametrize("cast", [False, True])
+@torch.no_grad()
+def test_strided_device_copy_stays_on_the_published_gpu_source(cast):
+    reference = torch.arange(17 * 38, dtype=torch.float32).reshape(17, 38) / 64
+    source = reference.to("flagos:0")[:, ::2]
+    dtype = torch.bfloat16 if cast else torch.float32
+    storage = torch.empty(17, 38, dtype=dtype, device="flagos:0")
+    output = storage[:, ::2]
+    result = output.copy_(source)
+    assert result.data_ptr() == output.data_ptr()
+    assert result.stride() == output.stride()
+    torch_fl.flagos.synchronize()
+    torch.testing.assert_close(
+        result.cpu(), reference[:, ::2].to(dtype), atol=0, rtol=0
+    )
+
+
+@torch.no_grad()
+def test_unsupported_device_copy_rejects_its_explicit_cpu_escape():
+    source = torch.tensor([1 + 2j, 3 + 4j], dtype=torch.complex64).to("flagos:0")
+    output = torch.empty(2, dtype=torch.float32, device="flagos:0")
+    with pytest.raises(RuntimeError, match="CPU fallback: device copy/cast"):
+        output.copy_(source)
+
+
+@torch.no_grad()
+def test_unsupported_device_gather_rejects_its_explicit_cpu_escape():
+    source = torch.tensor([[1 + 2j, 3 + 4j], [5 + 6j, 7 + 8j]], dtype=torch.complex64)
+    value = source.to("flagos:0").t()
+    with pytest.raises(RuntimeError, match="CPU fallback: device contiguous/clone"):
+        value.contiguous()

@@ -263,6 +263,8 @@ at::Tensor& WrapperIndexPut_(
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate) {
+  TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::index_put_");
   at::Tensor self_cpu = self.cpu();
   at::Tensor values_cpu = values.cpu();
   c10::List<::std::optional<at::Tensor>> indices_cpu;
@@ -369,6 +371,8 @@ at::Tensor FlagosWrapperConvolutionOverrideable(
     bool transposed,
     c10::SymIntArrayRef output_padding,
     c10::SymInt groups) {
+  TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::convolution_overrideable");
   auto out = at::convolution_symint(
       input.cpu(),
       weight.cpu(),
@@ -396,6 +400,8 @@ FlagosWrapperConvolutionBackwardOverrideable(
     c10::SymIntArrayRef output_padding,
     c10::SymInt groups,
     ::std::array<bool, 3> output_mask) {
+  TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::convolution_backward_overrideable");
   // convolution_backward wants the forward bias *sizes*, not the bias, and only
   // to shape grad_bias -- which is a plain sum over the non-channel dims, so the
   // channel count is all it needs.

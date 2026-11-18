@@ -215,6 +215,9 @@ For FP32 outer products, original published pointwise kernels preserve the
 caller's TF32 rounding policy; the resolved adaptation is recorded in the wheel
 manifest. The installed-wheel cohort covers these routes, TF32 contexts,
 strided outputs and strict fallback rejection.
+Native MetaX device copies and casts use the existing published FlagGems copy
+source. Strict hosts reject uncovered device-copy, gather and explicit numerical
+host escapes before transferring their operands to CPU.
 Full-model accuracy and the 80% vendor-performance gate remain tracked in
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
 does not establish those results. NVIDIA's existing precision policy is unchanged.
