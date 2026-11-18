@@ -453,7 +453,7 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
             assert verify_at < install_at, path
 
 
-@pytest.fixture(params=["nvidia", "ascend"])
+@pytest.fixture(params=["nvidia", "metax", "ascend"])
 def native_wheel(tmp_path, manifest, monkeypatch, request):
     spec = importlib.util.spec_from_file_location(
         "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"

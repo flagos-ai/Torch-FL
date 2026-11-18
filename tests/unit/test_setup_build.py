@@ -14,8 +14,10 @@
 
 import importlib.metadata
 import json
+import os
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -328,7 +330,7 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     assert generated["NATIVE_HOSTS"] is False
 
 
-@pytest.mark.parametrize("vendor", ["nvidia", "ascend"])
+@pytest.mark.parametrize("vendor", ["nvidia", "metax", "ascend"])
 def test_native_host_build_uses_staged_package(
     monkeypatch, tmp_path, clean_kernel_env, vendor
 ):
@@ -343,12 +345,12 @@ def test_native_host_build_uses_staged_package(
     namespace, kwargs = _load_setup(monkeypatch)
     globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
     monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", vendor)
-    if vendor == "ascend":
+    if vendor in {"metax", "ascend"}:
         monkeypatch.setitem(
             globals_,
             "_setup_cuda_build_env",
             lambda env: pytest.fail(
-                "Ascend native hosts must not discover a CUDA toolkit"
+                f"{vendor} native hosts must not discover a CUDA toolkit"
             ),
         )
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
@@ -370,6 +372,153 @@ def test_native_host_build_uses_staged_package(
     assert options["env"]["_TORCH_FL_BUILDING_NATIVE_HOST"] == "1"
     assert options["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert options["env"]["PYTHONPATH"].startswith(command.build_lib)
+
+
+def test_native_metax_rejects_staged_vendor_libtorch(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    for name in (
+        "FLAGOS_BUILD_BOXING",
+        "FLAGOS_BUILD_FLAGGEMS_CPP",
+        "FLAGOS_BUILD_TILEOPS",
+    ):
+        monkeypatch.setenv(name, "0")
+    namespace, kwargs = _load_setup(monkeypatch)
+    globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "metax")
+    command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
+    command.ensure_finalized()
+    command.build_lib = str(tmp_path / "staging")
+    bundle = Path(command.build_lib) / "torch_fl/lib_metax"
+    bundle.mkdir(parents=True)
+    (bundle / "libtorch_cuda.so").write_bytes(b"previous vendor build")
+    monkeypatch.setattr(
+        subprocess,
+        "check_call",
+        lambda *args, **kwargs: pytest.fail(
+            "a dirty native build must not import Torch"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="clean staging tree"):
+        command._build_native_hosts()
+
+
+@pytest.mark.parametrize("vendor", ["metax", "ascend"])
+@pytest.mark.parametrize("different_owner", [False, True])
+def test_native_host_ci_build_excludes_the_default_build(
+    tmp_path, clean_kernel_env, vendor, different_owner
+):
+    if shutil.which("git") is None or shutil.which("bash") is None:
+        pytest.skip("the CI build script requires Git and Bash")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    helper = workspace / ".github/scripts/lib/set_env_common.sh"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes((ROOT / ".github/scripts/lib/set_env_common.sh").read_bytes())
+    (workspace / "setup.py").write_text("# tracked source\n")
+    for arguments in (
+        ["init", "-q"],
+        ["add", "."],
+        [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ):
+        subprocess.run(
+            ["git", "-C", str(workspace), *arguments],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    for relative in (
+        "torch_fl/lib_metax/libtorch_cuda.so",
+        "build/stale.so",
+        "dist/default.whl",
+    ):
+        path = workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("previous default build\n")
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    python = tools / "python"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, zipfile\n"
+        "from pathlib import Path\n"
+        "if sys.argv[1] == 'setup.py':\n"
+        "    root = Path.cwd()\n"
+        "    assert (root / 'setup.py').read_text() == '# tracked source\\n'\n"
+        "    assert not (root / 'build').exists(), 'inherited build cache'\n"
+        "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
+        "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
+        "    assert os.environ['FLAGOS_BUILD_BOXING'] == '0'\n"
+        "    Path(os.environ['BUILD_RECEIPT']).write_text(str(root))\n"
+        "    output = Path(sys.argv[sys.argv.index('--dist-dir') + 1])\n"
+        "    with zipfile.ZipFile(output / 'native.whl', 'w') as wheel:\n"
+        "        wheel.writestr('torch_fl/_build_config.py', 'NATIVE_HOSTS = True\\n')\n"
+        "        wheel.writestr('torch_fl/compatibility.json', '{}')\n"
+        "elif sys.argv[1] == '-m' or sys.argv[1].endswith('torch-fl-preflight'):\n"
+        "    pass\n"
+        "else:\n"
+        "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+    )
+    python.chmod(0o755)
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    receipt = tmp_path / "receipt"
+    git_config = tmp_path / "gitconfig"
+    git_config.write_text("")
+    git_environment = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": str(git_config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1" if different_owner else "0",
+    }
+    ownership_check = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+        env=git_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if different_owner:
+        if ownership_check.returncode == 0:
+            pytest.skip("Git does not support synthetic ownership checks")
+        assert ownership_check.returncode != 0
+        assert "dubious ownership" in ownership_check.stderr
+    else:
+        assert ownership_check.returncode == 0
+    result = subprocess.run(
+        ["bash", str(ROOT / ".github/scripts/build_native_hosts_ci.sh")],
+        env={
+            **git_environment,
+            "GITHUB_WORKSPACE": str(workspace),
+            "RUNNER_TEMP": str(runner_temp),
+            "FLAGOS_ACCELERATOR": vendor,
+            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+            "BUILD_RECEIPT": str(receipt),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git_config.read_text() == ""
+    assert Path(receipt.read_text()).parent == runner_temp
+    assert (workspace / "dist/default.whl").read_text() == "previous default build\n"
+    assert (workspace / "torch_fl/lib_metax/libtorch_cuda.so").is_file()
+    evidence = runner_temp / "torch-fl-native-host-evidence"
+    assert (evidence / "native.whl").is_file()
+    assert (
+        evidence / "torch_fl/_build_config.py"
+    ).read_text() == "NATIVE_HOSTS = True\n"
 
 
 def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
