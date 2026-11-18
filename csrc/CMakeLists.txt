@@ -460,6 +460,12 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 if(FLAGOS_BUILD_FLAGGEMS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_PYTHON)
 endif()
+if(FLAGOS_NATIVE_HOSTS)
+  if(NOT FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_BOXING OR FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_TILEOPS)
+    message(FATAL_ERROR "Native hosts require FlagGems with boxing, FlagGems C++ and TileOPs disabled")
+  endif()
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_HOSTS=1)
+endif()
 
 # Tells register.cc that the generated CUDA boxing kernels are part of this
 # wheel, so the CUDA-ABI platforms (cuda, metax, dcu, ppu, tsingmicro) may claim

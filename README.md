@@ -206,8 +206,13 @@ For the MetaX pilot, use the same native-host build switches with
 `FLAGOS_ACCELERATOR=metax` and `MACA_PATH` pointing at the installed MACA SDK.
 The adapter submits the original published MetaX FlagGems kernels directly through
 MACA, with boxing disabled. MetaX CI builds a separate opt-in wheel and retains
-its generated coverage, preflight and launch-conformance evidence. Full-model
-accuracy and the 80% vendor-performance gate remain tracked in
+its generated coverage, preflight and launch-conformance evidence. The native
+wheel selects generated `backends_metax_native_host.conf` from its build record
+and compiles its additional registrations; the ordinary wheel keeps its own
+measured routing. Native routes align the published hosts' device identity and
+use the existing contracted-axis padding for small-K bmm, including out variants.
+The installed-wheel cohort covers these routes and strict fallback rejection.
+Full-model accuracy and the 80% vendor-performance gate remain tracked in
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
 does not establish those results. NVIDIA's existing precision policy is unchanged.
 

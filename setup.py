@@ -775,6 +775,8 @@ def build_deps():
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     for switch in KERNEL_SWITCHES:
         cmake_args.append(f"-D{switch}={'ON' if kernels[switch] else 'OFF'}")
+    native_hosts = _env_module().flag("FLAGOS_BUILD_NATIVE_HOST")
+    cmake_args.append(f"-DFLAGOS_NATIVE_HOSTS={'ON' if native_hosts else 'OFF'}")
 
     build_env = os.environ.copy()
     build_jobs = _cmake_build_jobs()

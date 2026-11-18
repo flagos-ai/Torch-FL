@@ -77,6 +77,7 @@ option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via P
 option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
+option(FLAGOS_NATIVE_HOSTS "Enable compiled original FlagGems host routing" OFF)
 
 # Pin one kernel build switch for the accelerator selected below.
 #

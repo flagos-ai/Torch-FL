@@ -410,6 +410,18 @@ nor the legacy `cuda` spelling of it.
   wrong, fix the route.
 - The only place a `boxing` key may appear is the opt-in day-0 file below.
 
+### Native-host routing confs
+
+The experimental MetaX native-host wheel selects generated
+`backends_metax_native_host.conf` when its build record has `NATIVE_HOSTS=True`.
+`gen_vendor_confs.py` owns this variant and `codegen_boxing_flaggems_register.py`
+generates its additional claims. Compile those claims only with
+`FLAGOS_NATIVE_HOSTS`; setup.py derives that CMake feature from
+`FLAGOS_BUILD_NATIVE_HOST`. Ordinary vendor/default and day-0 boxing coverage
+remain independent. A native-only route is launch evidence, not a claim of
+full-model precision or performance. Native activation must retain strict CPU
+fallback rejection, and a missing generated native conf is an import error.
+
 ### Day-0 boxing confs
 
 `torch_fl/configs/backends_<platform>_boxing.conf` is a **temporary**,

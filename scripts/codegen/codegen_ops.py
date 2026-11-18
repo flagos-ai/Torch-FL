@@ -150,12 +150,13 @@ _CONTIGUOUS_TENSOR_ARGS_BY_OP = {
 # constraint. TritonMinDotContractExtent() returns 0 where there is no floor, so
 # every other platform pays one integer compare.
 #
-# Only the plain forms are listed. `mm.out` and the `.dtype` forms carry no
-# FlagGems kernel on the platforms with a floor, and `bmm` reaches the C++ slot
-# there; when that changes, the entry is a line each and the padding is already
-# rank-agnostic (it indexes the contracted axis from the end).
+# `mm.out` and the `.dtype` forms carry no FlagGems kernel on platforms with a
+# floor. Native MetaX hosts use the published bmm/bmm_out Python slots, including
+# Qwen3's K=1 RoPE product. The rank-agnostic helper leaves M/N and out untouched.
 _DOT_CONTRACT_PADDED_OPS = {
     "mm": ("self", "mat2"),
+    "bmm": ("self", "mat2"),
+    "bmm.out": ("self", "mat2"),
 }
 
 

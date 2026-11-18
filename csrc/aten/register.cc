@@ -985,6 +985,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #include "generated/register_flaggems_nvidia.inc"
   #elif defined(FLAGOS_ACCEL_METAX)
   #include "generated/register_flaggems_metax.inc"
+  #if defined(FLAGOS_NATIVE_HOSTS)
+  #include "generated/register_flaggems_metax_native_host.inc"
+  #endif
   #elif defined(FLAGOS_ACCEL_DCU)
   #include "generated/register_flaggems_hygon.inc"
   #elif defined(FLAGOS_ACCEL_PPU)

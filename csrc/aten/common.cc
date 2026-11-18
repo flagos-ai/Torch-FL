@@ -895,6 +895,8 @@ bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {
 }
 
 at::Tensor MatmulOnHost(const at::Tensor& lhs, const at::Tensor& rhs) {
+  TORCH_CHECK(CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::mm (host matmul escape)");
   return at::mm(lhs.cpu(), rhs.cpu()).to(lhs.device());
 }
 

@@ -357,13 +357,13 @@ _MIGRATION_EXEMPTIONS = frozenset(
 def test_platform_detector_covers_every_vendor_conf():
     """A new vendor is a detector/conf naming change, not a suite branch.
 
-    Boxing and TileOPs files are opt-in variants of an existing platform, not
-    new platforms; they do not add a detector name.
+    Boxing, TileOPs and native-host files are variants of an existing platform;
+    they do not add a detector name.
     """
     confs = {
         path.stem.removeprefix("backends_")
         for path in (REPO_ROOT / "torch_fl/configs").glob("backends_*.conf")
-        if not path.stem.endswith(("_boxing", "_tileops"))
+        if not path.stem.endswith(("_boxing", "_tileops", "_native_host"))
     }
     platform_source = ast.parse(
         (REPO_ROOT / "torch_fl/_platform.py").read_text(encoding="utf-8")

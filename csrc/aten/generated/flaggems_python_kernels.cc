@@ -1184,14 +1184,20 @@ at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool period
 
 static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self, mat2}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2));
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self_dotpad, mat2_dotpad}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad));
   UnboxToFlagos(result);
   return result;
 }
 
 static TypedSourceSlot BmmOutFnSource("aten::bmm.out", "flag_gems.bmm_out", "f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1", "{\"abi\": \"f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm_out\", \"op\": \"aten::bmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self, mat2, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self_dotpad, mat2_dotpad, out}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad), static_cast<const at::Tensor&>(out));
   return out;
 }
 

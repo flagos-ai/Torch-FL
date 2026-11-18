@@ -23,8 +23,12 @@ TORCH_LIBRARY_FRAGMENT(flagos, m) {
   });
 }
 
+bool CpuFallbackAllowed() {
+  return !strict_host_routes.load(std::memory_order_relaxed);
+}
+
 void cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  TORCH_CHECK(!strict_host_routes.load(std::memory_order_relaxed),
+  TORCH_CHECK(CpuFallbackAllowed(),
               "native FlagGems hosts do not permit CPU fallback: ", op.schema());
   static const bool log_enabled = LogEnabled("fallback");
   if (log_enabled) {

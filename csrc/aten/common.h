@@ -294,6 +294,9 @@ at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
 // with the same small K. See TritonMinDotContractExtent above.
 bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
 
+// Shared by ATen fallback and explicit numerical host escapes.
+bool CpuFallbackAllowed();
+
 // Whether this platform's FlagGems matmul must not be handed `dtype`, with the
 // host round-trip as the only alternative.
 //
