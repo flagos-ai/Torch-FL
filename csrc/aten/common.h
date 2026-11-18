@@ -300,6 +300,7 @@ bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
                                   at::Tensor& result);
 
 // Shared by ATen fallback and explicit numerical host escapes.
+void SetStrictHostRoutes(bool enabled);
 bool CpuFallbackAllowed();
 
 // Whether this platform's FlagGems matmul must not be handed `dtype`, with the

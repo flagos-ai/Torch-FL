@@ -5,6 +5,7 @@
 #include <ATen/Context.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@
 namespace at::native::flagos {
 
 namespace {
+std::atomic<bool> strict_host_routes{false};
 
 std::string& BackendConfigPathOverride() {
   static std::string path;
@@ -910,6 +912,14 @@ bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
   (void)result;
   return false;
 #endif
+}
+
+void SetStrictHostRoutes(bool enabled) {
+  strict_host_routes.store(enabled, std::memory_order_relaxed);
+}
+
+bool CpuFallbackAllowed() {
+  return !strict_host_routes.load(std::memory_order_relaxed);
 }
 
 bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {
