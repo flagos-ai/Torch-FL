@@ -128,6 +128,7 @@ jobs:
             tests/unit/test_dtype_cast_arm_contract.py
             tests/unit/test_env_registry.py
             tests/unit/test_gen_vendor_confs.py
+            tests/unit/test_vendor_conf_single_writer.py
             tests/unit/test_host_program_admission.py
             tests/unit/test_native_host_continuations.py
             tests/unit/test_native_host_source.py
