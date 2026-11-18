@@ -140,7 +140,7 @@ def build(source_root, output, build_temp, vendor_library):
     (target.parent / "vendor_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
-    print("Built measured MetaX vendor SiLU host entry", flush=True)
+    print(f"Built {len(catalog)} measured MetaX vendor host entries", flush=True)
 
 
 if __name__ == "__main__":

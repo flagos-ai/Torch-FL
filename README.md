@@ -229,11 +229,14 @@ last-axis means normalize GPU layout and original-kernel launch metadata to
 preserve the vendor's reduction order; the kernel source remains unchanged.
 For the measured `2.10.0+metax3.8.1.0` vendor Torch cohort, an explicit
 `FLAGOS_VENDOR_TORCH_LIB=/path/to/vendor/torch/lib` also builds the BF16 SiLU
-precision exception. It bundles only the published `libc10_cuda.so` and
-`libtorch_cuda.so` under the native-host artifacts. CPU host glue compiles the
+precision exception and measured FP32 softmax/mean exceptions. It also selects
+the unchanged published multiply source validated in this MetaX cohort. The
+bundle contains only published `libc10_cuda.so` and `libtorch_cuda.so` under the
+native-host artifacts. CPU host glue compiles the
 two hash-verified published MACA environment headers with their original flag
-semantics and calls the original GPU stub on FlagOS storage. The generated
-`BFloat16:metax` clause applies only when that typed entry is installed.
+semantics and calls the original GPU implementations on FlagOS storage. The generated
+`BFloat16:metax` SiLU and `Float:metax` softmax/mean clauses apply only when their
+typed entries are installed.
 Build and runtime verify the numerical assets, schema ABI and official CPU core;
 no vendor CPU Torch library is bundled or loaded. The compatibility manifest
 records the vendor Torch version and this numerical-library bundle.
@@ -241,9 +244,16 @@ The optional cohort's additional installed-wheel tests run with
 `python -m pytest tests/manual/test_native_metax_vendor_precision.py -v`.
 They require the exact published vendor cohort above; the ordinary MetaX CI
 artifact runs its separate 86-case native-host suite without this optional bundle.
-Full-model accuracy and the 80% vendor-performance gate remain tracked in
-[issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
-does not establish those results. NVIDIA's existing precision policy is unchanged.
+On an idle C550 with MACA 3.8.1.3, complete Qwen3-0.6B BF16 eager execution
+(60 prefill tokens plus 512 identical teacher-forced decode inputs) has zero
+logit error and all 572 top-1 positions aligned. Strict CPU-fallback rejection
+is enabled. The native traversal median is 14.067 s against 11.772 s for vendor
+Torch, or 83.68% of vendor throughput, over three measured traversals. Separate
+GPU attribution accounts for every launch; model capture and legacy host-plan
+counters are zero. See the [measured cohort](docs/design/flaggems-build-time-hosts.md#metax-native-host-precision-cohort)
+and [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) for scope.
+These results apply to this exact optional cohort. NVIDIA's existing precision
+policy is unchanged.
 
 The Ascend pilot uses the same native-host switches with
 `FLAGOS_ACCELERATOR=ascend` and `ASCEND_HOME` pointing at the installed CANN SDK.

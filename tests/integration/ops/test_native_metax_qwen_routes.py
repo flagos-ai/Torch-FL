@@ -340,7 +340,8 @@ def test_native_fp32_mean_preserves_the_vendor_reduction_tree(rows, columns):
     before = runtime.metax_mean_calls()
     actual = reference.to("flagos:0").mean(-1, keepdim=True)
     torch_fl.flagos.synchronize()
-    assert runtime.metax_mean_calls() == before + 1
+    expected = before if torch_fl._build_config.NATIVE_VENDOR else before + 1
+    assert runtime.metax_mean_calls() == expected
     torch.testing.assert_close(
         actual.cpu(), _vendor_mean_reference(reference), atol=0, rtol=0
     )

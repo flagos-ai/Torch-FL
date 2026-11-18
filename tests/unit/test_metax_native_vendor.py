@@ -112,6 +112,8 @@ def test_silu_exception_is_only_in_explicit_native_configuration():
     clause = "silu = flaggems; BFloat16:metax\n"
     assert clause in native.read_text()
     assert clause not in ordinary.read_text()
+    assert "_softmax = flaggems; Float:metax\n" in native.read_text()
+    assert "_softmax = flaggems; Float:metax\n" not in ordinary.read_text()
 
 
 @pytest.mark.parametrize(

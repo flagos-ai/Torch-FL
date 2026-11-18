@@ -25,9 +25,9 @@ cohort = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cohort)
 
 
-@pytest.fixture
-def policy():
-    return cohort.load_build_policy(ROOT).source_policy("nvidia")
+@pytest.fixture(params=["nvidia", "metax"])
+def policy(request):
+    return cohort.load_build_policy(ROOT).source_policy(request.param)
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ def test_policy_is_opt_in_to_the_validated_vendor_build(policy, tmp_path):
     )
     assert (
         cohort.source_policy_for_build(
-            SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="nvidia"), ROOT
+            SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR=policy["vendor"]), ROOT
         )
         == policy
     )

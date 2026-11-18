@@ -14,7 +14,7 @@ import sys
 def validate(policy):
     if (
         policy.get("schema_version") != 1
-        or policy.get("vendor") != "nvidia"
+        or policy.get("vendor") not in {"nvidia", "metax"}
         or policy.get("requires_native_vendor") is not True
     ):
         raise ValueError("unsupported published source policy")

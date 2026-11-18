@@ -88,7 +88,7 @@ _COHORTS = {
         "torch_git_version": "f0eb8bf5e72d15327617097aa264c899b3581986",
         "cpu_torch_git_version": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
         "issue": "https://github.com/flagos-ai/Torch-FL/issues/832",
-        "retirement": "Remove after a published FlagGems SiLU passes the paired full-model logits gate and repeated eager performance checks.",
+        "retirement": "Remove each exception after a published FlagGems wheel passes the paired full-model logits gate and repeated eager performance checks.",
         "host_headers": {
             "ATen/native/cuda/maca_kernels/Context.h": "97e838330b718214d3c6778e0b54feef2ff55d9c5d60d4471fa168636a2ec237",
             "ATen/native/cuda/maca_kernels/Context_.h": "9c09c849ade51a96fd3f6d94eef7394e0ce8918ac6b7187cd52b8e63430974bf",
@@ -100,9 +100,34 @@ _COHORTS = {
                 "stub": "silu_stub",
                 "dtypes": ["BFloat16"],
                 "reason": "The first full-model divergence is BF16 SiLU(5.9375): published FlagGems returns 5.90625, while the manufacturer returns 5.9375. The original vendor stub matches all 65,536 BF16 bit patterns with the official CPU core retained.",
+            },
+            {
+                "op": "_softmax",
+                "family": "structured",
+                "dtypes": ["Float"],
+                "half_to_float": False,
+                "reason": "Published softmax differs at 335 of 476 actual model inputs, crossing BF16 rounding boundaries in eight cases and first changing decode-5 attention weights. The original structured vendor implementation matches all 476 FP32 and BF16 comparisons bitwise with the official CPU core retained.",
+            },
+            {
+                "op": "mean.dim",
+                "family": "reduction",
+                "stub": "mean_stub",
+                "dtypes": ["Float"],
+                "output_dtype": "Float",
+                "reason": "The published mean has a different reduction order. Its precise original-kernel layout normalization adds 226 profiled mean calls and 25.024 ms across two model forwards; the current full traversal reaches only 50.3% of manufacturer throughput. Reuse the original vendor reduction to retain the measured order without the layout-copy composition.",
+            },
+        ],
+        "sources": [
+            {
+                "id": "published_mul",
+                "op": "aten::mul.Tensor",
+                "module": "flag_gems.runtime.backend._sunrise.ops.mul",
+                "function": "mul",
+                "sha256": "35a2059ab4f4f80f0e5bd7d09c190e3a5008811fa9cff4a5f6621e4851d0190b",
+                "dtypes": ["Float", "BFloat16"],
+                "reason": "The current native profile spends 18.0 ms of host self time in 794 multiply calls across two forwards. Validate the unchanged published pointwise source already admitted in the NVIDIA cohort against this measured MetaX precision/performance baseline.",
             }
         ],
-        "sources": [],
     },
     "nvidia": {
         "schema_version": 1,

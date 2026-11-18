@@ -82,6 +82,64 @@ def test_unknown_kernel_and_empty_trace_are_rejected():
             provenance.audit_kernels(events, {"published_gems"})
 
 
+def correlated_trace():
+    events = trace()
+    for event in events[:3]:
+        event.setdefault("args", {})["External id"] = 389
+    return events
+
+
+def test_external_correlation_handles_independent_trace_clocks():
+    events = correlated_trace()
+    events[1]["ts"] = events[0]["ts"] - 0.78
+    report = provenance.audit_kernels(
+        events, {"published_gems"}, {"catalog": [{"op": "mm"}]}
+    )
+    assert report["vendor_entry_launches"] == {"flagos::nvidia::mm": 1}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "scope_id",
+        "launch_id",
+        "kernel_id",
+        "thread",
+        "correlation",
+        "missing_launch",
+        "unknown_scope",
+    ],
+)
+def test_external_ids_preserve_scope_thread_and_api_admission(mutation):
+    events = correlated_trace()
+    policy = {"catalog": [{"op": "mm"}]}
+    if mutation.endswith("_id"):
+        index = {"scope_id": 0, "launch_id": 1, "kernel_id": 2}[mutation]
+        events[index]["args"]["External id"] = 390
+    elif mutation == "thread":
+        events[1]["tid"] += 1
+    elif mutation == "correlation":
+        events[2]["args"]["correlation"] += 1
+    elif mutation == "missing_launch":
+        del events[1]
+    else:
+        policy = None
+    with pytest.raises(RuntimeError):
+        provenance.audit_kernels(events, {"published_gems"}, policy)
+
+
+@pytest.mark.parametrize("value", [None, 0, True])
+def test_unknown_external_ids_do_not_prove_out_of_scope_launches(value):
+    events = trace()
+    events[1]["ts"] = events[0]["ts"] - 0.78
+    for event in events[:3]:
+        event.setdefault("args", {})["External id"] = value
+    with pytest.raises(RuntimeError):
+        provenance.audit_kernels(
+            events, {"published_gems"}, {"catalog": [{"op": "mm"}]}
+        )
+
+
 @pytest.mark.parametrize(
     "native_hosts,native_vendor,expected",
     [(True, False, True), (True, True, True), (False, False, False)],

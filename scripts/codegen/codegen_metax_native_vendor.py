@@ -16,6 +16,7 @@ from torchgen.gen import parse_native_yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from codegen_ops import schema_to_cpp_name, unified_sig
+from codegen_native_vendor import schema_groups
 from native_host_policy import precision_policy
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,61 +31,121 @@ def render(policy=None):
     policy = precision_policy("metax") if policy is None else policy
     if policy.get("vendor") != "metax" or policy.get("schema_version") != 1:
         raise ValueError("unsupported MetaX vendor policy")
-    rows = policy["operators"]
-    if len(rows) != 1 or any(
-        row.get("op") != "silu"
-        or row.get("family") != "pointwise_stub"
-        or row.get("stub") != "silu_stub"
-        or row.get("dtypes") != ["BFloat16"]
-        or not row.get("reason")
-        for row in rows
+    rows = sorted(policy["operators"], key=lambda row: row["op"])
+    contracts = {
+        "silu": {
+            "family": "pointwise_stub",
+            "stub": "silu_stub",
+            "dtypes": ["BFloat16"],
+        },
+        "_softmax": {
+            "family": "structured",
+            "dtypes": ["Float"],
+            "half_to_float": False,
+        },
+        "mean.dim": {
+            "family": "reduction",
+            "stub": "mean_stub",
+            "dtypes": ["Float"],
+            "output_dtype": "Float",
+        },
+    }
+    if (
+        len(rows) != len(contracts)
+        or {row["op"] for row in rows} != contracts.keys()
+        or any(
+            any(row.get(key) != value for key, value in contracts[row["op"]].items())
+            or not row.get("reason")
+            for row in rows
+        )
     ):
         raise ValueError("unmeasured MetaX vendor stub or dtype")
     root = Path(torchgen.__file__).parent / "packaged/ATen/native"
     parsed = parse_native_yaml(
         str(root / "native_functions.yaml"), str(root / "tags.yaml")
     )
-    function = next(f for f in parsed.native_functions if str(f.func.name) == "silu")
-    with native_function_manager(function):
-        pointer, result, args = unified_sig(function)
-    if result != "at::Tensor" or args != [("const at::Tensor &", "self")]:
-        raise ValueError("unsupported MetaX vendor unary schema boundary")
-    row = rows[0]
-    catalog = {
-        "vendor": "metax",
-        "op": row["op"],
-        "schema": str(function.func),
-        "pointer": pointer,
-        "family": row["family"],
-        "stub": row["stub"],
-        "dtypes": row["dtypes"],
-        "policy_sha256": hashlib.sha256(
-            json.dumps(policy, sort_keys=True).encode()
-        ).hexdigest(),
+    functions = {
+        str(function.func.name): function for function in parsed.native_functions
     }
-    catalog["abi"] = hashlib.sha256(
-        json.dumps(catalog, sort_keys=True).encode()
+    groups, backend = schema_groups()
+    policy_hash = hashlib.sha256(
+        json.dumps(policy, sort_keys=True).encode()
     ).hexdigest()
-    kind, dispatcher = schema_to_cpp_name(row["op"])
-    encoded = json.dumps(json.dumps(catalog, sort_keys=True, separators=(",", ":")))
-    entry = (
-        BANNER
-        + f'NATIVE_VENDOR_ENTRY("metax", "silu", "{catalog["abi"]}", '
-        + f"{encoded}, {kind}, {dispatcher})\n"
-    )
+    entries, wrappers, bindings, catalog = [], [], [], []
+    for index, row in enumerate(rows):
+        name = row["op"]
+        function = functions[name]
+        with native_function_manager(function):
+            pointer, result, args = unified_sig(function)
+        expected = [("const at::Tensor &", "self")]
+        if name == "_softmax":
+            expected += [("int64_t", "dim"), ("bool", "half_to_float")]
+        elif name == "mean.dim":
+            expected += [
+                ("at::OptionalIntArrayRef", "dim"),
+                ("bool", "keepdim"),
+                ("::std::optional<at::ScalarType>", "dtype"),
+            ]
+        if result != "at::Tensor" or args != expected:
+            raise ValueError("unsupported MetaX vendor schema boundary")
+        record = {
+            "vendor": "metax",
+            "op": name,
+            "schema": str(function.func),
+            "pointer": pointer,
+            "family": row["family"],
+            "dtypes": row["dtypes"],
+            "policy_sha256": policy_hash,
+        }
+        if row["family"] in {"structured", "reduction"}:
+            metadata = backend.get_kernel(groups[name])
+            if metadata is None or not metadata.structured:
+                raise ValueError(
+                    "MetaX vendor entry requires a structured CUDA implementation"
+                )
+            parent = f"{metadata.cpp_namespace}::structured_{metadata.kernel}"
+            record["parent"] = parent
+            if row["family"] == "reduction":
+                record["stub"] = row["stub"]
+                call = f"Reduction<{parent}>(at::native::{row['stub']}, self, dim, keepdim, dtype)"
+                check = '  TORCH_CHECK(!dtype || *dtype == at::kFloat, "MetaX mean admits only FP32 output");\n'
+            else:
+                call = f"Structured<{parent}>(self, dim, half_to_float)"
+                check = '  TORCH_CHECK(!half_to_float, "MetaX FP32 softmax does not admit half promotion");\n'
+        else:
+            record["stub"] = row["stub"]
+            call = f"Unary(at::native::{row['stub']}, self)"
+            check = ""
+        record["abi"] = hashlib.sha256(
+            json.dumps(record, sort_keys=True).encode()
+        ).hexdigest()
+        catalog.append(record)
+        kind, dispatcher = schema_to_cpp_name(name)
+        encoded = json.dumps(json.dumps(record, sort_keys=True, separators=(",", ":")))
+        entries.append(
+            f'NATIVE_VENDOR_ENTRY("metax", "{name}", "{record["abi"]}", {encoded}, {kind}, {dispatcher})'
+        )
+        arguments = ", ".join(f"{kind} {arg}" for kind, arg in args)
+        wrappers.append(
+            f"at::Tensor Entry_{index}({arguments}) {{\n"
+            f'  TORCH_CHECK(self.scalar_type() == at::ScalarType::{row["dtypes"][0]}, "unmeasured MetaX vendor dtype");\n'
+            + check
+            + f"  ++hits[{index}];\n"
+            + f'  RECORD_FUNCTION("flagos::metax::{name}", std::vector<c10::IValue>());\n'
+            + f"  return {call};\n}}\n"
+        )
+        bindings.append(
+            f'  result.append(py::make_tuple("{name}", "{record["abi"]}", reinterpret_cast<uintptr_t>(&Entry_{index}), hits[{index}].load()));'
+        )
     source = (
         BANNER
         + '#include "metax_vendor_runtime.h"\n\n'
         + "namespace at::native::flagos::metax_vendor {\n"
-        + "std::atomic<int64_t> hits{0};\n"
-        + "at::Tensor Entry(const at::Tensor& self) {\n"
-        + '  TORCH_CHECK(self.scalar_type() == at::kBFloat16, "unmeasured MetaX vendor dtype");\n'
-        + "  ++hits;\n"
-        + '  RECORD_FUNCTION("flagos::metax::silu", std::vector<c10::IValue>());\n'
-        + "  return Unary(at::native::silu_stub, self);\n}\n"
+        + f"std::atomic<int64_t> hits[{len(rows)}]{{}};\n"
+        + "\n".join(wrappers)
         + "py::list Bindings() {\n  py::list result;\n"
-        + f'  result.append(py::make_tuple("silu", "{catalog["abi"]}", '
-        + "reinterpret_cast<uintptr_t>(&Entry), hits.load()));\n"
+        + "\n".join(bindings)
+        + "\n"
         + "  return result;\n}\n"
         + "}  // namespace at::native::flagos::metax_vendor\n\n"
         + "PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {\n"
@@ -92,7 +153,10 @@ def render(policy=None):
         + '  module.def("libraries", &at::native::flagos::metax_vendor::Libraries);\n'
         + "}\n"
     )
-    return {ENTRY_PATH: entry, SOURCE_PATH: source}, [catalog]
+    return {
+        ENTRY_PATH: BANNER + "\n".join(entries) + "\n",
+        SOURCE_PATH: source,
+    }, catalog
 
 
 def main():

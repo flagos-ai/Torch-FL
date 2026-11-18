@@ -170,7 +170,7 @@ def main():
         AutoModelForCausalLM.from_pretrained(
             args.model,
             local_files_only=True,
-            dtype=getattr(torch, args.dtype),
+            torch_dtype=getattr(torch, args.dtype),
             attn_implementation="eager",
         )
         .eval()
@@ -317,6 +317,7 @@ def main():
             )
 
         timings = {
+            "traversal_complete_ms": [],
             "prefill_submit_ms": [],
             "prefill_complete_ms": [],
             "decode_submit_ms": [],
@@ -325,6 +326,7 @@ def main():
         device_inputs = [token.to(args.device) for token in inputs]
         for repetition in range(args.rounds + 1 if args.rounds else 0):
             synchronize()
+            traversal_started = time.perf_counter()
             t0 = time.perf_counter()
             out = model(ids, use_cache=True)
             t1 = time.perf_counter()
@@ -343,12 +345,33 @@ def main():
                 if repetition:
                     timings["decode_submit_ms"].append((t1 - t0) * 1000)
                     timings["decode_complete_ms"].append((t2 - t0) * 1000)
+            synchronize()
+            if repetition:
+                timings["traversal_complete_ms"].append(
+                    (time.perf_counter() - traversal_started) * 1000
+                )
         report["timings"] = timings
         report["medians"] = {
             name: statistics.median(values)
             for name, values in timings.items()
             if values
         }
+        if args.rounds:
+            # Preserve completed timing evidence if a later provenance audit fails.
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.with_suffix(".timings.json").write_text(
+                json.dumps(
+                    {
+                        "acceptance": "pending remaining accuracy and provenance audits",
+                        "contract": contract,
+                        "math_settings": report["math_settings"],
+                        "timings": timings,
+                        "medians": report["medians"],
+                        "logits_validation": report.get("logits_validation"),
+                    },
+                    indent=2,
+                )
+            )
         calls = Counter()
 
         def profile(frame, event, arg):
