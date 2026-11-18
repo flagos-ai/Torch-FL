@@ -802,9 +802,12 @@ steps:
     platforms: [apple]
     command: python -m pytest tests/integration/test_mps_runtime.py -v --tb=short
 
+  # Build a separate opt-in artifact after the ordinary vendor wheel has been
+  # tested. Boxing is disabled; the following group runs the installed hosts
+  # from the same wheel-only workspace as the other operator suites.
   - id: native_host_build
     name: Build native FlagGems hosts
-    platforms: [ascend]
+    platforms: [metax, ascend]
     vendor_only: true
     command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh
 
@@ -815,4 +818,13 @@ steps:
     min_passed: 27
     command: >-
       python -m pytest tests/integration/ops/test_native_ascend_hosts.py -v --tb=short
+      --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
+
+  - id: native_source_hosts_metax
+    name: Native MetaX FlagGems host conformance
+    platforms: [metax]
+    vendor_only: true
+    min_passed: 36
+    command: >-
+      python -m pytest tests/integration/ops/test_native_metax_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"

@@ -344,7 +344,7 @@ class _MetaxStreamShim:
         if event is None:
             # Not `real.record_event(None)`: that allocates the `Event` bound
             # inside torch/cuda/streams.py, which is the dummy base class on the
-            # CPU torch wheel. `torch.cuda.Event` is the one _patch_inductor_event
+            # CPU torch wheel. `torch.cuda.Event` is the one _patch_registered_device
             # points at the working flagos wrapper.
             event = torch.cuda.Event()
         event.record(self._real)
@@ -385,10 +385,15 @@ def is_metax_available():
     return _load_mcruntime(metax_path) is not None
 
 
-def _patch_inductor_event():
-    """Make Inductor events bypass the lightweight CUDA stream shim."""
+def _patch_registered_device():
+    """Bind device queries and events after the public runtime is registered."""
     flagos = getattr(torch, "flagos", None)
-    if flagos is not None and getattr(flagos, "Event", None) is not None:
+    if flagos is None:
+        return
+    # CPU Torch reports zero CUDA devices. FlagGems snapshots this count before
+    # allocating its per-device kernel caches, so it must use MACA's count.
+    torch.cuda.device_count = flagos.device_count
+    if getattr(flagos, "Event", None) is not None:
         torch.cuda.Event = flagos.Event
 
 
@@ -410,8 +415,8 @@ def patch_torch_cuda_for_metax():
     if _patched:
         # FLAGOS_METAX_COMPAT can call us once before torch.flagos is registered
         # and again afterward. Keep this late-bound patch outside the one-time
-        # runtime setup so the second call can install the real Event wrapper.
-        _patch_inductor_event()
+        # runtime setup so the second call can bind device queries and events.
+        _patch_registered_device()
         return True
 
     metax_path = _find_metax_path()
@@ -539,7 +544,7 @@ def patch_torch_cuda_for_metax():
     # Inductor's autotuner constructs torch.cuda.Event directly. Its default
     # record path rejects the lightweight stream shim above, while flagos.Event
     # resolves the real underlying stream before recording the same MetaX event.
-    _patch_inductor_event()
+    _patch_registered_device()
 
     # Device context exchange: extract index for flagos/privateuseone tensors.
     def _exchange_device(idx):

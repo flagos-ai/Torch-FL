@@ -79,7 +79,8 @@
 #define FLAGOS_GUARD_HAS_CUDA_STREAM 0
 #endif
 
-#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
+#if !defined(FLAGOS_BOXING_BUILD) && \
+    (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA))
 #define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 1
 #include <c10/core/DeviceGuard.h>
 #include "runtime/allocator/caching_device_allocator.h"

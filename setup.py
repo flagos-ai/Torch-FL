@@ -1236,6 +1236,13 @@ class BuildExtWithCmake(_build_ext):
             _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
         )
         destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
+        if backend.vendor == "metax" and os.path.isdir(
+            os.path.join(destination, "torch_fl", "lib_metax")
+        ):
+            raise RuntimeError(
+                "MetaX native hosts require a clean staging tree without bundled "
+                "vendor libtorch; build from a clean source tree"
+            )
         env = os.environ.copy()
         if backend.vendor == "nvidia":
             _setup_cuda_build_env(env)

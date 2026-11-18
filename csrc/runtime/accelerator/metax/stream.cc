@@ -15,6 +15,51 @@
 #include <flagos.h>
 #include <cuda_runtime.h>
 
+#include <mutex>
+#include <unordered_map>
+
+namespace {
+
+// The non-boxing runtime owns these queues. Keep the registry out of headers
+// so the allocator, device guard and prebuilt launcher share one instance.
+std::mutex stream_mutex;
+std::unordered_map<int, cudaStream_t> default_streams;
+thread_local std::unordered_map<int, cudaStream_t> current_streams;
+
+cudaStream_t DefaultStream(int device) {
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  const auto found = default_streams.find(device);
+  if (found != default_streams.end()) return found->second;
+  int previous = 0;
+  if (cudaGetDevice(&previous) != cudaSuccess) return nullptr;
+  if (previous != device && cudaSetDevice(device) != cudaSuccess) return nullptr;
+  cudaStream_t stream = nullptr;
+  const auto status = cudaStreamCreate(&stream);
+  if (previous != device) cudaSetDevice(previous);
+  if (status != cudaSuccess) return nullptr;
+  default_streams.emplace(device, stream);
+  return stream;
+}
+
+}  // namespace
+
+Stream_t GetDefaultStreamForDevice(int device) {
+  return reinterpret_cast<Stream_t>(DefaultStream(device));
+}
+
+Stream_t GetCurrentStreamForDevice(int device) {
+  const auto found = current_streams.find(device);
+  if (found != current_streams.end()) return reinterpret_cast<Stream_t>(found->second);
+  auto stream = GetDefaultStreamForDevice(device);
+  if (stream) current_streams.emplace(device, reinterpret_cast<cudaStream_t>(stream));
+  return stream;
+}
+
+Error_t SetCurrentStreamForDevice(int device, Stream_t stream) {
+  current_streams[device] = reinterpret_cast<cudaStream_t>(stream);
+  return Success;
+}
+
 Error_t StreamCreateWithPriority(
     Stream_t* stream,
     unsigned int flags,
