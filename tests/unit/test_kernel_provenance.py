@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import ast
 from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -77,3 +80,34 @@ def test_unknown_kernel_and_empty_trace_are_rejected():
     for events in ([], [{"cat": "kernel", "name": "unknown", "dur": 1}]):
         with pytest.raises(RuntimeError, match="provenance audit failed"):
             provenance.audit_kernels(events, {"published_gems"})
+
+
+@pytest.mark.parametrize(
+    "native_hosts,native_vendor,expected",
+    [(True, False, True), (True, True, True), (False, False, False)],
+)
+def test_qwen_reports_sdk_precision_without_a_bundled_vendor_module(
+    monkeypatch, native_hosts, native_vendor, expected
+):
+    package = ModuleType("torch_fl")
+    package._build_config = SimpleNamespace(
+        NATIVE_HOSTS=native_hosts, NATIVE_VENDOR=native_vendor
+    )
+    native = ModuleType("torch_fl.native_host")
+    report = {"vendor": "metax", "hits": {"mm": 1}}
+    native.vendor = SimpleNamespace(audit=lambda: report)
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setitem(sys.modules, "torch_fl.native_host", native)
+    source = ROOT / "benchmarks/host_compiler/qwen_eager.py"
+    tree = ast.parse(source.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "vendor_audit"
+    )
+    namespace = {}
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"),
+        namespace,
+    )
+    assert namespace["vendor_audit"]() == (report if expected else None)

@@ -64,7 +64,10 @@ def compare(actual, expected):
 def vendor_audit():
     from torch_fl import _build_config
 
-    if not getattr(_build_config, "NATIVE_VENDOR", False):
+    if not (
+        getattr(_build_config, "NATIVE_HOSTS", False)
+        or getattr(_build_config, "NATIVE_VENDOR", False)
+    ):
         return None
     from torch_fl.native_host import vendor
 
