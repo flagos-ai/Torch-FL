@@ -197,9 +197,30 @@ def emit_entries(catalog, groups, selections=()):
                         + "))"
                         for dtype in selection["dtypes"]
                     )
+                    restricted = (
+                        selection.get("same_tensor_metadata", False)
+                        or (selection.get("min_tensors", 1) != 1)
+                        or selection.get("unit_stride_axis", False)
+                    )
+                    guard = (
+                        "PublishedSourceAcceptsRestricted("
+                        if restricted
+                        else "PublishedSourceAccepts("
+                    )
+                    options = (
+                        ", "
+                        + str(selection.get("same_tensor_metadata", False)).lower()
+                        + ", "
+                        + str(selection.get("min_tensors", 1))
+                        + ", "
+                        + str(selection.get("unit_stride_axis", False)).lower()
+                        if restricted
+                        else ""
+                    )
                     checks.append(
-                        "PublishedSourceAccepts("
+                        guard
                         + mask
+                        + options
                         + ", "
                         + ", ".join(f"a{i}" for i in range(len(record["arguments"])))
                         + ")"
@@ -286,12 +307,27 @@ HEADER = r"""
 class PublishedSourceGuard {
  uint64_t mask_;
  std::optional<c10::Device> device_;
+ bool same_metadata_, unit_stride_;
+ int64_t minimum_, count_ = 0;
+ std::optional<at::ScalarType> dtype_;
+ std::optional<int64_t> rank_;
  public:
- explicit PublishedSourceGuard(uint64_t mask):mask_(mask){}
+ explicit PublishedSourceGuard(uint64_t mask,bool same_metadata=false,int64_t minimum=1,
+                               bool unit_stride=false)
+   :mask_(mask),same_metadata_(same_metadata),unit_stride_(unit_stride),minimum_(minimum){}
  bool Check(const at::Tensor& value) {
   if(!value.defined() || !value.device().is_privateuseone() ||
      !(mask_ & (uint64_t{1} << static_cast<unsigned>(value.scalar_type()))))return false;
   if(device_ && *device_!=value.device())return false;
+  if(same_metadata_ && ((dtype_ && *dtype_!=value.scalar_type()) ||
+                       (rank_ && *rank_!=value.dim())))return false;
+  if(unit_stride_ && value.numel()>1) {
+   bool found=false;
+   for(int64_t dim=0;dim<value.dim();++dim)
+    if(value.size(dim)>1 && value.stride(dim)==1)found=true;
+   if(!found)return false;
+  }
+  dtype_=value.scalar_type();rank_=value.dim();++count_;
   device_=value.device();return true;
  }
  template<class T> bool Check(const T&){return true;}
@@ -308,10 +344,15 @@ class PublishedSourceGuard {
   for(const auto& value:values)if(!Check(value))return false;
   return true;
  }
- bool HasTensor() const{return device_.has_value();}
+ bool HasTensor() const{return device_.has_value() && count_>=minimum_;}
 };
 template<class... Args> bool PublishedSourceAccepts(uint64_t mask,const Args&... args){
  PublishedSourceGuard guard(mask);
+ return (guard.Check(args) && ...) && guard.HasTensor();
+}
+template<class... Args> bool PublishedSourceAcceptsRestricted(
+ uint64_t mask,bool same_metadata,int64_t minimum,bool unit_stride,const Args&... args){
+ PublishedSourceGuard guard(mask,same_metadata,minimum,unit_stride);
  return (guard.Check(args) && ...) && guard.HasTensor();
 }
 inline bool TypedWrappedNumber(const at::Tensor& value) {

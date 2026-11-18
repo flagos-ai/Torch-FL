@@ -17,7 +17,7 @@ _softmax dispatch tests
 
 Verifies that torch._softmax:
   - produces correct results on flagos device
-  - C++ wrapper routes to flaggems (default) or cuda (via env override)
+  - C++ wrapper follows the base route, dtype exceptions and explicit overrides
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -43,14 +43,18 @@ DEVICE = "flagos:0"
 
 
 def _run_softmax_subprocess(
-    extra_env: dict, check: bool = True
+    extra_env: dict, check: bool = True, *, dtype: str = "float32"
 ) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(extra_env)
+    tolerance = {"float32": 1e-4, "float16": 1e-3, "bfloat16": 1e-2}[dtype]
     code = (
         "import torch_fl, torch; "
-        "x = torch.randn(4,8,device='flagos:0'); "
-        "torch.softmax(x, dim=-1)"
+        f"cpu = torch.linspace(-2,2,32).reshape(4,8).to(torch.{dtype}); "
+        "x = cpu.to('flagos:0'); "
+        "out = torch.softmax(x, dim=-1); "
+        "torch.testing.assert_close(out.cpu(), torch.softmax(cpu, dim=-1), "
+        f"rtol={tolerance}, atol={tolerance})"
     )
     return subprocess.run(
         [sys.executable, "-c", code],
@@ -123,15 +127,17 @@ class TestSoftmaxDispatch:
     @pytest.mark.flaggems
     @pytest.mark.main_ops
     def test_dispatch_log_flaggems_runtime(self):
-        """_softmax dispatches to whatever backend this platform's conf lists.
+        """An unmatched dtype follows the platform's configured base route.
 
         The conf name and the log name differ: the FlagGems C++ path is
         ``flaggems_cpp`` in the conf and ``-> flagos`` in the log, the Python path
         ``flaggems``/``-> flagos_python`` (csrc/aten/dispatcher.h, LogDispatch).
         routed_backend() owns that mapping, so this asserts the platform's real
         route instead of the one the test was written on.
+        FP16 is outside the measured FP32 precision exception; the Ascend cases
+        below separately exercise that exception and its explicit override.
         """
-        result = _run_softmax_subprocess({"FLAGOS_LOG": "dispatch"})
+        result = _run_softmax_subprocess({"FLAGOS_LOG": "dispatch"}, dtype="float16")
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("_softmax")
         assert f"[flagos dispatch] _softmax -> {expected}" in result.stderr
@@ -154,3 +160,31 @@ class TestSoftmaxAscendDispatch:
         """Verify softmax on ascend backend matches CPU reference."""
         result = _run_softmax_subprocess({"FLAGOS_OP__softmax": "ascend"})
         assert result.returncode == 0
+
+    @pytest.mark.ascend
+    @pytest.mark.flaggems
+    @pytest.mark.main_ops
+    @pytest.mark.parametrize(
+        "dtype,default_backend",
+        [
+            ("float32", "ascend"),
+            ("float16", "flagos_python"),
+            ("bfloat16", "flagos_python"),
+        ],
+    )
+    @pytest.mark.parametrize("force_flaggems", [False, True])
+    def test_precision_route_and_explicit_override(
+        self, dtype, default_backend, force_flaggems
+    ):
+        env = {"FLAGOS_LOG": "dispatch"}
+        if force_flaggems:
+            env["FLAGOS_OP__softmax"] = "flaggems"
+        result = _run_softmax_subprocess(env, dtype=dtype)
+        assert result.returncode == 0, result.stderr
+        expected = "flagos_python" if force_flaggems else default_backend
+        routes = [
+            line
+            for line in result.stderr.splitlines()
+            if line.startswith("[flagos dispatch] _softmax -> ")
+        ]
+        assert routes == [f"[flagos dispatch] _softmax -> {expected}"], result.stderr

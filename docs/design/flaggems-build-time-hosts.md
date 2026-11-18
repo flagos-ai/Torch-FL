@@ -42,6 +42,39 @@ The build identifies host functions and their transitive helpers separately
 from device functions. Generated host references bind to compiled helpers and
 a common launcher. No per-operator native implementation is added.
 
+Published vendor loaders may give their modules short aliases such as
+`_ascend.ops.embedding`. Class helpers defined by those modules are compiled
+when their source belongs to the installed FlagGems package, using the same
+source admission and kernel binding as other hosts. Imported classes and classes
+outside that package retain their existing treatment. A missing compiler binding
+is a host-compiler defect, not evidence that the numerical operator needs a
+vendor fallback.
+
+Pure tensor-metadata generator consumers (`min`, `max`, `sum`, `any`, `all`,
+and `next`) and integer prefix sums can lower to native loops. Short-circuit
+evaluation is preserved. Empty reductions retain the original exception path.
+Other consumed generators and materialized iterator calls can remain intact in
+build-time Cython helpers, preserving lazy effects, scopes and exceptions through
+the existing source-metadata bridge. Unknown argument types and dtype objects
+encoded as TorchScript integers do not enter that bridge.
+
+Filtered integer metadata comprehensions and sorting by a captured integer
+lookup also lower to native loops. The sort evaluates keys once and preserves
+input order for equal keys, including descending order. This keeps dimension
+compression native without changing the published reduction kernel or its
+axis-ordering decisions.
+
+Tensor-backed `StridedBuffer` objects with unchanged dtype and tensor strides
+can become native `as_strided` views. Their offsets remain relative to the base
+tensor's current storage offset; no numerical copy is introduced. Computed or
+negative strides retain the original object semantics. Inline pointwise
+instantiation calls use the existing native launch ABI and original FlagGems
+generator. Straight-line loops using other opaque FlagGems metadata classes can
+retain their original source when none of the loop's local bindings escapes.
+These transformations derive from the published host source and do not require
+operator-specific implementations or model examples. A selected published host
+must still lower successfully; the builder rejects an unlowered selection.
+
 PointwiseDynamic uses a shared rank-independent host adapter. Its original
 KernelGenerator specializes device code for a new rank. No Python host wrapper
 is generated for that rank. The source-derived preparation code retains the
@@ -678,6 +711,56 @@ still accepts legacy artifacts for input-oracle diagnostics and reports numerica
 differences without making an acceptance claim. `--logits-atol` and `--logits-rtol`
 support other diagnostic tolerances; the project acceptance values remain 1e-3.
 The wrapper retains its no-capture audit even when logit acceptance fails.
+
+Current BF16 portability testing uses the fixed `--logits-policy bf16-v2`
+option in both processes. This additionally requires the exact same top-1 token
+at every position, including ties according to `argmax`'s first index. It applies
+the following limits to uncentered, finite logits, with all error calculations
+performed in FP64 outside timing:
+
+| Scope | Limit |
+| --- | ---: |
+| Relative L2 over each complete phase | 0.02 |
+| Relative L2 at each token position | 0.10 |
+| Per-position p99 absolute error / reference RMS | 0.25 |
+| Per-position maximum absolute error / reference RMS | 0.50 |
+
+The reference RMS denominator is floored at `1e-6`. Every position must pass
+every limit and preserve top-1; aggregate metrics cannot exempt an individual
+token. The policy is versioned independently of operator selection. This does
+not revise the historical NVIDIA elementwise acceptance results below.
+
+For Ascend, run the reference with `--device npu:0` in a separate environment
+containing the manufacturer's original `torch-npu`, and the candidate with
+`--device flagos:0` in the installed native-host wheel environment. Both use the
+same pinned Transformers version and BF16 workload. The benchmark records the
+NPU math settings and rejects HF32 matmul. `--snapshot-layers` saves untimed
+first-layer outputs and parameter layouts for diagnosis; hooks are removed
+before warm measurements. Keep generated reports, snapshots and profiler traces
+as external evidence artifacts, not source-controlled routing policy.
+
+Ascend scalar conversion must follow the manufacturer's operator overload, not
+just the output dtype. The paired torch-npu 2.10 cohort retains an FP32 scalar
+for BF16 multiplication and division; rounding that scalar to BF16 before the
+operation changes attention scores even with every operator on ACLNN. The
+Ascend generator promotes only BF16 scalars; FP16 and other dtype conversion
+remain unchanged. This does not change tensor/model precision. The measured
+FP32 `_softmax` exception is a generated input-dtype route: other softmax dtypes
+and other FlagGems operators keep their base routes. It remains a precision
+exception, not a claim that full-model performance has passed.
+
+The Ascend native-host cohort also selects the unchanged published
+`flag_gems.runtime.backend._tsingmicro.ops.cat.cat` implementation for lists of
+at least two FP32 or BF16 tensors sharing dtype, rank and device, with a
+unit-stride axis in each nontrivial input. The original
+pointwise copy generator avoids the Ascend implementation's measured strided
+copy bottleneck. The selection is pinned to the published source hash and runs
+on held-out layouts and decode lengths without a model or shape plan. Other
+signatures retain the existing public host. In particular, a held-out stepped
+slice without a unit-stride axis produces zeros in the unchanged alternative
+and therefore retains the original Ascend FlagGems implementation. The module
+loads directly from the
+installed wheel without importing an unrelated accelerator backend or SDK.
 
 The [BF16 evidence record in issue #840](https://github.com/flagos-ai/Torch-FL/issues/840)
 records the unchanged #839 wheel against native vendor Torch 2.10.0+cu130.

@@ -3907,7 +3907,7 @@ def render(
         }
     counts = {}
     for value in routes.values():
-        backend = value.split("#", 1)[0].strip()
+        backend = value.split("#", 1)[0].split(";", 1)[0].strip()
         counts[backend] = counts.get(backend, 0) + 1
     total = len(routes)
     covered = total - counts.get("none", 0)
@@ -4156,6 +4156,14 @@ def build_all(conf_dir: Path) -> dict:
         # directly (COMPOSITE_NATIVE): `route()` cannot see it, because the op
         # is in neither the native nor the FlagGems `.inc`.
         routes.update({op: vendor for op in COMPOSITE_NATIVE.get(vendor, set())})
+        if vendor == "ascend":
+            from native_host_policy import configured_dtype_routes
+
+            for op, clause in configured_dtype_routes(vendor).items():
+                base, comment, annotation = routes[op].partition("#")
+                if base.strip() == "flaggems":
+                    suffix = "  #" + annotation if comment else ""
+                    routes[op] = base.strip() + "; " + clause + suffix
         out[vendor] = (
             render(
                 vendor,
@@ -4495,7 +4503,7 @@ def print_stats(built: dict) -> None:
         kernels = 0
         for value in routes.values():
             backend, _, annotation = value.partition("#")
-            backend = backend.strip()
+            backend = backend.split(";", 1)[0].strip()
             counts[backend] = counts.get(backend, 0) + 1
             if backend == vendor or annotation.strip() == vendor:
                 kernels += 1
