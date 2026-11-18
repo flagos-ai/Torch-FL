@@ -349,6 +349,9 @@ class Hosts:
                 path.read_bytes()
             ).hexdigest()
             for path in self.path.rglob("*.so")
+            # Numerical vendor binaries have their own immutable manifest and
+            # vendor audit; they are not compiled source-host artifacts.
+            if path.parent != self.path / "metax_vendor"
         }
 
     def audit(self):

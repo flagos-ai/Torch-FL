@@ -161,7 +161,9 @@ class Dispatcher {
       case Backend::kFlagGems:      flaggems_fn_ = fn;         break;
       case Backend::kAscend:        ascend_fn_ = fn;           break;
       case Backend::kMthreads:      mthreads_fn_ = fn;        break;
-      case Backend::kMetax:         metax_fn_ = fn;            break;
+      case Backend::kMetax:
+        metax_fn_.store(fn, std::memory_order_release);
+        break;
       case Backend::kTsingMicro:    tsingmicro_fn_ = fn;       break;
       case Backend::kEnflame:       enflame_fn_ = fn;         break;
       case Backend::kKunlunxin:     kunlunxin_fn_ = fn;        break;
@@ -395,7 +397,7 @@ class Dispatcher {
   std::pair<FnPtr, Backend> VendorSlot() const {
     if (ascend_fn_)      return {ascend_fn_,      Backend::kAscend};
     if (mthreads_fn_)    return {mthreads_fn_,    Backend::kMthreads};
-    if (metax_fn_)       return {metax_fn_,       Backend::kMetax};
+    if (auto fn = metax_fn_.load(std::memory_order_acquire)) return {fn, Backend::kMetax};
     if (enflame_fn_)     return {enflame_fn_,     Backend::kEnflame};
     if (kunlunxin_fn_)   return {kunlunxin_fn_,   Backend::kKunlunxin};
     if (iluvatar_fn_)    return {iluvatar_fn_,    Backend::kIluvatar};
@@ -466,7 +468,7 @@ class Dispatcher {
         return cuda_fn_ ? cuda_fn_ : flaggems_cpp_fn_;
       case Backend::kAscend:        return ascend_fn_;
       case Backend::kMthreads:      return mthreads_fn_;
-      case Backend::kMetax:         return metax_fn_;
+      case Backend::kMetax:         return metax_fn_.load(std::memory_order_acquire);
       case Backend::kTsingMicro:    return tsingmicro_fn_;
       case Backend::kEnflame:       return enflame_fn_;
       case Backend::kKunlunxin:     return kunlunxin_fn_;
@@ -662,7 +664,7 @@ class Dispatcher {
   std::atomic<FnPtr> nvidia_fn_{nullptr};
   FnPtr ascend_fn_         = nullptr;
   FnPtr mthreads_fn_       = nullptr;
-  FnPtr metax_fn_          = nullptr;
+  std::atomic<FnPtr> metax_fn_{nullptr};
   FnPtr tsingmicro_fn_     = nullptr;
   FnPtr enflame_fn_        = nullptr;
   FnPtr kunlunxin_fn_      = nullptr;

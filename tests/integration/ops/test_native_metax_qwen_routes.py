@@ -266,6 +266,7 @@ def test_native_bf16_sdk_audit_preserves_the_cpu_core_and_declared_dtypes():
 
     report = vendor.audit()
     assert report["vendor"] == "metax"
+    report = report.get("sdk_precision", report)
     assert {row["op"]: row["dtypes"] for row in report["policy"]["operators"]} == {
         "mm": ["BFloat16"],
         "bmm": ["BFloat16"],

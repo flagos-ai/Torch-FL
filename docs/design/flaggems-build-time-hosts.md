@@ -89,10 +89,10 @@ scratch arguments, tensor-map encoding and published FlagTree module loader.
 This adapter contains no numerical kernels. Other adapters must describe their
 own compiler metadata and loader instead of inheriting CUDA behavior.
 
-`backend.py` is the single admission registry. Only `nvidia` is admitted in this
-change. A native-host build or activation for another vendor fails explicitly;
-it cannot select a CUDA adapter, boxing route or alternate host implementation.
-MetaX and Ascend admission requires separate validation under
+`backend.py` is the single admission registry. NVIDIA, MetaX and Ascend have
+separate adapters and installed-wheel conformance. An unadmitted vendor fails
+explicitly; it cannot select a CUDA adapter, boxing route or alternate host
+implementation. MetaX and Ascend full-model acceptance remains separate under
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) and
 [issue #833](https://github.com/flagos-ai/Torch-FL/issues/833).
 
@@ -873,3 +873,35 @@ The evidence file records the wheel, numerical-library and raw-result hashes.
 
 The native-host build remains opt-in. This cohort's acceptance does not establish
 all-signature compiler coverage or results on other accelerators.
+
+### MetaX native-host precision cohort
+
+The opt-in MetaX native config includes measured BF16 `mm`/`bmm` clauses for
+installed MACA BLAS. The official CPU Torch core remains loaded, and the wheel
+records the actual SDK library hashes. Contiguous FP32 last-axis means use the
+original published FlagGems reduction with normalized layout and launch metadata.
+The ordinary MetaX default configuration is unchanged.
+
+An optional `FLAGOS_VENDOR_TORCH_LIB` selects the verified
+`2.10.0+metax3.8.1.0` vendor Torch numerical cohort. Its additional BF16 SiLU
+exception addresses a full-model midpoint divergence at input 5.9375. Only
+`libc10_cuda.so` and `libtorch_cuda.so` are bundled, under
+`native_host/_generated/metax_vendor/`. Vendor CPU libraries are neither bundled
+nor loaded. The compatibility manifest records this bundle and its vendor Torch
+version. Wheel preflight validates every numerical artifact hash.
+
+`codegen_metax_native_vendor.py` derives the unary signature and schema/policy ABI
+from Torch schemas. CPU host glue supplies FlagOS storage and the current stream
+to the original published GPU stub; real tensor devices and dispatch keys stay
+PrivateUse1. The build compiles the two hash-verified published MACA environment
+headers unchanged. These retain the manufacturer's original environment semantics;
+there are no constant-return flag stubs or new numerical GPU sources. Only the
+explicit `BFloat16:metax` clause selects the entry, when installed. Other dtypes
+and explicit FlagGems overrides keep the base route.
+
+The complete BF16 input bit-pattern comparison passes against manufacturer SiLU,
+and installed tests cover layouts, empty tensors and nondefault streams. These
+operator results do not establish full-model acceptance. The paired 512-step
+strict model still fails the frozen logits bound after the SiLU correction;
+subsequent attention-weight differences remain under investigation. Native timing
+is not accepted before the independent full-model precision gate passes.

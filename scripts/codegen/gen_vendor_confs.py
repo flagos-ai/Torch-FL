@@ -4269,11 +4269,19 @@ def build_all(conf_dir: Path) -> dict:
         name = f"{platform}_native_host"
         text = render(name, "", routes)
         if platform == "metax":
-            from native_host_policy import NATIVE_SDK_PRECISION, render_config_routes
-
-            text = render_config_routes(
-                text, platform, policy=NATIVE_SDK_PRECISION[platform]
+            from native_host_policy import (
+                NATIVE_SDK_PRECISION,
+                precision_policy,
+                render_config_routes,
             )
+
+            policy = {
+                "operators": [
+                    *NATIVE_SDK_PRECISION[platform]["operators"],
+                    *precision_policy(platform)["operators"],
+                ]
+            }
+            text = render_config_routes(text, platform, policy=policy)
         text = text.replace(
             "# Full-coverage config:",
             "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"

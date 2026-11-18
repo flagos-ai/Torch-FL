@@ -227,6 +227,20 @@ FlagGems override removes these clauses. The build manifest and audit record
 the policy and hashes of the numerical SDK libraries. Measured contiguous FP32
 last-axis means normalize GPU layout and original-kernel launch metadata to
 preserve the vendor's reduction order; the kernel source remains unchanged.
+For the measured `2.10.0+metax3.8.1.0` vendor Torch cohort, an explicit
+`FLAGOS_VENDOR_TORCH_LIB=/path/to/vendor/torch/lib` also builds the BF16 SiLU
+precision exception. It bundles only the published `libc10_cuda.so` and
+`libtorch_cuda.so` under the native-host artifacts. CPU host glue compiles the
+two hash-verified published MACA environment headers with their original flag
+semantics and calls the original GPU stub on FlagOS storage. The generated
+`BFloat16:metax` clause applies only when that typed entry is installed.
+Build and runtime verify the numerical assets, schema ABI and official CPU core;
+no vendor CPU Torch library is bundled or loaded. The compatibility manifest
+records the vendor Torch version and this numerical-library bundle.
+The optional cohort's additional installed-wheel tests run with
+`python -m pytest tests/manual/test_native_metax_vendor_precision.py -v`.
+They require the exact published vendor cohort above; the ordinary MetaX CI
+artifact runs its separate 86-case native-host suite without this optional bundle.
 Full-model accuracy and the 80% vendor-performance gate remain tracked in
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
 does not establish those results. NVIDIA's existing precision policy is unchanged.

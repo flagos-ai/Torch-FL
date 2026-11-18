@@ -81,6 +81,29 @@ NATIVE_REDUCTION_ADAPTATIONS = {
 
 
 _COHORTS = {
+    "metax": {
+        "schema_version": 1,
+        "flag_gems": "5.4.0",
+        "vendor_torch": "2.10.0+metax3.8.1.0",
+        "torch_git_version": "f0eb8bf5e72d15327617097aa264c899b3581986",
+        "cpu_torch_git_version": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+        "issue": "https://github.com/flagos-ai/Torch-FL/issues/832",
+        "retirement": "Remove after a published FlagGems SiLU passes the paired full-model logits gate and repeated eager performance checks.",
+        "host_headers": {
+            "ATen/native/cuda/maca_kernels/Context.h": "97e838330b718214d3c6778e0b54feef2ff55d9c5d60d4471fa168636a2ec237",
+            "ATen/native/cuda/maca_kernels/Context_.h": "9c09c849ade51a96fd3f6d94eef7394e0ce8918ac6b7187cd52b8e63430974bf",
+        },
+        "operators": [
+            {
+                "op": "silu",
+                "family": "pointwise_stub",
+                "stub": "silu_stub",
+                "dtypes": ["BFloat16"],
+                "reason": "The first full-model divergence is BF16 SiLU(5.9375): published FlagGems returns 5.90625, while the manufacturer returns 5.9375. The original vendor stub matches all 65,536 BF16 bit patterns with the official CPU core retained.",
+            }
+        ],
+        "sources": [],
+    },
     "nvidia": {
         "schema_version": 1,
         "flag_gems": "5.4.0",
