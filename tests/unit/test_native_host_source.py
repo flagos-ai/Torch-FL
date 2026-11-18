@@ -27,7 +27,9 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
         "if 'torch' in sys.modules:\n"
         "    raise RuntimeError('vendor core must be selected before torch')\n"
     )
-    (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
+    (package / "_build_config.py").write_text(
+        f"ACCELERATOR = {accelerator!r}\nKERNELS = ('flaggems',)\n"
+    )
     (backend / "__init__.py").write_text("")
     (backend / "backend.py").write_text(
         "from pathlib import Path\n"
@@ -79,7 +81,9 @@ def test_builder_initializes_only_platforms_that_require_early_setup(
         "    (Path(__file__).parent / 'initialized').touch()\n"
         "flagos = SimpleNamespace(init=initialize)\n"
     )
-    (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
+    (package / "_build_config.py").write_text(
+        f"ACCELERATOR = {accelerator!r}\nKERNELS = ('flaggems',)\n"
+    )
     (backend / "__init__.py").write_text("")
     (backend / "vendor_cohort.py").write_text(
         (SOURCE.parent / "vendor_cohort.py").read_text()

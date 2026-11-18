@@ -16,6 +16,9 @@
 #include <vector>
 
 #include <flagos_env.h>
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+#include "backends/flagos/python_op_caller.h"
+#endif
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -883,6 +886,25 @@ bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
   lhs = PadMatmulContractDim(lhs, false, floor);
   rhs = PadMatmulContractDim(rhs, true, floor);
   return true;
+}
+
+bool TryNativeHostMean(const at::Tensor& input, at::OptionalIntArrayRef dims,
+                       bool keepdim, std::optional<at::ScalarType> dtype,
+                       at::Tensor& result) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  if (!input.device().is_privateuseone() || input.scalar_type() != at::kFloat ||
+      (dtype.has_value() && *dtype != at::kFloat) || !input.is_contiguous() ||
+      input.dim() == 0 || input.numel() == 0 || !dims.has_value() || dims->size() != 1)
+    return false;
+  const auto dim = (*dims)[0];
+  if (dim != -1 && dim != input.dim() - 1) return false;
+  result = CallPythonOp_Generic("torch_fl.native_host._generated.runtime.metax_mean",
+                                {input, keepdim});
+  return true;
+#else
+  (void)input; (void)dims; (void)keepdim; (void)dtype; (void)result;
+  return false;
+#endif
 }
 
 bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,

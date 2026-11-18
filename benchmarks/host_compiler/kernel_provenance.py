@@ -7,14 +7,13 @@ from collections import Counter, defaultdict
 
 
 def audit_kernels(events, admitted, vendor=None):
-    approved = {
-        "flagos::nvidia::" + row["op"] for row in (vendor or {}).get("catalog", [])
-    }
+    prefix = "flagos::" + (vendor or {}).get("vendor", "nvidia") + "::"
+    approved = {prefix + row["op"] for row in (vendor or {}).get("catalog", [])}
     scopes = defaultdict(list)
     launches = defaultdict(list)
     for event in events:
         name = event.get("name", "")
-        if name.startswith("flagos::nvidia::"):
+        if name.startswith(("flagos::nvidia::", "flagos::metax::")):
             if name not in approved or event.get("ph") != "X":
                 raise RuntimeError(f"unapproved native vendor scope: {name}")
             scopes[event["pid"], event["tid"]].append(event)

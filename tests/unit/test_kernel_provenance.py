@@ -40,15 +40,17 @@ def trace():
 @pytest.mark.parametrize(
     "launch_name", ["cudaLaunchKernel", "cuLaunchKernel", "cuLaunchKernelEx"]
 )
-def test_vendor_requires_approved_scope_and_correlated_launch(launch_name):
+@pytest.mark.parametrize("vendor", ["nvidia", "metax"])
+def test_vendor_requires_approved_scope_and_correlated_launch(launch_name, vendor):
     events = trace()
+    events[0]["name"] = f"flagos::{vendor}::mm"
     events[1]["name"] = launch_name
     report = provenance.audit_kernels(
-        events, {"published_gems"}, {"catalog": [{"op": "mm"}]}
+        events, {"published_gems"}, {"vendor": vendor, "catalog": [{"op": "mm"}]}
     )
     assert report["flaggems_counts"] == {"published_gems": 1}
     assert report["vendor_counts"] == {"vendor_gemm": 1}
-    assert report["vendor_entry_launches"] == {"flagos::nvidia::mm": 1}
+    assert report["vendor_entry_launches"] == {f"flagos::{vendor}::mm": 1}
 
 
 @pytest.mark.parametrize(

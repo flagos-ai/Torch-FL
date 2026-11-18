@@ -4268,6 +4268,12 @@ def build_all(conf_dir: Path) -> dict:
         routes.update({op: "flaggems" for op in operators})
         name = f"{platform}_native_host"
         text = render(name, "", routes)
+        if platform == "metax":
+            from native_host_policy import NATIVE_SDK_PRECISION, render_config_routes
+
+            text = render_config_routes(
+                text, platform, policy=NATIVE_SDK_PRECISION[platform]
+            )
         text = text.replace(
             "# Full-coverage config:",
             "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"

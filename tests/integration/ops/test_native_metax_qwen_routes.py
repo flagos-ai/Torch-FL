@@ -211,3 +211,160 @@ def test_causal_mask_bool_to_bf16_copy_and_inplace_multiply_stay_on_device(shape
     torch.testing.assert_close(
         mask.cpu(), -16.0 * expected.expand(shape), atol=0, rtol=0
     )
+
+
+def _exact_bf16(shape):
+    count = 1
+    for extent in shape:
+        count *= extent
+    return (
+        ((torch.arange(count).remainder(13) - 6).float() / 8).reshape(shape).bfloat16()
+    )
+
+
+@pytest.mark.parametrize("rank", [2, 3])
+@pytest.mark.parametrize("rows", [1, 60])
+@pytest.mark.parametrize("strided", [False, True])
+@torch.no_grad()
+def test_native_bf16_sdk_matrix_layouts(rank, rows, strided):
+    assert "vendor" in torch_fl._build_config.KERNELS
+    batch = (2,) if rank == 3 else ()
+    left, right = _exact_bf16((*batch, rows, 64)), _exact_bf16((*batch, 64, 32))
+    if strided:
+        a = left.transpose(-1, -2).contiguous().to("flagos:0").transpose(-1, -2)
+        b = right.transpose(-1, -2).contiguous().to("flagos:0").transpose(-1, -2)
+    else:
+        a, b = left.to("flagos:0"), right.to("flagos:0")
+    function = torch.mm if rank == 2 else torch.bmm
+    name = "mm" if rank == 2 else "bmm"
+    before = dict(torch.ops.flagos.native_metax_sdk_hits())
+    actual = function(a, b)
+    torch_fl.flagos.synchronize()
+    after = dict(torch.ops.flagos.native_metax_sdk_hits())
+    assert after[name] == before[name] + 1
+    torch.testing.assert_close(actual.cpu(), function(left, right), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("rank", [2, 3])
+@pytest.mark.parametrize("contracted", [0, 64])
+@torch.no_grad()
+def test_native_bf16_sdk_empty_matrices(rank, contracted):
+    batch = (2,) if rank == 3 else ()
+    rows = 3 if contracted == 0 else 0
+    left, right = (
+        _exact_bf16((*batch, rows, contracted)),
+        _exact_bf16((*batch, contracted, 5)),
+    )
+    function = torch.mm if rank == 2 else torch.bmm
+    actual = function(left.to("flagos:0"), right.to("flagos:0"))
+    torch_fl.flagos.synchronize()
+    torch.testing.assert_close(actual.cpu(), function(left, right), atol=0, rtol=0)
+
+
+def test_native_bf16_sdk_audit_preserves_the_cpu_core_and_declared_dtypes():
+    from torch_fl.native_host import vendor
+
+    report = vendor.audit()
+    assert report["vendor"] == "metax"
+    assert {row["op"]: row["dtypes"] for row in report["policy"]["operators"]} == {
+        "mm": ["BFloat16"],
+        "bmm": ["BFloat16"],
+    }
+    assert set(report["numerical_libraries"]) == {"mcblas", "mcblas_lt", "mcruntime"}
+    assert torch.__version__ == "2.10.0+cpu"
+
+
+@pytest.mark.parametrize("allow_reduction", [False, True])
+@torch.no_grad()
+def test_native_bf16_sdk_preserves_the_callers_reduction_setting(allow_reduction):
+    settings = torch.backends.cuda.matmul
+    original = settings.allow_bf16_reduced_precision_reduction
+    try:
+        settings.allow_bf16_reduced_precision_reduction = allow_reduction
+        left = torch.full((4, 64), 0.125, dtype=torch.bfloat16, device="flagos:0")
+        right = torch.full((64, 3), 0.25, dtype=torch.bfloat16, device="flagos:0")
+        actual = torch.mm(left, right)
+        torch_fl.flagos.synchronize()
+        assert settings.allow_bf16_reduced_precision_reduction == allow_reduction
+        torch.testing.assert_close(
+            actual.cpu(), torch.full((4, 3), 2.0, dtype=torch.bfloat16), atol=0, rtol=0
+        )
+    finally:
+        settings.allow_bf16_reduced_precision_reduction = original
+
+
+@torch.no_grad()
+def test_native_bf16_sdk_rejects_an_unenforceable_split_k_setting():
+    settings = torch.backends.cuda.matmul
+    original = settings.allow_bf16_reduced_precision_reduction
+    try:
+        settings.allow_bf16_reduced_precision_reduction = (False, False)
+        left = torch.ones((2, 2), dtype=torch.bfloat16, device="flagos:0")
+        with pytest.raises(RuntimeError, match="split-K prohibition"):
+            torch.mm(left, left)
+    finally:
+        settings.allow_bf16_reduced_precision_reduction = original
+
+
+def _vendor_mean_reference(source):
+    # Independent transcription of the published MACA ReduceConfigMaca and
+    # continuous-reduce host/kernel contract, evaluated only for test evidence.
+    rows, columns = source.shape
+    vector = 4 if columns > 128 else 1
+    extent = columns // vector
+    width = min(extent, 16 if columns <= 256 else 64)
+    height = min(1 << (min(rows, 512).bit_length() - 1), 512 // width)
+    width = min(extent, 512 // height)
+    accumulators = torch.zeros(rows, width, dtype=torch.float32)
+    for start in range(0, columns, width * vector):
+        values = source[:, start : start + width * vector].reshape(rows, width, vector)
+        for component in range(vector):
+            accumulators = accumulators + values[:, :, component]
+    while accumulators.size(1) > 64:
+        half = accumulators.size(1) // 2
+        accumulators = accumulators[:, :half] + accumulators[:, half:]
+    while accumulators.size(1) > 1:
+        accumulators = accumulators[:, ::2] + accumulators[:, 1::2]
+    return accumulators / columns
+
+
+@pytest.mark.parametrize("columns", [128, 1024])
+@pytest.mark.parametrize("rows", [1, 8, 16, 60, 480, 960])
+@torch.no_grad()
+def test_native_fp32_mean_preserves_the_vendor_reduction_tree(rows, columns):
+    reference = torch.randn(
+        rows, columns, generator=torch.Generator().manual_seed(17002)
+    )
+    runtime = torch_fl.native_host._hosts.runtime
+    before = runtime.metax_mean_calls()
+    actual = reference.to("flagos:0").mean(-1, keepdim=True)
+    torch_fl.flagos.synchronize()
+    assert runtime.metax_mean_calls() == before + 1
+    torch.testing.assert_close(
+        actual.cpu(), _vendor_mean_reference(reference), atol=0, rtol=0
+    )
+
+
+@torch.no_grad()
+def test_native_fp32_mean_unmeasured_layout_keeps_the_original_route():
+    source = torch.randn(4, 256, generator=torch.Generator().manual_seed(17003))
+    value = source.to("flagos:0")[:, ::2]
+    runtime = torch_fl.native_host._hosts.runtime
+    before = runtime.metax_mean_calls()
+    actual = value.mean(-1)
+    torch_fl.flagos.synchronize()
+    assert runtime.metax_mean_calls() == before
+    torch.testing.assert_close(
+        actual.cpu(), source[:, ::2].mean(-1), atol=1e-3, rtol=1e-3
+    )
+
+
+@torch.no_grad()
+def test_native_fp32_mean_rank_one_preserves_scalar_shape():
+    source = torch.randn(1, 128, generator=torch.Generator().manual_seed(17004))
+    actual = source.flatten().to("flagos:0").mean(-1)
+    torch_fl.flagos.synchronize()
+    assert actual.shape == torch.Size([])
+    torch.testing.assert_close(
+        actual.cpu(), _vendor_mean_reference(source).reshape(()), atol=0, rtol=0
+    )

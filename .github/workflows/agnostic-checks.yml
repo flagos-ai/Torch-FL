@@ -134,6 +134,7 @@ jobs:
             tests/unit/test_native_host_audit.py
             tests/unit/test_native_host_backend.py
             tests/unit/test_native_host_metax_routes.py
+          tests/unit/test_metax_sdk_precision.py
             tests/unit/test_metax_runtime_link.py
             tests/unit/test_metax_native_link_contract.py
             tests/unit/test_metax_device_properties_restore.py

@@ -3123,6 +3123,10 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  at::Tensor native_mean;
+  if (self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
+#endif
   auto result = MeanDimFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;

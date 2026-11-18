@@ -65,7 +65,11 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_coverage import TILEOPS_OPS  # noqa: E402
 from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
-from native_host_policy import NATIVE_BMM_ADAPTATIONS, render_config_routes  # noqa: E402
+from native_host_policy import (  # noqa: E402
+    NATIVE_BMM_ADAPTATIONS,
+    NATIVE_REDUCTION_ADAPTATIONS,
+    render_config_routes,
+)
 
 
 # TensorList C++ spelling (IListRef vs ArrayRef) must match what PyTorch itself
@@ -199,6 +203,20 @@ def _dot_contract_prelude(op, args):
         f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
     )
     return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
+
+
+def _native_reduction_prelude(op):
+    policy = NATIVE_REDUCTION_ADAPTATIONS["metax"]
+    if op != policy["operator"]:
+        return ""
+    extents = " || ".join(f"self.size(-1) == {extent}" for extent in policy["extents"])
+    return (
+        "#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)\n"
+        "  at::Tensor native_mean;\n"
+        f"  if (self.dim() > 0 && ({extents}) && "
+        "at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) "
+        "{ return native_mean; }\n#endif\n"
+    )
 
 
 # Matmul ops whose FlagGems Python kernel must leave the device entirely for the
@@ -1636,7 +1654,7 @@ def gen_flaggems_python_kernel(
     # Ordered: the host escape returns before the padding runs, because a dtype
     # this route cannot serve at all should not pay for a pad it will not use.
     host_lines = _host_matmul_prelude(op, args, ret_type)
-    return finish(body, host_lines + dotpad_lines)
+    return finish(body, host_lines + _native_reduction_prelude(op) + dotpad_lines)
 
 
 def gen_flaggems_source_bridges(funcs, discovered):

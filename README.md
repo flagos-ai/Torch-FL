@@ -204,6 +204,8 @@ for its boundary and wheel preflight command.
 
 For the MetaX pilot, use the same native-host build switches with
 `FLAGOS_ACCELERATOR=metax` and `MACA_PATH` pointing at the installed MACA SDK.
+Set `FLAGOS_BUILD_VENDOR=1` to include the measured BF16 matrix precision slots;
+MetaX native-host CI uses this selection.
 The adapter submits the original published MetaX FlagGems kernels directly through
 MACA, with boxing disabled. MetaX CI builds a separate opt-in wheel and retains
 its generated coverage, preflight and launch-conformance evidence. The native
@@ -218,6 +220,13 @@ strided outputs and strict fallback rejection.
 Native MetaX device copies and casts use the existing published FlagGems copy
 source. Strict hosts reject uncovered device-copy, gather and explicit numerical
 host escapes before transferring their operands to CPU.
+The generated native config selects `BFloat16:metax` for measured mm/bmm
+exceptions, which call the installed MACA BLAS directly on FlagOS storage without
+vendor Torch or boxing. Other dtypes retain their base routes, and an explicit
+FlagGems override removes these clauses. The build manifest and audit record
+the policy and hashes of the numerical SDK libraries. Measured contiguous FP32
+last-axis means normalize GPU layout and original-kernel launch metadata to
+preserve the vendor's reduction order; the kernel source remains unchanged.
 Full-model accuracy and the 80% vendor-performance gate remain tracked in
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
 does not establish those results. NVIDIA's existing precision policy is unchanged.

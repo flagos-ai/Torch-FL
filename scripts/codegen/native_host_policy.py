@@ -39,6 +39,47 @@ NATIVE_COPY_ADAPTATIONS = {
 }
 
 
+NATIVE_SDK_PRECISION = {
+    "metax": {
+        "schema_version": 1,
+        "vendor": "metax",
+        "flag_gems": "5.4.0",
+        "flagtree": "0.7.0.post2+metax3.6",
+        "measured_sdk_version": "3.8.1.3",
+        "vendor_torch": "2.10.0+metax3.8.1.0",
+        "issue": "https://github.com/flagos-ai/Torch-FL/issues/832",
+        "evidence": "All 27 actual first-layer BF16 matrix products from prefill and two teacher-forced decode steps match the installed SDK BLAS bitwise; original published FlagGems products differ at identical inputs.",
+        "retirement": "Remove each exception after a published FlagGems wheel passes the paired full-model logits gate and repeated eager performance checks.",
+        "operators": [
+            {"op": "mm", "rank": 2, "dtypes": ["BFloat16"]},
+            {"op": "bmm", "rank": 3, "dtypes": ["BFloat16"]},
+        ],
+    }
+}
+
+
+NATIVE_REDUCTION_ADAPTATIONS = {
+    "metax": {
+        "flag_gems": "5.4.0",
+        "flagtree": "0.7.0.post2+metax3.6",
+        "vendor_torch": "2.10.0+metax3.8.1.0",
+        "operator": "mean.dim",
+        "dtype": "Float",
+        "extents": [128, 1024],
+        "contract": "Contiguous FP32 input, one last-axis reduction, FP32 output, nonempty rows.",
+        "max_threads": 512,
+        "warp_size": 64,
+        "split_warp_extent": 256,
+        "split_warp_width": 16,
+        "vectorize_above": 128,
+        "vector_width": 4,
+        "implementation": "GPU layout permutation and launch metadata for the original published mean_dim_kernel_inner; one element per lane preserves balanced reduction stages.",
+        "evidence": "The original reduction order differs at actual Qwen normalization inputs. The normalized original GPU kernel matches all 48 paired random shape/seed cases bitwise, including one-row decode and prefill geometry.",
+        "retirement": "Remove after a published FlagGems mean passes paired full-model precision and repeated eager performance checks with the manufacturer reduction order.",
+    }
+}
+
+
 _COHORTS = {
     "nvidia": {
         "schema_version": 1,
@@ -127,16 +168,16 @@ def source_policy(vendor):
     }
 
 
-def configured_dtype_routes(vendor):
+def configured_dtype_routes(vendor, *, policy=None):
     """Render measured input-dtype clauses for the vendor conf generator."""
     return {
         row["op"]: ",".join(row["dtypes"]) + ":" + vendor
-        for row in precision_policy(vendor)["operators"]
+        for row in (precision_policy(vendor) if policy is None else policy)["operators"]
     }
 
 
-def render_config_routes(text, vendor):
-    rules = configured_dtype_routes(vendor)
+def render_config_routes(text, vendor, *, policy=None):
+    rules = configured_dtype_routes(vendor, policy=policy)
     lines, seen = [], set()
     header = "# Dtype clauses override the base route only when the input matches and the kernel is installed."
     add_header = header not in text
