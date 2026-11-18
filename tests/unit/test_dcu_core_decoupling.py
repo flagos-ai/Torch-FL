@@ -81,6 +81,36 @@ def fake_env(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Bundle directory name
+# ---------------------------------------------------------------------------
+
+
+def test_bundle_dirname_prefers_the_canonical_name(tmp_path, monkeypatch):
+    (tmp_path / "lib_hygon").mkdir()
+    (tmp_path / "lib_dcu").mkdir()
+    monkeypatch.setattr(link, "_bundle_package_root", lambda: str(tmp_path))
+    assert link._bundle_dirname() == "lib_hygon"
+
+
+def test_bundle_dirname_accepts_the_vendor_spelling(tmp_path, monkeypatch):
+    """A wheel that shipped torch_fl/lib_dcu/ must still find its bundle.
+
+    AGENTS.md names the wheel's bundle lib_<vendor>/; the source tree writes
+    lib_hygon/. A loader that only probes the latter reported the decoupled
+    runtime absent on a wheel that had one, and the device libs were never
+    dlopened.
+    """
+    (tmp_path / "lib_dcu").mkdir()
+    monkeypatch.setattr(link, "_bundle_package_root", lambda: str(tmp_path))
+    assert link._bundle_dirname() == "lib_dcu"
+
+
+def test_bundle_dirname_falls_back_to_the_canonical_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(link, "_bundle_package_root", lambda: str(tmp_path))
+    assert link._bundle_dirname() == "lib_hygon"
+
+
+# ---------------------------------------------------------------------------
 # Mode selection
 # ---------------------------------------------------------------------------
 

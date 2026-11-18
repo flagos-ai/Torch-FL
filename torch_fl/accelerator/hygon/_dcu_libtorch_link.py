@@ -69,6 +69,29 @@ from torch_fl.accelerator._vendor_libtorch import (
 )
 
 _BUNDLE_DIR = "lib_hygon"
+# A wheel assembled from a vendor lane and this tree's `setup.py` can carry the
+# bundle under the vendor's name instead. AGENTS.md makes the vendor the name a
+# tree produces (wheel dirs, confs, `lib_<vendor>/` bundles) and the platform id
+# the name older scripts still type; `lib_hygon` and `lib_dcu` are those two
+# spellings of one directory. Measured on a DCU wheel that shipped
+# `torch_fl/lib_dcu/`: with only `lib_hygon` probed, the decoupled runtime
+# looked absent and the device libs were never dlopened.
+_BUNDLE_DIR_ALIASES = (_BUNDLE_DIR, "lib_dcu")
+
+
+def _bundle_package_root():
+    """The torch_fl package directory the bundle would sit in."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _bundle_dirname():
+    """The bundle directory this tree actually has, else the canonical name."""
+    pkg_root = _bundle_package_root()
+    for name in _BUNDLE_DIR_ALIASES:
+        if os.path.isdir(os.path.join(pkg_root, name)):
+            return name
+    return _BUNDLE_DIR
+
 
 # Core C++ .so that legacy mode takes from the DTK wheel as a self-consistent set.
 _CORE_SO = (
@@ -154,7 +177,7 @@ def vendor_core_mode():
 
 def _bundled_dcu_lib():
     """DTK device libraries bundled inside this wheel (self-contained build)."""
-    return bundled_lib_dir(_BUNDLE_DIR, "libtorch_hip.so")
+    return bundled_lib_dir(_bundle_dirname(), "libtorch_hip.so")
 
 
 def _discover_dcu_torch_lib():
@@ -164,7 +187,7 @@ def _discover_dcu_torch_lib():
     envs whose torch is a DTK build.
     """
     return discover_vendor_torch_lib(
-        _BUNDLE_DIR,
+        _bundle_dirname(),
         "libtorch_hip.so",
         env_override="FLAGOS_VENDOR_TORCH_LIB",
         vendor_markers=_MARKERS,
@@ -181,7 +204,7 @@ def _compat_shim_path(lib_dir):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             ),
-            _BUNDLE_DIR,
+            _bundle_dirname(),
             _COMPAT_SO,
         ),
     ):
@@ -282,7 +305,7 @@ def ensure_dcu_libtorch_links():
                 "FLAGOS_DCU_VENDOR_CORE=1 bash scripts/vendor/bundle_hygon_libtorch.sh."
             )
     return ensure_vendor_libtorch_links(
-        _BUNDLE_DIR,
+        _bundle_dirname(),
         _CORE_SO,
         extra_so=_HIP_SO,
         env_override="FLAGOS_VENDOR_TORCH_LIB",
@@ -306,4 +329,4 @@ def setup_dcu_runtime():
 
 def restore_original_libtorch():
     """Compatibility no-op; neither runtime mode modifies the installed wheel."""
-    _restore(_CORE_SO, _HIP_SO, bundle_dirname=_BUNDLE_DIR)
+    _restore(_CORE_SO, _HIP_SO, bundle_dirname=_bundle_dirname())
