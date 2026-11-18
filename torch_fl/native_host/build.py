@@ -639,6 +639,13 @@ def main():
         "modules": {},
         "closures": {},
     }
+    from torch_fl.native_host.vendor_cohort import load_build_policy
+
+    adaptation = load_build_policy(args.source_root).NATIVE_BMM_ADAPTATIONS.get(
+        backend.vendor
+    )
+    if adaptation is not None:
+        manifest["matmul_adaptation"] = adaptation
     if not args.launcher_only:
         initialize = getattr(backend, "initialize_runtime", None)
         if initialize is not None:

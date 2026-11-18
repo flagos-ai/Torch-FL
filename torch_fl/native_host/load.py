@@ -353,6 +353,7 @@ class Hosts:
             "host_artifacts": self.artifacts,
             "backend": self.manifest["backend"],
             "source_variants": self.manifest.get("source_variants"),
+            "matmul_adaptation": self.manifest.get("matmul_adaptation"),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "launched_kernels": _launched_kernels,

@@ -65,7 +65,7 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_coverage import TILEOPS_OPS  # noqa: E402
 from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
-from native_host_policy import render_config_routes  # noqa: E402
+from native_host_policy import NATIVE_BMM_ADAPTATIONS, render_config_routes  # noqa: E402
 
 
 # TensorList C++ spelling (IListRef vs ArrayRef) must match what PyTorch itself
@@ -178,8 +178,23 @@ def _dot_contract_prelude(op, args):
                 f"the schema has {sorted(arg_names)}"
             )
     lhs, rhs = operands
+    native = ""
+    if op in NATIVE_BMM_ADAPTATIONS["metax"]["operators"]:
+        condition = f"at::native::flagos::TryNativeHostBmmOuterProduct({lhs}, {rhs}, native_product)"
+        result = "return native_product;"
+        if op.endswith(".out"):
+            if "out" not in arg_names:
+                raise SystemExit(f"{op}: native outer product requires an out tensor")
+            condition = (
+                f"{lhs}.dim() == 3 && {rhs}.dim() == 3 && out.dim() == 3 && "
+                f"out.device() == {lhs}.device() && out.scalar_type() == {lhs}.scalar_type() && "
+                f"out.size(0) == {lhs}.size(0) && out.size(1) == {lhs}.size(1) && "
+                f"out.size(2) == {rhs}.size(2) && " + condition
+            )
+            result = "out.copy_(native_product); return out;"
+        native = f"  at::Tensor native_product;\n  if ({condition}) {{ {result} }}\n"
     lines = (
-        f"  at::Tensor {lhs}_dotpad = {lhs};\n"
+        native + f"  at::Tensor {lhs}_dotpad = {lhs};\n"
         f"  at::Tensor {rhs}_dotpad = {rhs};\n"
         f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
     )

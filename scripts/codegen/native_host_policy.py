@@ -11,6 +11,20 @@ runtime activation never imports this module or reads the source checkout.
 from copy import deepcopy
 
 
+NATIVE_BMM_ADAPTATIONS = {
+    "metax": {
+        "flag_gems": "5.4.0",
+        "vendor_torch": "2.10.0+metax3.8.1.0",
+        "operators": ("bmm", "bmm.out"),
+        "dtype": "Float",
+        "contract": "Matching 3-D batches with contracted extent one.",
+        "implementation": "Original published pointwise kernels; TF32 nearest-even operands when the caller allows TF32.",
+        "reason": "Published bmm fixes allow_tf32=False; actual Qwen RoPE products differ from the manufacturer's TF32 results by up to 0.010868073. GPU nearest-even operand rounding reproduces all captured products bitwise.",
+        "retirement": "Remove after the published bmm supports K=1 and honors the same TF32 context with paired model precision/performance evidence.",
+    }
+}
+
+
 _COHORTS = {
     "nvidia": {
         "schema_version": 1,

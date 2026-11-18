@@ -211,7 +211,10 @@ wheel selects generated `backends_metax_native_host.conf` from its build record
 and compiles its additional registrations; the ordinary wheel keeps its own
 measured routing. Native routes align the published hosts' device identity and
 use the existing contracted-axis padding for small-K bmm, including out variants.
-The installed-wheel cohort covers these routes and strict fallback rejection.
+For FP32 outer products, original published pointwise kernels preserve the
+caller's TF32 rounding policy; the resolved adaptation is recorded in the wheel
+manifest. The installed-wheel cohort covers these routes, TF32 contexts,
+strided outputs and strict fallback rejection.
 Full-model accuracy and the 80% vendor-performance gate remain tracked in
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
 does not establish those results. NVIDIA's existing precision policy is unchanged.

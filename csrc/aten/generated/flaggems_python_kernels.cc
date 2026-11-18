@@ -1184,6 +1184,8 @@ at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool period
 
 static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
+  at::Tensor native_product;
+  if (at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { return native_product; }
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
@@ -1194,6 +1196,8 @@ at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
 
 static TypedSourceSlot BmmOutFnSource("aten::bmm.out", "flag_gems.bmm_out", "f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1", "{\"abi\": \"f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm_out\", \"op\": \"aten::bmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
+  at::Tensor native_product;
+  if (self.dim() == 3 && mat2.dim() == 3 && out.dim() == 3 && out.device() == self.device() && out.scalar_type() == self.scalar_type() && out.size(0) == self.size(0) && out.size(1) == self.size(1) && out.size(2) == mat2.size(2) && at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { out.copy_(native_product); return out; }
   at::Tensor self_dotpad = self;
   at::Tensor mat2_dotpad = mat2;
   at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);

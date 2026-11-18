@@ -65,7 +65,7 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
     assert (tmp_path / "selected-backend").read_text() == accelerator
 
 
-@pytest.mark.parametrize("accelerator", ["cuda", "ascend"])
+@pytest.mark.parametrize("accelerator", ["cuda", "ascend", "metax"])
 def test_builder_initializes_only_platforms_that_require_early_setup(
     tmp_path, accelerator
 ):
@@ -81,11 +81,15 @@ def test_builder_initializes_only_platforms_that_require_early_setup(
     )
     (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
     (backend / "__init__.py").write_text("")
+    (backend / "vendor_cohort.py").write_text(
+        (SOURCE.parent / "vendor_cohort.py").read_text()
+    )
     (backend / "backend.py").write_text(
         "from types import SimpleNamespace\n"
         "def get_backend(accelerator):\n"
         "    import torch_fl\n"
-        "    result = SimpleNamespace(extensions=lambda *args: [])\n"
+        "    result = SimpleNamespace(extensions=lambda *args: [], "
+        "vendor='nvidia' if accelerator == 'cuda' else accelerator)\n"
         "    if accelerator == 'ascend':\n"
         "        result.initialize_runtime = torch_fl.flagos.init\n"
         "    return result\n"

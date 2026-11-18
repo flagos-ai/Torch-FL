@@ -4,6 +4,10 @@
 """Installed native routes needed by the unmodified eager Qwen3 workload."""
 
 from pathlib import Path
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -78,6 +82,65 @@ def test_qwen_rope_small_k_bmm(tokens, out_variant):
     torch.testing.assert_close(
         actual.cpu(), torch.bmm(left, right), atol=1e-3, rtol=1e-3
     )
+
+
+@pytest.mark.parametrize("allow_tf32", [False, True])
+def test_native_rope_outer_product_honors_the_callers_tf32_context(allow_tf32):
+    environment = os.environ.copy()
+    environment.pop("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                f"""
+                import torch
+                import torch_fl
+
+                torch.backends.cuda.matmul.allow_tf32 = {allow_tf32!r}
+                bits = torch.tensor([
+                    0x00000000, 0x80000000, 0x3f800fff, 0x3f801000,
+                    0x3f803000, 0xbf801000, 0xbf803000, 0x00000001,
+                    0x7f800000, 0xff800000, 0x7fc00000,
+                ], dtype=torch.int64).to(torch.int32)
+                left = bits.view(torch.float32).reshape(1, -1, 1)
+                right = torch.tensor([0.031249, 60.0, 61.0]).reshape(1, 1, -1)
+
+                def rounded(value):
+                    raw = value.view(torch.int32)
+                    special = (raw & 0x7fffffff) >= 0x7f800000
+                    low_bit = (raw >> 13) & 1
+                    quantized = ((raw + 4095 + low_bit) & -8192).view(torch.float32)
+                    return torch.where(special, value, quantized)
+
+                expected = (rounded(left) * rounded(right)
+                            if {allow_tf32!r} else left * right)
+                if {allow_tf32!r}:
+                    assert not torch.equal(expected[:, 2:7], (left * right)[:, 2:7])
+                a, b = left.to('flagos:0'), right.to('flagos:0')
+                actual = torch.bmm(a, b)
+                storage = torch.empty(1, left.size(1), 6, device='flagos:0')
+                output = storage[..., ::2]
+                returned = torch.bmm(a, b, out=output)
+                assert returned.data_ptr() == output.data_ptr()
+                assert returned.stride() == output.stride()
+                torch_fl.flagos.synchronize()
+                for value in (actual.cpu(), returned.cpu()):
+                    torch.testing.assert_close(value, expected, atol=0, rtol=0,
+                                               equal_nan=True)
+                    assert torch.equal(torch.signbit(value[:, :2]),
+                                       torch.signbit(expected[:, :2]))
+                print('TF32 context and strided out passed')
+                """
+            ),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TF32 context and strided out passed" in result.stdout
 
 
 @torch.no_grad()

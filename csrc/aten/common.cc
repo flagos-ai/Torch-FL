@@ -2,6 +2,8 @@
 
 #include "common.h"
 
+#include <ATen/Context.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -879,6 +881,35 @@ bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
   lhs = PadMatmulContractDim(lhs, false, floor);
   rhs = PadMatmulContractDim(rhs, true, floor);
   return true;
+}
+
+bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
+                                  at::Tensor& result) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  if (lhs.dim() != 3 || rhs.dim() != 3 || lhs.size(0) != rhs.size(0) ||
+      lhs.size(2) != 1 || rhs.size(1) != 1 || lhs.device() != rhs.device() ||
+      lhs.scalar_type() != at::kFloat || rhs.scalar_type() != at::kFloat) {
+    return false;
+  }
+  auto operand = [](const at::Tensor& input) {
+    if (!at::globalContext().allowTF32CuBLAS()) return input;
+    auto bits = input.contiguous().view(at::kInt);
+    auto options = input.options().dtype(at::kInt);
+    auto shift = at::full(at::IntArrayRef{}, 13, options);
+    auto bias = at::full(at::IntArrayRef{}, 4095, options);
+    auto low_bit = at::bitwise_and(at::bitwise_right_shift(bits, shift), 1);
+    auto rounded = at::bitwise_and(at::add(at::add(bits, bias), low_bit), -8192).view(at::kFloat);
+    auto special = at::ge(at::bitwise_and(bits, 0x7fffffff), 0x7f800000);
+    return at::where(special, input, rounded);
+  };
+  result = at::mul(operand(lhs), operand(rhs));
+  return true;
+#else
+  (void)lhs;
+  (void)rhs;
+  (void)result;
+  return false;
+#endif
 }
 
 bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {

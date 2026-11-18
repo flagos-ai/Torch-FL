@@ -294,6 +294,11 @@ at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
 // with the same small K. See TritonMinDotContractExtent above.
 bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
 
+// Native MetaX FP32 outer products honor the caller's TF32 policy using the
+// published pointwise kernels. Other builds/contracts retain their bmm path.
+bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
+                                  at::Tensor& result);
+
 // Shared by ATen fallback and explicit numerical host escapes.
 bool CpuFallbackAllowed();
 
