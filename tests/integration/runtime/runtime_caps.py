@@ -103,7 +103,7 @@ def load_routes() -> dict[str, str]:
 
 
 def route_reason(op: str) -> tuple[str | None, str]:
-    """The backend ``op`` dispatches to, plus why it resolved that way.
+    """The base backend configured for ``op``, plus why it resolved that way.
 
     The backend is named the way ``[flagos dispatch]`` names it, so a caller can
     compare it to a log line without restating the conf/log vocabulary split.
@@ -121,7 +121,7 @@ def route_reason(op: str) -> tuple[str | None, str]:
 
 
 def effective_route(op: str) -> tuple[str | None, str]:
-    """The route this wheel can verify, or ``unimplemented`` for a ``none``.
+    """The base route to verify, or ``unimplemented`` for a ``none``.
 
     ``none`` remains visible in the conf and in the summary's ``ops_none``
     count. The second value states whether the dispatch probe has work to do,

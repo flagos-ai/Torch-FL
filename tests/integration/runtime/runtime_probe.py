@@ -68,7 +68,7 @@ _CHILD_SRC = textwrap.dedent(
 
     def _randn(seed, shape):
         torch.manual_seed(seed)
-        return torch.randn(*shape)
+        return torch.randn(*shape, dtype=torch.float32, device="cpu")
 
 
     def _run_one(op):
@@ -106,7 +106,9 @@ _CHILD_SRC = textwrap.dedent(
                 aten.sum.dim_IntList(a, [1], False),
             )
         if op == "_softmax":
-            a = _randn(12, (4, 4))
+            # Probe the base route outside the measured FP32 precision clause.
+            # The operator suite separately checks FP32/BF16/FP16 and overrides.
+            a = _randn(12, (4, 4)).to(torch.float16)
             return (
                 aten._softmax(a.to(_DEVICE), -1, False),
                 aten._softmax(a, -1, False),

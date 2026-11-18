@@ -27,11 +27,13 @@ tests and stays silent when none of them ran.
 Run: pytest tests/unit/test_runtime_conformance_report.py -v
 """
 
+import ast
 import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,6 +180,80 @@ def test_effective_route_does_not_translate_an_empty_conf_value(tmp_path, monkey
         {"add.Tensor": "apple", "cat": ""},
     )
     assert runtime_caps.effective_route("cat") == ("", "routed")
+
+
+def test_base_route_probes_do_not_match_configured_dtype_clauses(monkeypatch):
+    """A base-route assertion must stay valid for every shipped precision policy."""
+    monkeypatch.setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+    torch = pytest.importorskip("torch")
+    from torch.utils._pytree import tree_leaves
+
+    from runtime_probe import _CHILD_SRC
+
+    seen = set()
+
+    class RecordInputs:
+        def __init__(self, operation):
+            self.operation = operation
+
+        def __getattr__(self, name):
+            return RecordInputs(getattr(self.operation, name))
+
+        def __call__(self, *args, **kwargs):
+            for value in tree_leaves((args, kwargs)):
+                if isinstance(value, torch.Tensor):
+                    assert value.device.type == "cpu"
+                    type_name = value.type().rsplit(".", 1)[-1]
+                    seen.add(type_name[: -len("Tensor")].lower())
+            return self.operation(*args, **kwargs)
+
+    class CpuTorch:
+        ops = SimpleNamespace(aten=RecordInputs(torch.ops.aten))
+
+        def __getattr__(self, name):
+            return getattr(torch, name)
+
+        @staticmethod
+        def manual_seed(seed):
+            return torch.random.default_generator.manual_seed(seed)
+
+    program = ast.parse(_CHILD_SRC)
+    builders = ast.Module(
+        body=[
+            node
+            for node in program.body
+            if isinstance(node, ast.FunctionDef) and node.name in {"_randn", "_run_one"}
+        ],
+        type_ignores=[],
+    )
+    namespace = {"torch": CpuTorch(), "_DEVICE": "cpu"}
+    exec(compile(builders, "<runtime-probe-inputs>", "exec"), namespace)
+    inputs = {}
+    with torch.random.fork_rng(devices=[]), torch.device("cpu"):
+        for op in _RUNTIME_OPS:
+            seen.clear()
+            namespace["_run_one"](op)
+            assert seen, f"{op} did not expose any tensor operands"
+            inputs[op] = frozenset(seen)
+
+    conflicts = []
+    for conf in (_REPO_ROOT / "torch_fl" / "configs").glob("backends_*.conf"):
+        for line in conf.read_text().splitlines():
+            op, separator, spec = line.split("#", 1)[0].partition("=")
+            op = op.strip()
+            if not separator or op not in inputs:
+                continue
+            for clause in spec.split(";")[1:]:
+                dtypes, _, backend = clause.partition(":")
+                matched = inputs[op].intersection(
+                    dtype.strip().lower() for dtype in dtypes.split(",")
+                )
+                if matched:
+                    conflicts.append((conf.name, op, sorted(matched), backend.strip()))
+    assert not conflicts, (
+        "Base-route probes match dtype-specific precision clauses; exercise an "
+        f"unmatched dtype and retain the dedicated dtype-route tests: {conflicts}"
+    )
 
 
 def _write_tree(root, *, runtime_tests, other_tests):
