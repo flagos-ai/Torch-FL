@@ -354,6 +354,7 @@ class Hosts:
             "backend": self.manifest["backend"],
             "source_variants": self.manifest.get("source_variants"),
             "matmul_adaptation": self.manifest.get("matmul_adaptation"),
+            "copy_adaptation": self.manifest.get("copy_adaptation"),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "launched_kernels": _launched_kernels,

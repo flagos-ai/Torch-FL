@@ -192,3 +192,22 @@ def test_unsupported_device_gather_rejects_its_explicit_cpu_escape():
     value = source.to("flagos:0").t()
     with pytest.raises(RuntimeError, match="CPU fallback: device contiguous/clone"):
         value.contiguous()
+
+
+@pytest.mark.parametrize("shape", [(60, 61), (1, 62)])
+@torch.no_grad()
+def test_causal_mask_bool_to_bf16_copy_and_inplace_multiply_stay_on_device(shape):
+    reference = torch.arange(shape[1]).remainder(3).ne(0).reshape(1, -1)
+    source = reference.to("flagos:0")
+    output = torch.empty(shape, dtype=torch.bfloat16, device="flagos:0")
+    output.copy_(source)
+    value = source.to(torch.bfloat16)
+    mask = torch.full(shape, -16.0, dtype=torch.bfloat16, device="flagos:0")
+    mask.mul_(source)
+    torch_fl.flagos.synchronize()
+    expected = reference.to(torch.bfloat16)
+    torch.testing.assert_close(output.cpu(), expected.expand(shape), atol=0, rtol=0)
+    torch.testing.assert_close(value.cpu(), expected, atol=0, rtol=0)
+    torch.testing.assert_close(
+        mask.cpu(), -16.0 * expected.expand(shape), atol=0, rtol=0
+    )

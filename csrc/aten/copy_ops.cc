@@ -115,6 +115,16 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  // The published MACA compiler lowers Bool -> BF16 to uitofp with an i16
+  // result. Two original GPU copies through FP32 preserve both Boolean values.
+  if (src.scalar_type() == at::kBool && dst.scalar_type() == at::kBFloat16) {
+    auto promoted = at::empty(src.sizes(), src.options().dtype(at::kFloat));
+    CopyInplaceSourceHost(promoted, src, /*non_blocking=*/false);
+    CopyInplaceSourceHost(dst, promoted, /*non_blocking=*/false);
+    return true;
+  }
+#endif
   CopyInplaceSourceHost(dst, src, /*non_blocking=*/false);
   return true;
 #else

@@ -25,6 +25,20 @@ NATIVE_BMM_ADAPTATIONS = {
 }
 
 
+NATIVE_COPY_ADAPTATIONS = {
+    "metax": {
+        "flag_gems": "5.4.0",
+        "flagtree": "0.7.0.post2+metax3.6",
+        "source_dtype": "Bool",
+        "destination_dtype": "BFloat16",
+        "intermediate_dtype": "Float",
+        "implementation": "Two original published GPU copy kernels; Boolean values are exact through FP32.",
+        "reason": "The original direct copy in the eager causal-mask multiply fails MACA lowering: llvm.uitofp produces i16 instead of a floating-point result.",
+        "retirement": "Remove after the published compiler passes the direct Bool-to-BF16 GPU copy and paired full-model checks.",
+    }
+}
+
+
 _COHORTS = {
     "nvidia": {
         "schema_version": 1,

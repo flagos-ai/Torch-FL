@@ -437,7 +437,7 @@ def test_native_host_programs_run_in_the_default_nvidia_lane(profile):
 @pytest.mark.parametrize("profile", ["pr", "nightly"])
 @pytest.mark.parametrize(
     "vendor,group_id,minimum",
-    [("ascend", "native_source_hosts", 27), ("metax", "native_source_hosts_metax", 54)],
+    [("ascend", "native_source_hosts", 27), ("metax", "native_source_hosts_metax", 56)],
 )
 def test_native_source_hosts_require_the_installed_nonboxing_cohort(
     profile, vendor, group_id, minimum

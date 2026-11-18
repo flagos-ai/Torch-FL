@@ -824,7 +824,7 @@ steps:
     name: Native MetaX FlagGems host conformance
     platforms: [metax]
     vendor_only: true
-    min_passed: 54
+    min_passed: 56
     command: >-
       python -m pytest tests/integration/ops/test_native_metax_hosts.py
       tests/integration/ops/test_native_metax_qwen_routes.py -v --tb=short
