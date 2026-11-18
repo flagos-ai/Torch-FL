@@ -17,6 +17,9 @@ export FLAGOS_BUILD_NATIVE_HOST=1 FLAGOS_BUILD_BOXING=0
 export FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
 if [[ "$FLAGOS_ACCELERATOR" == metax ]]; then
   export FLAGOS_BUILD_VENDOR=1
+  # Default CI stages link inputs without the optional precision cohort's
+  # published package/headers. This lane tests the SDK-only native artifact.
+  unset FLAGOS_VENDOR_TORCH_LIB FLAGOS_VENDOR_TORCH_VERSION
 fi
 unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 
