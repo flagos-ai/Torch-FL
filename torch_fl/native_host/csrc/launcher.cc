@@ -26,6 +26,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -47,6 +48,36 @@ const backend::Api* backend_api = nullptr;
 using backend::CheckedProduct;
 
 const backend::Api& Backend() { return *backend_api; }
+
+struct EnqueueCounter {
+  explicit EnqueueCounter(std::string value) : name(std::move(value)) {}
+  std::string name;
+  std::atomic<uint64_t> count{0};
+};
+std::mutex enqueue_counter_mutex;
+std::vector<std::shared_ptr<EnqueueCounter>>& EnqueueCounters() {
+  static auto* counters = new std::vector<std::shared_ptr<EnqueueCounter>>();
+  return *counters;
+}
+std::shared_ptr<EnqueueCounter> RegisterEnqueueCounter(py::handle metadata) {
+  auto counter = std::make_shared<EnqueueCounter>(
+      py::cast<std::string>(py::getattr(metadata, "name", py::str("<anonymous>"))));
+  std::lock_guard<std::mutex> lock(enqueue_counter_mutex);
+  EnqueueCounters().push_back(counter);
+  return counter;
+}
+py::dict EnqueueStats() {
+  std::unordered_map<std::string, uint64_t> counts;
+  {
+    std::lock_guard<std::mutex> lock(enqueue_counter_mutex);
+    for (const auto& counter : EnqueueCounters())
+      if (const auto value = counter->count.load(std::memory_order_relaxed))
+        counts[counter->name] += value;
+  }
+  py::dict result;
+  for (const auto& item : counts) result[py::str(item.first)] = py::int_(item.second);
+  return result;
+}
 
 bool IsCapturing(uint64_t stream) {
   if (!Backend().is_capturing)
@@ -321,6 +352,7 @@ class Launcher {
       zero_scratch_.resize(kernel_->scratch_slots);
       kernel_->PackScratch(0, 0, zero_scratch_.data());
     }
+    enqueue_counter_ = RegisterEnqueueCounter(metadata);
   }
 
   // Matches CompiledKernel.run; callers pass metadata and optional profiler hooks.
@@ -367,9 +399,11 @@ class Launcher {
     std::vector<void*> pointers;
     pointers.reserve(slots.size());
     for (auto& slot : slots) pointers.push_back(slot.bytes.data());
-    if (grid)
+    if (grid) {
       kernel_->Enqueue({{x, y, z}, stream, function, pointers.data(), global_ptr,
                         global_bytes, true});
+      enqueue_counter_->count.fetch_add(1, std::memory_order_relaxed);
+    }
     if (!leave.is_none()) leave(launch_metadata);
   }
 
@@ -491,6 +525,7 @@ class Launcher {
     }
     if (!CheckedProduct(CheckedProduct(dims[0], dims[1]), dims[2])) return;
     kernel_->Enqueue({dims, Stream(device), function, pointers});
+    enqueue_counter_->count.fetch_add(1, std::memory_order_relaxed);
   }
 
   template <class Slots>
@@ -659,6 +694,7 @@ class Launcher {
   py::object metadata_;
   size_t num_args_;
   std::unique_ptr<backend::Kernel> kernel_;
+  std::shared_ptr<EnqueueCounter> enqueue_counter_;
 };
 
 // Device-specialization metadata only. Every hit still binds this call's tensors,
@@ -1604,8 +1640,9 @@ class PointwiseSchedule {
 
  public:
   PointwiseSchedule(py::object owner, size_t rank, py::object kernel, py::tuple helpers,
-                    py::tuple device_api)
-      : rank_(rank), kernel_(kernel), helpers_(helpers), device_api_(device_api) {
+                    py::tuple device_api, bool enflame = false)
+      : rank_(rank), kernel_(kernel), helpers_(helpers), device_api_(device_api),
+        enflame_(enflame) {
     auto schema = owner.attr("fx");
     auto config = owner.attr("config");
     for (size_t i = 0, n = py::cast<size_t>(schema.attr("num_inputs")()); i < n; ++i)
@@ -1615,8 +1652,28 @@ class PointwiseSchedule {
     for (size_t i = 0; i < rank_; ++i) tile_names_.push_back("tile_size" + std::to_string(i));
     one_dim_ = py::cast<bool>(config.attr("prefer_1d_tile"));
     block_pointer_ = py::cast<bool>(config.attr("prefer_block_pointer"));
-    balanced_ = py::cast<bool>(config.attr("balance_grid"));
+    balanced_ = !enflame_ && py::cast<bool>(config.attr("balance_grid"));
     max_grid_ = py::cast<int64_t>(config.attr("max_grid_size")[py::int_(0)]);
+    if (enflame_) {
+      TORCH_CHECK(std::string(Backend().vendor) == "enflame",
+                  "Enflame pointwise schedule requires the Enflame backend");
+      auto kernels = py::cast<py::tuple>(kernel);
+      kernel_ = kernels[0];
+      secondary_kernel_ = kernels.size() > 1 ? py::object(kernels[1]) : kernel_;
+      cache_ = py::cast<KernelCache*>(kernel_.attr("native_cache"));
+      secondary_cache_ = py::cast<KernelCache*>(secondary_kernel_.attr("native_cache"));
+      max_tile_ = py::cast<int64_t>(config.attr("max_tile_size"));
+      four_sips_ = py::cast<int>(helpers[4]) == 1;
+      mmu_limit_ = py::cast<int64_t>(helpers[5]);
+      TORCH_CHECK(max_grid_ > 0 && max_tile_ > 0 && mmu_limit_ > 0,
+                  "invalid Enflame pointwise configuration");
+      const uint64_t limit = CheckedProduct(max_tile_, 8);
+      for (uint64_t tile = 1; tile <= limit; tile *= 2) {
+        enflame_warps_[tile] = py::cast<int64_t>(helpers_[1](tile));
+        if (tile > limit / 2) break;
+      }
+      return;
+    }
     max_tile_ = py::cast<int64_t>(config.attr("max_tile_size")) /
                 (py::cast<bool>(helpers[4](schema)) ? 2 : 1);
     const auto name = py::cast<std::string>(owner.attr("_scalar_fn").attr("__name__"));
@@ -1628,6 +1685,26 @@ class PointwiseSchedule {
   template <class Args, class Outputs>
   void CallNative(const Args& args, const Outputs& outputs,
                   std::optional<at::IntArrayRef> task = std::nullopt, bool collapse = false) {
+    if (enflame_) {
+      auto plan = EnflamePlanFor(args, outputs, task, collapse);
+      if (!plan.grid[0]) return;
+      auto* cache = plan.secondary ? secondary_cache_ : cache_;
+      const auto& kernel = plan.secondary ? secondary_kernel_ : kernel_;
+      const int device = outputs.get(0).device().index();
+      CurrentDeviceScope guard(outputs.get(0).device());
+      if (cache->RunNative(flagos::native_host::Arguments{plan.values},
+                           flagos::native_host::Keywords{plan.options}, plan.grid, device))
+        return;
+      py::gil_scoped_acquire gil;
+      py::tuple values(plan.values.size());
+      for (size_t i = 0; i < values.size(); ++i) values[i] = torch::jit::toPyObject(plan.values[i]);
+      py::dict options;
+      for (const auto& item : plan.options)
+        options[py::str(std::string(item.key()))] = torch::jit::toPyObject(item.value());
+      options["grid"] = py::tuple(py::cast(plan.grid));
+      kernel.attr("run")(*values, **options);
+      return;
+    }
     c10::SmallVector<at::Tensor, 8> tensors;
     for (auto i : tensors_) tensors.push_back(args.get(i).toTensor());
     for (const auto& out : outputs) tensors.push_back(out);
@@ -1720,6 +1797,7 @@ class PointwiseSchedule {
     kernel_.attr("run")(*pyargs, **pykwargs);
   }
   py::object Call(py::tuple args, py::dict kwargs) {
+    if (enflame_) return py::none();
     std::vector<View> views;
     for (auto i : tensors_) {
       View v;
@@ -1810,7 +1888,158 @@ class PointwiseSchedule {
     return result;
   }
 
+  py::dict DescribeEnflame(py::tuple args, py::list outputs,
+                           const std::vector<int64_t>& shape, bool collapse) {
+    TORCH_CHECK(enflame_, "launch-plan inspection requires an Enflame schedule");
+    c10::List<c10::IValue> values(c10::AnyType::get());
+    for (auto value : args) values.push_back(torch::jit::toIValue(value, c10::AnyType::get()));
+    c10::List<at::Tensor> tensors;
+    for (auto value : outputs) tensors.push_back(THPVariable_Unpack(value.ptr()));
+    auto plan = EnflamePlanFor(values, tensors, at::IntArrayRef(shape), collapse);
+    py::dict result, options;
+    py::tuple parameters(plan.values.size());
+    for (size_t i = 0; i < parameters.size(); ++i)
+      parameters[i] = torch::jit::toPyObject(plan.values[i]);
+    for (const auto& item : plan.options)
+      options[py::str(std::string(item.key()))] = torch::jit::toPyObject(item.value());
+    result["arguments"] = parameters;
+    result["options"] = options;
+    result["grid"] = py::tuple(py::cast(plan.grid));
+    result["variant"] = plan.secondary ? 1 : 0;
+    return result;
+  }
+
  private:
+  struct EnflamePlan {
+    c10::SmallVector<c10::IValue, 64> values;
+    c10::SmallVector<flagos::native_host::Keyword, 16> options;
+    std::vector<int64_t> grid{0, 1, 1};
+    bool secondary = false;
+  };
+  template <class Args, class Outputs>
+  EnflamePlan EnflamePlanFor(const Args& args, const Outputs& outputs,
+                             std::optional<at::IntArrayRef> task, bool collapse) const {
+    c10::SmallVector<at::Tensor, 8> tensors;
+    for (auto index : tensors_) tensors.push_back(args.get(index).toTensor());
+    for (const auto& output : outputs) tensors.push_back(output);
+    TORCH_CHECK(!tensors_.empty() && outputs.size() == outputs_.size(),
+                "Enflame pointwise output arity mismatch");
+    const auto& output = tensors[tensors_.size()];
+    const at::IntArrayRef shape = task ? *task : output.sizes();
+    TORCH_CHECK(shape.size() == rank_, "Enflame pointwise rank mismatch");
+    if (!task)
+      for (const auto& tensor : tensors)
+        TORCH_CHECK(tensor.sizes() == shape, "Enflame pointwise inputs must be broadcasted");
+    EnflamePlan plan;
+    const int64_t tasks = output.numel();
+    if (rank_ && !tasks) return plan;
+    for (const auto& value : args) plan.values.push_back(value);
+    for (size_t i = 0; i < outputs.size(); ++i) plan.values.push_back(outputs.get(i));
+    bool enable_i64 = false;
+    for (const auto& tensor : tensors)
+      enable_i64 |= tensor.scalar_type() == at::kLong || tensor.scalar_type() == at::kUInt64;
+    plan.options.push_back({"ENABLE_I64", enable_i64});
+    plan.grid[0] = 1;
+    int64_t warps = 1;
+    if (rank_) {
+      c10::SmallVector<c10::SmallVector<int64_t, 8>, 8> strides;
+      for (const auto& tensor : tensors) {
+        strides.emplace_back(shape.size(), 0);
+        auto& steps = strides.back();
+        if (collapse)
+          steps[0] = 1;
+        else {
+          TORCH_CHECK(tensor.dim() <= static_cast<int64_t>(shape.size()),
+                      "Enflame pointwise input rank exceeds task rank");
+          const auto leading = shape.size() - tensor.dim();
+          for (int64_t i = 0; i < tensor.dim(); ++i)
+            steps[leading + i] = tensor.size(i) == 1 && shape[leading + i] != 1
+                ? 0 : tensor.stride(i);
+        }
+      }
+      // The published DMA predicate is on the prepared, broadcasted strides.
+      bool no_dma = false;
+      for (const auto& steps : strides) {
+        for (auto value : steps) no_dma |= value <= 0;
+        for (size_t i = 0; i < steps.size(); ++i)
+          for (size_t j = i + 1; j < steps.size(); ++j)
+            if (steps[i] > 0 && steps[j] > 0)
+              no_dma |= steps[i] == steps[j] ||
+                  std::max(steps[i], steps[j]) % std::min(steps[i], steps[j]) != 0;
+      }
+      const int64_t element_size = output.element_size();
+      int64_t factor = 8 / std::max(tensors.front().element_size(), output.element_size());
+      if (no_dma) factor = std::max<int64_t>(1, factor / 4);
+      TORCH_CHECK(factor > 0, "unsupported Enflame pointwise element width");
+      int64_t budget = CheckedProduct(max_tile_, factor), remaining = mmu_limit_;
+      c10::SmallVector<int64_t, 8> sizes;
+      if (one_dim_) sizes.push_back(tasks);
+      else sizes.append(shape.begin(), shape.end());
+      c10::SmallVector<int64_t, 8> tiles(sizes.size(), 1);
+      for (size_t reverse = sizes.size(); reverse > 0; --reverse) {
+        const auto i = reverse - 1;
+        const uint64_t size = sizes[i];
+        const uint64_t power = size <= 1 ? 1 : uint64_t{1} << (64 - __builtin_clzll(size - 1));
+        int64_t tile = std::min<uint64_t>(budget, power);
+        if (!four_sips_ && power <= 512 * 1024 && budget > 1)
+          tile = std::min(budget / 2, tile);
+        if (budget > 1) tile = std::max<int64_t>(2, tile);
+        if (no_dma && !one_dim_) {
+          const int64_t stride = strides.back()[i];
+          __int128 cost = __int128(tile - 1) * stride * element_size;
+          if (cost > remaining) {
+            const int64_t limit = std::max<int64_t>(1, remaining / (__int128(stride) * element_size));
+            tile = int64_t{1} << (63 - __builtin_clzll(static_cast<uint64_t>(limit)));
+            cost = __int128(tile - 1) * stride * element_size;
+          }
+          remaining -= static_cast<int64_t>(cost);
+        }
+        tiles[i] = tile;
+        budget = std::max<int64_t>(1, budget / tile);
+      }
+      int64_t tile_size = 1, count = 1;
+      for (auto tile : tiles) tile_size = CheckedProduct(tile_size, tile);
+      if (one_dim_)
+        count = (tasks - 1) / tile_size + 1;
+      else
+        for (size_t i = 0; i < shape.size(); ++i)
+          count = CheckedProduct(count, (shape[i] - 1) / tiles[i] + 1);
+      plan.grid[0] = std::min(max_grid_, count);
+      const int64_t per_cta = (count - 1) / plan.grid[0] + 1;
+      auto warp = enflame_warps_.find(tile_size);
+      if (warp != enflame_warps_.end())
+        warps = warp->second;
+      else {
+        py::gil_scoped_acquire gil;
+        warps = py::cast<int64_t>(helpers_[1](tile_size));
+      }
+      for (const auto& steps : strides) {
+        for (auto stride : steps) plan.values.push_back(stride);
+        if (block_pointer_ && !one_dim_) {
+          c10::SmallVector<int64_t, 8> order(steps.size());
+          for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+          std::stable_sort(order.begin(), order.end(), [&](auto a, auto b) {
+            return std::abs(steps[a]) < std::abs(steps[b]);
+          });
+          for (auto index : order) plan.values.push_back(index);
+        }
+      }
+      for (auto size : shape) plan.values.push_back(size);
+      plan.values.push_back(tasks);
+      plan.values.push_back(count);
+      plan.options.push_back({"tiles_per_cta", per_cta});
+      plan.options.push_back({"one_tile_per_cta", per_cta == 1});
+      if (one_dim_)
+        plan.options.push_back({"tile_size", tile_size});
+      else {
+        for (size_t i = 0; i < tiles.size(); ++i) plan.options.push_back({tile_names_[i], tiles[i]});
+        plan.options.push_back({"stages", int64_t{2}});
+      }
+      plan.secondary = no_dma && secondary_cache_ != cache_;
+    }
+    plan.options.push_back({"num_warps", warps});
+    return plan;
+  }
   size_t rank_;
   std::vector<size_t> tensors_;
   std::vector<py::str> outputs_;
@@ -1821,6 +2050,11 @@ class PointwiseSchedule {
   bool one_dim_, block_pointer_, balanced_, fill_;
   int64_t max_grid_, max_tile_;
   std::vector<int64_t> warps_;
+  bool enflame_ = false, four_sips_ = false;
+  int64_t mmu_limit_ = 0;
+  py::object secondary_kernel_;
+  KernelCache* secondary_cache_ = nullptr;
+  std::unordered_map<int64_t, int64_t> enflame_warps_;
 };
 
 void ExecutePointwise(py::object owner, size_t rank, py::tuple args,
@@ -2435,6 +2669,7 @@ PYBIND11_MODULE(_launcher, module) {
     if (!current_stream) throw std::runtime_error("missing FlagOS stream provider");
   });
   module.def("current_stream", &Stream);
+  module.def("enqueue_stats", &EnqueueStats);
   module.def("is_capturing", [](int device) {
     return IsCapturing(Stream(device));
   });
@@ -2452,5 +2687,7 @@ PYBIND11_MODULE(_launcher, module) {
            "owner"_a = py::none());
   py::class_<PointwiseSchedule>(module, "PointwiseSchedule")
       .def(py::init<py::object, size_t, py::object, py::tuple, py::tuple>())
+      .def(py::init<py::object, size_t, py::object, py::tuple, py::tuple, bool>())
+      .def("describe_enflame", &PointwiseSchedule::DescribeEnflame)
       .def("__call__", &PointwiseSchedule::Call);
 }

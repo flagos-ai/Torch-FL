@@ -44,7 +44,9 @@ def test_backend_record_and_compiled_extension_agree(contract):
     assert record["abi_version"] == 2
 
 
-@pytest.mark.parametrize("vendor", ["unregistered", "cuda", "../nvidia"])
+@pytest.mark.parametrize(
+    "vendor", ["unregistered", "kunlunxin", "gcu", "cuda", "../nvidia"]
+)
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
         backend.get_backend(vendor)
@@ -197,6 +199,107 @@ def test_metax_reinstallation_updates_existing_and_future_driver_streams(
             assert instance.get_current_stream(3) == offset + 3
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
             driver.compile_module_from_src("unused")
+
+
+def test_enflame_build_fingerprints_and_links_its_own_published_loader(
+    tmp_path, monkeypatch
+):
+    adapter = backend.get_backend("enflame")
+    assert (adapter.vendor, adapter.compiler_backend) == ("enflame", "gcu")
+    for path in adapter.driver_sources(tmp_path).values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("published backend source\n")
+    monkeypatch.setattr(
+        backend.importlib.metadata, "version", lambda name: "0.7.0+enflame3.6"
+    )
+    monkeypatch.setenv("TOPS_HOME", "/test/tops")
+    record = backend.build_record(adapter, tmp_path)
+    torch = SimpleNamespace(
+        __file__="/cpu/torch/__init__.py",
+        _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+    )
+    launcher, utilities = adapter.extensions(
+        "hosts", backend._ROOT, torch, record, tmp_path
+    )
+    assert "topsrt" in launcher.libraries
+    assert "cuda" not in launcher.libraries
+    assert "/test/tops/include" in launcher.include_dirs
+    assert utilities.sources == [str(tmp_path / "backends/enflame/utils/gcu.cpp")]
+    assert "backends/enflame/VERSION" in record["driver_sources"]
+    backend.validate_record(record, adapter, tmp_path)
+    (tmp_path / "backends/enflame/backend.py").write_text("changed ABI")
+    with pytest.raises(RuntimeError, match="ABI changed"):
+        backend.validate_record(record, adapter, tmp_path)
+
+
+@pytest.mark.parametrize("pointers", [(0,), (2,), (-1,), (True,), (1,)])
+def test_enflame_validates_integer_pointer_slots(pointers):
+    # The registry loads by filename without publishing an importable module.
+    spec = importlib.util.spec_from_file_location(
+        "enflame_prepare", SOURCE.parent / "backends/enflame.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    driver = SimpleNamespace(
+        _triton_version=lambda: (3, 6), _expand_signature=lambda values: list(values)
+    )
+    source = SimpleNamespace(signature={0: "*fp32", 1: "i64"})
+    metadata = SimpleNamespace(ptr_int_args=pointers, name="original_kernel")
+    if pointers == (1,) and type(pointers[0]) is int:
+        result = module.prepare(source, metadata, driver)
+        assert result.name == "original_kernel" and result.ptr_int_args == (1,)
+    else:
+        with pytest.raises(ValueError, match="integer pointer"):
+            module.prepare(source, metadata, driver)
+
+
+def test_enflame_installer_preserves_current_stream_after_reinstallation(monkeypatch):
+    import ctypes
+
+    def enable(abi):
+        assert abi == 2
+        return 0
+
+    monkeypatch.setattr(
+        ctypes,
+        "CDLL",
+        lambda *args, **kwargs: SimpleNamespace(FlagosEnflameEnableInterop=enable),
+    )
+
+    class Driver:
+        def __init__(self):
+            self.utils = module.GCUUtils()
+            self.launcher_cls = module.GcuLauncher
+            self.get_current_stream = lambda device: 0
+
+    module = SimpleNamespace(GCUDriver=Driver)
+    wrapper = SimpleNamespace(_GCUDriver=type("Wrapper", (), {}))
+    active = Driver.__new__(Driver)
+    runtime = SimpleNamespace(_active=active, _default=None)
+    utilities = SimpleNamespace(load_binary=object(), get_device_properties=object())
+    modules = {
+        "torch_fl": SimpleNamespace(__file__="/installed/torch_fl/__init__.py"),
+        "triton.backends.enflame.backend": module,
+        "triton.backends.enflame.driver": wrapper,
+        "hosts.gcu_utils": utilities,
+    }
+    adapter = backend.get_backend("enflame")
+    monkeypatch.setattr(importlib, "import_module", modules.__getitem__)
+    monkeypatch.setitem(sys.modules, "triton.runtime", SimpleNamespace(driver=runtime))
+    adapter.install(
+        "hosts", SimpleNamespace(current_stream=lambda device: device + 100), object()
+    )
+    first = Driver()
+    assert first.get_current_stream(3) == active.get_current_stream(3) == 103
+    adapter.install(
+        "hosts", SimpleNamespace(current_stream=lambda device: device + 200), object()
+    )
+    assert Driver().get_current_stream(3) == active.get_current_stream(3) == 203
+    assert first.get_current_stream(3) == 203
+    assert first.utils is utilities
+    for function in (module.build_gcu_ext, module.compile_module_from_src):
+        with pytest.raises(RuntimeError, match="compilation is forbidden"):
+            function()
 
 
 def test_backend_api_compiles_without_torch_or_a_vendor_sdk(tmp_path):

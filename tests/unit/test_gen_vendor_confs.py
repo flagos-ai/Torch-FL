@@ -476,6 +476,31 @@ def test_shipped_confs_are_up_to_date():
     assert not stale, f"stale: {stale}; run scripts/codegen/gen_vendor_confs.py"
 
 
+def test_enflame_native_host_experiment_preserves_every_unmeasured_route():
+    built = g.build_all(CONF_DIR)
+    text = g.enflame_native_host_conf(built)
+    path = REPO_ROOT / "benchmarks/host_compiler/configs/enflame_native_host.conf"
+    assert path.read_text() == text
+    routes = {}
+    for line in text.splitlines():
+        op, sep, value = line.split("#", 1)[0].partition("=")
+        if sep:
+            routes[op.strip()] = value.strip()
+    assert set(routes) == set(built["enflame"][1])
+    for op, value in built["enflame"][1].items():
+        expected = (
+            "flaggems; Long:enflame"
+            if op in g.ENFLAME_NATIVE_HOST_FLAGGEMS
+            else value.split("#", 1)[0].strip()
+        )
+        if op == "add.Tensor":
+            expected = "flaggems; Int:enflame; Long:enflame"
+        assert routes[op] == expected, op
+    assert len(g.ENFLAME_NATIVE_HOST_FLAGGEMS) == 9
+    assert built["enflame"][1]["silu"].split("#", 1)[0].strip() == "flaggems"
+    assert built["enflame"][1]["_softmax"] == "enflame"
+
+
 def test_generation_is_idempotent():
     """Regenerating from already-generated confs reproduces them exactly.
 

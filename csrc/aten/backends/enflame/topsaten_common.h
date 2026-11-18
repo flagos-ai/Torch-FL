@@ -12,6 +12,7 @@
 #ifdef USE_GCU
 
 #include "runtime/accelerator/enflame/tops_stream.h"
+#include "runtime/accelerator/enflame/interop.h"
 
 #include <ATen/ATen.h>
 #include <ATen/ops/full.h>
@@ -26,6 +27,27 @@
 #include <vector>
 
 namespace at::native::flagos::gcu {
+
+class TopsSubmission {
+ public:
+  explicit TopsSubmission(topsStream_t stream) : stream_(stream) {
+    const auto status = static_cast<topsError_t>(FlagosEnflameBeginLaunch(stream, 1));
+    TORCH_CHECK(status == topsSuccess, "TOPS producer barrier failed: ",
+                topsGetErrorString(status));
+  }
+  ~TopsSubmission() {
+    if (active_) FlagosEnflameEndLaunch(stream_);
+  }
+  topsError_t Finish() {
+    active_ = false;
+    return static_cast<topsError_t>(FlagosEnflameEndLaunch(stream_));
+  }
+  TopsSubmission(const TopsSubmission&) = delete;
+  TopsSubmission& operator=(const TopsSubmission&) = delete;
+ private:
+  topsStream_t stream_;
+  bool active_ = true;
+};
 
 inline const char* TopsatenStatusName(topsatenStatus_t status) {
   switch (status) {
@@ -840,8 +862,13 @@ inline at::ScalarType ClampComputeDtype(
 
 } // namespace at::native::flagos::gcu
 
-// Issues a topsaten op on the shared stream of `guard_tensor`'s device and
-// waits for it, mirroring EXEC_ASCEND_CMD's synchronous contract.
+// Issues a topsaten op on the shared stream of `guard_tensor`'s device.
+// Untracked launchers retain the conservative pre/post drain. Native-host
+// wheels track producer changes under a shared submission lock: calls from
+// the same producer stay asynchronous; ABI 2 records and waits a TOPS event
+// at topsaten/Triton transitions before issuing the consumer. ABI 1 retains
+// transition drains. Explicit synchronization and blocking host transfers
+// retain their ordinary semantics.
 //
 // "Synchronous" has to mean both directions. The trailing synchronise waits for
 // the op just issued; it does not wait for work another producer already queued,
@@ -865,26 +892,24 @@ inline at::ScalarType ClampComputeDtype(
 // steps was black (mean=0.0000 std=0.0000, against mean=0.3334 std=0.2581 for
 // the vendor leg from the same initial latents).
 //
-// The pre-op drain is close to free in the steady state, because the post-op
-// drain below has already emptied the stream: only work issued since the last
-// topsaten op can be in flight, which is exactly the FlagGems work that needs
-// waiting for.
+// The measured failure requires a barrier at a producer transition. An ABI 2
+// device event provides that ordering without making the host wait; the S60
+// native-host hardware chain and full Qwen logit checks qualify this path.
+// The adapter opts in only after it owns all Triton submissions. Normal builds
+// keep the legacy barriers.
 #define EXEC_TOPSATEN_CMD(op, guard_tensor, ...)                              \
   do {                                                                        \
     at::native::flagos::gcu::EnsureTopsatenInit();                            \
     at::native::flagos::gcu::TopsDeviceGuard _tops_guard((guard_tensor));     \
     topsStream_t _tops_stream =                                               \
         at::native::flagos::gcu::GetCurrentTopsStream();                      \
-    topsError_t _tops_pre = topsStreamSynchronize(_tops_stream);              \
-    TORCH_CHECK(                                                              \
-        _tops_pre == topsSuccess,                                             \
-        #op, " pre-stream sync failed: ", topsGetErrorString(_tops_pre));     \
+    at::native::flagos::gcu::TopsSubmission _tops_submission(_tops_stream);  \
     topsatenStatus_t _tops_status = topsaten::op(__VA_ARGS__, _tops_stream);   \
     TORCH_CHECK(                                                              \
         _tops_status == TOPSATEN_STATUS_SUCCESS,                              \
         #op, " failed: ",                                                     \
         at::native::flagos::gcu::TopsatenStatusName(_tops_status));           \
-    topsError_t _tops_sync = topsStreamSynchronize(_tops_stream);             \
+    topsError_t _tops_sync = _tops_submission.Finish();                       \
     TORCH_CHECK(                                                              \
         _tops_sync == topsSuccess,                                            \
         #op, " stream sync failed: ", topsGetErrorString(_tops_sync));        \

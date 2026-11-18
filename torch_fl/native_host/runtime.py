@@ -274,6 +274,108 @@ class KernelEntry:
         return (kernel, constants) if self.returns_constants else kernel
 
 
+class EnflamePointwiseOverload:
+    """Rank-independent host adapter for the published GCU300 pointwise ABI.
+
+    Ordinary tensors use the C++ preparation and schedule. The compiled vendor
+    preparation and this Cython schedule preserve the general fallback. Only
+    the unchanged device generator runs for a new rank; generated Python host
+    wrappers are never loaded at runtime.
+    """
+
+    def __init__(self, owner, ndim, kernels):
+        self.owner, self.ndim, self.kernels = owner, ndim, kernels
+        self.helpers = _imports[owner._native_pointwise_helpers]
+        if all(hasattr(kernel, "native_cache") for kernel in kernels):
+            self.native = _launcher.PointwiseSchedule(
+                owner,
+                ndim,
+                kernels,
+                (
+                    self.helpers.heuristics_for_tile_size,
+                    self.helpers.heuristics_for_num_warps,
+                    _imports["flag_gems.utils.shape_utils"].stride_order,
+                    self.helpers.heuristics_for_tile_size_with_mmu_constraint,
+                    self.helpers.ENFLAME_GCU300_4SIPS,
+                    self.helpers.MMU_LIMIT,
+                ),
+                (_C._exchangeDevice, _C._set_device),
+                True,
+            )
+
+    def __call__(self, *args, **kwargs):
+        owner, ndim = self.owner, self.ndim
+        schema, config = owner.fx, owner.config
+        outputs = [kwargs[f"out{i}"] for i in range(schema.num_output_tensors())]
+        inputs = [value for i, value in enumerate(args) if schema.is_tensor(i)]
+        tensors = inputs + outputs
+        shape, tasks = outputs[0].shape, outputs[0].numel()
+        result = outputs[0] if len(outputs) == 1 else tuple(outputs)
+        if any(value.shape != shape for value in tensors):
+            raise ValueError("pointwise overload expects broadcasted inputs")
+        if ndim and not tasks:
+            return result
+        parameters = list(args) + outputs
+        options = {"ENABLE_I64": kwargs.get("enable_i64", False)}
+        ctas, warps, no_dma = 1, 1, False
+        if ndim:
+            # This is the published WrapperGenerator's DMA selection predicate.
+            for value in tensors:
+                strides = value.stride()
+                no_dma |= any(s <= 0 for s in strides)
+                positive = [s for s in strides if s != 0]
+                no_dma |= not all(
+                    max(a, b) % min(a, b) == 0 and a != b
+                    for i, a in enumerate(positive)
+                    for b in positive[i + 1 :]
+                )
+            factor = 8 // max(inputs[0].element_size(), outputs[0].element_size())
+            if no_dma:
+                factor = max(1, factor // 4)
+            budget = config.max_tile_size * factor
+            if config.prefer_1d_tile:
+                tiles = self.helpers.heuristics_for_tile_size(budget, tasks)
+            elif no_dma:
+                tiles = self.helpers.heuristics_for_tile_size_with_mmu_constraint(
+                    budget, outputs[0].element_size(), outputs[0].stride(), *shape
+                )
+            else:
+                tiles = self.helpers.heuristics_for_tile_size(budget, *shape)
+            tile_size = math.prod(tiles)
+            count = (
+                (tasks + tile_size - 1) // tile_size
+                if config.prefer_1d_tile
+                else math.prod((s + t - 1) // t for s, t in zip(shape, tiles))
+            )
+            ctas = min(config.max_grid_size[0], count)
+            per_cta = (count + ctas - 1) // ctas
+            warps = self.helpers.heuristics_for_num_warps(tile_size)
+            for value in tensors:
+                strides = value.stride()
+                parameters.extend(strides)
+                if config.prefer_block_pointer and not config.prefer_1d_tile:
+                    parameters.extend(
+                        _imports["flag_gems.utils.shape_utils"].stride_order(strides)
+                        if ndim >= 2
+                        else (0,)
+                    )
+            parameters.extend(shape)
+            parameters.extend((tasks, count))
+            options.update(tiles_per_cta=per_cta, one_tile_per_cta=per_cta == 1)
+            if config.prefer_1d_tile:
+                options["tile_size"] = tile_size
+            else:
+                options.update((f"tile_size{i}", tile) for i, tile in enumerate(tiles))
+                options["stages"] = 2
+        options["num_warps"] = warps
+        kernel = (
+            self.kernels[1] if no_dma and len(self.kernels) > 1 else self.kernels[0]
+        )
+        with DeviceScope(inputs[0].device.index):
+            kernel.run(*parameters, grid=(ctas, 1, 1), **options)
+        return result
+
+
 class PointwiseOverload:
     """Rank-independent adapter for FlagGems' original pointwise kernel ABI."""
 
@@ -364,15 +466,35 @@ class PointwiseOverload:
 
 
 def pointwise_instantiate(owner, ndim):
-    key = (ndim, owner.config.prefer_block_pointer, owner.config.balance_grid)
+    key = (
+        ndim,
+        owner.config.prefer_block_pointer,
+        getattr(owner.config, "balance_grid", False),
+    )
+    if hasattr(owner, "_native_pointwise_module"):
+        key += (
+            getattr(owner.config, "max_tile_size", None),
+            tuple(getattr(owner.config, "max_grid_size", ())),
+            getattr(owner.config, "prefer_1d_tile", False),
+        )
     overload = owner.overloads.get(key)
     if overload is None:
-        overload = PointwiseOverload(owner, ndim, _kernel_factory(owner, ndim))
+        adapter = (
+            EnflamePointwiseOverload
+            if hasattr(owner, "_native_pointwise_module")
+            else PointwiseOverload
+        )
+        overload = adapter(owner, ndim, _kernel_factory(owner, ndim))
         owner.overloads[key] = overload
     return overload
 
 
 def pointwise_prepare(owner, args, kwargs, execute=False):
+    if hasattr(owner, "_native_pointwise_module") and any(
+        key not in {f"out{i}" for i in range(owner.fx.num_output_tensors())}
+        for key in kwargs
+    ):
+        return None
     native = owner.__dict__.get("_native_spec")
     if native is None:
         native = _launcher.PointwiseSpec(

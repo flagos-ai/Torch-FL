@@ -213,6 +213,15 @@ def pytest_collection_modifyitems(
                 reason="requires handwritten MetaX operator backend",
             )
             continue
+        if item.get_closest_marker("enflame_native_host"):
+            if platform != "gcu" or not _native_source_host_enabled():
+                add_platform_skip(
+                    item,
+                    gate="platform_support" if platform != "gcu" else "build_record",
+                    detail="requires an Enflame wheel with precompiled native hosts",
+                    reason="Enflame native-host contract",
+                )
+                continue
         if (
             item.get_closest_marker("nvidia")
             or item.get_closest_marker("host_compiler")
@@ -336,6 +345,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
     config.addinivalue_line("markers", "nvidia: requires the NVIDIA runtime")
+    config.addinivalue_line(
+        "markers", "enflame_native_host: requires Enflame native hosts"
+    )
     config.addinivalue_line(
         "markers", "host_compiler: requires the experimental native host compiler build"
     )

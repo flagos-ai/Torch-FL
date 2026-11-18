@@ -517,8 +517,16 @@ def source_module(module, package, modules=()):
     source = path.read_text()
     tree = ast.parse(source)
     definitions = []
+    # A device function can be saved under an alias and then replaced by a
+    # same-named host function. Only the visible definition belongs to this
+    # binding; aliases retain their original JIT objects through _original.
+    visible = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
     classes = {"PointwiseDynamicFunction", "FunctionSchema", "StridedBuffer"}
     for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and visible[node.name] is not node:
+            continue
         value = vars(module).get(getattr(node, "name", ""))
         function = value.fn if type(value).__name__ == "ConstexprFunction" else value
         if isinstance(node, ast.FunctionDef) and isinstance(
@@ -609,11 +617,16 @@ def source_module(module, package, modules=()):
             isinstance(definition, ast.ClassDef)
             and definition.name == "PointwiseDynamicFunction"
         ):
+            entry = (
+                "_call_real_impl"
+                if any(
+                    getattr(method, "name", None) == "_call_real_impl"
+                    for method in definition.body
+                )
+                else "__call__"
+            )
             for method in definition.body:
-                if (
-                    isinstance(method, ast.FunctionDef)
-                    and method.name == "_call_real_impl"
-                ):
+                if isinstance(method, ast.FunctionDef) and method.name == entry:
                     method.body[:0] = ast.parse("""
 _native_result = _runtime.pointwise_prepare(self, args, kwargs, execute=True)
 if _native_result is not None:
@@ -677,12 +690,27 @@ def collect_modules(functions):
         "triton.tools.tensor_descriptor",
         "triton._utils",
     )
+    import flag_gems
+
+    prefixes += (
+        "flag_gems.runtime.backend._" + flag_gems.runtime.device.vendor_name + ".",
+    )
+    prefixes += tuple(
+        {
+            fn.__module__.split(".")[0] + ".utils"
+            for fn in functions
+            if not fn.__module__.startswith("flag_gems")
+            and "flag_gems" in Path(inspect.getsourcefile(fn)).parts
+        }
+    )
     while pending:
         module = pending.pop()
         if module.__name__ in modules:
             continue
         modules[module.__name__] = module
         for value in vars(module).values():
+            if type(value).__name__ == "PointwiseDynamicFunction":
+                value = type(value)
             if isinstance(value, types.FunctionType):
                 value = inspect.unwrap(value)
             owner = getattr(value, "__module__", "")
@@ -690,9 +718,23 @@ def collect_modules(functions):
                 prefixes
             ):
                 pending.append(importlib.import_module(owner))
-        for node in ast.walk(
-            ast.parse(Path(inspect.getsourcefile(module)).read_text())
+        trees = [ast.parse(Path(inspect.getsourcefile(module)).read_text())]
+        if all(
+            hasattr(module, name)
+            for name in (
+                "ModuleGenerator",
+                "IndentedBuffer",
+                "PointwiseDynamicFunction",
+            )
         ):
+            imports = module.IndentedBuffer()
+            if isinstance(
+                inspect.getattr_static(module.ModuleGenerator, "generate_imports"),
+                staticmethod,
+            ):
+                module.ModuleGenerator.generate_imports(imports)
+                trees.append(ast.parse(imports.getvalue()))
+        for node in (node for tree in trees for node in ast.walk(tree)):
             if (
                 isinstance(node, ast.ImportFrom)
                 and not node.level

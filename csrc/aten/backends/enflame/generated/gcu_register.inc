@@ -49,6 +49,8 @@
   m.impl("arange", WrapperArange);
   m.impl("arange.start", WrapperArangeStart);
   m.impl("arange.start_step", WrapperArangeStartStep);
+  m.impl("argmax", WrapperArgmax);
+  m.impl("argmax.out", WrapperArgmaxOut);
   m.impl("asin", WrapperAsin);
   m.impl("atan", WrapperAtan);
   m.impl("bernoulli", WrapperBernoulli);

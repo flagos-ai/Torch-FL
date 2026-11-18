@@ -364,14 +364,20 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     assert generated["NATIVE_HOSTS"] is False
 
 
-@pytest.mark.parametrize("vendor", ["nvidia", "hygon", "dcu", "metax", "ascend"])
+@pytest.mark.parametrize(
+    "vendor", ["nvidia", "hygon", "dcu", "metax", "ascend", "enflame", "gcu"]
+)
 def test_native_host_build_uses_staged_package(
     monkeypatch, tmp_path, clean_kernel_env, vendor
 ):
+    # Keep the upstream non-CUDA fixtures independent of local vendor SDKs.
+    # Hygon and Enflame also check their public names and device aliases.
     monkeypatch.setenv(
-        "FLAGOS_ACCELERATOR", vendor if vendor in {"hygon", "dcu"} else "nvidia"
+        "FLAGOS_ACCELERATOR",
+        vendor if vendor in {"hygon", "dcu", "enflame", "gcu"} else "nvidia",
     )
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    monkeypatch.setenv("FLAGOS_BUILD_FLAGGEMS", "1")
     for name in (
         "FLAGOS_BUILD_BOXING",
         "FLAGOS_BUILD_FLAGGEMS_CPP",
@@ -427,7 +433,7 @@ def test_native_host_build_uses_staged_package(
         else:
             assert vendor_args[1].endswith("native_host/vendor_build.py")
             assert vendor_args[vendor_args.index("--vendor") + 1] == (
-                "hygon" if vendor == "dcu" else vendor
+                {"dcu": "hygon", "gcu": "enflame"}.get(vendor, vendor)
             )
 
 
@@ -593,7 +599,7 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
         command._build_native_hosts()
 
 
-@pytest.mark.parametrize("vendor", ["enflame", "mthreads"])
+@pytest.mark.parametrize("vendor", ["kunlunxin", "mthreads"])
 def test_native_host_build_requires_a_validated_backend_adapter(
     monkeypatch, clean_kernel_env, vendor
 ):

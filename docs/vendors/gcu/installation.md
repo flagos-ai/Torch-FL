@@ -39,6 +39,16 @@ Build flags:
 
 The build runs `scripts/codegen/codegen_gcu.py` to generate kernels. Each op is validated against the demangled `topsaten::topsatenXxx` symbols actually present in `libtopsaten.so`; ops missing from the SDK are skipped with a warning. `scripts/codegen/codegen_gcu_flaggems.py` separately writes the FlagGems wrapper registrations into `csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc`; both generators must be re-run when the routing sets change.
 
+The optional `FLAGOS_BUILD_NATIVE_HOST=1` build precompiles FlagGems host control
+and the TOPS launcher. See the
+[FlagGems-first native-host validation](flaggems-native-host-validation.md)
+for the exact dependencies, generated opt-in model config and 67 hardware
+conformance cases. Nine model operators use FlagGems directly, and FP32 square
+uses its multiply. The November 18 complete Qwen3-0.6B comparison reached
+82.6%/80.7% of vendor prefill/decode performance with bitwise-identical logits.
+Post-rebase validation preserves exact logits but has not stably reproduced the
+80% performance gate; see the current measurements in the linked record.
+
 ### Codegen validation
 
 The generator matches derived `topsaten<Name>` symbols (e.g., `topsatenAdd`, `topsatenSqrt`) against the installed SDK via:
@@ -146,18 +156,24 @@ merely *submitted* behind an already-queued Triton kernel does not read that
 kernel's output on this hardware, so a FlagGems producer followed by a `topsaten`
 consumer races unless the stream is drained in between:
 
-- `EXEC_TOPSATEN_CMD` (`csrc/aten/backends/enflame/topsaten_common.h`) synchronises
-  the stream **before** issuing its op as well as after it.
+- Ordinary builds retain synchronization before and after each
+  `EXEC_TOPSATEN_CMD` (`csrc/aten/backends/enflame/topsaten_common.h`).
+- The native-host adapter opts into shared producer tracking after a device
+  drain. Same-producer submissions stay asynchronous; a change between the
+  prebuilt Triton launcher and topsaten records and waits a device event before
+  the consumer (interop ABI 2). ABI 1 retains a transition drain. A shared
+  submission lock also protects transitions against concurrent host threads.
+  Stream destruction removes its tracking record and destroys its event.
 - `BlockingCopyGuard::DrainCurrentQueue` (`csrc/aten/copy_ops.cc`) drains the
   same stream on GCU, so a blocking device-to-host copy waits for a FlagGems
   kernel rather than reading the buffer ahead of it.
 
-Only the consumer side needs this. The trailing synchronise in
-`EXEC_TOPSATEN_CMD` has already emptied the stream when the next FlagGems kernel
-is launched, so a FlagGems op that follows a `topsaten` op is ordered without
-help. The cost is close to free in the steady state for the same reason: only
-work issued since the last `topsaten` op can be in flight, which is exactly the
-FlagGems work the barrier exists to wait for.
+The native-host optimization preserves the measured inter-producer barrier
+without imposing two host waits on every topsaten call. The
+[validation record](native-host-validation.md) includes mixed-producer hardware
+tests, a device timeline and a separate API-transfer audit. Ordinary builds
+keep the conservative ordering because they do not own the published Triton
+launcher's submission boundary.
 
 The failure mode this prevents is not a stale read that looks like a small
 numerical difference. Measured at `transformer_blocks.0.attn.norm_q`, the

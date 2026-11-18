@@ -31,6 +31,7 @@ _ADAPTERS = {
     "hygon": "hygon.py",
     "metax": "metax.py",
     "ascend": "ascend.py",
+    "enflame": "enflame.py",
 }
 _ROOT = Path(__file__).resolve().parent
 

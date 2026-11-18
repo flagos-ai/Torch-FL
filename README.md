@@ -81,7 +81,7 @@ Capability availability and validation status vary by platform. A feature existi
 | PPU | FlagGems-primary; CUDA boxing against PPU's CUDA-13-compatible SDK is opt-in | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
 | Hygon DCU | FlagGems-primary; CUDA boxing over the hipified DTK torch is opt-in | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | Kunlunxin (Kunlun P800) | Native XPU backend over the vendor xdnn operator library | Eager, autograd | **Experimental** | [Kunlunxin](docs/vendors/kunlunxin/installation.md) |
-| Enflame GCU | Native topsaten backend, CPU fallback for unrouted/int64 ops | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
+| Enflame GCU | Native topsaten backend, CPU fallback for unrouted ops and unsupported dtypes | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
 | Moore Threads MUSA | FlagGems-first Triton kernels, native mudnn fallback, CPU fallback for unrouted ops | Eager, FP16/BF16 AMP | **Experimental** | [MUSA](docs/vendors/musa/installation.md) |
 | D-Robotics BPU | No eager kernels; `torch.compile` graph path via hbdk4 | Graph compilation only | **Runtime only** | [BPU](docs/vendors/bpu/installation.md) |
 | TsingMicro | FlagGems-primary over the Kuiper TX runtime; no vendor-native operator library | Eager (FlagGems routes), RNG (host-draw kernels), Qwen-Image-2.1 rotary embedding | **Experimental** | [TsingMicro](docs/vendors/tsingmicro/installation.md) |
@@ -201,8 +201,8 @@ The [generalization project](https://github.com/orgs/flagos-ai/projects/14)
 tracks broader eager and accelerator support. Domestic accelerator acceptance
 compares against the manufacturer's native PyTorch on the same card and workload:
 at least 80% of its throughput, or at most 1.25 times its latency for fixed work.
-The shared host launcher uses a versioned backend contract. NVIDIA, Hygon and the
-experimental MetaX and Ascend adapters are available; other vendors require
+The shared host launcher uses a versioned backend contract. NVIDIA, Hygon, MetaX,
+Ascend and Enflame adapters are available; other vendors require
 separate validation. Hygon's non-boxing adapter passes its installed-wheel
 operator and stream checks. Its generated out adapters complete the recorded
 Qwen3 device routes. Measured BF16 matrix and FP32 normalization/softmax precision
@@ -286,6 +286,18 @@ The paired benchmark accepts `--device npu:0` for the separate original
 `torch-npu` environment and `--device flagos:0` for the installed native-host
 wheel. Both use the same BF16 checkpoint, inputs and math settings; HF32 matmul
 is rejected by this acceptance harness.
+
+Enflame builds use `FLAGOS_ACCELERATOR=enflame FLAGOS_BUILD_NATIVE_HOST=1`
+with CPU Torch and the pinned published FlagGems/FlagTree wheels. The adapter
+packages the TOPS module loader at build time and preserves Enflame's pointwise
+kernel ABI through compiled host control. See the
+[FlagGems-first Enflame validation](docs/vendors/gcu/flaggems-native-host-validation.md)
+for the tested cohort and explicit experiment config. Nine model operators use
+FlagGems directly, with FP32 square composed through its multiply. The complete
+Qwen3-0.6B comparison on November 18 reached 82.6%/80.7% of vendor
+prefill/decode performance with bitwise-identical logits. Post-rebase validation
+preserves exact logits but has not stably reproduced the 80% performance gate;
+the linked record includes all current measurements.
 
 An optional graph-mode comparison uses Dynamo to capture the model and
 TorchScript to execute its ATen graph:
