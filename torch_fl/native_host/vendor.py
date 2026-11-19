@@ -3,6 +3,7 @@
 
 """Install and audit schema-typed precision exceptions from a prebuilt module."""
 
+from contextlib import nullcontext
 import importlib
 import importlib.metadata
 import json
@@ -12,6 +13,23 @@ from .vendor_cohort import digest
 
 _module = None
 _manifest = None
+
+
+def stream_scope(device=None):
+    """Bind published library stream state for an eager execution region.
+
+    Each operator still checks its actual device and stream. This context owns
+    no tensors, launches or model plans, and restores library state on exit.
+    """
+    if _module is None or not hasattr(_module, "StreamScope"):
+        return nullcontext()
+    if device is None:
+        from torch_fl import flagos
+
+        device = flagos.current_device()
+    if type(device) is not int or device < 0:
+        raise ValueError("native stream scope requires a nonnegative device index")
+    return _module.StreamScope(device)
 
 
 def _verify_libraries(module, manifest):
@@ -30,9 +48,12 @@ def activate():
 
     if not getattr(_build_config, "NATIVE_VENDOR", False):
         return
-    if _build_config.ACCELERATOR != "nvidia" or "boxing" in _build_config.KERNELS:
+    if (
+        _build_config.ACCELERATOR not in {"nvidia", "hygon"}
+        or "boxing" in _build_config.KERNELS
+    ):
         raise RuntimeError(
-            "native vendor precision requires the NVIDIA non-boxing build"
+            "native vendor precision requires a measured non-boxing vendor build"
         )
     if "vendor" not in _build_config.KERNELS:
         raise RuntimeError(
@@ -51,7 +72,9 @@ def activate():
         if digest(package / relative) != expected:
             raise RuntimeError(f"native vendor artifact changed: {relative}")
     expected = _manifest["catalog"]
-    actual = json.loads(torch.ops.flagos.native_vendor_catalog())
+    actual = json.loads(
+        torch.ops.flagos.native_vendor_catalog(_build_config.ACCELERATOR)
+    )
     if expected != actual:
         raise RuntimeError(
             "native vendor schema/policy catalog differs from the core library"
@@ -69,7 +92,9 @@ def activate():
             "native vendor module has missing or unexpected typed entries"
         )
     for name, abi, address, _ in bindings:
-        torch.ops.flagos.native_vendor_register("nvidia", name, abi, address)
+        torch.ops.flagos.native_vendor_register(
+            _build_config.ACCELERATOR, name, abi, address
+        )
 
 
 def audit():
@@ -83,7 +108,7 @@ def audit():
                 f"native vendor artifact changed during execution: {relative}"
             )
     return {
-        "vendor": "nvidia",
+        "vendor": _manifest.get("vendor", "nvidia"),
         "vendor_torch": _manifest["vendor_torch"],
         "artifacts": _manifest["artifacts"],
         "numerical_libraries": _manifest["numerical_libraries"],

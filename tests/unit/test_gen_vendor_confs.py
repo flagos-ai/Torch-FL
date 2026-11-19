@@ -544,10 +544,17 @@ def test_default_confs_never_route_boxing(platform):
     routes = g.build_all(CONF_DIR)[platform][1]
     assert routes, f"{platform} produced no routes"
     for op, value in routes.items():
-        key = value.split("#", 1)[0].strip()
-        assert key in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
-        assert key != g.BOXING_FALLBACK, op
-        assert key != "nvidia", op
+        from native_host_policy import configured_dtype_routes, route_backends
+
+        keys = route_backends(value)
+        assert keys[0] in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
+        if len(keys) > 1:
+            assert platform == "hygon"
+            assert (
+                value.split(";", 1)[1].strip() == configured_dtype_routes(platform)[op]
+            )
+            assert keys[1:] == [platform]
+        assert not {g.BOXING_FALLBACK, "cuda", "nvidia"}.intersection(keys), op
 
 
 def test_every_platform_covers_the_same_op_set():
@@ -922,6 +929,8 @@ def test_default_confs_route_only_measured_flaggems(platform):
     }
     fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
     measured = g.boxing_measured_python_ops(f"backends_{platform}.conf")
+    if platform == "hygon":
+        measured |= g.HYGON_HOST_FLAGGEMS_MEASURED
     stray = sorted(accelerated - (fg | measured))
     assert not stray, f"{platform} accelerates {stray[:5]} with no FlagGems route"
 

@@ -108,3 +108,49 @@ def test_version_reader_does_not_execute_the_package(tmp_path):
     )
     assert cohort.version_fields(source) == {"__version__": "2.10.0+cu130"}
     assert not marker.exists()
+
+
+def test_hcu_cohort_checks_vendor_git_and_metadata_separately(tmp_path):
+    policy = cohort.load_build_policy(ROOT).precision_policy("hygon")
+    library = tmp_path / "torch/lib"
+    library.mkdir(parents=True)
+    version = library.parent / "version.py"
+    version.write_text(
+        f"__version__ = {policy['vendor_source_version']!r}\n"
+        f"git_version = {policy['torch_git_version']!r}\n"
+        f"hip = {policy['hip']!r}\ncuda = None\n"
+    )
+    for name in ("libtorch_hip.so", "libc10_hip.so"):
+        (library / name).write_bytes(name.encode())
+    info = tmp_path / "torch-2.10.0.dist-info"
+    (info / "licenses").mkdir(parents=True)
+    (info / "licenses/LICENSE").write_text("published HCU license")
+    (info / "METADATA").write_text(f"Name: torch\nVersion: {policy['vendor_torch']}\n")
+    record = cohort.describe(library, policy)
+    assert record["vendor"] == "hygon" and record["cuda"] is None
+    assert record["version"] == policy["vendor_torch"]
+    assert record["git_version"] != policy["cpu_torch_git_version"]
+    version.write_text(version.read_text().replace(policy["hip"], "unknown"))
+    with pytest.raises(ValueError, match="validated published Torch cohort"):
+        cohort.describe(library, policy)
+
+
+def test_hcu_bundle_must_use_the_existing_dtk_builder(tmp_path):
+    with pytest.raises(ValueError, match="existing DTK bundle builder"):
+        cohort.bundle(
+            {"vendor": "hygon", "library_dir": str(tmp_path)}, tmp_path / "package"
+        )
+
+
+def test_hcu_published_source_selection_is_explicit_and_dtype_scoped():
+    from types import SimpleNamespace
+
+    policy = cohort.source_policy_for_build(
+        SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="hygon"), ROOT
+    )
+    assert policy["vendor"] == "hygon" and policy["requires_native_vendor"]
+    assert len(policy["entries"]) == 1
+    row = policy["entries"][0]
+    assert row["op"] == "aten::mul.Tensor"
+    assert row["dtypes"] == ["Float", "BFloat16"]
+    assert row["module"] == "flag_gems.runtime.backend._sunrise.ops.mul"

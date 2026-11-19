@@ -101,6 +101,8 @@ class Frontend:
         self.constants = Evaluator(metadata_modules)
         self.module_literals = {}
         self.module_initializers = {}
+        self.guarded_function = None
+        self.guarded_input_dtypes = frozenset()
 
     def literal_global(self, function, name):
         module_name = function.__module__
@@ -188,6 +190,7 @@ class Frontend:
     ):
         key = (
             function,
+            self.guarded_input_dtypes if function is self.guarded_function else (),
             tuple(sorted((argument_types or {}).items())),
             return_hint,
             repr(argument_containers),
@@ -457,7 +460,11 @@ class Frontend:
         self.functions[name] = ast.fix_missing_locations(node)
         return name
 
-    def source(self, function, signature):
+    def source(self, function, signature, *, input_dtypes=()):
+        # Only schema entries with the corresponding runtime dtype guard may
+        # call this specialization. Ordinary source hosts keep every branch.
+        self.guarded_function = function
+        self.guarded_input_dtypes = frozenset(input_dtypes)
         name = self.transform(function, signature=signature)
         node = self.functions[name]
         text = "import torch\nimport math\nfrom typing import Any, List, Dict, Tuple, Optional\n\n"
@@ -2598,6 +2605,19 @@ class Transform(ast.NodeTransformer):
         if call is not None:
             return call
         label = ast.unparse(node.func)
+        if (
+            self.function is self.frontend.guarded_function
+            and self.frontend.guarded_input_dtypes
+            and self.frontend.guarded_input_dtypes <= {"Float", "BFloat16"}
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "is_complex"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in self.tensor_inputs
+            and not self.assignments[node.func.value.id]
+            and not node.args
+            and not node.keywords
+        ):
+            return ast.Constant(False)
         if isinstance(node.func, ast.Name) and node.func.id in self.local_functions:
             definition = self.local_functions[node.func.id]
             parameters = [argument.arg for argument in definition.args.args]

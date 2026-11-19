@@ -22,10 +22,11 @@ struct VendorEntry {
 
 #define NATIVE_VENDOR_ENTRY(vendor, op, abi, catalog, type, dispatcher) \
   {vendor, op, abi, catalog, [](uintptr_t address) {                         \
-     dispatcher.RegisterKernel(Backend::kNvidia, reinterpret_cast<type>(address)); \
+     dispatcher.RegisterKernel(std::string(vendor) == "hygon" ? Backend::kHygon : Backend::kNvidia, reinterpret_cast<type>(address)); \
    }},
 VendorEntry entries[] = {
 #include "../../generated/native_vendor_entries.inc"
+#include "../../generated/native_vendor_hygon_entries.inc"
 };
 #undef NATIVE_VENDOR_ENTRY
 
@@ -36,9 +37,10 @@ std::mutex& RegistryMutex() {
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(flagos, m) {
-  m.def("native_vendor_catalog() -> str", []() {
+  m.def("native_vendor_catalog(str vendor=\"nvidia\") -> str", [](const std::string& vendor) {
     std::string result = "[";
     for (const auto& entry : entries) {
+      if (vendor != entry.vendor) continue;
       if (result.size() > 1) result += ',';
       result += entry.catalog;
     }

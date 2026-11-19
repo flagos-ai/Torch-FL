@@ -12,7 +12,7 @@ import sys
 
 
 def validate(policy):
-    vendor_requirements = {"nvidia": True, "ascend": False}
+    vendor_requirements = {"nvidia": True, "hygon": True, "ascend": False}
     if (
         policy.get("schema_version") != 1
         or policy.get("vendor") not in vendor_requirements
@@ -34,6 +34,7 @@ def validate(policy):
             or not re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", ""))
             or not row.get("dtypes")
             or set(row["dtypes"]) - {"Float", "BFloat16"}
+            or type(row.get("allow_wrapped_numbers", False)) is not bool
             or not row.get("reason")
             or type(row.get("same_tensor_metadata", False)) is not bool
             or type(row.get("unit_stride_axis", False)) is not bool

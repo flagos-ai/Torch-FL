@@ -1339,7 +1339,7 @@ def _pow_exponent_is_two(exponent) -> bool:
         return False
 
 
-def _flaggems_pow_scalar_square_wrapper(original, square):
+def _flaggems_pow_scalar_square_wrapper(original, square, native_square=None):
     """Wrap FlagGems' ``pow_tensor_scalar`` so an exponent of 2 is a multiply.
 
     See ``_patch_flaggems_pow_scalar_square`` for why. Every other exponent, and
@@ -1355,6 +1355,8 @@ def _flaggems_pow_scalar_square_wrapper(original, square):
         except Exception:
             fast = False
         if fast:
+            if native_square is not None:
+                return native_square(A, A)
             import flag_gems
 
             mul = getattr(flag_gems, "mul", None) or square
@@ -1468,6 +1470,13 @@ def _patch_flaggems_pow_scalar_square():
         if not candidates:
             return
         square = getattr(flag_gems, "mul", None)
+        from .. import _build_config
+
+        # Native source selection belongs to the ATen route. Calling the
+        # registry callable directly bypasses its compiled pointwise entry.
+        native_square = (
+            torch.mul if getattr(_build_config, "NATIVE_HOSTS", False) else None
+        )
         # The C++ bridge resolves "flag_gems.pow_tensor_scalar" once and caches
         # the callable, and every re-export above holds its own reference, so
         # rebind every module that currently points at an original -- matched
@@ -1475,7 +1484,9 @@ def _patch_flaggems_pow_scalar_square():
         for original in candidates:
             if getattr(original, "_torch_fl_square_via_mul", False):
                 continue
-            wrapper = _flaggems_pow_scalar_square_wrapper(original, square)
+            wrapper = _flaggems_pow_scalar_square_wrapper(
+                original, square, native_square
+            )
             _rebind_flag_gems_name("pow_tensor_scalar", original, wrapper)
     except Exception:
         pass
@@ -1520,6 +1531,37 @@ def _flaggems_mean_last_dim_wrapper(original, kernel, cdiv, device_ctx):
     """
 
     def mean_dim(inp, dim=None, keepdim=False, *, dtype=None):
+        if inp.numel() == 0:
+            output_dtype = inp.dtype if dtype is None else dtype
+            if not (output_dtype.is_floating_point or output_dtype.is_complex):
+                raise RuntimeError(
+                    "mean(): input or output dtype must be floating point or complex"
+                )
+            dims = (
+                list(range(inp.ndim))
+                if dim is None
+                else [dim]
+                if isinstance(dim, int)
+                else list(dim)
+            )
+            if not dims:
+                dims = list(range(inp.ndim))
+            normalized = []
+            for axis in dims:
+                if not -inp.ndim <= axis < inp.ndim:
+                    raise IndexError("mean(): dimension out of range")
+                axis %= inp.ndim
+                if axis in normalized:
+                    raise RuntimeError("mean(): dimension appears multiple times")
+                normalized.append(axis)
+            shape = [
+                1 if keepdim and i in normalized else n
+                for i, n in enumerate(inp.shape)
+                if keepdim or i not in normalized
+            ]
+            return torch.full(
+                shape, float("nan"), dtype=output_dtype, device=inp.device
+            )
         if dtype is None and _mean_is_last_dim(inp, dim):
             n = inp.shape[-1]
             m = inp.numel() // n

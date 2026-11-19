@@ -106,6 +106,66 @@ _COHORTS = {
 }
 
 
+# HCU uses the published DTK implementations directly on FlagOS storage. These
+# entries retain the vendor reduction/BLAS order at the measured input dtypes.
+_COHORTS["hygon"] = {
+    "schema_version": 1,
+    "flag_gems": "5.4.0",
+    "vendor_torch": "2.10.0+das.opt1.dtk2604.2606151054.g98b1a8",
+    "vendor_source_version": "2.10.0",
+    "torch_git_version": "98b1a89bbf5bcf9572ae9e23279e6ecee92857ed",
+    "cpu_torch_git_version": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+    "hip": "6.3.26113",
+    "retirement": "Remove each exception after a published FlagGems wheel passes the paired HCU logit gate and repeated eager performance checks.",
+    "operators": [
+        {
+            "op": "bmm",
+            "family": "structured",
+            "dtypes": ["BFloat16"],
+            "reason": "The 481-token attention reduction first breaks vendor logits at decode step 458; replacing only BF16 bmm restores all 512 decode steps exactly.",
+        },
+        {
+            "op": "mm",
+            "family": "structured",
+            "dtypes": ["BFloat16"],
+            "reason": "Identical first-layer normalization inputs produce different BF16 projection outputs with the published FlagGems reduction.",
+        },
+        {
+            "op": "_softmax",
+            "family": "structured",
+            "dtypes": ["Float"],
+            "reason": "FP32 attention rounding propagates across BF16 conversion boundaries.",
+        },
+        {
+            "op": "mean.dim",
+            "family": "reduction",
+            "stub": "mean_stub",
+            "empty": "nan",
+            "dtypes": ["Float"],
+            "reason": "Normalization requires the published HCU reduction order and empty-reduction identity.",
+        },
+        {
+            "op": "rsqrt",
+            "family": "structured",
+            "dtypes": ["Float"],
+            "reason": "Normalization requires the original HCU reciprocal-square-root arithmetic.",
+        },
+    ],
+    "sources": [
+        {
+            "id": "published_mul",
+            "op": "aten::mul.Tensor",
+            "module": "flag_gems.runtime.backend._sunrise.ops.mul",
+            "function": "mul",
+            "allow_wrapped_numbers": True,
+            "sha256": "35a2059ab4f4f80f0e5bd7d09c190e3a5008811fa9cff4a5f6621e4851d0190b",
+            "dtypes": ["Float", "BFloat16"],
+            "reason": "The published pointwise source admits typed host lowering instead of HCU broadcast bookkeeping; paired FP32/BF16 products are identical.",
+        }
+    ],
+}
+
+
 def _cohort(vendor):
     if vendor not in _COHORTS:
         raise ValueError(f"unmeasured native-host vendor: {vendor}")
@@ -124,7 +184,7 @@ def source_policy(vendor):
         "schema_version": policy["schema_version"],
         "vendor": vendor,
         "flag_gems": policy["flag_gems"],
-        "requires_native_vendor": vendor == "nvidia",
+        "requires_native_vendor": vendor in {"nvidia", "hygon"},
         "entries": policy["sources"],
     }
 
@@ -152,7 +212,7 @@ def render_config_routes(text, vendor):
             lines.extend(
                 [
                     header,
-                    "# Example: mm = flaggems; BFloat16:nvidia. Unmatched or unavailable clauses use the base.",
+                    f"# Example: mm = flaggems; BFloat16:{vendor}. Unmatched or unavailable clauses use the base.",
                 ]
             )
             add_header = False

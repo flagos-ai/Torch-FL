@@ -14,7 +14,7 @@ struct _object;
 
 namespace flagos::native_host::backend {
 
-constexpr uint32_t kAbiVersion = 1;
+constexpr uint32_t kAbiVersion = 2;
 constexpr size_t kSlotBytes = 128;
 constexpr size_t kSlotAlignment = 128;
 
@@ -100,7 +100,7 @@ struct Api {
   uint64_t capabilities;
   uint64_t scratch_alignment;
   std::unique_ptr<Kernel> (*kernel)(_object*);
-  std::shared_ptr<const Descriptor> (*descriptor)(_object*);
+  std::shared_ptr<const Descriptor> (*descriptor)(_object*, _object* kernel_metadata);
   bool (*is_capturing)(uint64_t);
 };
 

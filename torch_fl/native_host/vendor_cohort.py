@@ -7,8 +7,11 @@ import ast
 from email.parser import Parser
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 from packaging.requirements import Requirement
 
@@ -62,6 +65,7 @@ def version_fields(path):
                 "__version__",
                 "git_version",
                 "cuda",
+                "hip",
             }:
                 values[target.id] = ast.literal_eval(statement.value)
     return values
@@ -70,21 +74,27 @@ def version_fields(path):
 def describe(library_dir, policy):
     library_dir = Path(library_dir).resolve()
     fields = version_fields(library_dir.parent / "version.py")
+    hygon = policy.get("vendor") == "hygon"
+    libraries = ("libc10_hip.so", "libtorch_hip.so") if hygon else LIBRARIES
     if (
-        fields.get("__version__") != policy["vendor_torch"]
+        fields.get("__version__")
+        != policy.get("vendor_source_version", policy["vendor_torch"])
         or fields.get("git_version") != policy["torch_git_version"]
-        or fields.get("cuda") is None
+        or (fields.get("hip") != policy["hip"] if hygon else fields.get("cuda") is None)
     ):
         raise ValueError(
             "native vendor precision requires its validated published Torch cohort"
         )
-    for name in LIBRARIES:
+    for name in libraries:
         if not (library_dir / name).is_file():
             raise ValueError(f"missing published vendor library: {name}")
     matches = []
     for candidate in library_dir.parent.parent.glob("torch-*.dist-info"):
         metadata = Parser().parsestr((candidate / "METADATA").read_text())
-        if metadata["Name"] == "torch" and metadata["Version"] == fields["__version__"]:
+        if (
+            metadata["Name"] == "torch"
+            and metadata["Version"] == policy["vendor_torch"]
+        ):
             matches.append((candidate, metadata))
     if len(matches) != 1:
         raise ValueError("published vendor Torch metadata is missing or ambiguous")
@@ -100,15 +110,18 @@ def describe(library_dir, policy):
                 "vendor runtime dependencies must have verified exact pins"
             )
         requirements.append(str(requirement))
-    if not requirements:
+    if not hygon and not requirements:
         raise ValueError("vendor Torch declares no NVIDIA runtime dependencies")
     licenses = sorted((distribution / "licenses").glob("*"))
     if not any(path.is_file() for path in licenses):
         raise ValueError("published vendor Torch license files are missing")
     return {
-        "version": fields["__version__"],
+        "version": policy["vendor_torch"],
+        "vendor": policy.get("vendor", "nvidia"),
+        "libraries": libraries,
         "git_version": fields["git_version"],
-        "cuda": fields["cuda"],
+        "cuda": fields.get("cuda"),
+        "hip": fields.get("hip"),
         "flag_gems": policy["flag_gems"],
         "library_dir": str(library_dir),
         "metadata_sha256": digest(distribution / "METADATA"),
@@ -117,16 +130,34 @@ def describe(library_dir, policy):
     }
 
 
-def bundle(cohort, package):
+def bundle(cohort, package, source_root=None):
     package = Path(package)
     source = Path(cohort["library_dir"])
-    destination = package / "lib"
+    destination = package / ("lib_hygon" if cohort.get("vendor") == "hygon" else "lib")
     destination.mkdir(parents=True, exist_ok=True)
     hashes = {}
-    for name in LIBRARIES:
+    if cohort.get("vendor") == "hygon":
+        if source_root is None:
+            raise ValueError("HCU precision requires the existing DTK bundle builder")
+        source_root = Path(source_root).resolve()
+        subprocess.check_call(
+            ["bash", str(source_root / "scripts/vendor/bundle_hygon_libtorch.sh")],
+            env={
+                **os.environ,
+                "PYTHON": sys.executable,
+                "FLAGOS_VENDOR_TORCH_LIB": cohort["library_dir"],
+            },
+        )
+        source = source_root / "torch_fl/lib_hygon"
+        names = [path.name for path in source.iterdir() if path.is_file()]
+    else:
+        names = cohort.get("libraries", LIBRARIES)
+    for name in names:
         expected = digest(source / name)
         target = destination / name
-        if not target.exists() or digest(target) != expected:
+        if target.resolve() != (source / name).resolve() and (
+            not target.exists() or digest(target) != expected
+        ):
             shutil.copy2(source / name, target)
         hashes[name] = expected
     licenses = package / "native_host/_generated/licenses"

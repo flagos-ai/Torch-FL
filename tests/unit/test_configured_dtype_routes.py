@@ -3,6 +3,7 @@
 
 """Execute the real config reader and dispatcher with CPU tensors and test kernels."""
 
+import ast
 import os
 from pathlib import Path
 import shutil
@@ -14,7 +15,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = r"""
 #include "aten/dispatcher.h"
+#include <cstring>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 using namespace at::native::flagos;
@@ -25,10 +28,51 @@ at::Tensor Vendor(const at::Tensor&, const at::Tensor&) { return at::scalar_tens
 int main(int argc, char** argv) {
   try {
     SetBackendConfigPath(argv[1]);
+    if (std::string(argv[2]) == "scalar") {
+      int wrong = 0;
+      for (auto dtype : {at::kFloat, at::kDouble, at::kHalf, at::kBFloat16}) {
+        for (double value : {-0.0, 0.1, std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+          auto tensor = at::scalar_tensor(value, at::TensorOptions().dtype(dtype));
+          tensor.unsafeGetTensorImpl()->set_wrapped_number(true);
+          const double a = TypedWrappedScalar(tensor).toDouble(), b = tensor.item().toDouble();
+          wrong += std::memcmp(&a, &b, sizeof(a)) != 0;
+        }
+      }
+      for (int64_t value : {INT64_MIN, int64_t(9007199254740999LL), INT64_MAX}) {
+        auto tensor = at::scalar_tensor(value, at::TensorOptions().dtype(at::kLong));
+        tensor.unsafeGetTensorImpl()->set_wrapped_number(true);
+        wrong += TypedWrappedScalar(tensor).toLong() != value;
+      }
+      auto negative = at::scalar_tensor(2.0);
+      negative.unsafeGetTensorImpl()->set_wrapped_number(true);
+      negative._set_neg(true);
+      wrong += TypedWrappedScalar(negative).toDouble() != negative.item().toDouble();
+      bool rejected = false;
+      try { TypedWrappedScalar(at::ones({2})); } catch (const std::exception&) { rejected = true; }
+      std::cout << wrong << ' ' << rejected << '\n';
+      return 0;
+    }
+    if (std::string(argv[2]) == "wrapped") {
+      auto scalar = at::scalar_tensor(0.5);
+      auto regular = at::scalar_tensor(0.5);
+      auto complex = at::scalar_tensor(c10::complex<double>(0.5, 1.0),
+                                     at::TensorOptions().dtype(at::kComplexDouble));
+      scalar.unsafeGetTensorImpl()->set_wrapped_number(true);
+      complex.unsafeGetTensorImpl()->set_wrapped_number(true);
+      const auto mask = uint64_t{1} << static_cast<unsigned>(at::kFloat);
+      PublishedSourceGuard ordinary(mask), enabled(mask, false, 1, false, true);
+      std::cout << ordinary.Check(scalar) << ' ' << enabled.Check(scalar) << ' '
+                << enabled.Check(regular) << ' ' << enabled.HasTensor() << ' '
+                << PublishedSourceAccepts<true>(mask, scalar) << ' '
+                << enabled.Check(complex) << '\n';
+      return 0;
+    }
     Dispatcher<Fn> op("mm");
     op.RegisterKernel(Backend::kFlagGems, &Gems);
     const std::string mode(argv[2]);
     if (mode == "native" || mode == "threads") op.RegisterKernel(Backend::kNvidia, &Vendor);
+    if (mode == "hygon") op.RegisterKernel(Backend::kHygon, &Vendor);
     auto bf = at::empty({1}, at::TensorOptions().dtype(at::kBFloat16));
     if (mode == "late") {
       std::cout << op(bf, bf).item<int>() << ' ';
@@ -66,7 +110,17 @@ def executable(tmp_path_factory):
         pytest.skip("C++ compiler is unavailable")
     root = tmp_path_factory.mktemp("configured-routes")
     source, binary = root / "main.cc", root / "routes"
-    source.write_text(SOURCE)
+    entry_source = ROOT / "torch_fl/native_host/compiler/entries.py"
+    header = next(
+        ast.literal_eval(node.value)
+        for node in ast.parse(entry_source.read_text()).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "HEADER"
+            for target in node.targets
+        )
+    )
+    source.write_text("#include <ATen/ATen.h>\n" + header + SOURCE)
     torch_root = Path(torch.__file__).parent
     command = [
         compiler,
@@ -111,6 +165,9 @@ def run(executable, tmp_path, config, mode="native", **overrides):
     "config,mode,expected",
     [
         ("mm = flaggems", "native", "11 11 11 11 11"),
+        ("mm = flaggems; BFloat16:hygon", "hygon", "11 22 11 22 11"),
+        ("mm = flaggems; BFloat16:hygon", "native", "11 11 11 11 11"),
+        ("mm = flaggems; BFloat16:nvidia", "hygon", "11 11 11 11 11"),
         ("mm = flaggems; BFloat16:nvidia", "native", "11 22 11 22 11"),
         ("mm = flaggems; Float:nvidia", "native", "22 11 11 11 11"),
         ("mm = flaggems; Float,BFloat16:nvidia", "native", "22 22 11 22 11"),
@@ -181,3 +238,17 @@ def test_invalid_dtype_rules_fail_explicitly(executable, tmp_path, clause):
     result = run(executable, tmp_path, "mm = flaggems; " + clause)
     assert result.returncode != 0
     assert "flagos:" in result.stderr
+
+
+def test_published_source_scalar_admission_requires_a_real_device_tensor(
+    executable, tmp_path
+):
+    result = run(executable, tmp_path, "mm = flaggems", mode="wrapped")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0 1 0 0 0 0"
+
+
+def test_wrapped_scalar_conversion_preserves_bits_and_item_errors(executable, tmp_path):
+    result = run(executable, tmp_path, "mm = flaggems", mode="scalar")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0 1"

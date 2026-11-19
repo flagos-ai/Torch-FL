@@ -114,3 +114,22 @@ def test_catalog_emission_rejects_stale_core_sources(
     with pytest.raises(SystemExit, match="stale native vendor entries"):
         generator.main()
     assert not capsys.readouterr().out
+
+
+def test_hcu_entries_use_published_structured_implementations(generator):
+    outputs, catalog = generator.render(generator.load_policy("hygon"))
+    assert len(catalog) == 5
+    for path, content in outputs.items():
+        assert path.read_text() == content
+    source = next(content for path, content in outputs.items() if path.suffix == ".cc")
+    assert "#define FLAGOS_NATIVE_HYGON 1" in source
+    assert "BindStreamScope(module)" in source
+    assert "StructuredCall<at::native::structured_mm_out_cuda>" in source
+    assert "StructuredCall<at::native::structured_bmm_out_cuda>" in source
+    assert "Matrix<" not in source
+    assert "DeviceBoxingGuard" not in source and "redispatch" not in source
+    routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
+    for row in catalog:
+        assert row["vendor"] == "hygon"
+        expected = ",".join(row["dtypes"]) + ":hygon"
+        assert f"{row['op']} = flaggems; {expected}" in routes

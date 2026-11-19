@@ -301,7 +301,7 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   // Convert at::Stream to flagos Stream_t.
   // The stream id encodes the underlying device stream pointer.
   Stream_t stream = reinterpret_cast<Stream_t>(s.id());
-#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
+#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_DCU))
   c10::OptionalDeviceGuard device_guard(s.device());
 #endif
   alloc->record_stream(self.storage().data_ptr(), stream);

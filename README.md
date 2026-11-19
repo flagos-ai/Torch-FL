@@ -201,8 +201,21 @@ The [generalization project](https://github.com/orgs/flagos-ai/projects/14)
 tracks broader eager and accelerator support. Domestic accelerator acceptance
 compares against the manufacturer's native PyTorch on the same card and workload:
 at least 80% of its throughput, or at most 1.25 times its latency for fixed work.
-The shared host launcher uses a versioned backend contract. NVIDIA and the
-experimental MetaX and Ascend adapters are available; other vendors require separate validation. New native-host
+The shared host launcher uses a versioned backend contract. NVIDIA, Hygon and the
+experimental MetaX and Ascend adapters are available; other vendors require
+separate validation. Hygon's non-boxing adapter passes its installed-wheel
+operator and stream checks. Its generated out adapters complete the recorded
+Qwen3 device routes. Measured BF16 matrix and FP32 normalization/softmax precision
+entries call published DTK implementations on PrivateUse1 storage. On BW1101,
+the full Qwen3-0.6B BF16 eager model passes every prefill position and 512 decode
+steps with maximum logit error zero. Six independent short-sequence pairs and
+two 512-step pairs pass the 1.25x latency gate in both execution orders. The worst
+paired prefill/decode ratios are **1.234x/1.228x** for short sequences and
+**1.199x/1.212x** for long sequences. Non-boxing HCU builds reject
+PrivateUse1-to-CUDA tensor metadata conversions. The benchmark uses
+`torch_fl.native_host.execution_scope(0)` to bind the current DTK stream during
+ordinary eager execution. See paired correctness and performance evidence in the
+[Hygon validation report](docs/design/hygon-native-host-validation.md). New native-host
 wheels fingerprint their adapter, published compiler driver and native ABI before
 activation. See the [backend launch contract](docs/design/flaggems-build-time-hosts.md#backend-launch-contract)
 for its boundary and wheel preflight command.

@@ -101,7 +101,7 @@ const Api api{
     [](_object* metadata) -> std::unique_ptr<Kernel> {
       return std::make_unique<MetaxKernel>(py::handle(metadata));
     },
-    [](_object* metadata) -> std::shared_ptr<const Descriptor> {
+    [](_object* metadata, _object*) -> std::shared_ptr<const Descriptor> {
       return std::make_shared<MetaxDescriptor>(py::handle(metadata));
     },
     &IsCapturing};

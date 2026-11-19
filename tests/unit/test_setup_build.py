@@ -303,6 +303,40 @@ def test_cuda_manifest_vendor_torch_policy_follows_boxing(
     assert manifest["build"]["vendor_torch_libraries"] is expected
 
 
+@pytest.mark.parametrize("bundled", [False, True])
+def test_hygon_manifest_records_device_libraries_without_boxing(
+    monkeypatch, tmp_path, clean_kernel_env, bundled
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "hygon")
+    monkeypatch.setenv("FLAGOS_BUILD_BOXING", "0")
+    monkeypatch.setenv("FLAGOS_VENDOR_TORCH_VERSION", "2.10.0+das.opt1.dtk2604")
+    namespace, _ = _load_setup(monkeypatch)
+    package = tmp_path / "torch_fl"
+    (package / "lib_hygon").mkdir(parents=True)
+    if bundled:
+        (package / "lib_hygon/libtorch_hip.so").touch()
+    monkeypatch.setitem(
+        namespace["_write_compatibility_manifest"].__globals__,
+        "BASE_DIR",
+        str(tmp_path),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(_C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True)),
+    )
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "2.10.0+cpu" if name == "torch" else None,
+    )
+    namespace["_write_compatibility_manifest"]("2.10.0+dtk2604")
+    manifest = json.loads((package / "compatibility.json").read_text())
+    assert "boxing" not in manifest["build"]["kernels"]
+    assert manifest["build"]["vendor_torch_libraries"] is bundled
+    assert manifest["build"]["vendor_torch_version"] == "2.10.0+das.opt1.dtk2604"
+
+
 def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_env):
     """The generated file is imported by torch_fl._env.build_kernels()."""
     namespace, _ = _load_setup(monkeypatch)
@@ -330,11 +364,13 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     assert generated["NATIVE_HOSTS"] is False
 
 
-@pytest.mark.parametrize("vendor", ["nvidia", "metax", "ascend"])
+@pytest.mark.parametrize("vendor", ["nvidia", "hygon", "dcu", "metax", "ascend"])
 def test_native_host_build_uses_staged_package(
     monkeypatch, tmp_path, clean_kernel_env, vendor
 ):
-    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv(
+        "FLAGOS_ACCELERATOR", vendor if vendor in {"hygon", "dcu"} else "nvidia"
+    )
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
     for name in (
         "FLAGOS_BUILD_BOXING",
@@ -532,7 +568,7 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
         command._build_native_hosts()
 
 
-@pytest.mark.parametrize("vendor", ["enflame", "hygon"])
+@pytest.mark.parametrize("vendor", ["enflame", "mthreads"])
 def test_native_host_build_requires_a_validated_backend_adapter(
     monkeypatch, clean_kernel_env, vendor
 ):

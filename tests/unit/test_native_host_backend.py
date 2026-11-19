@@ -25,7 +25,7 @@ def contract(tmp_path, monkeypatch, request):
     adapter = backend.get_backend(request.param)
     root = tmp_path / "native_host"
     shutil.copytree(SOURCE.parent, root, ignore=shutil.ignore_patterns("__pycache__"))
-    driver = tmp_path / "triton/backends" / adapter.vendor
+    driver = tmp_path / "triton/backends" / adapter.compiler_backend
     for path in adapter.driver_sources(driver.parents[1]).values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("// published backend source\n")
@@ -41,6 +41,7 @@ def test_backend_record_and_compiled_extension_agree(contract):
     backend.validate_record(record, adapter, root, compiled)
     assert record["vendor"] == adapter.vendor
     assert record["compiler_backend"] == adapter.compiler_backend
+    assert record["abi_version"] == 2
 
 
 @pytest.mark.parametrize("vendor", ["unregistered", "cuda", "../nvidia"])
@@ -55,7 +56,7 @@ def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
         ("schema_version", 2),
         ("abi_version", 0),
         ("vendor", "unregistered"),
-        ("compiler_backend", "hip"),
+        ("compiler_backend", "foreign"),
         ("capabilities", 0),
         ("compiler_distribution", {"name": "flagtree", "version": "0.8.0"}),
     ],
@@ -71,7 +72,7 @@ def test_changed_contract_is_rejected(contract, field, value):
 def test_patched_loader_or_native_source_is_rejected(contract, kind):
     adapter, root, record, compiled = contract
     paths = {
-        "driver": root / "backends" / adapter.vendor / "driver.py",
+        "driver": next(iter(adapter.driver_sources(root).values())),
         "adapter": backend._ROOT / "backends" / (adapter.vendor + ".py"),
         "native": backend._ROOT / adapter.sources[0],
     }
@@ -88,8 +89,20 @@ def test_stale_compiled_backend_is_rejected_even_with_current_sources(contract):
         backend.validate_record(record, adapter, root, compiled)
 
 
-def test_build_reuses_the_published_loader_and_tracks_header_dependencies(contract):
+def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
+    contract, monkeypatch, tmp_path
+):
     adapter, root, record, _ = contract
+    if adapter.vendor == "hygon":
+        sdk = tmp_path / "dtk/lib"
+        sdk.mkdir(parents=True)
+        (sdk / "libgalaxyhip.so").touch()
+        monkeypatch.setenv("ROCM_PATH", str(sdk.parent))
+        (root / "backends/hcu/driver.c").write_text(
+            "typedef struct { unsigned words[12]; } TDMDescriptor;\n"
+            "static bool encodeTDMDescriptor() { return true; }\n"
+            "/*py_libhip_search_path*/\n/*py_hip_get_device_properties_sym*/ NULL\n"
+        )
     torch = SimpleNamespace(
         __file__="/cpu-torch/torch/__init__.py",
         _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
@@ -99,11 +112,18 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(contra
     )
     assert str(backend._ROOT / adapter.sources[0]) in launcher.sources
     assert str(backend._ROOT / "csrc/backend_api.h") in launcher.depends
-    assert utilities.sources == [
-        str(path)
-        for path in adapter.driver_sources(root).values()
-        if path.suffix in {".c", ".cpp"}
-    ]
+    if adapter.vendor == "hygon":
+        utility = Path(utilities.sources[0]).read_text()
+        assert '"hipGetDeviceProperties_v2"' in utility
+        assert "/*py_libhip_search_path*/" not in utility
+        assert "cuda" not in launcher.libraries
+        assert adapter.capabilities == 187
+    else:
+        assert utilities.sources == [
+            str(path)
+            for path in adapter.driver_sources(root).values()
+            if path.suffix in {".c", ".cpp"}
+        ]
 
 
 @pytest.mark.parametrize("contract", ["metax"], indirect=True)

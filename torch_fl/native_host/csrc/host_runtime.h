@@ -4,9 +4,15 @@
 // Copied into generated host translation units by the build-time compiler.
 
 #include <ATen/Context.h>
+#include <ATen/EmptyTensor.h>
 #include <ATen/Operators.h>
+#include <ATen/ops/empty_ops.h>
+#include <ATen/ops/contiguous_ops.h>
+#include <c10/core/GradMode.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <c10/core/DefaultDtype.h>
+#include <c10/core/DeviceGuard.h>
+#include <c10/core/impl/VirtualGuardImpl.h>
 #include <c10/util/SmallVector.h>
 #include <torch/csrc/DynamicTypes.h>
 #include <torch/extension.h>
@@ -17,6 +23,36 @@
 
 #include "host_abi.h"
 namespace py = pybind11;
+
+inline at::Tensor HostContiguous(const at::Tensor& tensor, at::MemoryFormat format) {
+#if defined(FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC)
+  if (!c10::GradMode::is_enabled() && tensor.device().is_privateuseone() &&
+      tensor.layout() == at::kStrided && !tensor.has_names() &&
+      !tensor.unsafeGetTensorImpl()->has_symbolic_sizes_strides() &&
+      !tensor.key_set().has(c10::DispatchKey::Python) &&
+      !tensor.key_set().has(c10::DispatchKey::Functionalize) &&
+      format != at::MemoryFormat::Preserve && tensor.is_contiguous(format))
+    return tensor;
+#endif
+  return at::_ops::contiguous::call(tensor, format);
+}
+
+inline at::Tensor HostEmpty(c10::SymIntArrayRef size, std::optional<at::ScalarType> dtype,
+                            std::optional<at::Layout> layout, std::optional<at::Device> device,
+                            std::optional<bool> pinned, std::optional<at::MemoryFormat> format) {
+#if defined(FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC)
+  if (device && device->is_privateuseone() && device->has_index() &&
+      (!layout || *layout == at::kStrided) && !pinned.value_or(false)) {
+    c10::impl::VirtualGuardImpl implementation(at::kPrivateUse1);
+    c10::OptionalDeviceGuard guard;
+    if (implementation.getDevice() != *device) guard.reset_device(*device);
+    return at::detail::empty_generic(C10_AS_INTARRAYREF_SLOW(size),
+        at::GetAllocator(at::kPrivateUse1), c10::DispatchKeySet(c10::DispatchKey::PrivateUse1),
+        dtype.value_or(c10::typeMetaToScalarType(at::get_default_dtype())), format);
+  }
+#endif
+  return at::_ops::empty_memory_format::call(size, dtype, layout, device, pinned, format);
+}
 
 struct HostIntList : c10::SmallVector<int64_t, 8> {
   using Base = c10::SmallVector<int64_t, 8>;

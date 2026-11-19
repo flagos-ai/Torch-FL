@@ -206,7 +206,7 @@ def check_native_backend(
     if (
         not isinstance(record, dict)
         or record.get("schema_version") != 1
-        or record.get("abi_version") != 1
+        or record.get("abi_version") not in (1, 2)
     ):
         raise ValueError("Unsupported or missing native-host backend ABI")
     build_path = "torch_fl/_build_config.py"
