@@ -459,6 +459,9 @@ def test_native_host_ci_build_excludes_the_default_build(
         "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
         "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
         "    assert os.environ['FLAGOS_BUILD_BOXING'] == '0'\n"
+        "    if os.environ['FLAGOS_ACCELERATOR'] == 'metax':\n"
+        "        assert 'FLAGOS_VENDOR_TORCH_LIB' not in os.environ, 'inherited optional vendor cohort'\n"
+        "        assert os.environ['FLAGOS_BUILD_VENDOR'] == '1'\n"
         "    Path(os.environ['BUILD_RECEIPT']).write_text(str(root))\n"
         "    output = Path(sys.argv[sys.argv.index('--dist-dir') + 1])\n"
         "    with zipfile.ZipFile(output / 'native.whl', 'w') as wheel:\n"
@@ -502,6 +505,7 @@ def test_native_host_ci_build_excludes_the_default_build(
             "GITHUB_WORKSPACE": str(workspace),
             "RUNNER_TEMP": str(runner_temp),
             "FLAGOS_ACCELERATOR": vendor,
+            "FLAGOS_VENDOR_TORCH_LIB": str(workspace / "torch_fl/lib_metax"),
             "PATH": str(tools) + os.pathsep + os.environ["PATH"],
             "BUILD_RECEIPT": str(receipt),
         },

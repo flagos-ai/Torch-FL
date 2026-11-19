@@ -775,6 +775,8 @@ def build_deps():
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     for switch in KERNEL_SWITCHES:
         cmake_args.append(f"-D{switch}={'ON' if kernels[switch] else 'OFF'}")
+    native_hosts = _env_module().flag("FLAGOS_BUILD_NATIVE_HOST")
+    cmake_args.append(f"-DFLAGOS_NATIVE_HOSTS={'ON' if native_hosts else 'OFF'}")
 
     build_env = os.environ.copy()
     build_jobs = _cmake_build_jobs()
@@ -997,7 +999,11 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
         platform=FLAGOS_ACCELERATOR,
         wheel_version=wheel_version,
         kernels=compiled,
-        bundle_libdir=_BUNDLE_LIBDIR,
+        bundle_libdir=(
+            "native_host/_generated/metax_vendor"
+            if native_vendor is not None and FLAGOS_ACCELERATOR == "metax"
+            else _BUNDLE_LIBDIR
+        ),
         vendor_torch_libraries=native_vendor is not None
         or (entry["vendor_torch_libraries"] and (gate is None or kernels[gate])),
         requirements=_install_requires(),
@@ -1021,7 +1027,7 @@ def _native_vendor_cohort():
     """Resolve the optional precision module's published binary cohort."""
     library = os.environ.get("FLAGOS_VENDOR_TORCH_LIB")
     if (
-        FLAGOS_ACCELERATOR != "cuda"
+        FLAGOS_ACCELERATOR not in ("cuda", "metax")
         or not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST")
         or not library
     ):
@@ -1030,7 +1036,10 @@ def _native_vendor_cohort():
     if (
         kernels["FLAGOS_BUILD_BOXING"]
         or not kernels["FLAGOS_BUILD_VENDOR"]
-        or _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
+        or (
+            FLAGOS_ACCELERATOR == "cuda"
+            and _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
+        )
     ):
         raise RuntimeError(
             "native vendor precision requires bundled non-boxing vendor libraries"
@@ -1041,7 +1050,8 @@ def _native_vendor_cohort():
         raise RuntimeError(f"Cannot load vendor cohort reader from {source}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    policy = module.load_build_policy(SOURCE_DIR).precision_policy("nvidia")
+    vendor = _PLATFORM_TO_VENDOR.get(FLAGOS_ACCELERATOR, FLAGOS_ACCELERATOR)
+    policy = module.load_build_policy(SOURCE_DIR).precision_policy(vendor)
     cohort = module.describe(library, policy)
     declared = os.environ.get("FLAGOS_VENDOR_TORCH_VERSION")
     if declared and declared != cohort["version"]:
@@ -1273,7 +1283,15 @@ class BuildExtWithCmake(_build_ext):
             subprocess.check_call(
                 [
                     sys.executable,
-                    os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_build.py"),
+                    os.path.join(
+                        SOURCE_DIR,
+                        "torch_fl/native_host/"
+                        + (
+                            "metax_vendor_build.py"
+                            if backend.vendor == "metax"
+                            else "vendor_build.py"
+                        ),
+                    ),
                     "--source-root",
                     SOURCE_DIR,
                     "--output",
@@ -1486,6 +1504,7 @@ def _get_setup_kwargs():
             "native_host/_generated/typed/*.json",
             "native_host/_generated/typed/*.py",
             "native_host/_generated/licenses/*",
+            "native_host/_generated/metax_vendor/*.so*",
             "host_compiler/include/torch/csrc/inductor/cpp_wrapper/*.h",
             "host_compiler/include/torch/csrc/inductor/cpp_wrapper/device_internal/*.h",
             "lib/*.so*",

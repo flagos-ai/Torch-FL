@@ -437,7 +437,7 @@ def test_native_host_programs_run_in_the_default_nvidia_lane(profile):
 @pytest.mark.parametrize("profile", ["pr", "nightly"])
 @pytest.mark.parametrize(
     "vendor,group_id,minimum",
-    [("ascend", "native_source_hosts", 94), ("metax", "native_source_hosts_metax", 36)],
+    [("ascend", "native_source_hosts", 94), ("metax", "native_source_hosts_metax", 86)],
 )
 def test_native_source_hosts_require_the_installed_nonboxing_cohort(
     profile, vendor, group_id, minimum
@@ -462,6 +462,8 @@ def test_native_source_hosts_require_the_installed_nonboxing_cohort(
         if selected:
             assert selected[0]["min_passed"] == minimum
             assert f"test_native_{vendor}_hosts.py" in selected[0]["command"]
+            if vendor == "metax":
+                assert "test_native_metax_qwen_routes.py" in selected[0]["command"]
 
 
 def test_the_only_substitution_is_the_display_name():

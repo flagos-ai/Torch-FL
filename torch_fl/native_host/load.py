@@ -199,6 +199,15 @@ class Hosts:
             _pointwise_helpers(self.modules),
             self.modules,
         )
+        if self.manifest.get("reduction_adaptation") is not None:
+            from triton.runtime.jit import JITFunction
+
+            kernel = self.originals["flag_gems.ops.mean"].mean_dim_kernel_inner
+            while not isinstance(kernel, JITFunction):
+                kernel = kernel.fn
+            runtime.configure_metax_mean(
+                self.resolve(kernel), self.manifest["reduction_adaptation"]
+            )
 
     def resolve(self, value):
         import triton
@@ -340,6 +349,9 @@ class Hosts:
                 path.read_bytes()
             ).hexdigest()
             for path in self.path.rglob("*.so")
+            # Numerical vendor binaries have their own immutable manifest and
+            # vendor audit; they are not compiled source-host artifacts.
+            if path.parent != self.path / "metax_vendor"
         }
 
     def audit(self):
@@ -353,6 +365,12 @@ class Hosts:
             "host_artifacts": self.artifacts,
             "backend": self.manifest["backend"],
             "source_variants": self.manifest.get("source_variants"),
+            "matmul_adaptation": self.manifest.get("matmul_adaptation"),
+            "copy_adaptation": self.manifest.get("copy_adaptation"),
+            "reduction_adaptation": self.manifest.get("reduction_adaptation"),
+            "normalized_mean_calls": getattr(
+                self.runtime, "metax_mean_calls", lambda: 0
+            )(),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "launched_kernels": _launched_kernels,

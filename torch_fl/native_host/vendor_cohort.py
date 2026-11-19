@@ -13,6 +13,7 @@ import shutil
 from packaging.requirements import Requirement
 
 LIBRARIES = ("libtorch_nvshmem.so", "libc10_cuda.so", "libtorch_cuda.so")
+METAX_LIBRARIES = ("libc10_cuda.so", "libtorch_cuda.so")
 
 
 def load_build_policy(source_root):
@@ -78,7 +79,9 @@ def describe(library_dir, policy):
         raise ValueError(
             "native vendor precision requires its validated published Torch cohort"
         )
-    for name in LIBRARIES:
+    metax = policy.get("vendor") == "metax"
+    libraries = METAX_LIBRARIES if metax else LIBRARIES
+    for name in libraries:
         if not (library_dir / name).is_file():
             raise ValueError(f"missing published vendor library: {name}")
     matches = []
@@ -100,12 +103,19 @@ def describe(library_dir, policy):
                 "vendor runtime dependencies must have verified exact pins"
             )
         requirements.append(str(requirement))
-    if not requirements:
+    if not requirements and not metax:
         raise ValueError("vendor Torch declares no NVIDIA runtime dependencies")
+    headers = {}
+    for relative, expected in policy.get("host_headers", {}).items():
+        path = library_dir.parent / "include" / relative
+        if not path.is_file() or digest(path) != expected:
+            raise ValueError(f"published vendor host header changed: {relative}")
+        headers[relative] = {"path": str(path), "sha256": expected}
     licenses = sorted((distribution / "licenses").glob("*"))
     if not any(path.is_file() for path in licenses):
         raise ValueError("published vendor Torch license files are missing")
     return {
+        "vendor": policy.get("vendor", "nvidia"),
         "version": fields["__version__"],
         "git_version": fields["git_version"],
         "cuda": fields["cuda"],
@@ -114,16 +124,19 @@ def describe(library_dir, policy):
         "metadata_sha256": digest(distribution / "METADATA"),
         "requirements": sorted(requirements),
         "licenses": [str(path) for path in licenses if path.is_file()],
+        "libraries": libraries,
+        "host_headers": headers,
     }
 
 
 def bundle(cohort, package):
     package = Path(package)
     source = Path(cohort["library_dir"])
-    destination = package / "lib"
+    metax = cohort.get("vendor") == "metax"
+    destination = package / ("native_host/_generated/metax_vendor" if metax else "lib")
     destination.mkdir(parents=True, exist_ok=True)
     hashes = {}
-    for name in LIBRARIES:
+    for name in cohort.get("libraries", LIBRARIES):
         expected = digest(source / name)
         target = destination / name
         if not target.exists() or digest(target) != expected:

@@ -88,14 +88,16 @@
 #include <c10/cuda/CUDAStream.h>
 #endif
 
-#if defined(FLAGOS_NVIDIA_GEMS_COPY)
+#if defined(FLAGOS_NVIDIA_GEMS_COPY) || \
+    (defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX))
+#define FLAGOS_GEMS_DEVICE_COPY 1
 #include "generated/flaggems_source_bridges.h"
 #endif
 
 namespace at::native::flagos {
 
 bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
-#if defined(FLAGOS_NVIDIA_GEMS_COPY)
+#if defined(FLAGOS_GEMS_DEVICE_COPY)
   static thread_local bool active = false;
   if (active || !src.device().is_privateuseone() || src.device() != dst.device() ||
       src.is_conj() || src.is_neg() || dst.is_conj() || dst.is_neg() ||
@@ -113,6 +115,16 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  // The published MACA compiler lowers Bool -> BF16 to uitofp with an i16
+  // result. Two original GPU copies through FP32 preserve both Boolean values.
+  if (src.scalar_type() == at::kBool && dst.scalar_type() == at::kBFloat16) {
+    auto promoted = at::empty(src.sizes(), src.options().dtype(at::kFloat));
+    CopyInplaceSourceHost(promoted, src, /*non_blocking=*/false);
+    CopyInplaceSourceHost(dst, promoted, /*non_blocking=*/false);
+    return true;
+  }
+#endif
   CopyInplaceSourceHost(dst, src, /*non_blocking=*/false);
   return true;
 #else
@@ -389,6 +401,8 @@ bool cast_needs_cpu_roundtrip(c10::ScalarType src, c10::ScalarType dst) {
 // live on the same device, so the guard is per-copy rather than per-function.
 void strided_copy_cast_via_cpu(const at::Tensor& src, const at::Tensor& dst) {
   if (TryGemsDeviceCopy(src, dst)) return;
+  TORCH_CHECK(CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: device copy/cast");
   at::Tensor src_contig = src.is_contiguous()
       ? src
       : at::native::flagos::contiguous(src, c10::MemoryFormat::Contiguous);
@@ -607,6 +621,8 @@ at::Tensor _copy_from(
       const bool copied_on_device = ascend::StridedCopy(dst, self);
 #endif
       if (!copied_on_device) {
+        TORCH_CHECK(CpuFallbackAllowed(),
+                    "native FlagGems hosts do not permit CPU fallback: device copy/cast");
         // Fallback: CPU round-trip (device->host, strided copy on CPU, host->device).
         at::Tensor self_contig = self.is_contiguous()
             ? self
@@ -978,6 +994,8 @@ at::Tensor _to_copy(
       }
 #endif
       if (!result.defined()) {
+        TORCH_CHECK(CpuFallbackAllowed(),
+                    "native FlagGems hosts do not permit CPU fallback: device dtype cast");
         // Fallback: CPU round-trip when no on-device cast is available
         // (TsingMicro / BPU, a MUSA mudnn CAST dtype pair it does not map, a GCU
         // dtype pair topsatenToCopy declines, an Ascend dtype pair aclnnCast

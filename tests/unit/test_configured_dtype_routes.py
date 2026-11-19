@@ -28,6 +28,25 @@ int main(int argc, char** argv) {
     Dispatcher<Fn> op("mm");
     op.RegisterKernel(Backend::kFlagGems, &Gems);
     const std::string mode(argv[2]);
+    if (mode == "host") {
+      auto value = at::ones({2, 2}, at::TensorOptions().dtype(at::kDouble));
+      TORCH_CHECK(CpuFallbackAllowed());
+      auto expected = MatmulOnHost(value, value);
+      SetStrictHostRoutes(true);
+      TORCH_CHECK(!CpuFallbackAllowed());
+      bool rejected = false;
+      try {
+        MatmulOnHost(value, value);
+      } catch (const c10::Error& error) {
+        rejected = std::string(error.what()).find("host matmul escape") != std::string::npos;
+      }
+      TORCH_CHECK(rejected, "strict host matmul was not rejected");
+      SetStrictHostRoutes(false);
+      TORCH_CHECK(CpuFallbackAllowed());
+      TORCH_CHECK(at::equal(MatmulOnHost(value, value), expected));
+      std::cout << "allowed rejected restored\n";
+      return 0;
+    }
     if (mode == "native" || mode == "threads") op.RegisterKernel(Backend::kNvidia, &Vendor);
     auto bf = at::empty({1}, at::TensorOptions().dtype(at::kBFloat16));
     if (mode == "late") {
@@ -163,6 +182,12 @@ def test_plain_override_replaces_an_included_dtype_rule(executable, tmp_path):
     result = run(executable, tmp_path, "include included.conf\nmm = flaggems")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "11 11 11 11 11"
+
+
+def test_host_matmul_uses_the_shared_strict_fallback_policy(executable, tmp_path):
+    result = run(executable, tmp_path, "mm = flaggems", mode="host")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "allowed rejected restored"
 
 
 @pytest.mark.parametrize(

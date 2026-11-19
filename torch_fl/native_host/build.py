@@ -778,6 +778,40 @@ def main():
         "modules": {},
         "closures": {},
     }
+    from torch_fl.native_host.vendor_cohort import load_build_policy
+
+    policy = load_build_policy(args.source_root)
+    adaptation = policy.NATIVE_BMM_ADAPTATIONS.get(backend.vendor)
+    if adaptation is not None:
+        manifest["matmul_adaptation"] = adaptation
+    copy_adaptation = policy.NATIVE_COPY_ADAPTATIONS.get(backend.vendor)
+    if copy_adaptation is not None:
+        manifest["copy_adaptation"] = copy_adaptation
+    reduction_adaptation = policy.NATIVE_REDUCTION_ADAPTATIONS.get(backend.vendor)
+    if reduction_adaptation is not None:
+        manifest["reduction_adaptation"] = reduction_adaptation
+    sdk_policy = policy.NATIVE_SDK_PRECISION.get(backend.vendor)
+    if sdk_policy is not None and "vendor" in _build_config.KERNELS:
+        from torch_fl.native_host.vendor_cohort import digest
+
+        for dependency in ("flag_gems", "flagtree"):
+            if importlib.metadata.version(dependency) != sdk_policy[dependency]:
+                raise RuntimeError("unmeasured MetaX SDK precision dependency cohort")
+        catalog = json.loads(torch.ops.flagos.native_metax_sdk_catalog())
+        if catalog["policy"] != sdk_policy:
+            raise RuntimeError(
+                "rebuild the core after changing the SDK precision policy"
+            )
+        libraries = dict(torch.ops.flagos.native_metax_sdk_libraries())
+        manifest["sdk_precision"] = {
+            **catalog,
+            "flag_gems": importlib.metadata.version("flag_gems"),
+            "flagtree": importlib.metadata.version("flagtree"),
+            "numerical_libraries": {
+                name: {"path": str(Path(path).resolve()), "sha256": digest(path)}
+                for name, path in libraries.items()
+            },
+        }
     if not args.launcher_only:
         initialize = getattr(backend, "initialize_runtime", None)
         if initialize is not None:

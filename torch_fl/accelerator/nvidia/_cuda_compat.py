@@ -807,6 +807,8 @@ _VENDOR_DEVICE_NAME = "cuda"
 # remedy newly enables every guarded FlagGems kernel on a platform this change
 # was not measured on. Add a vendor here only with a survey run on its hardware.
 _ALIGNED_VENDORS = ("nvidia", "hygon")
+# CPU-Torch compiled hosts have their own measured launch/layout cohort.
+_ALIGNED_NATIVE_HOST_VENDORS = ("metax",)
 
 
 def _flag_gems_package_root():
@@ -878,7 +880,7 @@ def _accept_plugin_device(fn):
     return lookup
 
 
-def patch_flaggems_device_name() -> bool:
+def patch_flaggems_device_name(*, native_hosts=False) -> bool:
     """Point FlagGems' device identity at the name torch_fl registered.
 
     FlagGems decides per op between running its Triton kernel and handing the
@@ -925,9 +927,9 @@ def patch_flaggems_device_name() -> bool:
     than of the name, so no realignment reaches it. Only
     ``special_modified_bessel_k0`` and its ``.out`` assert on it and so fail for
     that reason; the rest use it to choose between paths and pass in both arms.
-    Only the two vendors in ``_ALIGNED_VENDORS`` are realigned; see the constant
-    for why the other four descriptors that name this accelerator ``cuda`` are
-    not.
+    Ordinary builds realign only ``_ALIGNED_VENDORS``. The native-host build
+    additionally admits ``_ALIGNED_NATIVE_HOST_VENDORS`` from its measured
+    compiled-host cohort.
 
     Those two classes are what the rewrite is *for*; a third thing it reaches is
     not a guard at all. A module global holding the name is not always compared:
@@ -961,7 +963,7 @@ def patch_flaggems_device_name() -> bool:
     device.name`` in 13 of the generic-path modules, ``_DEVICE_NAME`` in
     ``ops/mul.py``). Correcting the singleton alone would leave each of those
     literals stale, so every already-loaded flag_gems module is rewritten as
-    well. Idempotent, and a no-op for any vendor outside ``_ALIGNED_VENDORS``.
+    well. Idempotent, and a no-op outside the applicable measured vendor set.
     """
     import importlib.util
     import sys
@@ -977,7 +979,8 @@ def patch_flaggems_device_name() -> bool:
             return False
 
     detector = DeviceDetector()
-    if detector.vendor_name not in _ALIGNED_VENDORS:
+    aligned = _ALIGNED_VENDORS + (_ALIGNED_NATIVE_HOST_VENDORS if native_hosts else ())
+    if detector.vendor_name not in aligned:
         return False
 
     stale = detector.name
