@@ -355,6 +355,7 @@ jobs:
             --wheel "$FLAGCX_WHEEL_ascend" \
             --version "$FLAGCX_VERSION_ascend" \
             --sha256 "$FLAGCX_WHEEL_SHA256_ascend" \
+            --torch-fl-wheel dist/*.whl \
             --workdir "$INTEGRATION_WORKDIR" \
             --output "$FLAGCICD_REPORT_DIR/flagcx-experiment"
 
@@ -450,11 +451,11 @@ jobs:
           if-no-files-found: warn
 
       - name: Retain native-host build and conformance evidence
-        if: ${{ !cancelled() && !needs.configuration.outputs.boxing_lane && contains(fromJSON('["metax", "ascend"]'), needs.configuration.outputs.platform) }}
+        if: ${{ !cancelled() && env.TORCH_FL_NATIVE_HOST_EVIDENCE != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: native-host-${{ inputs.platform }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/torch-fl-native-host-evidence/
+          path: ${{ env.TORCH_FL_NATIVE_HOST_EVIDENCE }}/
           if-no-files-found: warn
 
       # A fork diagnostic run still retains reports, without giving its tested

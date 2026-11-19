@@ -8,7 +8,11 @@ set -euo pipefail
 cd "${GITHUB_WORKSPACE:?}"
 evidence="${RUNNER_TEMP:?}/torch-fl-native-host-evidence"
 mkdir -p "$evidence"
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  printf 'TORCH_FL_NATIVE_HOST_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+fi
 build_source="$(mktemp -d "$RUNNER_TEMP/torch-fl-native-host-source.XXXXXX")"
+trap 'rm -rf -- "$build_source"' EXIT
 # The container user can differ from the checkout owner; trust only this read.
 git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$build_source"
 cd "$build_source"

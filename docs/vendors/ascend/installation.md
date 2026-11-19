@@ -21,10 +21,11 @@ satisfied packages. The setup log reports reused wheels and local copy time.
 Baseline CI defers FlagCX. Ascend alone also runs a separate, non-required FlagCX
 admission check after the regular integration tests. This check verifies the
 published wheel's exact version and SHA256, inspects ELF dependencies, and blocks
-a wheel requiring `libtorch_npu.so` before importing it. An admitted wheel is
-installed into a temporary package overlay visible only to the experimental
-children, which require the actual FlagCX tier of Torch-FL's `flagos` process
-group and check two-device all-reduce/all-gather. No vendor Torch package is added
+a wheel requiring `libtorch_npu.so` before importing it. An admitted wheel and
+the ordinary Torch-FL wheel are installed into a temporary package overlay
+visible only to the experimental children. The workers require the FlagCX tier
+of Torch-FL's `flagos` process group and check two-device all-reduce/all-gather.
+No vendor Torch package is added
 to the baseline venv. The `flagcx-experiment-ascend-<attempt>` artifact and job
 summary retain passed, failed or blocked results; baseline success does not imply
 FlagCX support. `blocked` is an environment-policy decision: import and communication
@@ -55,18 +56,14 @@ console scripts are regenerated for the CI interpreter. System commands such
 as gcc, g++ and make are used from the image directly. CMake is also listed as a
 Python build-system requirement in `pyproject.toml`, so the build frontend needs
 its distribution metadata even when the image already has a cmake executable.
-FlagCX is pinned to `0.14.0+cann9.0.0.910c`, matching the runtime, and copied when
-available; a missing or mismatched copy is installed from the vendor index.
-The wheel declares the same pin from `.github/version-pins.env`. The `.910c`
-suffix identifies this FlagCX build variant; torch_fl's SDK segment stays
-`cann9.0.0`, without a chip suffix. The workflow also installs
-`pytest-json-report==1.5.0` and `coverage==7.10.7` for reporting. No Ascend extras
-of FlagGems are installed: those would pull the real `torch_npu` back in.
+The workflow installs `pytest-json-report==1.5.0` and `coverage==7.10.7` for
+reporting. It omits the FlagGems Ascend extras to keep vendor `torch_npu` outside
+the venv.
 
 The migration accepts runtime-compatible dependency updates within the declared
 requirements; it does not require every tool version to match the old image.
-The validated runtime uses FlagCX's 910C variant and pybind11 3.0.3, while the
-old-image run installed the generic CANN FlagCX variant and pybind11 3.1.0.
+The initial runtime validation recorded pybind11 3.0.3. The old-image run
+recorded pybind11 3.1.0.
 CPU Torch 2.10.0, FlagTree 0.7.0+ascend3.5 and FlagGems 5.4.0 remain the CI pins.
 The image digest fixes the SDK and system toolchain used by each run; later
 image upgrades need a new digest and validation.
@@ -421,9 +418,12 @@ The Ascend CI runner image does not carry the Triton toolchain, so
 validated only by hand on hardware that has it installed. The results
 quoted above are point measurements, not a continuously enforced gate.
 
-### Distributed support is architectural only
+### Distributed collectives
 
-Distributed collectives route through FlagCX (recommended) or an HCCL fallback. The routing architecture is in place (see [`docs/architecture/distributed-flagcx.md`](../../architecture/distributed-flagcx.md) lines 204-208), but collective-level CI tests on Ascend hardware do not yet exist. The HCCL fallback and the `flagos→npu` zero-copy view are routing logic, not on-hardware-verified collectives (same document, lines 67-75).
+Distributed collectives route through FlagCX or an HCCL fallback. The optional
+Ascend CI experiment exercises the FlagCX path when the published wheel passes
+admission. Its current pinned wheel is blocked, and the HCCL fallback remains
+outside the experiment. See the [distributed routing design](../../architecture/distributed-flagcx.md).
 
 ## Reference Documentation
 

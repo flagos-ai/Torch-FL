@@ -50,8 +50,7 @@ the runtime interpreter and job-owned destination.
 
 Shared helpers also own repeated build-tool imports, CPU-Torch identity and
 FlagTree provider-origin checks. Hooks retain SDK discovery, platform-specific
-package restrictions and vendor-library staging. GCU/MUSA continue to defer
-FlagCX; removing old environment branches does not enable unsupported binaries.
+package restrictions and vendor-library staging.
 
 Runtime copying, installed-package dependency checks and pip all honor the
 same constraints, including constraints on transitive dependencies. Constraints
@@ -76,29 +75,20 @@ source ref and wheel SHA256. The earlier preparation snapshot is not treated
 as the final test environment. Validation failures retain their JSON artifact
 and count as installation failures in execution evidence.
 
-When FlagCX is installed, an isolated subprocess imports `torch_fl` before
-FlagCX, checks backend registration and rejects vendor Torch extensions or
-Torch libraries loaded from `/flagos`. This import check does not replace
-multi-rank collective tests and adds no source build. MetaX's two lanes reuse
-the matching `0.14.0+maca3.8.1.3` package, or install that published pin, against
-the vendor Torch libraries already bundled by those lanes.
+Baseline CI defers FlagCX across all platforms using shared preparation. The
+final gate allows functional tests when a check reports only Torch-FL's
+declared FlagCX dependency missing and the wheel records no FlagCX at build
+time. Other dependency or environment errors remain blocking. The artifact
+retains the failing checks and the reason for proceeding
+(`valid=false`, `ready_for_tests=true`). Wheel metadata and release checks are
+unchanged.
 
-GCU and MUSA explicitly defer FlagCX until compatible binaries are available.
-Static inspection of their published 0.14.0 and 0.14.1 extensions found a hard
-dependency on `libtorch_gcu.so` or `libmusa_python.so.2`, respectively; changing
-the Python backend selector does not remove those ELF dependencies. Do not
-copy those vendor extensions into the isolated CPU-Torch environment, build a
-new FlagCX from source, or remove the artifact's declared requirements to make
-this check pass.
-
-The final gate accepts only the exact missing-FlagCX diagnostic for Torch-FL
-on these two platforms. Missing unrelated dependencies, version conflicts,
-checker failures, and missing FlagCX recorded as present at build time remain
-fatal. The raw nonzero checker results and the deferred requirement remain in
-the artifact: `valid` is false while `ready_for_tests` can be true under this
-explicit functional-CI policy. This is not a claim that the published wheel's
-complete dependency contract or communication support has been validated.
-MetaX, Ascend and Hygon do not receive this exception.
+Ascend runs a separate optional experiment after integration tests. The
+experiment checks the published FlagCX wheel's ELF dependencies before
+installing an admitted wheel and the ordinary Torch-FL wheel into a temporary
+package overlay. The launched workers require the FlagCX backend and exercise
+two-device collectives. The experiment reports admission and runtime outcomes
+separately from the baseline result.
 
 Pending resolution of [Torch-FL #878](https://github.com/flagos-ai/Torch-FL/issues/878),
 the final gate also allows functional tests on `nvidia-boxing` using

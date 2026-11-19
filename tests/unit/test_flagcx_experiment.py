@@ -41,6 +41,7 @@ def wheel_fixture(tmp_path):
         wheel=wheel.name,
         version="0.14.0+cann9.0.0.910c",
         sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        torch_fl_wheel=tmp_path / "torch_fl-0.1.0-py3-none-any.whl",
         index_url="https://example.invalid/simple",
         output=tmp_path / "report",
         workdir=tmp_path,
@@ -68,6 +69,10 @@ def test_native_dependency_gate_precedes_install_and_import(
         assert command[:4] == [sys.executable, "-m", "pip", "install"]
         assert "--no-deps" in command and "--no-index" in command
         assert "--target" in command
+        assert command[-2:] == [
+            str(args.torch_fl_wheel),
+            str(args.wheelhouse / args.wheel),
+        ]
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     def collectives(command, workdir, env, log):
@@ -104,6 +109,7 @@ def test_native_dependency_gate_precedes_install_and_import(
     assert len(calls) == (1 if vendor_library else 2)
     assert report["required"] is False
     assert report["baseline_environment_modified"] is False
+    assert report["torch_fl_wheel"] == args.torch_fl_wheel.name
     assert os.environ["PYTHONPATH"] == "/baseline/reporting"
     assert os.environ["FLAGCX_TORCH_BACKEND"] == "vendor"
 
@@ -304,6 +310,7 @@ def test_prefetch_and_experiment_keep_distinct_acceptance_scopes():
     experiment = next(s for s in steps if s.get("id") == "flagcx-experiment")
     assert "inputs.platform == 'ascend'" in experiment["if"]
     assert experiment["continue-on-error"] is True
+    assert "--torch-fl-wheel dist/*.whl" in experiment["run"]
     assert steps.index(experiment) > next(
         i for i, s in enumerate(steps) if s.get("id") == "integration-tests"
     )

@@ -169,6 +169,7 @@ def experiment(args):
         "requested_wheel": args.wheel,
         "requested_version": args.version,
         "requested_sha256": args.sha256,
+        "torch_fl_wheel": args.torch_fl_wheel.name,
     }
     args.output.mkdir(parents=True, exist_ok=True)
     try:
@@ -216,6 +217,8 @@ def experiment(args):
                 return 1
             report["admission_status"] = "passed"
             overlay = scratch / "site-packages"
+            # Native-host tests may have installed a different Torch-FL wheel.
+            # Pair FlagCX with the ordinary wheel tested by the baseline groups.
             result = subprocess.run(
                 [
                     sys.executable,
@@ -227,6 +230,7 @@ def experiment(args):
                     "--no-compile",
                     "--target",
                     str(overlay),
+                    str(args.torch_fl_wheel.resolve()),
                     str(wheel),
                 ],
                 capture_output=True,
@@ -314,6 +318,7 @@ def main():
     parser.add_argument("--wheel", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--sha256", required=True)
+    parser.add_argument("--torch-fl-wheel", type=Path, required=True)
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return experiment(parser.parse_args())
