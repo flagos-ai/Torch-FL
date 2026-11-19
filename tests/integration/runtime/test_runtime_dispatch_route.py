@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The routing half of the contract: each op dispatches where the conf says.
+"""The routing half of the contract: each op follows its configured base route.
 
 For every op in ``RUNTIME_OPS`` this runs the op on the device in a fresh child
 with ``FLAGOS_LOG=dispatch``, then asserts two things at once:
@@ -20,6 +20,10 @@ with ``FLAGOS_LOG=dispatch``, then asserts two things at once:
     * the child's ``[flagos dispatch] <op> -> <backend>`` line names exactly the
       backend this platform's conf routes the op to (``runtime_caps.route_reason``);
     * the device numerics match a CPU reference (``cpu_reference_ok``).
+
+The probes use input dtypes outside the configured precision clauses. The
+operator suite separately covers matching dtypes and explicit overrides; the
+portable probe audit checks this base-route precondition against every conf.
 
 The only skip is build-driven: an op routed to a FlagGems backend or to the CUDA
 dispatch key is marked with the kernel set that route needs, so the package

@@ -81,7 +81,7 @@ Capability availability and validation status vary by platform. A feature existi
 | PPU | FlagGems-primary; CUDA boxing against PPU's CUDA-13-compatible SDK is opt-in | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
 | Hygon DCU | FlagGems-primary; CUDA boxing over the hipified DTK torch is opt-in | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | Kunlunxin (Kunlun P800) | Native XPU backend over the vendor xdnn operator library | Eager, autograd | **Experimental** | [Kunlunxin](docs/vendors/kunlunxin/installation.md) |
-| Enflame GCU | Native topsaten backend, CPU fallback for unrouted/int64 ops | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
+| Enflame GCU | Native topsaten backend, CPU fallback for unrouted ops and unsupported dtypes | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
 | Moore Threads MUSA | FlagGems-first Triton kernels, native mudnn fallback, CPU fallback for unrouted ops | Eager, FP16/BF16 AMP | **Experimental** | [MUSA](docs/vendors/musa/installation.md) |
 | D-Robotics BPU | No eager kernels; `torch.compile` graph path via hbdk4 | Graph compilation only | **Runtime only** | [BPU](docs/vendors/bpu/installation.md) |
 | TsingMicro | FlagGems-primary over the Kuiper TX runtime; no vendor-native operator library | Eager (FlagGems routes), RNG (host-draw kernels), Qwen-Image-2.1 rotary embedding | **Experimental** | [TsingMicro](docs/vendors/tsingmicro/installation.md) |
@@ -164,6 +164,11 @@ against the roughly 24 ms vendor workload, with the model remaining eager.
 Logit acceptance separately requires elementwise `atol=rtol=1e-3` against the
 accelerator manufacturer's native Torch at the same precision. The unchanged
 #839 BF16 cohort fails this gate; the optional precision cohort below passes it.
+Current BF16 portability validation also supports the fixed `bf16-v2` policy:
+every prefill and decode position must preserve the vendor's exact top-1 token
+and satisfy independent raw-logit error limits. Select it with
+`--logits-policy bf16-v2` in both processes. The recorded NVIDIA elementwise
+results below are unchanged.
 Use the strict-eager benchmark's
 `--check-logits --reference <vendor-reference.pt>` to enforce it; see the
 [paired validation procedure](docs/design/flaggems-build-time-hosts.md#vendor-logit-acceptance).
@@ -196,11 +201,77 @@ The [generalization project](https://github.com/orgs/flagos-ai/projects/14)
 tracks broader eager and accelerator support. Domestic accelerator acceptance
 compares against the manufacturer's native PyTorch on the same card and workload:
 at least 80% of its throughput, or at most 1.25 times its latency for fixed work.
-The shared host launcher uses a versioned backend contract. NVIDIA and the
-experimental Ascend adapter are available; other vendors require separate validation. New native-host
+The shared host launcher uses a versioned backend contract. NVIDIA, Hygon, MetaX,
+Ascend and Enflame adapters are available; other vendors require
+separate validation. Hygon's non-boxing adapter passes its installed-wheel
+operator and stream checks. Its generated out adapters complete the recorded
+Qwen3 device routes. Measured BF16 matrix and FP32 normalization/softmax precision
+entries call published DTK implementations on PrivateUse1 storage. On BW1101,
+the full Qwen3-0.6B BF16 eager model matches every prefill position and 512 decode
+steps with maximum logit error zero. The original qualification passed all eight
+latency pairs. Fresh PR qualification after rebasing has two failing short-sequence
+pairs, with worst prefill/decode ratios **1.264x/1.260x**, so the repeated 1.25x
+performance gate remains open. Both records are retained. Non-boxing HCU builds reject
+PrivateUse1-to-CUDA tensor metadata conversions. The benchmark uses
+`torch_fl.native_host.execution_scope(0)` to bind the current DTK stream during
+ordinary eager execution. See paired correctness and performance evidence in the
+[Hygon validation report](docs/design/hygon-native-host-validation.md). New native-host
 wheels fingerprint their adapter, published compiler driver and native ABI before
 activation. See the [backend launch contract](docs/design/flaggems-build-time-hosts.md#backend-launch-contract)
 for its boundary and wheel preflight command.
+
+For the MetaX pilot, use the same native-host build switches with
+`FLAGOS_ACCELERATOR=metax` and `MACA_PATH` pointing at the installed MACA SDK.
+Set `FLAGOS_BUILD_VENDOR=1` to include the measured BF16 matrix precision slots;
+MetaX native-host CI uses this selection.
+The adapter submits the original published MetaX FlagGems kernels directly through
+MACA, with boxing disabled. MetaX CI builds a separate opt-in wheel and retains
+its generated coverage, preflight and launch-conformance evidence. The native
+wheel selects generated `backends_metax_native_host.conf` from its build record
+and compiles its additional registrations; the ordinary wheel keeps its own
+measured routing. Native routes align the published hosts' device identity and
+use the existing contracted-axis padding for small-K bmm, including out variants.
+For FP32 outer products, original published pointwise kernels preserve the
+caller's TF32 rounding policy; the resolved adaptation is recorded in the wheel
+manifest. The installed-wheel cohort covers these routes, TF32 contexts,
+strided outputs and strict fallback rejection.
+Native MetaX device copies and casts use the existing published FlagGems copy
+source. Strict hosts reject uncovered device-copy, gather and explicit numerical
+host escapes before transferring their operands to CPU.
+The generated native config selects `BFloat16:metax` for measured mm/bmm
+exceptions, which call the installed MACA BLAS directly on FlagOS storage without
+vendor Torch or boxing. Other dtypes retain their base routes, and an explicit
+FlagGems override removes these clauses. The build manifest and audit record
+the policy and hashes of the numerical SDK libraries. Measured contiguous FP32
+last-axis means normalize GPU layout and original-kernel launch metadata to
+preserve the vendor's reduction order; the kernel source remains unchanged.
+For the measured `2.10.0+metax3.8.1.0` vendor Torch cohort, an explicit
+`FLAGOS_VENDOR_TORCH_LIB=/path/to/vendor/torch/lib` also builds the BF16 SiLU
+precision exception and measured FP32 softmax/mean exceptions. It also selects
+the unchanged published multiply source validated in this MetaX cohort. The
+bundle contains only published `libc10_cuda.so` and `libtorch_cuda.so` under the
+native-host artifacts. CPU host glue compiles the
+two hash-verified published MACA environment headers with their original flag
+semantics and calls the original GPU implementations on FlagOS storage. The generated
+`BFloat16:metax` SiLU and `Float:metax` softmax/mean clauses apply only when their
+typed entries are installed.
+Build and runtime verify the numerical assets, schema ABI and official CPU core;
+no vendor CPU Torch library is bundled or loaded. The compatibility manifest
+records the vendor Torch version and this numerical-library bundle.
+The optional cohort's additional installed-wheel tests run with
+`python -m pytest tests/manual/test_native_metax_vendor_precision.py -v`.
+They require the exact published vendor cohort above; the ordinary MetaX CI
+artifact runs its separate 86-case native-host suite without this optional bundle.
+On an idle C550 with MACA 3.8.1.3, complete Qwen3-0.6B BF16 eager execution
+(60 prefill tokens plus 512 identical teacher-forced decode inputs) has zero
+logit error and all 572 top-1 positions aligned. Strict CPU-fallback rejection
+is enabled. The native traversal median is 14.067 s against 11.772 s for vendor
+Torch, or 83.68% of vendor throughput, over three measured traversals. Separate
+GPU attribution accounts for every launch; model capture and legacy host-plan
+counters are zero. See the [measured cohort](docs/design/flaggems-build-time-hosts.md#metax-native-host-precision-cohort)
+and [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) for scope.
+These results apply to this exact optional cohort. NVIDIA's existing precision
+policy is unchanged.
 
 The Ascend pilot uses the same native-host switches with
 `FLAGOS_ACCELERATOR=ascend` and `ASCEND_HOME` pointing at the installed CANN SDK.
@@ -211,6 +282,22 @@ after testing the ordinary wheel and retains coverage and conformance artifacts.
 Full-model accuracy and the 80% vendor-performance gate remain open in
 [issue #833](https://github.com/flagos-ai/Torch-FL/issues/833); build coverage is
 not evidence of those results. NVIDIA's existing precision policy is unchanged.
+The paired benchmark accepts `--device npu:0` for the separate original
+`torch-npu` environment and `--device flagos:0` for the installed native-host
+wheel. Both use the same BF16 checkpoint, inputs and math settings; HF32 matmul
+is rejected by this acceptance harness.
+
+Enflame builds use `FLAGOS_ACCELERATOR=enflame FLAGOS_BUILD_NATIVE_HOST=1`
+with CPU Torch and the pinned published FlagGems/FlagTree wheels. The adapter
+packages the TOPS module loader at build time and preserves Enflame's pointwise
+kernel ABI through compiled host control. See the
+[FlagGems-first Enflame validation](docs/vendors/gcu/flaggems-native-host-validation.md)
+for the tested cohort and explicit experiment config. Nine model operators use
+FlagGems directly, with FP32 square composed through its multiply. The complete
+Qwen3-0.6B comparison on November 18 reached 82.6%/80.7% of vendor
+prefill/decode performance with bitwise-identical logits. Post-rebase validation
+preserves exact logits but has not stably reproduced the 80% performance gate;
+the linked record includes all current measurements.
 
 An optional graph-mode comparison uses Dynamo to capture the model and
 TorchScript to execute its ATen graph:

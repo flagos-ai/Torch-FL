@@ -157,7 +157,7 @@ def test_profiles_keep_mandatory_registration_outside_optional_gate():
         if isinstance(node, ast.Call)
     ]
     mandatory = {
-        "_register_flaggems_operators",
+        "runtime.prepare_dispatch",
         "_register_distributed_backend",
     }
     for name in mandatory:

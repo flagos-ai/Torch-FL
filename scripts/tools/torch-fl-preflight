@@ -206,7 +206,7 @@ def check_native_backend(
     if (
         not isinstance(record, dict)
         or record.get("schema_version") != 1
-        or record.get("abi_version") != 1
+        or record.get("abi_version") not in (1, 2)
     ):
         raise ValueError("Unsupported or missing native-host backend ABI")
     build_path = "torch_fl/_build_config.py"
@@ -219,6 +219,7 @@ def check_native_backend(
                 if isinstance(target, ast.Name) and target.id in {
                     "ACCELERATOR",
                     "NATIVE_HOSTS",
+                    "NATIVE_VENDOR",
                 }:
                     config[target.id] = ast.literal_eval(statement.value)
     if config.get("NATIVE_HOSTS") is not True or config.get(
@@ -227,6 +228,8 @@ def check_native_backend(
         raise ValueError("Native-host backend target differs from the wheel build")
     if "boxing" in manifest["build"]["kernels"]:
         raise ValueError("Native-host backend cannot use boxing")
+    if config.get("NATIVE_VENDOR") is True:
+        check_native_vendor_bundle(manifest, read, exists, record["vendor"])
     provider = record.get("compiler_distribution", {})
     if (
         not isinstance(provider, dict)
@@ -314,6 +317,47 @@ def check_native_backend(
                 or hashlib.sha256(path.read_bytes()).hexdigest() != checksum
             ):
                 raise ValueError("Native-host compiler driver ABI differs: " + name)
+
+
+def check_native_vendor_bundle(manifest, read, exists, vendor):
+    """Validate optional numerical assets without importing either Torch build."""
+    path = "torch_fl/native_host/_generated/vendor_manifest.json"
+    if not exists(path):
+        raise ValueError("Native vendor precision manifest is missing")
+    record = json.loads(read(path))
+    build = manifest["build"]
+    if (
+        not build["vendor_torch_libraries"]
+        or build["vendor_torch_version"] != record.get("vendor_torch")
+        or record.get("vendor", "nvidia") != vendor
+        or not record.get("artifacts")
+    ):
+        raise ValueError("Native vendor precision differs from wheel provenance")
+    if vendor == "metax":
+        prefix = "native_host/_generated/"
+        expected = {prefix + "_metax_vendor.so"} | {
+            prefix + "metax_vendor/" + name
+            for name in ("libc10_cuda.so", "libtorch_cuda.so")
+        }
+        if set(record["artifacts"]) != expected:
+            raise ValueError(
+                "MetaX native vendor bundle must contain only admitted GPU assets"
+            )
+        if build["bundle_libdir"] != prefix + "metax_vendor":
+            raise ValueError(
+                "MetaX native vendor bundle location differs from its manifest"
+            )
+    for relative, checksum in record["artifacts"].items():
+        parts = PurePosixPath(relative)
+        if (
+            parts.is_absolute()
+            or ".." in parts.parts
+            or not isinstance(checksum, str)
+            or len(checksum) != 64
+            or not exists("torch_fl/" + relative)
+            or hashlib.sha256(read("torch_fl/" + relative)).hexdigest() != checksum
+        ):
+            raise ValueError("Native vendor numerical artifact changed: " + relative)
 
 
 def load_wheel(path, *, native_backend=False, check_driver=False):

@@ -107,7 +107,11 @@ def native_call(node, names, int_array_views=()):
         convert(binding.type, name, value.type())
         for binding, name, value in zip(bindings, names, inputs)
     ]
-    result = "at::_ops::" + identifier + "::call(" + ", ".join(arguments) + ")"
+    function = {
+        "empty_memory_format": "HostEmpty",
+        "contiguous": "HostContiguous",
+    }.get(identifier, "at::_ops::" + identifier + "::call")
+    result = function + "(" + ", ".join(arguments) + ")"
     if len(schema.returns) == 1 and str(schema.returns[0].type) in (
         "ScalarType",
         "Layout",

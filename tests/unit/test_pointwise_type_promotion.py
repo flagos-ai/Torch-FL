@@ -17,7 +17,7 @@ from torch._prims_common import (  # noqa: E402
 
 @pytest.fixture
 def promotion():
-    path = Path(__file__).resolve().parents[2] / "torch_fl/flagos/__init__.py"
+    path = Path(__file__).resolve().parents[2] / "torch_fl/compat/flaggems/launch.py"
     function = next(
         node
         for node in ast.parse(path.read_text()).body

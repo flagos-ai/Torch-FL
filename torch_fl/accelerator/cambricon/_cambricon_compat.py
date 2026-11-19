@@ -37,7 +37,7 @@ vendor names, in four places, all at import time or on the launch path:
 Synthesize exactly those attributes from ``torch_fl.flagos`` -- the same
 surface, backed by the cnrt runtime torch_fl owns -- and publish a stub module
 under ``torch_mlu`` so the imports succeed. The TsingMicro shim
-(``_install_tsingmicro_flaggems_compat`` in ``torch_fl/__init__.py``) solves the
+(``_install_tsingmicro_flaggems_compat`` in ``torch_fl/compat/flaggems/device.py``) solves the
 identical problem for its vendor.
 
 Measured on an MLU590 (neuware 4.6.7, torch 2.10.0+cpu, flag_gems 5.4.0,

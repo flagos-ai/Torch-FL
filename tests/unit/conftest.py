@@ -33,7 +33,7 @@ def _restore_backend_config_path():
 
     Everything that reads the global afterwards then sees a scratch path pytest
     deleted with tmp_path, or nothing at all. tests/unit/test_musa_rng_bridge.py
-    reads it indirectly: _conf_routes_to_flaggems() answers False, the FlagGems
+    reads it indirectly: routes_to_flaggems() answers False, the FlagGems
     Philox bridge is never patched, and its three symbol-gated tests fail -- but
     only when the whole suite runs, never when the file is run on its own, which
     is why the leak went unnoticed.

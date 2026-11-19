@@ -95,15 +95,14 @@ def _conf_route_count(platform: str) -> int:
 def test_matrix_covers_every_accelerator():
     """One matrix row per canonical accelerator conf.
 
-    The day-0 boxing-only variants and the TileOPs experiment variants are not
-    platforms: they are opt-in routing tables for a platform that already has a
-    row. See AGENTS.md.
+    Boxing, TileOPs and native-host variants are routing tables for an existing
+    platform and do not add a matrix row. See AGENTS.md.
     """
     # Conf, row and lane are all named for the vendor.
     confs = {
         p.stem.removeprefix("backends_")
         for p in (REPO_ROOT / "torch_fl" / "configs").glob("backends_*.conf")
-        if not p.stem.endswith(("_boxing", "_tileops"))
+        if not p.stem.endswith(("_boxing", "_tileops", "_native_host"))
     }
     assert set(_matrix_rows()) == confs
 

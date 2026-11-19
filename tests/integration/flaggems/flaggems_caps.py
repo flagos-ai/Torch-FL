@@ -190,8 +190,9 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # claim carries every dtype through the prelude, so the key cannot box), and
     # left this count at the pre-reroute 452. The hygon lane reported the two it
     # had gained as `assert 454 == 452`.
-    "dcu": 454,
-    "gcu": 251,
+    "dcu": 462,
+    # Isolated full-model precision checks restore SiLU to FlagGems.
+    "gcu": 250,
     # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen
     # to the native slot (eight ixdnn/ixblas kernels -- `_convolution`, `addmm`,
     # `baddbmm`, `baddbmm_`, `bmm`, `convolution`, `mm`, `native_batch_norm` --

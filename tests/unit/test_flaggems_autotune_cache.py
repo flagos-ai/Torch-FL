@@ -33,7 +33,7 @@ import os
 
 import pytest
 
-from torch_fl import flagos
+from torch_fl.compat.flaggems import autotune, runtime
 
 triton_knobs = None
 try:
@@ -51,8 +51,7 @@ ENV_VAR = "TRITON_CACHE_AUTOTUNING"
 @pytest.fixture
 def as_dcu(monkeypatch):
     """Make the patch believe it is on the configuration it was measured on."""
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "hygon")
-    monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: True)
+    monkeypatch.setattr(runtime, "routes_to_flaggems", lambda: True)
     monkeypatch.delenv(ENV_VAR, raising=False)
     yield
     # Clearing the override, not restoring its value: ``env_base.__set__`` calls
@@ -70,15 +69,14 @@ def test_noop_off_the_measured_configuration(monkeypatch):
     detector answers for this build.
 
     ``ascend`` is the arm, not ``cuda``: the CUDA boxing build now shares the
-    patch (``flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS``), so it is no longer an
+    patch (``launch._FLAGGEMS_LAUNCH_PATCH_BUILDS``), so it is no longer an
     example of a configuration the gate closes on.
     """
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "ascend")
-    monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: True)
+    monkeypatch.setattr(runtime, "routes_to_flaggems", lambda: True)
     monkeypatch.delenv(ENV_VAR, raising=False)
     previous = triton_knobs.autotuning.cache
 
-    flagos._enable_flaggems_autotune_cache()
+    autotune.enable_cache("ascend")
 
     assert ENV_VAR not in os.environ
     assert triton_knobs.autotuning.cache is previous
@@ -87,10 +85,10 @@ def test_noop_off_the_measured_configuration(monkeypatch):
 def test_cuda_route_alone_is_not_enough(monkeypatch, as_dcu):
     """The conf has to route to FlagGems as well: a DCU build on the CUDA route
     has no FlagGems autotuner to save anything on."""
-    monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: False)
+    monkeypatch.setattr(runtime, "routes_to_flaggems", lambda: False)
     previous = triton_knobs.autotuning.cache
 
-    flagos._enable_flaggems_autotune_cache()
+    autotune.enable_cache("hygon")
 
     assert ENV_VAR not in os.environ
     assert triton_knobs.autotuning.cache is previous
@@ -100,7 +98,7 @@ def test_enables_both_halves(as_dcu):
     """The env var is for readers that have not imported triton yet, and the
     knob is for the ones that have -- triton.knobs reads the variable once, when
     its knob objects are built, which is before this runs."""
-    flagos._enable_flaggems_autotune_cache()
+    autotune.enable_cache("hygon")
 
     assert os.environ[ENV_VAR] == "1"
     assert triton_knobs.autotuning.cache is True
@@ -116,7 +114,7 @@ def test_user_setting_wins(as_dcu, monkeypatch):
     """
     monkeypatch.setenv(ENV_VAR, "0")
 
-    flagos._enable_flaggems_autotune_cache()
+    autotune.enable_cache("hygon")
 
     assert os.environ[ENV_VAR] == "0"
     assert triton_knobs.autotuning.cache is False
@@ -127,7 +125,7 @@ def test_unparsable_setting_is_left_alone(as_dcu, monkeypatch):
     that does not read as "on" there does not get turned on here."""
     monkeypatch.setenv(ENV_VAR, "off")
 
-    flagos._enable_flaggems_autotune_cache()
+    autotune.enable_cache("hygon")
 
     assert os.environ[ENV_VAR] == "off"
     assert triton_knobs.autotuning.cache is False
@@ -146,7 +144,7 @@ def test_a_knob_without_a_value_is_read_from_the_environment(as_dcu, monkeypatch
     monkeypatch.setenv(ENV_VAR, "0")
 
     assert os.environ[ENV_VAR] == "0"
-    assert flagos._flaggems_autotune_knob(triton_knobs) is False
+    assert autotune._flaggems_autotune_knob(triton_knobs) is False
 
 
 def test_a_build_without_the_parser_still_enables(as_dcu, monkeypatch):
@@ -156,7 +154,7 @@ def test_a_build_without_the_parser_still_enables(as_dcu, monkeypatch):
     monkeypatch.delattr(triton_knobs, "getenv_bool", raising=False)
     monkeypatch.setenv(ENV_VAR, "0")
 
-    flagos._enable_flaggems_autotune_cache()
+    autotune.enable_cache("hygon")
 
     assert os.environ[ENV_VAR] == "1"
     assert triton_knobs.autotuning.cache is True
@@ -168,7 +166,7 @@ def test_failure_is_not_fatal(as_dcu, monkeypatch):
     def boom(name, *args, **kwargs):
         raise RuntimeError("no triton here")
 
-    monkeypatch.setattr(flagos.importlib, "import_module", boom)
+    monkeypatch.setattr(autotune.importlib, "import_module", boom)
 
-    flagos._enable_flaggems_autotune_cache()  # must not raise
+    autotune.enable_cache("hygon")  # must not raise
     assert triton_knobs.autotuning.cache is False

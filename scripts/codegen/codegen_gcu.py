@@ -98,7 +98,7 @@ OPS = {
     "trunc": ("unary", None),
     "sign": ("unary", None),
     # ---- binary: topsaten<Name>(out, self, other) ----
-    "mul.Tensor": ("binary", None),
+    "mul.Tensor": ("binary_mul", None),
     "div.Tensor": ("binary", None),
     "maximum": ("binary", None),
     "minimum": ("binary", None),
@@ -122,11 +122,11 @@ OPS = {
     "logical_and": ("binary_cmp", None),
     "logical_or": ("binary_cmp", None),
     # ---- binary_scalar: topsaten<Name>(out, self, scalar) ----
-    "pow.Tensor_Scalar": ("binary_scalar", None),
+    "pow.Tensor_Scalar": ("pow_scalar", None),
     "remainder.Scalar": ("binary_scalar", None),
     "fmod.Scalar": ("binary_scalar", None),
     # ---- scalar staged as a device tensor (see T_BINARY_SCALAR_AS_TENSOR) ----
-    "mul.Scalar": ("binary_scalar_as_tensor", None),
+    "mul.Scalar": ("binary_scalar_mul", None),
     "div.Scalar": ("binary_scalar_as_tensor", None),
     "add.Scalar": ("binary_scalar_alpha_as_tensor", None),
     "sub.Scalar": ("binary_scalar_alpha_as_tensor", None),
@@ -158,6 +158,8 @@ OPS = {
     # ---- reduce over a required dim list (no dtype arg) ----
     "amax": ("reduce_dims_plain", None),
     "amin": ("reduce_dims_plain", None),
+    "argmax": ("argmax", None),
+    "argmax.out": ("argmax_out", "Argmax"),
     # ---- ordered reduction over an optional dim list ----
     "linalg_vector_norm": ("linalg_vector_norm", None),
     # ---- shape-preserving with one int64 arg ----
@@ -673,11 +675,48 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
+
+def _floating_scalar_mul(scalar, condition):
+    # Keep the weak scalar in FP32 opmath for fp16/bf16, as the vendor Torch
+    # path does. Staging it in the result dtype rounds attention's 1/sqrt(D)
+    # before the multiply. The published scalar overload works with the
+    # allocator callbacks installed by EnsureTopsatenInit.
+    return f"""\
+  if ({condition} && at::isFloatingType(result_dtype)) {{{{
+    auto lhs = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+    auto out = at::empty(lhs.sizes(), self.options().dtype(result_dtype));
+    auto scalar = gcu::ToTopsatenScalar({scalar}, at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(lhs), t_out(out);
+    EXEC_TOPSATEN_CMD({{tops}}, self, t_out.get(), t_self.get(), scalar);
+    return out;
+  }}}}
+"""
+
+
+T_BINARY_MUL = T_BINARY.replace(
+    _binary_dtype_guard(_binary_host_fallback("{at_op}")),
+    """\
+  if (self.device().is_cpu() && self.dim() == 0 && other.is_privateuseone()) {{
+    return {kernel}(other, self);
+  }}
+"""
+    + _binary_dtype_guard(_binary_host_fallback("{at_op}")),
+).replace(
+    _BINARY_PROLOGUE,
+    _floating_scalar_mul("other.item()", "other.device().is_cpu() && other.dim() == 0")
+    + _BINARY_PROLOGUE,
+)
+
 T_BINARY_ALPHA = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {{
+  if (at::result_type(self, other) == at::kLong && alpha.isIntegral(false) &&
+      alpha.toLong() == 1) {{
+    return LongAddOrSubtract(self, other, {subtract});
+  }}
 """
     + _binary_dtype_guard(_binary_host_fallback("{at_op}", alpha=True))
+    + "{scalar_add}\n"
     + _BINARY_PROLOGUE
     + """\
   auto out = at::empty(out_shape, self.options().dtype(result_dtype));
@@ -790,6 +829,7 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 T_BINARY_CMP = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Tensor& other) {{
+{long_compare}
 """
     + _binary_dtype_guard(_binary_host_fallback("{at_op}"))
     + _BINARY_PROLOGUE
@@ -837,6 +877,20 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
+# The published GCU pow kernel changes Qwen RMSNorm logits; its FP32 square
+# expressed with the published FlagGems multiply is bitwise identical to the
+# vendor reference. Compose through the selected mul route and retain topsaten
+# for every other exponent/dtype. No new numerical device kernel is introduced.
+T_POW_SCALAR = T_BINARY_SCALAR.replace(
+    "  if (!gcu::TopsatenSupportsDtype(self.scalar_type())",
+    "  if (self.scalar_type() == at::kFloat && !other.isComplex() &&\n"
+    "      other.toDouble() == 2.0) {{\n"
+    "    return at::mul(self, self);\n"
+    "  }}\n"
+    "  if (!gcu::TopsatenSupportsDtype(self.scalar_type())",
+    1,
+)
+
 T_BINARY_SCALAR_ALPHA = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {{
@@ -860,9 +914,10 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
-# add/sub/mul/div reject topsaten's tensor-with-scalar overload in-process (the
-# scalar is staged in host memory the driver will not accept), so the scalar is
-# materialized as a device tensor and the tensor-with-tensor overload is used.
+# Preserve the historical tensor-staging route except for measured scalar
+# overloads: floating Mul and FP32 Add now use the SDK scalar argument directly
+# with the registered runtime allocator. Half/BF16 Add retains staging because
+# the scalar SDK overload disagrees on some opmath rounding cases.
 _SCALAR_AS_TENSOR_PROLOGUE = """\
   auto result_dtype = at::result_type(self, other);
   auto self_c = (self.scalar_type() == result_dtype ? self : self.to(result_dtype))
@@ -893,9 +948,24 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 """
 )
 
+T_BINARY_SCALAR_MUL = T_BINARY_SCALAR_AS_TENSOR.replace(
+    _SCALAR_AS_TENSOR_PROLOGUE,
+    "  auto result_dtype = at::result_type(self, other);\n"
+    + _floating_scalar_mul("other", "true")
+    + _SCALAR_AS_TENSOR_PROLOGUE.replace(
+        "  auto result_dtype = at::result_type(self, other);\n", ""
+    ),
+)
+
 T_BINARY_SCALAR_ALPHA_AS_TENSOR = (
     """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {{
+  if (self.scalar_type() == at::kLong && other.isIntegral(false) &&
+      alpha.isIntegral(false) && alpha.toLong() == 1) {{
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongAddOrSubtract(self, scalar, {subtract});
+  }}
+{scalar_add_explicit}
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {{
     return at::{at_op}(self.cpu(), other, alpha).to(self.device());
@@ -988,6 +1058,10 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 
 T_BINARY_SCALAR_CMP = """\
 at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {{
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, {compare_id});
+  }}
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {{
@@ -1237,6 +1311,65 @@ at::Tensor {kernel}(const at::Tensor& self, int64_t dim, bool half_to_float) {{
   gcu::TopsatenTensorWrapper t_self(self);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD({tops}, self, t_out.get(), t_self.get(), d, half_to_float);
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
+"""
+
+T_ARGMAX = """\
+at::Tensor {kernel}(
+    const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim) {{
+  TORCH_CHECK(gcu::TopsatenSupportsDtype(self.scalar_type()),
+      "Enflame argmax requires a vendor-supported input dtype");
+  const int64_t rank = self.dim();
+  int64_t axis = dim.value_or(0);
+  if (dim.has_value()) {{
+    TORCH_CHECK(axis >= -std::max<int64_t>(rank, 1) &&
+                axis < std::max<int64_t>(rank, 1), "argmax dimension out of range");
+    if (axis < 0) axis += std::max<int64_t>(rank, 1);
+  }}
+  auto shape = self.sizes().vec();
+  auto input = self.contiguous();
+  if (!dim.has_value()) {{
+    TORCH_CHECK(self.numel(), "argmax requires a nonempty input when dim is absent");
+    input = self.contiguous().reshape({{-1}});
+    shape = keepdim ? std::vector<int64_t>(rank, 1) : std::vector<int64_t>();
+  }} else if (rank) {{
+    TORCH_CHECK(self.size(axis), "argmax cannot reduce an empty dimension");
+    if (keepdim) shape[axis] = 1;
+    else shape.erase(shape.begin() + axis);
+  }}
+  auto out = at::empty(shape, self.options().dtype(at::kLong));
+  if (!out.numel()) return out;
+  auto words = out.reshape({{-1}}).view(at::kInt).reshape({{-1, 2}});
+  words.zero_();
+  if (!rank) return out;
+  TORCH_CHECK(input.size(axis) <= INT32_MAX, "Enflame argmax index exceeds int32");
+  auto index_shape = dim.has_value() ? shape : std::vector<int64_t>{{1}};
+  auto indices = at::empty(index_shape, self.options().dtype(at::kInt));
+  auto scalar = gcu::ToTopsatenScalar(at::Scalar(axis), at::kLong);
+  gcu::TopsatenTensorWrapper t_input(input), t_indices(indices);
+  EXEC_TOPSATEN_CMD({tops}, self, t_indices.get(), t_input.get(), scalar, keepdim);
+  // The vendor returns nonnegative int32 indices. Zero extension into the
+  // logical int64 result uses only the vendor's strided 32-bit copy.
+  words.select(1, 0).copy_(indices.reshape({{-1}}));
+  return out;
+}}
+
+REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
+"""
+
+T_ARGMAX_OUT = """\
+at::Tensor& {kernel}(
+    const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim,
+    at::Tensor& out) {{
+  gcu::TopsDeviceGuard guard(self);
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == at::kLong,
+      "argmax.out requires an int64 output on the input device");
+  auto result = argmax_dispatcher.DispatchBackend(Backend::kEnflame, self, dim, keepdim);
+  if (!out.sizes().equals(result.sizes())) out.resize_(result.sizes());
+  out.copy_(result);
   return out;
 }}
 
@@ -1723,11 +1856,9 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 # issues, `arange(0, dim, 2)` and `arange(4096)` included -- are bit-exact,
 # because nothing rounds.
 #
-# int64 -- which is what `torch.arange(n)` infers and what the Qwen-Image text
-# path asks for explicitly -- cannot use the vendor kernel at all
-# (TopsatenSupportsDtype rejects kLong), so it keeps a host round trip. That is
-# measured at 0.075 ms/call over a few hundred elements, against the full
-# activation a cpu_fallback of a compute op would copy.
+# Integer ranges whose scalar bounds fit int32 use the vendor int32 factory
+# and sign-extend both words on the device. This includes the int64 position
+# and cache indices in ordinary Transformers inference.
 T_ARANGE = """\
 at::Tensor {kernel}(
     {params},
@@ -1754,7 +1885,20 @@ at::Tensor {kernel}(
       ? at::native::compute_arange_size<int64_t>(start, end, step)
       : at::native::compute_arange_size<double>(start, end, step);
 
-  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+  if (layout.value_or(at::kStrided) == at::kStrided && length == 0) {{
+    return at::empty({{0}}, at::TensorOptions().dtype(out_dtype).device(target));
+  }}
+  auto kernel_dtype = out_dtype;
+  if (out_dtype == at::kLong && layout.value_or(at::kStrided) == at::kStrided) {{
+    auto fits = [](const at::Scalar& value) {{
+      auto n = value.toLong();
+      return n >= std::numeric_limits<int32_t>::min() &&
+          n <= std::numeric_limits<int32_t>::max();
+    }};
+    if (fits(start) && fits(end) && fits(step)) kernel_dtype = at::kInt;
+  }}
+
+  if (!gcu::TopsatenArangeDtype(kernel_dtype) ||
       layout.value_or(at::kStrided) != at::kStrided || length == 0) {{
     // Built with at::kCPU and the caller's layout, so the call lands on the CPU
     // kernel (which re-raises for a non-strided layout the same way ATen does)
@@ -1765,15 +1909,15 @@ at::Tensor {kernel}(
 
   auto out = at::empty(
       {{length}},
-      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
-  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
-  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
-  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+      at::TensorOptions().dtype(kernel_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, kernel_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, kernel_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, kernel_dtype);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       {tops}, out, t_out.get(), t_start, t_end, t_step,
-      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
-  return out;
+      gcu::ToTopsatenDataType(kernel_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return kernel_dtype == out_dtype ? out : gcu::DtypeCast(out, out_dtype);
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
@@ -2232,10 +2376,9 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 # The index is the fourth rule and the dangerous one. The vendor *detects* an
 # index outside [0, num_weights) and then aborts the process with a device
 # assert (`indice out of range! range=[0, 10], indice=99`), where ATen raises
-# IndexError. So the index is validated on the host before it is handed over --
-# `TopsatenEmbeddingIndex` does exactly that, and narrows to the i32 the vendor
-# wants -- and one it rejects sends the call to the host path, where ATen raises
-# its own message.
+# IndexError. Validate the complete index on the device and export only a bool
+# predicate for the host exception. The int64 comparison checks both words;
+# narrowing the low word is safe only after that check succeeds.
 #
 # The output shape is ATen's rule, not the vendor's: the index shape with the
 # embedding width appended, so a (2, 3) index gives a (2, 3, embed_dim) result.
@@ -2257,15 +2400,15 @@ at::Tensor {kernel}(const at::Tensor& weight, const at::Tensor& indices, int64_t
         .to(weight.device());
   }}
   auto weight_c = weight.contiguous();
-  // The vendor detects an out-of-range index and then aborts the process with a
-  // device assert (`indice out of range!`), where ATen raises IndexError. This
-  // is the read-back that validates every entry first; it returns an undefined
-  // tensor for one it rejects, and the host path below raises ATen's message.
-  auto indices_i32 = gcu::TopsatenEmbeddingIndex(indices, weight_c.size(0), weight.device());
-  if (!indices_i32.defined()) {{
-    return at::{at_op}(weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
-        .to(weight.device());
-  }}
+  TORCH_CHECK(weight_c.size(0) <= std::numeric_limits<int32_t>::max(),
+              "Enflame embedding table exceeds the vendor int32 index range");
+  // Validate on the device, returning only a scalar predicate to raise the
+  // ATen exception before the vendor's otherwise fatal device assertion.
+  auto valid = at::logical_and(at::ge(indices, 0), at::lt(indices, weight_c.size(0)));
+  TORCH_CHECK_INDEX(at::all(valid).item<bool>(), "index out of range in self");
+  auto indices_i32 = indices.scalar_type() == at::kLong
+      ? gcu::Int64Words(indices).select(-1, 0).contiguous()
+      : indices.contiguous();
   auto out_sizes = indices.sizes().vec();
   out_sizes.push_back(weight_c.size(1));
   auto out = at::empty(out_sizes, weight_c.options());
@@ -3473,13 +3616,16 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kEnflame, {kernel})
 CATEGORIES = {
     "unary": T_UNARY,
     "binary": T_BINARY,
+    "binary_mul": T_BINARY_MUL,
     "binary_alpha": T_BINARY_ALPHA,
     "binary_out": T_BINARY_OUT,
     "binary_alpha_out": T_BINARY_ALPHA_OUT,
     "binary_cmp": T_BINARY_CMP,
     "binary_scalar": T_BINARY_SCALAR,
+    "pow_scalar": T_POW_SCALAR,
     "binary_scalar_alpha": T_BINARY_SCALAR_ALPHA,
     "binary_scalar_as_tensor": T_BINARY_SCALAR_AS_TENSOR,
+    "binary_scalar_mul": T_BINARY_SCALAR_MUL,
     "binary_scalar_alpha_as_tensor": T_BINARY_SCALAR_ALPHA_AS_TENSOR,
     "binary_rsub_scalar": T_BINARY_RSUB_SCALAR,
     "binary_rsub": T_BINARY_RSUB,
@@ -3489,6 +3635,8 @@ CATEGORIES = {
     "reduce_dims_dtype": T_REDUCE_DIMS_DTYPE,
     "reduce_all_dtype": T_REDUCE_ALL_DTYPE,
     "reduce_dims_plain": T_REDUCE_DIMS_PLAIN,
+    "argmax": T_ARGMAX,
+    "argmax_out": T_ARGMAX_OUT,
     "linalg_vector_norm": T_LINALG_VECTOR_NORM,
     "unary_int": T_UNARY_INT,
     "unary_dims": T_UNARY_DIMS,
@@ -3560,6 +3708,7 @@ FILE_HEADER = """\
 // Backend::kEnflame slot.
 
 #include "../../../generated/ops.h"
+#include <ATen/ATen.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/native/RangeUtils.h>
@@ -3593,11 +3742,75 @@ FILE_HEADER = """\
 #include <string>
 #include <vector>
 #include "../topsaten_common.h"
+#include "../gcu_copy.h"
 #include "runtime/functions.h"
 
 namespace at::native::flagos {
 
 namespace gcu = at::native::flagos::gcu;
+
+namespace {
+
+// The S60 compiler rejects int64 Triton arithmetic. Compose the vendor int32
+// operations over the two storage words instead of downloading tensor data.
+std::pair<at::Tensor, at::Tensor> LongOperandWords(
+    const at::Tensor& value, const at::TensorOptions& options) {
+  if (value.device().is_cpu() && value.dim() == 0) {
+    uint64_t bits = static_cast<uint64_t>(value.item<int64_t>());
+    return {at::full({}, static_cast<int32_t>(bits), options.dtype(at::kInt)),
+            at::full({}, static_cast<int32_t>(bits >> 32), options.dtype(at::kInt))};
+  }
+  auto integral = value.scalar_type() == at::kLong ? value
+      : gcu::DtypeCast(value.to(at::kInt), at::kLong);
+  auto words = gcu::Int64Words(integral);
+  return {words.select(-1, 0), words.select(-1, 1)};
+}
+
+at::Tensor UnsignedLess(const at::Tensor& a, const at::Tensor& b) {
+  auto a_negative = at::lt(a, 0), b_negative = at::lt(b, 0);
+  return at::where(at::eq(a_negative, b_negative), at::lt(a, b), b_negative);
+}
+
+at::Tensor LongAddOrSubtract(
+    const at::Tensor& self, const at::Tensor& other, bool subtract) {
+  const auto& device_value = self.is_privateuseone() ? self : other;
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end())
+    return at::empty(shape, device_value.options().dtype(at::kLong));
+  auto a = LongOperandWords(self, device_value.options());
+  auto b = LongOperandWords(other, device_value.options());
+  auto low = subtract ? at::sub(a.first, b.first) : at::add(a.first, b.first);
+  auto carry = (subtract ? UnsignedLess(a.first, b.first)
+                        : UnsignedLess(low, a.first)).to(at::kInt);
+  auto high = subtract ? at::sub(at::sub(a.second, b.second), carry)
+                       : at::add(at::add(a.second, b.second), carry);
+  auto out = at::empty(low.sizes(), device_value.options().dtype(at::kLong));
+  auto words = gcu::Int64Words(out);
+  words.select(-1, 0).copy_(low);
+  words.select(-1, 1).copy_(high);
+  return out;
+}
+
+at::Tensor LongCompare(const at::Tensor& self, const at::Tensor& other, int op) {
+  const auto& device_value = self.is_privateuseone() ? self : other;
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end())
+    return at::empty(shape, device_value.options().dtype(at::kBool));
+  auto a = LongOperandWords(self, device_value.options());
+  auto b = LongOperandWords(other, device_value.options());
+  auto equal_high = at::eq(a.second, b.second);
+  auto equal = at::logical_and(equal_high, at::eq(a.first, b.first));
+  if (op == 0) return equal;
+  if (op == 1) return at::eq(equal, false);
+  auto less = at::logical_or(at::lt(a.second, b.second),
+      at::logical_and(equal_high, UnsignedLess(a.first, b.first)));
+  if (op == 2) return less;
+  if (op == 3) return at::logical_or(less, equal);
+  if (op == 4) return at::eq(at::logical_or(less, equal), false);
+  return at::eq(less, false);
+}
+
+} // namespace
 
 """
 
@@ -3730,6 +3943,47 @@ def main():
                 bind=bind,
                 dtype_infer=dtype_infer,
                 complex=COMPLEX_ARITHMETIC.get(op, ""),
+                subtract="true" if base == "sub" else "false",
+                compare_id=(
+                    ["eq", "ne", "lt", "le", "gt", "ge"].index(base)
+                    if base in {"eq", "ne", "lt", "le", "gt", "ge"}
+                    else 0
+                ),
+                scalar_add=(
+                    """\
+  if (other.device().is_cpu() && other.dim() == 0 && result_dtype == at::kFloat) {
+    auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+    auto scalar = gcu::ToTopsatenScalar(other.item(), at::kFloat);
+    auto scale = gcu::ToTopsatenScalar(alpha, at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(self), t_out(out);
+    EXEC_TOPSATEN_CMD(topsatenAdd, self, t_out.get(), t_self.get(), scalar, scale);
+    return out;
+  }
+"""
+                    if base == "add"
+                    else ""
+                ),
+                scalar_add_explicit=(
+                    """\
+  if (self.scalar_type() == at::kFloat && at::result_type(self, other) == at::kFloat) {
+    auto out = at::empty(self.sizes(), self.options());
+    auto scalar = gcu::ToTopsatenScalar(other, at::kFloat);
+    auto scale = gcu::ToTopsatenScalar(alpha, at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(self), t_out(out);
+    EXEC_TOPSATEN_CMD(topsatenAdd, self, t_out.get(), t_self.get(), scalar, scale);
+    return out;
+  }
+"""
+                    if base == "add"
+                    else ""
+                ),
+                long_compare=(
+                    "  if (at::result_type(self, other) == at::kLong) {\n"
+                    f"    return LongCompare(self, other, {['eq', 'ne', 'lt', 'le', 'gt', 'ge'].index(base)});\n"
+                    "  }\n"
+                    if base in {"eq", "ne", "lt", "le", "gt", "ge"}
+                    else ""
+                ),
             )
         )
         covered.append((op, tops, cat))

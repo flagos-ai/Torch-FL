@@ -201,6 +201,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     )
     selections = hosts.manifest.get("source_variants", {}).get("entries", [])
     selected_names = {row["id"] for row in selections}
+    selected_dtypes = {row["id"]: row["dtypes"] for row in selections}
     if selected_names & hosts.original_ops.keys():
         raise ValueError("published source identifier shadows an existing host")
     for row in selections:
@@ -278,7 +279,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         checkpoints = {kind: len(records) for kind, records in recorder.records.items()}
         try:
             frontend = Frontend(hosts, recorder)
-            source = frontend.source(function, signature)
+            source = frontend.source(
+                function, signature, input_dtypes=selected_dtypes.get(name, ())
+            )
             if function in frontend.fallback_functions:
                 raise NotImplementedError(
                     "root host requires compiled object semantics: "
@@ -533,6 +536,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             "typed_rejected": typed_rejected,
         }
     torch_dir = Path(torch.__file__).parent
+    native_dir = source_root / "csrc/native_host"
     extension = Extension(
         "_source_hosts",
         [str(path)],
@@ -540,10 +544,16 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             str(torch_dir / "include"),
             str(torch_dir / "include/torch/csrc/api/include"),
             str(source_root / "csrc/aten/backends/flagos"),
-            str(source_root / "torch_fl/native_host/csrc"),
+            str(native_dir),
         ],
+        depends=[str(native_dir / name) for name in ("host_runtime.h", "host_abi.h")],
         library_dirs=[str(torch_dir / "lib")],
         libraries=["torch_python", "torch_cpu", "c10"],
+        define_macros=(
+            [("FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC", "1")]
+            if _build_config.ACCELERATOR == "hygon"
+            else []
+        ),
         language="c++",
         extra_compile_args=[
             "-O3",

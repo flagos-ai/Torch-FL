@@ -9,6 +9,7 @@
 // Backend::kEnflame slot.
 
 #include "../../../generated/ops.h"
+#include <ATen/ATen.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/native/RangeUtils.h>
@@ -42,11 +43,75 @@
 #include <string>
 #include <vector>
 #include "../topsaten_common.h"
+#include "../gcu_copy.h"
 #include "runtime/functions.h"
 
 namespace at::native::flagos {
 
 namespace gcu = at::native::flagos::gcu;
+
+namespace {
+
+// The S60 compiler rejects int64 Triton arithmetic. Compose the vendor int32
+// operations over the two storage words instead of downloading tensor data.
+std::pair<at::Tensor, at::Tensor> LongOperandWords(
+    const at::Tensor& value, const at::TensorOptions& options) {
+  if (value.device().is_cpu() && value.dim() == 0) {
+    uint64_t bits = static_cast<uint64_t>(value.item<int64_t>());
+    return {at::full({}, static_cast<int32_t>(bits), options.dtype(at::kInt)),
+            at::full({}, static_cast<int32_t>(bits >> 32), options.dtype(at::kInt))};
+  }
+  auto integral = value.scalar_type() == at::kLong ? value
+      : gcu::DtypeCast(value.to(at::kInt), at::kLong);
+  auto words = gcu::Int64Words(integral);
+  return {words.select(-1, 0), words.select(-1, 1)};
+}
+
+at::Tensor UnsignedLess(const at::Tensor& a, const at::Tensor& b) {
+  auto a_negative = at::lt(a, 0), b_negative = at::lt(b, 0);
+  return at::where(at::eq(a_negative, b_negative), at::lt(a, b), b_negative);
+}
+
+at::Tensor LongAddOrSubtract(
+    const at::Tensor& self, const at::Tensor& other, bool subtract) {
+  const auto& device_value = self.is_privateuseone() ? self : other;
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end())
+    return at::empty(shape, device_value.options().dtype(at::kLong));
+  auto a = LongOperandWords(self, device_value.options());
+  auto b = LongOperandWords(other, device_value.options());
+  auto low = subtract ? at::sub(a.first, b.first) : at::add(a.first, b.first);
+  auto carry = (subtract ? UnsignedLess(a.first, b.first)
+                        : UnsignedLess(low, a.first)).to(at::kInt);
+  auto high = subtract ? at::sub(at::sub(a.second, b.second), carry)
+                       : at::add(at::add(a.second, b.second), carry);
+  auto out = at::empty(low.sizes(), device_value.options().dtype(at::kLong));
+  auto words = gcu::Int64Words(out);
+  words.select(-1, 0).copy_(low);
+  words.select(-1, 1).copy_(high);
+  return out;
+}
+
+at::Tensor LongCompare(const at::Tensor& self, const at::Tensor& other, int op) {
+  const auto& device_value = self.is_privateuseone() ? self : other;
+  auto shape = at::infer_size(self.sizes(), other.sizes());
+  if (std::find(shape.begin(), shape.end(), 0) != shape.end())
+    return at::empty(shape, device_value.options().dtype(at::kBool));
+  auto a = LongOperandWords(self, device_value.options());
+  auto b = LongOperandWords(other, device_value.options());
+  auto equal_high = at::eq(a.second, b.second);
+  auto equal = at::logical_and(equal_high, at::eq(a.first, b.first));
+  if (op == 0) return equal;
+  if (op == 1) return at::eq(equal, false);
+  auto less = at::logical_or(at::lt(a.second, b.second),
+      at::logical_and(equal_high, UnsignedLess(a.first, b.first)));
+  if (op == 2) return less;
+  if (op == 3) return at::logical_or(less, equal);
+  if (op == 4) return at::eq(at::logical_or(less, equal), false);
+  return at::eq(less, false);
+}
+
+} // namespace
 
 at::Tensor AbsKernelGcu(const at::Tensor& self) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type())) {
@@ -400,6 +465,9 @@ at::Tensor SignKernelGcu(const at::Tensor& self) {
 REGISTER_IMPL_TO_DISPATCHER(SignFn, sign_dispatcher, Backend::kEnflame, SignKernelGcu)
 
 at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (self.device().is_cpu() && self.dim() == 0 && other.is_privateuseone()) {
+    return MulTensorKernelGcu(other, self);
+  }
   auto result_dtype = at::result_type(self, other);
   if (result_dtype == at::kComplexFloat) {
     auto lhs = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
@@ -420,6 +488,14 @@ at::Tensor MulTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::mul(self.cpu(), other.cpu()).to(self.device());
+  }
+  if (other.device().is_cpu() && other.dim() == 0 && at::isFloatingType(result_dtype)) {
+    auto lhs = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+    auto out = at::empty(lhs.sizes(), self.options().dtype(result_dtype));
+    auto scalar = gcu::ToTopsatenScalar(other.item(), at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(lhs), t_out(out);
+    EXEC_TOPSATEN_CMD(topsatenMul, self, t_out.get(), t_self.get(), scalar);
+    return out;
   }
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
@@ -570,11 +646,24 @@ at::Tensor PowTensorTensorKernelGcu(const at::Tensor& self, const at::Tensor& ot
 REGISTER_IMPL_TO_DISPATCHER(PowTensorTensorFn, pow_tensor_tensor_dispatcher, Backend::kEnflame, PowTensorTensorKernelGcu)
 
 at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (at::result_type(self, other) == at::kLong && alpha.isIntegral(false) &&
+      alpha.toLong() == 1) {
+    return LongAddOrSubtract(self, other, false);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
   }
+  if (other.device().is_cpu() && other.dim() == 0 && result_dtype == at::kFloat) {
+    auto out = at::empty(self.sizes(), self.options().dtype(result_dtype));
+    auto scalar = gcu::ToTopsatenScalar(other.item(), at::kFloat);
+    auto scale = gcu::ToTopsatenScalar(alpha, at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(self), t_out(out);
+    EXEC_TOPSATEN_CMD(topsatenAdd, self, t_out.get(), t_self.get(), scalar, scale);
+    return out;
+  }
+
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -593,11 +682,16 @@ at::Tensor AddTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, c
 REGISTER_IMPL_TO_DISPATCHER(AddTensorFn, add_tensor_dispatcher, Backend::kEnflame, AddTensorKernelGcu)
 
 at::Tensor SubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (at::result_type(self, other) == at::kLong && alpha.isIntegral(false) &&
+      alpha.toLong() == 1) {
+    return LongAddOrSubtract(self, other, true);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
     return at::sub(self.cpu(), other.cpu(), alpha).to(self.device());
   }
+
   auto self_c = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
   auto other_c = other.to(self.device(), result_dtype);
   auto out_shape = at::infer_size(self_c.sizes(), other_c.sizes());
@@ -750,6 +844,10 @@ at::Tensor& SubOutKernelGcu(const at::Tensor& self, const at::Tensor& other, con
 REGISTER_IMPL_TO_DISPATCHER(SubOutFn, sub_out_dispatcher, Backend::kEnflame, SubOutKernelGcu)
 
 at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (at::result_type(self, other) == at::kLong) {
+    return LongCompare(self, other, 0);
+  }
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -772,6 +870,10 @@ at::Tensor EqTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(EqTensorFn, eq_tensor_dispatcher, Backend::kEnflame, EqTensorKernelGcu)
 
 at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (at::result_type(self, other) == at::kLong) {
+    return LongCompare(self, other, 1);
+  }
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -794,6 +896,10 @@ at::Tensor NeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(NeTensorFn, ne_tensor_dispatcher, Backend::kEnflame, NeTensorKernelGcu)
 
 at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (at::result_type(self, other) == at::kLong) {
+    return LongCompare(self, other, 2);
+  }
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -816,6 +922,10 @@ at::Tensor LtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(LtTensorFn, lt_tensor_dispatcher, Backend::kEnflame, LtTensorKernelGcu)
 
 at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (at::result_type(self, other) == at::kLong) {
+    return LongCompare(self, other, 4);
+  }
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -838,6 +948,10 @@ at::Tensor GtTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(GtTensorFn, gt_tensor_dispatcher, Backend::kEnflame, GtTensorKernelGcu)
 
 at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (at::result_type(self, other) == at::kLong) {
+    return LongCompare(self, other, 3);
+  }
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -860,6 +974,10 @@ at::Tensor LeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(LeTensorFn, le_tensor_dispatcher, Backend::kEnflame, LeTensorKernelGcu)
 
 at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+  if (at::result_type(self, other) == at::kLong) {
+    return LongCompare(self, other, 5);
+  }
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -882,6 +1000,7 @@ at::Tensor GeTensorKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(GeTensorFn, ge_tensor_dispatcher, Backend::kEnflame, GeTensorKernelGcu)
 
 at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -904,6 +1023,7 @@ at::Tensor LogicalAndKernelGcu(const at::Tensor& self, const at::Tensor& other) 
 REGISTER_IMPL_TO_DISPATCHER(LogicalAndFn, logical_and_dispatcher, Backend::kEnflame, LogicalAndKernelGcu)
 
 at::Tensor LogicalOrKernelGcu(const at::Tensor& self, const at::Tensor& other) {
+
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -926,6 +1046,10 @@ at::Tensor LogicalOrKernelGcu(const at::Tensor& self, const at::Tensor& other) {
 REGISTER_IMPL_TO_DISPATCHER(LogicalOrFn, logical_or_dispatcher, Backend::kEnflame, LogicalOrKernelGcu)
 
 at::Tensor PowTensorScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kFloat && !other.isComplex() &&
+      other.toDouble() == 2.0) {
+    return at::mul(self, self);
+  }
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
     return at::pow(self.cpu(), other).to(self.device());
@@ -985,6 +1109,14 @@ at::Tensor MulScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
     return at::mul(self.cpu(), other).to(self.device());
   }
   auto result_dtype = at::result_type(self, other);
+  if (true && at::isFloatingType(result_dtype)) {
+    auto lhs = self.scalar_type() == result_dtype ? self : self.to(result_dtype);
+    auto out = at::empty(lhs.sizes(), self.options().dtype(result_dtype));
+    auto scalar = gcu::ToTopsatenScalar(other, at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(lhs), t_out(out);
+    EXEC_TOPSATEN_CMD(topsatenMul, self, t_out.get(), t_self.get(), scalar);
+    return out;
+  }
   auto self_c = (self.scalar_type() == result_dtype ? self : self.to(result_dtype))
                     .contiguous();
   auto other_t = gcu::ScalarToDeviceTensor(
@@ -1020,6 +1152,20 @@ at::Tensor DivScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(DivScalarFn, div_scalar_dispatcher, Backend::kEnflame, DivScalarKernelGcu)
 
 at::Tensor AddScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false) &&
+      alpha.isIntegral(false) && alpha.toLong() == 1) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongAddOrSubtract(self, scalar, false);
+  }
+  if (self.scalar_type() == at::kFloat && at::result_type(self, other) == at::kFloat) {
+    auto out = at::empty(self.sizes(), self.options());
+    auto scalar = gcu::ToTopsatenScalar(other, at::kFloat);
+    auto scale = gcu::ToTopsatenScalar(alpha, at::kFloat);
+    gcu::TopsatenTensorWrapper t_self(self), t_out(out);
+    EXEC_TOPSATEN_CMD(topsatenAdd, self, t_out.get(), t_self.get(), scalar, scale);
+    return out;
+  }
+
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
     return at::add(self.cpu(), other, alpha).to(self.device());
@@ -1042,6 +1188,12 @@ at::Tensor AddScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, c
 REGISTER_IMPL_TO_DISPATCHER(AddScalarFn, add_scalar_dispatcher, Backend::kEnflame, AddScalarKernelGcu)
 
 at::Tensor SubScalarKernelGcu(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false) &&
+      alpha.isIntegral(false) && alpha.toLong() == 1) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongAddOrSubtract(self, scalar, true);
+  }
+
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(at::result_type(self, other))) {
     return at::sub(self.cpu(), other, alpha).to(self.device());
@@ -1109,6 +1261,10 @@ at::Tensor RsubTensorKernelGcu(const at::Tensor& self, const at::Tensor& other, 
 REGISTER_IMPL_TO_DISPATCHER(RsubTensorFn, rsub_tensor_dispatcher, Backend::kEnflame, RsubTensorKernelGcu)
 
 at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, 0);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -1131,6 +1287,10 @@ at::Tensor EqScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(EqScalarFn, eq_scalar_dispatcher, Backend::kEnflame, EqScalarKernelGcu)
 
 at::Tensor NeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, 1);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -1153,6 +1313,10 @@ at::Tensor NeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(NeScalarFn, ne_scalar_dispatcher, Backend::kEnflame, NeScalarKernelGcu)
 
 at::Tensor LtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, 2);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -1175,6 +1339,10 @@ at::Tensor LtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(LtScalarFn, lt_scalar_dispatcher, Backend::kEnflame, LtScalarKernelGcu)
 
 at::Tensor GtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, 4);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -1197,6 +1365,10 @@ at::Tensor GtScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(GtScalarFn, gt_scalar_dispatcher, Backend::kEnflame, GtScalarKernelGcu)
 
 at::Tensor LeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, 3);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -1219,6 +1391,10 @@ at::Tensor LeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
 REGISTER_IMPL_TO_DISPATCHER(LeScalarFn, le_scalar_dispatcher, Backend::kEnflame, LeScalarKernelGcu)
 
 at::Tensor GeScalarKernelGcu(const at::Tensor& self, const at::Scalar& other) {
+  if (self.scalar_type() == at::kLong && other.isIntegral(false)) {
+    auto scalar = at::scalar_tensor(other, at::TensorOptions().dtype(at::kLong));
+    return LongCompare(self, scalar, 5);
+  }
   auto result_dtype = at::result_type(self, other);
   if (!gcu::TopsatenSupportsDtype(self.scalar_type()) ||
       !gcu::TopsatenSupportsDtype(result_dtype)) {
@@ -1551,6 +1727,61 @@ at::Tensor AminKernelGcu(
 }
 
 REGISTER_IMPL_TO_DISPATCHER(AminFn, amin_dispatcher, Backend::kEnflame, AminKernelGcu)
+
+at::Tensor ArgmaxKernelGcu(
+    const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim) {
+  TORCH_CHECK(gcu::TopsatenSupportsDtype(self.scalar_type()),
+      "Enflame argmax requires a vendor-supported input dtype");
+  const int64_t rank = self.dim();
+  int64_t axis = dim.value_or(0);
+  if (dim.has_value()) {
+    TORCH_CHECK(axis >= -std::max<int64_t>(rank, 1) &&
+                axis < std::max<int64_t>(rank, 1), "argmax dimension out of range");
+    if (axis < 0) axis += std::max<int64_t>(rank, 1);
+  }
+  auto shape = self.sizes().vec();
+  auto input = self.contiguous();
+  if (!dim.has_value()) {
+    TORCH_CHECK(self.numel(), "argmax requires a nonempty input when dim is absent");
+    input = self.contiguous().reshape({-1});
+    shape = keepdim ? std::vector<int64_t>(rank, 1) : std::vector<int64_t>();
+  } else if (rank) {
+    TORCH_CHECK(self.size(axis), "argmax cannot reduce an empty dimension");
+    if (keepdim) shape[axis] = 1;
+    else shape.erase(shape.begin() + axis);
+  }
+  auto out = at::empty(shape, self.options().dtype(at::kLong));
+  if (!out.numel()) return out;
+  auto words = out.reshape({-1}).view(at::kInt).reshape({-1, 2});
+  words.zero_();
+  if (!rank) return out;
+  TORCH_CHECK(input.size(axis) <= INT32_MAX, "Enflame argmax index exceeds int32");
+  auto index_shape = dim.has_value() ? shape : std::vector<int64_t>{1};
+  auto indices = at::empty(index_shape, self.options().dtype(at::kInt));
+  auto scalar = gcu::ToTopsatenScalar(at::Scalar(axis), at::kLong);
+  gcu::TopsatenTensorWrapper t_input(input), t_indices(indices);
+  EXEC_TOPSATEN_CMD(topsatenArgmax, self, t_indices.get(), t_input.get(), scalar, keepdim);
+  // The vendor returns nonnegative int32 indices. Zero extension into the
+  // logical int64 result uses only the vendor's strided 32-bit copy.
+  words.select(1, 0).copy_(indices.reshape({-1}));
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxFn, argmax_dispatcher, Backend::kEnflame, ArgmaxKernelGcu)
+
+at::Tensor& ArgmaxOutKernelGcu(
+    const at::Tensor& self, ::std::optional<int64_t> dim, bool keepdim,
+    at::Tensor& out) {
+  gcu::TopsDeviceGuard guard(self);
+  TORCH_CHECK(out.device() == self.device() && out.scalar_type() == at::kLong,
+      "argmax.out requires an int64 output on the input device");
+  auto result = argmax_dispatcher.DispatchBackend(Backend::kEnflame, self, dim, keepdim);
+  if (!out.sizes().equals(result.sizes())) out.resize_(result.sizes());
+  out.copy_(result);
+  return out;
+}
+
+REGISTER_IMPL_TO_DISPATCHER(ArgmaxOutFn, argmax_out_dispatcher, Backend::kEnflame, ArgmaxOutKernelGcu)
 
 at::Tensor LinalgVectorNormKernelGcu(
     const at::Tensor& self,
@@ -1999,7 +2230,20 @@ at::Tensor ArangeKernelGcu(
       ? at::native::compute_arange_size<int64_t>(start, end, step)
       : at::native::compute_arange_size<double>(start, end, step);
 
-  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+  if (layout.value_or(at::kStrided) == at::kStrided && length == 0) {
+    return at::empty({0}, at::TensorOptions().dtype(out_dtype).device(target));
+  }
+  auto kernel_dtype = out_dtype;
+  if (out_dtype == at::kLong && layout.value_or(at::kStrided) == at::kStrided) {
+    auto fits = [](const at::Scalar& value) {
+      auto n = value.toLong();
+      return n >= std::numeric_limits<int32_t>::min() &&
+          n <= std::numeric_limits<int32_t>::max();
+    };
+    if (fits(start) && fits(end) && fits(step)) kernel_dtype = at::kInt;
+  }
+
+  if (!gcu::TopsatenArangeDtype(kernel_dtype) ||
       layout.value_or(at::kStrided) != at::kStrided || length == 0) {
     // Built with at::kCPU and the caller's layout, so the call lands on the CPU
     // kernel (which re-raises for a non-strided layout the same way ATen does)
@@ -2010,15 +2254,15 @@ at::Tensor ArangeKernelGcu(
 
   auto out = at::empty(
       {length},
-      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
-  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
-  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
-  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+      at::TensorOptions().dtype(kernel_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, kernel_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, kernel_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, kernel_dtype);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       topsatenArange, out, t_out.get(), t_start, t_end, t_step,
-      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
-  return out;
+      gcu::ToTopsatenDataType(kernel_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return kernel_dtype == out_dtype ? out : gcu::DtypeCast(out, out_dtype);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ArangeFn, arange_dispatcher, Backend::kEnflame, ArangeKernelGcu)
@@ -2048,7 +2292,20 @@ at::Tensor ArangeStartKernelGcu(
       ? at::native::compute_arange_size<int64_t>(start, end, step)
       : at::native::compute_arange_size<double>(start, end, step);
 
-  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+  if (layout.value_or(at::kStrided) == at::kStrided && length == 0) {
+    return at::empty({0}, at::TensorOptions().dtype(out_dtype).device(target));
+  }
+  auto kernel_dtype = out_dtype;
+  if (out_dtype == at::kLong && layout.value_or(at::kStrided) == at::kStrided) {
+    auto fits = [](const at::Scalar& value) {
+      auto n = value.toLong();
+      return n >= std::numeric_limits<int32_t>::min() &&
+          n <= std::numeric_limits<int32_t>::max();
+    };
+    if (fits(start) && fits(end) && fits(step)) kernel_dtype = at::kInt;
+  }
+
+  if (!gcu::TopsatenArangeDtype(kernel_dtype) ||
       layout.value_or(at::kStrided) != at::kStrided || length == 0) {
     // Built with at::kCPU and the caller's layout, so the call lands on the CPU
     // kernel (which re-raises for a non-strided layout the same way ATen does)
@@ -2059,15 +2316,15 @@ at::Tensor ArangeStartKernelGcu(
 
   auto out = at::empty(
       {length},
-      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
-  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
-  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
-  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+      at::TensorOptions().dtype(kernel_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, kernel_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, kernel_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, kernel_dtype);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       topsatenArange, out, t_out.get(), t_start, t_end, t_step,
-      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
-  return out;
+      gcu::ToTopsatenDataType(kernel_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return kernel_dtype == out_dtype ? out : gcu::DtypeCast(out, out_dtype);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ArangeStartFn, arange_start_dispatcher, Backend::kEnflame, ArangeStartKernelGcu)
@@ -2097,7 +2354,20 @@ at::Tensor ArangeStartStepKernelGcu(
       ? at::native::compute_arange_size<int64_t>(start, end, step)
       : at::native::compute_arange_size<double>(start, end, step);
 
-  if (!gcu::TopsatenArangeDtype(out_dtype) ||
+  if (layout.value_or(at::kStrided) == at::kStrided && length == 0) {
+    return at::empty({0}, at::TensorOptions().dtype(out_dtype).device(target));
+  }
+  auto kernel_dtype = out_dtype;
+  if (out_dtype == at::kLong && layout.value_or(at::kStrided) == at::kStrided) {
+    auto fits = [](const at::Scalar& value) {
+      auto n = value.toLong();
+      return n >= std::numeric_limits<int32_t>::min() &&
+          n <= std::numeric_limits<int32_t>::max();
+    };
+    if (fits(start) && fits(end) && fits(step)) kernel_dtype = at::kInt;
+  }
+
+  if (!gcu::TopsatenArangeDtype(kernel_dtype) ||
       layout.value_or(at::kStrided) != at::kStrided || length == 0) {
     // Built with at::kCPU and the caller's layout, so the call lands on the CPU
     // kernel (which re-raises for a non-strided layout the same way ATen does)
@@ -2108,15 +2378,15 @@ at::Tensor ArangeStartStepKernelGcu(
 
   auto out = at::empty(
       {length},
-      at::TensorOptions().dtype(out_dtype).device(target).pinned_memory(false));
-  auto t_start = gcu::ToTopsatenScalar(start, out_dtype);
-  auto t_end = gcu::ToTopsatenScalar(end, out_dtype);
-  auto t_step = gcu::ToTopsatenScalar(step, out_dtype);
+      at::TensorOptions().dtype(kernel_dtype).device(target).pinned_memory(false));
+  auto t_start = gcu::ToTopsatenScalar(start, kernel_dtype);
+  auto t_end = gcu::ToTopsatenScalar(end, kernel_dtype);
+  auto t_step = gcu::ToTopsatenScalar(step, kernel_dtype);
   gcu::TopsatenTensorWrapper t_out(out);
   EXEC_TOPSATEN_CMD(
       topsatenArange, out, t_out.get(), t_start, t_end, t_step,
-      gcu::ToTopsatenDataType(out_dtype), TOPSATEN_LAYOUT_STRIDED, false);
-  return out;
+      gcu::ToTopsatenDataType(kernel_dtype), TOPSATEN_LAYOUT_STRIDED, false);
+  return kernel_dtype == out_dtype ? out : gcu::DtypeCast(out, out_dtype);
 }
 
 REGISTER_IMPL_TO_DISPATCHER(ArangeStartStepFn, arange_start_step_dispatcher, Backend::kEnflame, ArangeStartStepKernelGcu)
@@ -2740,15 +3010,15 @@ at::Tensor EmbeddingKernelGcu(const at::Tensor& weight, const at::Tensor& indice
         .to(weight.device());
   }
   auto weight_c = weight.contiguous();
-  // The vendor detects an out-of-range index and then aborts the process with a
-  // device assert (`indice out of range!`), where ATen raises IndexError. This
-  // is the read-back that validates every entry first; it returns an undefined
-  // tensor for one it rejects, and the host path below raises ATen's message.
-  auto indices_i32 = gcu::TopsatenEmbeddingIndex(indices, weight_c.size(0), weight.device());
-  if (!indices_i32.defined()) {
-    return at::embedding(weight.cpu(), indices.cpu(), padding_idx, scale_grad_by_freq, sparse)
-        .to(weight.device());
-  }
+  TORCH_CHECK(weight_c.size(0) <= std::numeric_limits<int32_t>::max(),
+              "Enflame embedding table exceeds the vendor int32 index range");
+  // Validate on the device, returning only a scalar predicate to raise the
+  // ATen exception before the vendor's otherwise fatal device assertion.
+  auto valid = at::logical_and(at::ge(indices, 0), at::lt(indices, weight_c.size(0)));
+  TORCH_CHECK_INDEX(at::all(valid).item<bool>(), "index out of range in self");
+  auto indices_i32 = indices.scalar_type() == at::kLong
+      ? gcu::Int64Words(indices).select(-1, 0).contiguous()
+      : indices.contiguous();
   auto out_sizes = indices.sizes().vec();
   out_sizes.push_back(weight_c.size(1));
   auto out = at::empty(out_sizes, weight_c.options());

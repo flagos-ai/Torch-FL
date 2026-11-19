@@ -106,6 +106,7 @@ jobs:
             tests/unit/test_ai_reviewer.py
             tests/unit/test_ascend_env_script.py
             tests/unit/test_backend_autoload_contract.py
+            tests/unit/test_setup_build.py
             tests/unit/test_backend_enum_naming.py
             tests/unit/test_backend_key_vendor_naming.py
             tests/unit/test_case_gap_issues.py
@@ -131,12 +132,20 @@ jobs:
             tests/unit/test_env_registry.py
             tests/unit/test_enflame_env_script.py
             tests/unit/test_gen_vendor_confs.py
+            tests/unit/test_vendor_conf_single_writer.py
             tests/unit/test_host_program_admission.py
             tests/unit/test_native_host_continuations.py
             tests/unit/test_native_host_source.py
+            tests/unit/test_native_host_dtype_specialization.py
             tests/unit/test_native_host_audit.py
             tests/unit/test_native_host_backend.py
+            tests/unit/test_native_host_metax_routes.py
+          tests/unit/test_metax_sdk_precision.py
+            tests/unit/test_metax_runtime_link.py
+            tests/unit/test_metax_native_link_contract.py
+            tests/unit/test_metax_device_properties_restore.py
             tests/unit/test_native_host_ascend.py
+            tests/unit/test_ascend_device_runtime.py
             tests/unit/test_native_host_coverage.py
             tests/unit/test_native_host_entries.py
             tests/unit/test_native_scalar_bindings.py

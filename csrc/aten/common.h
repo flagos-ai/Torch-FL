@@ -49,6 +49,7 @@ enum class Backend {
   // takes the CPU round-trip. Conf key: drobotics.
   kDrobotics,
   kNvidia,         // Published vendor-native precision entries; never boxing.
+  kHygon,          // Published HCU precision entries on PrivateUse1 storage.
   // No accelerated implementation on this platform. The op is deliberately not
   // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
   // arriving here with an empty kernel slot. Recorded explicitly (rather than
@@ -110,7 +111,7 @@ bool HasBackendForOp(const std::string& op_name);
 // for the rest of the process.
 //
 // FLAGOS_EXPORT because of who calls it: the binding is
-// torch_fl._C._set_backend_config_path, and torch_fl/csrc/module.cc is linked
+// torch_fl._C._set_backend_config_path, and csrc/bindings/module.cc is linked
 // into libtorch_bindings.so, not into libtorch_fl.so. CMakeLists.txt sets
 // CMAKE_CXX_VISIBILITY_PRESET hidden, so an unannotated definition here is
 // local to libtorch_fl.so and the import fails with an undefined symbol rather
@@ -293,6 +294,18 @@ at::Tensor PadMatmulContractDim(const at::Tensor& operand, bool is_rhs,
 // arithmetic: an ordinary fp32 `mm` routed to FlagGems hits the same assertion
 // with the same small K. See TritonMinDotContractExtent above.
 bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs);
+
+// Native MetaX FP32 outer products honor the caller's TF32 policy using the
+// published pointwise kernels. Other builds/contracts retain their bmm path.
+bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
+                                  at::Tensor& result);
+bool TryNativeHostMean(const at::Tensor& input, at::OptionalIntArrayRef dims,
+                       bool keepdim, std::optional<at::ScalarType> dtype,
+                       at::Tensor& result);
+
+// Shared by ATen fallback and explicit numerical host escapes.
+void SetStrictHostRoutes(bool enabled);
+bool CpuFallbackAllowed();
 
 // Whether this platform's FlagGems matmul must not be handed `dtype`, with the
 // host round-trip as the only alternative.

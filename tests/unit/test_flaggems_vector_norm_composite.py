@@ -28,7 +28,7 @@ composite's equivalence against the implementation it replaces is measured in
 import torch
 import pytest
 
-from torch_fl import flagos
+from torch_fl.compat.flaggems import ops
 
 
 # Shapes the wrapper has an opinion about. ``(1, N, 1, 32, 32)`` is the rank-5
@@ -45,7 +45,7 @@ def _fake_original(x, ord=2, dim=None, keepdim=False, dtype=None):
 
 @pytest.fixture
 def wrapped():
-    return flagos._flaggems_vector_norm_wrapper(_fake_original)
+    return ops._flaggems_vector_norm_wrapper(_fake_original)
 
 
 def _delegated(out):
@@ -57,25 +57,25 @@ class TestVectorNormPermutes:
 
     def test_innermost_dim_needs_no_permute(self):
         x = torch.randn(8, 16)
-        assert flagos._vector_norm_permutes(x, [1]) is False
+        assert ops._vector_norm_permutes(x, [1]) is False
 
     def test_transposed_input_needs_no_permute(self):
         # ``.t()`` leaves the reduced axis at stride 1, so dim_compress is a view.
         x = torch.randn(8, 16).t()
-        assert flagos._vector_norm_permutes(x, [1]) is False
+        assert ops._vector_norm_permutes(x, [1]) is False
 
     def test_strided_dim_needs_a_permute(self):
         x = torch.randn(*VAE_LIKE)
-        assert flagos._vector_norm_permutes(x, [1]) is True
+        assert ops._vector_norm_permutes(x, [1]) is True
 
     def test_full_reduction_needs_no_permute(self):
         # Every dim is reduced, so the sorted order is the identity.
         x = torch.randn(*VAE_LIKE)
-        assert flagos._vector_norm_permutes(x, list(range(x.ndim))) is False
+        assert ops._vector_norm_permutes(x, list(range(x.ndim))) is False
 
     def test_last_dim_needs_no_permute(self):
         x = torch.randn(2, 64, 32, 32)
-        assert flagos._vector_norm_permutes(x, [3]) is False
+        assert ops._vector_norm_permutes(x, [3]) is False
 
 
 class TestCompositeGate:

@@ -83,6 +83,25 @@ def _function(name):
     return namespace[name]
 
 
+@pytest.mark.parametrize("native_hosts", [False, True])
+@pytest.mark.parametrize("build_override", ["0", "1"])
+def test_native_metax_never_selects_a_vendor_torch_core(
+    monkeypatch, native_hosts, build_override
+):
+    calls = []
+    package = SimpleNamespace(_build_config=SimpleNamespace(NATIVE_HOSTS=native_hosts))
+    linker = SimpleNamespace(ensure_maca_libtorch_links=lambda: calls.append("vendor"))
+    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    monkeypatch.setitem(
+        sys.modules, "torch_fl.accelerator.metax._metax_libtorch_link", linker
+    )
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", build_override)
+    function = _function("_relink_vendor_libtorch")
+    function.__globals__["_build_accelerator"] = lambda: "metax"
+    function()
+    assert calls == ([] if native_hosts else ["vendor"])
+
+
 def test_entry_points_are_resolved_by_the_build():
     """The hook is declared in pyproject.toml, not passed from setup().
 

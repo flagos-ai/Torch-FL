@@ -3,11 +3,20 @@
 
 """Run qwen_eager.py with model graph-compilation entry points forbidden."""
 
+# Device libraries must precede Torch import on the CPU-Torch Hygon build.
+# ruff: noqa: E402
+
 import argparse
 import json
 from pathlib import Path
 import runpy
 import sys
+
+# Hygon's CPU frontend must load its device libraries before Torch caches hooks.
+_backend_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+_backend_parser.add_argument("--device")
+if (_backend_parser.parse_known_args()[0].device or "").startswith("flagos"):
+    import torch_fl  # noqa: F401
 
 import torch
 import torch._dynamo
@@ -26,9 +35,15 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="plain")
     parser.add_argument("--model-host", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--device")
     args, _ = parser.parse_known_args()
     if args.model_host or args.mode != "plain":
         parser.error("strict eager requires --mode plain without --model-host")
+    if args.device == "gcu:0":
+        # Initialize the vendor plugin before blocking model capture APIs, as
+        # Torch itself is initialized above. The model is loaded after the gate.
+        import torch_gcu  # noqa: F401
+
     blocked = []
     for owner, names in (
         (torch, ("compile",)),

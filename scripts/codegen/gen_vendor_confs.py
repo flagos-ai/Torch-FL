@@ -1825,6 +1825,12 @@ NATIVE_TRITON_GAPS = {
         "topk",
     },
     "enflame": {
+        # FlagGems 5.4.0 + FlagTree 0.7.0+enflame3.6, S60, 2026-11-18:
+        # Isolated substitutions confirm mean.dim changes full Qwen3-0.6B
+        # logits beyond atol=rtol=1e-3. SiLU alone is bitwise identical for
+        # full prefill and eight decode logits, so its earlier joint hold
+        # with mean.dim was too broad and has been removed.
+        "mean.dim",
         # Pointwise overloads broken by ATen's float64 wrapped-number boxing.
         "add.Tensor",
         "add_.Tensor",
@@ -2856,6 +2862,26 @@ METAX_FLAGGEMS_MEASURED = {
     "unsqueeze_",
 }
 
+# Original published hosts measured on C550 with CPU Torch 2.10.0, FlagGems
+# 5.4.0 and FlagTree 0.7.0.post2+metax3.6. The 80 paired model-layout profiles
+# require native device-name alignment and generic small-K padding for bmm.
+# This is launch/layout evidence, not full-model precision or general vendor
+# coverage. Keep the ordinary conf's historical holds separate.
+NATIVE_HOST_FLAGGEMS_OPS = {
+    "metax": frozenset(
+        {
+            "add.Tensor",
+            "bmm",
+            "bmm.out",
+            "cat",
+            "mean.dim",
+            "mul.Tensor",
+            "mul_.Tensor",
+            "slice.Tensor",
+        }
+    ),
+}
+
 # The hand-registered composite (EXTRA_ROUTED), on the platform that measured
 # it. Unlike METAX_FLAGGEMS_MEASURED these ops are not held from the shared
 # ceiling -- they are not in it at all, because they are not leaves any
@@ -3627,6 +3653,20 @@ def boxing_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
     return METAX_CPP_MEASURED & fg_cpp if filename == "backends_metax.conf" else set()
 
 
+# Paired HCU measurements with the pinned published cohort. These default
+# routes are independent of the temporary day-0 configuration.
+HYGON_HOST_FLAGGEMS_MEASURED = {
+    "add.Tensor",
+    "mul.Tensor",
+    "mean.dim",
+    "cat",
+    "add.out",
+    "mul.out",
+    "mean.out",
+    "cat.out",
+}
+
+
 def boxing_measured_python_ops(filename: str) -> set:
     """Extra FlagGems Python ops a boxing platform routes on measured evidence.
 
@@ -3669,6 +3709,49 @@ def native_measured_python_ops(vendor: str) -> set:
     kunlunxin -- so adding an op there changed nothing and looked like success.
     """
     return NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & flaggems_python_ops_for(vendor)
+
+
+# This opt-in model experiment uses the published native-host cohort rather
+# than the default lane's older FlagTree cohort. It does not promote coverage
+# for other models or change a wheel's automatic config selection. All nine
+# routes have successful TOPS submissions and complete Qwen3-0.6B logit checks.
+ENFLAME_NATIVE_HOST_FLAGGEMS = frozenset(
+    {
+        "mul.Tensor",
+        "add.Tensor",
+        "neg",
+        "cos",
+        "sin",
+        "where.self",
+        "silu",
+        "_softmax",
+        "bmm",
+    }
+)
+
+
+def enflame_native_host_conf(built: dict) -> str:
+    """Generate the explicit FlagGems-first Qwen3 native-host experiment."""
+    routes = dict(built["enflame"][1])
+    missing = ENFLAME_NATIVE_HOST_FLAGGEMS - vendor_registered_ops("enflame")
+    if missing:
+        raise SystemExit(f"unregistered Enflame native-host routes: {sorted(missing)}")
+    routes.update({op: "flaggems; Long:enflame" for op in ENFLAME_NATIVE_HOST_FLAGGEMS})
+    # Floating add passes; integer add corrupts the int32 carry/word
+    # composition used by the vendor int64 implementation.
+    routes["add.Tensor"] = "flaggems; Int:enflame; Long:enflame"
+    _reject_boxing_routes("enflame_native_host", routes)
+    header = (
+        "# Opt-in Qwen3-0.6B native-host experiment; never selected automatically.\n"
+        "# Measured cohort: FlagGems 5.4.0, FlagTree 0.7.0+enflame3.6,\n"
+        "# TOPS 1.7.2.2402, BF16, eager attention, batch 1, 23 prompt tokens,\n"
+        "# eight cached decode steps. This is not a general coverage claim.\n"
+        "# The generated FP32 pow(2) path composes through this mul.Tensor route.\n"
+        "# Larger softmax grids and other model shapes retain their existing\n"
+        "# default-config holds; use backends_enflame.conf for those workloads.\n"
+        "# Regenerate with gen_vendor_confs.py --enflame-native-host-conf PATH.\n\n"
+    )
+    return header + render("enflame", "enflame", routes)
 
 
 def boxing_to_none_notes(notes) -> tuple:
@@ -3887,7 +3970,7 @@ def render(
         }
     counts = {}
     for value in routes.values():
-        backend = value.split("#", 1)[0].strip()
+        backend = value.split("#", 1)[0].split(";", 1)[0].strip()
         counts[backend] = counts.get(backend, 0) + 1
     total = len(routes)
     covered = total - counts.get("none", 0)
@@ -4136,6 +4219,14 @@ def build_all(conf_dir: Path) -> dict:
         # directly (COMPOSITE_NATIVE): `route()` cannot see it, because the op
         # is in neither the native nor the FlagGems `.inc`.
         routes.update({op: vendor for op in COMPOSITE_NATIVE.get(vendor, set())})
+        if vendor == "ascend":
+            from native_host_policy import configured_dtype_routes
+
+            for op, clause in configured_dtype_routes(vendor).items():
+                base, comment, annotation = routes[op].partition("#")
+                if base.strip() == "flaggems":
+                    suffix = "  #" + annotation if comment else ""
+                    routes[op] = base.strip() + "; " + clause + suffix
         out[vendor] = (
             render(
                 vendor,
@@ -4183,6 +4274,8 @@ def build_all(conf_dir: Path) -> dict:
         # platform measured a triton gap. It has to come off `gaps` as well as
         # onto `py_here` -- route() takes the gap set outside the coverage sets.
         measured = boxing_measured_python_ops(sparse_conf)
+        if platform == "hygon":
+            measured |= HYGON_HOST_FLAGGEMS_MEASURED
         gaps -= measured
         # Same gate as the native vendors: a platform whose FlagGems Python
         # routes are not measured yet is not in FLAGGEMS_PYTHON_PLATFORMS, so
@@ -4210,11 +4303,23 @@ def build_all(conf_dir: Path) -> dict:
             )
             for op in sorted(all_ops)
         }
-        out[platform] = (
-            render(platform, "", routes, cuda_abi=True),
-            routes,
-            "",
-        )
+        text = render(platform, "", routes, cuda_abi=True)
+        if platform == "hygon":
+            from native_host_policy import render_config_routes
+
+            text = text.replace(
+                "# Values:\n",
+                "# Values:\n#   hygon         measured dtype-scoped DTK precision entries (native-host builds)\n",
+                1,
+            )
+            text = render_config_routes(text, platform)
+            routes = {
+                name.strip(): value.strip()
+                for line in text.splitlines()
+                for name, sep, value in [line.split("#", 1)[0].partition("=")]
+                if sep
+            }
+        out[platform] = (text, routes, "")
         if platform == "metax":
             experimental = {
                 op: route_metax_tileops(op, all_ops, tileops) for op in sorted(all_ops)
@@ -4229,6 +4334,49 @@ def build_all(conf_dir: Path) -> dict:
                 experimental,
                 "none",
             )
+
+    for platform, operators in NATIVE_HOST_FLAGGEMS_OPS.items():
+        python_ops = flaggems_python_ops_for(platform)
+        routes = {
+            op: ("flaggems" if op in python_ops else "none")
+            if value == "flaggems_cpp"
+            else value
+            for op, value in out[platform][1].items()
+        }
+        # Composite measurements from the ordinary wheel do not establish
+        # native-host lowering. Qwen's eager attention uses its explicit ops.
+        if platform == "metax":
+            routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
+        missing = operators - routes.keys()
+        if missing:
+            raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
+        routes.update({op: "flaggems" for op in operators})
+        name = f"{platform}_native_host"
+        text = render(name, "", routes)
+        if platform == "metax":
+            from native_host_policy import (
+                NATIVE_SDK_PRECISION,
+                precision_policy,
+                render_config_routes,
+            )
+
+            policy = {
+                "operators": [
+                    *NATIVE_SDK_PRECISION[platform]["operators"],
+                    *precision_policy(platform)["operators"],
+                ]
+            }
+            text = render_config_routes(text, platform, policy=policy)
+        text = text.replace(
+            "# Full-coverage config:",
+            "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"
+            "# Selected by the wheel build record; numerical CPU fallback is rejected.\n"
+            "# These routes require the compiled original hosts and device-name alignment.\n"
+            "# Full-model accuracy and performance remain separate acceptance gates.\n#\n"
+            "# Full-coverage config:",
+            1,
+        )
+        out[name] = (text, routes, "")
 
     # The contract from AGENTS.md ("Day-0 boxing confs"), enforced rather than
     # documented: no default conf may route an op to the boxing kernel. It would
@@ -4432,7 +4580,7 @@ def print_stats(built: dict) -> None:
         kernels = 0
         for value in routes.values():
             backend, _, annotation = value.partition("#")
-            backend = backend.strip()
+            backend = backend.split(";", 1)[0].strip()
             counts[backend] = counts.get(backend, 0) + 1
             if backend == vendor or annotation.strip() == vendor:
                 kernels += 1
@@ -4494,7 +4642,25 @@ def main() -> int:
     ap.add_argument(
         "--stats", action="store_true", help="print a coverage table and exit"
     )
+    ap.add_argument(
+        "--enflame-native-host-conf",
+        type=Path,
+        help="generate an opt-in Qwen3 native-host experiment at this path",
+    )
     args = ap.parse_args()
+
+    if args.enflame_native_host_conf:
+        path = args.enflame_native_host_conf
+        text = enflame_native_host_conf(build_all(CONF_DIR))
+        if args.check:
+            if not path.is_file() or path.read_text() != text:
+                print(f"error: stale native-host experiment: {path}", file=sys.stderr)
+                return 1
+            print("Enflame native-host experiment up to date")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return 0
 
     # build_boxing_variants() reads each platform's triton gap set back from the
     # conf file, and this run is about to rewrite those files, so one pass can

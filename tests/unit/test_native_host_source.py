@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import importlib.util
 import os
 from pathlib import Path
@@ -27,11 +28,17 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
         "if 'torch' in sys.modules:\n"
         "    raise RuntimeError('vendor core must be selected before torch')\n"
     )
-    (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
+    (package / "_build_config.py").write_text(
+        f"ACCELERATOR = {accelerator!r}\nKERNELS = ('flaggems',)\n"
+    )
     (backend / "__init__.py").write_text("")
     (backend / "backend.py").write_text(
         "from pathlib import Path\n"
-        "def build_record(*args):\n"
+        "WHEEL_PACKAGE = 'torch_fl.native_host._generated'\n"
+        "def build_extensions(*args):\n"
+        "    raise AssertionError('startup fixture must not compile')\n"
+        "stage_native_sources = build_extensions\n"
+        "def build_record(*args, **kwargs):\n"
         "    raise AssertionError('startup fixture must not compile')\n"
         "def get_backend(accelerator):\n"
         "    (Path(__file__).parents[2] / 'selected-backend').write_text(accelerator)\n"
@@ -65,7 +72,7 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
     assert (tmp_path / "selected-backend").read_text() == accelerator
 
 
-@pytest.mark.parametrize("accelerator", ["cuda", "ascend"])
+@pytest.mark.parametrize("accelerator", ["cuda", "ascend", "metax"])
 def test_builder_initializes_only_platforms_that_require_early_setup(
     tmp_path, accelerator
 ):
@@ -79,18 +86,28 @@ def test_builder_initializes_only_platforms_that_require_early_setup(
         "    (Path(__file__).parent / 'initialized').touch()\n"
         "flagos = SimpleNamespace(init=initialize)\n"
     )
-    (package / "_build_config.py").write_text(f"ACCELERATOR = {accelerator!r}\n")
+    (package / "_build_config.py").write_text(
+        f"ACCELERATOR = {accelerator!r}\nKERNELS = ('flaggems',)\n"
+    )
     (backend / "__init__.py").write_text("")
+    (backend / "vendor_cohort.py").write_text(
+        (SOURCE.parent / "vendor_cohort.py").read_text()
+    )
     (backend / "backend.py").write_text(
         "from types import SimpleNamespace\n"
+        "WHEEL_PACKAGE = 'torch_fl.native_host._generated'\n"
         "def get_backend(accelerator):\n"
         "    import torch_fl\n"
-        "    result = SimpleNamespace(extensions=lambda *args: [])\n"
+        "    config = SimpleNamespace(vendor='nvidia' if accelerator == 'cuda' else accelerator)\n"
+        "    result = SimpleNamespace(config=config, initialize_runtime=lambda: None)\n"
         "    if accelerator == 'ascend':\n"
         "        result.initialize_runtime = torch_fl.flagos.init\n"
         "    return result\n"
-        "def build_record(*args):\n"
+        "def build_record(*args, **kwargs):\n"
         f"    return dict(vendor={accelerator!r})\n"
+        "def build_extensions(*args):\n"
+        "    return []\n"
+        "stage_native_sources = build_extensions\n"
     )
     (tmp_path / "torch.py").write_text("__version__ = '2.10.0+cpu'\n")
     (tmp_path / "triton.py").write_text("__version__ = '3.5.0'\n")
@@ -207,6 +224,78 @@ def test_identical_source_does_not_touch_build_artifact(tmp_path):
     assert path.read_text() == "def f(): return 2\n"
 
 
+def test_lambda_closure_retains_free_variables_and_defaults(source_module):
+    original = source_module("""
+def make(scale):
+    return lambda value, offset=7: value * scale + offset
+wrapped = make(3)
+""")
+    original.wrapped.__name__ = "wrapped"
+    source = build.closure_source(original.wrapped, "sample_host", "wrapped")
+    generated = {}
+    exec(source, generated)
+    generated["_bind"](lambda value: value)
+    closure = generated["make"]({"scale": 3})
+    assert closure(5) == 22
+    assert closure(8, offset=2) == 26
+
+
+def test_shadowed_device_definition_keeps_the_original_jit_alias(source_module):
+    original = source_module("""
+decorations = []
+def device(function):
+    decorations.append(function)
+    return object()
+@device
+def copy_(value):
+    return value
+device_copy = copy_
+def copy_(value):
+    return device_copy
+""")
+    source, _ = build.source_module(original, "fg_aot")
+    assert "@device" not in source
+    assert source.count("def copy_(") == 1
+    generated = {}
+    exec(source, generated)
+    generated["_bind"](lambda value: value)
+    assert generated["copy_"](None) is original.device_copy
+    assert len(original.decorations) == 1
+
+
+def test_vendor_pointwise_cache_accepts_the_published_config_without_balance_grid():
+    from types import SimpleNamespace
+
+    path = SOURCE.with_name("runtime.py")
+    tree = ast.parse(path.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if getattr(node, "name", None) == "pointwise_instantiate"
+    )
+    calls = []
+
+    def adapter(owner, rank, kernel):
+        calls.append((rank, kernel))
+        return object()
+
+    namespace = {
+        "EnflamePointwiseOverload": adapter,
+        "PointwiseOverload": adapter,
+        "_kernel_factory": lambda owner, rank: rank,
+    }
+    exec(compile(ast.Module([function], []), str(path), "exec"), namespace)
+    owner = SimpleNamespace(
+        config=SimpleNamespace(prefer_block_pointer=True),
+        overloads={},
+        _native_pointwise_module="published.vendor.pointwise",
+    )
+    first = namespace["pointwise_instantiate"](owner, 1)
+    assert namespace["pointwise_instantiate"](owner, 1) is first
+    assert namespace["pointwise_instantiate"](owner, 3) is not first
+    assert calls == [(1, 1), (3, 3)]
+
+
 def test_dataclass_constructor_preserves_enum_default_and_factory(source_module):
     original = source_module("""
 from dataclasses import dataclass, field
@@ -277,6 +366,207 @@ def host(dim):
         helper(None)
 
 
+@pytest.mark.parametrize(
+    "expression,values,expected,effects",
+    [
+        ("any(check(x) for x in values)", [1, 0], True, [1]),
+        ("all(check(x) for x in values)", [0, 1], False, [0]),
+        ("next(x for x in values if check(x))", [0, 2, 3], 2, [0, 2]),
+        ("sum(check(x) for x in values)", [0, 2, 3], 2, [0, 2, 3]),
+        ("max(check(x) for x in values)", [0, 2, 3], True, [0, 2, 3]),
+    ],
+)
+def test_iterator_regions_preserve_lazy_effect_order(
+    source_module, expression, values, expected, effects
+):
+    original = source_module(
+        "effects = []\n"
+        "def check(value):\n    effects.append(value)\n    return bool(value)\n"
+        f"def host(values):\n    return {expression}\n"
+    )
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    generated["_bind"](lambda value: value)
+    (region,) = [r for r in record["regions"] if r.get("kind") == "expression"]
+    assert region["inputs"] == ["values"]
+    assert generated[region["name"]](values) == expected
+    assert original.effects == effects
+
+
+@pytest.mark.parametrize(
+    "consumer,error", [("next", StopIteration), ("max", ValueError)]
+)
+def test_iterator_regions_preserve_empty_errors(source_module, consumer, error):
+    original = source_module(
+        f"def host(values):\n    return {consumer}(x for x in values)\n"
+    )
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    (region,) = record["regions"]
+    with pytest.raises(error):
+        generated[region["name"]]([])
+
+
+def test_iterator_scope_keeps_outer_iterable_and_nested_captures(source_module):
+    original = source_module("""
+def host(values, offset):
+    return sum(values + inner + offset for values in values for inner in [values])
+""")
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    (region,) = record["regions"]
+    assert region["inputs"] == ["offset", "values"]
+    assert generated[region["name"]](3, [1, 2]) == original.host([1, 2], 3) == 12
+
+
+def test_object_loop_keeps_live_inputs_and_original_exception(source_module):
+    original = source_module("""
+class Buffer:
+    def __init__(self, value):
+        if value < 0:
+            raise ValueError('negative buffer')
+        self.value = value
+def host(values, output):
+    for value in values:
+        buffer = Buffer(value)
+        output.append(buffer.value)
+    return output
+""")
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    generated["_bind"](lambda value: value)
+    (region,) = [r for r in record["regions"] if r.get("kind") == "object_loop"]
+    assert region["inputs"] == ["output", "values"]
+    output = []
+    assert generated[region["name"]](output, [2, 3]) is None
+    assert output == [2, 3]
+    with pytest.raises(ValueError, match="negative buffer"):
+        generated[region["name"]](output, [4, -1, 5])
+    assert output == [2, 3, 4]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "for value in values:\n    result = value\nreturn result",
+        "for value in values:\n    output[0] = value\nreturn output",
+        "for value in values:\n    if value:\n        break\nreturn output",
+        "for value in values:\n    return value\nreturn output",
+        "for value in values:\n    output.append(locals())\nreturn output",
+    ],
+)
+def test_object_loop_refuses_escaping_bindings_or_control(source_module, body):
+    source = "def host(values, output):\n" + "\n".join(
+        "    " + s for s in body.splitlines()
+    )
+    original = source_module(source)
+    _, record = build.source_module(original, "fg_aot")
+    assert not [r for r in record["regions"] if r.get("kind") == "object_loop"]
+
+
+def test_typed_iterator_regions_lower_without_root_fallback(source_module, tmp_path):
+    torch = pytest.importorskip("torch")
+    original = source_module("""
+import itertools
+effects = []
+class MetadataView:
+    def __init__(self, value):
+        self.rank = value.ndim
+def host(values, dim):
+    shapes = [list(value.shape) for value in values]
+    rank = max(value.ndim for value in values)
+    mismatch = any(value.ndim != rank for value in values)
+    uniform = all(value.ndim == rank for value in values)
+    ref = next(value for value in values if value.ndim == rank)
+    smallest = min(value.shape[0] for value in values if value.ndim == rank)
+    total = sum(shape[dim] for shape in shapes)
+    offsets = list(itertools.accumulate([shape[dim] for shape in shapes], initial=0))
+    for value in values:
+        view = MetadataView(value)
+        effects.append(view.rank)
+    return rank, mismatch, ref, total, offsets, uniform, smallest
+""")
+    original.MetadataView.__module__ = "flag_gems.metadata_fixture"
+    source, record = build.source_module(original, "fg_aot")
+    compiled = {}
+    exec(source, compiled)
+    spec = importlib.util.spec_from_file_location(
+        "test_iterator_compiler",
+        SOURCE.parent / "compiler/__init__.py",
+        submodule_search_locations=[str(SOURCE.parent / "compiler")],
+    )
+    package = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = package
+    spec.loader.exec_module(package)
+    frontend = __import__(spec.name + ".frontend", fromlist=["Frontend"])
+    hosts = types.SimpleNamespace(
+        originals={original.__name__: original},
+        manifest={"modules": {original.__name__: record}},
+        modules={original.__name__: types.SimpleNamespace(**compiled)},
+        resolve=lambda fn: fn,
+    )
+    helpers = []
+
+    def register(function, prefix):
+        helpers.append(function)
+        return len(helpers) - 1
+
+    compiler = frontend.Frontend(
+        hosts, types.SimpleNamespace(register_foreign=register)
+    )
+    generated = compiler.source(
+        original.host,
+        "def f(values: List[torch.Tensor], dim: int) -> Tuple[int, bool, torch.Tensor, int, List[int], bool, int]: pass",
+    )
+    assert not compiler.fallback_functions, compiler.fallback_reasons
+    assert len(helpers) == 7
+    schema = torch.library.Library("flagos_source_native", "FRAGMENT")
+    schema.define(
+        "foreign_value(int slot, Any[] args, Dict(str, Any) kwargs) -> Any",
+        alias_analysis="CONSERVATIVE",
+    )
+    executed = []
+
+    def invoke(slot, args, kwargs):
+        executed.append(slot)
+        return helpers[slot](*args, **kwargs)
+
+    schema.impl(
+        "foreign_value",
+        invoke,
+        "CompositeExplicitAutograd",
+    )
+    path = tmp_path / "iterator_host.py"
+    path.write_text(generated)
+    spec = importlib.util.spec_from_file_location("test_iterator_host", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    scripted = torch.jit.script(module.Host())
+    for values in (
+        [torch.empty(2, 3), torch.empty(4, 3)],
+        [torch.empty(2, 1, 3)],
+        [torch.empty(2, 3), torch.empty(0, 3), torch.empty(4)],
+    ):
+        original.effects.clear()
+        executed.clear()
+        actual = scripted(values, 0)
+        # Only the opaque class loop needs Cython; scalar generator reductions
+        # and cumulative offsets execute directly in the generated typed host.
+        assert executed == [6]
+        assert original.effects == [value.ndim for value in values]
+        expected = original.host(values, 0)
+        assert actual[:2] == expected[:2]
+        assert actual[2] is expected[2]
+        assert actual[3:] == expected[3:]
+    with pytest.raises(Exception, match="empty"):
+        scripted([], 0)
+
+
 def test_local_callback_region_retains_each_calls_capture(source_module):
     original = source_module("""
 callbacks = []
@@ -341,3 +631,44 @@ def host(size):
     assert "Schedule" in record["functions"]
     assert generated["host"](0) == 0
     assert generated["host"](5) == sum(range(15))
+
+
+@pytest.mark.parametrize("wheel_origin", [False, True])
+def test_vendor_alias_class_binds_original_kernel_from_its_wheel(
+    source_module, tmp_path, wheel_origin
+):
+    original = source_module(
+        """
+from functools import partial
+from operator import mul
+kernel = partial(mul, 3)
+class Helper:
+    @staticmethod
+    def forward(size):
+        return kernel(size)
+def host(size):
+    return Helper.forward(size)
+""",
+        "_vendor.ops.example",
+    )
+    if wheel_origin:
+        path = tmp_path / "flag_gems/runtime/backend/_vendor/ops/example.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(Path(original.__file__).read_text())
+        original.__file__ = str(path)
+    source, record = build.source_module(original, "fg_aot")
+    generated = {}
+    exec(source, generated)
+    calls = []
+
+    def resolved_kernel(size):
+        calls.append(size)
+        return original.kernel(size)
+
+    generated["_bind"](
+        lambda value: resolved_kernel if value is original.kernel else value
+    )
+    assert generated["host"](0) == 0
+    assert generated["host"](7) == 21
+    assert ("Helper" in record["functions"]) == wheel_origin
+    assert calls == ([0, 7] if wheel_origin else [])

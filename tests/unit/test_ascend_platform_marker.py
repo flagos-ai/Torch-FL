@@ -197,7 +197,7 @@ def test_selection_does_not_leak_into_the_next_test():
     runs afterwards.
 
     That is not academic: tests/unit/test_musa_rng_bridge.py reads the global
-    through _conf_routes_to_flaggems(), and an empty path closes the FlagGems
+    through routes_to_flaggems(), and an empty path closes the FlagGems
     Philox gate, so its three symbol-gated tests fail in a whole-suite run while
     passing on their own. Assert the resolved conf is still there, which holds
     only because the fixture restores the import-time selection at teardown.

@@ -155,6 +155,7 @@
 //   - masked_fill_.Tensor
 //   - masked_select
 //   - max.dim
+//   - mean.dim
 //   - median
 //   - median.dim
 //   - min.dim
@@ -251,7 +252,7 @@
 //   - zeros
 //   - zeros_like
 //
-// Total: 244 ops registered here, 106 further FlagGems ops already claimed by gcu_register.inc.
+// Total: 244 ops registered here, 107 further FlagGems ops already claimed by gcu_register.inc.
 
   m.impl("_conv_depthwise2d", WrapperPrivConvDepthwise2d);
   m.impl("_efficient_attention_backward", WrapperPrivEfficientAttentionBackward);

@@ -21,6 +21,7 @@
 namespace {
 
 thread_local int gCurrentDevice = 0;
+thread_local bool gDeviceBound = false;
 
 bool ensureAclInit() {
   static bool initialized = []() {
@@ -41,7 +42,10 @@ Error_t GetDeviceCount(int* count) {
     return ErrorUnknown;
   }
 
-  ensureAclInit();
+  if (!ensureAclInit()) {
+    *count = 0;
+    return ErrorUnknown;
+  }
 
   uint32_t ascend_count = 0;
   aclError err = aclrtGetDeviceCount(&ascend_count);
@@ -59,22 +63,33 @@ Error_t GetDevice(int* device) {
     return ErrorUnknown;
   }
 
-  static bool first_call = []() {
-    ensureAclInit();
-    aclrtSetDevice(0);
-    return true;
-  }();
-  (void)first_call;
+  // ACL's current context belongs to the calling thread. Bind each thread
+  // before publishing its cached device, including threads first using device 0.
+  if (!gDeviceBound) {
+    const Error_t err = SetDevice(gCurrentDevice);
+    if (err != Success) {
+      return err;
+    }
+  }
 
   *device = gCurrentDevice;
   return Success;
 }
 
 Error_t SetDevice(int device) {
-  ensureAclInit();
+  // Allocations and guard restoration repeatedly select the current device.
+  // A bound thread already owns that context; avoid two driver calls per probe.
+  if (gDeviceBound && gCurrentDevice == device) {
+    return Success;
+  }
+  if (!ensureAclInit()) {
+    return ErrorUnknown;
+  }
 
   int count = 0;
-  GetDeviceCount(&count);
+  if (GetDeviceCount(&count) != Success) {
+    return ErrorUnknown;
+  }
 
   if (device < 0 || device >= count) {
     return ErrorInvalidDevice;
@@ -86,6 +101,7 @@ Error_t SetDevice(int device) {
   }
 
   gCurrentDevice = device;
+  gDeviceBound = true;
   return Success;
 }
 

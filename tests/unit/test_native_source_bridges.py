@@ -84,3 +84,85 @@ def test_committed_bridges_match_their_catalog_and_faithful_schemas(functions):
     header, generated = codegen.gen_flaggems_source_bridges(functions, discovered)
     assert header == (directory / "flaggems_source_bridges.h").read_text()
     assert generated == source
+
+
+def test_out_adapters_preserve_storage_and_use_configured_functional_routes(functions):
+    source = codegen.gen_flaggems_out_adapters(functions)
+    assert source.count("resize_output(") == 4
+    assert source.count("assert_no_internal_overlap(") == 4
+    assert "assert_no_overlap(out, input)" in source
+    for call in (
+        "add_tensor_dispatcher(self, other, alpha)",
+        "mul_tensor_dispatcher(self, other)",
+        "mean_dim_dispatcher(self, dim, keepdim, dtype.value_or(out.scalar_type()))",
+        "cat_dispatcher(tensors, dim)",
+    ):
+        assert call in source
+    assert "USE_DCU" in source
+    assert "DeviceBoxingGuard" not in source and "redispatch" not in source
+    committed = (ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text()
+    assert committed.endswith(source)
+
+
+def test_hcu_floating_square_keeps_the_configured_mul_dispatcher(functions):
+    func = functions["pow.Tensor_Scalar"]
+    with codegen.local.parametrize(
+        use_const_ref_for_mutable_tensors=func.use_const_ref_for_mutable_tensors,
+        use_ilistref_for_tensor_lists=not codegen.should_use_arrayref(func),
+    ):
+        _, result, args = codegen.unified_sig(func)
+    fn_type, _ = codegen.schema_to_cpp_name("pow.Tensor_Scalar")
+    generated = codegen.gen_flaggems_python_kernel(
+        "pow.Tensor_Scalar",
+        fn_type,
+        result,
+        args,
+        "flag_gems.pow_tensor_scalar",
+        "functional_pure",
+        func,
+        typed=True,
+    )
+    assert "MulTensorFnSource.Available()" in generated
+    assert "c10::isFloatingType(self.scalar_type())" in generated
+    assert "exponent.toDouble() == 2.0" in generated
+    assert "return at::mul(self, self);" in generated
+    assert "DeviceBoxingGuard" not in generated
+    assert 'CallPythonOp_Generic("flag_gems.pow_tensor_scalar"' in generated
+    assert (
+        generated
+        in (ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text()
+    )
+
+
+@pytest.mark.parametrize("op", codegen.FLAGGEMS_HCU_METADATA_ADAPTERS)
+def test_hcu_metadata_adapters_reuse_existing_aten_primitives(functions, op):
+    func = functions[op]
+    with codegen.local.parametrize(
+        use_const_ref_for_mutable_tensors=func.use_const_ref_for_mutable_tensors,
+        use_ilistref_for_tensor_lists=not codegen.should_use_arrayref(func),
+    ):
+        _, result, args = codegen.unified_sig(func)
+    fn_type, _ = codegen.schema_to_cpp_name(op)
+    host = {
+        "_unsafe_view": "_unsafe_view",
+        "transpose.int": "transpose",
+        "unsqueeze": "unsqueeze",
+        "slice.Tensor": "slice",
+    }[op]
+    source = codegen.gen_flaggems_python_kernel(
+        op,
+        fn_type,
+        result,
+        args,
+        "flag_gems." + host,
+        "functional_pure",
+        func,
+        typed=True,
+    )
+    target = codegen.FLAGGEMS_HCU_METADATA_ADAPTERS[op]
+    assert f"return at::native::flagos::{target}(" in source
+    assert "defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)" in source
+    assert "DeviceBoxingGuard" not in source
+    assert (
+        source in (ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text()
+    )

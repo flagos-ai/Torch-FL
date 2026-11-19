@@ -24,9 +24,9 @@ The mechanism -- private facade and RTLD_GLOBAL preload --
 and why a pure ctypes preload cannot do this on its own -- lives in
 ``torch_fl.accelerator._vendor_libtorch``.  This module is just the MetaX .so
 lists; whether to select the vendor runtime is decided by
-``torch_fl.__init__._relink_vendor_libtorch`` (unconditional on a MetaX build --
-it is boxing-only, reaching the vendor torch through FLAGOS_VENDOR_TORCH_LIB or a
-self-contained lib_metax/ bundle).
+``torch_fl.__init__._relink_vendor_libtorch``. Native-host wheels keep the
+official CPU core; other MetaX builds reach the vendor torch through
+FLAGOS_VENDOR_TORCH_LIB or a self-contained lib_metax/ bundle.
 """
 
 from torch_fl.accelerator._vendor_libtorch import (
@@ -112,9 +112,9 @@ def ensure_maca_libtorch_links():
     bundle, no MetaX torch found, or torch already IS the MetaX wheel).
 
     Deciding *whether* to select it is the caller's job -- see
-    ``torch_fl.__init__._relink_vendor_libtorch``, which runs on every MetaX
-    build (a self-contained wheel finds lib_metax/, an in-place build finds the
-    vendor torch through FLAGOS_VENDOR_TORCH_LIB).  This used to self-gate on a
+    ``torch_fl.__init__._relink_vendor_libtorch``, which skips native-host
+    builds (a self-contained boxing wheel finds lib_metax/, an in-place build
+    finds the vendor torch through FLAGOS_VENDOR_TORCH_LIB). This used to self-gate on a
     mode variable, which made the self-contained path a silent no-op:
     the stock libtorch_cpu.so stayed in place and libtorch_cuda.so then failed
     to resolve at::maca symbols that only the forked CPU runtime defines.

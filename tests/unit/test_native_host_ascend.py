@@ -3,23 +3,36 @@
 
 """Ascend packed ABI: scalar promotion, layout, and immutable launch metadata."""
 
-import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import sysconfig
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from native_host_test_utils import import_native_host
+
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location(
-    "ascend_host_adapter", ROOT / "torch_fl/native_host/backends/ascend.py"
-)
-adapter = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(adapter)
+adapter = import_native_host("backends.ascend")
+backend = import_native_host("backend")
+driver_binding = import_native_host("backends.driver")
+
+
+def test_prepare_runtime_configures_flaggems_for_the_ascend_device(monkeypatch):
+    calls = []
+    torch_fl = ModuleType("torch_fl")
+    torch_fl.flagos = object()
+    runtime = ModuleType("torch_fl.compat.flaggems.runtime")
+    runtime.configure_vendor = lambda *args: calls.append(args)
+    monkeypatch.setitem(sys.modules, torch_fl.__name__, torch_fl)
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+
+    adapter.Backend().prepare_runtime()
+
+    assert calls == [("ascend", torch_fl.flagos)]
 
 
 @pytest.fixture
@@ -142,6 +155,7 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
     monkeypatch.setattr(
         adapter, "importlib", SimpleNamespace(import_module=modules.__getitem__)
     )
+    monkeypatch.setattr(driver_binding, "importlib", adapter.importlib)
     calls = []
 
     def factory(source, metadata):
@@ -149,7 +163,8 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
         return "prebuilt-kernel"
 
     for package in ("first", "second"):
-        adapter.Backend().install(
+        driver_binding.install_driver(
+            adapter.Backend(),
             package,
             SimpleNamespace(current_stream=lambda device: 100 + device),
             factory,
@@ -198,12 +213,14 @@ def test_sdk_runtime_headers_find_their_profiling_dependency(
         __file__=str(tmp_path / "torch/__init__.py"),
         _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
     )
-    extensions = adapter.Backend().extensions(
+    extensions = backend.build_extensions(
+        adapter.Backend(),
         "probe",
-        ROOT / "torch_fl/native_host",
+        ROOT / "csrc/native_host",
         torch,
         {"native_source_sha256": "0" * 64},
         tmp_path / "triton",
+        tmp_path / "sources",
     )
     extension = next(e for e in extensions if e.name == "probe." + module)
     source = tmp_path / "probe.cc"
@@ -234,7 +251,7 @@ def test_packed_arguments_match_the_published_launcher_struct(tmp_path):
     # published FlagTree 0.7.0+ascend3.5 driver (SHA256 da34b0e53e48056980cb8dfe8e5120f8dd3bae279004ceab730cb6314ec6445d).
     source = tmp_path / "conformance.cc"
     source.write_text(
-        '#include "ascend_abi.h"\n#include <cassert>\n#include <cstddef>\n'
+        '#include "abi.h"\n#include <cassert>\n#include <cstddef>\n'
         "using flagos::native_host::ascend::Layout;\n"
         "struct __attribute__((packed)) Published {\n"
         "void* ffts __attribute__((aligned(8)));\n"
@@ -278,7 +295,7 @@ def test_packed_arguments_match_the_published_launcher_struct(tmp_path):
             compiler,
             "-std=c++17",
             "-Werror",
-            "-I" + str(ROOT / "torch_fl/native_host/csrc"),
+            "-I" + str(ROOT / "csrc/native_host/backends/ascend"),
             str(source),
             "-o",
             str(tmp_path / "conformance"),
@@ -328,7 +345,8 @@ def test_native_backend_syntax_with_cpu_torch_and_runtime_declarations(tmp_path)
             "-I" + str(tmp_path),
             "-I" + sysconfig.get_path("include"),
             "-I" + str(Path(torch.__file__).parent / "include"),
-            str(ROOT / "torch_fl/native_host/csrc/backends/ascend.cc"),
+            "-I" + str(ROOT / "csrc/native_host"),
+            str(ROOT / "csrc/native_host/backends/ascend/launch.cc"),
         ],
         capture_output=True,
         text=True,

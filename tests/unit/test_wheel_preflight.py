@@ -15,6 +15,7 @@
 """Wheel preflight must work without importing torch_fl or accelerator runtimes."""
 
 import ast
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -27,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from native_host_test_utils import import_native_host
+
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 PREFLIGHT_PATH = SOURCE_ROOT / "scripts" / "tools" / "torch-fl-preflight"
 loader = importlib.machinery.SourceFileLoader(
@@ -35,6 +38,51 @@ loader = importlib.machinery.SourceFileLoader(
 spec = importlib.util.spec_from_loader(loader.name, loader)
 preflight = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(preflight)
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "binary", "cpu_library", "version", "location"]
+)
+def test_metax_native_precision_bundle_is_verified_without_imports(mutation):
+    prefix = "native_host/_generated/"
+    assets = {
+        prefix + "_metax_vendor.so": b"typed host glue",
+        prefix + "metax_vendor/libc10_cuda.so": b"original vendor runtime",
+        prefix + "metax_vendor/libtorch_cuda.so": b"original vendor GPU kernels",
+    }
+    record = {
+        "vendor": "metax",
+        "vendor_torch": "2.10.0+metax3.8.1.0",
+        "artifacts": {
+            path: hashlib.sha256(data).hexdigest() for path, data in assets.items()
+        },
+    }
+    manifest = {
+        "build": {
+            "vendor_torch_libraries": True,
+            "vendor_torch_version": record["vendor_torch"],
+            "bundle_libdir": prefix + "metax_vendor",
+        }
+    }
+    if mutation == "binary":
+        assets[prefix + "metax_vendor/libtorch_cuda.so"] = b"changed numerical source"
+    elif mutation == "cpu_library":
+        record["artifacts"][prefix + "metax_vendor/libtorch_cpu.so"] = "0" * 64
+    elif mutation == "version":
+        manifest["build"]["vendor_torch_version"] = "unmeasured"
+    elif mutation == "location":
+        manifest["build"]["bundle_libdir"] = "lib_metax"
+    files = {"torch_fl/" + path: data for path, data in assets.items()}
+    files["torch_fl/" + prefix + "vendor_manifest.json"] = json.dumps(record).encode()
+    if mutation is None:
+        preflight.check_native_vendor_bundle(
+            manifest, files.__getitem__, files.__contains__, "metax"
+        )
+    else:
+        with pytest.raises(ValueError, match="vendor|artifact"):
+            preflight.check_native_vendor_bundle(
+                manifest, files.__getitem__, files.__contains__, "metax"
+            )
 
 
 def test_manifest_builder_works_without_source_root_on_import_path(
@@ -60,7 +108,10 @@ def test_manifest_builder_works_without_source_root_on_import_path(
         "KERNEL_SWITCHES": ("VENDOR",),
         "KERNEL_SET_NAME": {"VENDOR": "vendor"},
         "_BUNDLE_LIBDIR": "lib",
-        "_platform_entry": lambda _: {"vendor_torch_libraries": True},
+        "_platform_entry": lambda _: {
+            "vendor": "nvidia",
+            "vendor_torch_libraries": True,
+        },
         "_install_requires": lambda: ["torch>=2.10,<2.11"],
         "_native_vendor_cohort": lambda: None,
     }
@@ -453,17 +504,13 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
             assert verify_at < install_at, path
 
 
-@pytest.fixture(params=["nvidia", "ascend"])
+@pytest.fixture(params=["nvidia", "metax", "hygon", "ascend"])
 def native_wheel(tmp_path, manifest, monkeypatch, request):
-    spec = importlib.util.spec_from_file_location(
-        "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"
-    )
-    backend = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(backend)
+    backend = import_native_host("backend")
     driver_root = tmp_path / "compiler"
     vendor = request.param
     adapter = backend.get_backend(vendor)
-    for path in adapter.driver_sources(driver_root).values():
+    for path in backend.driver_sources(adapter, driver_root).values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("// published backend source\n")
     monkeypatch.setattr(
@@ -471,8 +518,12 @@ def native_wheel(tmp_path, manifest, monkeypatch, request):
         "version",
         lambda name: manifest["build"]["distributions"][name],
     )
-    record = backend.build_record(backend.get_backend(vendor), driver_root)
-    manifest["platform"] = "cuda" if vendor == "nvidia" else vendor
+    record = backend.build_record(adapter, driver_root)
+    staged_native = tmp_path / "staged_native"
+    backend.stage_native_sources(
+        adapter, SOURCE_ROOT / "csrc/native_host", staged_native / "csrc"
+    )
+    manifest["platform"] = {"nvidia": "cuda", "hygon": "dcu"}.get(vendor, vendor)
     manifest["build"]["kernels"] = ["vendor", "flaggems"]
     path = _wheel(tmp_path, manifest)
     prefix = "torch_fl/native_host/"
@@ -486,9 +537,12 @@ def native_wheel(tmp_path, manifest, monkeypatch, request):
         )
         for category in ("native_sources", "adapter_sources"):
             for name in record[category]:
-                wheel.writestr(
-                    prefix + name, (SOURCE_ROOT / prefix / name).read_bytes()
+                root = (
+                    staged_native
+                    if category == "native_sources"
+                    else SOURCE_ROOT / prefix
                 )
+                wheel.writestr(prefix + name, (root / name).read_bytes())
         wheel.writestr(
             prefix + "_generated/_launcher.cpython-312-test.so", b"not loaded"
         )
@@ -518,17 +572,28 @@ def test_versioned_native_backend_is_verified_without_imports(native_wheel):
 
 
 @pytest.mark.parametrize(
-    "change", ["target", "version", "source", "utility", "compiler"]
+    "change",
+    [
+        "target",
+        "version",
+        "source",
+        "missing_source",
+        "driver_binding",
+        "utility",
+        "compiler",
+    ],
 )
 def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
     path, record, _ = native_wheel
     prefix = "torch_fl/native_host/"
-    if change == "source":
+    if change in {"source", "missing_source"}:
         _replace_wheel_entry(
             path,
-            prefix + "csrc/backends/" + record["vendor"] + ".cc",
-            b"changed source",
+            f"{prefix}csrc/backends/{record['vendor']}/launch.cc",
+            b"changed source" if change == "source" else None,
         )
+    elif change == "driver_binding":
+        _replace_wheel_entry(path, prefix + "backends/driver.py", b"changed binding")
     elif change == "utility":
         _replace_wheel_entry(
             path, prefix + "_generated/" + record["utility_modules"][0] + ".so", None
@@ -537,7 +602,7 @@ def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
         if change == "target":
             record["vendor"] = "unregistered"
         elif change == "version":
-            record["abi_version"] = 2
+            record["abi_version"] = 99
         else:
             record["compiler_distribution"]["version"] = "0.8.0"
         _replace_wheel_entry(
@@ -557,7 +622,7 @@ def test_native_backend_verifies_installed_driver_sources(native_wheel, monkeypa
     # The distribution root contains triton/, as in the actual published wheel.
     (root.parent / "triton").symlink_to(root, target_is_directory=True)
     preflight.load_wheel(path, native_backend=True, check_driver=True)
-    (root / "backends" / record["vendor"] / "driver.py").write_text("# changed ABI\n")
+    (root / next(iter(record["driver_sources"]))).write_text("# changed ABI\n")
     with pytest.raises(ValueError, match="driver ABI differs"):
         preflight.load_wheel(path, native_backend=True, check_driver=True)
     assert record["compiler_distribution"]["name"] == "flagtree"

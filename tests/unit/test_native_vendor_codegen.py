@@ -85,16 +85,27 @@ def test_policy_change_invalidates_all_entry_abis(generator):
     assert {row["abi"] for row in original}.isdisjoint(row["abi"] for row in changed)
 
 
-def test_wheel_builder_generates_catalog_without_source_json(generator, monkeypatch):
+@pytest.mark.parametrize("vendor", ["nvidia", "hygon", "metax"])
+def test_wheel_builder_generates_catalog_without_source_json(
+    generator, monkeypatch, vendor
+):
     monkeypatch.syspath_prepend(str(ROOT / "torch_fl/native_host"))
     spec = importlib.util.spec_from_file_location(
         "vendor_builder_test", ROOT / "torch_fl/native_host/vendor_build.py"
     )
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
-    assert (
-        builder.generate_catalog(ROOT) == generator.render(generator.load_policy())[1]
-    )
+    if vendor == "metax":
+        spec = importlib.util.spec_from_file_location(
+            "metax_vendor_codegen_test",
+            ROOT / "scripts/codegen/codegen_metax_native_vendor.py",
+        )
+        metax = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(metax)
+        expected = metax.render()[1]
+    else:
+        expected = generator.render(generator.load_policy(vendor))[1]
+    assert builder.generate_catalog(ROOT, vendor) == expected
     for name in (
         "source_variants.json",
         "vendor_precision.json",
@@ -106,7 +117,7 @@ def test_wheel_builder_generates_catalog_without_source_json(generator, monkeypa
 def test_catalog_emission_rejects_stale_core_sources(
     generator, monkeypatch, tmp_path, capsys
 ):
-    monkeypatch.setattr(generator, "SOURCE_PATH", tmp_path / "stale.cc")
+    monkeypatch.setattr(generator, "SOURCE_DIR", tmp_path)
     monkeypatch.setattr(generator, "ROOT", tmp_path)
     monkeypatch.setattr(
         generator.sys, "argv", ["codegen", "--check", "--print-catalog"]
@@ -114,3 +125,22 @@ def test_catalog_emission_rejects_stale_core_sources(
     with pytest.raises(SystemExit, match="stale native vendor entries"):
         generator.main()
     assert not capsys.readouterr().out
+
+
+def test_hcu_entries_use_published_structured_implementations(generator):
+    outputs, catalog = generator.render(generator.load_policy("hygon"))
+    assert len(catalog) == 5
+    for path, content in outputs.items():
+        assert path.read_text() == content
+    source = next(content for path, content in outputs.items() if path.suffix == ".cc")
+    assert "#define FLAGOS_NATIVE_HYGON 1" in source
+    assert "BindStreamScope(module)" in source
+    assert "StructuredCall<at::native::structured_mm_out_cuda>" in source
+    assert "StructuredCall<at::native::structured_bmm_out_cuda>" in source
+    assert "Matrix<" not in source
+    assert "DeviceBoxingGuard" not in source and "redispatch" not in source
+    routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
+    for row in catalog:
+        assert row["vendor"] == "hygon"
+        expected = ",".join(row["dtypes"]) + ":hygon"
+        assert f"{row['op']} = flaggems; {expected}" in routes

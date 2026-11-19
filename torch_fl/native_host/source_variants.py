@@ -12,10 +12,17 @@ import sys
 
 
 def validate(policy):
+    vendor_requirements = {
+        "nvidia": True,
+        "hygon": True,
+        "metax": True,
+        "ascend": False,
+    }
     if (
         policy.get("schema_version") != 1
-        or policy.get("vendor") != "nvidia"
-        or policy.get("requires_native_vendor") is not True
+        or policy.get("vendor") not in vendor_requirements
+        or policy.get("requires_native_vendor")
+        is not vendor_requirements.get(policy.get("vendor"))
     ):
         raise ValueError("unsupported published source policy")
     operators, identifiers = set(), set()
@@ -32,7 +39,12 @@ def validate(policy):
             or not re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", ""))
             or not row.get("dtypes")
             or set(row["dtypes"]) - {"Float", "BFloat16"}
+            or type(row.get("allow_wrapped_numbers", False)) is not bool
             or not row.get("reason")
+            or type(row.get("same_tensor_metadata", False)) is not bool
+            or type(row.get("unit_stride_axis", False)) is not bool
+            or type(row.get("min_tensors", 1)) is not int
+            or row.get("min_tensors", 1) < 1
         ):
             raise ValueError("invalid published source selection")
     return policy

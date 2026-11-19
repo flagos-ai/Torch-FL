@@ -263,6 +263,8 @@ at::Tensor& WrapperIndexPut_(
     const c10::List<::std::optional<at::Tensor>>& indices,
     const at::Tensor& values,
     bool accumulate) {
+  TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::index_put_");
   at::Tensor self_cpu = self.cpu();
   at::Tensor values_cpu = values.cpu();
   c10::List<::std::optional<at::Tensor>> indices_cpu;
@@ -301,7 +303,7 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   // Convert at::Stream to flagos Stream_t.
   // The stream id encodes the underlying device stream pointer.
   Stream_t stream = reinterpret_cast<Stream_t>(s.id());
-#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA))
+#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_DCU))
   c10::OptionalDeviceGuard device_guard(s.device());
 #endif
   alloc->record_stream(self.storage().data_ptr(), stream);
@@ -369,6 +371,8 @@ at::Tensor FlagosWrapperConvolutionOverrideable(
     bool transposed,
     c10::SymIntArrayRef output_padding,
     c10::SymInt groups) {
+  TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::convolution_overrideable");
   auto out = at::convolution_symint(
       input.cpu(),
       weight.cpu(),
@@ -396,6 +400,8 @@ FlagosWrapperConvolutionBackwardOverrideable(
     c10::SymIntArrayRef output_padding,
     c10::SymInt groups,
     ::std::array<bool, 3> output_mask) {
+  TORCH_CHECK(at::native::flagos::CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::convolution_backward_overrideable");
   // convolution_backward wants the forward bias *sizes*, not the bias, and only
   // to shape grad_bias -- which is a plain sum over the non-channel dims, so the
   // channel count is all it needs.
@@ -985,6 +991,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   #include "generated/register_flaggems_nvidia.inc"
   #elif defined(FLAGOS_ACCEL_METAX)
   #include "generated/register_flaggems_metax.inc"
+  #if defined(FLAGOS_NATIVE_HOSTS)
+  #include "generated/register_flaggems_metax_native_host.inc"
+  #endif
   #elif defined(FLAGOS_ACCEL_DCU)
   #include "generated/register_flaggems_hygon.inc"
   #elif defined(FLAGOS_ACCEL_PPU)

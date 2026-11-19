@@ -82,6 +82,19 @@ def test_the_platform_table_publishes_the_vendor_to_cmake():
     ), "FlagosPlatforms.cmake must publish FLAGOS_PLATFORM_VENDOR from the table"
 
 
+def test_native_host_and_bindings_sources_are_outside_the_core_globs():
+    source = _code(REPO_ROOT / "csrc/CMakeLists.txt")
+    # Check the core's initial globs before any platform filter runs.
+    discovery = source.split("list(FILTER SOURCE_FILES", 1)[0]
+    globs = set(re.findall(r'"\$\{CMAKE_CURRENT_SOURCE_DIR\}/([^"]+)"', discovery))
+    assert globs == {
+        f"{directory}/*.{extension}"
+        for directory in ("aten", "profiler", "runtime", "runtime/allocator")
+        for extension in ("cc", "cu")
+    }
+    assert "add_subdirectory(${PROJECT_SOURCE_DIR}/csrc/bindings)" in _code(RESOLVER)
+
+
 def test_cmake_resolves_the_platform_from_both_spellings():
     resolver = _code(RESOLVER)
     assert "macro(_flagos_resolve_platforms)" in resolver

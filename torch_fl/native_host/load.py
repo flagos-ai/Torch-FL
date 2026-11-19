@@ -3,6 +3,7 @@
 
 """Load prebuilt host artifacts and bind original FlagGems device functions."""
 
+import ast
 import hashlib
 import importlib
 import importlib.util
@@ -80,25 +81,37 @@ def function_identity(function):
     return f"{function.__module__}:{function.__qualname__}:{Path(code.co_filename).name}:{code.co_firstlineno}"
 
 
-def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
-    global _audit_installed, _launcher_module
+def _validate_launcher(record, package, path, launcher):
     import triton
     from torch_fl import _build_config
-    from torch_fl.native_host.backend import get_backend, validate_record
+    from torch_fl.native_host.backend import WHEEL_PACKAGE, get_backend, validate_record
 
-    package_module = importlib.import_module(package)
-    manifest = json.loads(
-        (Path(package_module.__file__).parent / "manifest.json").read_text()
-    )
     backend = get_backend(_build_config.ACCELERATOR)
-    _launcher_module = importlib.import_module(package + "._launcher")
+    # Standalone build probes carry their verification inputs with the launcher.
+    sources = path / "csrc"
+    native_dir = sources if package != WHEEL_PACKAGE and sources.is_dir() else None
     validate_record(
-        manifest.get("backend"),
+        record,
         backend,
         Path(triton.__file__).parent,
-        _launcher_module.backend_contract(),
+        launcher.backend_contract(),
+        native_dir=native_dir,
     )
-    backend.install(package, _launcher_module, kernel_launcher)
+    return backend
+
+
+def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
+    global _audit_installed, _launcher_module
+    from torch_fl.native_host.backends.driver import install_driver
+
+    package_module = importlib.import_module(package)
+    path = Path(package_module.__file__).parent
+    manifest = json.loads((path / "manifest.json").read_text())
+    _launcher_module = importlib.import_module(package + "._launcher")
+    backend = _validate_launcher(
+        manifest.get("backend"), package, path, _launcher_module
+    )
+    install_driver(backend, package, _launcher_module, kernel_launcher)
     if enforce_native_compilation and not _audit_installed:
         sys.addaudithook(audit_native_compilers)
         _audit_installed = True
@@ -151,16 +164,10 @@ class Hosts:
             raise RuntimeError(
                 "native hosts require their build-time Torch/FlagTree cohort"
             )
-        from torch_fl import _build_config
-        from torch_fl.native_host.backend import get_backend, validate_record
-
         self.package = self.manifest.get("package", "fg_aot")
         _launcher = importlib.import_module(self.package + "._launcher")
-        validate_record(
-            self.manifest.get("backend"),
-            get_backend(_build_config.ACCELERATOR),
-            Path(triton.__file__).parent,
-            _launcher.backend_contract(),
+        _validate_launcher(
+            self.manifest.get("backend"), self.package, self.path, _launcher
         )
         runtime = importlib.import_module(self.package + ".runtime")
         self.modules = {}
@@ -199,6 +206,15 @@ class Hosts:
             _pointwise_helpers(self.modules),
             self.modules,
         )
+        if self.manifest.get("reduction_adaptation") is not None:
+            from triton.runtime.jit import JITFunction
+
+            kernel = self.originals["flag_gems.ops.mean"].mean_dim_kernel_inner
+            while not isinstance(kernel, JITFunction):
+                kernel = kernel.fn
+            runtime.configure_metax_mean(
+                self.resolve(kernel), self.manifest["reduction_adaptation"]
+            )
 
     def resolve(self, value):
         import triton
@@ -281,10 +297,12 @@ class Hosts:
                         for k, v in value.__dict__.items()
                     }
                 )
-                if isinstance(value, self.Pointwise):
+                if type(value).__name__ == "PointwiseDynamicFunction":
                     found.overloads = {}
                     found._kernel_info_cache = {}
                     found._capture_output_pool = {}
+                    if not isinstance(value, self.Pointwise):
+                        found._native_pointwise_module = kind.__module__
             else:
                 return value
         self.objects[id(value)] = found
@@ -293,7 +311,10 @@ class Hosts:
     def pointwise_kernel(self, owner, ndim):
         # The upstream generator emits only its original device kernel here.
         # The rank-independent host adapter was compiled during the build.
-        pointwise = self.originals["flag_gems.utils.pointwise_dynamic"]
+        provider = getattr(
+            owner, "_native_pointwise_module", "flag_gems.utils.pointwise_dynamic"
+        )
+        pointwise = self.originals[provider]
 
         name = f"{owner._scalar_fn.__name__}_kernel_rank_{ndim}"
         generator = pointwise.ModuleGenerator(
@@ -301,6 +322,19 @@ class Hosts:
         )
         code = pointwise.IndentedBuffer()
         generator.generate_imports(code)
+        if provider != "flag_gems.utils.pointwise_dynamic":
+            helpers = [
+                node.module
+                for node in ast.walk(ast.parse(code.getvalue()))
+                if isinstance(node, ast.ImportFrom)
+                and any(
+                    alias.name == "heuristics_for_tile_size_with_mmu_constraint"
+                    for alias in node.names
+                )
+            ]
+            if len(helpers) != 1:
+                raise RuntimeError("unsupported published vendor pointwise host ABI")
+            owner._native_pointwise_helpers = helpers[0]
         if owner.config.prefer_1d_tile:
             generator.kernel_gen.codegen_1d_tile(code)
         else:
@@ -314,22 +348,31 @@ class Hosts:
         spec.loader.exec_module(module)
         module.__dict__.update(owner._scalar_fn.__globals__)
         module.__dict__[owner._scalar_fn.__name__] = owner._scalar_fn
-        entry = getattr(module, name)
-        self.provenance.append(
-            {
-                "kernel": name,
-                "source": str(path),
-                "sha256": digest,
-                "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
-                "scalar_kernel": owner._scalar_fn.__name__,
-                "jit_sha256": hashlib.sha256(
-                    entry.jit_function.src.encode()
-                ).hexdigest(),
-            }
-        )
-        _admitted_kernels[id(entry.jit_function)] = self.provenance[-1]
+        entries = []
+        for kernel_name in (name, name + "_stride_constexpr"):
+            if not hasattr(module, kernel_name):
+                continue
+            entry = getattr(module, kernel_name)
+            self.provenance.append(
+                {
+                    "kernel": kernel_name,
+                    "source": str(path),
+                    "sha256": digest,
+                    "generator": provider + ".KernelGenerator",
+                    "scalar_kernel": owner._scalar_fn.__name__,
+                    "jit_sha256": hashlib.sha256(
+                        entry.jit_function.src.encode()
+                    ).hexdigest(),
+                }
+            )
+            _admitted_kernels[id(entry.jit_function)] = self.provenance[-1]
+            entries.append(self.runtime.KernelEntry(entry, entry))
         # Generated device code is admitted only through the wheel's generator.
-        return self.runtime.KernelEntry(entry, entry)
+        return (
+            entries[0]
+            if provider == "flag_gems.utils.pointwise_dynamic"
+            else tuple(entries)
+        )
 
     def op(self, name):
         return self.resolve(self.original_ops[name])
@@ -340,6 +383,9 @@ class Hosts:
                 path.read_bytes()
             ).hexdigest()
             for path in self.path.rglob("*.so")
+            # Numerical vendor binaries have their own immutable manifest and
+            # vendor audit; they are not compiled source-host artifacts.
+            if path.parent != self.path / "metax_vendor"
         }
 
     def audit(self):
@@ -353,9 +399,18 @@ class Hosts:
             "host_artifacts": self.artifacts,
             "backend": self.manifest["backend"],
             "source_variants": self.manifest.get("source_variants"),
+            "matmul_adaptation": self.manifest.get("matmul_adaptation"),
+            "copy_adaptation": self.manifest.get("copy_adaptation"),
+            "reduction_adaptation": self.manifest.get("reduction_adaptation"),
+            "normalized_mean_calls": getattr(
+                self.runtime, "metax_mean_calls", lambda: 0
+            )(),
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "launched_kernels": _launched_kernels,
+            "enqueued_kernels": _launcher_module.enqueue_stats()
+            if hasattr(_launcher_module, "enqueue_stats")
+            else {},
         }
 
     def activate(self):

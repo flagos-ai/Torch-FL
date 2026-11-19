@@ -6,6 +6,7 @@ import types
 import pytest
 
 import torch_fl
+from torch_fl.compat.flaggems import random, runtime
 
 
 def _fallback_seed_offset(increment, generator=None):
@@ -31,8 +32,8 @@ def _install_fake_flag_gems(monkeypatch, original=_fallback_seed_offset):
     # Forget the bridge a previous test's call left behind (autouse fixtures do
     # not touch it): the patched function closes over the fake package and the
     # stubbed names of that call, and a later one must not adopt it.
-    monkeypatch.setattr(torch_fl, "_PHILOX_BINDING", None, raising=False)
-    monkeypatch.setattr(torch_fl, "_PHILOX_REBIND", None, raising=False)
+    monkeypatch.setattr(random, "_PHILOX_BINDING", None, raising=False)
+    monkeypatch.setattr(random, "_PHILOX_REBIND", None, raising=False)
     install_modules(
         monkeypatch,
         {
@@ -41,13 +42,10 @@ def _install_fake_flag_gems(monkeypatch, original=_fallback_seed_offset):
             "flag_gems.utils.random_utils": random_utils,
         },
     )
-    # The record holds the vendor, which is what the bridge's gate reads; the
-    # platform id "musa" is normalised to it at build time.
-    monkeypatch.setattr(torch_fl, "_build_accelerator", lambda: "mthreads")
-    # The other half of that gate reads the installed conf, which is this host's
+    # The gate reads the installed conf, which is this host's
     # and has nothing to do with the bridge under test. Stand it up explicitly
     # so the test is the same on a host whose conf routes no op to FlagGems.
-    monkeypatch.setattr(torch_fl, "_conf_routes_to_flaggems", lambda: True)
+    monkeypatch.setattr(runtime, "routes_to_flaggems", lambda: True)
     return random_utils
 
 
@@ -85,7 +83,7 @@ def test_flaggems_philox_uses_flagos_reservations(monkeypatch):
     random_utils = _install_fake_flag_gems(monkeypatch)
     monkeypatch.setattr(torch_fl.flagos._C, "_reserve_rng_seed", reserve_seed)
 
-    torch_fl._patch_flaggems_philox()
+    random.patch_philox("mthreads", torch_fl.flagos)
 
     assert random_utils.philox_backend_seed_offset(128) == (-(1 << 63) + 1, 0)
     generator = types.SimpleNamespace(
@@ -105,7 +103,7 @@ def test_flaggems_philox_preserves_non_flagos_generators(monkeypatch):
         original=lambda increment, generator=None: (sentinel, increment),
     )
 
-    torch_fl._patch_flaggems_philox()
+    random.patch_philox("mthreads", torch_fl.flagos)
 
     generator = types.SimpleNamespace(
         device=types.SimpleNamespace(type="cpu", index=None)
@@ -137,7 +135,7 @@ def test_flaggems_philox_reaches_vendor_backend_modules(monkeypatch):
         lambda device, generator=None: (1 << 63) + 5,
     )
 
-    torch_fl._patch_flaggems_philox()
+    random.patch_philox("mthreads", torch_fl.flagos)
 
     assert vendor_randn.philox_backend_seed_offset(128) == (-(1 << 63) + 5, 0)
 
@@ -194,7 +192,7 @@ def test_flaggems_philox_survives_modules_that_raise_on_getattr(monkeypatch):
     vendor_randn.philox_backend_seed_offset = random_utils.philox_backend_seed_offset
     install_modules(monkeypatch, {"_mthreads.ops.randn": vendor_randn})
 
-    torch_fl._patch_flaggems_philox()
+    random.patch_philox("mthreads", torch_fl.flagos)
 
     assert random_utils.philox_backend_seed_offset is not _fallback_seed_offset
     assert vendor_randn.philox_backend_seed_offset is not _fallback_seed_offset
@@ -211,7 +209,7 @@ def test_flaggems_philox_survives_modules_that_raise_on_getattr(monkeypatch):
 def test_flaggems_philox_reaches_modules_imported_after_the_patch(monkeypatch):
     """A copy the dispatcher imports later must get the patched function too.
 
-    `_register_flaggems_operators()` walks the package under the dispatcher's
+    `prepare_dispatch()` walks the package under the dispatcher's
     dotted name, so the module behind `flag_gems.randn` is imported as
     `flag_gems.runtime.backend._mthreads.ops.randn` -- a *second* module object
     beside the `_mthreads.ops.randn` FlagGems loaded, with its own
@@ -223,7 +221,7 @@ def test_flaggems_philox_reaches_modules_imported_after_the_patch(monkeypatch):
     # _install_fake_flag_gems resets both halves for its own call. The joined
     # bridge must be the one that answers below: an unjoined one would leave
     # the late module on `_fallback_seed_offset` and return (999, 64).
-    monkeypatch.setattr(torch_fl, "_PHILOX_BINDING", _OTHER, raising=False)
+    monkeypatch.setattr(random, "_PHILOX_BINDING", _OTHER, raising=False)
     monkeypatch.setattr(
         torch_fl,
         "_PHILOX_REBIND",
@@ -240,7 +238,7 @@ def test_flaggems_philox_reaches_modules_imported_after_the_patch(monkeypatch):
         lambda device, generator=None: (1 << 63) + 7,
     )
 
-    torch_fl._patch_flaggems_philox()
+    random.patch_philox("mthreads", torch_fl.flagos)
 
     # The import that happens during registration, after the first sweep.
     late = types.ModuleType("flag_gems.runtime.backend._mthreads.ops.randn")
@@ -249,6 +247,6 @@ def test_flaggems_philox_reaches_modules_imported_after_the_patch(monkeypatch):
         monkeypatch, {"flag_gems.runtime.backend._mthreads.ops.randn": late}
     )
 
-    torch_fl._sweep_philox_after_imports()
+    random.refresh_philox_bindings()
 
     assert late.philox_backend_seed_offset(64) == (-(1 << 63) + 7, 0)

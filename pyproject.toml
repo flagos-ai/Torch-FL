@@ -81,6 +81,11 @@ dev = [
 # aligned with FLAGCX_VERSION_cuda; other vendors retain their existing pins.
 cuda-comm = ["flagcx==0.14.0+cuda13.3"]
 
+[tool.setuptools]
+# Install the preflight as a standalone script so running it can inspect a
+# wheel without executing the package's device registration.
+script-files = ["scripts/tools/torch-fl-preflight"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["torch_fl*", "accelerator*", "csrc.runtime.accelerator*"]

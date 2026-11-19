@@ -21,23 +21,37 @@ CUDA graphs, layer truncation, a replacement model or output pooling. Run each
 backend in its own process on an otherwise idle GPU.
 """
 
+# Device libraries must precede Torch import on the CPU-Torch Hygon build.
+# ruff: noqa: E402
+
 import argparse
 from collections import Counter
+from contextlib import contextmanager, ExitStack, nullcontext
 import json
 import importlib.util
+import importlib.metadata
+import os
 from pathlib import Path
 import statistics
 import sys
 import time
 
+_backend_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+_backend_parser.add_argument("--device")
+if (_backend_parser.parse_known_args()[0].device or "").startswith("flagos"):
+    import torch_fl  # noqa: F401
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from logits_validation import (
+    bf16_vector_accuracy,
+    bf16_vector_policy,
     LogitsValidationFailed,
     file_sha256,
     math_settings,
     summarize_accuracy,
+    summarize_bf16_accuracy,
     tensor_accuracy,
     validate_reference,
     validate_tolerances,
@@ -64,17 +78,64 @@ def compare(actual, expected):
 def vendor_audit():
     from torch_fl import _build_config
 
-    if not getattr(_build_config, "NATIVE_VENDOR", False):
+    if not (
+        getattr(_build_config, "NATIVE_HOSTS", False)
+        or getattr(_build_config, "NATIVE_VENDOR", False)
+    ):
         return None
     from torch_fl.native_host import vendor
 
     return vendor.audit()
 
 
+@contextmanager
+def tops_capture(enabled):
+    if not enabled:
+        yield
+        return
+    import ctypes
+
+    runtime = ctypes.CDLL("/opt/tops/lib/libtopsrt.so")
+    for name in ("topsProfilerStart", "topsProfilerStop"):
+        function = getattr(runtime, name)
+        function.argtypes = []
+        function.restype = ctypes.c_int
+    if runtime.topsProfilerStart():
+        raise RuntimeError("TOPS hardware profiling did not start")
+    try:
+        yield
+    finally:
+        if runtime.topsProfilerStop():
+            raise RuntimeError("TOPS hardware profiling did not stop")
+
+
+@contextmanager
+def api_capture(path):
+    if path is None:
+        yield
+        return
+    import ctypes
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    observer = ctypes.CDLL(None)
+    observer.flagos_api_trace_begin.argtypes = []
+    observer.flagos_api_trace_begin.restype = None
+    observer.flagos_api_trace_end.argtypes = [ctypes.c_char_p]
+    observer.flagos_api_trace_end.restype = ctypes.c_int
+    observer.flagos_api_trace_begin()
+    try:
+        yield
+    finally:
+        if observer.flagos_api_trace_end(str(path).encode()):
+            raise RuntimeError("could not write the preloaded TOPS API observer report")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--device", required=True, choices=["cuda:0", "flagos:0"])
+    parser.add_argument(
+        "--device", required=True, choices=["cuda:0", "npu:0", "gcu:0", "flagos:0"]
+    )
     parser.add_argument(
         "--mode", choices=["plain", "collect", "compile", "load"], default="plain"
     )
@@ -87,17 +148,40 @@ def main():
     parser.add_argument(
         "--profile-kernels", type=Path, help="Export a separate kernel-provenance trace"
     )
+    parser.add_argument(
+        "--profile-trace", type=Path, help="Export a separate host/device timing trace"
+    )
+    parser.add_argument(
+        "--api-profile", type=Path, help="Record a preloaded TOPS API observer report"
+    )
+    parser.add_argument(
+        "--tops-profile",
+        action="store_true",
+        help="Bracket profiled forwards for topsprof --capture-range topsProfilerApi",
+    )
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--logits-atol", type=float, default=1e-3)
     parser.add_argument("--logits-rtol", type=float, default=1e-3)
     parser.add_argument(
+        "--logits-policy",
+        choices=["elementwise", "bf16-v2"],
+        default="elementwise",
+        help="Select strict elementwise or fixed per-token BF16 vector acceptance",
+    )
+    parser.add_argument(
         "--check-logits",
         action="store_true",
-        help="Fail after reporting if any logit misses tolerance",
+        help="Fail after reporting if the selected logit acceptance policy fails",
     )
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--progress-every", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument(
+        "--main-cpu", type=int, help="Pin the timing thread after runtime workers start"
+    )
+    parser.add_argument(
+        "--token-selection-device", choices=["device", "cpu"], default="device"
+    )
     parser.add_argument(
         "--skip-sampling",
         action="store_true",
@@ -111,8 +195,18 @@ def main():
     args = parser.parse_args()
     if args.steps < 1 or args.rounds < 0:
         parser.error("steps must be positive and rounds must be nonnegative")
+    if args.main_cpu is not None and (
+        not hasattr(os, "sched_setaffinity")
+        or args.main_cpu not in os.sched_getaffinity(0)
+    ):
+        parser.error("--main-cpu must name a CPU in this process's allowed affinity")
     if args.check_logits and args.reference is None:
         parser.error("--check-logits requires a vendor --reference")
+    if args.logits_policy == "bf16-v2":
+        if args.dtype != "bfloat16":
+            parser.error("bf16-v2 requires the vendor bfloat16 workload")
+        if (args.logits_atol, args.logits_rtol) != (1e-3, 1e-3):
+            parser.error("bf16-v2 has fixed limits; atol/rtol apply to elementwise")
     try:
         validate_tolerances(args.logits_atol, args.logits_rtol)
     except ValueError as error:
@@ -121,7 +215,12 @@ def main():
         parser.error("--model-host requires --device flagos:0 --mode plain")
     if args.profile_kernels and args.device != "flagos:0":
         parser.error("--profile-kernels audits FlagGems launches on --device flagos:0")
+    if args.tops_profile and (
+        not args.profile_trace or args.device not in ("gcu:0", "flagos:0")
+    ):
+        parser.error("--tops-profile requires --profile-trace on Enflame")
     hosts = None
+    native_scope = nullcontext()
     report = {
         "torch": str(torch.__version__),
         "device": args.device,
@@ -130,6 +229,29 @@ def main():
         "execution": "flaggems-model-host" if args.model_host else "eager",
         "steps": args.steps,
         "rounds": args.rounds,
+        "routing_environment": {
+            name: value
+            for name, value in sorted(os.environ.items())
+            if name.startswith("FLAGOS_OP_")
+            or name
+            in {"FLAGOS_FORCE_BACKEND", "FLAGOS_BACKEND_CONFIG", "FLAGOS_ALIAS_CUDA"}
+        },
+        "logits_policy": (
+            bf16_vector_policy()
+            if args.logits_policy == "bf16-v2"
+            else {
+                "name": "elementwise",
+                "atol": args.logits_atol,
+                "rtol": args.logits_rtol,
+            }
+        ),
+        "python": sys.version,
+        "transformers": importlib.metadata.version("transformers"),
+        "cpu_affinity": sorted(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else None,
+        "torch_threads": torch.get_num_threads(),
+        "token_selection_device": args.token_selection_device,
     }
     if args.device.startswith("flagos"):
         if args.hosts:
@@ -152,11 +274,37 @@ def main():
         if getattr(_build_config, "NATIVE_HOSTS", False):
             report["torch_fl_import_ms"] = (time.perf_counter() - import_started) * 1000
             hosts = torch_fl.native_host._hosts
+            native_scope = torch_fl.native_host.execution_scope(0)
+            report["native_execution_scope"] = {
+                "vendor_stream_binding": _build_config.ACCELERATOR == "hygon"
+                and getattr(_build_config, "NATIVE_VENDOR", False),
+                "graph_capture": False,
+                "cached_tensors": False,
+            }
         if args.hosts:
             started = time.perf_counter()
             hosts = loader.Hosts(args.hosts)
             hosts.activate()
             report["source_host_load_ms"] = (time.perf_counter() - started) * 1000
+    elif args.device == "npu:0":
+        import torch_npu
+
+        synchronize = torch.npu.synchronize
+        report["torch_npu"] = str(torch_npu.__version__)
+        report["npu_math_settings"] = {
+            "matmul_allow_hf32": torch.npu.matmul.allow_hf32,
+            "conv_allow_hf32": torch.npu.conv.allow_hf32,
+            "allow_internal_format": getattr(
+                torch.npu.config, "allow_internal_format", None
+            ),
+        }
+        if report["npu_math_settings"]["matmul_allow_hf32"]:
+            raise RuntimeError("paired native-host acceptance requires HF32 disabled")
+    elif args.device.startswith("gcu"):
+        import torch_gcu  # noqa: F401
+
+        synchronize = torch.gcu.synchronize
+        report["vendor_torch"] = importlib.metadata.version("torch-gcu")
     else:
         synchronize = torch.cuda.synchronize
 
@@ -167,7 +315,7 @@ def main():
         AutoModelForCausalLM.from_pretrained(
             args.model,
             local_files_only=True,
-            dtype=getattr(torch, args.dtype),
+            torch_dtype=getattr(torch, args.dtype),
             attn_implementation="eager",
         )
         .eval()
@@ -222,6 +370,23 @@ def main():
     layers = {}
     hooks = []
     if args.snapshot_layers:
+        report["parameter_layouts"] = {}
+        for name, parameter in model.named_parameters():
+            if (
+                name.startswith("model.layers.0.")
+                or name == "model.embed_tokens.weight"
+            ):
+                layout = {
+                    "shape": list(parameter.shape),
+                    "stride": list(parameter.stride()),
+                    "dtype": str(parameter.dtype),
+                }
+                if args.device == "npu:0":
+                    get_format = getattr(torch_npu, "get_npu_format", None)
+                    layout["npu_format"] = (
+                        int(get_format(parameter)) if get_format is not None else None
+                    )
+                report["parameter_layouts"][name] = layout
 
         def save(name):
             def hook(module, inputs, output):
@@ -239,7 +404,7 @@ def main():
             }:
                 hooks.append(module.register_forward_hook(save(name)))
 
-    with torch.no_grad():
+    with torch.no_grad(), native_scope:
         synchronize()
         started = time.perf_counter()
         out = model(ids, use_cache=True)
@@ -251,10 +416,18 @@ def main():
         logits = [prefill_logits[:, -1, :]]
         predictions, inputs = [], []
         for step in range(args.steps):
-            predicted = out.logits[:, -1, :].argmax(-1, keepdim=True)
+            # Token selection is outside timed forwards on both providers.
+            prediction_logits = (
+                logits[-1]
+                if args.token_selection_device == "cpu"
+                else out.logits[:, -1, :]
+            )
+            predicted = prediction_logits.argmax(-1, keepdim=True)
             predictions.append(predicted.cpu())
             token = (
-                reference["inputs"][step].to(args.device) if reference else predicted
+                reference["inputs"][step].to(args.device)
+                if reference
+                else predicted.to(args.device)
             )
             inputs.append(token.cpu())
             out = model(token, past_key_values=out.past_key_values, use_cache=True)
@@ -270,16 +443,20 @@ def main():
             report["reference_comparison"] = [
                 compare(a, b) for a, b in zip(logits, reference["logits"])
             ]
+
+            def accuracy_check(actual, expected):
+                if args.logits_policy == "bf16-v2":
+                    return bf16_vector_accuracy(actual, expected)
+                return tensor_accuracy(
+                    actual, expected, atol=args.logits_atol, rtol=args.logits_rtol
+                )
+
             accuracy = [
-                tensor_accuracy(a, b, atol=args.logits_atol, rtol=args.logits_rtol)
-                for a, b in zip(logits, reference["logits"])
+                accuracy_check(a, b) for a, b in zip(logits, reference["logits"])
             ]
             if "prefill_logits" in reference:
-                accuracy[0] = tensor_accuracy(
-                    prefill_logits,
-                    reference["prefill_logits"],
-                    atol=args.logits_atol,
-                    rtol=args.logits_rtol,
+                accuracy[0] = accuracy_check(
+                    prefill_logits, reference["prefill_logits"]
                 )
             report["logits_scope"] = {
                 "prefill": (
@@ -290,8 +467,15 @@ def main():
                 "decode": "every_requested_step",
             }
             report["logits_comparison"] = accuracy
-            report["logits_validation"] = summarize_accuracy(
-                accuracy, args.steps + 1, atol=args.logits_atol, rtol=args.logits_rtol
+            report["logits_validation"] = (
+                summarize_bf16_accuracy(accuracy, args.steps + 1)
+                if args.logits_policy == "bf16-v2"
+                else summarize_accuracy(
+                    accuracy,
+                    args.steps + 1,
+                    atol=args.logits_atol,
+                    rtol=args.logits_rtol,
+                )
             )
             if layers and reference.get("layers"):
                 report["layer_comparison"] = {
@@ -305,7 +489,10 @@ def main():
         if not args.skip_sampling:
             out = model(ids, use_cache=True)
             for _ in range(args.steps):
-                token = out.logits[:, -1, :].argmax(-1, keepdim=True)
+                prediction_logits = out.logits[:, -1, :]
+                if args.token_selection_device == "cpu":
+                    prediction_logits = prediction_logits.cpu()
+                token = prediction_logits.argmax(-1, keepdim=True).to(args.device)
                 generated.append(int(token.item()))
                 out = model(token, past_key_values=out.past_key_values, use_cache=True)
             report["generated_tokens"] = generated
@@ -314,14 +501,22 @@ def main():
             )
 
         timings = {
+            "traversal_complete_ms": [],
             "prefill_submit_ms": [],
             "prefill_complete_ms": [],
             "decode_submit_ms": [],
             "decode_complete_ms": [],
         }
+        if hasattr(os, "sched_getaffinity"):
+            report["cpu_affinity_before_timing"] = sorted(os.sched_getaffinity(0))
+        if args.main_cpu is not None:
+            os.sched_setaffinity(0, {args.main_cpu})
+        if hasattr(os, "sched_getaffinity"):
+            report["measurement_main_cpu_affinity"] = sorted(os.sched_getaffinity(0))
         device_inputs = [token.to(args.device) for token in inputs]
         for repetition in range(args.rounds + 1 if args.rounds else 0):
             synchronize()
+            traversal_started = time.perf_counter()
             t0 = time.perf_counter()
             out = model(ids, use_cache=True)
             t1 = time.perf_counter()
@@ -340,12 +535,33 @@ def main():
                 if repetition:
                     timings["decode_submit_ms"].append((t1 - t0) * 1000)
                     timings["decode_complete_ms"].append((t2 - t0) * 1000)
+            synchronize()
+            if repetition:
+                timings["traversal_complete_ms"].append(
+                    (time.perf_counter() - traversal_started) * 1000
+                )
         report["timings"] = timings
         report["medians"] = {
             name: statistics.median(values)
             for name, values in timings.items()
             if values
         }
+        if args.rounds:
+            # Preserve completed timing evidence if a later provenance audit fails.
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.with_suffix(".timings.json").write_text(
+                json.dumps(
+                    {
+                        "acceptance": "pending remaining accuracy and provenance audits",
+                        "contract": contract,
+                        "math_settings": report["math_settings"],
+                        "timings": timings,
+                        "medians": report["medians"],
+                        "logits_validation": report.get("logits_validation"),
+                    },
+                    indent=2,
+                )
+            )
         calls = Counter()
 
         def profile(frame, event, arg):
@@ -363,29 +579,70 @@ def main():
         finally:
             sys.setprofile(None)
         report["warm_python_calls"] = dict(calls)
-        if args.profile_kernels:
-            if hosts is None:
+        if args.profile_kernels or args.profile_trace or args.api_profile:
+            if args.profile_kernels and hosts is None:
                 raise RuntimeError("kernel provenance requires the native-host wheel")
             from torch.profiler import ProfilerActivity, profile as torch_profile
 
-            with torch_profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
-            ) as profiler:
-                out = model(ids, use_cache=True)
-                out = model(
-                    device_inputs[0],
-                    past_key_values=out.past_key_values,
-                    use_cache=True,
-                )
-                synchronize()
-            args.profile_kernels.parent.mkdir(parents=True, exist_ok=True)
-            profiler.export_chrome_trace(str(args.profile_kernels))
-            trace = json.loads(args.profile_kernels.read_text())
-            events = trace["traceEvents"]
-            from kernel_provenance import audit_kernels
+            if args.device == "gcu:0":
+                from torch_gcu.gcu.profiler import profile as torch_profile
 
-            admitted = hosts.audit()["launched_kernels"]
-            report["gpu_kernel_audit"] = audit_kernels(events, admitted, vendor_audit())
+            activities = [ProfilerActivity.CPU]
+            if not (args.tops_profile or args.api_profile):
+                activities.append(ProfilerActivity.PrivateUse1)
+            ranges = {}
+            with ExitStack() as stack:
+                profiler = stack.enter_context(torch_profile(activities=activities))
+                stack.enter_context(tops_capture(args.tops_profile))
+                stack.enter_context(api_capture(args.api_profile))
+                with torch.profiler.record_function("qwen::prefill"):
+                    started_ns = time.time_ns()
+                    out = model(ids, use_cache=True)
+                    synchronize()
+                    ranges["prefill"] = {
+                        "start_ns": started_ns,
+                        "end_ns": time.time_ns(),
+                    }
+                with torch.profiler.record_function("qwen::decode"):
+                    started_ns = time.time_ns()
+                    out = model(
+                        device_inputs[0],
+                        past_key_values=out.past_key_values,
+                        use_cache=True,
+                    )
+                    synchronize()
+                    ranges["decode"] = {
+                        "start_ns": started_ns,
+                        "end_ns": time.time_ns(),
+                    }
+            report["profile_ranges_ns"] = ranges
+            trace_path = args.profile_kernels or args.profile_trace
+            if trace_path:
+                trace_path.parent.mkdir(parents=True, exist_ok=True)
+                profiler.export_chrome_trace(str(trace_path))
+            report["profile_operator_times"] = sorted(
+                [
+                    {
+                        "name": event.key,
+                        "calls": event.count,
+                        "self_cpu_us": event.self_cpu_time_total,
+                        "cpu_total_us": event.cpu_time_total,
+                        "self_device_us": event.self_device_time_total,
+                        "device_total_us": event.device_time_total,
+                    }
+                    for event in profiler.key_averages()
+                ],
+                key=lambda event: event["self_cpu_us"],
+                reverse=True,
+            )
+            if args.profile_kernels:
+                trace = json.loads(trace_path.read_text())
+                from kernel_provenance import audit_kernels
+
+                admitted = hosts.audit()["launched_kernels"]
+                report["gpu_kernel_audit"] = audit_kernels(
+                    trace["traceEvents"], admitted, vendor_audit()
+                )
         if hosts is not None:
             report["kernel_sources"] = hosts.provenance
             report["native_audit"] = hosts.audit()
@@ -407,7 +664,7 @@ def main():
     producer = {
         "backend": (
             "vendor"
-            if args.device == "cuda:0"
+            if args.device in {"cuda:0", "npu:0", "gcu:0"}
             and "torch_fl" not in sys.modules
             and "flag_gems" not in sys.modules
             else "torch_fl"

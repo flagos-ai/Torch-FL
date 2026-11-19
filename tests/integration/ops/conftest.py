@@ -186,13 +186,6 @@ def pytest_collection_modifyitems(
 ) -> None:
     platform = _platform.detect_platform()
     markers_to_skip = list(_PLATFORM_SKIP_MARKERS.get(platform, ()))
-    # MetaX builds are boxing-only: the hand-written mxcc backend is NOT
-    # compiled, so ops run through the CUDA boxing kernels (and optionally the
-    # FlagGems Python path). Tests asserting a `-> metax` dispatch (mark.metax)
-    # cannot pass, so skip them. No mode variable to consult -- the platform
-    # name already says it.
-    if platform == "metax":
-        markers_to_skip.append("metax")
     flaggems_cpp_on = _flaggems_cpp_enabled()
     # The `cuda` mark asserts a `-> boxing` dispatch, and on a CUDA-ABI platform
     # that route is served by the generated boxing kernels. A FlagGems-primary
@@ -205,6 +198,30 @@ def pytest_collection_modifyitems(
     if not _boxing_enabled():
         markers_to_skip.append("cuda")
     for item in items:
+        # Legacy @metax cases assert the unbuilt handwritten mxcc operator
+        # backend. Native-source-host cases instead exercise published FlagGems
+        # kernels on the MetaX runtime and must reach their build-record gate.
+        if (
+            platform == "metax"
+            and item.get_closest_marker("metax")
+            and not item.get_closest_marker("native_source_host")
+        ):
+            add_platform_skip(
+                item,
+                gate="backend_marker",
+                detail="handwritten MetaX operator backend is not built",
+                reason="requires handwritten MetaX operator backend",
+            )
+            continue
+        if item.get_closest_marker("enflame_native_host"):
+            if platform != "gcu" or not _native_source_host_enabled():
+                add_platform_skip(
+                    item,
+                    gate="platform_support" if platform != "gcu" else "build_record",
+                    detail="requires an Enflame wheel with precompiled native hosts",
+                    reason="Enflame native-host contract",
+                )
+                continue
         if (
             item.get_closest_marker("nvidia")
             or item.get_closest_marker("host_compiler")
@@ -219,6 +236,8 @@ def pytest_collection_modifyitems(
             continue
         if item.get_closest_marker("native_source_host") and platform not in {
             "cuda",
+            "dcu",
+            "metax",
             "ascend",
         }:
             add_platform_skip(
@@ -326,6 +345,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
     config.addinivalue_line("markers", "cuda: requires CUDA platform")
     config.addinivalue_line("markers", "nvidia: requires the NVIDIA runtime")
+    config.addinivalue_line(
+        "markers", "enflame_native_host: requires Enflame native hosts"
+    )
     config.addinivalue_line(
         "markers", "host_compiler: requires the experimental native host compiler build"
     )

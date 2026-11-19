@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit coverage for the DCU FlagGems cost patches in ``torch_fl.flagos``.
+"""Unit coverage for the DCU FlagGems cost patches.
 
 ``_patch_flaggems_pow_scalar_square``, ``_patch_flaggems_mean_last_dim`` and
 ``_prewarm_triton_key`` all replace one backend-resolved callable with a cheaper
@@ -30,7 +30,7 @@ python segfaults when this tree's ``torch`` and the real ``flag_gems`` are
 imported into one process, and none of this needs either to be real.
 
 The on-hardware measurements behind the patches, and what each one is worth, are
-in ``torch_fl/flagos/__init__.py`` at each patch and summarised in
+in ``torch_fl/compat/flaggems/`` at each patch and summarised in
 ``docs/reference/operator-support.md``.
 """
 
@@ -41,7 +41,7 @@ import types
 import pytest
 import torch
 
-from torch_fl import flagos
+from torch_fl.compat.flaggems import autotune, ops, runtime
 
 
 SENTINEL = -12345.0
@@ -80,7 +80,7 @@ class TestRebindFlagGemsName:
             mod.target = original
         self._install(monkeypatch, *holders)
 
-        flagos._rebind_flag_gems_name("target", original, wrapper)
+        ops._rebind_flag_gems_name("target", original, wrapper)
 
         assert all(mod.target is wrapper for mod in holders)
 
@@ -100,7 +100,7 @@ class TestRebindFlagGemsName:
         decoy.target = other
         self._install(monkeypatch, holder, decoy)
 
-        flagos._rebind_flag_gems_name("target", original, wrapper)
+        ops._rebind_flag_gems_name("target", original, wrapper)
 
         assert holder.target is wrapper
         assert decoy.target is other
@@ -131,7 +131,7 @@ class TestRebindFlagGemsName:
         lazy.__getattr__ = _getattr
         self._install(monkeypatch, lazy)
 
-        flagos._rebind_flag_gems_name("target", original, wrapper)
+        ops._rebind_flag_gems_name("target", original, wrapper)
 
         assert asked == []
 
@@ -154,7 +154,7 @@ class TestRebindFlagGemsName:
         monkeypatch.setitem(sys.modules, "_torch_fl_holder_none", None)
         self._install(monkeypatch, holder)
 
-        flagos._rebind_flag_gems_name("target", original, wrapper)
+        ops._rebind_flag_gems_name("target", original, wrapper)
 
         assert holder.target is wrapper
 
@@ -162,9 +162,7 @@ class TestRebindFlagGemsName:
         holder = types.ModuleType("_torch_fl_holder_unrelated")
         self._install(monkeypatch, holder)
 
-        flagos._rebind_flag_gems_name(
-            "target", lambda *a, **k: None, lambda *a, **k: None
-        )
+        ops._rebind_flag_gems_name("target", lambda *a, **k: None, lambda *a, **k: None)
 
         assert not hasattr(holder, "target")
 
@@ -203,7 +201,7 @@ class TestPowScalarSquare:
     def test_the_exponent_is_read_off_any_scalar_it_can_be_converted_to(
         self, exponent, square_calls
     ):
-        assert flagos._pow_exponent_is_two(exponent) is True
+        assert ops._pow_exponent_is_two(exponent) is True
 
     @pytest.mark.parametrize(
         "exponent",
@@ -217,25 +215,25 @@ class TestPowScalarSquare:
         be converted is not 2 -- it must not raise out of the wrapper, which
         runs on the dispatch path.
         """
-        assert flagos._pow_exponent_is_two(exponent) is False
+        assert ops._pow_exponent_is_two(exponent) is False
 
     def test_an_integer_exponent_of_two_is_a_multiply(self, square_calls):
         """``pow.Tensor_Scalar`` passes an int for ``x.pow(2)``."""
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
         x = torch.randn(4, 8)
 
         assert wrapped(x, 2) == "mul"
         assert square_calls == [(x, x)], "the multiply is not x * x"
 
     def test_a_float_exponent_of_two_is_a_multiply(self, square_calls):
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
 
         assert wrapped(torch.randn(4, 8), 2.0) == "mul"
         assert len(square_calls) == 1
 
     @pytest.mark.parametrize("exponent", [3, 2.5, 0.5, -1])
     def test_every_other_exponent_reaches_the_original(self, exponent, square_calls):
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
 
         assert wrapped(torch.randn(4, 8), exponent) == "pow"
         assert square_calls == []
@@ -246,7 +244,7 @@ class TestPowScalarSquare:
     def test_a_non_floating_input_reaches_the_original(self, dtype, square_calls):
         """``x * x`` overflows where ``pow`` saturates, so ints keep ``pow``."""
         x = torch.ones(4, 8, dtype=dtype)
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
 
         assert wrapped(x, 2) == "pow"
         assert square_calls == []
@@ -268,7 +266,7 @@ class TestPowScalarSquare:
             square_calls.append((a, b))
             return "square"
 
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(_original_pow(), square)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(_original_pow(), square)
         x = torch.randn(4, 8)
 
         assert wrapped(x, 2) == "square"
@@ -278,14 +276,14 @@ class TestPowScalarSquare:
         self, monkeypatch, square_calls
     ):
         del sys.modules["flag_gems"].mul
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(_original_pow(), None)
 
         assert wrapped(torch.randn(4, 8), 2) == "pow"
         assert square_calls == []
 
     def test_the_wrapper_keeps_a_handle_on_what_it_replaced(self, square_calls):
         original = _original_pow()
-        wrapped = flagos._flaggems_pow_scalar_square_wrapper(original, None)
+        wrapped = ops._flaggems_pow_scalar_square_wrapper(original, None)
 
         assert wrapped.__wrapped__ is original
         assert wrapped._torch_fl_square_via_mul is True
@@ -333,7 +331,7 @@ def wrapped_mean(tiled):
         return "original"
 
     return (
-        flagos._flaggems_mean_last_dim_wrapper(
+        ops._flaggems_mean_last_dim_wrapper(
             mean_dim, tiled, _cdiv, contextlib.nullcontext
         ),
         tiled,
@@ -363,7 +361,7 @@ class TestMeanIsLastDim:
         ],
     )
     def test_a_last_axis_row_mean_is_taken(self, shape, dim):
-        assert flagos._mean_is_last_dim(torch.randn(*shape), dim) is True
+        assert ops._mean_is_last_dim(torch.randn(*shape), dim) is True
 
     @pytest.mark.parametrize(
         "shape,dim",
@@ -387,7 +385,7 @@ class TestMeanIsLastDim:
         ],
     )
     def test_any_other_reduction_is_refused(self, shape, dim):
-        assert flagos._mean_is_last_dim(torch.randn(*shape), dim) is False
+        assert ops._mean_is_last_dim(torch.randn(*shape), dim) is False
 
     @pytest.mark.parametrize("dim", [2, -3, 7])
     def test_an_out_of_range_dim_is_refused(self, dim):
@@ -397,17 +395,17 @@ class TestMeanIsLastDim:
         axis and the wrapper returns a plausible mean over the wrong axis where
         the op it replaces raises.
         """
-        assert flagos._mean_is_last_dim(torch.randn(4, 8), dim) is False
+        assert ops._mean_is_last_dim(torch.randn(4, 8), dim) is False
 
     def test_a_strided_input_is_refused(self):
         """A transposed last axis is not contiguous, so the row is not a row."""
-        assert flagos._mean_is_last_dim(torch.randn(8, 4).t(), -1) is False
+        assert ops._mean_is_last_dim(torch.randn(8, 4).t(), -1) is False
 
     @pytest.mark.parametrize(
         "dtype", [torch.int32, torch.int64], ids=["int32", "int64"]
     )
     def test_a_non_floating_input_is_refused(self, dtype):
-        assert flagos._mean_is_last_dim(torch.ones(4, 8, dtype=dtype), -1) is False
+        assert ops._mean_is_last_dim(torch.ones(4, 8, dtype=dtype), -1) is False
 
     @pytest.mark.parametrize(
         "inp",
@@ -415,14 +413,14 @@ class TestMeanIsLastDim:
         ids=["empty", "empty-row"],
     )
     def test_a_reduction_with_no_row_to_speak_of_is_refused(self, inp):
-        assert flagos._mean_is_last_dim(inp, -1) is False
+        assert ops._mean_is_last_dim(inp, -1) is False
 
     def test_a_non_tensor_is_refused(self):
         """The wrapper is reached from dispatch, but not only with tensors."""
-        assert flagos._mean_is_last_dim([[1.0, 2.0]], -1) is False
+        assert ops._mean_is_last_dim([[1.0, 2.0]], -1) is False
 
     def test_no_dim_is_refused(self):
-        assert flagos._mean_is_last_dim(torch.randn(4, 8), None) is False
+        assert ops._mean_is_last_dim(torch.randn(4, 8), None) is False
 
 
 class TestMeanLastDimWrapper:
@@ -530,24 +528,17 @@ def tkey(monkeypatch):
     return calls
 
 
-def _gate(monkeypatch, accelerator, routed):
-    """Pin the build record and the conf route the prewarm gate reads.
-
-    ``accelerator`` is spelled the way the *build record* spells it, which is
-    the vendor name (setup.py writes "hygon"), not the platform this file's
-    cases are named after ("dcu").
-    """
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: accelerator)
-    monkeypatch.setattr("torch_fl._conf_routes_to_flaggems", lambda: routed)
+def _route(monkeypatch, routed):
+    monkeypatch.setattr(runtime, "routes_to_flaggems", lambda: routed)
 
 
 class TestPrewarmTritonKey:
     """The key is hashed on a side thread, on the builds it was measured on."""
 
     def test_the_key_is_computed_on_a_daemon_thread(self, monkeypatch, tkey):
-        _gate(monkeypatch, "hygon", True)
+        _route(monkeypatch, True)
 
-        flagos._prewarm_triton_key()
+        autotune.prewarm_triton_key("hygon")
 
         assert len(_RecordingThread.instances) == 1
         thread = _RecordingThread.instances[0]
@@ -565,32 +556,77 @@ class TestPrewarmTritonKey:
     def test_nothing_starts_off_the_measured_configuration(
         self, monkeypatch, tkey, accelerator, routed
     ):
-        _gate(monkeypatch, accelerator, routed)
+        _route(monkeypatch, routed)
 
-        flagos._prewarm_triton_key()
+        autotune.prewarm_triton_key(accelerator)
 
         assert _RecordingThread.instances == []
         assert tkey == []
 
     def test_a_key_that_cannot_be_computed_is_swallowed(self, monkeypatch, tkey):
         """Best-effort: an unwarmed cache is slow, not broken."""
-        _gate(monkeypatch, "hygon", True)
+        _route(monkeypatch, True)
 
         def boom():
             raise RuntimeError("no key for you")
 
         sys.modules["triton.runtime.cache"].triton_key = boom
 
-        flagos._prewarm_triton_key()
+        autotune.prewarm_triton_key("hygon")
 
         assert len(_RecordingThread.instances) == 1
         assert _RecordingThread.instances[0].started
 
     def test_a_triton_without_the_function_is_swallowed(self, monkeypatch, tkey):
         """The module can be importable and still not have the name."""
-        _gate(monkeypatch, "hygon", True)
+        _route(monkeypatch, True)
         del sys.modules["triton.runtime.cache"].triton_key
 
-        flagos._prewarm_triton_key()
+        autotune.prewarm_triton_key("hygon")
 
         assert _RecordingThread.instances == []
+
+
+@pytest.mark.parametrize(
+    "shape,dim,keepdim",
+    [
+        ((0, 7), [0], False),
+        ((3, 0), [-1], True),
+        ((0, 7), None, False),
+        ((0, 7), [1], True),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_empty_mean_uses_nan_identity_without_a_reduction_launch(
+    wrapped_mean, shape, dim, keepdim, dtype
+):
+    wrapped, kernel = wrapped_mean
+    value = torch.empty(shape, dtype=dtype)
+    actual = wrapped(value, dim, keepdim)
+    expected = value.mean(dim=dim, keepdim=keepdim)
+    torch.testing.assert_close(actual, expected, equal_nan=True)
+    assert not kernel.launches
+
+
+@pytest.mark.parametrize("dim,error", [([2], IndexError), ([0, 0], RuntimeError)])
+def test_empty_mean_keeps_dimension_validation(wrapped_mean, dim, error):
+    with pytest.raises(error):
+        wrapped_mean[0](torch.empty(0, 7), dim)
+
+
+def test_native_square_uses_the_configured_mul_route(square_calls):
+    calls = []
+
+    def native_square(a, b):
+        calls.append((a, b))
+        return "configured-mul"
+
+    wrapped = ops._flaggems_pow_scalar_square_wrapper(
+        _original_pow(), None, native_square
+    )
+    value = torch.randn(4, 8)
+    assert wrapped(value, 2) == "configured-mul"
+    assert calls == [(value, value)] and square_calls == []
+    assert wrapped(value, 3) == "pow"
+    assert wrapped(torch.ones(4, dtype=torch.int64), 2) == "pow"
+    assert len(calls) == 1

@@ -20,10 +20,23 @@ option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
 
+# The main library owns ATen, profiling, and the common runtime. Each
+# accelerator runtime, the Python bindings, and the AOT hosts have their own
+# build entry points.
 file(GLOB_RECURSE SOURCE_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aten/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aten/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/profiler/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/profiler/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/allocator/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/allocator/*.cu"
 )
+file(GLOB _runtime_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/*.cu"
+)
+list(APPEND SOURCE_FILES ${_runtime_sources})
+list(SORT SOURCE_FILES)
 
 # The TsingMicro rocprofiler tool is built as its own shared library (below)
 # and must never be linked into libtorch_fl.so: rocprofiler dlopens its tools
@@ -47,11 +60,6 @@ if(FLAGOS_PLATFORM_VENDOR STREQUAL "apple")
   )
   list(APPEND SOURCE_FILES ${MPS_ATEN_OBJCXX_SOURCES})
 endif()
-
-# Exclude runtime/accelerator (built separately as subdirectory)
-list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/.*")
-# stream_api is built as a separate shared lib
-list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api\\.cc")
 
 # Select exactly one vendor-specific DeviceTracer implementation. CUDA and PPU
 # use the CUPTI-compatible tracer, MetaX uses that same tracer against MCPTI,
@@ -375,12 +383,14 @@ endif()
 # declines to register a plan and keeps the Python route.
 if(_flagos_is_cuda)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_FAST_PLAN=1)
-  if(FLAGOS_BUILD_FLAGGEMS)
-    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NVIDIA_GEMS_COPY=1)
-  endif()
   message(STATUS "fast plan replay: enabled (CUDA)")
 else()
   message(STATUS "fast plan replay: stubbed (not a CUDA build)")
+endif()
+
+# The published FlagGems copy host also supports HCU storage and streams.
+if(FLAGOS_BUILD_FLAGGEMS AND (_flagos_is_cuda OR _flagos_is_dcu))
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_GEMS_DEVICE_COPY=1)
 endif()
 
 # ROCtracer headers for DCU profiler support. Similar to CUPTI above, we only
@@ -459,6 +469,15 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
 # python_op_caller only when the Python FlagGems path is requested.
 if(FLAGOS_BUILD_FLAGGEMS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_PYTHON)
+endif()
+if(FLAGOS_NATIVE_HOSTS)
+  if(NOT FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_BOXING OR FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_TILEOPS)
+    message(FATAL_ERROR "Native hosts require FlagGems with boxing, FlagGems C++ and TileOPs disabled")
+  endif()
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_HOSTS=1)
+  if(_flagos_is_metax AND FLAGOS_BUILD_VENDOR)
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_METAX_VENDOR=1)
+  endif()
 endif()
 
 # Tells register.cc that the generated CUDA boxing kernels are part of this
@@ -607,10 +626,13 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
   endif()
 endif()
 
-if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR)
+if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR AND FLAGOS_BUILD_BOXING)
   # The CPU TorchConfig used for the isolated Python environment does not
   # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
   # symbols are resolved by ELF instead of being left to process-global lookup.
+  # A build without boxing has no consumer of that runtime. In particular,
+  # native hosts keep the official CPU core, which cannot resolve its at::maca
+  # dependencies. MACA's device runtime is linked independently above.
   set(_metax_torch_lib "$ENV{FLAGOS_VENDOR_TORCH_LIB}")
   if(IS_DIRECTORY "${_metax_torch_lib}")
     if(EXISTS "${_metax_torch_lib}/libtorch_cuda.so")
@@ -793,6 +815,8 @@ if(_flagos_is_metax)
             "/opt/maca/lib64")
   if(MCBLAS_LIB)
     target_link_libraries(${LIBRARY_NAME} PRIVATE ${MCBLAS_LIB})
+  elseif(FLAGOS_NATIVE_HOSTS AND FLAGOS_BUILD_VENDOR)
+    message(FATAL_ERROR "Native MetaX precision requires the MACA BLAS SDK")
   else()
     message(WARNING "mcblas not found, MetaX mm will fallback to naive kernel")
   endif()

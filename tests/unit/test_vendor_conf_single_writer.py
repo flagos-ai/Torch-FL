@@ -138,7 +138,8 @@ def test_the_cuda_conf_is_not_a_generated_vendor_conf():
     assert "cuda" not in built
     canonical = set(g.BOXING_PLATFORMS) | set(g.VENDORS)
     experimental = {f"{vendor}_tileops" for vendor in ("ascend", "mthreads", "metax")}
-    assert set(built) == canonical | (experimental & set(built))
+    native_hosts = {f"{vendor}_native_host" for vendor in g.NATIVE_HOST_FLAGGEMS_OPS}
+    assert set(built) == canonical | native_hosts | (experimental & set(built))
 
 
 def test_vendors_and_boxing_platforms_are_disjoint():

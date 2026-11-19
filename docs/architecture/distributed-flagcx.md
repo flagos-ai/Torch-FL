@@ -152,7 +152,7 @@ not re-run through the HF harness.
 ### 1.1 Zero-copy bridging
 
 flagos tensors and CUDA tensors share the same device memory. `flagos_to_cuda_view_impl` in
-`torch_fl/csrc/module.cc` builds a tensor carrying `DispatchKey::CUDA` over the same `data_ptr`
+`csrc/bindings/module.cc` builds a tensor carrying `DispatchKey::CUDA` over the same `data_ptr`
 (holding a reference to the original flagos tensor so the memory is not freed). The communication
 backend therefore receives what is, to it, a CUDA tensor, entirely unaware of flagos.
 
@@ -172,7 +172,7 @@ backend therefore receives what is, to it, a CUDA tensor, entirely unaware of fl
 
 ### 1.3 The authoritative source for vendor detection
 
-`_patch_flaggems_codegen_config()` in `torch_fl/__init__.py` sets the `GEMS_VENDOR` environment
+`configure_vendor()` in `torch_fl/compat/flaggems/runtime.py` sets the `GEMS_VENDOR` environment
 variable to one of `nvidia` / `metax` / `ascend` at import time. The distributed layer should
 **reuse that variable directly** rather than starting a second hardware detection scheme.
 

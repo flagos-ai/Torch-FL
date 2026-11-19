@@ -52,6 +52,9 @@ add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
 if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
 endif()
+if(FLAGOS_PLATFORM_VENDOR STREQUAL "hygon" AND NOT FLAGOS_BUILD_BOXING)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HYGON_NATIVE_STREAM=1)
+endif()
 
 # This cascade picks the SDK to find and what to link, and it compares both
 # spellings of the platform (the table id and its vendor): FLAGOS_ACCELERATOR is

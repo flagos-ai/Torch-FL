@@ -65,7 +65,11 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_coverage import TILEOPS_OPS  # noqa: E402
 from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
-from native_host_policy import render_config_routes  # noqa: E402
+from native_host_policy import (  # noqa: E402
+    NATIVE_BMM_ADAPTATIONS,
+    NATIVE_REDUCTION_ADAPTATIONS,
+    render_config_routes,
+)
 
 
 # TensorList C++ spelling (IListRef vs ArrayRef) must match what PyTorch itself
@@ -150,12 +154,13 @@ _CONTIGUOUS_TENSOR_ARGS_BY_OP = {
 # constraint. TritonMinDotContractExtent() returns 0 where there is no floor, so
 # every other platform pays one integer compare.
 #
-# Only the plain forms are listed. `mm.out` and the `.dtype` forms carry no
-# FlagGems kernel on the platforms with a floor, and `bmm` reaches the C++ slot
-# there; when that changes, the entry is a line each and the padding is already
-# rank-agnostic (it indexes the contracted axis from the end).
+# `mm.out` and the `.dtype` forms carry no FlagGems kernel on platforms with a
+# floor. Native MetaX hosts use the published bmm/bmm_out Python slots, including
+# Qwen3's K=1 RoPE product. The rank-agnostic helper leaves M/N and out untouched.
 _DOT_CONTRACT_PADDED_OPS = {
     "mm": ("self", "mat2"),
+    "bmm": ("self", "mat2"),
+    "bmm.out": ("self", "mat2"),
 }
 
 
@@ -177,12 +182,41 @@ def _dot_contract_prelude(op, args):
                 f"the schema has {sorted(arg_names)}"
             )
     lhs, rhs = operands
+    native = ""
+    if op in NATIVE_BMM_ADAPTATIONS["metax"]["operators"]:
+        condition = f"at::native::flagos::TryNativeHostBmmOuterProduct({lhs}, {rhs}, native_product)"
+        result = "return native_product;"
+        if op.endswith(".out"):
+            if "out" not in arg_names:
+                raise SystemExit(f"{op}: native outer product requires an out tensor")
+            condition = (
+                f"{lhs}.dim() == 3 && {rhs}.dim() == 3 && out.dim() == 3 && "
+                f"out.device() == {lhs}.device() && out.scalar_type() == {lhs}.scalar_type() && "
+                f"out.size(0) == {lhs}.size(0) && out.size(1) == {lhs}.size(1) && "
+                f"out.size(2) == {rhs}.size(2) && " + condition
+            )
+            result = "out.copy_(native_product); return out;"
+        native = f"  at::Tensor native_product;\n  if ({condition}) {{ {result} }}\n"
     lines = (
-        f"  at::Tensor {lhs}_dotpad = {lhs};\n"
+        native + f"  at::Tensor {lhs}_dotpad = {lhs};\n"
         f"  at::Tensor {rhs}_dotpad = {rhs};\n"
         f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
     )
     return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
+
+
+def _native_reduction_prelude(op):
+    policy = NATIVE_REDUCTION_ADAPTATIONS["metax"]
+    if op != policy["operator"]:
+        return ""
+    extents = " || ".join(f"self.size(-1) == {extent}" for extent in policy["extents"])
+    return (
+        "#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)\n"
+        "  at::Tensor native_mean;\n"
+        f"  if (self.dim() > 0 && ({extents}) && "
+        "at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) "
+        "{ return native_mean; }\n#endif\n"
+    )
 
 
 # Matmul ops whose FlagGems Python kernel must leave the device entirely for the
@@ -744,7 +778,7 @@ _FLAGGEMS_RANDOM_INPLACE = {"uniform_", "exponential_", "bernoulli_.float"}
 
 # RNG functional ops whose aten schema carries a trailing `Generator?` the
 # positional caller can't express. We DROP that arg and let gems draw from the
-# _patch_flaggems_philox() fallback generator (gems' gen=None path hits the
+# patch_philox() fallback generator (gems' gen=None path hits the
 # patched philox_backend_seed_offset). Verified to run + sample correctly.
 # randperm needs no entry here: its aten schema has no generator arg in this
 # torch version, so the plain factory branch already covers it. normal_* stays
@@ -1333,6 +1367,42 @@ def gen_flaggems_python_kernel(
         return expression
 
     def finish(body, prelude=""):
+        if op in FLAGGEMS_HCU_METADATA_ADAPTERS:
+            target = FLAGGEMS_HCU_METADATA_ADAPTERS[op]
+            prelude += (
+                "#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)\n"
+                f"  return at::native::flagos::{target}({', '.join(n for _, n in args)});\n"
+                "#endif\n"
+            )
+        if op == "add.Tensor":
+            prelude += (
+                "#if defined(USE_DCU)\n"
+                "  if (!alpha.isIntegral(false))\n"
+                "    at::native::alpha_check(at::result_type(self, other), alpha);\n"
+                "#endif\n"
+            )
+        elif op == "mean.dim":
+            prelude += (
+                "#if defined(USE_DCU)\n"
+                "  const auto output_dtype = dtype.value_or(self.scalar_type());\n"
+                '  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");\n'
+                "#endif\n"
+            )
+        elif typed and op == "pow.Tensor_Scalar":
+            # Match the existing floating-square decomposition while keeping
+            # the nested multiply on its configured dispatcher route.
+            prelude += (
+                "#if defined(USE_DCU)\n"
+                "  if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&\n"
+                "      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)\n"
+                "    return at::mul(self, self);\n"
+                "#endif\n"
+            )
+        elif op == "cat":
+            body = body.replace(
+                "  return result;",
+                "#if defined(USE_DCU)\n  for (const auto& input : tensors) if (result.is_alias_of(input)) return result.clone();\n#endif\n  return result;",
+            )
         return (
             "".join(declarations)
             + f"{ret_type} {kn}({args_decl(args)}) {{\n{prelude}{body}\n}}"
@@ -1458,7 +1528,7 @@ def gen_flaggems_python_kernel(
     if category == "rng_dropgen":
         # RNG functional with the aten Generator? dropped: pass the remaining
         # positionals to gems; RNG state comes from the philox monkeypatch
-        # (torch_fl._patch_flaggems_philox). Returns a fresh (flagos) tensor.
+        # (compat.flaggems.random.patch_philox). Returns a fresh (flagos) tensor.
         positional = kwargs or []
         pos_names = [n for _t, n in positional]
         pos_init = "{" + ", ".join(pos_names) + "}"
@@ -1620,7 +1690,157 @@ def gen_flaggems_python_kernel(
     # Ordered: the host escape returns before the padding runs, because a dtype
     # this route cannot serve at all should not pay for a pad it will not use.
     host_lines = _host_matmul_prelude(op, args, ret_type)
-    return finish(body, host_lines + dotpad_lines)
+    return finish(body, host_lines + _native_reduction_prelude(op) + dotpad_lines)
+
+
+# These out schemas are absent from the published registry. The generated
+# adapters preserve ATen output storage while calling the existing functional
+# route. No numerical kernel or CUDA redispatch is introduced.
+FLAGGEMS_OUT_ADAPTERS = {
+    "add.out": "add.Tensor",
+    "mul.out": "mul.Tensor",
+    "mean.out": "mean.dim",
+    "cat.out": "cat",
+}
+# Reuse the existing ATen metadata primitives. These allocate no device data
+# and introduce no numerical implementation or vendor dispatch.
+FLAGGEMS_HCU_METADATA_ADAPTERS = {
+    "_unsafe_view": "unsafe_view",
+    "transpose.int": "transpose_int",
+    "unsqueeze": "unsqueeze",
+    "slice.Tensor": "slice_tensor",
+}
+_OUT_ADAPTER_MARKER = "// BEGIN GENERATED FLAGGEMS OUT ADAPTERS"
+
+
+def gen_flaggems_out_adapters(funcs):
+    lines = [
+        _OUT_ADAPTER_MARKER,
+        "#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_DCU)",
+        "#include <ATen/MemoryOverlap.h>",
+        "#include <ATen/native/Resize.h>",
+        "namespace at::native::flagos {",
+    ]
+    for op, functional in FLAGGEMS_OUT_ADAPTERS.items():
+        out_func, source_func = funcs[op], funcs[functional]
+
+        def signature(func):
+            with local.parametrize(
+                use_const_ref_for_mutable_tensors=func.use_const_ref_for_mutable_tensors,
+                use_ilistref_for_tensor_lists=not should_use_arrayref(func),
+            ):
+                return unified_sig(func)
+
+        _, result_type, args = signature(out_func)
+        _, source_result, source_args = signature(source_func)
+        outs = list(out_func.func.arguments.out)
+        if len(outs) != 1 or source_result != "at::Tensor":
+            raise ValueError("out adapter requires a single functional tensor")
+        out_name = outs[0].name
+        non_out = [(t, n) for t, n in args if n != out_name]
+        if [n for _, n in non_out] != [n for _, n in source_args]:
+            raise ValueError(f"out adapter arguments differ: {op}")
+        fn_type, dispatcher = schema_to_cpp_name(op)
+        _, source_dispatcher = schema_to_cpp_name(functional)
+        kernel = fn_type[:-2] + "Adapter"
+        lines += [
+            f"{result_type} {kernel}({args_decl(args)}) {{",
+            f"  at::assert_no_internal_overlap({out_name});",
+        ]
+        for kind, name in non_out:
+            if "TensorList" in kind or "ITensorListRef" in kind:
+                lines.append(
+                    f"  for (const auto& input : {name}) at::assert_no_overlap({out_name}, input);"
+                )
+            elif "Tensor" in kind:
+                lines.append(f"  at::assert_no_partial_overlap({out_name}, {name});")
+        call_args = ", ".join(n for _, n in non_out)
+        if op == "mean.out":
+            lines.append(
+                f'  TORCH_CHECK(!dtype.has_value() || *dtype == {out_name}.scalar_type(), "mean(): dtype must match the output tensor");'
+            )
+            call_args = call_args.replace(
+                "dtype", f"dtype.value_or({out_name}.scalar_type())"
+            )
+        lines += [
+            f"  auto result = {source_dispatcher}({call_args});",
+            f'  TORCH_CHECK(result.device() == {out_name}.device(), "out adapter device mismatch");',
+            f'  TORCH_CHECK(c10::canCast(result.scalar_type(), {out_name}.scalar_type()), "result type cannot be cast to output type");',
+            f"  at::native::resize_output({out_name}, result.sizes());",
+            f"  {out_name}.copy_(result);",
+            f"  return {out_name};",
+            "}",
+            f"REGISTER_IMPL_TO_DISPATCHER({fn_type}, {dispatcher}, Backend::kFlagGems, {kernel})",
+        ]
+    lines += [
+        "} // namespace at::native::flagos",
+        "#endif",
+        "// END GENERATED FLAGGEMS OUT ADAPTERS",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def update_flaggems_out_adapters(path, funcs, *, check=False):
+    current = path.read_text()
+    refreshed = current
+    include = "#include <ATen/native/BinaryOps.h>"
+    if include not in refreshed:
+        refreshed = refreshed.replace(
+            '#include "ops.h"', '#include "ops.h"\n' + include, 1
+        )
+    metadata_include = '#include "../strided_ops.h"'
+    if metadata_include not in refreshed:
+        refreshed = refreshed.replace(
+            '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
+        )
+    for op, category, keywords in (
+        ("add.Tensor", "functional_pure", {"alpha"}),
+        ("mean.dim", "functional_pure", {"dtype"}),
+        ("cat", "tensorlist_dim", set()),
+        ("pow.Tensor_Scalar", "functional_pure", set()),
+        *((op, "functional_pure", set()) for op in FLAGGEMS_HCU_METADATA_ADAPTERS),
+    ):
+        func = funcs[op]
+        with local.parametrize(
+            use_const_ref_for_mutable_tensors=func.use_const_ref_for_mutable_tensors,
+            use_ilistref_for_tensor_lists=not should_use_arrayref(func),
+        ):
+            _, result, args = unified_sig(func)
+        fn_type, _ = schema_to_cpp_name(op)
+        kwargs = [
+            (str(a.type), a.name)
+            for a in func.func.arguments.flat_all
+            if a.name in keywords
+        ]
+        host = (
+            "flag_gems."
+            + {
+                "add.Tensor": "add",
+                "mean.dim": "mean_dim",
+                "cat": "cat",
+                "pow.Tensor_Scalar": "pow_tensor_scalar",
+                "_unsafe_view": "_unsafe_view",
+                "transpose.int": "transpose",
+                "unsqueeze": "unsqueeze",
+                "slice.Tensor": "slice",
+            }[op]
+        )
+        kernel = gen_flaggems_python_kernel(
+            op, fn_type, result, args, host, category, func, kwargs, typed=True
+        )
+        pattern = rf"static TypedSourceSlot {fn_type}Source\([^\n]+\);\n{re.escape(result)} {fn_type[:-2]}KernelPython\([^\n]*\) \{{.*?\n\}}"
+        refreshed, count = re.subn(pattern, lambda match: kernel, refreshed, flags=re.S)
+        if count != 1:
+            raise ValueError(f"cannot uniquely refresh measured HCU source route: {op}")
+    expected = (
+        refreshed.split(_OUT_ADAPTER_MARKER, 1)[0].rstrip()
+        + "\n\n"
+        + gen_flaggems_out_adapters(funcs)
+    )
+    if check and current != expected:
+        raise SystemExit("stale FlagGems out adapters")
+    if not check and current != expected:
+        path.write_text(expected)
 
 
 def gen_flaggems_source_bridges(funcs, discovered):
@@ -2910,6 +3130,13 @@ def main():
         str(root / "packaged/ATen/native/tags.yaml"),
     )
     funcs = {str(f.func.name): f for f in nf.native_functions}
+    if "--out-adapters-only" in sys.argv or "--check-out-adapters" in sys.argv:
+        update_flaggems_out_adapters(
+            out_dir / "flaggems_python_kernels.cc",
+            funcs,
+            check="--check-out-adapters" in sys.argv,
+        )
+        return
 
     # Ops the templates cannot compile yet; skipped -> fall through to cpu_fallback.
     # Grown empirically during the compile/import fix loop.
@@ -3225,6 +3452,7 @@ def main():
     lines.append("")
     lines.append("#endif  // FLAGOS_FLAGGEMS_PYTHON")
     (out_dir / "flaggems_python_kernels.cc").write_text("\n".join(lines) + "\n")
+    update_flaggems_out_adapters(out_dir / "flaggems_python_kernels.cc", funcs)
     print(f"   generated {len(py_ops)} flaggems-python kernels")
 
     # ---- register.inc ----

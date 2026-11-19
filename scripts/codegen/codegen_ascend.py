@@ -698,7 +698,10 @@ _SCALAR_FASTPATH_NOALPHA = """\
     at::Scalar sc = other.item();
     auto out = ascend::OpPreparation::apply_tensor_without_format(
         self.sizes(), self.options());
-    ascend::AclScalarWrapper acl_sc(sc, self.scalar_type());
+    // Match the vendor BF16 scalar path without rounding the scalar to BF16.
+    auto scalar_dtype = self.scalar_type() == at::kBFloat16
+        ? at::kFloat : self.scalar_type();
+    ascend::AclScalarWrapper acl_sc(sc, scalar_dtype);
     static void* sOpAddr = nullptr; static void* sWsAddr = nullptr;
     ascend::SigHasher hsh; hsh.tensor(self);
     {{ double sv = sc.toDouble(); hsh.val(sv); }}
@@ -2627,7 +2630,9 @@ at::Tensor {kernel}(const at::Tensor& self, const at::Scalar& other) {{
       self.sizes(), self.options());
 
   ascend::AclTensorWrapper acl_self(self);
-  ascend::AclScalarWrapper acl_other(other, self.scalar_type());
+  auto scalar_dtype = self.scalar_type() == at::kBFloat16
+      ? at::kFloat : self.scalar_type();
+  ascend::AclScalarWrapper acl_other(other, scalar_dtype);
   ascend::AclTensorWrapper acl_out(out);
 
   EXEC_ASCEND_CMD({aclnn}, acl_self.get(), acl_other.get(), acl_out.get());

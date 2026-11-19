@@ -14,6 +14,6 @@
 
 """TsingMicro (TX8) accelerator compatibility shims.
 
-Populated by ``torch_fl._install_tsingmicro_flaggems_compat`` at import; see
+Populated by ``torch_fl.compat.flaggems.device.install_device_shims`` at import; see
 ``_tsingmicro_compat`` for the Qwen-Image-2.1 rotation patch.
 """

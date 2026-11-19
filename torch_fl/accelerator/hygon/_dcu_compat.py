@@ -445,7 +445,7 @@ def patch_torch_cuda_for_dcu() -> bool:
     the native implementation is strictly better and must not be shadowed.
 
     Must be called before FlagGems / triton import anything that captures
-    ``torch.cuda`` attributes, which is why ``_patch_flaggems_codegen_config()``
+    ``torch.cuda`` attributes, which is why ``configure_vendor()``
     in ``torch_fl/__init__.py`` calls it ahead of ``install_dcu_rng_bridge()``.
     """
     global _cuda_patched

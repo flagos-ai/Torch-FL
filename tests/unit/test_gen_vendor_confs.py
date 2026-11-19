@@ -54,6 +54,7 @@ Run: pytest tests/unit/test_gen_vendor_confs.py
 import importlib.util
 from collections import Counter
 from pathlib import Path
+import re
 
 import pytest
 
@@ -70,6 +71,7 @@ def _load():
 
 
 g = pytest.importorskip("importlib") and _load()
+policy = importlib.import_module("native_host_policy")
 CONF_DIR = REPO_ROOT / "torch_fl" / "configs"
 
 
@@ -474,6 +476,31 @@ def test_shipped_confs_are_up_to_date():
     assert not stale, f"stale: {stale}; run scripts/codegen/gen_vendor_confs.py"
 
 
+def test_enflame_native_host_experiment_preserves_every_unmeasured_route():
+    built = g.build_all(CONF_DIR)
+    text = g.enflame_native_host_conf(built)
+    path = REPO_ROOT / "benchmarks/host_compiler/configs/enflame_native_host.conf"
+    assert path.read_text() == text
+    routes = {}
+    for line in text.splitlines():
+        op, sep, value = line.split("#", 1)[0].partition("=")
+        if sep:
+            routes[op.strip()] = value.strip()
+    assert set(routes) == set(built["enflame"][1])
+    for op, value in built["enflame"][1].items():
+        expected = (
+            "flaggems; Long:enflame"
+            if op in g.ENFLAME_NATIVE_HOST_FLAGGEMS
+            else value.split("#", 1)[0].strip()
+        )
+        if op == "add.Tensor":
+            expected = "flaggems; Int:enflame; Long:enflame"
+        assert routes[op] == expected, op
+    assert len(g.ENFLAME_NATIVE_HOST_FLAGGEMS) == 9
+    assert built["enflame"][1]["silu"].split("#", 1)[0].strip() == "flaggems"
+    assert built["enflame"][1]["_softmax"] == "enflame"
+
+
 def test_generation_is_idempotent():
     """Regenerating from already-generated confs reproduces them exactly.
 
@@ -504,6 +531,19 @@ def test_native_nvidia_dtype_route_is_distinct_from_boxing():
     g._reject_boxing_routes("backends_nvidia.conf", {"mm": "flaggems; BFloat16:nvidia"})
 
 
+def test_ascend_softmax_precision_exception_preserves_flaggems_base():
+    text, routes, _ = g.build_all(CONF_DIR)["ascend"]
+    assert routes["_softmax"] == "flaggems; Float:ascend  # ascend"
+    assert "_softmax = flaggems; Float:ascend  # ascend" in text
+    assert policy.route_backends(routes["_softmax"]) == ["flaggems", "ascend"]
+    assert policy.route_backends(routes["rsqrt"])[0] == "flaggems"
+    assert policy.route_backends(routes["mean.dim"])[0] == "flaggems"
+    count = int(re.search(r"(?m)^#\s+flaggems\s+(\d+)$", text).group(1))
+    assert count == sum(
+        policy.route_backends(value)[0] == "flaggems" for value in routes.values()
+    )
+
+
 @pytest.mark.parametrize("vendor", sorted(g.VENDORS))
 def test_every_vendor_conf_covers_the_whole_op_list(vendor):
     built = g.build_all(CONF_DIR)
@@ -512,8 +552,8 @@ def test_every_vendor_conf_covers_the_whole_op_list(vendor):
     assert len(routes) == op_count
     allowed = {"flaggems_cpp", "flaggems", "tileops", vendor, "none"}
     for op, value in routes.items():
-        key = value.split("#", 1)[0].strip()
-        assert key in allowed, f"{vendor}: {op} routed to unexpected {key!r}"
+        for key in policy.route_backends(value):
+            assert key in allowed, f"{vendor}: {op} routed to unexpected {key!r}"
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
@@ -529,10 +569,17 @@ def test_default_confs_never_route_boxing(platform):
     routes = g.build_all(CONF_DIR)[platform][1]
     assert routes, f"{platform} produced no routes"
     for op, value in routes.items():
-        key = value.split("#", 1)[0].strip()
-        assert key in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
-        assert key != g.BOXING_FALLBACK, op
-        assert key != "nvidia", op
+        from native_host_policy import configured_dtype_routes, route_backends
+
+        keys = route_backends(value)
+        assert keys[0] in {"flaggems_cpp", "flaggems", "tileops", "none"}, op
+        if len(keys) > 1:
+            assert platform == "hygon"
+            assert (
+                value.split(";", 1)[1].strip() == configured_dtype_routes(platform)[op]
+            )
+            assert keys[1:] == [platform]
+        assert not {g.BOXING_FALLBACK, "cuda", "nvidia"}.intersection(keys), op
 
 
 def test_every_platform_covers_the_same_op_set():
@@ -907,6 +954,8 @@ def test_default_confs_route_only_measured_flaggems(platform):
     }
     fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
     measured = g.boxing_measured_python_ops(f"backends_{platform}.conf")
+    if platform == "hygon":
+        measured |= g.HYGON_HOST_FLAGGEMS_MEASURED
     stray = sorted(accelerated - (fg | measured))
     assert not stray, f"{platform} accelerates {stray[:5]} with no FlagGems route"
 

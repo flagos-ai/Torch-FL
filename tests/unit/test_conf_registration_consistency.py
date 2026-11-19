@@ -789,7 +789,7 @@ def test_conf_route_counts_are_stable():
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        "hygon": {"none": 1586, "flaggems": 456},
+        "hygon": {"none": 1578, "flaggems": 464},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.
@@ -802,7 +802,9 @@ def test_conf_route_counts_are_stable():
         # kernel is rejected by the Enflame front end (64-bit data type not
         # supported on GCU300), so they are served by the native topsaten kernel
         # instead. See NATIVE_TRITON_GAPS["enflame"].
-        "enflame": {"none": 1608, "enflame": 183, "flaggems": 251},
+        # Native argmax/default+out close two CPU routes. Isolated precision
+        # checks restore SiLU to FlagGems and retain the vendor mean.dim path.
+        "enflame": {"none": 1606, "enflame": 186, "flaggems": 250},
         # kunlunxin is a native vendor backend: every op routes to the vendor
         # XPU SDK (``kunlunxin``), to FlagGems, or is left at ``none`` -- there
         # is no ``cuda`` route.  The ``kunlunxin`` count is exactly what

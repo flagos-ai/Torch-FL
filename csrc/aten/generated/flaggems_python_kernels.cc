@@ -4,6 +4,8 @@
 #ifdef FLAGOS_FLAGGEMS_PYTHON
 
 #include "ops.h"
+#include "../strided_ops.h"
+#include <ATen/native/BinaryOps.h>
 #include "../device_boxing.h"
 #include "../backends/flagos/python_op_caller.h"
 #include "../backends/flagos/typed_source_host.h"
@@ -445,6 +447,9 @@ static TypedSourceSlot PrivUnique2FnSource("aten::_unique2", "flag_gems._unique2
 
 static TypedSourceSlot PrivUnsafeViewFnSource("aten::_unsafe_view", "flag_gems._unsafe_view", "873830181b5714c67e350022f6af9c25ee23b38520076ef324e0058c891e2356", "{\"abi\": \"873830181b5714c67e350022f6af9c25ee23b38520076ef324e0058c891e2356\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems._unsafe_view\", \"op\": \"aten::_unsafe_view\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUnsafeViewKernelPython(const at::Tensor & self, at::IntArrayRef size) {
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+  return at::native::flagos::unsafe_view(self, size);
+#endif
   auto result = PrivUnsafeViewFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._unsafe_view", {self, size}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(size));
   UnboxToFlagos(result);
   return result;
@@ -594,6 +599,10 @@ at::Tensor AdaptiveMaxPool3dBackwardKernelPython(const at::Tensor & grad_output,
 
 static TypedSourceSlot AddTensorFnSource("aten::add.Tensor", "flag_gems.add", "fb0edf418eebcfa98e41dff7d746ec8e1dc6d2742c252afbcb38a995ca5f3a72", "{\"abi\": \"fb0edf418eebcfa98e41dff7d746ec8e1dc6d2742c252afbcb38a995ca5f3a72\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": \"alpha\", \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.add\", \"op\": \"aten::add.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor AddTensorKernelPython(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
+#if defined(USE_DCU)
+  if (!alpha.isIntegral(false))
+    at::native::alpha_check(at::result_type(self, other), alpha);
+#endif
   auto result = AddTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.add", {self, other}, {PyKwarg{"alpha", alpha}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(other), static_cast<const at::Scalar&>(alpha));
   UnboxToFlagos(result);
   return result;
@@ -1184,14 +1193,24 @@ at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool period
 
 static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self, mat2}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2));
+  at::Tensor native_product;
+  if (at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { return native_product; }
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self_dotpad, mat2_dotpad}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad));
   UnboxToFlagos(result);
   return result;
 }
 
 static TypedSourceSlot BmmOutFnSource("aten::bmm.out", "flag_gems.bmm_out", "f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1", "{\"abi\": \"f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm_out\", \"op\": \"aten::bmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self, mat2, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
+  at::Tensor native_product;
+  if (self.dim() == 3 && mat2.dim() == 3 && out.dim() == 3 && out.device() == self.device() && out.scalar_type() == self.scalar_type() && out.size(0) == self.size(0) && out.size(1) == self.size(1) && out.size(2) == mat2.size(2) && at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { out.copy_(native_product); return out; }
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self_dotpad, mat2_dotpad, out}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad), static_cast<const at::Tensor&>(out));
   return out;
 }
 
@@ -1206,6 +1225,9 @@ static TypedSourceSlot CatFnSource("aten::cat", "flag_gems.cat", "eb699a46d16038
 at::Tensor CatKernelPython(const at::ITensorListRef & tensors, int64_t dim) {
   auto result = CatFnSource.Call<at::Tensor>([&]() { return CallPythonOp_ListI("flag_gems.cat", tensors, dim); }, static_cast<const at::ITensorListRef&>(tensors), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
+#if defined(USE_DCU)
+  for (const auto& input : tensors) if (result.is_alias_of(input)) return result.clone();
+#endif
   return result;
 }
 
@@ -3113,6 +3135,14 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  at::Tensor native_mean;
+  if (self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
+#endif
+#if defined(USE_DCU)
+  const auto output_dtype = dtype.value_or(self.scalar_type());
+  TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");
+#endif
   auto result = MeanDimFnSource.Call<at::Tensor>([&]() { return CallPythonOp_GenericKw("flag_gems.mean_dim", {self, dim, keepdim}, {PyKwarg{"dtype", dtype.has_value() ? c10::IValue(static_cast<int64_t>(*dtype)) : c10::IValue(), /*is_dtype=*/true, /*is_none=*/!dtype.has_value()}}); }, static_cast<const at::Tensor&>(self), static_cast<const at::OptionalIntArrayRef&>(dim), static_cast<const bool&>(keepdim), static_cast<const ::std::optional<at::ScalarType>&>(dtype));
   UnboxToFlagos(result);
   return result;
@@ -3576,6 +3606,11 @@ at::Tensor PowScalarKernelPython(const at::Scalar & self, const at::Tensor & exp
 
 static TypedSourceSlot PowTensorScalarFnSource("aten::pow.Tensor_Scalar", "flag_gems.pow_tensor_scalar", "16bf27f73e9f912188b5fa351fce8a83d819ab07d8c949bbdc1555c5f6de5522", "{\"abi\": \"16bf27f73e9f912188b5fa351fce8a83d819ab07d8c949bbdc1555c5f6de5522\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Scalar\"}], \"host\": \"flag_gems.pow_tensor_scalar\", \"op\": \"aten::pow.Tensor_Scalar\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PowTensorScalarKernelPython(const at::Tensor & self, const at::Scalar & exponent) {
+#if defined(USE_DCU)
+  if (MulTensorFnSource.Available() && c10::isFloatingType(self.scalar_type()) &&
+      (exponent.isIntegral(false) || exponent.isFloatingPoint()) && exponent.toDouble() == 2.0)
+    return at::mul(self, self);
+#endif
   auto result = PowTensorScalarFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.pow_tensor_scalar", {self, exponent}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Scalar&>(exponent));
   UnboxToFlagos(result);
   return result;
@@ -4157,6 +4192,9 @@ at::Tensor & SinhInplaceKernelPython(at::Tensor & self) {
 
 static TypedSourceSlot SliceTensorFnSource("aten::slice.Tensor", "flag_gems.slice", "b95c118341a68b6e0f60b4953ab5d4593f864f5b4a243dd4ce31b0c8d4d2bf40", "{\"abi\": \"b95c118341a68b6e0f60b4953ab5d4593f864f5b4a243dd4ce31b0c8d4d2bf40\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.slice\", \"op\": \"aten::slice.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SliceTensorKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+  return at::native::flagos::slice_tensor(self, dim, start, end, step);
+#endif
   auto result = SliceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.slice", {self, dim, start, end, step}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<int64_t>&>(start), static_cast<const ::std::optional<int64_t>&>(end), static_cast<const int64_t&>(step));
   UnboxToFlagos(result);
   return result;
@@ -4637,6 +4675,9 @@ at::Tensor TraceKernelPython(const at::Tensor & self) {
 
 static TypedSourceSlot TransposeIntFnSource("aten::transpose.int", "flag_gems.transpose", "a691b511b3e6d9f9bc96631cd111e1473c3e822396c2a765a4fc013ee9c6d56d", "{\"abi\": \"a691b511b3e6d9f9bc96631cd111e1473c3e822396c2a765a4fc013ee9c6d56d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.transpose\", \"op\": \"aten::transpose.int\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TransposeIntKernelPython(const at::Tensor & self, int64_t dim0, int64_t dim1) {
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+  return at::native::flagos::transpose_int(self, dim0, dim1);
+#endif
   auto result = TransposeIntFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.transpose", {self, dim0, dim1}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim0), static_cast<const int64_t&>(dim1));
   UnboxToFlagos(result);
   return result;
@@ -4725,6 +4766,9 @@ static TypedSourceSlot UniqueDimFnSource("aten::unique_dim", "flag_gems.unique_d
 
 static TypedSourceSlot UnsqueezeFnSource("aten::unsqueeze", "flag_gems.unsqueeze", "90ed4ac6933e2d84868d6938fb7180aa58dc4b8e8e8a14759e01722fe81e9ac2", "{\"abi\": \"90ed4ac6933e2d84868d6938fb7180aa58dc4b8e8e8a14759e01722fe81e9ac2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.unsqueeze\", \"op\": \"aten::unsqueeze\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UnsqueezeKernelPython(const at::Tensor & self, int64_t dim) {
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+  return at::native::flagos::unsqueeze(self, dim);
+#endif
   auto result = UnsqueezeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.unsqueeze", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));
   UnboxToFlagos(result);
   return result;
@@ -5575,3 +5619,59 @@ REGISTER_IMPL_TO_DISPATCHER(ZerosLikeFn, zeros_like_dispatcher, Backend::kFlagGe
 } // namespace at::native::flagos
 
 #endif  // FLAGOS_FLAGGEMS_PYTHON
+
+// BEGIN GENERATED FLAGGEMS OUT ADAPTERS
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && defined(USE_DCU)
+#include <ATen/MemoryOverlap.h>
+#include <ATen/native/Resize.h>
+namespace at::native::flagos {
+at::Tensor & AddOutAdapter(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha, at::Tensor & out) {
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto result = add_tensor_dispatcher(self, other, alpha);
+  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");
+  TORCH_CHECK(c10::canCast(result.scalar_type(), out.scalar_type()), "result type cannot be cast to output type");
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(AddOutFn, add_out_dispatcher, Backend::kFlagGems, AddOutAdapter)
+at::Tensor & MulOutAdapter(const at::Tensor & self, const at::Tensor & other, at::Tensor & out) {
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  at::assert_no_partial_overlap(out, other);
+  auto result = mul_tensor_dispatcher(self, other);
+  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");
+  TORCH_CHECK(c10::canCast(result.scalar_type(), out.scalar_type()), "result type cannot be cast to output type");
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(MulOutFn, mul_out_dispatcher, Backend::kFlagGems, MulOutAdapter)
+at::Tensor & MeanOutAdapter(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype, at::Tensor & out) {
+  at::assert_no_internal_overlap(out);
+  at::assert_no_partial_overlap(out, self);
+  TORCH_CHECK(!dtype.has_value() || *dtype == out.scalar_type(), "mean(): dtype must match the output tensor");
+  auto result = mean_dim_dispatcher(self, dim, keepdim, dtype.value_or(out.scalar_type()));
+  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");
+  TORCH_CHECK(c10::canCast(result.scalar_type(), out.scalar_type()), "result type cannot be cast to output type");
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(MeanOutFn, mean_out_dispatcher, Backend::kFlagGems, MeanOutAdapter)
+at::Tensor & CatOutAdapter(const at::ITensorListRef & tensors, int64_t dim, at::Tensor & out) {
+  at::assert_no_internal_overlap(out);
+  for (const auto& input : tensors) at::assert_no_overlap(out, input);
+  auto result = cat_dispatcher(tensors, dim);
+  TORCH_CHECK(result.device() == out.device(), "out adapter device mismatch");
+  TORCH_CHECK(c10::canCast(result.scalar_type(), out.scalar_type()), "result type cannot be cast to output type");
+  at::native::resize_output(out, result.sizes());
+  out.copy_(result);
+  return out;
+}
+REGISTER_IMPL_TO_DISPATCHER(CatOutFn, cat_out_dispatcher, Backend::kFlagGems, CatOutAdapter)
+} // namespace at::native::flagos
+#endif
+// END GENERATED FLAGGEMS OUT ADAPTERS

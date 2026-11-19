@@ -25,9 +25,9 @@ cohort = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cohort)
 
 
-@pytest.fixture
-def policy():
-    return cohort.load_build_policy(ROOT).source_policy("nvidia")
+@pytest.fixture(params=["nvidia", "metax"])
+def policy(request):
+    return cohort.load_build_policy(ROOT).source_policy(request.param)
 
 
 @pytest.fixture
@@ -59,7 +59,16 @@ def test_policy_is_opt_in_to_the_validated_vendor_build(policy, tmp_path):
     )
     assert (
         cohort.source_policy_for_build(
-            SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="nvidia"), ROOT
+            SimpleNamespace(
+                NATIVE_HOSTS=True, NATIVE_VENDOR=False, ACCELERATOR=policy["vendor"]
+            ),
+            ROOT,
+        )
+        is None
+    )
+    assert (
+        cohort.source_policy_for_build(
+            SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR=policy["vendor"]), ROOT
         )
         == policy
     )
@@ -67,6 +76,45 @@ def test_policy_is_opt_in_to_the_validated_vendor_build(policy, tmp_path):
         cohort.source_policy_for_build(
             SimpleNamespace(NATIVE_VENDOR=True, ACCELERATOR="mthreads"), ROOT
         )
+
+
+def test_ascend_sources_require_native_hosts_without_bundling_vendor_torch():
+    policy = cohort.load_build_policy(ROOT).source_policy("ascend")
+    assert policy["requires_native_vendor"] is False
+    assert variants.validate(policy) == policy
+    assert (
+        cohort.source_policy_for_build(
+            SimpleNamespace(
+                NATIVE_HOSTS=True, NATIVE_VENDOR=False, ACCELERATOR="ascend"
+            ),
+            ROOT,
+        )
+        == policy
+    )
+    assert (
+        cohort.source_policy_for_build(
+            SimpleNamespace(
+                NATIVE_HOSTS=True, NATIVE_VENDOR=False, ACCELERATOR="mthreads"
+            ),
+            ROOT,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("same_tensor_metadata", 1),
+        ("unit_stride_axis", 1),
+        ("min_tensors", True),
+        ("min_tensors", 0),
+    ],
+)
+def test_source_metadata_constraints_are_typed(policy, field, value):
+    policy["entries"][0][field] = value
+    with pytest.raises(ValueError, match="invalid published source"):
+        variants.validate(policy)
 
 
 def test_load_keeps_public_operator_and_published_source_unchanged(policy, published):
@@ -98,7 +146,9 @@ def test_cohort_changes_fail_before_admission(policy, published, monkeypatch, ch
         variants.load(policy, sources)
 
 
-@pytest.mark.parametrize("change", ["duplicate", "dtype", "module", "hash", "reason"])
+@pytest.mark.parametrize(
+    "change", ["duplicate", "dtype", "module", "hash", "reason", "wrapped_numbers"]
+)
 def test_unvalidated_selections_are_rejected(policy, change):
     row = policy["entries"][0]
     if change == "duplicate":
@@ -107,6 +157,8 @@ def test_unvalidated_selections_are_rejected(policy, change):
         row["dtypes"] = ["Half"]
     elif change == "module":
         row["module"] = "flag_gems...outside"
+    elif change == "wrapped_numbers":
+        row["allow_wrapped_numbers"] = "yes"
     elif change == "hash":
         row["sha256"] = "unknown"
     else:

@@ -10,7 +10,7 @@
 // claim without a route raises "routed to 'none' ... but the op is registered
 // on PrivateUse1" instead of reaching cpu_fallback.
 //
-// Total: 453 ops registered here.
+// Total: 461 ops registered here.
 //
 // Held back from the boxing claim: the conf routes them to `none`, or
 // `register.inc` has no wrapper for them:
@@ -571,8 +571,6 @@
 //   - adaptive_max_pool3d_backward.grad_input
 //   - add.Scalar
 //   - add.Scalar_out
-//   - add.Tensor
-//   - add.out
 //   - add_.Scalar
 //   - add_.Tensor
 //   - addbmm
@@ -689,8 +687,6 @@
 //   - bucketize.Scalar
 //   - bucketize.Scalar_out
 //   - bucketize.Tensor_out
-//   - cat
-//   - cat.out
 //   - cauchy
 //   - cauchy.out
 //   - cauchy_
@@ -1064,9 +1060,7 @@
 //   - maximum
 //   - maximum.out
 //   - mean
-//   - mean.dim
 //   - mean.dtype_out
-//   - mean.out
 //   - median.dim_values
 //   - median.out
 //   - min.dim_min
@@ -1114,8 +1108,6 @@
 //   - mse_loss_backward.grad_input
 //   - mul.Scalar
 //   - mul.Scalar_out
-//   - mul.Tensor
-//   - mul.out
 //   - mul_.Scalar
 //   - mul_.Tensor
 //   - multi_margin_loss
@@ -1634,6 +1626,8 @@
   m.impl("acos", WrapperAcos);
   m.impl("acosh", WrapperAcosh);
   m.impl("acosh_", WrapperAcoshInplace);
+  m.impl("add.Tensor", WrapperAddTensor);
+  m.impl("add.out", WrapperAddOut);
   m.impl("addcdiv", WrapperAddcdiv);
   m.impl("addcdiv_", WrapperAddcdivInplace);
   m.impl("addcmul", WrapperAddcmul);
@@ -1696,6 +1690,8 @@
   m.impl("bitwise_xor_.Scalar", WrapperBitwiseXorInplaceScalar);
   m.impl("bitwise_xor_.Tensor", WrapperBitwiseXorInplaceTensor);
   m.impl("bucketize.Tensor", WrapperBucketizeTensor);
+  m.impl("cat", WrapperCat);
+  m.impl("cat.out", WrapperCatOut);
   m.impl("ceil", WrapperCeil);
   m.impl("ceil.out", WrapperCeilOut);
   m.impl("ceil_", WrapperCeilInplace);
@@ -1878,6 +1874,8 @@
   m.impl("max_pool2d_with_indices", WrapperMaxPool2dWithIndices);
   m.impl("max_pool3d_with_indices", WrapperMaxPool3dWithIndices);
   m.impl("max_unpool2d", WrapperMaxUnpool2d);
+  m.impl("mean.dim", WrapperMeanDim);
+  m.impl("mean.out", WrapperMeanOut);
   m.impl("median", WrapperMedian);
   m.impl("median.dim", WrapperMedianDim);
   m.impl("min", WrapperMin);
@@ -1885,6 +1883,8 @@
   m.impl("mish", WrapperMish);
   m.impl("mish_", WrapperMishInplace);
   m.impl("mode", WrapperMode);
+  m.impl("mul.Tensor", WrapperMulTensor);
+  m.impl("mul.out", WrapperMulOut);
   m.impl("multinomial", WrapperMultinomial);
   m.impl("mv", WrapperMv);
   m.impl("nan_to_num", WrapperNanToNum);

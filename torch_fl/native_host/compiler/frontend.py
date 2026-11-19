@@ -7,6 +7,7 @@ import ast
 import builtins
 import copy
 import inspect
+import itertools
 import textwrap
 import typing
 import collections.abc
@@ -100,6 +101,8 @@ class Frontend:
         self.constants = Evaluator(metadata_modules)
         self.module_literals = {}
         self.module_initializers = {}
+        self.guarded_function = None
+        self.guarded_input_dtypes = frozenset()
 
     def literal_global(self, function, name):
         module_name = function.__module__
@@ -187,6 +190,7 @@ class Frontend:
     ):
         key = (
             function,
+            self.guarded_input_dtypes if function is self.guarded_function else (),
             tuple(sorted((argument_types or {}).items())),
             return_hint,
             repr(argument_containers),
@@ -456,7 +460,11 @@ class Frontend:
         self.functions[name] = ast.fix_missing_locations(node)
         return name
 
-    def source(self, function, signature):
+    def source(self, function, signature, *, input_dtypes=()):
+        # Only schema entries with the corresponding runtime dtype guard may
+        # call this specialization. Ordinary source hosts keep every branch.
+        self.guarded_function = function
+        self.guarded_input_dtypes = frozenset(input_dtypes)
         name = self.transform(function, signature=signature)
         node = self.functions[name]
         text = "import torch\nimport math\nfrom typing import Any, List, Dict, Tuple, Optional\n\n"
@@ -869,8 +877,20 @@ class Transform(ast.NodeTransformer):
             left, right = self.annotation(node.body), self.annotation(node.orelse)
             if left == right:
                 return left
-        if isinstance(node, ast.ListComp):
-            element = self.annotation(node.elt)
+        if isinstance(node, (ast.ListComp, ast.GeneratorExp)):
+            original_types = self.types.copy()
+            try:
+                for generator in node.generators:
+                    owner = self.annotation(generator.iter)
+                    if (
+                        isinstance(generator.target, ast.Name)
+                        and owner
+                        and owner.startswith("List[")
+                    ):
+                        self.types[generator.target.id] = owner[5:-1]
+                element = self.annotation(node.elt)
+            finally:
+                self.types = original_types
             if element:
                 return "List[" + element + "]"
         if isinstance(node, ast.Compare):
@@ -887,6 +907,23 @@ class Transform(ast.NodeTransformer):
                     return "List[" + annotations[0] + "]"
         if isinstance(node, ast.Call):
             name = ast.unparse(node.func)
+            if (
+                node.args
+                and isinstance(node.args[0], ast.GeneratorExp)
+                and isinstance(node.func, ast.Name)
+                and name not in self.locals
+                and self.resolve(node.func) is getattr(builtins, name, None)
+            ):
+                if name in ("any", "all"):
+                    return "bool"
+                owner = self.annotation(node.args[0])
+                if owner and name in ("min", "max", "sum", "next"):
+                    element = owner[5:-1]
+                    if len(node.args) == 1 or self.annotation(node.args[1]) == element:
+                        return element
+                    return None
+            if name == "itertools.accumulate" and node.args:
+                return self.annotation(node.args[0])
             if name in ("tuple", "list", "torch.Size"):
                 return self.annotation(node.args[0])
             if (
@@ -971,6 +1008,34 @@ class Transform(ast.NodeTransformer):
         return None
 
     def visit_For(self, node):
+        if isinstance(node.target, ast.Name):
+            owner = self.annotation(node.iter)
+            if owner and owner.startswith("List["):
+                self.types[node.target.id] = owner[5:-1]
+        if (
+            isinstance(node.iter, ast.Call)
+            and ast.unparse(node.iter.func) == "zip"
+            and "zip" not in self.locals
+            and self.resolve(node.iter.func) is zip
+            and isinstance(node.target, ast.Tuple)
+        ):
+            for target, value in zip(node.target.elts, node.iter.args):
+                owner = self.annotation(value)
+                if isinstance(target, ast.Name) and owner and owner.startswith("List["):
+                    self.types[target.id] = owner[5:-1]
+        # Opaque wheel-owned metadata classes remain in a precompiled source
+        # region. Their original pointwise launches use the native runtime.
+        if any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and isinstance(self.globals.get(n.func.id), type)
+            and self.globals[n.func.id].__module__.startswith("flag_gems.")
+            and self.tensor_buffer(n) is None
+            for n in ast.walk(node)
+        ):
+            call = self.source_region(node, "object_loop", "None")
+            if call is not None:
+                return ast.Expr(call)
         if isinstance(node.target, ast.Name) and isinstance(node.iter, ast.Tuple):
             kinds = [self.annotation(n) for n in node.iter.elts]
             if all(kinds) and len(set(kinds)) > 1:
@@ -1031,6 +1096,9 @@ class Transform(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_ListComp(self, node):
+        filtered = self.metadata_comprehension(node)
+        if filtered is not None:
+            return filtered
         for generator in node.generators:
             owner = self.annotation(generator.iter)
             if (
@@ -1962,8 +2030,686 @@ class Transform(ast.NodeTransformer):
                         self.types[element.id] = ast.unparse(member)
         return node
 
+    def tensor_buffer(self, node):
+        """Represent tensor-backed, non-reinterpreting buffers as native views."""
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            return None
+        owner = self.globals.get(node.func.id)
+        if not (
+            isinstance(owner, type)
+            and owner.__module__ == "flag_gems.utils.tensor_wrapper"
+            and owner.__name__ == "StridedBuffer"
+        ):
+            return None
+        parameters = ("base", "shape", "strides", "dtype", "offset")
+        if len(node.args) > len(parameters):
+            return None
+        values = dict(zip(parameters, node.args))
+        for key in node.keywords:
+            if key.arg not in parameters or key.arg in values:
+                return None
+            values[key.arg] = key.value
+        base = values.get("base")
+        if not isinstance(base, ast.Name) or self.annotation(base) != "torch.Tensor":
+            return None
+        dtype = values.get("dtype", ast.Constant(None))
+        if not isinstance(dtype, ast.Constant) or dtype.value is not None:
+            return None
+        shape = values.get("shape", ast.Constant(None))
+        strides = values.get("strides", ast.Constant(None))
+        if isinstance(shape, ast.Constant) and shape.value is None:
+            shape = ast.Attribute(copy.deepcopy(base), "shape", ast.Load())
+        if isinstance(strides, ast.Constant) and strides.value is None:
+            strides = ast.Call(
+                ast.Attribute(copy.deepcopy(base), "stride", ast.Load()), [], []
+            )
+        # Tensor strides are nonnegative. A buffer with computed/negative strides
+        # keeps its original object semantics instead of becoming an invalid view.
+        if not (
+            isinstance(strides, ast.Call)
+            and isinstance(strides.func, ast.Attribute)
+            and strides.func.attr == "stride"
+            and self.annotation(strides.func.value) == "torch.Tensor"
+            and not strides.args
+            and not strides.keywords
+            and self.annotation(shape) == "List[int]"
+        ):
+            return None
+        offset = values.get("offset", ast.Constant(0))
+        if self.annotation(offset) != "int":
+            return None
+        absolute = ast.BinOp(
+            ast.Call(
+                ast.Attribute(copy.deepcopy(base), "storage_offset", ast.Load()), [], []
+            ),
+            ast.Add(),
+            offset,
+        )
+        return ast.Call(
+            ast.parse("torch.as_strided").body[0].value,
+            [base, shape, strides, absolute],
+            [],
+        )
+
+    def metadata_generator(self, node, record, result, fallback):
+        """Lower pure metadata consumers without materializing their generators."""
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id not in self.locals
+            and node.func.id in {"min", "max", "sum", "any", "all", "next"}
+            and self.resolve(node.func) is getattr(builtins, node.func.id)
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], ast.GeneratorExp)
+            and len(node.args[0].generators) == 1
+        ):
+            return None
+        expression = node.args[0]
+        generator = expression.generators[0]
+        if not (
+            isinstance(generator.target, ast.Name)
+            and isinstance(generator.iter, ast.Name)
+            and not generator.is_async
+        ):
+            return None
+        # Calls, nested scopes, tensor arithmetic and mutable/global reads retain
+        # their original lazy source helper. These metadata reads are effect-free.
+        allowed = (
+            ast.Name,
+            ast.Constant,
+            ast.Attribute,
+            ast.Subscript,
+            ast.Compare,
+            ast.BoolOp,
+            ast.UnaryOp,
+            ast.BinOp,
+            ast.Load,
+            ast.expr_context,
+            ast.cmpop,
+            ast.boolop,
+            ast.unaryop,
+            ast.operator,
+        )
+        names = set(record["inputs"]) | {generator.target.id}
+        for value in [expression.elt, *generator.ifs]:
+            if any(
+                not isinstance(n, allowed)
+                or isinstance(n, ast.Name)
+                and n.id not in names
+                or isinstance(n, ast.Attribute)
+                and n.attr not in {"ndim", "shape"}
+                for n in ast.walk(value)
+            ):
+                return None
+        consumer = node.func.id
+        iterable = self.annotation(generator.iter)
+        if not iterable or not iterable.startswith("List["):
+            return None
+        local_types = {**self.types, generator.target.id: iterable[5:-1]}
+        for root in [expression.elt, *generator.ifs]:
+            parents = {
+                child: parent
+                for parent in ast.walk(root)
+                for child in ast.iter_child_nodes(parent)
+            }
+            for value in ast.walk(root):
+                if (
+                    isinstance(value, ast.Attribute)
+                    and value.attr == "shape"
+                    and not isinstance(parents.get(value), ast.Subscript)
+                ):
+                    return None
+                if (
+                    isinstance(value, ast.Name)
+                    and local_types.get(value.id) == "torch.Tensor"
+                ):
+                    parent = parents.get(value)
+                    if not isinstance(parent, ast.Attribute) and not (
+                        consumer == "next"
+                        and value is root
+                        and value.id == generator.target.id
+                    ):
+                        return None
+        if names & {"_generator_sum", "_generator_best", "_generator_found"}:
+            return None
+        element = self.annotation(expression)
+        element = element[5:-1] if element and element.startswith("List[") else None
+        if element not in {"int", "bool"} and not (
+            consumer == "next"
+            and isinstance(expression.elt, ast.Name)
+            and expression.elt.id == generator.target.id
+            and element == "torch.Tensor"
+        ):
+            return None
+        name = "metadata_generator_" + str(len(self.frontend.functions))
+        item = "_generator_item"
+        while item in names:
+            item += "_"
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(inner, value):
+                return (
+                    ast.Name(item, value.ctx)
+                    if value.id == generator.target.id
+                    else value
+                )
+
+        rename = Rename()
+        value = rename.visit(copy.deepcopy(expression.elt))
+        body = []
+        prefix = []
+        tail = []
+        if consumer in {"any", "all"}:
+            condition = value if consumer == "any" else ast.UnaryOp(ast.Not(), value)
+            body = [
+                ast.If(condition, [ast.Return(ast.Constant(consumer == "any"))], [])
+            ]
+            tail = [ast.Return(ast.Constant(consumer == "all"))]
+        elif consumer == "next":
+            body = [ast.Return(value)]
+            tail = [ast.Return(copy.deepcopy(fallback))]
+        elif consumer == "sum":
+            if element != "int":
+                return None
+            prefix = ast.parse("_generator_sum = 0").body
+            body = [
+                ast.AugAssign(ast.Name("_generator_sum", ast.Store()), ast.Add(), value)
+            ]
+            tail = [ast.Return(ast.Name("_generator_sum", ast.Load()))]
+        else:
+            if element != "int":
+                return None
+            prefix = ast.parse("_generator_found = False\n_generator_best = 0").body
+            comparison = ast.Compare(
+                value,
+                [ast.Gt() if consumer == "max" else ast.Lt()],
+                [ast.Name("_generator_best", ast.Load())],
+            )
+            body = [
+                ast.If(
+                    ast.BoolOp(
+                        ast.Or(),
+                        [
+                            ast.UnaryOp(
+                                ast.Not(), ast.Name("_generator_found", ast.Load())
+                            ),
+                            comparison,
+                        ],
+                    ),
+                    [
+                        ast.Assign(
+                            [ast.Name("_generator_best", ast.Store())],
+                            copy.deepcopy(value),
+                        ),
+                        ast.Assign(
+                            [ast.Name("_generator_found", ast.Store())],
+                            ast.Constant(True),
+                        ),
+                    ],
+                    [],
+                )
+            ]
+            tail = [
+                ast.If(
+                    ast.Name("_generator_found", ast.Load()),
+                    [ast.Return(ast.Name("_generator_best", ast.Load()))],
+                    [],
+                ),
+                ast.Return(copy.deepcopy(fallback)),
+            ]
+        for condition in reversed(generator.ifs):
+            body = [ast.If(rename.visit(copy.deepcopy(condition)), body, [])]
+        helper = ast.parse(
+            "def "
+            + name
+            + "("
+            + ", ".join(n + ": " + self.types[n] for n in record["inputs"])
+            + ") -> "
+            + result
+            + ": pass"
+        ).body[0]
+        helper.body = (
+            prefix
+            + [
+                ast.For(
+                    ast.Name(item, ast.Store()), copy.deepcopy(generator.iter), body, []
+                )
+            ]
+            + tail
+        )
+        self.frontend.functions[name] = ast.fix_missing_locations(helper)
+        return ast.Call(
+            ast.Name(name, ast.Load()),
+            [ast.Name(n, ast.Load()) for n in record["inputs"]],
+            [],
+        )
+
+    def metadata_accumulate(self, node):
+        if not (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "list"
+            and node.func.id not in self.locals
+            and self.resolve(node.func) is list
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], ast.Call)
+        ):
+            return None
+        call = node.args[0]
+        try:
+            constructor = self.resolve(call.func)
+        except (AttributeError, ValueError):
+            return None
+        if not (
+            constructor is itertools.accumulate
+            and len(call.args) == 1
+            and len(call.keywords) == 1
+            and call.keywords[0].arg == "initial"
+            and self.annotation(call.args[0]) == "List[int]"
+            and self.annotation(call.keywords[0].value) == "int"
+        ):
+            return None
+        name = "metadata_accumulate_" + str(len(self.frontend.functions))
+        self.frontend.functions[name] = ast.parse(
+            "def " + name + "(values: List[int], initial: int) -> List[int]:\n"
+            "    output = [initial]\n    running = initial\n"
+            "    for value in values:\n        running = running + value\n        output.append(running)\n"
+            "    return output"
+        ).body[0]
+        return ast.Call(
+            ast.Name(name, ast.Load()),
+            [self.visit(call.args[0]), self.visit(call.keywords[0].value)],
+            [],
+        )
+
+    def metadata_sort(self, node):
+        """Preserve stable sorting by a captured integer metadata lookup."""
+        if not (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "sorted"
+            and node.func.id not in self.locals
+            and self.resolve(node.func) is sorted
+            and len(node.args) == 1
+            and self.annotation(node.args[0]) == "List[int]"
+            and len({key.arg for key in node.keywords}) == len(node.keywords)
+            and all(key.arg in {"key", "reverse"} for key in node.keywords)
+        ):
+            return None
+        options = {key.arg: key.value for key in node.keywords}
+        key = options.get("key")
+        reverse = options.get("reverse", ast.Constant(False))
+        if not (
+            isinstance(key, ast.Lambda)
+            and len(key.args.args) == 1
+            and not key.args.posonlyargs
+            and not key.args.kwonlyargs
+            and not key.args.defaults
+            and key.args.vararg is None
+            and key.args.kwarg is None
+            and isinstance(key.body, ast.Subscript)
+            and isinstance(key.body.value, ast.Name)
+            and key.body.value.id != key.args.args[0].arg
+            and self.annotation(key.body.value) == "List[int]"
+            and isinstance(key.body.slice, ast.Name)
+            and key.body.slice.id == key.args.args[0].arg
+            and self.annotation(reverse) == "bool"
+        ):
+            return None
+        name = "metadata_sort_" + str(len(self.frontend.functions))
+        # Compute keys before sorting, as Python does. Strict comparisons retain
+        # input order for equal keys in both ascending and descending order.
+        self.frontend.functions[name] = ast.parse(
+            "def "
+            + name
+            + "(values: List[int], lookup: List[int], reverse: bool) -> List[int]:\n"
+            "    output = list(values)\n"
+            "    keys = [lookup[value] for value in values]\n"
+            "    for index in range(1, len(output)):\n"
+            "        value = output[index]\n        key = keys[index]\n"
+            "        position = index\n"
+            "        while position > 0:\n"
+            "            previous = keys[position - 1]\n"
+            "            move = key > previous if reverse else key < previous\n"
+            "            if not move:\n                break\n"
+            "            output[position] = output[position - 1]\n"
+            "            keys[position] = previous\n            position -= 1\n"
+            "        output[position] = value\n        keys[position] = key\n"
+            "    return output"
+        ).body[0]
+        return ast.Call(
+            ast.Name(name, ast.Load()),
+            [self.visit(node.args[0]), self.visit(key.body.value), self.visit(reverse)],
+            [],
+        )
+
+    def metadata_comprehension(self, node):
+        if len(node.generators) != 1:
+            return None
+        generator = node.generators[0]
+        if not (
+            generator.ifs
+            and not generator.is_async
+            and isinstance(generator.target, ast.Name)
+        ):
+            return None
+        iterable = generator.iter
+        is_range = (
+            isinstance(iterable, ast.Call)
+            and isinstance(iterable.func, ast.Name)
+            and iterable.func.id == "range"
+            and "range" not in self.locals
+            and self.resolve(iterable.func) is range
+            and 1 <= len(iterable.args) <= 3
+            and not iterable.keywords
+            and all(self.annotation(arg) == "int" for arg in iterable.args)
+        )
+        if not is_range and not (
+            isinstance(iterable, ast.Name) and self.annotation(iterable) == "List[int]"
+        ):
+            return None
+        if any(
+            isinstance(n, ast.Name) and n.id == generator.target.id
+            for n in ast.walk(iterable)
+        ):
+            return None
+        allowed = (
+            ast.Name,
+            ast.Constant,
+            ast.Subscript,
+            ast.Compare,
+            ast.BoolOp,
+            ast.UnaryOp,
+            ast.BinOp,
+            ast.Load,
+            ast.cmpop,
+            ast.boolop,
+            ast.unaryop,
+            ast.operator,
+        )
+        expressions = [node.elt, *generator.ifs]
+        if any(
+            not isinstance(n, allowed) for value in expressions for n in ast.walk(value)
+        ):
+            return None
+        inputs = sorted(
+            {
+                n.id
+                for value in [iterable, *expressions]
+                for n in ast.walk(value)
+                if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Load)
+                and n.id != generator.target.id
+                and not (is_range and n is iterable.func)
+            }
+        )
+        if any(self.types.get(n) not in {"int", "bool", "List[int]"} for n in inputs):
+            return None
+        original_types = self.types.copy()
+        self.types[generator.target.id] = "int"
+        try:
+            if self.annotation(node.elt) != "int":
+                return None
+        finally:
+            self.types = original_types
+        name = "metadata_filter_" + str(len(self.frontend.functions))
+        output = "_filtered_output"
+        while output in inputs or output == generator.target.id:
+            output += "_"
+        helper = ast.parse(
+            "def "
+            + name
+            + "("
+            + ", ".join(n + ": " + self.types[n] for n in inputs)
+            + ") -> List[int]:\n    "
+            + output
+            + " = torch.jit.annotate(List[int], [])"
+        ).body[0]
+        body = [
+            ast.Expr(
+                ast.Call(
+                    ast.Attribute(ast.Name(output, ast.Load()), "append", ast.Load()),
+                    [copy.deepcopy(node.elt)],
+                    [],
+                )
+            )
+        ]
+        for condition in reversed(generator.ifs):
+            body = [ast.If(copy.deepcopy(condition), body, [])]
+        helper.body += [
+            ast.For(copy.deepcopy(generator.target), copy.deepcopy(iterable), body, []),
+            ast.Return(ast.Name(output, ast.Load())),
+        ]
+        self.frontend.functions[name] = ast.fix_missing_locations(helper)
+        call = ast.Call(
+            ast.Name(name, ast.Load()), [ast.Name(n, ast.Load()) for n in inputs], []
+        )
+        call._type = "List[int]"
+        return call
+
+    def source_region(self, node, kind, result):
+        digest = hashlib.sha256(
+            (
+                self.function.__name__ + "\n" + ast.dump(node, include_attributes=False)
+            ).encode()
+        ).hexdigest()[:16]
+        region_name = "_host_" + kind + "_" + digest
+        record = next(
+            (
+                r
+                for r in getattr(self.frontend.hosts, "manifest", {})
+                .get("modules", {})
+                .get(self.function.__module__, {})
+                .get("regions", [])
+                if r["name"] == region_name and r.get("kind") == kind
+            ),
+            None,
+        )
+        if record is None or result is None:
+            return None
+        allowed = {"bool", "int", "float", "str", "torch.Tensor", "torch.device"}
+
+        def transferable(kind):
+            return kind in allowed or bool(
+                kind and kind.startswith("List[") and transferable(kind[5:-1])
+            )
+
+        if not all(transferable(self.types.get(n)) for n in record["inputs"]):
+            return None
+        helper = getattr(
+            self.frontend.hosts.modules[self.function.__module__], region_name
+        )
+        slot = self.frontend.launcher.register_foreign(helper, ())
+        name = "host_region_" + str(slot)
+        code = (
+            "def " + name + "(args: List[Any]) -> " + result + ":\n"
+            "    value = torch.ops.flagos_source_native.foreign_value("
+            + str(slot)
+            + ", args, torch.jit.annotate(Dict[str, Any], {}))\n"
+        )
+        code += (
+            "    return None"
+            if result == "None"
+            else "    assert torch.jit.isinstance(value, "
+            + result
+            + ")\n    return value"
+        )
+        self.frontend.functions[name] = ast.parse(code).body[0]
+        call = ast.Call(
+            ast.Name(name, ast.Load()),
+            [
+                annotated_list(
+                    "Any",
+                    [self.visit(ast.Name(n, ast.Load())) for n in record["inputs"]],
+                )
+            ],
+            [],
+        )
+        if kind == "expression":
+            native = self.metadata_generator(node, record, result, call)
+            if native is not None:
+                return native
+        return call
+
+    def inline_variadic_metadata_predicate(self, function, call):
+        """Unroll a read-only any/all predicate over known positional names."""
+        source = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
+        if (
+            source.decorator_list
+            or not source.args.vararg
+            or source.args.args
+            or source.args.posonlyargs
+            or source.args.kwarg
+            or source.args.kwonlyargs
+            or call.keywords
+            or any(
+                not isinstance(value, (ast.Name, ast.Constant)) for value in call.args
+            )
+            or len(source.body) != 1
+            or not isinstance(source.body[0], ast.Return)
+        ):
+            return None
+        reduction = source.body[0].value
+        if (
+            not isinstance(reduction, ast.Call)
+            or not isinstance(reduction.func, ast.Name)
+            or reduction.func.id not in ("any", "all")
+            or reduction.keywords
+            or len(reduction.args) != 1
+            or not isinstance(reduction.args[0], ast.GeneratorExp)
+        ):
+            return None
+        expression = reduction.args[0]
+        if (
+            function.__globals__.get(
+                reduction.func.id, getattr(builtins, reduction.func.id)
+            )
+            is not getattr(builtins, reduction.func.id)
+            or function.__globals__.get("isinstance", isinstance) is not isinstance
+        ):
+            return None
+        if len(expression.generators) != 1:
+            return None
+        generator = expression.generators[0]
+        if (
+            generator.ifs
+            or generator.is_async
+            or not isinstance(generator.target, ast.Name)
+            or not isinstance(generator.iter, ast.Name)
+            or generator.iter.id != source.args.vararg.arg
+        ):
+            return None
+        target = generator.target.id
+        parents = {
+            child: parent
+            for parent in ast.walk(expression.elt)
+            for child in ast.iter_child_nodes(parent)
+        }
+        for item in ast.walk(expression.elt):
+            if isinstance(item, ast.Call) and (
+                not isinstance(item.func, ast.Name) or item.func.id != "isinstance"
+            ):
+                return None
+            if isinstance(item, ast.Name):
+                if item.id == target:
+                    parent = parents.get(item)
+                    if not (
+                        isinstance(parent, ast.Attribute)
+                        and parent.attr in ("dtype", "ndim")
+                        or isinstance(parent, ast.Call)
+                        and isinstance(parent.func, ast.Name)
+                        and parent.func.id == "isinstance"
+                    ):
+                        return None
+                elif function.__globals__.get(
+                    item.id, getattr(builtins, item.id, None)
+                ) is not self.globals.get(item.id, getattr(builtins, item.id, None)):
+                    return None
+        values = []
+        for argument in call.args:
+
+            class Bind(ast.NodeTransformer):
+                def visit_Name(inner, value):
+                    return copy.deepcopy(argument) if value.id == target else value
+
+            values.append(Bind().visit(copy.deepcopy(expression.elt)))
+        if not values:
+            return ast.Constant(reduction.func.id == "all")
+        return (
+            values[0]
+            if len(values) == 1
+            else ast.BoolOp(
+                ast.Or() if reduction.func.id == "any" else ast.And(), values
+            )
+        )
+
     def visit_Call(self, node):
+        ordered = self.metadata_sort(node)
+        if ordered is not None:
+            return ordered
+        accumulated = self.metadata_accumulate(node)
+        if accumulated is not None:
+            return accumulated
+        buffer = self.tensor_buffer(node)
+        if buffer is not None:
+            result = self.visit(buffer)
+            result._type = "torch.Tensor"
+            return result
+        if (
+            isinstance(node.func, ast.Call)
+            and isinstance(node.func.func, ast.Attribute)
+            and node.func.func.attr == "instantiate"
+        ):
+            owner = self.resolve(node.func.func.value)
+            if type(owner).__name__ == "PointwiseDynamicFunction":
+                output_names = {
+                    "out" + str(i) for i in range(owner.fx.num_output_tensors())
+                }
+                if (
+                    len(node.func.args) != 1
+                    or node.func.keywords
+                    or {key.arg for key in node.keywords} != output_names
+                ):
+                    raise NotImplementedError("unsupported inline pointwise arguments")
+                slot = self.frontend.launcher.register_pointwise(
+                    self.frontend.hosts.resolve(owner)
+                )
+                outputs = {key.arg: key.value for key in node.keywords}
+                return ast.Call(
+                    ast.parse("torch.ops.flagos_source_native.pointwise_launch")
+                    .body[0]
+                    .value,
+                    [
+                        ast.Constant(slot),
+                        self.visit(node.func.args[0]),
+                        annotated_list("Any", [self.visit(a) for a in node.args]),
+                        annotated_list(
+                            "torch.Tensor",
+                            [
+                                self.visit(outputs["out" + str(i)])
+                                for i in range(owner.fx.num_output_tensors())
+                            ],
+                        ),
+                    ],
+                    [],
+                )
+        call = self.source_region(node, "expression", self.annotation(node))
+        if call is not None:
+            return call
         label = ast.unparse(node.func)
+        if (
+            self.function is self.frontend.guarded_function
+            and self.frontend.guarded_input_dtypes
+            and self.frontend.guarded_input_dtypes <= {"Float", "BFloat16"}
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "is_complex"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in self.tensor_inputs
+            and not self.assignments[node.func.value.id]
+            and not node.args
+            and not node.keywords
+        ):
+            return ast.Constant(False)
         if isinstance(node.func, ast.Name) and node.func.id in self.local_functions:
             definition = self.local_functions[node.func.id]
             parameters = [argument.arg for argument in definition.args.args]
@@ -2283,9 +3029,14 @@ class Transform(ast.NodeTransformer):
         if isinstance(node.func, ast.Name) and node.func.id in self.globals:
             function = self.globals[node.func.id]
             if type(function).__name__ == "PointwiseDynamicFunction":
-                slot = self.frontend.launcher.register_pointwise(
-                    self.frontend.hosts.resolve(function)
-                )
+                resolved = self.frontend.hosts.resolve(function)
+                if not hasattr(function, "_call_real_impl") and not hasattr(
+                    resolved, "_native_pointwise_module"
+                ):
+                    raise NotImplementedError(
+                        "vendor pointwise schedule retains compiled object semantics"
+                    )
+                slot = self.frontend.launcher.register_pointwise(resolved)
                 call = ast.Call(
                     ast.parse("torch.ops.flagos_source_native.pointwise_apply")
                     .body[0]
@@ -2308,6 +3059,16 @@ class Transform(ast.NodeTransformer):
                 inspect.isfunction(function)
                 and function.__module__ in self.frontend.hosts.originals
             ):
+                if any(
+                    parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                    for parameter in inspect.signature(function).parameters.values()
+                ):
+                    predicate = self.inline_variadic_metadata_predicate(function, node)
+                    if predicate is None:
+                        raise NotImplementedError(
+                            "variadic helper requires compiled object semantics"
+                        )
+                    return self.visit(predicate)
                 parameters = list(inspect.signature(function).parameters)
                 types = {p: self.annotation(a) for p, a in zip(parameters, node.args)}
                 types.update({k.arg: self.annotation(k.value) for k in node.keywords})
