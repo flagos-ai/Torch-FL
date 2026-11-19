@@ -3647,6 +3647,20 @@ def boxing_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
     return METAX_CPP_MEASURED & fg_cpp if filename == "backends_metax.conf" else set()
 
 
+# Paired HCU measurements with the pinned published cohort. These default
+# routes are independent of the temporary day-0 configuration.
+HYGON_HOST_FLAGGEMS_MEASURED = {
+    "add.Tensor",
+    "mul.Tensor",
+    "mean.dim",
+    "cat",
+    "add.out",
+    "mul.out",
+    "mean.out",
+    "cat.out",
+}
+
+
 def boxing_measured_python_ops(filename: str) -> set:
     """Extra FlagGems Python ops a boxing platform routes on measured evidence.
 
@@ -4211,6 +4225,8 @@ def build_all(conf_dir: Path) -> dict:
         # platform measured a triton gap. It has to come off `gaps` as well as
         # onto `py_here` -- route() takes the gap set outside the coverage sets.
         measured = boxing_measured_python_ops(sparse_conf)
+        if platform == "hygon":
+            measured |= HYGON_HOST_FLAGGEMS_MEASURED
         gaps -= measured
         # Same gate as the native vendors: a platform whose FlagGems Python
         # routes are not measured yet is not in FLAGGEMS_PYTHON_PLATFORMS, so
@@ -4238,11 +4254,23 @@ def build_all(conf_dir: Path) -> dict:
             )
             for op in sorted(all_ops)
         }
-        out[platform] = (
-            render(platform, "", routes, cuda_abi=True),
-            routes,
-            "",
-        )
+        text = render(platform, "", routes, cuda_abi=True)
+        if platform == "hygon":
+            from native_host_policy import render_config_routes
+
+            text = text.replace(
+                "# Values:\n",
+                "# Values:\n#   hygon         measured dtype-scoped DTK precision entries (native-host builds)\n",
+                1,
+            )
+            text = render_config_routes(text, platform)
+            routes = {
+                name.strip(): value.strip()
+                for line in text.splitlines()
+                for name, sep, value in [line.split("#", 1)[0].partition("=")]
+                if sep
+            }
+        out[platform] = (text, routes, "")
         if platform == "metax":
             experimental = {
                 op: route_metax_tileops(op, all_ops, tileops) for op in sorted(all_ops)

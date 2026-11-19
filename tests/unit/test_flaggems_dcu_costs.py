@@ -594,3 +594,48 @@ class TestPrewarmTritonKey:
         flagos._prewarm_triton_key()
 
         assert _RecordingThread.instances == []
+
+
+@pytest.mark.parametrize(
+    "shape,dim,keepdim",
+    [
+        ((0, 7), [0], False),
+        ((3, 0), [-1], True),
+        ((0, 7), None, False),
+        ((0, 7), [1], True),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_empty_mean_uses_nan_identity_without_a_reduction_launch(
+    wrapped_mean, shape, dim, keepdim, dtype
+):
+    wrapped, kernel = wrapped_mean
+    value = torch.empty(shape, dtype=dtype)
+    actual = wrapped(value, dim, keepdim)
+    expected = value.mean(dim=dim, keepdim=keepdim)
+    torch.testing.assert_close(actual, expected, equal_nan=True)
+    assert not kernel.launches
+
+
+@pytest.mark.parametrize("dim,error", [([2], IndexError), ([0, 0], RuntimeError)])
+def test_empty_mean_keeps_dimension_validation(wrapped_mean, dim, error):
+    with pytest.raises(error):
+        wrapped_mean[0](torch.empty(0, 7), dim)
+
+
+def test_native_square_uses_the_configured_mul_route(square_calls):
+    calls = []
+
+    def native_square(a, b):
+        calls.append((a, b))
+        return "configured-mul"
+
+    wrapped = flagos._flaggems_pow_scalar_square_wrapper(
+        _original_pow(), None, native_square
+    )
+    value = torch.randn(4, 8)
+    assert wrapped(value, 2) == "configured-mul"
+    assert calls == [(value, value)] and square_calls == []
+    assert wrapped(value, 3) == "pow"
+    assert wrapped(torch.ones(4, dtype=torch.int64), 2) == "pow"
+    assert len(calls) == 1

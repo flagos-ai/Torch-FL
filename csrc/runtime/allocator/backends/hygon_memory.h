@@ -6,6 +6,10 @@
 
 #include <ATen/Context.h>
 #include <c10/core/CachingDeviceAllocator.h>
+#include <c10/core/StreamGuard.h>
+#include <c10/core/impl/VirtualGuardImpl.h>
+
+#include <optional>
 
 #include <cuda_runtime.h>
 
@@ -134,11 +138,18 @@ class DcuDeviceMemory final : public DeviceMemoryInterface {
   bool provides_caching() const override { return true; }
 
   void* caching_alloc(size_t nbytes, Stream_t stream) override {
+#ifndef FLAGOS_BOXING_BUILD
+    const auto physical = physical_stream(stream);
+    c10::impl::VirtualGuardImpl implementation(c10::DeviceType::HIP);
+    std::optional<c10::StreamGuard> guard;
+    if (implementation.getStream(physical.device()) != physical) guard.emplace(physical);
+#else
     // CachingDeviceAllocator only ever asks for the current stream (it passes
     // nullptr), and the generic DeviceAllocator has no alloc-with-stream entry
     // point, so there is nothing to honor here. raw_allocate() associates the
     // block with the current stream, which is the one the boxed kernels run on.
     (void)stream;
+#endif
     return allocator()->raw_allocate(nbytes);
   }
 
@@ -146,13 +157,28 @@ class DcuDeviceMemory final : public DeviceMemoryInterface {
 
   void caching_empty_cache() override { allocator()->emptyCache(); }
 
-  void caching_record_stream(void* /*ptr*/, Stream_t /*stream*/) override {
+  void caching_record_stream(void* ptr, Stream_t stream) override {
+#ifndef FLAGOS_BOXING_BUILD
+    if (!ptr) return;
+    const auto physical = physical_stream(stream);
+    // Preserve the allocator's expected deleter identity while borrowing the
+    // pointer solely for dependency tracking. Ownership stays with the tensor.
+    at::DataPtr borrowed(ptr, ptr, allocator()->raw_deleter(), physical.device());
+    try {
+      allocator()->recordStream(borrowed, physical);
+    } catch (...) {
+      borrowed.release_context();
+      throw;
+    }
+    borrowed.release_context();
+#else
     // No-op. DeviceAllocator::recordStream needs a c10::Stream on the CUDA
     // device type, and the only way to build one from a raw stream handle is
     // c10::cuda::getStreamFromExternal -- a symbol this wheel does not export.
     // This is not a regression: flagos stream ids are raw device stream
     // pointers, so before delegation the block lookup for a torch-pool pointer
     // failed and record_stream returned without doing anything either.
+#endif
   }
 
   bool caching_get_stats(int device, AllocatorStats* out) override {
@@ -177,6 +203,18 @@ class DcuDeviceMemory final : public DeviceMemoryInterface {
   }
 
  private:
+#ifndef FLAGOS_BOXING_BUILD
+  static c10::Stream physical_stream(Stream_t stream) {
+    int device = 0;
+    TORCH_CHECK(cudaGetDevice(&device) == cudaSuccess, "cannot read HCU allocation device");
+    if (!stream) stream = ::GetCurrentStreamForDevice(device);
+    // DTK's generic device allocator accepts HIP external-stream descriptors.
+    // Their IDs carry aligned raw handles. No TensorImpl or dispatch key changes.
+    return c10::Stream(c10::Stream::UNSAFE,
+        c10::Device(c10::DeviceType::HIP, static_cast<c10::DeviceIndex>(device)),
+        static_cast<c10::StreamId>(reinterpret_cast<uintptr_t>(stream)));
+  }
+#endif
   // The HIP caching allocator asserts unless its per-device tables are sized by
   // init(device_count). PyTorch normally does that during torch.cuda lazy init;
   // in the flagos external-libtorch scheme we may allocate before that runs, so

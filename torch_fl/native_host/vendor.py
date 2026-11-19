@@ -3,6 +3,7 @@
 
 """Install and audit schema-typed precision exceptions from a prebuilt module."""
 
+from contextlib import nullcontext
 import importlib
 import importlib.metadata
 import ctypes
@@ -72,6 +73,23 @@ def _verify_sdk(manifest):
             raise RuntimeError(f"native MetaX SDK numerical library changed: {name}")
 
 
+def stream_scope(device=None):
+    """Bind published library stream state for an eager execution region.
+
+    Each operator still checks its actual device and stream. This context owns
+    no tensors, launches or model plans, and restores library state on exit.
+    """
+    if _module is None or not hasattr(_module, "StreamScope"):
+        return nullcontext()
+    if device is None:
+        from torch_fl import flagos
+
+        device = flagos.current_device()
+    if type(device) is not int or device < 0:
+        raise ValueError("native stream scope requires a nonnegative device index")
+    return _module.StreamScope(device)
+
+
 def _verify_libraries(module, manifest):
     libraries = module.libraries()
     if set(libraries) != set(manifest["numerical_libraries"]):
@@ -101,7 +119,7 @@ def activate():
     if not getattr(_build_config, "NATIVE_VENDOR", False):
         return
     vendor = _build_config.ACCELERATOR
-    if vendor not in ("nvidia", "metax") or "boxing" in _build_config.KERNELS:
+    if vendor not in ("nvidia", "metax", "hygon") or "boxing" in _build_config.KERNELS:
         raise RuntimeError(
             "native vendor precision requires a measured non-boxing build"
         )
@@ -122,7 +140,9 @@ def activate():
         if digest(package / relative) != expected:
             raise RuntimeError(f"native vendor artifact changed: {relative}")
     expected = _manifest["catalog"]
-    actual = json.loads(torch.ops.flagos.native_vendor_catalog())
+    actual = json.loads(
+        torch.ops.flagos.native_vendor_catalog(_build_config.ACCELERATOR)
+    )
     if expected != actual:
         raise RuntimeError(
             "native vendor schema/policy catalog differs from the core library"

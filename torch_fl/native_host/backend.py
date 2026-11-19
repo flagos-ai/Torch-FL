@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 COMPILED_FIELDS = (
     "abi_version",
     "vendor",
@@ -26,7 +26,12 @@ COMPILED_FIELDS = (
     "slot_alignment",
     "native_source_sha256",
 )
-_ADAPTERS = {"nvidia": "nvidia.py", "metax": "metax.py", "ascend": "ascend.py"}
+_ADAPTERS = {
+    "nvidia": "nvidia.py",
+    "hygon": "hygon.py",
+    "metax": "metax.py",
+    "ascend": "ascend.py",
+}
 _ROOT = Path(__file__).resolve().parent
 
 

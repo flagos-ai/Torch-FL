@@ -94,12 +94,14 @@ Caches contain original device specializations and the original pointwise
 generator's rank definitions. They contain no output tensors, captured launch
 sequences, or shape-specific host programs. On CPython 3.12, dictionary watchers
 invalidate rank definitions when configuration or overload definitions change;
-without watcher support the original instantiation path runs on every call.
+CPython 3.10/3.11 check dictionary identity and version under the GIL instead.
+Changes during instantiation prevent caching that result. Other interpreters
+retain the original instantiation path on every call.
 
 ## Backend launch contract
 
 [Issue #831](https://github.com/flagos-ai/Torch-FL/issues/831) separates the shared
-host language from device submission. `csrc/backend_api.h` defines ABI version 1
+host language from device submission. `csrc/backend_api.h` defines ABI version 2
 without including a vendor SDK. The common launcher retains scalar packing,
 current-call tensor pointers, device guards, stream selection, workspace allocation
 and the generated host callbacks. A selected adapter owns immutable kernel launch
@@ -122,12 +124,63 @@ scratch arguments, tensor-map encoding and published FlagTree module loader.
 This adapter contains no numerical kernels. Other adapters must describe their
 own compiler metadata and loader instead of inheriting CUDA behavior.
 
-`backend.py` is the single admission registry. NVIDIA, MetaX and Ascend have
-separate adapters and installed-wheel conformance. An unadmitted vendor fails
-explicitly; it cannot select a CUDA adapter, boxing route or alternate host
-implementation. MetaX and Ascend full-model acceptance is tracked separately under
+`backend.py` is the single admission registry. NVIDIA, Hygon and the experimental
+MetaX and Ascend backends have separate launch adapters. A native-host build or
+activation for an unregistered vendor fails explicitly; it cannot select a CUDA
+adapter, boxing route or alternate host implementation. MetaX and Ascend
+qualification is tracked separately under
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) and
 [issue #833](https://github.com/flagos-ai/Torch-FL/issues/833).
+The [Hygon validation](hygon-native-host-validation.md) records the initial
+missing-adapter error and subsequent non-boxing adapter validation. HCU uses its
+published HIP loader and TDM codec, its measured wavefront width, and null
+global scratch. ABI version 2 passes kernel metadata to descriptor factories
+so the TDM encoder receives the kernel's warp count. Older native-host bundles
+require a rebuild before runtime activation.
+
+Hygon's generated `add.out`, `mul.out`, `mean.out` and `cat.out` adapters call
+the configured functional route and preserve the output tensor's storage,
+casting and overlap rules. Supported same-device copies use the published
+FlagGems copy host on the current stream. HCU casts allocate directly while
+preserving dense strides or an explicit memory format, avoiding a preceding
+contiguous gather. Valid integral non-boolean add alpha values skip redundant
+result-type dispatch; other alpha types retain ATen validation. Generated metadata adapters for
+`_unsafe_view`, `transpose.int`, `unsqueeze` and `slice.Tensor` reuse the
+existing ATen metadata primitives. They perform no GPU arithmetic. In
+particular, `_unsafe_view` preserves the ATen view-or-error contract instead of
+silently materializing an incompatible reshape.
+
+For HCU eager regions, `torch_fl.native_host.execution_scope(device)` binds the
+published DTK library's current stream to the current FlagOS stream and restores
+the caller's state on exit, including exceptions. Nested scopes can bind a new
+stream. Individual vendor entries still establish the correct stream when
+called outside a scope. The context stores no tensors or model execution plan;
+the Qwen benchmark remains ordinary eager execution. Non-boxing Hygon uses an
+owned nonblocking default stream, with explicit synchronization for blocking
+host transfers. This avoids implicit serialization with HIP's legacy stream.
+
+Generated HCU hosts also avoid redundant dispatcher traversals for two host
+operations. CPU tensors explicitly marked as wrapped scalar numbers use ATen's
+CPU scalar reader, with the ordinary `item()` path retained for other tensors,
+including lazy conjugate/negative values. Indexed PrivateUse1 strided empty
+factories use the existing allocator under a device guard; unsupported factory
+options retain the ATen call. Both paths create fresh results and preserve the
+original device and dtype contracts.
+
+Ordinary native launch scalars occupy eight-byte slots; descriptors retain
+the wide slot ABI. Zero scratch arguments are reusable immutable metadata,
+while every call rebinds its tensors, grid and stream. HCU's compiled contiguous
+host returns an already-contiguous plain PrivateUse1 tensor directly under
+no-grad, retaining ATen dispatch for symbolic, Python and functional tensors.
+
+The shared launcher's flat specialization path mirrors an already verified
+serialized key as immutable metadata. A bounded candidate bucket checks the
+complete current tensor metadata and scalar type/value bits, including NaN
+payloads and signed zero, before skipping key serialization and keyword sorting.
+Keyword reordering, containers and large collision buckets retain the original
+lookup. The mirror holds no tensors or data pointers; grid, prehooks, launch
+arguments and stream remain current-call values. Hygon's repeated short and
+long acceptance results are recorded in the validation report above.
 
 The generated wheel manifest records the vendor, compiler backend and distribution
 version, capability and slot ABI, utility modules, published driver source hashes,
@@ -186,8 +239,9 @@ and common launcher under `torch_fl.native_host._generated`.
 
 Initialization installs the prebuilt launcher before importing FlagGems, then
 binds the generated host functions after the normal backend setup. The build
-requires a working NVIDIA CPU-Torch environment, the pinned published dependency
-wheels, Cython 3.2.4, and the CUDA toolkit. Cython is an optional build requirement
+requires a working CPU-Torch environment for the selected adapter, the pinned
+published dependency wheels, Cython 3.2.4, and its matching toolkit (CUDA for
+NVIDIA, DTK for Hygon). Cython is an optional build requirement
 selected by `FLAGOS_BUILD_NATIVE_HOST`, not a dependency of ordinary platform
 builds. Install it explicitly when building without isolation. No FlagGems or
 FlagTree Git checkout is used. The manifest binds the hosts to their
@@ -792,6 +846,17 @@ runtime dependencies; the build bundles the original numerical libraries and
 licenses. The compatibility manifest records the verified vendor Torch version.
 No SDK version is inferred from a wheel suffix.
 
+The Hygon cohort uses the same generated entry mechanism with
+`codegen_native_vendor.py --vendor hygon`. It verifies the published DTK Torch
+distribution, vendor Git revision and HIP runtime separately from the CPU Torch
+frontend revision. Its measured exceptions are BF16 `mm`/`bmm` and FP32
+`mean.dim`/`rsqrt`/`_softmax`. Each entry calls the published structured
+implementation or reduction stub on PrivateUse1 storage and the current HIP
+stream. The generated conf states conditions such as
+`bmm = flaggems; BFloat16:hygon`; explicit FlagGems overrides remove them.
+Hygon's per-exception ablations and full-model results are recorded in the
+[Hygon validation report](hygon-native-host-validation.md).
+
 `scripts/codegen/native_host_policy.py` is the single build-time source for
 measured operator/dtype exceptions, published source selections and their shared
 dependency cohort. It records the exceptions' removal condition.
@@ -840,8 +905,8 @@ Existing platform capability guards outside this optional NVIDIA cohort are
 unchanged. The prebuilt module is registered at import with schema/policy ABI
 checks; model execution contains no Python routing mode. The adapter checks the selected
 cuBLAS backend and uses the vendor precision flags rather than changing them.
-This first policy covers functional inference operations; it does not claim
-out/in-place variants or other vendors have passed this numerical gate.
+These policies cover the recorded functional inference operations; they do not
+imply precision coverage for out/in-place variants or unmeasured vendors.
 The `nvidia` route key now means the native NVIDIA slot. Custom boxing configs
 that used `nvidia` as an alias must use `boxing`; legacy `cuda` remains accepted
 for the opt-in boxing build.
@@ -879,10 +944,18 @@ pointwise generator. The source file is pinned by package version and SHA-256;
 neither its host source nor its GPU arithmetic is edited. Its simpler host path
 reduces eager overhead in the paired model workload.
 
+Hygon also admits CPU zero-dimensional tensors marked by PyTorch as wrapped
+numbers. Ordinary CPU tensor operands remain excluded, and a selection still
+requires a PrivateUse1 tensor. The FP32/BF16 entry guard lets the source compiler
+remove unreachable complex branches for unchanged root inputs; other source
+hosts and helper inputs keep their runtime checks. Scalar arguments retain their
+current values. The existing floating `pow(2)` decomposition enters the configured
+multiply route from generated C++ when a typed HCU host is available.
+
 Selections are schema-specific, without shape or model conditions. The generated
 callback checks the dtype/device predicate and retains the ordinary generated
-FlagGems callback after it. Other dtypes, mixed-device operands, scalar overloads
-and grad-enabled dispatch retain their original routes. The build fails if a
+FlagGems callback after it. Other dtypes, mixed-device operands, unadmitted scalar
+arguments and grad-enabled dispatch retain their original routes. The build fails if a
 declared selection cannot lower. Primary registry coverage remains separate from
 alternative source compilation, so an alternative cannot inflate operator counts.
 The wheel manifest and runtime audit include source identities and selection hit

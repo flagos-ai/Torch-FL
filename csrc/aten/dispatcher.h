@@ -171,6 +171,9 @@ class Dispatcher {
       case Backend::kCambricon:     cambricon_fn_ = fn;        break;
       case Backend::kTileOps:       tileops_fn_ = fn;          break;
       case Backend::kApple:         apple_fn_ = fn;           break;
+      case Backend::kHygon:
+        hygon_fn_.store(fn, std::memory_order_release);
+        break;
       case Backend::kNvidia:
         nvidia_fn_.store(fn, std::memory_order_release);
         break;
@@ -476,6 +479,7 @@ class Dispatcher {
       case Backend::kCambricon:     return cambricon_fn_;
       case Backend::kApple:         return apple_fn_;
       case Backend::kNvidia:        return nvidia_fn_.load(std::memory_order_acquire);
+      case Backend::kHygon:         return hygon_fn_.load(std::memory_order_acquire);
       // TileOPs kernels live in Python and are bound via torch.library on
       // PrivateUse1, which intercepts before this dispatcher is reached. A conf
       // entry of "tileops" therefore only lands here when that registration did
@@ -532,6 +536,7 @@ class Dispatcher {
       case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
       case Backend::kBoxing:      return cuda_fn_;
       case Backend::kNvidia:      return nvidia_fn_.load(std::memory_order_acquire);
+      case Backend::kHygon:       return hygon_fn_.load(std::memory_order_acquire);
       default:                    return nullptr;
     }
   }
@@ -541,6 +546,7 @@ class Dispatcher {
   // the two that can answer a decoded pair: a C++ FlagGems kernel (real, and
   // does not run Python), or boxing.
   static Backend ParseBackendName(const std::string& raw) {
+    if (flagos_env::EnvIs(raw.c_str(), "hygon")) return Backend::kHygon;
     if (flagos_env::EnvIs(raw.c_str(), "nvidia")) return Backend::kNvidia;
     const char* boxing[] = {"boxing", "cuda"};
     for (const char* name : boxing) {
@@ -611,6 +617,7 @@ class Dispatcher {
       case Backend::kApple:       return "vendor";
       case Backend::kDrobotics:   return "vendor";
       case Backend::kNvidia:     return "vendor";
+      case Backend::kHygon:      return "vendor";
       case Backend::kNone:
       case Backend::kUncached:    return nullptr;
     }
@@ -648,6 +655,7 @@ class Dispatcher {
       case Backend::kApple:         name = "mps"; break;
       case Backend::kDrobotics:     name = "drobotics"; break;
       case Backend::kNvidia:        name = "nvidia"; break;
+      case Backend::kHygon:         name = "hygon"; break;
       case Backend::kNone:          name = "none"; break;
       default:                      name = "unknown"; break;
     }
@@ -662,6 +670,7 @@ class Dispatcher {
   FnPtr flaggems_cpp_fn_   = nullptr;
   FnPtr flaggems_fn_       = nullptr;
   std::atomic<FnPtr> nvidia_fn_{nullptr};
+  std::atomic<FnPtr> hygon_fn_{nullptr};
   FnPtr ascend_fn_         = nullptr;
   FnPtr mthreads_fn_       = nullptr;
   std::atomic<FnPtr> metax_fn_{nullptr};

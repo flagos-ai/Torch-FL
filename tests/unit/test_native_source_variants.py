@@ -146,7 +146,9 @@ def test_cohort_changes_fail_before_admission(policy, published, monkeypatch, ch
         variants.load(policy, sources)
 
 
-@pytest.mark.parametrize("change", ["duplicate", "dtype", "module", "hash", "reason"])
+@pytest.mark.parametrize(
+    "change", ["duplicate", "dtype", "module", "hash", "reason", "wrapped_numbers"]
+)
 def test_unvalidated_selections_are_rejected(policy, change):
     row = policy["entries"][0]
     if change == "duplicate":
@@ -155,6 +157,8 @@ def test_unvalidated_selections_are_rejected(policy, change):
         row["dtypes"] = ["Half"]
     elif change == "module":
         row["module"] = "flag_gems...outside"
+    elif change == "wrapped_numbers":
+        row["allow_wrapped_numbers"] = "yes"
     elif change == "hash":
         row["sha256"] = "unknown"
     else:

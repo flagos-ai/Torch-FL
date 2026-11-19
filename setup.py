@@ -991,9 +991,13 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
     # and ship a vendor libtorch. CUDA-ABI platforms gate on boxing: the generated
     # boxing kernels are the only consumer of a vendor libtorch there, so a
     # FlagGems-primary wheel (the default) ships none and must not be asked for
-    # vendor provenance at release time.
+    # vendor provenance at release time. DTK's bundled device libraries also
+    # provide runtime hooks and generators to its non-boxing CPU frontend.
     entry = _platform_entry(FLAGOS_ACCELERATOR)
     gate = entry.get("vendor_torch_gate")
+    hygon_device_bundle = entry["vendor"] == "hygon" and os.path.isfile(
+        os.path.join(BASE_DIR, "torch_fl", _BUNDLE_LIBDIR, "libtorch_hip.so")
+    )
     native_vendor = _native_vendor_cohort()
     manifest = preflight.make_manifest(
         platform=FLAGOS_ACCELERATOR,
@@ -1005,6 +1009,7 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
             else _BUNDLE_LIBDIR
         ),
         vendor_torch_libraries=native_vendor is not None
+        or hygon_device_bundle
         or (entry["vendor_torch_libraries"] and (gate is None or kernels[gate])),
         requirements=_install_requires(),
         torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
@@ -1027,7 +1032,7 @@ def _native_vendor_cohort():
     """Resolve the optional precision module's published binary cohort."""
     library = os.environ.get("FLAGOS_VENDOR_TORCH_LIB")
     if (
-        FLAGOS_ACCELERATOR not in ("cuda", "metax")
+        FLAGOS_ACCELERATOR not in {"cuda", "dcu", "metax"}
         or not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST")
         or not library
     ):
@@ -1300,6 +1305,11 @@ class BuildExtWithCmake(_build_ext):
                     os.path.abspath(os.path.join(self.build_temp, "native_vendor")),
                     "--vendor-library",
                     native_vendor[1]["library_dir"],
+                    *(
+                        ["--vendor", backend.vendor]
+                        if backend.vendor != "metax"
+                        else []
+                    ),
                 ],
                 env=env,
                 cwd=destination,

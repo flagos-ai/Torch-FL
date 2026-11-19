@@ -67,7 +67,13 @@ cudaStream_t get_default_stream(int device) {
   }
 
   cudaStream_t stream = nullptr;
+#if defined(FLAGOS_HYGON_NATIVE_STREAM)
+  // Every HCU producer uses this owned stream. Blocking host transfers drain
+  // it explicitly, so unrelated legacy-default work need not serialize it.
+  const cudaError_t create_err = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+#else
   const cudaError_t create_err = cudaStreamCreate(&stream);
+#endif
 
   if (previous_device != device) {
     cudaSetDevice(previous_device);

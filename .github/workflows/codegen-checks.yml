@@ -106,9 +106,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/codegen/codegen_native_vendor.py --check
+          python3 scripts/codegen/codegen_native_vendor.py --vendor hygon --check
           python3 scripts/codegen/codegen_metax_native_precision.py --check
           python3 scripts/codegen/codegen_metax_native_vendor.py --check
           python3 scripts/codegen/codegen_ops.py --check-native-routes
+          python3 scripts/codegen/codegen_ops.py --check-out-adapters
           # Regenerates the per-platform FlagGems register lists that a
           # FlagGems-primary CUDA-ABI build (FLAGOS_BUILD_BOXING=OFF) compiles
           # instead of the full generated/register.inc. Reads only committed

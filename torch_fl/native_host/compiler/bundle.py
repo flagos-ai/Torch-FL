@@ -201,6 +201,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
     )
     selections = hosts.manifest.get("source_variants", {}).get("entries", [])
     selected_names = {row["id"] for row in selections}
+    selected_dtypes = {row["id"]: row["dtypes"] for row in selections}
     if selected_names & hosts.original_ops.keys():
         raise ValueError("published source identifier shadows an existing host")
     for row in selections:
@@ -278,7 +279,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         checkpoints = {kind: len(records) for kind, records in recorder.records.items()}
         try:
             frontend = Frontend(hosts, recorder)
-            source = frontend.source(function, signature)
+            source = frontend.source(
+                function, signature, input_dtypes=selected_dtypes.get(name, ())
+            )
             if function in frontend.fallback_functions:
                 raise NotImplementedError(
                     "root host requires compiled object semantics: "
@@ -544,6 +547,11 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
         ],
         library_dirs=[str(torch_dir / "lib")],
         libraries=["torch_python", "torch_cpu", "c10"],
+        define_macros=(
+            [("FLAGOS_HYGON_NATIVE_HOST_FAST_ALLOC", "1")]
+            if _build_config.ACCELERATOR == "hygon"
+            else []
+        ),
         language="c++",
         extra_compile_args=[
             "-O3",

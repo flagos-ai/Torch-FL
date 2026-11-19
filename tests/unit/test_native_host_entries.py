@@ -66,9 +66,10 @@ template<class T> struct List:std::vector<T> {using std::vector<T>::vector;};
 namespace at {
 enum class ScalarType {Float, BFloat16, Half};
 struct Tensor {
-  struct Impl {bool is_wrapped_number() const {return false;}} impl;
+  struct Impl {bool wrapped=false; bool is_wrapped_number() const {return wrapped;}} impl;
   ScalarType type=ScalarType::Float; int64_t rank=4, inner=1; c10::Device dev{};
   bool defined() const {return true;}
+  bool is_complex() const {return false;}
   c10::Device device() const {return dev;}
   ScalarType scalar_type() const {return type;}
   int64_t dim() const {return rank;}
@@ -81,7 +82,11 @@ template<class T> struct ArrayRef:std::vector<T> {using std::vector<T>::vector;}
 struct ITensorListRef:std::vector<Tensor> {using std::vector<Tensor>::vector;};
 }
 """
-        + entries.HEADER
+        + entries.HEADER[
+            entries.HEADER.index("class PublishedSourceGuard") : entries.HEADER.index(
+                "inline bool TypedWrappedNumber"
+            )
+        ]
         + r"""
 int main() {
  const uint64_t mask=3;
@@ -111,6 +116,15 @@ int main() {
  assert(PublishedSourceAccepts(mask,inputs));
  inputs[1]=second; std::optional<at::Tensor> absent;
  assert(PublishedSourceAcceptsRestricted(mask,true,2,false,inputs,absent));
+ at::Tensor scalar;
+ scalar.dev.cpu=true; scalar.rank=0; scalar.impl.wrapped=true;
+ assert(!PublishedSourceAccepts(mask,first,scalar));
+ assert(PublishedSourceAccepts<true>(mask,first,scalar));
+ assert(!PublishedSourceAccepts<true>(mask,scalar));
+ assert(!PublishedSourceAcceptsRestricted<true>(mask,true,2,false,first,scalar));
+ assert(PublishedSourceAcceptsRestricted<true>(mask,true,2,false,inputs,scalar));
+ scalar.impl.wrapped=false;
+ assert(!PublishedSourceAccepts<true>(mask,first,scalar));
 }
 """
     )
@@ -230,7 +244,7 @@ def test_wrapped_number_admission_does_not_read_tensor_data():
     assert "TypedWrappedNumber" in check
     assert "isFloatingType" in check
     assert ".item()" not in check
-    assert value == "scalar.item().toDouble()"
+    assert value == "TypedWrappedScalar(scalar).toDouble()"
     check, _ = entries.convert("at::Tensor", TENSOR, "scalar")
     assert "defined()" in check and "!TypedWrappedNumber" in check
 

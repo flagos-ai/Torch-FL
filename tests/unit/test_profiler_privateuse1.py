@@ -45,14 +45,9 @@ from torch.profiler import ProfilerActivity, profile
 # ("nvidia", "metax") and CMake the platform id ("cuda").
 _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "nvidia", "metax")
 
-# Mirrors csrc/runtime/guard.h. Three tail branches build a flagos stream, and
-# only two of them carry a real handle: USE_ASCEND wraps the aclrtStream pointer
-# into the stream id (MakeAscendStream), while every other accelerator macro --
-# USE_TSINGMICRO, USE_DCU, USE_GCU, USE_MUSA, USE_BPU, USE_MPS -- falls through to
-# `c10::Stream(UNSAFE, d, 0)`, an id of exactly zero. DCU is the clearest case:
-# its hipified wheel exports c10::hip::HIPCachingAllocator with zero c10::cuda
-# symbols, so the c10::cuda delegation at the top of that function cannot even
-# link there.
+# Mirrors the synthetic tail of csrc/runtime/guard.h. Non-boxing Hygon owns a
+# real stream registry and carries HIP handles through the PrivateUse1 stream
+# ID, without depending on c10::cuda symbols.
 #
 # Spelled with both halves for the same reason as _CUPTI_BUILD above: the
 # record holds the vendor, and only `tsingmicro` spells its platform id the
@@ -62,8 +57,6 @@ _CUPTI_BUILD = torch_fl._build_accelerator() in ("", "cuda", "nvidia", "metax")
 # (run 40818353562, job artifact pytest-hygon-1).
 _GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
     "tsingmicro",
-    "dcu",
-    "hygon",
     "gcu",
     "enflame",
     "musa",
@@ -72,6 +65,9 @@ _GUARD_STREAM_IS_SYNTHETIC = torch_fl._build_accelerator() in (
     "drobotics",
     "mps",
     "apple",
+) or (
+    torch_fl._build_accelerator() in ("dcu", "hygon")
+    and "boxing" in torch_fl._build_config.KERNELS
 )
 
 

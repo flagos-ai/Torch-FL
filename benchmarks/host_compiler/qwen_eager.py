@@ -21,8 +21,12 @@ CUDA graphs, layer truncation, a replacement model or output pooling. Run each
 backend in its own process on an otherwise idle GPU.
 """
 
+# Device libraries must precede Torch import on the CPU-Torch Hygon build.
+# ruff: noqa: E402
+
 import argparse
 from collections import Counter
+from contextlib import nullcontext
 import json
 import importlib.util
 import os
@@ -30,6 +34,11 @@ from pathlib import Path
 import statistics
 import sys
 import time
+
+_backend_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+_backend_parser.add_argument("--device")
+if (_backend_parser.parse_known_args()[0].device or "").startswith("flagos"):
+    import torch_fl  # noqa: F401
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -114,6 +123,9 @@ def main():
     parser.add_argument("--progress-every", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument(
+        "--main-cpu", type=int, help="Pin the timing thread after runtime workers start"
+    )
+    parser.add_argument(
         "--skip-sampling",
         action="store_true",
         help="Omit the separate autoregressive demonstration",
@@ -126,6 +138,11 @@ def main():
     args = parser.parse_args()
     if args.steps < 1 or args.rounds < 0:
         parser.error("steps must be positive and rounds must be nonnegative")
+    if args.main_cpu is not None and (
+        not hasattr(os, "sched_setaffinity")
+        or args.main_cpu not in os.sched_getaffinity(0)
+    ):
+        parser.error("--main-cpu must name a CPU in this process's allowed affinity")
     if args.check_logits and args.reference is None:
         parser.error("--check-logits requires a vendor --reference")
     if args.logits_policy == "bf16-v2":
@@ -142,6 +159,7 @@ def main():
     if args.profile_kernels and args.device != "flagos:0":
         parser.error("--profile-kernels audits FlagGems launches on --device flagos:0")
     hosts = None
+    native_scope = nullcontext()
     report = {
         "torch": str(torch.__version__),
         "device": args.device,
@@ -188,6 +206,13 @@ def main():
         if getattr(_build_config, "NATIVE_HOSTS", False):
             report["torch_fl_import_ms"] = (time.perf_counter() - import_started) * 1000
             hosts = torch_fl.native_host._hosts
+            native_scope = torch_fl.native_host.execution_scope(0)
+            report["native_execution_scope"] = {
+                "vendor_stream_binding": _build_config.ACCELERATOR == "hygon"
+                and getattr(_build_config, "NATIVE_VENDOR", False),
+                "graph_capture": False,
+                "cached_tensors": False,
+            }
         if args.hosts:
             started = time.perf_counter()
             hosts = loader.Hosts(args.hosts)
@@ -306,7 +331,7 @@ def main():
             }:
                 hooks.append(module.register_forward_hook(save(name)))
 
-    with torch.no_grad():
+    with torch.no_grad(), native_scope:
         synchronize()
         started = time.perf_counter()
         out = model(ids, use_cache=True)
@@ -398,6 +423,12 @@ def main():
             "decode_submit_ms": [],
             "decode_complete_ms": [],
         }
+        if hasattr(os, "sched_getaffinity"):
+            report["cpu_affinity_before_timing"] = sorted(os.sched_getaffinity(0))
+        if args.main_cpu is not None:
+            os.sched_setaffinity(0, {args.main_cpu})
+        if hasattr(os, "sched_getaffinity"):
+            report["measurement_main_cpu_affinity"] = sorted(os.sched_getaffinity(0))
         device_inputs = [token.to(args.device) for token in inputs]
         for repetition in range(args.rounds + 1 if args.rounds else 0):
             synchronize()

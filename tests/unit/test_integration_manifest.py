@@ -80,9 +80,12 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
-    "native_host_build": tuple(p for p in _PLATFORMS if p not in {"metax", "ascend"}),
+    "native_host_build": tuple(
+        p for p in _PLATFORMS if p not in {"metax", "ascend", "hygon"}
+    ),
     "native_source_hosts": tuple(p for p in _PLATFORMS if p != "ascend"),
     "native_source_hosts_metax": tuple(p for p in _PLATFORMS if p != "metax"),
+    "native_source_hosts_hygon": tuple(p for p in _PLATFORMS if p != "hygon"),
     "nvidia_host_programs": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "cuda_flaggems_mul": tuple(p for p in _PLATFORMS if p != "nvidia"),
     "cuda_dtype_cast_performance": tuple(p for p in _PLATFORMS if p != "nvidia"),
@@ -437,7 +440,11 @@ def test_native_host_programs_run_in_the_default_nvidia_lane(profile):
 @pytest.mark.parametrize("profile", ["pr", "nightly"])
 @pytest.mark.parametrize(
     "vendor,group_id,minimum",
-    [("ascend", "native_source_hosts", 94), ("metax", "native_source_hosts_metax", 86)],
+    [
+        ("ascend", "native_source_hosts", 94),
+        ("metax", "native_source_hosts_metax", 86),
+        ("hygon", "native_source_hosts_hygon", 216),
+    ],
 )
 def test_native_source_hosts_require_the_installed_nonboxing_cohort(
     profile, vendor, group_id, minimum
@@ -461,9 +468,16 @@ def test_native_source_hosts_require_the_installed_nonboxing_cohort(
         assert len(selected) == (0 if boxing_lane else 1)
         if selected:
             assert selected[0]["min_passed"] == minimum
-            assert f"test_native_{vendor}_hosts.py" in selected[0]["command"]
+            filename = (
+                "test_hygon_native_hosts.py"
+                if vendor == "hygon"
+                else f"test_native_{vendor}_hosts.py"
+            )
+            assert filename in selected[0]["command"]
             if vendor == "metax":
                 assert "test_native_metax_qwen_routes.py" in selected[0]["command"]
+            if vendor == "hygon":
+                assert "test_hygon_native_routes.py" in selected[0]["command"]
 
 
 def test_the_only_substitution_is_the_display_name():

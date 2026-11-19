@@ -704,9 +704,24 @@ def collect_modules(functions):
 
 
 def closure_source(function, provider, attribute):
-    node = HostSource().visit(
-        ast.parse(textwrap.dedent(inspect.getsource(function.__code__))).body[0]
-    )
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function.__code__)))
+    node = tree.body[0]
+    if function.__code__.co_name == "<lambda>":
+        candidates = [
+            value for value in ast.walk(tree) if isinstance(value, ast.Lambda)
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                "cannot identify a unique lambda closure: " + str(function)
+            )
+        value = candidates[0]
+        node = ast.FunctionDef(
+            name="_host_lambda",
+            args=value.args,
+            body=[ast.Return(value.body)],
+            decorator_list=[],
+        )
+    node = HostSource().visit(node)
     freevars = function.__code__.co_freevars
     used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
     globals_used = sorted(used.intersection(function.__globals__) - set(freevars))

@@ -283,6 +283,14 @@ uint64_t Pointer(py::handle value) {
 
 using Slot = backend::Slot;
 
+struct ScalarSlot {
+  alignas(uint64_t) std::array<unsigned char, sizeof(uint64_t)> bytes{};
+  template <class T> void Set(T value) {
+    static_assert(sizeof(T) <= sizeof(uint64_t));
+    std::memcpy(bytes.data(), &value, sizeof(T));
+  }
+};
+
 struct Argument {
   enum class Kind {
     Pointer, Descriptor, Float64, Float32, Bool, Int8, Int16, Int32, Int64, Other
@@ -307,7 +315,12 @@ class Launcher {
     if (!descriptors.is_none() && descriptor != py::len(descriptors))
       throw std::invalid_argument("Triton descriptor metadata arity mismatch");
     num_args_ = index;
-
+    compact_ = NativeSafe() && std::none_of(arguments_.begin(), arguments_.end(),
+        [](const auto& arg) { return arg.kind == Argument::Kind::Descriptor; });
+    if (compact_) {
+      zero_scratch_.resize(kernel_->scratch_slots);
+      kernel_->PackScratch(0, 0, zero_scratch_.data());
+    }
   }
 
   // Matches CompiledKernel.run; callers pass metadata and optional profiler hooks.
@@ -381,6 +394,26 @@ class Launcher {
   void CallNative(size_t argument_count, const GetValue& get_value,
                   const std::vector<int64_t>& grid, int device, uint64_t function) const {
     TORCH_CHECK(argument_count == num_args_, "native launch argument arity mismatch");
+    if (compact_) {
+      c10::SmallVector<ScalarSlot, 32> slots;
+      slots.reserve(arguments_.size());
+      for (const auto& arg : arguments_) {
+        const auto& root = get_value(arg.path.front());
+        const auto* leaf = &root;
+        for (size_t depth = 1; depth < arg.path.size(); ++depth)
+          leaf = leaf->isTuple() ? &leaf->toTupleRef().elements().at(arg.path[depth])
+                                : &leaf->toListRef().at(arg.path[depth]);
+        slots.emplace_back();
+        PackNativeScalar(arg, *leaf, slots.back());
+      }
+      c10::SmallVector<void*, 32> pointers;
+      pointers.reserve(slots.size() + zero_scratch_.size());
+      for (auto& slot : slots) pointers.push_back(slot.bytes.data());
+      for (const auto& slot : zero_scratch_)
+        pointers.push_back(const_cast<unsigned char*>(slot.bytes.data()));
+      EnqueueNative(grid, device, function, pointers.data());
+      return;
+    }
     c10::SmallVector<Slot, 32> slots;
     slots.reserve(slot_capacity_);
     for (const auto& arg : arguments_) {
@@ -398,47 +431,58 @@ class Launcher {
       }
       slots.emplace_back();
       auto& slot = slots.back();
-      switch (arg.kind) {
-      case Argument::Kind::Pointer: {
-        uint64_t pointer = 0;
-        if (value.isTensor()) {
-          const auto& tensor = value.toTensor();
-          TORCH_CHECK(!tensor.device().is_cpu(),
-                      "CPU tensor cannot be passed to a FlagGems device kernel");
-          pointer = reinterpret_cast<uint64_t>(tensor.const_data_ptr());
-        } else if (!value.isNone())
-          pointer = static_cast<uint64_t>(value.toInt());
-        slot.Set(pointer);
-        break;
-      }
-      case Argument::Kind::Float64:
-        slot.Set(value.toDouble());
-        break;
-      case Argument::Kind::Float32:
-        slot.Set(static_cast<float>(value.toDouble()));
-        break;
-      case Argument::Kind::Bool:
-        slot.Set(static_cast<uint8_t>(value.toBool()));
-        break;
-      case Argument::Kind::Int8:
-        slot.Set(static_cast<uint8_t>(value.toInt()));
-        break;
-      case Argument::Kind::Int16:
-        slot.Set(static_cast<uint16_t>(value.toInt()));
-        break;
-      case Argument::Kind::Int32:
-        slot.Set(static_cast<uint32_t>(value.toInt()));
-        break;
-      case Argument::Kind::Int64:
-        slot.Set(static_cast<uint64_t>(value.toInt()));
-        break;
-      default:
-        throw std::invalid_argument("unsupported native scalar ABI");
-      }
+      PackNativeScalar(arg, value, slot);
     }
     PackScratch(0, 0, slots);
     c10::SmallVector<void*, 32> pointers;
     for (auto& slot : slots) pointers.push_back(slot.bytes.data());
+    EnqueueNative(grid, device, function, pointers.data());
+  }
+
+ private:
+  template <class ScalarStorage>
+  static void PackNativeScalar(const Argument& arg, const c10::IValue& value,
+                               ScalarStorage& slot) {
+    switch (arg.kind) {
+    case Argument::Kind::Pointer: {
+      uint64_t pointer = 0;
+      if (value.isTensor()) {
+        const auto& tensor = value.toTensor();
+        TORCH_CHECK(!tensor.device().is_cpu(),
+                    "CPU tensor cannot be passed to a FlagGems device kernel");
+        pointer = reinterpret_cast<uint64_t>(tensor.const_data_ptr());
+      } else if (!value.isNone())
+        pointer = static_cast<uint64_t>(value.toInt());
+      slot.Set(pointer);
+      break;
+    }
+    case Argument::Kind::Float64:
+      slot.Set(value.toDouble());
+      break;
+    case Argument::Kind::Float32:
+      slot.Set(static_cast<float>(value.toDouble()));
+      break;
+    case Argument::Kind::Bool:
+      slot.Set(static_cast<uint8_t>(value.toBool()));
+      break;
+    case Argument::Kind::Int8:
+      slot.Set(static_cast<uint8_t>(value.toInt()));
+      break;
+    case Argument::Kind::Int16:
+      slot.Set(static_cast<uint16_t>(value.toInt()));
+      break;
+    case Argument::Kind::Int32:
+      slot.Set(static_cast<uint32_t>(value.toInt()));
+      break;
+    case Argument::Kind::Int64:
+      slot.Set(static_cast<uint64_t>(value.toInt()));
+      break;
+    default:
+      throw std::invalid_argument("unsupported native scalar ABI");
+    }
+  }
+  void EnqueueNative(const std::vector<int64_t>& grid, int device, uint64_t function,
+                     void** pointers) const {
     TORCH_CHECK(!grid.empty() && grid.size() <= 3, "invalid launch grid");
     std::array<uint64_t, 3> dims{1, 1, 1};
     for (size_t i = 0; i < grid.size(); ++i) {
@@ -446,10 +490,9 @@ class Launcher {
       dims[i] = grid[i];
     }
     if (!CheckedProduct(CheckedProduct(dims[0], dims[1]), dims[2])) return;
-    kernel_->Enqueue({dims, Stream(device), function, pointers.data()});
+    kernel_->Enqueue({dims, Stream(device), function, pointers});
   }
 
- private:
   template <class Slots>
   void PackScratch(uint64_t global, uint64_t profile, Slots& slots) const {
     if (!kernel_->scratch_slots) return;
@@ -485,7 +528,7 @@ class Launcher {
       ++descriptor;
       if (!Backend().descriptor)
         throw std::invalid_argument("backend does not support tensor descriptors");
-      argument.descriptor = Backend().descriptor(metadata.ptr());
+      argument.descriptor = Backend().descriptor(metadata.ptr(), metadata_.ptr());
     } else if (!name.empty() && name[0] == '*')
       argument.kind = Argument::Kind::Pointer;
     else if (name == "fp64") argument.kind = Argument::Kind::Float64;
@@ -520,7 +563,11 @@ class Launcher {
       return;
     }
     if (a.type == "fp16") {
+#if PY_VERSION_HEX < 0x030B0000
+      if (_PyFloat_Pack2(py::cast<double>(value), reinterpret_cast<unsigned char*>(slot.bytes.data()), 1) < 0)
+#else
       if (PyFloat_Pack2(py::cast<double>(value), reinterpret_cast<char*>(slot.bytes.data()), 1) < 0)
+#endif
         throw py::error_already_set();
       return;
     }
@@ -606,6 +653,8 @@ class Launcher {
   }
 
   std::vector<Argument> arguments_;
+  bool compact_ = false;
+  std::vector<Slot> zero_scratch_;
   size_t slot_capacity_ = 0;
   py::object metadata_;
   size_t num_args_;
@@ -621,6 +670,104 @@ class KernelCache {
     py::object constant = py::none();
     std::string keyword_name;
     c10::IValue native_constant;
+  };
+  // Flat mirrors of an already verified serialized key. These retain only
+  // metadata; matching a tensor never retains or reuses its pointer or values.
+  struct ValuePattern {
+    enum Kind { None, Bool, Int, Double, String, Tensor } kind = None;
+    int64_t integer = 0;
+    uint64_t bits = 0;
+    at::ScalarType dtype = at::kFloat;
+    c10::DeviceIndex device = -1;
+    bool aligned = false;
+    std::string text;
+    std::vector<int64_t> shape, strides;
+
+    static std::optional<ValuePattern> Capture(py::handle value) {
+      ValuePattern result;
+      if (value.is_none()) return result;
+      if (PyBool_Check(value.ptr())) {
+        result.kind = Bool;
+        result.integer = value.ptr() == Py_True;
+      } else if (PyLong_CheckExact(value.ptr())) {
+        int overflow = 0;
+        result.integer = PyLong_AsLongLongAndOverflow(value.ptr(), &overflow);
+        if (overflow) return std::nullopt;
+        if (PyErr_Occurred()) throw py::error_already_set();
+        result.kind = Int;
+      } else if (PyFloat_CheckExact(value.ptr())) {
+        result.kind = Double;
+        const double number = PyFloat_AS_DOUBLE(value.ptr());
+        std::memcpy(&result.bits, &number, sizeof(number));
+      } else if (PyUnicode_Check(value.ptr())) {
+        result.kind = String;
+        result.text = py::cast<std::string>(value);
+      } else if (THPVariable_CheckExact(value.ptr())) {
+        result.kind = Tensor;
+        const auto& tensor = THPVariable_Unpack(value.ptr());
+        result.dtype = tensor.scalar_type();
+        result.device = tensor.device().index();
+        result.aligned = reinterpret_cast<uintptr_t>(tensor.const_data_ptr()) % 16 == 0;
+        result.shape.assign(tensor.sizes().begin(), tensor.sizes().end());
+        result.strides.assign(tensor.strides().begin(), tensor.strides().end());
+      } else {
+        return std::nullopt;
+      }
+      return result;
+    }
+
+    bool Matches(const c10::IValue& value) const {
+      switch (kind) {
+      case None: return value.isNone();
+      case Bool: return value.isBool() && value.toBool() == bool(integer);
+      case Int: return value.isInt() && value.toInt() == integer;
+      case Double: {
+        if (!value.isDouble()) return false;
+        const double number = value.toDouble();
+        uint64_t actual;
+        std::memcpy(&actual, &number, sizeof(actual));
+        return actual == bits;
+      }
+      case String: return value.isString() && value.toStringRef() == text;
+      case Tensor: {
+        if (!value.isTensor()) return false;
+        const auto& tensor = value.toTensor();
+        return tensor.scalar_type() == dtype && tensor.device().index() == device &&
+            tensor.sizes() == at::IntArrayRef(shape) &&
+            tensor.strides() == at::IntArrayRef(strides) &&
+            (reinterpret_cast<uintptr_t>(tensor.const_data_ptr()) % 16 == 0) == aligned;
+      }
+      }
+      return false;
+    }
+  };
+  struct Pattern {
+    struct Named { std::string name; ValuePattern value; };
+    uint64_t key;
+    int device;
+    std::vector<ValuePattern> args;
+    std::vector<Named> kwargs;
+
+    template <class Args, class Kwargs>
+    bool Matches(const Args& actual_args, const Kwargs& actual_kwargs, int actual_device) const {
+      if (device != actual_device || args.size() != actual_args.size()) return false;
+      const bool default_warmup = !actual_kwargs.contains("warmup");
+      if (kwargs.size() != actual_kwargs.size() + default_warmup) return false;
+      for (size_t i = 0; i < args.size(); ++i)
+        if (!args[i].Matches(actual_args.get(i))) return false;
+      auto current = actual_kwargs.begin();
+      for (const auto& expected : kwargs) {
+        if (default_warmup && expected.name == "warmup") {
+          if (!expected.value.Matches(c10::IValue(false))) return false;
+          continue;
+        }
+        if (current == actual_kwargs.end()) return false;
+        const auto& item = *current;
+        if (item.key() != expected.name || !expected.value.Matches(item.value())) return false;
+        ++current;
+      }
+      return current == actual_kwargs.end();
+    }
   };
   struct Variant {
     struct Hook {
@@ -640,6 +787,7 @@ class KernelCache {
     std::vector<Binding> bindings;
     bool native = false;
     c10::Dict<std::string, int64_t> native_meta;
+    std::optional<Pattern> pattern;
   };
 
  public:
@@ -766,11 +914,13 @@ class KernelCache {
       variant->bindings.push_back(std::move(binding));
     }
     variant->native_key = key;
+    if (variant->native) variant->pattern = CapturePattern(key, args, kwargs);
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto inserted = variants_.emplace(std::move(key), std::move(variant));
     if (inserted.second && inserted.first->second->native) {
       auto* item = inserted.first->second.get();
       native_variants_[std::hash<std::string_view>{}(item->native_key)].push_back(item);
+      if (item->pattern) fast_variants_[item->pattern->key].push_back(item);
     }
   }
 
@@ -780,44 +930,63 @@ class KernelCache {
     static_assert(std::is_same_v<Kwargs, flagos::native_host::Keywords> ||
                       std::is_lvalue_reference_v<decltype((*kwargs.begin()).key())>,
                   "native keyword views require dictionary-owned strings");
-    StackKey key;
-    Append(key, device);
-    key.push_back('q');
-    Append(key, args.size());
-    for (const auto& value : args)
-      if (!NativeValue(key, value)) return false;
-    c10::SmallVector<std::pair<std::string_view, const c10::IValue*>, 8> ordered;
-    c10::SmallVector<c10::IValue, 8> owned_keywords;
-    if constexpr (!std::is_lvalue_reference_v<decltype((*kwargs.begin()).value())>)
-      owned_keywords.reserve(kwargs.size());
-    for (const auto& item : kwargs) {
-      if constexpr (std::is_lvalue_reference_v<decltype(item.value())>)
-        ordered.emplace_back(item.key(), &item.value());
-      else {
-        owned_keywords.push_back(item.value());
-        ordered.emplace_back(item.key(), &owned_keywords.back());
-      }
-    }
-    const c10::IValue warmup(false);
-    if (!kwargs.contains("warmup")) ordered.emplace_back("warmup", &warmup);
-    std::sort(ordered.begin(), ordered.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-    Append(key, ordered.size());
-    for (const auto& item : ordered) {
-      Text(key, item.first.data(), item.first.size());
-      if (!NativeValue(key, *item.second)) return false;
-    }
     const Variant* selected = nullptr;
-    {
+    for (size_t index = 0; index < args.size(); ++index) {
+      const auto& value = args.get(index);
+      if (!value.isTensor()) continue;
+      const auto key = FastKey(device, args.size(), kwargs.size() + !kwargs.contains("warmup"),
+                               value.toTensor());
       std::shared_lock<std::shared_mutex> lock(mutex_);
-      auto found = native_variants_.find(std::hash<std::string_view>{}(key.view()));
-      if (found == native_variants_.end()) return false;
-      for (auto* candidate : found->second)
-        if (candidate->native_key == key.view()) {
-          selected = candidate;
-          break;
+      const auto found = fast_variants_.find(key);
+      // Bound a collision bucket's work; the complete serialized lookup is
+      // still available for unusual scalar/shape combinations and containers.
+      if (found != fast_variants_.end() && found->second.size() <= 8)
+        for (auto* candidate : found->second)
+          if (candidate->pattern->Matches(args, kwargs, device)) {
+            selected = candidate;
+            break;
+          }
+      break;
+    }
+    if (!selected) {
+      StackKey key;
+      Append(key, device);
+      key.push_back('q');
+      Append(key, args.size());
+      for (const auto& value : args)
+        if (!NativeValue(key, value)) return false;
+      c10::SmallVector<std::pair<std::string_view, const c10::IValue*>, 8> ordered;
+      c10::SmallVector<c10::IValue, 8> owned_keywords;
+      if constexpr (!std::is_lvalue_reference_v<decltype((*kwargs.begin()).value())>)
+        owned_keywords.reserve(kwargs.size());
+      for (const auto& item : kwargs) {
+        if constexpr (std::is_lvalue_reference_v<decltype(item.value())>)
+          ordered.emplace_back(item.key(), &item.value());
+        else {
+          owned_keywords.push_back(item.value());
+          ordered.emplace_back(item.key(), &owned_keywords.back());
         }
-      if (!selected) return false;
+      }
+      const c10::IValue warmup(false);
+      if (!kwargs.contains("warmup")) ordered.emplace_back("warmup", &warmup);
+      std::sort(ordered.begin(), ordered.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+      Append(key, ordered.size());
+      for (const auto& item : ordered) {
+        Text(key, item.first.data(), item.first.size());
+        if (!NativeValue(key, *item.second)) return false;
+      }
+      {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        auto found = native_variants_.find(std::hash<std::string_view>{}(key.view()));
+        if (found == native_variants_.end()) return false;
+        for (auto* candidate : found->second)
+          if (candidate->native_key == key.view()) {
+            selected = candidate;
+            break;
+          }
+        if (!selected) return false;
+      }
     }
     const auto& variant = *selected;
     auto get_value = [&](size_t position) -> decltype(auto) {
@@ -874,6 +1043,40 @@ class KernelCache {
   }
 
  private:
+  static uint64_t FastKey(int device, size_t count, size_t keywords, const at::Tensor& tensor) {
+    uint64_t key = static_cast<uint32_t>(device);
+    for (uint64_t value : {uint64_t(count), uint64_t(keywords), uint64_t(tensor.scalar_type()),
+                           uint64_t(tensor.dim()), uint64_t(tensor.numel())})
+      key ^= value + 0x9e3779b97f4a7c15ULL + (key << 6) + (key >> 2);
+    return key;
+  }
+  static std::optional<Pattern> CapturePattern(const std::string& key, py::tuple args,
+                                               py::dict kwargs) {
+    if (key.size() < sizeof(int)) return std::nullopt;
+    int device;
+    std::memcpy(&device, key.data(), sizeof(device));
+    std::string checked;
+    if (!Key(args, kwargs, device, checked) || checked != key) return std::nullopt;
+    Pattern result;
+    result.device = device;
+    bool tensor_found = false;
+    for (auto value : args) {
+      auto pattern = ValuePattern::Capture(value);
+      if (!pattern) return std::nullopt;
+      if (!tensor_found && pattern->kind == ValuePattern::Tensor) {
+        result.key = FastKey(device, args.size(), kwargs.size(), THPVariable_Unpack(value.ptr()));
+        tensor_found = true;
+      }
+      result.args.push_back(std::move(*pattern));
+    }
+    if (!tensor_found) return std::nullopt;
+    for (auto item : kwargs) {
+      auto pattern = ValuePattern::Capture(item.second);
+      if (!pattern) return std::nullopt;
+      result.kwargs.push_back({py::cast<std::string>(item.first), std::move(*pattern)});
+    }
+    return result;
+  }
   struct StackKey {
     c10::SmallVector<char, 1024> bytes;
     void push_back(char value) { bytes.push_back(value); }
@@ -1068,6 +1271,7 @@ class KernelCache {
   bool returns_constants_;
   std::unordered_map<std::string, std::unique_ptr<Variant>> variants_;
   std::unordered_map<size_t, std::vector<const Variant*>> native_variants_;
+  std::unordered_map<uint64_t, std::vector<const Variant*>> fast_variants_;
   std::shared_mutex mutex_;
 };
 
@@ -1631,6 +1835,32 @@ void ExecutePointwise(py::object owner, size_t rank, py::tuple args,
   schedule->CallNative(values, tensors, at::IntArrayRef(shape), collapse);
 }
 
+#if PY_VERSION_HEX >= 0x030A0000 && PY_VERSION_HEX < 0x030C0000 && !defined(PYPY_VERSION)
+#define FLAGOS_DICT_VERSIONS 1
+struct DictionaryVersion {
+  py::object owner;
+  py::object dictionary;
+  uint64_t version;
+  bool direct;
+
+  bool Unchanged() const {
+    // CPython 3.10/3.11 expose dictionary versions but have no watcher API.
+    // Every read is protected by the GIL, including dictionary replacement.
+    auto** current = direct ? nullptr : _PyObject_GetDictPtr(owner.ptr());
+    return (direct || (current && *current == dictionary.ptr())) &&
+        reinterpret_cast<PyDictObject*>(dictionary.ptr())->ma_version_tag == version;
+  }
+};
+
+std::optional<DictionaryVersion> DictionarySnapshot(py::object owner, bool direct = false) {
+  py::object dictionary = direct ? owner : owner.attr("__dict__");
+  if (!PyDict_CheckExact(dictionary.ptr())) return std::nullopt;
+  const auto version = reinterpret_cast<PyDictObject*>(dictionary.ptr())->ma_version_tag;
+  if (!version) return std::nullopt;
+  return DictionaryVersion{std::move(owner), std::move(dictionary), version, direct};
+}
+#endif
+
 struct NativePointwiseSlot {
   py::object owner;
   std::unique_ptr<PointwiseSpec> spec;
@@ -1643,6 +1873,9 @@ struct NativePointwiseSlot {
   uint64_t cached_version = 0;
   std::unordered_map<size_t, PointwiseSchedule*> ranks;
   std::vector<py::object> watched_objects;
+#if defined(FLAGOS_DICT_VERSIONS)
+  std::vector<DictionaryVersion> dictionary_versions;
+#endif
 };
 std::vector<NativePointwiseSlot*>& NativePointwiseSlots() {
   static auto* slots = new std::vector<NativePointwiseSlot*>();
@@ -1689,11 +1922,70 @@ bool WatchPointwise(NativePointwiseSlot* entry, py::handle overload) {
     return false;
   }
 }
+#elif defined(FLAGOS_DICT_VERSIONS)
+bool LegacyPointwiseUnchanged(const NativePointwiseSlot* entry) {
+  return !entry->dictionary_versions.empty() &&
+      std::all_of(entry->dictionary_versions.begin(), entry->dictionary_versions.end(),
+                  [](const auto& item) { return item.Unchanged(); });
+}
+bool WatchPointwise(NativePointwiseSlot* entry, py::handle overload) {
+  std::vector<DictionaryVersion> snapshots;
+  try {
+    for (auto item : {DictionarySnapshot(entry->owner),
+                      DictionarySnapshot(entry->owner.attr("config")),
+                      DictionarySnapshot(entry->owner.attr("overloads"), true),
+                      DictionarySnapshot(py::reinterpret_borrow<py::object>(overload))}) {
+      if (!item) return false;
+      snapshots.push_back(std::move(*item));
+    }
+  } catch (const py::error_already_set&) {
+    PyErr_Clear();
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(entry->mutex);
+  if (!LegacyPointwiseUnchanged(entry)) {
+    entry->ranks.clear();
+    entry->dictionary_versions.clear();
+  }
+  for (auto& item : snapshots) {
+    const auto found = std::find_if(entry->dictionary_versions.begin(), entry->dictionary_versions.end(),
+                                   [&](const auto& old) { return old.owner.ptr() == item.owner.ptr(); });
+    if (found == entry->dictionary_versions.end()) entry->dictionary_versions.push_back(std::move(item));
+  }
+  // This cache is checked under the GIL, never through the lock-free watcher path.
+  return false;
+}
 #else
 bool WatchPointwise(NativePointwiseSlot*, py::handle) { return false; }
 #endif
 
 PointwiseSchedule* PointwiseForRank(NativePointwiseSlot* entry, size_t rank) {
+#if defined(FLAGOS_DICT_VERSIONS)
+  py::gil_scoped_acquire legacy_gil;
+  {
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if (LegacyPointwiseUnchanged(entry)) {
+      const auto found = entry->ranks.find(rank);
+      if (found != entry->ranks.end()) return found->second;
+    } else {
+      entry->ranks.clear();
+      entry->dictionary_versions.clear();
+    }
+  }
+  // A mutation while instantiate releases the GIL must prevent caching its
+  // result, even if the resulting dictionaries can be watched afterwards.
+  std::vector<DictionaryVersion> before_dictionaries;
+  for (auto item : {DictionarySnapshot(entry->owner),
+                    DictionarySnapshot(entry->owner.attr("config"))})
+    if (item) before_dictionaries.push_back(std::move(*item));
+  auto overload_dictionary = entry->owner.attr("overloads");
+  py::dict before_overloads;
+  if (PyDict_CheckExact(overload_dictionary.ptr())) {
+    auto* copy = PyDict_Copy(overload_dictionary.ptr());
+    if (!copy) throw py::error_already_set();
+    before_overloads = py::reinterpret_steal<py::dict>(copy);
+  }
+#endif
   {
     std::lock_guard<std::mutex> lock(entry->mutex);
     if (entry->watched.load(std::memory_order_acquire) &&
@@ -1717,7 +2009,28 @@ PointwiseSchedule* PointwiseForRank(NativePointwiseSlot* entry, size_t rank) {
   const auto version = entry->version.load(std::memory_order_acquire);
   if (entry->cached_version != version) entry->ranks.clear();
   entry->cached_version = version;
-  if (before == version) entry->ranks.insert_or_assign(rank, schedule);
+  bool unchanged = before == version;
+#if defined(FLAGOS_DICT_VERSIONS)
+  unchanged &= before_dictionaries.size() == 2 &&
+      std::all_of(before_dictionaries.begin(), before_dictionaries.end(),
+                  [](const auto& item) { return item.Unchanged(); });
+  // instantiate may add a new rank. Preserve the cache only if every older
+  // entry still names the same overload; clearing/replacing entries invalidates it.
+  for (auto item : before_overloads) {
+    bool builtin_key = PyLong_CheckExact(item.first.ptr()) || PyBool_Check(item.first.ptr());
+    if (PyTuple_CheckExact(item.first.ptr())) {
+      builtin_key = true;
+      for (auto component : py::reinterpret_borrow<py::tuple>(item.first))
+        builtin_key &= PyLong_CheckExact(component.ptr()) || PyBool_Check(component.ptr());
+    }
+    if (!builtin_key) { unchanged = false; break; }
+    if (PyDict_GetItemWithError(overload_dictionary.ptr(), item.first.ptr()) != item.second.ptr()) {
+      unchanged = false;
+      break;
+    }
+  }
+#endif
+  if (unchanged) entry->ranks.insert_or_assign(rank, schedule);
   entry->watched.store(watched, std::memory_order_release);
   return schedule;
 }

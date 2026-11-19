@@ -405,6 +405,13 @@ nor the legacy `cuda` spelling of it.
   Keep precision exceptions and published source choices in that single build
   policy. Generate ABI catalogs into wheel manifests; do not duplicate the
   policy or its generated catalog as source JSON under `torch_fl/native_host/`.
+- The optional Hygon native-host precision module follows the same measured
+  dtype policy in `scripts/codegen/native_host_policy.py`. Its HCU entries call
+  published DTK numerical implementations directly on PrivateUse1 storage and
+  the current HIP stream. They never retag a tensor or redispatch to CUDA.
+  Generate their schema catalog with `codegen_native_vendor.py --vendor hygon`;
+  retain only exceptions whose individual removal fails the paired vendor logit
+  gate. A Hygon vendor clause is not a general fallback or a boxing alias.
 - `scripts/codegen/gen_vendor_confs.py` enforces this — `build_all()` exits if any
   default conf would emit `boxing`/`cuda`. Do not relax that check; if a route is
   wrong, fix the route.

@@ -132,7 +132,9 @@ bool ParseBackendName(const std::string& raw, Backend* out) {
     *out = Backend::kBoxing;
   } else if (val == "metax") {
     *out = Backend::kMetax;
-  } else if (val == "hygon" || val == "thead") {
+  } else if (val == "hygon") {
+    *out = Backend::kHygon;
+  } else if (val == "thead") {
     // This CUDA-ABI vendor's kernel slot was retired with the mxcc backend, so
     // there is no Backend for it. Before the vendor rename a conf could not name
     // it either; the two spellings are accepted only so an out-of-tree conf (or a
@@ -189,6 +191,7 @@ const char* BackendName(Backend b) {
     case Backend::kApple:        return "apple";
     case Backend::kDrobotics:    return "drobotics";
     case Backend::kNvidia:       return "nvidia";
+    case Backend::kHygon:        return "hygon";
     case Backend::kNone:         return "none";
     default:                     return "unknown";
   }

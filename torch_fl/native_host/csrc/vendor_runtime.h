@@ -1,7 +1,7 @@
 // Copyright 2026 FlagOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Host adapters for published NVIDIA numerical libraries. No tensor is retagged
+// Host adapters for published vendor numerical libraries. No tensor is retagged
 // and no CUDA tensor or ATen CUDA redispatch is created here.
 #pragma once
 
@@ -9,16 +9,23 @@
 #include <ATen/EmptyTensor.h>
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/TensorIterator.h>
-#include <ATen/cuda/CUDABlas.h>
-#include <ATen/cuda/CUDAContextLight.h>
 #include <ATen/native/ReduceOps.h>
 #include <ATen/native/ReduceOpsUtils.h>
+#if defined(FLAGOS_NATIVE_HYGON)
+#include <ATen/hip/HIPContext.h>
+#include <c10/hip/HIPCachingAllocator.h>
+#include <c10/hip/HIPGuard.h>
+#include <c10/hip/HIPStream.h>
+#else
+#include <ATen/cuda/CUDABlas.h>
+#include <ATen/cuda/CUDAContextLight.h>
 #include <ATen/native/cuda/cuBlasCommonArgs.h>
-#include <ATen/record_function.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cublas_v2.h>
+#endif
+#include <ATen/record_function.h>
 #include <dlfcn.h>
 #include <flagos.h>
 #include <pybind11/pybind11.h>
@@ -45,10 +52,17 @@ inline std::string LibraryOf(void* address) {
 
 inline py::dict Libraries() {
   py::dict result;
+#if defined(FLAGOS_NATIVE_HYGON)
+  result["torch_hip"] = LibraryOf(reinterpret_cast<void*>(&at::native::rsqrt_kernel_cuda));
+  result["c10_hip"] = LibraryOf(reinterpret_cast<void*>(&c10::hip::getCurrentHIPStream));
+  for (const auto* name : {"hipblasCreate", "hipblasLtCreate", "rocblas_gemm_ex"})
+    result[name] = LibraryOf(dlsym(RTLD_DEFAULT, name));
+#else
   result["torch_cuda"] = LibraryOf(reinterpret_cast<void*>(&at::native::rsqrt_kernel_cuda));
   result["c10_cuda"] = LibraryOf(reinterpret_cast<void*>(&c10::cuda::getCurrentCUDAStream));
   result["cublas"] = LibraryOf(reinterpret_cast<void*>(&cublasCreate));
   result["cublas_lt"] = LibraryOf(dlsym(RTLD_DEFAULT, "cublasLtCreate"));
+#endif
   return result;
 }
 
@@ -58,6 +72,62 @@ inline c10::DeviceIndex VendorDevice(const at::Tensor& input) {
   return input.device().index();
 }
 
+#if defined(FLAGOS_NATIVE_HYGON)
+inline c10::hip::HIPStream VendorStream(c10::DeviceIndex device) {
+  static std::once_flag initialized;
+  std::call_once(initialized, [] {
+    c10::hip::HIPCachingAllocator::init(c10::hip::device_count());
+  });
+  return c10::hip::getStreamFromExternal(
+      reinterpret_cast<hipStream_t>(GetCurrentStreamForDevice(device)), device);
+}
+inline c10::hip::HIPStream VendorStream(const at::Tensor& input) {
+  return VendorStream(VendorDevice(input));
+}
+
+struct VendorScope {
+  std::optional<c10::hip::HIPStreamGuard> guard;
+  explicit VendorScope(c10::DeviceIndex device) {
+    const auto stream = VendorStream(device);
+    // Default and external-null stream IDs can denote the same HIP handle.
+    // Avoid exchanging vendor TLS when both the device and handle match.
+    if (c10::hip::current_device() != stream.device_index() ||
+        c10::hip::getCurrentHIPStream(stream.device_index()).stream() != stream.stream())
+      guard.emplace(stream);
+  }
+  explicit VendorScope(const at::Tensor& input) : VendorScope(VendorDevice(input)) {}
+};
+
+class LibraryStreamScope {
+ public:
+  explicit LibraryStreamScope(int device) : device_(device) {}
+  LibraryStreamScope& Enter() {
+    TORCH_CHECK(!active_, "native stream scope is already active");
+    TORCH_CHECK(device_ >= 0 && device_ < c10::hip::device_count(), "invalid HCU device index");
+    active_.emplace(static_cast<c10::DeviceIndex>(device_));
+    return *this;
+  }
+  bool Exit(py::object, py::object, py::object) {
+    active_.reset();
+    return false;
+  }
+ private:
+  int device_;
+  std::optional<VendorScope> active_;
+};
+
+inline void BindStreamScope(py::module_& module) {
+  py::class_<LibraryStreamScope>(module, "StreamScope")
+      .def(py::init<int>())
+      .def("__enter__", &LibraryStreamScope::Enter, py::return_value_policy::reference_internal)
+      .def("__exit__", &LibraryStreamScope::Exit);
+  module.def("_stream_state", [](int device) {
+    return py::make_tuple(c10::hip::current_device(),
+        reinterpret_cast<uintptr_t>(c10::hip::getCurrentHIPStream(device).stream()));
+  });
+}
+
+#else
 inline c10::cuda::CUDAStream VendorStream(const at::Tensor& input) {
   const auto device = VendorDevice(input);
   static std::once_flag initialized;
@@ -79,6 +149,8 @@ struct VendorDeviceScope {
   c10::cuda::CUDAGuard guard;
   explicit VendorDeviceScope(const at::Tensor& input) : guard(VendorDevice(input)) {}
 };
+
+#endif
 
 inline void DescribeCudaMemory(at::TensorIteratorBase& iterator) {
   // OperandInfo is the iterator's pointer descriptor, not TensorImpl. NVIDIA
@@ -151,8 +223,13 @@ at::Tensor Reduction(Stub& stub, const at::Tensor& input,
   if (input.numel() == 0) {
     // The policy admits the mean family, whose empty identity is NaN. This
     // fill uses the existing FlagGems route; no reduction kernel accepts N=0.
+#if defined(FLAGOS_NATIVE_HYGON)
+    return at::full(kernel.output.sizes(), std::numeric_limits<double>::quiet_NaN(),
+                    kernel.output.options());
+#else
     kernel.output.fill_(std::numeric_limits<double>::quiet_NaN());
     return kernel.output;
+#endif
   }
   auto iterator = at::native::make_reduction(
       "native vendor reduction", kernel.output, input, dims, keepdim,
@@ -162,6 +239,7 @@ at::Tensor Reduction(Stub& stub, const at::Tensor& input,
   return kernel.output;
 }
 
+#if !defined(FLAGOS_NATIVE_HYGON)
 inline void CheckBlas(cublasStatus_t status, const char* call) {
   TORCH_CHECK(status == CUBLAS_STATUS_SUCCESS,
               "native NVIDIA ", call, " failed: ", static_cast<int>(status));
@@ -324,4 +402,5 @@ at::Tensor Matrix(const at::Tensor& input, const at::Tensor& other) {
   }
   return kernel.output;
 }
+#endif
 }  // namespace at::native::flagos::vendor

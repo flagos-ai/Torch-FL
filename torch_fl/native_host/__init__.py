@@ -63,6 +63,13 @@ def audit():
     return _hosts.audit()
 
 
+def execution_scope(device=None):
+    """Bind the current device-library stream while ordinary eager code runs."""
+    from .vendor import stream_scope
+
+    return stream_scope(device)
+
+
 def compile(model, *, dynamic=True, fullgraph=True):
     """Compile an inference model's host graph; numerical kernels stay FlagGems."""
     from .model import compile_model

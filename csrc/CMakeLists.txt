@@ -375,12 +375,14 @@ endif()
 # declines to register a plan and keeps the Python route.
 if(_flagos_is_cuda)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_HAVE_FAST_PLAN=1)
-  if(FLAGOS_BUILD_FLAGGEMS)
-    target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NVIDIA_GEMS_COPY=1)
-  endif()
   message(STATUS "fast plan replay: enabled (CUDA)")
 else()
   message(STATUS "fast plan replay: stubbed (not a CUDA build)")
+endif()
+
+# The published FlagGems copy host also supports HCU storage and streams.
+if(FLAGOS_BUILD_FLAGGEMS AND (_flagos_is_cuda OR _flagos_is_dcu))
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_GEMS_DEVICE_COPY=1)
 endif()
 
 # ROCtracer headers for DCU profiler support. Similar to CUPTI above, we only

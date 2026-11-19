@@ -3,11 +3,20 @@
 
 """Run qwen_eager.py with model graph-compilation entry points forbidden."""
 
+# Device libraries must precede Torch import on the CPU-Torch Hygon build.
+# ruff: noqa: E402
+
 import argparse
 import json
 from pathlib import Path
 import runpy
 import sys
+
+# Hygon's CPU frontend must load its device libraries before Torch caches hooks.
+_backend_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+_backend_parser.add_argument("--device")
+if (_backend_parser.parse_known_args()[0].device or "").startswith("flagos"):
+    import torch_fl  # noqa: F401
 
 import torch
 import torch._dynamo

@@ -1,0 +1,937 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-17",
+  "source_commit": "eba6b82e95b4ae3cc7f1784c54fd8724596f3845",
+  "status": "blocked_missing_hygon_native_host_adapter",
+  "boxing_allowed": false,
+  "native_host_wheel_built": false,
+  "native_host_runtime_executed": false,
+  "native_host_performance_measured": false,
+  "hardware": {
+    "model": "BW1101",
+    "memory_gb": 144,
+    "physical_device": 1,
+    "visible_device": "cuda:0",
+    "idle_checked_before_hardware_runs": true
+  },
+  "sdk": {
+    "dtk_install_version": "26.04",
+    "vendor_torch_hip_version": "6.3.26113"
+  },
+  "source_archive_sha256": "cfc0112ae044e6d98ad6263d5a2a97d59abcd24af3bcc11335425f17a40926a1",
+  "admission_probe": {
+    "source_commit": "eba6b82e95b4ae3cc7f1784c54fd8724596f3845",
+    "vendor": "hygon",
+    "admitted_backends": [
+      "nvidia"
+    ],
+    "admission": {
+      "passed": false,
+      "error_type": "RuntimeError",
+      "message": "no validated native-host launch adapter for hygon"
+    },
+    "torch": {
+      "version": "2.10.0+cpu",
+      "file": "/public-flash/lvyufeng/py653-venv/lib/python3.10/site-packages/torch/__init__.py",
+      "cuda": null,
+      "hip": null
+    },
+    "distributions": {
+      "torch": "2.10.0+cpu",
+      "flag_gems": "5.4.0",
+      "flagtree": "0.7.0+hcu3.6",
+      "Cython": "3.2.4",
+      "numpy": "1.26.4"
+    }
+  },
+  "build_stage_probe": {
+    "kernel_switches": {
+      "FLAGOS_BUILD_VENDOR": true,
+      "FLAGOS_BUILD_FLAGGEMS": true,
+      "FLAGOS_BUILD_BOXING": false,
+      "FLAGOS_BUILD_FLAGGEMS_CPP": false,
+      "FLAGOS_BUILD_TILEOPS": false
+    },
+    "default_conf_routes": {
+      "none": 1586,
+      "flaggems": 456
+    },
+    "native_build_stage": {
+      "passed": false,
+      "type": "RuntimeError",
+      "message": "no validated native-host launch adapter for hygon",
+      "traceback": "Traceback (most recent call last):\n  File \"<stdin>\", line 24, in <module>\n  File \"setup.py\", line 1235, in _build_native_hosts\n    backend_module.get_backend(_platform_entry(FLAGOS_ACCELERATOR)[\"vendor\"])\n  File \"/tmp/torch-fl-hygon-native-20261117/src/torch_fl/native_host/backend.py\", line 36, in get_backend\n    raise RuntimeError(f\"no validated native-host launch adapter for {vendor}\")\nRuntimeError: no validated native-host launch adapter for hygon\n"
+    }
+  },
+  "provider_smoke": {
+    "scope": "Original FlagGems Python hosts on vendor PyTorch; not native-host execution",
+    "torch": "2.10.0",
+    "vendor_torch_distribution": "2.10.0+das.opt1.dtk2604.2606151054.g98b1a8",
+    "torch_file": "/usr/local/lib/python3.10/dist-packages/torch/__init__.py",
+    "torch_hip": "6.3.26113",
+    "flaggems": "5.4.0",
+    "flagtree": "0.7.0+hcu3.6",
+    "triton": "3.6.0",
+    "flaggems_vendor": "hygon",
+    "device": "BW1101",
+    "visible_devices": 1,
+    "torch_fl_imported": false,
+    "sources": {
+      "driver.py": {
+        "sha256": "e06e5aad9ba2963ec3b4e8cae7a2c4c473657db37ceecaee99e8092c46736753",
+        "matches_cached_wheel": true
+      },
+      "driver.c": {
+        "sha256": "754b42923778aaf0d83e8936d517b9825daaa3bd72c184a262c4e47e42535bd8",
+        "matches_cached_wheel": true
+      },
+      "compiler.py": {
+        "sha256": "343431d02e3e83f56a962acba7f32c374d412a35f3636cc5b89574a18b4d499e",
+        "matches_cached_wheel": true
+      },
+      "compiler_hcu.py": {
+        "sha256": "3d6fe9044081a587938b6f2350d0173e6c4a0daf477038e9d4fa68b0acaccadb",
+        "matches_cached_wheel": true
+      }
+    },
+    "cases": [
+      {
+        "op": "add_broadcast",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          },
+          {
+            "shape": [
+              7
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.938,
+        "stream": "default"
+      },
+      {
+        "op": "mul_broadcast",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          },
+          {
+            "shape": [
+              7
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.033,
+        "stream": "default"
+      },
+      {
+        "op": "mul_strided",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              19,
+              11
+            ],
+            "stride": [
+              1,
+              19
+            ]
+          },
+          {
+            "shape": [
+              19,
+              11
+            ],
+            "stride": [
+              1,
+              19
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.051,
+        "stream": "default"
+      },
+      {
+        "op": "cos",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.023,
+        "stream": "default"
+      },
+      {
+        "op": "cos_empty",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              0
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.0,
+        "stream": "default"
+      },
+      {
+        "op": "silu",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 1.1920928955078125e-07,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.026,
+        "stream": "default"
+      },
+      {
+        "op": "softmax",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 1.4901161193847656e-08,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.025,
+        "stream": "default"
+      },
+      {
+        "op": "mm_transposed",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              17,
+              128
+            ],
+            "stride": [
+              128,
+              1
+            ]
+          },
+          {
+            "shape": [
+              128,
+              64
+            ],
+            "stride": [
+              1,
+              128
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 2.641,
+        "stream": "default"
+      },
+      {
+        "op": "cos_nondefault_stream",
+        "dtype": "torch.float32",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.0001,
+        "atol": 0.0001,
+        "elapsed_seconds": 0.008,
+        "stream": "nondefault"
+      },
+      {
+        "op": "add_broadcast",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          },
+          {
+            "shape": [
+              7
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "mul_broadcast",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          },
+          {
+            "shape": [
+              7
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.018,
+        "stream": "default"
+      },
+      {
+        "op": "mul_strided",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              19,
+              11
+            ],
+            "stride": [
+              1,
+              19
+            ]
+          },
+          {
+            "shape": [
+              19,
+              11
+            ],
+            "stride": [
+              1,
+              19
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.018,
+        "stream": "default"
+      },
+      {
+        "op": "cos",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "cos_empty",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              0
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.0,
+        "stream": "default"
+      },
+      {
+        "op": "silu",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0001220703125,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "softmax",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "mm_transposed",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              17,
+              128
+            ],
+            "stride": [
+              128,
+              1
+            ]
+          },
+          {
+            "shape": [
+              128,
+              64
+            ],
+            "stride": [
+              1,
+              128
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.09,
+        "stream": "default"
+      },
+      {
+        "op": "cos_nondefault_stream",
+        "dtype": "torch.float16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.003,
+        "atol": 0.003,
+        "elapsed_seconds": 0.001,
+        "stream": "nondefault"
+      },
+      {
+        "op": "add_broadcast",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          },
+          {
+            "shape": [
+              7
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "mul_broadcast",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          },
+          {
+            "shape": [
+              7
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.018,
+        "stream": "default"
+      },
+      {
+        "op": "mul_strided",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              19,
+              11
+            ],
+            "stride": [
+              1,
+              19
+            ]
+          },
+          {
+            "shape": [
+              19,
+              11
+            ],
+            "stride": [
+              1,
+              19
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "cos",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "cos_empty",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              0
+            ],
+            "stride": [
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.0,
+        "stream": "default"
+      },
+      {
+        "op": "silu",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.014,
+        "stream": "default"
+      },
+      {
+        "op": "softmax",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.016,
+        "stream": "default"
+      },
+      {
+        "op": "mm_transposed",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              17,
+              128
+            ],
+            "stride": [
+              128,
+              1
+            ]
+          },
+          {
+            "shape": [
+              128,
+              64
+            ],
+            "stride": [
+              1,
+              128
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.116,
+        "stream": "default"
+      },
+      {
+        "op": "cos_nondefault_stream",
+        "dtype": "torch.bfloat16",
+        "inputs": [
+          {
+            "shape": [
+              3,
+              5,
+              7
+            ],
+            "stride": [
+              35,
+              7,
+              1
+            ]
+          }
+        ],
+        "output_device": "cuda:0",
+        "status": "passed",
+        "max_abs_error": 0.0,
+        "rtol": 0.03,
+        "atol": 0.05,
+        "elapsed_seconds": 0.001,
+        "stream": "nondefault"
+      }
+    ],
+    "device_properties": {
+      "max_shared_mem": 65536,
+      "max_num_regs": 131072,
+      "multiprocessor_count": 64,
+      "sm_clock_rate": 1350000,
+      "mem_clock_rate": 875000,
+      "mem_bus_width": 256,
+      "arch": "gfx938:sramecc+:xnack-",
+      "warpSize": 64,
+      "max_threads_per_sm": 2560
+    },
+    "compiler_target": "GPUTarget(backend='hip', arch='gfx938', warp_size=64)",
+    "host_identities": {
+      "add": {
+        "module": "flag_gems.ops.add",
+        "source": "/tmp/torch-fl-hygon-native-20261117/vendor-env/lib/python3.10/site-packages/flag_gems/ops/add.py",
+        "sha256": "fb8c3c3b146e209e8ec330a18e4fbe83fa345fed94f659dfa294e4f287dc2bb9",
+        "matches_cached_wheel": true
+      },
+      "mul": {
+        "module": "_hygon.ops.mul",
+        "source": "/tmp/torch-fl-hygon-native-20261117/vendor-env/lib/python3.10/site-packages/flag_gems/runtime/backend/_hygon/ops/mul.py",
+        "sha256": "a0c24e9d2afb047b1be8e9cf9bb1c09e944d6bcce5628e8c338a1af17610022a",
+        "matches_cached_wheel": true
+      },
+      "mm": {
+        "module": "_hygon.ops.mm",
+        "source": "/tmp/torch-fl-hygon-native-20261117/vendor-env/lib/python3.10/site-packages/flag_gems/runtime/backend/_hygon/ops/mm.py",
+        "sha256": "d2594faf1b89fa0bdb2de549d4e2dde19ea87f63c0d92e587b326773d094a0cb",
+        "matches_cached_wheel": true
+      },
+      "softmax": {
+        "module": "flag_gems.ops.softmax",
+        "source": "/tmp/torch-fl-hygon-native-20261117/vendor-env/lib/python3.10/site-packages/flag_gems/ops/softmax.py",
+        "sha256": "d7c6eef628fba956403c1f43f4a2c94dea1142ec8fa532359de5016e3bf9488d",
+        "matches_cached_wheel": true
+      },
+      "silu": {
+        "module": "_hygon.ops.silu",
+        "source": "/tmp/torch-fl-hygon-native-20261117/vendor-env/lib/python3.10/site-packages/flag_gems/runtime/backend/_hygon/ops/silu.py",
+        "sha256": "13676ba7d9df99a47c01007fd723bf2798765f097cb43cb5872c163b9a48c0df",
+        "matches_cached_wheel": true
+      },
+      "cos": {
+        "module": "flag_gems.ops.cos",
+        "source": "/tmp/torch-fl-hygon-native-20261117/vendor-env/lib/python3.10/site-packages/flag_gems/ops/cos.py",
+        "sha256": "2e9f10204c179e7e1fcae8b7a5d7e17a48d920240875bbc5ab59c5591408cded",
+        "matches_cached_wheel": true
+      }
+    },
+    "summary": {
+      "passed": 27,
+      "failed": 0
+    }
+  },
+  "initial_provider_smoke_summary": {
+    "passed": 27,
+    "failed": 0
+  },
+  "reproduction_script": {
+    "path": "benchmarks/host_compiler/hygon_provider_smoke.py",
+    "sha256": "4ecb92fba1c43e6d6f6b8679bb4ed9481d39eaa63f05bc8a7c7f866822fa4844"
+  },
+  "checks": {
+    "command": "python -m pytest tests/unit/test_native_host_backend.py tests/unit/test_setup_build.py tests/unit/test_wheel_preflight.py -q",
+    "test_changes": "Added hygon and dcu to the existing build-admission regression test",
+    "hygon_linux_python310": "99 passed in 1.84s",
+    "local_macos": "98 passed, 1 skipped in 1.73s",
+    "local_skip_reason": "metax setup.py builds its shim with GNU ld",
+    "ruff_check": "All checks passed!",
+    "ruff_format_check": "625 files already formatted",
+    "git_diff_check": "passed with empty output"
+  },
+  "limitations": [
+    "The build probe called only the native-host build stage; no full core-extension or wheel build was attempted.",
+    "Provider smoke executes the original Python hosts on vendor PyTorch without importing torch_fl; it is not generated-host or PrivateUse1 validation.",
+    "Case elapsed times include compilation, synchronization, transfers and assertions and are not warm performance measurements.",
+    "No full-model, native-launch ABI or installed native-host wheel result is available for Hygon."
+  ]
+}

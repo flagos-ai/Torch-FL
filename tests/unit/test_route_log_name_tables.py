@@ -58,6 +58,7 @@ LOGGED_AS = {
     "mthreads": "musa",
     "musa": "musa",
     "nvidia": "nvidia",
+    "hygon": "hygon",
     "boxing": "boxing",
     "ascend": "ascend",
     "metax": "metax",

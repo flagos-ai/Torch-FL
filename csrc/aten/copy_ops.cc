@@ -7,6 +7,7 @@
 #include "copy_ops.h"
 #include "contiguous_ops.h"
 #include "copy_dispatcher.h"
+#include "empty.h"
 
 #include <ATen/native/Resize.h>
 #include <ATen/MemoryOverlap.h>
@@ -88,13 +89,21 @@
 #include <c10/cuda/CUDAStream.h>
 #endif
 
-#if defined(FLAGOS_NVIDIA_GEMS_COPY) || \
-    (defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX))
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX) && !defined(FLAGOS_GEMS_DEVICE_COPY)
 #define FLAGOS_GEMS_DEVICE_COPY 1
+#endif
+#if defined(FLAGOS_GEMS_DEVICE_COPY)
 #include "generated/flaggems_source_bridges.h"
 #endif
 
 namespace at::native::flagos {
+
+#if defined(FLAGOS_GEMS_DEVICE_COPY)
+static bool GemsCopyType(at::ScalarType type) {
+  return type == at::kFloat || type == at::kHalf || type == at::kBFloat16 ||
+         type == at::kLong || type == at::kInt || type == at::kBool || type == at::kByte;
+}
+#endif
 
 bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
 #if defined(FLAGOS_GEMS_DEVICE_COPY)
@@ -104,11 +113,7 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
       src.is_complex() || dst.is_complex() || src.numel() > INT32_MAX ||
       dst.numel() > INT32_MAX || src.numel() == 0 || dst.numel() == 0 ||
       src.is_alias_of(dst)) return false;
-  const auto supported = [](at::ScalarType t) {
-    return t == at::kFloat || t == at::kHalf || t == at::kBFloat16 ||
-           t == at::kLong || t == at::kInt || t == at::kBool || t == at::kByte;
-  };
-  if (!supported(src.scalar_type()) || !supported(dst.scalar_type())) return false;
+  if (!GemsCopyType(src.scalar_type()) || !GemsCopyType(dst.scalar_type())) return false;
   at::assert_no_internal_overlap(dst);
   struct Scope {
     bool& active;
@@ -537,6 +542,12 @@ at::Tensor _copy_from(
 
   // Both flagos tensors: copy on-device.
   if (self.is_privateuseone() && dst.is_privateuseone()) {
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+    // The published copy host orders against the current HCU stream. Prefer it
+    // for same-device copies, including contiguous copies, before the blocking
+    // memcpy path drains the whole device.
+    if (TryGemsDeviceCopy(self, dst)) return dst;
+#endif
     if (self.is_contiguous() && dst.is_contiguous() &&
         self.sizes().equals(dst.sizes()) &&
         self.scalar_type() == dst.scalar_type()) {
@@ -880,6 +891,25 @@ at::Tensor _to_copy(
         : 0;
     device = c10::Device(device.type(), device_index);
   }
+
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD) && defined(FLAGOS_GEMS_DEVICE_COPY)
+  if (self.is_privateuseone() && device == self.device() && dtype != self.scalar_type() &&
+      !self.is_conj() && !self.is_neg() && !self.has_names() &&
+      self.numel() > 0 && self.numel() <= INT32_MAX &&
+      GemsCopyType(self.scalar_type()) && GemsCopyType(dtype)) {
+    // Allocate once, retaining ATen's Preserve/explicit-format rules, then
+    // launch the original copy host on the source strides without a gather.
+    at::Tensor converted = memory_format == c10::MemoryFormat::Preserve &&
+            self.is_non_overlapping_and_dense()
+        ? at::native::flagos::empty_strided(self.sizes(), self.strides(), dtype,
+              self.layout(), device, false)
+        : at::native::flagos::empty_memory_format(self.sizes(), dtype,
+              self.layout(), device, false,
+              memory_format == c10::MemoryFormat::Preserve
+                  ? c10::MemoryFormat::Contiguous : memory_format);
+    if (TryGemsDeviceCopy(self, converted)) return converted;
+  }
+#endif
 
   if (device == self.device() && dtype == self.scalar_type()) {
     if (memory_format == c10::MemoryFormat::Preserve) {

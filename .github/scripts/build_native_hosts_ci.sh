@@ -20,6 +20,9 @@ if [[ "$FLAGOS_ACCELERATOR" == metax ]]; then
   # Default CI stages link inputs without the optional precision cohort's
   # published package/headers. This lane tests the SDK-only native artifact.
   unset FLAGOS_VENDOR_TORCH_LIB FLAGOS_VENDOR_TORCH_VERSION
+elif [[ "$FLAGOS_ACCELERATOR" == hygon || "$FLAGOS_ACCELERATOR" == dcu ]]; then
+  export FLAGOS_BUILD_VENDOR=1
+  : "${FLAGOS_VENDOR_TORCH_LIB:?HCU native precision requires the published DTK torch libraries}"
 fi
 unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 

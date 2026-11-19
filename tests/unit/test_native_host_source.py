@@ -215,6 +215,22 @@ def test_identical_source_does_not_touch_build_artifact(tmp_path):
     assert path.read_text() == "def f(): return 2\n"
 
 
+def test_lambda_closure_retains_free_variables_and_defaults(source_module):
+    original = source_module("""
+def make(scale):
+    return lambda value, offset=7: value * scale + offset
+wrapped = make(3)
+""")
+    original.wrapped.__name__ = "wrapped"
+    source = build.closure_source(original.wrapped, "sample_host", "wrapped")
+    generated = {}
+    exec(source, generated)
+    generated["_bind"](lambda value: value)
+    closure = generated["make"]({"scale": 3})
+    assert closure(5) == 22
+    assert closure(8, offset=2) == 26
+
+
 def test_dataclass_constructor_preserves_enum_default_and_factory(source_module):
     original = source_module("""
 from dataclasses import dataclass, field
