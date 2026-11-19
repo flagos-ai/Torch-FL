@@ -15,6 +15,22 @@
 #include <flagos.h>
 #include <cuda_runtime.h>
 
+namespace {
+// The stream currently being captured by flagos.CUDAGraph, or nullptr when not
+// capturing. Set via SetStreamCapturing from the Python graph wrapper; read back
+// by GetStreamCapturing (declared in flagos.h) both here and in the torch_fl
+// dispatch layer's index bounds check.
+Stream_t g_capture_stream = nullptr;
+} // namespace
+
+void SetStreamCapturing(Stream_t stream) {
+  g_capture_stream = stream;
+}
+
+Stream_t GetStreamCapturing(void) {
+  return g_capture_stream;
+}
+
 Error_t GetDeviceCount(int* count) {
   if (!count) {
     return ErrorUnknown;
@@ -70,6 +86,13 @@ Error_t DeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority) 
 }
 
 Error_t DeviceSynchronize(void) {
+  // A device-wide synchronize invalidates HIP stream capture. During capture the
+  // flagos backend has no per-stream synchronize to fall back on, so skip it:
+  // the capture stream's own ordering already provides the sequencing the caller
+  // needs, and replay will enforce it.
+  if (GetStreamCapturing() != nullptr) {
+    return Success;
+  }
   cudaError_t err = cudaDeviceSynchronize();
   return (err == cudaSuccess) ? Success : ErrorUnknown;
 }
