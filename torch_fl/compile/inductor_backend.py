@@ -449,8 +449,38 @@ def _resolve_config_patches(
 
     # CUDA graphs need torch.cuda.CUDAGraph, a dummy base class in the CPU torch
     # wheel ("Tried to instantiate dummy base class CUDAGraph"). mode=
-    # "max-autotune" turns them on, so force them back off.
-    patches["triton.cudagraphs"] = False
+    # "max-autotune" turns them on, so force them back off unless this build has a
+    # *native* graph binding (the vendor torch's own pybind class, as on MetaX).
+    #
+    # The emulated ctypes HIP graph (DCU) is not enough to turn them on by
+    # default: capture succeeds and every generated kernel records a node, but
+    # instantiating that graph aborts inside the DTK runtime, so enabling it would
+    # turn today's working eager fallback into a hard crash. Opt in explicitly
+    # with FLAGOS_COMPILE_CUDAGRAPHS=1 to exercise the path.
+    from torch_fl.flagos.cuda_graph import cudagraph_available, cudagraph_is_native
+
+    cudagraphs_enabled = cudagraph_available() and (
+        cudagraph_is_native() or _env.flag("FLAGOS_COMPILE_CUDAGRAPHS")
+    )
+
+    if not cudagraphs_enabled:
+        patches["triton.cudagraphs"] = False
+    else:
+        # Inductor 2.10 enables graph_partition by default. Its partitioned
+        # cudagraph path is CUDA-gated and silently skips cudagraphs on a
+        # PrivateUse1 device, so keep the non-partitioned path for flagos.
+        patches["graph_partition"] = False
+        # The slow-path assert calls torch._C._cuda_checkPoolLiveAllocations,
+        # a CUDA-allocator C++ function flagos does not build; it verifies the
+        # graph-private memory pool the flagos path does not use.
+        patches["triton.slow_path_cudagraph_asserts"] = False
+        # Prefer the legacy cudagraphify_impl over the 2.10 cudagraph_trees
+        # manager. cudagraph_trees reconstructs its static inputs through
+        # torch._C._construct_CUDA_Tensor_From_Storage_And_Metadata and
+        # torch._C._construct_storage_from_data_pointer, CUDA-only C++ entry
+        # points the CPU wheel does not build; the legacy path builds its static
+        # buffers with torch.empty_strided, which works on flagos unchanged.
+        patches["triton.cudagraph_trees"] = False
 
     # The static launcher needs torch._C._StaticCudaLauncher, which the CPU
     # torch wheel does not build (we supply libtorch_cuda.so externally). Fall
@@ -462,6 +492,38 @@ def _resolve_config_patches(
         patches["use_static_cuda_launcher"] = False
 
     return patches
+
+
+def _patch_cudagraph_device_gate() -> None:
+    """Let Inductor's cudagraph gate accept the flagos device.
+
+    ``torch/_inductor/cudagraph_utils.py`` only allows a cudagraph when the
+    graph's single device is ``cuda`` (``device.type == "cuda"``). flagos is a
+    PrivateUse1 device, so a single-flagos graph is rejected as "multiple
+    devices" and ``mode="reduce-overhead"`` silently no-ops. Accept any single
+    GPU device instead -- ``is_gpu("flagos")`` is True once the flagos device
+    interface is registered (see device_interface.py).
+    """
+    try:
+        import torch._inductor.cudagraph_utils as cu
+        from torch._inductor.utils import is_gpu
+    except ImportError:
+        return
+
+    original = cu.check_multiple_devices_or_any_cpu_nodes
+
+    def patched(device_node_mapping):
+        result = original(device_node_mapping)
+        if result is None:
+            return None
+        mapping = dict(device_node_mapping)
+        mapping.pop(torch.device("meta"), None)
+        mapping.pop(torch.device("cpu"), None)
+        if len(mapping) == 1 and is_gpu(next(iter(mapping)).type):
+            return None
+        return result
+
+    cu.check_multiple_devices_or_any_cpu_nodes = patched
 
 
 def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> None:
@@ -652,6 +714,18 @@ def flagos_compile_backend(
     # answer True and the device interface must be resolvable before the
     # codegen backend registration reads them.
     register_inductor_device()
+
+    # Allow Inductor's cudagraph gate to accept the flagos device (it hardcodes
+    # device.type == "cuda"), so mode="reduce-overhead" can actually engage.
+    _patch_cudagraph_device_gate()
+
+    # Install the stable raw-stream getter before Inductor emits code. The
+    # generated graph does ``from torch._C import _cuda_getCurrentRawStream``,
+    # snapshotting the function object; the accelerator compat layers have
+    # overwritten it since cuda_graph.py was imported, so re-apply it here.
+    from torch_fl.flagos.cuda_graph import install_raw_stream_getter
+
+    install_raw_stream_getter()
 
     # Hand the graph to inductor untouched -- it is on flagos and stays there.
     try:

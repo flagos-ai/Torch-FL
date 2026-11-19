@@ -17,8 +17,8 @@
 Two backends, selected at import time by whether ``torch.cuda.CUDAGraph`` is a
 *real* binding:
 
-* **CUDA-ABI boxing platforms with a real binding** (MetaX ``maca``, where
-  torch_fl relinks maca's libtorch_cuda).  ``torch._C._CUDAGraph`` is a real
+* **Platforms with a real vendor-torch CUDA binding** (MetaX, where torch_fl
+  relinks the vendor libtorch_cuda).  ``torch._C._CUDAGraph`` is a real
   pybind class, so we reuse ``torch.cuda.CUDAGraph`` / ``torch.cuda.graph``
   unchanged.  The flagos device's kernels are submitted through that same
   binding's capture stream (``flagos.current_stream`` is a vendor stream shim),
@@ -63,8 +63,77 @@ def _cuda_graph_binding_available() -> bool:
     return graph_cls is not None and getattr(graph_cls, "__module__", "") == "torch._C"
 
 
+def cudagraph_available() -> bool:
+    """True when ``torch.cuda.CUDAGraph`` is a usable graph class right now.
+
+    The CPU torch wheel ships ``torch.cuda.CUDAGraph`` as a dummy base class
+    whose ``__module__`` is ``torch._utils`` and which raises on construction.
+    Usable means it is either the vendor torch's real pybind class (MetaX)
+    or this module's ctypes-driven HIP graph (DCU decoupled mode, installed by
+    ``torch_fl.flagos._alias_torch_cuda_graph``).  Inductor gates
+    ``mode="reduce-overhead"`` on exactly this.
+    """
+    graph_cls = getattr(torch.cuda, "CUDAGraph", None)
+    return (
+        graph_cls is not None and getattr(graph_cls, "__module__", "") != "torch._utils"
+    )
+
+
+def cudagraph_is_native() -> bool:
+    """True when the graph class is the torch build's own CUDAGraph binding.
+
+    ``cudagraph_available`` answers "can a graph be constructed here"; this
+    answers "is it the runtime's native implementation". The distinction matters
+    to ``torch.compile``: on a native binding its generated kernels capture and
+    instantiate normally, while on the emulated ctypes HIP graph instantiating a
+    graph of Inductor-generated kernels aborts inside the vendor runtime (see
+    ``hip_graph_instantiate_crash.md``). So ``mode="reduce-overhead"`` is enabled
+    automatically only on the native path.
+    """
+    return _cuda_graph_binding_available()
+
+
+# Inductor's generated code snapshots the raw-stream getter at module import
+# time: ``from torch._C import _cuda_getCurrentRawStream as get_raw_stream``. So
+# the function object must never be reassigned -- only the mutable state it reads.
+# Reassigning it (as _route_stream did) leaves the snapshot on the default-stream
+# handle and compiled kernels never enter the capture. Keep a stable getter over
+# a module global: None means "not capturing", in which case the getter defers to
+# the native raw-stream getter the accelerator compat layer installed (which is
+# the current queue on native builds, and 0 on the decoupled CPU-torch build).
+_capture_raw_stream = None
+
+# The raw-stream getter snapshot at compile time, before the stable getter
+# replaces it. Read by _raw_stream_getter when nothing is being captured.
+_native_raw_stream = None
+
+
+def _raw_stream_getter(idx=0):
+    if _capture_raw_stream is not None:
+        return _capture_raw_stream
+    if _native_raw_stream is not None:
+        return _native_raw_stream(idx)
+    return 0
+
+
+def install_raw_stream_getter() -> None:
+    """Point ``torch._C._cuda_getCurrentRawStream`` at the stable getter.
+
+    Inductor's generated code snapshots this name at module import time
+    (``from torch._C import _cuda_getCurrentRawStream as get_raw_stream``), so the
+    binding must be installed before the first compiled graph is imported. The
+    accelerator compat layers (dcu/nvidia/metax) overwrite it with their own
+    default-stream lambda during ``import torch_fl``, which is why the module-level
+    assignment above is not enough -- this must be re-applied at compile time,
+    after those layers have run and before Inductor emits code.
+    """
+    global _native_raw_stream
+    _native_raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    torch._C._cuda_getCurrentRawStream = _raw_stream_getter
+
+
 if _cuda_graph_binding_available():
-    # ---- Backend 1: real torch.cuda.CUDAGraph binding (MetaX maca boxing). ----
+    # ---- Backend 1: real torch.cuda.CUDAGraph binding (MetaX vendor torch). ----
     CUDAGraph = torch.cuda.CUDAGraph
     graph = torch.cuda.graph
 
@@ -148,14 +217,20 @@ else:
                 fn.argtypes = args
 
         def _route_stream(self, stream) -> None:
-            """Point boxing + triton launches at `stream` (None = default stream)."""
+            """Point vendor + triton launches at `stream` (None = default stream)."""
+            global _capture_raw_stream
             if stream is None:
                 self._set_cuda_stream(None, 0)
                 handle = 0
+                # Not capturing: defer the raw-stream getter to the native one.
+                _capture_raw_stream = None
             else:
                 handle = stream.value
                 self._set_cuda_stream(stream, 0)
-            torch._C._cuda_getCurrentRawStream = lambda idx=0, h=handle: h
+                _capture_raw_stream = handle
+            # Update the mutable state the stable getter reads; do not reassign
+            # torch._C._cuda_getCurrentRawStream -- the generated Inductor code
+            # already snapshotted the function object at import time.
             try:
                 from triton.runtime import driver
 
@@ -170,9 +245,9 @@ else:
             # HIP capture modes, mirroring torch.cuda.graph's capture_error_mode:
             #   global (default) / thread_local / relaxed
             mode = {
-                "global": 0,       # hipStreamCaptureModeGlobal
+                "global": 0,  # hipStreamCaptureModeGlobal
                 "thread_local": 1,  # hipStreamCaptureModeThreadLocal
-                "relaxed": 2,       # hipStreamCaptureModeRelaxed
+                "relaxed": 2,  # hipStreamCaptureModeRelaxed
             }[capture_error_mode]
             rc = self._hip.hipStreamBeginCapture(stream, mode)
             if rc != 0:
@@ -221,11 +296,23 @@ else:
                 self._stream = ctypes.c_void_p()
 
     class graph:
-        """Context manager capturing into a :class:`CUDAGraph`, like torch.cuda.graph."""
+        """Context manager capturing into a :class:`CUDAGraph`, like torch.cuda.graph.
 
-        def __init__(self, cuda_graph: CUDAGraph, capture_error_mode: str = "global") -> None:
+        ``pool`` and ``stream`` mirror ``torch.cuda.graph``'s signature so Inductor
+        can call it unchanged; the flagos graph captures on its own private stream
+        (created in ``CUDAGraph.__init__``), so they are accepted but unused.
+        """
+
+        def __init__(
+            self,
+            cuda_graph: CUDAGraph,
+            pool=None,
+            stream=None,
+            capture_error_mode: str = "global",
+        ) -> None:
             self._graph = cuda_graph
             self._capture_error_mode = capture_error_mode
+            self._stream = stream
 
         def __enter__(self) -> CUDAGraph:
             self._graph.capture_begin(self._capture_error_mode)
