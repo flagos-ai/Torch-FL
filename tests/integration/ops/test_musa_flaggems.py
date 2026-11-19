@@ -11,7 +11,7 @@ import torch_fl
 pytestmark = pytest.mark.musa
 DEVICE = torch.device("flagos:0")
 
-#: Attribute ``torch_fl.flagos._patch_flaggems_tune_space`` sets on every
+#: Attribute ``torch_fl.compat.flaggems.autotune.patch_tune_space`` sets on every
 #: ``run`` it wraps; see that function for why the repair lives behind it.
 _TUNE_SPACE_FLAG = "_flagos_tune_space_fits_device"
 

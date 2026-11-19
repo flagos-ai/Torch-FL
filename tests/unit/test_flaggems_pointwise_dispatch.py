@@ -39,7 +39,8 @@ import importlib
 import pytest
 import torch
 
-from torch_fl import _build_accelerator, flagos
+from torch_fl import _build_accelerator
+from torch_fl.compat.flaggems import launch
 from torch_fl._platform import platform_for
 
 libentry = None
@@ -78,12 +79,12 @@ class TestRunPlan:
 
     def test_partitions_every_position(self, entry):
         n = len(entry.jit_function.params)
-        support, plain, constexpr = flagos._libentry_run_plan(entry, n)
+        support, plain, constexpr = launch._libentry_run_plan(entry, n)
         assert sorted(support + plain + constexpr) == list(range(n))
 
     def test_membership_follows_the_entry(self, entry):
         n = len(entry.jit_function.params)
-        support, plain, constexpr = flagos._libentry_run_plan(entry, n)
+        support, plain, constexpr = launch._libentry_run_plan(entry, n)
         assert set(support) == {i for i in range(n) if i in entry.specialize_indices}
         assert set(plain) == {
             i for i in range(n) if i in entry.do_not_specialize_indices
@@ -95,7 +96,7 @@ class TestRunPlan:
         # A launch that does not supply every parameter would need the stock
         # path's default handling, so no plan may be produced for it.
         n = len(entry.jit_function.params)
-        assert flagos._libentry_run_plan(entry, n + delta) is None
+        assert launch._libentry_run_plan(entry, n + delta) is None
 
     def test_a_tuned_entry_takes_the_stock_path(self, entry):
         # A tuner-produced constant is not in the argument list this path
@@ -105,7 +106,7 @@ class TestRunPlan:
         entry.__dict__["_has_flagtune_tuner"] = True
         try:
             n = len(entry.jit_function.params)
-            assert flagos._libentry_run_plan(entry, n) is None
+            assert launch._libentry_run_plan(entry, n) is None
         finally:
             if original is missing:
                 entry.__dict__.pop("_has_flagtune_tuner", None)
@@ -126,19 +127,19 @@ class TestFastKeyMatchesStock:
     @staticmethod
     def _specialization():
         gems_runtime = importlib.import_module("flag_gems.runtime")
-        return flagos._hygon_tensor_specialization(gems_runtime.device)
+        return launch._hygon_tensor_specialization(gems_runtime.device)
 
     def test_same_tuple_for_a_typical_launch(self, entry):
         x = torch.randn(64)
         y = torch.randn(64)
         spec = [x, y] if 0 in entry.specialize_indices else []
-        fast_key = flagos._fast_libentry_key(
+        fast_key = launch._fast_libentry_key(
             entry, libentry._descriptor_cache_key, self._specialization()
         )
         assert fast_key(spec, [64], [128]) == self._stock_key(entry, spec, [64], [128])
 
     def test_same_tuple_when_nothing_is_specialised(self, entry):
-        fast_key = flagos._fast_libentry_key(
+        fast_key = launch._fast_libentry_key(
             entry, libentry._descriptor_cache_key, self._specialization()
         )
         assert fast_key([], [], []) == self._stock_key(entry, [], [], [])
@@ -149,7 +150,7 @@ class TestFastKeyMatchesStock:
         # branch too.
         x = torch.randn(64)
         marker = object()
-        key = flagos._fast_libentry_key(
+        key = launch._fast_libentry_key(
             entry, libentry._descriptor_cache_key, lambda _t: marker
         )([x], [], [])
         aligned = x.data_ptr() % entry.divisibility == 0
@@ -159,7 +160,7 @@ class TestFastKeyMatchesStock:
         class _Device:
             vendor_name = "not-hygon"
 
-        assert flagos._hygon_tensor_specialization(_Device()) is None
+        assert launch._hygon_tensor_specialization(_Device()) is None
 
     def test_hook_resolves_to_a_callable_or_none(self):
         hook = self._specialization()
@@ -170,10 +171,10 @@ class TestFastKeyMatchesStock:
 
         def key_for_entry(e):
             calls.append(e)
-            return flagos._fast_libentry_key(e, libentry._descriptor_cache_key, None)
+            return launch._fast_libentry_key(e, libentry._descriptor_cache_key, None)
 
-        first = flagos._cached_libentry_key(entry, key_for_entry)
-        second = flagos._cached_libentry_key(entry, key_for_entry)
+        first = launch._cached_libentry_key(entry, key_for_entry)
+        second = launch._cached_libentry_key(entry, key_for_entry)
         try:
             assert first is second
             assert calls == [entry]
@@ -196,16 +197,16 @@ class TestHoistedDescriptorCacheKey:
 
     @pytest.mark.parametrize("obj", [7, 2.5, "i32", None])
     def test_non_descriptors_pass_through(self, obj):
-        dck = flagos._hoisted_descriptor_cache_key(None)
+        dck = launch._hoisted_descriptor_cache_key(None)
         assert dck(obj) is obj
 
     def test_tensors_pass_through_on_this_platform(self):
-        dck = flagos._hoisted_descriptor_cache_key(None)
+        dck = launch._hoisted_descriptor_cache_key(None)
         x = torch.randn(4)
         assert dck(x) is x
 
     def test_stock_agrees_on_non_descriptors(self):
-        dck = flagos._hoisted_descriptor_cache_key(None)
+        dck = launch._hoisted_descriptor_cache_key(None)
         stock = self._stock_descriptor_key()
         x = torch.randn(4)
         for obj in (x, 3, "i32"):
@@ -221,24 +222,24 @@ class TestBroadcastShapesMemo:
 
     def test_matches_torch(self):
         original = self._unpatched()
-        memo = flagos._memoized_broadcast_shapes(original)
+        memo = launch._memoized_broadcast_shapes(original)
         shapes = [(1, 4096, 1), (1, 1, 4096)]
         assert tuple(memo(*shapes)) == tuple(original(*shapes))
         assert isinstance(memo(*shapes), type(original(*shapes)))
 
     def test_repeat_returns_the_cached_object(self):
-        memo = flagos._memoized_broadcast_shapes(self._unpatched())
+        memo = launch._memoized_broadcast_shapes(self._unpatched())
         first = memo((2, 3), (3,))
         second = memo((2, 3), (3,))
         assert first is second
 
     def test_lists_fall_back_instead_of_raising(self):
-        memo = flagos._memoized_broadcast_shapes(self._unpatched())
+        memo = launch._memoized_broadcast_shapes(self._unpatched())
         assert tuple(memo([2, 3], [3])) == (2, 3)
 
     def test_cache_size_is_bounded(self):
-        memo = flagos._memoized_broadcast_shapes(self._unpatched())
-        limit = flagos._BROADCAST_SHAPES_LIMIT
+        memo = launch._memoized_broadcast_shapes(self._unpatched())
+        limit = launch._BROADCAST_SHAPES_LIMIT
         first = memo(
             (7, 11),
         )
@@ -264,7 +265,7 @@ class TestGate:
         torch.broadcast_shapes = broadcast_shapes
 
     def test_does_not_install_off_the_measured_builds(self):
-        if platform_for(_build_accelerator()) in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+        if platform_for(_build_accelerator()) in launch._FLAGGEMS_LAUNCH_PATCH_BUILDS:
             pytest.skip("a build the gate opens on")
         before = (
             libentry.LibEntry.run,
@@ -272,7 +273,7 @@ class TestGate:
             libentry._descriptor_cache_key,
             torch.broadcast_shapes,
         )
-        flagos._patch_flaggems_pointwise_dispatch()
+        launch.patch_pointwise_dispatch(_build_accelerator())
         assert (
             libentry.LibEntry.run,
             libentry.LibEntry.key,
@@ -283,7 +284,7 @@ class TestGate:
     def test_installs_on_a_measured_build_and_is_idempotent(self):
         if (
             platform_for(_build_accelerator())
-            not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS
+            not in launch._FLAGGEMS_LAUNCH_PATCH_BUILDS
         ):
             pytest.skip("not a build the gate opens on")
         saved = (
@@ -294,7 +295,7 @@ class TestGate:
         )
         already = getattr(libentry.LibEntry.run, "_torch_fl_fast", False)
         try:
-            flagos._patch_flaggems_pointwise_dispatch()
+            launch.patch_pointwise_dispatch(_build_accelerator())
             first = (
                 libentry.LibEntry.run,
                 libentry.LibEntry.key,
@@ -305,7 +306,7 @@ class TestGate:
                 # A second install must not wrap the wrappers: the key and the
                 # stock ``run`` a fallback returns to both have to stay the ones
                 # the first install captured.
-                flagos._patch_flaggems_pointwise_dispatch()
+                launch.patch_pointwise_dispatch(_build_accelerator())
                 assert libentry.LibEntry.run is first[0]
                 assert libentry.LibEntry.key is first[1]
                 assert libentry.LibEntry.run.__wrapped__ is saved[0]

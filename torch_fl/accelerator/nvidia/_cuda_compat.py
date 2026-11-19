@@ -739,7 +739,7 @@ def patch_torch_cuda_for_flagos():
     # philox_backend_seed_offset unpacks) and route cuda seeding to them, so
     # torch.manual_seed(s) -> torch.cuda.manual_seed_all(s) reseeds them and
     # gems RNG becomes reproducible. This is the SAME shape the metax branch
-    # uses; it replaces the old _patch_flaggems_philox monkeypatch.
+    # uses; it replaces the old patch_philox monkeypatch.
     def _manual_seed(seed):
         seed = int(seed)
         idx = _current_device()

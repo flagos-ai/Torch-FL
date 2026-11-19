@@ -23,7 +23,7 @@ routing decision that allowed it.
 
 Two facts this file exists for:
 
-  * Kunlunxin's `_patch_flaggems_codegen_config` branch used to label the vendor
+  * Kunlunxin's `configure_vendor` branch used to label the vendor
     and return *before any shim ran* (`... only labels the vendor and returns
     before any shim runs`). That is correct about the generic-NVIDIA shim -- it
     installs CUDA-backed generators this CPU wheel cannot construct -- but it
@@ -49,20 +49,20 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-INIT = REPO_ROOT / "torch_fl" / "__init__.py"
+RUNTIME = REPO_ROOT / "torch_fl/compat/flaggems/runtime.py"
 COMPAT = REPO_ROOT / "torch_fl" / "accelerator" / "kunlunxin" / "_klx_compat.py"
 
 
 def _kunlunxin_branch() -> str:
-    """The body of the kunlunxin arm of ``_patch_flaggems_codegen_config``.
+    """The body of the kunlunxin arm of ``configure_vendor``.
 
     Every branch in that chain opens with a ``# --- Name branch ---`` comment, so
     the arm ends at the next such comment. Cutting at the next same-indent `if`
     would instead run into the next branch's prologue -- MetaX's assigns
     ``_metax_requested`` before its ``if``.
     """
-    text = INIT.read_text()
-    start = text.index('if _build_accelerator() == "kunlunxin":')
+    text = RUNTIME.read_text()
+    start = text.index('if accelerator == "kunlunxin":')
     rest = text[start:]
     end = rest.index("\n    # --- ", 1)
     return rest[:end]

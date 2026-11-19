@@ -778,7 +778,7 @@ _FLAGGEMS_RANDOM_INPLACE = {"uniform_", "exponential_", "bernoulli_.float"}
 
 # RNG functional ops whose aten schema carries a trailing `Generator?` the
 # positional caller can't express. We DROP that arg and let gems draw from the
-# _patch_flaggems_philox() fallback generator (gems' gen=None path hits the
+# patch_philox() fallback generator (gems' gen=None path hits the
 # patched philox_backend_seed_offset). Verified to run + sample correctly.
 # randperm needs no entry here: its aten schema has no generator arg in this
 # torch version, so the plain factory branch already covers it. normal_* stays
@@ -1528,7 +1528,7 @@ def gen_flaggems_python_kernel(
     if category == "rng_dropgen":
         # RNG functional with the aten Generator? dropped: pass the remaining
         # positionals to gems; RNG state comes from the philox monkeypatch
-        # (torch_fl._patch_flaggems_philox). Returns a fresh (flagos) tensor.
+        # (compat.flaggems.random.patch_philox). Returns a fresh (flagos) tensor.
         positional = kwargs or []
         pos_names = [n for _t, n in positional]
         pos_init = "{" + ", ".join(pos_names) + "}"

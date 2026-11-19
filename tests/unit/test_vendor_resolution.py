@@ -14,7 +14,7 @@
 
 """Unit coverage for torch_fl/_vendor.py, the GEMS_VENDOR chokepoint.
 
-``_patch_flaggems_codegen_config`` in ``torch_fl/__init__.py`` used to leave an
+``configure_vendor`` in ``torch_fl/compat/flaggems/runtime.py`` used to leave an
 explicitly exported ``GEMS_VENDOR`` that torch_fl cannot configure in place, and
 its final ``else`` silently selected ``ascend`` when no vendor branch matched.
 Both are now fail-loud: an unknown explicit value raises here, and the ladder

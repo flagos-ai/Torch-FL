@@ -78,7 +78,7 @@ from torch_fl import _env
 # Vendor profiles
 #
 # GEMS_VENDOR selects the hardware backend (see torch_fl/__init__.py
-# _patch_flaggems_codegen_config). Each vendor differs in three comm-relevant
+# compat.flaggems.runtime.configure_vendor). Each vendor differs in three comm-relevant
 # ways, captured here so _build_inner stays table-driven — adding a new vendor
 # means adding one row, not editing branch logic:
 #

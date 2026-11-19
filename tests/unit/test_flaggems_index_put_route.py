@@ -32,12 +32,13 @@ The on-hardware measurements are in ``docs/reference/operator-support.md``.
 import pytest
 import torch
 
-from torch_fl import _build_accelerator, flagos
+from torch_fl import _build_accelerator
+from torch_fl.compat.flaggems import launch, ops, runtime
 from torch_fl._platform import platform_for
 
 
 def _roundtrip(x, indices, values, accumulate=False):
-    return flagos._flagos_index_put_roundtrip(x, indices, values, accumulate)
+    return ops._flagos_index_put_roundtrip(x, indices, values, accumulate)
 
 
 class TestFallbackMatchesSetitem:
@@ -149,16 +150,16 @@ class TestGate:
     """The patch is scoped to the builds and confs it was measured on."""
 
     def test_does_not_register_off_the_measured_builds(self):
-        if platform_for(_build_accelerator()) in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS:
+        if platform_for(_build_accelerator()) in launch._FLAGGEMS_LAUNCH_PATCH_BUILDS:
             pytest.skip("a build the gate opens on")
-        before = len(flagos._PATCH_LIBS)
-        flagos._patch_flaggems_index_put()
-        assert len(flagos._PATCH_LIBS) == before
+        before = len(ops._PATCH_LIBS)
+        ops.patch_index_put(_build_accelerator())
+        assert len(ops._PATCH_LIBS) == before
 
     def test_registers_on_a_measured_build(self):
         if (
             platform_for(_build_accelerator())
-            not in flagos._FLAGGEMS_LAUNCH_PATCH_BUILDS
+            not in launch._FLAGGEMS_LAUNCH_PATCH_BUILDS
         ):
             pytest.skip("not a build the gate opens on")
         flag_gems = pytest.importorskip("flag_gems")
@@ -166,12 +167,9 @@ class TestGate:
             pytest.skip("this flag_gems has no index_put_")
         # The function's own second gate, out here rather than inside the call,
         # so a skip says which of the two conditions was not met.
-        conf_routes = flagos.__dict__.get("_conf_routes_to_flaggems")
-        if conf_routes is None:
-            from torch_fl import _conf_routes_to_flaggems as conf_routes
-        if not conf_routes():
+        if not runtime.routes_to_flaggems():
             pytest.skip("the selected conf routes nothing to FlagGems")
         # Registering needs no device: torch.library only touches the dispatcher.
-        before = len(flagos._PATCH_LIBS)
-        flagos._patch_flaggems_index_put()
-        assert len(flagos._PATCH_LIBS) == before + 1
+        before = len(ops._PATCH_LIBS)
+        ops.patch_index_put(_build_accelerator())
+        assert len(ops._PATCH_LIBS) == before + 1

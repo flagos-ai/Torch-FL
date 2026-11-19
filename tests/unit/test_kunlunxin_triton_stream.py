@@ -23,7 +23,7 @@ when ``torch._C._cuda_getCurrentRawStream`` is absent -- which it is on the
 CPU-torch wheel Kunlunxin runs on -- and FlagTree's ``XPUDriver`` overrides the
 device pair but never the stream. The first kernel launch therefore dies in
 ``torch.cuda._lazy_init``. Reproducing that needs no accelerator, so the checks
-below drive ``_bind_stream_on_driver`` and ``_bind_kunlunxin_triton_stream``
+below drive ``_bind_stream_on_driver`` and ``bind_kunlunxin_stream``
 against synthetic driver objects with the same shape.
 
 Measured on a P800 (torch 2.10.0+cpu, triton 3.6.0): with the parent's lambda a
@@ -31,55 +31,35 @@ plain ``tl.load``/``tl.store`` kernel raises ``AssertionError: Torch not compile
 with CUDA enabled``; with the binding in place it launches, synchronizes and
 reads back ``min == max == 2.0`` for ``ones + ones``.
 
-The functions are loaded out of ``torch_fl/flagos/__init__.py`` by AST extraction
-rather than by importing torch_fl: the unit environment has no torch, and
-``import torch_fl`` claims the PrivateUse1 dispatch key. Extracting only the two
-functions under test keeps this file runnable everywhere.
+The compatibility module is loaded directly from ``torch_fl/compat/triton.py``
+so these tests can run without claiming the PrivateUse1 dispatch key.
 
 Run: pytest tests/unit/test_kunlunxin_triton_stream.py -v
 """
 
-import ast
+import importlib.util
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
-_SOURCE = Path(__file__).resolve().parents[2] / "torch_fl" / "flagos" / "__init__.py"
-_UNDER_TEST = ("_bind_stream_on_driver", "_bind_kunlunxin_triton_stream")
+_SOURCE = Path(__file__).resolve().parents[2] / "torch_fl/compat/triton.py"
 
 
-def _load_functions():
-    """Compile just the two functions under test into a throwaway module."""
-    tree = ast.parse(_SOURCE.read_text())
-    wanted = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in _UNDER_TEST
-    ]
-    assert {node.name for node in wanted} == set(_UNDER_TEST), (
-        f"{_SOURCE} no longer defines {_UNDER_TEST}"
-    )
-    module = types.ModuleType("kunlunxin_stream_under_test")
-    exec(
-        compile(ast.Module(body=wanted, type_ignores=[]), str(_SOURCE), "exec"),
-        module.__dict__,
-    )
-    # ``_bind_stream_on_driver`` resolves ``current_stream`` through
-    # ``sys.modules[__name__]``, so the module has to be registered under the
-    # name its own ``__name__`` reports.
-    sys.modules[module.__name__] = module
+@pytest.fixture()
+def triton_compat():
+    spec = importlib.util.spec_from_file_location("triton_compat_under_test", _SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture()
 def flagos():
-    """The extracted module, with the collaborators the functions reach for."""
-    module = _load_functions()
-    module._platform = lambda: "kunlunxin"
-    module.current_stream = lambda index: types.SimpleNamespace(handle=0)
-    return module
+    return types.SimpleNamespace(
+        current_stream=lambda index: types.SimpleNamespace(handle=0)
+    )
 
 
 class _FallbackDriver:
@@ -164,43 +144,43 @@ def test_the_fallback_lambda_is_what_we_key_on():
     assert "GPUDriver.__init__" in driver.get_current_stream.__qualname__
 
 
-def test_bind_replaces_the_parent_fallback(flagos):
+def test_bind_replaces_the_parent_fallback(triton_compat, flagos):
     driver = _FallbackDriver()
-    bound = flagos._bind_stream_on_driver(driver)
+    bound = triton_compat._bind_stream_on_driver(driver, flagos)
     assert bound is driver
     _assert_bound(bound)
 
 
-def test_bind_is_idempotent(flagos):
+def test_bind_is_idempotent(triton_compat, flagos):
     driver = _FallbackDriver()
-    first = flagos._bind_stream_on_driver(driver).get_current_stream
-    second = flagos._bind_stream_on_driver(driver).get_current_stream
+    first = triton_compat._bind_stream_on_driver(driver, flagos).get_current_stream
+    second = triton_compat._bind_stream_on_driver(driver, flagos).get_current_stream
     assert first is second
 
 
-def test_bind_leaves_a_real_implementation_alone(flagos):
+def test_bind_leaves_a_real_implementation_alone(triton_compat, flagos):
     driver = _OwnStreamDriver()
-    flagos._bind_stream_on_driver(driver)
+    triton_compat._bind_stream_on_driver(driver, flagos)
     assert driver.get_current_stream(0) == 4242
 
 
-def test_bound_accessor_reads_torch_fl_current_stream(flagos):
+def test_bound_accessor_reads_torch_fl_current_stream(triton_compat, flagos):
     """The replacement must answer from torch_fl's handle, never from torch.cuda."""
     flagos.current_stream = lambda index: types.SimpleNamespace(handle=7)
-    driver = flagos._bind_stream_on_driver(_FallbackDriver())
+    driver = triton_compat._bind_stream_on_driver(_FallbackDriver(), flagos)
     assert driver.get_current_stream(0) == 7
     assert driver.get_current_stream(3) == 7
 
 
-def test_bound_accessor_returns_an_int(flagos):
+def test_bound_accessor_returns_an_int(triton_compat, flagos):
     flagos.current_stream = lambda index: types.SimpleNamespace(handle="0")
-    driver = flagos._bind_stream_on_driver(_FallbackDriver())
+    driver = triton_compat._bind_stream_on_driver(_FallbackDriver(), flagos)
     assert driver.get_current_stream(0) == 0
     assert isinstance(driver.get_current_stream(0), int)
 
 
-def test_bind_handles_none_driver(flagos):
-    assert flagos._bind_stream_on_driver(None) is None
+def test_bind_handles_none_driver(triton_compat, flagos):
+    assert triton_compat._bind_stream_on_driver(None, flagos) is None
 
 
 @pytest.fixture()
@@ -234,12 +214,12 @@ def fake_triton_driver(monkeypatch):
     return instance
 
 
-def test_lazy_active_is_bound_on_first_read(flagos, monkeypatch, fake_triton_driver):
+def test_lazy_active_is_bound_on_first_read(triton_compat, flagos, fake_triton_driver):
     """The driver is built lazily, so the patch has to be applied lazily too."""
     config = fake_triton_driver
     assert not getattr(type(config), "_flagos_stream_bound", False)
 
-    flagos._bind_kunlunxin_triton_stream()
+    triton_compat.bind_kunlunxin_stream("kunlunxin", flagos)
 
     assert config.created == 0, "the binder must not force driver creation"
     driver = config.active
@@ -247,8 +227,10 @@ def test_lazy_active_is_bound_on_first_read(flagos, monkeypatch, fake_triton_dri
     _assert_bound(driver)
 
 
-def test_set_active_binds_a_substituted_driver(flagos, fake_triton_driver):
-    flagos._bind_kunlunxin_triton_stream()
+def test_set_active_binds_a_substituted_driver(
+    triton_compat, flagos, fake_triton_driver
+):
+    triton_compat.bind_kunlunxin_stream("kunlunxin", flagos)
 
     replacement = _FallbackDriver()
     fake_triton_driver.set_active(replacement)
@@ -256,18 +238,17 @@ def test_set_active_binds_a_substituted_driver(flagos, fake_triton_driver):
     _assert_bound(fake_triton_driver.active)
 
 
-def test_noop_off_kunlunxin(flagos, fake_triton_driver):
-    flagos._platform = lambda: "ascend"
-    flagos._bind_kunlunxin_triton_stream()
+def test_noop_off_kunlunxin(triton_compat, flagos, fake_triton_driver):
+    triton_compat.bind_kunlunxin_stream("ascend", flagos)
 
     assert not getattr(type(fake_triton_driver), "_flagos_stream_bound", False)
     driver = fake_triton_driver.active
     assert "GPUDriver.__init__" in driver.get_current_stream.__qualname__
 
 
-def test_idempotent_class_patch(flagos, fake_triton_driver):
-    flagos._bind_kunlunxin_triton_stream()
+def test_idempotent_class_patch(triton_compat, flagos, fake_triton_driver):
+    triton_compat.bind_kunlunxin_stream("kunlunxin", flagos)
     cls = type(fake_triton_driver)
     patched = cls.active
-    flagos._bind_kunlunxin_triton_stream()
+    triton_compat.bind_kunlunxin_stream("kunlunxin", flagos)
     assert cls.active is patched

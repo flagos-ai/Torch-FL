@@ -15,7 +15,7 @@
 """The recognized ``GEMS_VENDOR`` set and the fail-loud explicit-value check.
 
 ``torch_fl/__init__.py`` resolves FlagGems' vendor through a ladder of branches
-(``_patch_flaggems_codegen_config``). Two failure modes used to be silent:
+(``compat.flaggems.runtime.configure_vendor``). Two failure modes used to be silent:
 
 * an explicitly exported ``GEMS_VENDOR`` value torch_fl cannot configure was
   left in place (``_env.set_foreign`` never overrides an explicit export) and

@@ -172,7 +172,7 @@ backend therefore receives what is, to it, a CUDA tensor, entirely unaware of fl
 
 ### 1.3 The authoritative source for vendor detection
 
-`_patch_flaggems_codegen_config()` in `torch_fl/__init__.py` sets the `GEMS_VENDOR` environment
+`configure_vendor()` in `torch_fl/compat/flaggems/runtime.py` sets the `GEMS_VENDOR` environment
 variable to one of `nvidia` / `metax` / `ascend` at import time. The distributed layer should
 **reuse that variable directly** rather than starting a second hardware detection scheme.
 

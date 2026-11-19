@@ -50,7 +50,7 @@ def _build_accelerator():
 
 
 def _require_torch_first_supported():
-    if _build_accelerator() != "cuda":
+    if _accelerator_recorded_by_the_install() != "cuda":
         pytest.skip("Vendor libtorch overlays require torch_fl before torch")
 
 
@@ -59,15 +59,12 @@ def _entry_point_hooks():
 
     A fresh interpreter in this process's environment, because a package
     installed after this one started is invisible to the parent's
-    ``importlib.metadata`` cache. ``resolve()`` rather than ``load()``: the
-    test is about whether the hook is *registered*, not whether calling it (and
-    so importing the backend) works.
+    ``importlib.metadata`` cache. Inspect the metadata directly so the probe
+    leaves the backend unloaded.
     """
     probe = (
-        "import sys\n"
         "from importlib.metadata import entry_points\n"
-        "sys.exit(0 if [ep.resolve() for ep in entry_points(group='torch.backends')"
-        " if ep.name == 'torch_fl'] else 1)\n"
+        "print(any(ep.name == 'torch_fl' for ep in entry_points(group='torch.backends')))\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe],
@@ -77,8 +74,8 @@ def _entry_point_hooks():
         timeout=90,
         check=False,
     )
-    assert result.returncode in (0, 1), result.stderr
-    return result.returncode == 0
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip() == "True"
 
 
 def _installed_platform_module():
@@ -152,10 +149,7 @@ def _require_declared_entry_point():
     """
     if _entry_point_hooks():
         return
-    spec = importlib.util.find_spec("torch_fl")
-    installed = Path(spec.origin).resolve().parent if spec and spec.origin else None
-    if installed is None or (installed / "_build_config.py").is_file():
-        # torch_fl resolves to this checkout: a source tree, not a wheel.
+    if not _entry_point_metadata_exists():
         pytest.skip("this install is not a built wheel")
     accelerator = _accelerator_recorded_by_the_install()
     if not accelerator:
@@ -196,36 +190,46 @@ assert first_status == 'active' or first_status.startswith('failed:'), first_sta
     )
 
 
-def test_full_profile_activates_framework_hooks_during_import():
+@pytest.mark.parametrize("profile", ["full", "minimal"])
+@pytest.mark.parametrize(
+    "torch_first", [False, True], ids=["torch_fl-first", "torch-first"]
+)
+def test_import_order_and_startup_profile(profile, torch_first):
     _require_torch()
     _require_declared_entry_point()
-    _run(
-        """
-import torch_fl
-import torch
+    if torch_first and _accelerator_recorded_by_the_install() not in ("cuda", "mps"):
+        pytest.skip("Vendor libtorch overlays require torch_fl before torch")
 
-status = torch_fl.optional_integration_status()
-for name in ('ddp', 'parallel_comm'):
-    assert status[name] == 'active' or status[name].startswith('failed:'), status
-torch.empty(1, device='flagos')
-""",
-        "full",
+    imports = (
+        "import torch\n"
+        "import sys\n"
+        "assert 'torch_fl' not in sys.modules\n"
+        "import torch_fl\n"
+        if torch_first
+        else "import torch_fl\nimport torch\n"
     )
-
-
-def test_torch_first_import_on_cuda():
-    _require_torch_first_supported()
     _run(
-        """
-import torch
-import sys
-assert 'torch_fl' not in sys.modules
-import torch_fl
+        imports
+        + """
+import os
+status = torch_fl.optional_integration_status()
+if os.environ['FLAGOS_STARTUP_PROFILE'] == 'minimal':
+    assert all(value == 'inactive' for value in status.values()), status
+else:
+    for name in ('ddp', 'parallel_comm'):
+        assert status[name] == 'active' or status[name].startswith('failed:'), status
 
+assert torch.flagos is torch_fl.flagos
+assert torch._C._get_privateuse1_backend_name() == 'flagos'
 assert torch.device('flagos').type == 'flagos'
-assert torch_fl.optional_integration_status()['ddp'] == 'inactive'
+assert isinstance(torch_fl.get_registered_ops(), list)
+assert isinstance(torch_fl.is_flaggems_enabled(), bool)
+torch.flagos.init()
+torch.flagos.init()
+assert torch.empty(1, device='flagos').device.type == 'flagos'
+assert torch_fl.optional_integration_status() == status
 """,
-        "minimal",
+        profile,
         autoload="0",
     )
 
@@ -279,7 +283,7 @@ else:
 
 
 def _require_mps():
-    if _build_accelerator() != "mps":
+    if _accelerator_recorded_by_the_install() != "mps":
         pytest.skip("This check needs an MPS build")
 
 

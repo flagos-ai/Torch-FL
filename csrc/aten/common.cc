@@ -480,7 +480,7 @@ std::unordered_map<std::string, BackendConfigEntry> LoadBackendConfig() {
   // on A100: FLAGOS_BACKEND_CONFIG=/nonexistent/nope.conf sends every dispatch
   // to flagos_python, including the ~1600 ops the conf routes to CUDA boxing,
   // and it also silences the Python-side FlagGems setup that reads this same
-  // file (_conf_routes_to_flaggems in torch_fl/__init__.py).
+  // file (routes_to_flaggems in torch_fl/compat/flaggems/runtime.py).
   //
   // Only the top-level file is fatal. A missing `include` inside a conf still
   // warns and continues: the generated confs state every op directly and need
