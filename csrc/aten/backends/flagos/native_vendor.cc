@@ -20,15 +20,25 @@ struct VendorEntry {
   uintptr_t address = 0;
 };
 
+#if defined(FLAGOS_NATIVE_METAX_VENDOR)
+#define NATIVE_VENDOR_BACKEND Backend::kMetax
+#else
+#define NATIVE_VENDOR_BACKEND Backend::kNvidia
+#endif
 #define NATIVE_VENDOR_ENTRY(vendor, op, abi, catalog, type, dispatcher) \
   {vendor, op, abi, catalog, [](uintptr_t address) {                         \
-     dispatcher.RegisterKernel(std::string(vendor) == "hygon" ? Backend::kHygon : Backend::kNvidia, reinterpret_cast<type>(address)); \
+     dispatcher.RegisterKernel(std::string(vendor) == "hygon" ? Backend::kHygon : NATIVE_VENDOR_BACKEND, reinterpret_cast<type>(address)); \
    }},
 VendorEntry entries[] = {
+#if defined(FLAGOS_NATIVE_METAX_VENDOR)
+#include "../../generated/metax_native_vendor_entries.inc"
+#else
 #include "../../generated/native_vendor_entries.inc"
 #include "../../generated/native_vendor_hygon_entries.inc"
+#endif
 };
 #undef NATIVE_VENDOR_ENTRY
+#undef NATIVE_VENDOR_BACKEND
 
 std::mutex& RegistryMutex() {
   static auto* mutex = new std::mutex;

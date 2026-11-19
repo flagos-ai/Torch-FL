@@ -2,7 +2,10 @@
 
 #include "common.h"
 
+#include <ATen/Context.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +16,9 @@
 #include <vector>
 
 #include <flagos_env.h>
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+#include "backends/flagos/python_op_caller.h"
+#endif
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -21,6 +27,7 @@
 namespace at::native::flagos {
 
 namespace {
+std::atomic<bool> strict_host_routes{false};
 
 std::string& BackendConfigPathOverride() {
   static std::string path;
@@ -884,6 +891,62 @@ bool PadMatmulPairForDot(at::Tensor& lhs, at::Tensor& rhs) {
   return true;
 }
 
+bool TryNativeHostMean(const at::Tensor& input, at::OptionalIntArrayRef dims,
+                       bool keepdim, std::optional<at::ScalarType> dtype,
+                       at::Tensor& result) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  if (!input.device().is_privateuseone() || input.scalar_type() != at::kFloat ||
+      (dtype.has_value() && *dtype != at::kFloat) || !input.is_contiguous() ||
+      input.dim() == 0 || input.numel() == 0 || !dims.has_value() || dims->size() != 1)
+    return false;
+  const auto dim = (*dims)[0];
+  if (dim != -1 && dim != input.dim() - 1) return false;
+  result = CallPythonOp_Generic("torch_fl.native_host._generated.runtime.metax_mean",
+                                {input, keepdim});
+  return true;
+#else
+  (void)input; (void)dims; (void)keepdim; (void)dtype; (void)result;
+  return false;
+#endif
+}
+
+bool TryNativeHostBmmOuterProduct(const at::Tensor& lhs, const at::Tensor& rhs,
+                                  at::Tensor& result) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  if (lhs.dim() != 3 || rhs.dim() != 3 || lhs.size(0) != rhs.size(0) ||
+      lhs.size(2) != 1 || rhs.size(1) != 1 || lhs.device() != rhs.device() ||
+      lhs.scalar_type() != at::kFloat || rhs.scalar_type() != at::kFloat) {
+    return false;
+  }
+  auto operand = [](const at::Tensor& input) {
+    if (!at::globalContext().allowTF32CuBLAS()) return input;
+    auto bits = input.contiguous().view(at::kInt);
+    auto options = input.options().dtype(at::kInt);
+    auto shift = at::full(at::IntArrayRef{}, 13, options);
+    auto bias = at::full(at::IntArrayRef{}, 4095, options);
+    auto low_bit = at::bitwise_and(at::bitwise_right_shift(bits, shift), 1);
+    auto rounded = at::bitwise_and(at::add(at::add(bits, bias), low_bit), -8192).view(at::kFloat);
+    auto special = at::ge(at::bitwise_and(bits, 0x7fffffff), 0x7f800000);
+    return at::where(special, input, rounded);
+  };
+  result = at::mul(operand(lhs), operand(rhs));
+  return true;
+#else
+  (void)lhs;
+  (void)rhs;
+  (void)result;
+  return false;
+#endif
+}
+
+void SetStrictHostRoutes(bool enabled) {
+  strict_host_routes.store(enabled, std::memory_order_relaxed);
+}
+
+bool CpuFallbackAllowed() {
+  return !strict_host_routes.load(std::memory_order_relaxed);
+}
+
 bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {
 #if defined(FLAGOS_ACCEL_METAX)
   // See the declaration in common.h for the compiler assertion, the silent
@@ -898,6 +961,8 @@ bool FlagGemsMatmulNeedsHost(at::ScalarType dtype) {
 }
 
 at::Tensor MatmulOnHost(const at::Tensor& lhs, const at::Tensor& rhs) {
+  TORCH_CHECK(CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: aten::mm (host matmul escape)");
   return at::mm(lhs.cpu(), rhs.cpu()).to(lhs.device());
 }
 

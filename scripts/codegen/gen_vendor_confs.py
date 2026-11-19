@@ -2856,6 +2856,26 @@ METAX_FLAGGEMS_MEASURED = {
     "unsqueeze_",
 }
 
+# Original published hosts measured on C550 with CPU Torch 2.10.0, FlagGems
+# 5.4.0 and FlagTree 0.7.0.post2+metax3.6. The 80 paired model-layout profiles
+# require native device-name alignment and generic small-K padding for bmm.
+# This is launch/layout evidence, not full-model precision or general vendor
+# coverage. Keep the ordinary conf's historical holds separate.
+NATIVE_HOST_FLAGGEMS_OPS = {
+    "metax": frozenset(
+        {
+            "add.Tensor",
+            "bmm",
+            "bmm.out",
+            "cat",
+            "mean.dim",
+            "mul.Tensor",
+            "mul_.Tensor",
+            "slice.Tensor",
+        }
+    ),
+}
+
 # The hand-registered composite (EXTRA_ROUTED), on the platform that measured
 # it. Unlike METAX_FLAGGEMS_MEASURED these ops are not held from the shared
 # ceiling -- they are not in it at all, because they are not leaves any
@@ -4265,6 +4285,49 @@ def build_all(conf_dir: Path) -> dict:
                 experimental,
                 "none",
             )
+
+    for platform, operators in NATIVE_HOST_FLAGGEMS_OPS.items():
+        python_ops = flaggems_python_ops_for(platform)
+        routes = {
+            op: ("flaggems" if op in python_ops else "none")
+            if value == "flaggems_cpp"
+            else value
+            for op, value in out[platform][1].items()
+        }
+        # Composite measurements from the ordinary wheel do not establish
+        # native-host lowering. Qwen's eager attention uses its explicit ops.
+        if platform == "metax":
+            routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
+        missing = operators - routes.keys()
+        if missing:
+            raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
+        routes.update({op: "flaggems" for op in operators})
+        name = f"{platform}_native_host"
+        text = render(name, "", routes)
+        if platform == "metax":
+            from native_host_policy import (
+                NATIVE_SDK_PRECISION,
+                precision_policy,
+                render_config_routes,
+            )
+
+            policy = {
+                "operators": [
+                    *NATIVE_SDK_PRECISION[platform]["operators"],
+                    *precision_policy(platform)["operators"],
+                ]
+            }
+            text = render_config_routes(text, platform, policy=policy)
+        text = text.replace(
+            "# Full-coverage config:",
+            "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"
+            "# Selected by the wheel build record; numerical CPU fallback is rejected.\n"
+            "# These routes require the compiled original hosts and device-name alignment.\n"
+            "# Full-model accuracy and performance remain separate acceptance gates.\n#\n"
+            "# Full-coverage config:",
+            1,
+        )
+        out[name] = (text, routes, "")
 
     # The contract from AGENTS.md ("Day-0 boxing confs"), enforced rather than
     # documented: no default conf may route an op to the boxing kernel. It would

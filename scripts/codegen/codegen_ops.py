@@ -65,7 +65,11 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_coverage import TILEOPS_OPS  # noqa: E402
 from native_source_entries import wrap_call as wrap_native_source_call  # noqa: E402
-from native_host_policy import render_config_routes  # noqa: E402
+from native_host_policy import (  # noqa: E402
+    NATIVE_BMM_ADAPTATIONS,
+    NATIVE_REDUCTION_ADAPTATIONS,
+    render_config_routes,
+)
 
 
 # TensorList C++ spelling (IListRef vs ArrayRef) must match what PyTorch itself
@@ -150,12 +154,13 @@ _CONTIGUOUS_TENSOR_ARGS_BY_OP = {
 # constraint. TritonMinDotContractExtent() returns 0 where there is no floor, so
 # every other platform pays one integer compare.
 #
-# Only the plain forms are listed. `mm.out` and the `.dtype` forms carry no
-# FlagGems kernel on the platforms with a floor, and `bmm` reaches the C++ slot
-# there; when that changes, the entry is a line each and the padding is already
-# rank-agnostic (it indexes the contracted axis from the end).
+# `mm.out` and the `.dtype` forms carry no FlagGems kernel on platforms with a
+# floor. Native MetaX hosts use the published bmm/bmm_out Python slots, including
+# Qwen3's K=1 RoPE product. The rank-agnostic helper leaves M/N and out untouched.
 _DOT_CONTRACT_PADDED_OPS = {
     "mm": ("self", "mat2"),
+    "bmm": ("self", "mat2"),
+    "bmm.out": ("self", "mat2"),
 }
 
 
@@ -177,12 +182,41 @@ def _dot_contract_prelude(op, args):
                 f"the schema has {sorted(arg_names)}"
             )
     lhs, rhs = operands
+    native = ""
+    if op in NATIVE_BMM_ADAPTATIONS["metax"]["operators"]:
+        condition = f"at::native::flagos::TryNativeHostBmmOuterProduct({lhs}, {rhs}, native_product)"
+        result = "return native_product;"
+        if op.endswith(".out"):
+            if "out" not in arg_names:
+                raise SystemExit(f"{op}: native outer product requires an out tensor")
+            condition = (
+                f"{lhs}.dim() == 3 && {rhs}.dim() == 3 && out.dim() == 3 && "
+                f"out.device() == {lhs}.device() && out.scalar_type() == {lhs}.scalar_type() && "
+                f"out.size(0) == {lhs}.size(0) && out.size(1) == {lhs}.size(1) && "
+                f"out.size(2) == {rhs}.size(2) && " + condition
+            )
+            result = "out.copy_(native_product); return out;"
+        native = f"  at::Tensor native_product;\n  if ({condition}) {{ {result} }}\n"
     lines = (
-        f"  at::Tensor {lhs}_dotpad = {lhs};\n"
+        native + f"  at::Tensor {lhs}_dotpad = {lhs};\n"
         f"  at::Tensor {rhs}_dotpad = {rhs};\n"
         f"  at::native::flagos::PadMatmulPairForDot({lhs}_dotpad, {rhs}_dotpad);\n"
     )
     return lines, {lhs: f"{lhs}_dotpad", rhs: f"{rhs}_dotpad"}
+
+
+def _native_reduction_prelude(op):
+    policy = NATIVE_REDUCTION_ADAPTATIONS["metax"]
+    if op != policy["operator"]:
+        return ""
+    extents = " || ".join(f"self.size(-1) == {extent}" for extent in policy["extents"])
+    return (
+        "#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)\n"
+        "  at::Tensor native_mean;\n"
+        f"  if (self.dim() > 0 && ({extents}) && "
+        "at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) "
+        "{ return native_mean; }\n#endif\n"
+    )
 
 
 # Matmul ops whose FlagGems Python kernel must leave the device entirely for the
@@ -1656,7 +1690,7 @@ def gen_flaggems_python_kernel(
     # Ordered: the host escape returns before the padding runs, because a dtype
     # this route cannot serve at all should not pay for a pad it will not use.
     host_lines = _host_matmul_prelude(op, args, ret_type)
-    return finish(body, host_lines + dotpad_lines)
+    return finish(body, host_lines + _native_reduction_prelude(op) + dotpad_lines)
 
 
 # These out schemas are absent from the published registry. The generated

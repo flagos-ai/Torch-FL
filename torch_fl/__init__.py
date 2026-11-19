@@ -116,8 +116,9 @@ def _mps_shutdown_allocator() -> None:
 def _select_backend_config() -> None:
     """Pick the op-routing config file for this build.
 
-    Every conf is backends_<vendor>.conf -- one file per platform, no per-mode
-    suffix -- so the selection is a property of the build, not of an env var.
+    Ordinary wheels select backends_<vendor>.conf. Experimental MetaX native
+    hosts select backends_metax_native_host.conf with their additional claims.
+    Selection is a property of the build, not of a runtime mode variable.
     The platform is read from the build record setup.py writes
     (torch_fl/_build_config.py): the wheel records the platform it resolved
     FLAGOS_ACCELERATOR to, and that record, not the environment and not a file
@@ -131,7 +132,7 @@ def _select_backend_config() -> None:
     "routed to 'none'" for every op that conf does not list. It is no longer
     consulted, and builds that write no marker now remove a stale one.
 
-    What the build compiled in does not decide the file, only which entry
+    Within that build family, numerical kernel switches decide which entry
     point an op takes once dispatched: flaggems_cpp is Backend::kFlagGemsCpp and
     needs FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor);
     tileops is Backend::kTileOps and needs FLAGOS_BUILD_TILEOPS=ON plus an SM90
@@ -216,11 +217,21 @@ def _select_backend_config() -> None:
     platform = _platform.platform_for(_build_accelerator())
     if _is_ppu_build():
         platform = "ppu"
-    conf_name = f"backends_{_platform.vendor_for(platform) or 'nvidia'}.conf"
+    vendor = _platform.vendor_for(platform) or "nvidia"
+    conf_name = f"backends_{vendor}.conf"
+    if vendor == "metax":
+        from torch_fl import _build_config
+
+        if getattr(_build_config, "NATIVE_HOSTS", False):
+            conf_name = f"backends_{vendor}_native_host.conf"
     conf_path = os.path.join(os.path.dirname(__file__), "configs", conf_name)
     if os.path.exists(conf_path):
         _BACKEND_CONFIG_PATH = conf_path
         return
+    if conf_name.endswith("_native_host.conf"):
+        raise RuntimeError(
+            f"native-host wheel is missing its generated config: {conf_path}"
+        )
     # A vendor conf named for the build's own accelerator but shipped under the
     # other of its names: `musa` and `mthreads` are the same vendor (the record,
     # the CI platform and the conf generator each use one of them). Without the

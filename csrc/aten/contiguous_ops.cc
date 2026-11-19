@@ -134,6 +134,8 @@ void copy_strided_via_host(
     const at::Tensor& result,
     c10::MemoryFormat memory_format) {
   if (TryGemsDeviceCopy(self, result)) return;
+  TORCH_CHECK(CpuFallbackAllowed(),
+              "native FlagGems hosts do not permit CPU fallback: device contiguous/clone");
   size_t storage_size = self.storage().nbytes();
   at::Tensor storage_cpu = at::empty(
       {static_cast<int64_t>(storage_size)},

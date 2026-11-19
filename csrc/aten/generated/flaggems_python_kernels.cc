@@ -1193,14 +1193,24 @@ at::Tensor BlackmanWindowPeriodicKernelPython(int64_t window_length, bool period
 
 static TypedSourceSlot BmmFnSource("aten::bmm", "flag_gems.bmm", "e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268", "{\"abi\": \"e98d9aff9b884e037186f0fef320f25f6968209d004bfebc0be655a0e3c6e268\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm\", \"op\": \"aten::bmm\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor BmmKernelPython(const at::Tensor & self, const at::Tensor & mat2) {
-  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self, mat2}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2));
+  at::Tensor native_product;
+  if (at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { return native_product; }
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  auto result = BmmFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm", {self_dotpad, mat2_dotpad}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad));
   UnboxToFlagos(result);
   return result;
 }
 
 static TypedSourceSlot BmmOutFnSource("aten::bmm.out", "flag_gems.bmm_out", "f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1", "{\"abi\": \"f5ebf2a91a07c2f05a3d1fc2a0946ca866fbb95122eca50e006ae433bee43ba1\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::Tensor\"}], \"host\": \"flag_gems.bmm_out\", \"op\": \"aten::bmm.out\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor & BmmOutKernelPython(const at::Tensor & self, const at::Tensor & mat2, at::Tensor & out) {
-  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self, mat2, out}); }, static_cast<const at::Tensor&>(self), static_cast<const at::Tensor&>(mat2), static_cast<const at::Tensor&>(out));
+  at::Tensor native_product;
+  if (self.dim() == 3 && mat2.dim() == 3 && out.dim() == 3 && out.device() == self.device() && out.scalar_type() == self.scalar_type() && out.size(0) == self.size(0) && out.size(1) == self.size(1) && out.size(2) == mat2.size(2) && at::native::flagos::TryNativeHostBmmOuterProduct(self, mat2, native_product)) { out.copy_(native_product); return out; }
+  at::Tensor self_dotpad = self;
+  at::Tensor mat2_dotpad = mat2;
+  at::native::flagos::PadMatmulPairForDot(self_dotpad, mat2_dotpad);
+  BmmOutFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.bmm_out", {self_dotpad, mat2_dotpad, out}); }, static_cast<const at::Tensor&>(self_dotpad), static_cast<const at::Tensor&>(mat2_dotpad), static_cast<const at::Tensor&>(out));
   return out;
 }
 
@@ -3125,6 +3135,10 @@ at::Tensor MeanKernelPython(const at::Tensor & self, ::std::optional<at::ScalarT
 
 static TypedSourceSlot MeanDimFnSource("aten::mean.dim", "flag_gems.mean_dim", "0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c", "{\"abi\": \"0ea2b3ee194e923f3b95f95035b47889276d41b56238c76e5b3ec97dee45c48c\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::OptionalIntArrayRef\"}, {\"keyword\": null, \"type\": \"bool\"}, {\"keyword\": \"dtype\", \"type\": \"::std::optional<at::ScalarType>\"}], \"host\": \"flag_gems.mean_dim\", \"op\": \"aten::mean.dim\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor MeanDimKernelPython(const at::Tensor & self, at::OptionalIntArrayRef dim, bool keepdim, ::std::optional<at::ScalarType> dtype) {
+#if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
+  at::Tensor native_mean;
+  if (self.dim() > 0 && (self.size(-1) == 128 || self.size(-1) == 1024) && at::native::flagos::TryNativeHostMean(self, dim, keepdim, dtype, native_mean)) { return native_mean; }
+#endif
 #if defined(USE_DCU)
   const auto output_dtype = dtype.value_or(self.scalar_type());
   TORCH_CHECK(c10::isFloatingType(output_dtype) || c10::isComplexType(output_dtype), "mean(): input or output dtype must be floating point or complex");

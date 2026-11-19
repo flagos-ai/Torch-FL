@@ -12,7 +12,12 @@ import sys
 
 
 def validate(policy):
-    vendor_requirements = {"nvidia": True, "hygon": True, "ascend": False}
+    vendor_requirements = {
+        "nvidia": True,
+        "hygon": True,
+        "metax": True,
+        "ascend": False,
+    }
     if (
         policy.get("schema_version") != 1
         or policy.get("vendor") not in vendor_requirements

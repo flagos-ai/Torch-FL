@@ -807,7 +807,7 @@ steps:
   # from the same wheel-only workspace as the other operator suites.
   - id: native_host_build
     name: Build native FlagGems hosts
-    platforms: [metax, ascend]
+    platforms: [metax, ascend, hygon]
     vendor_only: true
     command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh
 
@@ -824,7 +824,18 @@ steps:
     name: Native MetaX FlagGems host conformance
     platforms: [metax]
     vendor_only: true
-    min_passed: 36
+    min_passed: 86
     command: >-
-      python -m pytest tests/integration/ops/test_native_metax_hosts.py -v --tb=short
+      python -m pytest tests/integration/ops/test_native_metax_hosts.py
+      tests/integration/ops/test_native_metax_qwen_routes.py -v --tb=short
+      --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
+
+  - id: native_source_hosts_hygon
+    name: Native Hygon FlagGems host conformance
+    platforms: [hygon]
+    vendor_only: true
+    min_passed: 216
+    command: >-
+      python -m pytest tests/integration/ops/test_hygon_native_hosts.py
+      tests/integration/ops/test_hygon_native_routes.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"

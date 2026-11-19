@@ -1029,3 +1029,68 @@ The evidence file records the wheel, numerical-library and raw-result hashes.
 
 The native-host build remains opt-in. This cohort's acceptance does not establish
 all-signature compiler coverage or results on other accelerators.
+
+### MetaX native-host precision cohort
+
+The opt-in MetaX native config includes measured BF16 `mm`/`bmm` clauses for
+installed MACA BLAS. The official CPU Torch core remains loaded, and the wheel
+records the actual SDK library hashes. Contiguous FP32 last-axis means use the
+original published FlagGems reduction with normalized layout and launch metadata.
+The ordinary MetaX default configuration is unchanged.
+
+An optional `FLAGOS_VENDOR_TORCH_LIB` selects the verified
+`2.10.0+metax3.8.1.0` vendor Torch numerical cohort. Its additional BF16 SiLU
+exception addresses a full-model midpoint divergence at input 5.9375. The FP32
+softmax exception addresses attention-weight differences that first cross a
+BF16 rounding boundary at decode-5. The FP32 mean exception retains the vendor
+reduction order while avoiding the original-kernel layout normalization cost.
+The unchanged published multiply source already used by the NVIDIA cohort is
+separately admitted and validated for MetaX. Only
+`libc10_cuda.so` and `libtorch_cuda.so` are bundled, under
+`native_host/_generated/metax_vendor/`. Vendor CPU libraries are neither bundled
+nor loaded. The compatibility manifest records this bundle and its vendor Torch
+version. Wheel preflight validates every numerical artifact hash.
+
+`codegen_metax_native_vendor.py` derives signatures and the schema/policy ABI
+from Torch schemas. CPU host glue supplies FlagOS storage and the current stream
+to the original published GPU implementations; real tensor devices and dispatch keys stay
+PrivateUse1. The build compiles the two hash-verified published MACA environment
+headers unchanged. These retain the manufacturer's original environment semantics;
+there are no constant-return flag stubs or new numerical GPU sources. Only the
+explicit `BFloat16:metax` SiLU and `Float:metax` softmax/mean clauses select their
+installed entries. Softmax uses the original structured meta/implementation and
+admits FP32 without half promotion. Mean uses the original meta and reduction
+stub with FP32 input/output. Other dtypes and explicit FlagGems overrides
+keep the base route.
+
+The complete BF16 input bit-pattern comparison passes against manufacturer SiLU.
+All 476 actual softmax operands match the manufacturer bitwise before and after
+BF16 conversion. The installed wheel passes 119 cases, including layouts, empty
+tensors and nondefault streams. The complete BF16 eager Qwen3-0.6B comparison
+uses 60 prefill tokens and 512 teacher-forced decode steps on MACA 3.8.1.3. Its
+independent audit passes all 513 comparisons with maximum absolute logit error
+zero, zero bound violations at unchanged `atol=rtol=1e-3`, and all 572 top-1
+positions aligned. Model capture calls and legacy host-plan counters are zero.
+
+On the same idle C550 physical device, three complete native traversals take
+14,066.858 / 14,095.816 / 14,058.506 ms. Their median, 14,066.858 ms, is 83.68%
+of manufacturer throughput against the frozen 11,771.663 ms median. Both sides
+include prefill and every teacher-forced decode forward with matching per-call
+synchronization; loading and sampling are excluded. Tolerances and math settings
+are unchanged. The separate two-forward profiler audit attributes all 3,902 GPU
+launches: 3,030 original FlagGems and 872 approved vendor launches, zero unmatched.
+Approved vendor scopes require the same CPU thread, the correlated API launch,
+and matching external IDs when available; explicit correlation handles sub-
+microsecond differences between profiler clocks. Missing correlation, conflicting
+IDs and unapproved scopes remain failures. Timing evidence is checkpointed before
+this separate audit, and an audit failure still rejects the run.
+
+Native wheel SHA256:
+`c15c2c9201fe6d3fa746125e1ea8ecaf52283eac1ccbf8f505682d56c3158e01`.
+Manufacturer reference SHA256:
+`f0cfe93eb1ee7b5a1e9c17558b82d47e5cdd24fd47c70f7fae002953bcb2a145`.
+Raw evidence is retained under
+`/public-flash/lvyufeng/sandbox/codex-metax-qwen-routes-4f97-20261118/`
+(`native-accuracy-112-v19.*`, `native-performance-112-v19b.*` and
+`native-performance-kernels-112-v19b.json`). These measured model gates remain
+separate from the current-head cross-platform CI gate.

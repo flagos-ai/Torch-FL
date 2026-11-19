@@ -121,8 +121,15 @@ def _module_op_set(module_path: Path, name: str) -> set[str]:
 
 
 def _conf_flagos_python_ops() -> set[str]:
-    """Op names the generator treats as FlagGems-Python coverage."""
-    return _module_op_set(_COVERAGE, "FLAGGEMS_PYTHON_OPS")
+    """Provider coverage plus explicitly generated functional out adapters.
+
+    Out adapters compose configured functional routes and copies. They are a
+    separate generated registry, so admitting them here does not widen the
+    published provider ceiling used by every platform's default conf.
+    """
+    return _module_op_set(_COVERAGE, "FLAGGEMS_PYTHON_OPS") | _codegen_op_set(
+        "FLAGGEMS_OUT_ADAPTERS"
+    )
 
 
 def _codegen_op_set(name: str) -> set[str]:

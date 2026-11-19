@@ -1161,18 +1161,22 @@ def _align_flaggems_device_identity():
     against the realignment. DCU needs it as much as CUDA does -- its guarded
     modules raise rather than fall back, which is the ``ValueError: i0: input
     tensor must be on cuda device`` class in the DCU survey. On every other
-    vendor (Ascend, GCU, MetaX, MUSA, and the remaining descriptors that say
+    vendor (Ascend, GCU, ordinary MetaX, MUSA, and other descriptors that say
     ``cuda``) the call returns immediately -- see
     ``torch_fl.accelerator.nvidia._cuda_compat.patch_flaggems_device_name``, which
-    GCU mirrors in ``torch_fl.accelerator.enflame._gcu_compat``.
+    GCU mirrors in ``torch_fl.accelerator.enflame._gcu_compat``. MetaX native
+    hosts are admitted separately by the wheel's build record.
 
     Best-effort -- the name check is a dispatch guard, so failing to realign it
     costs the routed ops their Triton kernel but must not take down device init.
     """
     try:
         from torch_fl.accelerator.nvidia._cuda_compat import patch_flaggems_device_name
+        from torch_fl import _build_config
 
-        patch_flaggems_device_name()
+        patch_flaggems_device_name(
+            native_hosts=getattr(_build_config, "NATIVE_HOSTS", False)
+        )
     except Exception:
         pass
 

@@ -16,6 +16,7 @@ import sys
 from packaging.requirements import Requirement
 
 LIBRARIES = ("libtorch_nvshmem.so", "libc10_cuda.so", "libtorch_cuda.so")
+METAX_LIBRARIES = ("libc10_cuda.so", "libtorch_cuda.so")
 
 
 def load_build_policy(source_root):
@@ -75,7 +76,14 @@ def describe(library_dir, policy):
     library_dir = Path(library_dir).resolve()
     fields = version_fields(library_dir.parent / "version.py")
     hygon = policy.get("vendor") == "hygon"
-    libraries = ("libc10_hip.so", "libtorch_hip.so") if hygon else LIBRARIES
+    metax = policy.get("vendor") == "metax"
+    libraries = (
+        ("libc10_hip.so", "libtorch_hip.so")
+        if hygon
+        else METAX_LIBRARIES
+        if metax
+        else LIBRARIES
+    )
     if (
         fields.get("__version__")
         != policy.get("vendor_source_version", policy["vendor_torch"])
@@ -110,15 +118,20 @@ def describe(library_dir, policy):
                 "vendor runtime dependencies must have verified exact pins"
             )
         requirements.append(str(requirement))
-    if not hygon and not requirements:
+    if not hygon and not metax and not requirements:
         raise ValueError("vendor Torch declares no NVIDIA runtime dependencies")
+    headers = {}
+    for relative, expected in policy.get("host_headers", {}).items():
+        path = library_dir.parent / "include" / relative
+        if not path.is_file() or digest(path) != expected:
+            raise ValueError(f"published vendor host header changed: {relative}")
+        headers[relative] = {"path": str(path), "sha256": expected}
     licenses = sorted((distribution / "licenses").glob("*"))
     if not any(path.is_file() for path in licenses):
         raise ValueError("published vendor Torch license files are missing")
     return {
         "version": policy["vendor_torch"],
         "vendor": policy.get("vendor", "nvidia"),
-        "libraries": libraries,
         "git_version": fields["git_version"],
         "cuda": fields.get("cuda"),
         "hip": fields.get("hip"),
@@ -127,13 +140,22 @@ def describe(library_dir, policy):
         "metadata_sha256": digest(distribution / "METADATA"),
         "requirements": sorted(requirements),
         "licenses": [str(path) for path in licenses if path.is_file()],
+        "libraries": libraries,
+        "host_headers": headers,
     }
 
 
 def bundle(cohort, package, source_root=None):
     package = Path(package)
     source = Path(cohort["library_dir"])
-    destination = package / ("lib_hygon" if cohort.get("vendor") == "hygon" else "lib")
+    vendor = cohort.get("vendor")
+    destination = package / (
+        "lib_hygon"
+        if vendor == "hygon"
+        else "native_host/_generated/metax_vendor"
+        if vendor == "metax"
+        else "lib"
+    )
     destination.mkdir(parents=True, exist_ok=True)
     hashes = {}
     if cohort.get("vendor") == "hygon":

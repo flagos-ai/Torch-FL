@@ -381,6 +381,16 @@ def test_native_host_build_uses_staged_package(
     namespace, kwargs = _load_setup(monkeypatch)
     globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
     monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", vendor)
+    native_precision = vendor != "ascend"
+    monkeypatch.setitem(
+        globals_,
+        "_native_vendor_cohort",
+        lambda: (
+            ({}, {"library_dir": "/published-vendor/torch/lib"})
+            if native_precision
+            else None
+        ),
+    )
     if vendor in {"metax", "ascend"}:
         monkeypatch.setitem(
             globals_,
@@ -408,6 +418,17 @@ def test_native_host_build_uses_staged_package(
     assert options["env"]["_TORCH_FL_BUILDING_NATIVE_HOST"] == "1"
     assert options["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert options["env"]["PYTHONPATH"].startswith(command.build_lib)
+    assert len(calls) == 1 + native_precision
+    if native_precision:
+        vendor_args, _ = calls[1]
+        if vendor == "metax":
+            assert vendor_args[1].endswith("native_host/metax_vendor_build.py")
+            assert "--vendor" not in vendor_args
+        else:
+            assert vendor_args[1].endswith("native_host/vendor_build.py")
+            assert vendor_args[vendor_args.index("--vendor") + 1] == (
+                "hygon" if vendor == "dcu" else vendor
+            )
 
 
 def test_native_metax_rejects_staged_vendor_libtorch(
@@ -495,6 +516,9 @@ def test_native_host_ci_build_excludes_the_default_build(
         "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
         "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
         "    assert os.environ['FLAGOS_BUILD_BOXING'] == '0'\n"
+        "    if os.environ['FLAGOS_ACCELERATOR'] == 'metax':\n"
+        "        assert 'FLAGOS_VENDOR_TORCH_LIB' not in os.environ, 'inherited optional vendor cohort'\n"
+        "        assert os.environ['FLAGOS_BUILD_VENDOR'] == '1'\n"
         "    Path(os.environ['BUILD_RECEIPT']).write_text(str(root))\n"
         "    output = Path(sys.argv[sys.argv.index('--dist-dir') + 1])\n"
         "    with zipfile.ZipFile(output / 'native.whl', 'w') as wheel:\n"
@@ -538,6 +562,7 @@ def test_native_host_ci_build_excludes_the_default_build(
             "GITHUB_WORKSPACE": str(workspace),
             "RUNNER_TEMP": str(runner_temp),
             "FLAGOS_ACCELERATOR": vendor,
+            "FLAGOS_VENDOR_TORCH_LIB": str(workspace / "torch_fl/lib_metax"),
             "PATH": str(tools) + os.pathsep + os.environ["PATH"],
             "BUILD_RECEIPT": str(receipt),
         },

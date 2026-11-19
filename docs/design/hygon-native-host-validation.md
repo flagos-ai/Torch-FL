@@ -2,7 +2,8 @@
 
 ## PR qualification: 2026-11-19
 
-**The repeated performance gate remains open; the PR is a draft.** Fresh
+**The repeated performance gate remains open.** The maintainer has authorized
+merging before the performance follow-up is complete and checking CI. Fresh
 qualification after rebasing onto upstream `f0b41362390a41e0d1d598379f658910eaf02ac1`
 retains bitwise-identical logits, but short pairs `s03` and `s05` exceed the
 1.25x latency limit. Worst short prefill/decode ratios are **1.264/1.260**;

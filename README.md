@@ -222,12 +222,56 @@ for its boundary and wheel preflight command.
 
 For the MetaX pilot, use the same native-host build switches with
 `FLAGOS_ACCELERATOR=metax` and `MACA_PATH` pointing at the installed MACA SDK.
+Set `FLAGOS_BUILD_VENDOR=1` to include the measured BF16 matrix precision slots;
+MetaX native-host CI uses this selection.
 The adapter submits the original published MetaX FlagGems kernels directly through
 MACA, with boxing disabled. MetaX CI builds a separate opt-in wheel and retains
-its generated coverage, preflight and launch-conformance evidence. Full-model
-accuracy and the 80% vendor-performance gate remain tracked in
-[issue #832](https://github.com/flagos-ai/Torch-FL/issues/832); adapter availability
-does not establish those results. NVIDIA's existing precision policy is unchanged.
+its generated coverage, preflight and launch-conformance evidence. The native
+wheel selects generated `backends_metax_native_host.conf` from its build record
+and compiles its additional registrations; the ordinary wheel keeps its own
+measured routing. Native routes align the published hosts' device identity and
+use the existing contracted-axis padding for small-K bmm, including out variants.
+For FP32 outer products, original published pointwise kernels preserve the
+caller's TF32 rounding policy; the resolved adaptation is recorded in the wheel
+manifest. The installed-wheel cohort covers these routes, TF32 contexts,
+strided outputs and strict fallback rejection.
+Native MetaX device copies and casts use the existing published FlagGems copy
+source. Strict hosts reject uncovered device-copy, gather and explicit numerical
+host escapes before transferring their operands to CPU.
+The generated native config selects `BFloat16:metax` for measured mm/bmm
+exceptions, which call the installed MACA BLAS directly on FlagOS storage without
+vendor Torch or boxing. Other dtypes retain their base routes, and an explicit
+FlagGems override removes these clauses. The build manifest and audit record
+the policy and hashes of the numerical SDK libraries. Measured contiguous FP32
+last-axis means normalize GPU layout and original-kernel launch metadata to
+preserve the vendor's reduction order; the kernel source remains unchanged.
+For the measured `2.10.0+metax3.8.1.0` vendor Torch cohort, an explicit
+`FLAGOS_VENDOR_TORCH_LIB=/path/to/vendor/torch/lib` also builds the BF16 SiLU
+precision exception and measured FP32 softmax/mean exceptions. It also selects
+the unchanged published multiply source validated in this MetaX cohort. The
+bundle contains only published `libc10_cuda.so` and `libtorch_cuda.so` under the
+native-host artifacts. CPU host glue compiles the
+two hash-verified published MACA environment headers with their original flag
+semantics and calls the original GPU implementations on FlagOS storage. The generated
+`BFloat16:metax` SiLU and `Float:metax` softmax/mean clauses apply only when their
+typed entries are installed.
+Build and runtime verify the numerical assets, schema ABI and official CPU core;
+no vendor CPU Torch library is bundled or loaded. The compatibility manifest
+records the vendor Torch version and this numerical-library bundle.
+The optional cohort's additional installed-wheel tests run with
+`python -m pytest tests/manual/test_native_metax_vendor_precision.py -v`.
+They require the exact published vendor cohort above; the ordinary MetaX CI
+artifact runs its separate 86-case native-host suite without this optional bundle.
+On an idle C550 with MACA 3.8.1.3, complete Qwen3-0.6B BF16 eager execution
+(60 prefill tokens plus 512 identical teacher-forced decode inputs) has zero
+logit error and all 572 top-1 positions aligned. Strict CPU-fallback rejection
+is enabled. The native traversal median is 14.067 s against 11.772 s for vendor
+Torch, or 83.68% of vendor throughput, over three measured traversals. Separate
+GPU attribution accounts for every launch; model capture and legacy host-plan
+counters are zero. See the [measured cohort](docs/design/flaggems-build-time-hosts.md#metax-native-host-precision-cohort)
+and [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) for scope.
+These results apply to this exact optional cohort. NVIDIA's existing precision
+policy is unchanged.
 
 The Ascend pilot uses the same native-host switches with
 `FLAGOS_ACCELERATOR=ascend` and `ASCEND_HOME` pointing at the installed CANN SDK.
