@@ -23,5 +23,7 @@ FLAGOS_EXPORT DeviceIndex DeviceCount() noexcept;
 FLAGOS_EXPORT DeviceIndex CurrentDevice();
 FLAGOS_EXPORT void SetCurrentDevice(DeviceIndex device);
 FLAGOS_EXPORT DeviceIndex ExchangeDevice(DeviceIndex device);
+FLAGOS_EXPORT bool HasOwnedStreams() noexcept;
+FLAGOS_EXPORT uintptr_t OwnedStreamHandle(int64_t device, bool use_default);
 
 } // namespace c10::flagos

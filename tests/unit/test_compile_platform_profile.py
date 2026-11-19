@@ -332,86 +332,89 @@ def test_hardware_module_is_torch_cuda_on_cuda_like(as_cuda):
     assert di._hardware_module() is torch.cuda
 
 
+@pytest.fixture
+def stream_runtime(monkeypatch):
+    from torch_fl.flagos import _streams
+
+    def select(platform):
+        monkeypatch.setattr(torch.flagos, "_platform", lambda: platform)
+        monkeypatch.setattr(torch.flagos, "_has_cuda_runtime", lambda: False)
+        monkeypatch.setattr(_streams, "_C", types.SimpleNamespace())
+
+    _streams._device_streams.cache_clear()
+    yield select
+    _streams._device_streams.cache_clear()
+
+
 @pytest.mark.anyplatform
-def test_raw_stream_comes_from_acl_registry_on_ascend(as_ascend, monkeypatch):
-    """The launch-path stream must be torch_fl's ACL stream, not CUDA's.
+@pytest.mark.parametrize("platform", ["ascend", "iluvatar"])
+def test_inductor_and_eager_read_the_device_registry(
+    platform, stream_runtime, monkeypatch
+):
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+    from torch_fl.flagos import _streams
 
-    A kernel launched on rt stream 0 is not ordered against the aclnn ops that
-    produced its inputs; that silently corrupted results once already (see
-    scripts/vendor/patch_triton_ascend.py).
-    """
-    from torch_fl.compile import device_interface as di
-
+    stream_runtime(platform)
+    name, stream_type, current = _streams._DEVICE_STREAMS[platform]
     seen = []
+
+    def raw(index):
+        seen.append(index)
+        return 0x1234 + index
+
+    module = types.SimpleNamespace(
+        **{
+            stream_type: object,
+            current: lambda index: types.SimpleNamespace(cuda_stream=raw(index)),
+            "current_acl_raw_stream": raw,
+        }
+    )
+    monkeypatch.setitem(sys.modules, f"torch_fl.accelerator.{name}", module)
     monkeypatch.setattr(
-        "torch_fl.accelerator.ascend.acl_stream.current_acl_raw_stream",
-        lambda idx: seen.append(idx) or 0x1234,
+        _streams._C, "_get_iluvatar_current_raw_stream", raw, raising=False
     )
 
-    assert di._raw_stream(3) == 0x1234
-    assert seen == [3]
+    assert (
+        FlagOSDeviceInterface.get_raw_stream(3)
+        == torch.flagos.current_stream(3).cuda_stream
+    )
+    assert seen == [3, 3]
 
 
 @pytest.mark.anyplatform
-def test_raw_stream_comes_from_the_platform_registry_on_iluvatar(as_iluvatar):
-    """Iluvatar must not fall back to the CUDA binding, which the CPU wheel lacks.
+def test_native_stream_binding_takes_precedence_over_cuda(stream_runtime, monkeypatch):
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+    from torch_fl.flagos import _streams
 
-    The profile looks CUDA-ish -- corex's runtime is CUDA-shaped and the Triton
-    target name really is "cuda" -- but ``torch._C._cuda_getCurrentRawStream``
-    does not exist on a CPU torch wheel. The handle has to come from the
-    platform's own registry, which is the stream eager kernels submit to.
-    """
-    from torch_fl.compile import device_interface as di
-    from torch_fl.compile import flagtree_shim
-
-    seen = []
-    original = flagtree_shim.get_iluvatar_current_raw_stream
-    try:
-        flagtree_shim.get_iluvatar_current_raw_stream = lambda idx: (
-            seen.append(idx) or 0x5678
-        )
-        assert di._raw_stream(1) == 0x5678
-        assert seen == [1]
-    finally:
-        flagtree_shim.get_iluvatar_current_raw_stream = original
-
-
-@pytest.mark.anyplatform
-def test_generated_code_imports_the_iluvatar_stream_getter(as_iluvatar):
-    """The snippet inductor emits must name the getter that exists in this build."""
-    from torch_fl.compile.inductor_codegen import (
-        _device_op_overrides,
-        FlagOSAscendDeviceOpOverrides,
-    )
-
-    overrides = _device_op_overrides()
-    assert not isinstance(overrides, FlagOSAscendDeviceOpOverrides)
-    assert overrides.import_get_raw_stream_as("s") == (
-        "from torch_fl.compile.flagtree_shim import "
-        "get_iluvatar_current_raw_stream as s"
-    )
-
-
-@pytest.mark.anyplatform
-def test_raw_stream_comes_from_flagos_on_tsingmicro(as_tsingmicro, monkeypatch):
-    """The launch-path stream is the TX runtime's, read through torch.flagos.
-
-    There is no CUDA binding and no vendor raw-stream binding in ``_C`` (unlike
-    MUSA), so the value can only come from the flagos stand-in -- and it must be
-    the same one the eager FlagGems kernels launch on, or compiled and eager
-    kernels would not be ordered against each other.
-    """
-    from torch_fl.compile import device_interface as di
-
-    seen = []
-
+    stream_runtime("metax")
     monkeypatch.setattr(
-        "torch_fl.compile.flagtree_shim.get_tsingmicro_current_raw_stream",
-        lambda idx=None: seen.append(idx) or 0,
+        _streams._C,
+        "_get_native_current_raw_stream",
+        lambda index: 0x5678 + index,
+        raising=False,
     )
+    monkeypatch.setattr(
+        torch._C, "_cuda_getCurrentRawStream", lambda index: 0, raising=False
+    )
+    assert FlagOSDeviceInterface.get_raw_stream(1) == 0x5679
 
-    assert di._raw_stream(3) == 0
-    assert seen == [3]
+
+@pytest.mark.anyplatform
+def test_inductor_uses_the_txda_shared_queue(stream_runtime, monkeypatch):
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+
+    stream_runtime("tsingmicro")
+    monkeypatch.setattr(
+        torch._C,
+        "_cuda_getCurrentRawStream",
+        lambda index: pytest.fail("Unexpected CUDA query"),
+        raising=False,
+    )
+    assert (
+        FlagOSDeviceInterface.get_raw_stream(3)
+        == torch.flagos.current_stream(3).txda_stream
+        == 0
+    )
 
 
 @pytest.mark.anyplatform
@@ -426,11 +429,12 @@ def test_compute_capability_is_the_driver_arch_on_tsingmicro(
 
 
 @pytest.mark.anyplatform
-def test_set_stream_is_a_noop_on_tsingmicro(as_tsingmicro, monkeypatch):
+def test_set_stream_is_a_noop_on_tsingmicro(stream_runtime, monkeypatch):
     """One default queue per device: there is nothing to switch, and nothing
     on the stand-in to call (it has no ``set_current``)."""
     from torch_fl.compile import device_interface as di
 
+    stream_runtime("tsingmicro")
     monkeypatch.setattr(
         torch.cuda, "set_stream", lambda *a, **k: pytest.fail("must not touch cuda")
     )
@@ -1206,48 +1210,39 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
     ]
     for snippet in snippets:
         assert "cuda" not in snippet.lower(), snippet
-    assert "current_acl_raw_stream" in snippets[-1]
+    assert "torch_fl.flagos._streams import get_raw_stream" in snippets[-1]
 
 
 @pytest.mark.anyplatform
-def test_musa_device_op_overrides_emit_the_musa_raw_stream(as_musa):
-    """A non-CUDA build that is not Ascend must not get the ACL snippets.
-
-    MUSA and GCU are `is_cuda_like=False` like Ascend, but their raw-stream
-    getters are branches of FlagOSDeviceOpOverrides, so selecting on that boolean
-    emitted `current_acl_raw_stream` into generated MUSA code -- which dies at
-    call time on `libflagos.so: undefined symbol: GetCurrentStream`.
-    """
+@pytest.mark.parametrize(
+    "vendor",
+    [
+        "nvidia",
+        "hygon",
+        "metax",
+        "ascend",
+        "mthreads",
+        "enflame",
+        "iluvatar",
+        "kunlunxin",
+        "tsingmicro",
+        "cambricon",
+    ],
+)
+def test_generated_wrappers_import_the_shared_stream_getter(vendor, monkeypatch):
+    from torch_fl import _build_config
     from torch_fl.compile import inductor_codegen as ic
+    from torch_fl.flagos._streams import get_raw_stream
 
+    monkeypatch.setattr(_build_config, "ACCELERATOR", vendor)
     overrides = ic._device_op_overrides()
-    assert isinstance(overrides, ic.FlagOSDeviceOpOverrides)
-    assert not isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides)
+    assert isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides) == (
+        vendor == "ascend"
+    )
 
-    snippet = overrides.import_get_raw_stream_as("get_raw_stream")
-    assert "current_acl_raw_stream" not in snippet
-    assert "get_musa_current_raw_stream as get_raw_stream" in snippet
-
-
-@pytest.mark.anyplatform
-def test_tsingmicro_device_op_overrides_emit_the_txda_raw_stream(as_tsingmicro):
-    """Same trap as MUSA/GCU: a non-CUDA build that is not Ascend.
-
-    Selecting the raw-stream snippet on `is_cuda_like` alone emitted either the
-    ACL getter or the CUDA binding into generated TX code; the CUDA one is the
-    failure that made `torch.compile` unusable here
-    (``ImportError: cannot import name '_cuda_getCurrentRawStream'``).
-    """
-    from torch_fl.compile import inductor_codegen as ic
-
-    overrides = ic._device_op_overrides()
-    assert isinstance(overrides, ic.FlagOSDeviceOpOverrides)
-    assert not isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides)
-
-    snippet = overrides.import_get_raw_stream_as("get_raw_stream")
-    assert "current_acl_raw_stream" not in snippet
-    assert "_cuda_getCurrentRawStream" not in snippet
-    assert "get_tsingmicro_current_raw_stream as get_raw_stream" in snippet
+    namespace = {}
+    exec(overrides.import_get_raw_stream_as("raw"), namespace)
+    assert namespace["raw"] is get_raw_stream
 
 
 @pytest.mark.anyplatform
@@ -1332,7 +1327,10 @@ def test_cuda_device_op_overrides_use_flagos_device_state(as_cuda):
     assert isinstance(overrides, ic.FlagOSDeviceOpOverrides)
     assert overrides.set_device(1) == "torch.flagos.set_device(1)"
     assert overrides.device_guard(1) == "torch.flagos.device(1)"
-    assert "_cuda_getCurrentRawStream" in overrides.import_get_raw_stream_as("s")
+    assert (
+        "torch_fl.flagos._streams import get_raw_stream"
+        in overrides.import_get_raw_stream_as("s")
+    )
 
 
 @pytest.mark.anyplatform

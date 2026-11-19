@@ -39,6 +39,7 @@ import pytest
 import torch
 
 from torch_fl import flagos
+from torch_fl.flagos import _streams
 
 _ASCEND_STREAM_MODULE = "torch_fl.accelerator.ascend.acl_stream"
 _HANDLE = 0x7F0000001234
@@ -53,16 +54,17 @@ def vendor(monkeypatch):
         monkeypatch.setattr(flagos, "_has_cuda_runtime", lambda: False)
         monkeypatch.delitem(sys.modules, _ASCEND_STREAM_MODULE, raising=False)
 
-    monkeypatch.setattr(
-        flagos,
-        "_C",
-        types.SimpleNamespace(
-            _get_device=lambda: 0,
-            _set_device=lambda index: None,
-            _get_musa_current_raw_stream=lambda index: _HANDLE,
-        ),
+    core = types.SimpleNamespace(
+        _get_device=lambda: 0,
+        _set_device=lambda index: None,
+        _get_musa_current_raw_stream=lambda index: _HANDLE,
     )
-    return select
+    monkeypatch.setattr(flagos, "_C", core)
+    monkeypatch.setattr(_streams, "_C", core)
+    monkeypatch.delattr(torch._C, "_cuda_getCurrentRawStream", raising=False)
+    _streams._device_streams.cache_clear()
+    yield select
+    _streams._device_streams.cache_clear()
 
 
 def _ascend_was_imported() -> bool:
@@ -146,8 +148,8 @@ def test_current_stream_is_a_musa_handle(vendor):
 
     current = flagos.current_stream()
 
-    assert isinstance(current, flagos._DefaultStreamHandle)
-    assert current.musa_stream == _HANDLE
+    assert isinstance(current, _streams._StreamHandle)
+    assert current.musa_stream == _streams.get_raw_stream(0) == _HANDLE
     assert not _ascend_was_imported()
 
 
@@ -172,7 +174,7 @@ def test_unlisted_vendor_gets_the_default_handle_instead_of_ascend(vendor):
     """The bare ``else`` is gone: no vendor is handed another vendor's runtime.
 
     Stream dispatch names the accelerators that have a stream class of their own
-    and routes everything else to ``_DefaultStreamHandle`` -- the same handle-only
+    and routes everything else to ``_StreamHandle`` -- the same handle-only
     stand-in ``current_stream()`` returns, denoting the one queue the runtime has
     with handle 0. ``ppu`` is such an accelerator: it must build, must not carry
     another vendor's handle, and must not import the Ascend module to do it.
@@ -181,7 +183,7 @@ def test_unlisted_vendor_gets_the_default_handle_instead_of_ascend(vendor):
 
     stream = _build_stream()
 
-    assert isinstance(stream._stream, flagos._DefaultStreamHandle)
+    assert isinstance(stream._stream, _streams._StreamHandle)
     assert stream.cuda_stream == 0
     assert stream.stream_id == 0
     assert stream.device == torch.device("flagos", 0)

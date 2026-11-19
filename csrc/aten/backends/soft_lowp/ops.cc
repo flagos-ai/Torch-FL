@@ -17,6 +17,8 @@
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/eq.h>
+#include <ATen/ops/floor_divide.h>
+#include <ATen/ops/full.h>
 #include <ATen/ops/mul.h>
 #include <ATen/ops/exp2.h>
 #include <ATen/ops/mm.h>
@@ -25,7 +27,9 @@
 #include <ATen/ops/where.h>
 #include <ATen/native/Resize.h>
 #include <c10/util/Exception.h>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "../../device_boxing.h"
@@ -100,6 +104,70 @@ at::Tensor DecodeFp4Nibbles(const at::Tensor& raw) {
   return at::stack({decoded_low, decoded_high}, -1);
 }
 
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+at::Tensor DecodeFp8OnDevice(const at::Tensor& input) {
+  const auto format = GetFormatSpec(*FormatForDtype(input.scalar_type()));
+  const auto raw = input.view(c10::kByte);
+  // Use the routed Tensor overloads for arithmetic on PrivateUse1 storage.
+  auto constant = [&input](c10::Scalar value, c10::ScalarType dtype) {
+    return at::full({}, value, input.options().dtype(dtype));
+  };
+  if (format.id == FormatId::kFloat8E8M0FNU) {
+    // The byte is the float32 exponent. Zero encodes 2^-127, and 255 is NaN.
+    const auto exponent = raw.to(c10::kInt) * constant(1 << 23, c10::kInt);
+    const auto bits = at::where(
+        at::eq(raw, 0), constant(1 << 22, c10::kInt), exponent);
+    return at::where(
+               at::eq(raw, 255), constant(0x7fc00000, c10::kInt), bits)
+        .view(c10::kFloat)
+        .to(c10::kBFloat16);
+  }
+
+  const bool e5m2 = format.id == FormatId::kFloat8E5M2 ||
+      format.id == FormatId::kFloat8E5M2FNUZ;
+  const int mantissa_bits = e5m2 ? 2 : 3;
+  const int bias = (e5m2 ? 15 : 7) + format.fnuz;
+  const int field_base = 1 << mantissa_bits;
+  const auto magnitude = at::bitwise_and(raw, at::Scalar(0x7f));
+  const auto exponent = at::floor_divide(magnitude, constant(field_base, c10::kByte));
+  const auto mantissa = at::bitwise_and(magnitude, at::Scalar(field_base - 1));
+  const auto fraction = mantissa.to(c10::kFloat) * constant(1.0 / field_base, c10::kFloat);
+  const auto power = at::exp2(exponent.to(c10::kFloat) + constant(-bias, c10::kFloat));
+  const auto normal = (constant(1.0, c10::kFloat) + fraction) * power;
+  const auto subnormal = fraction * constant(std::ldexp(1.0, 1 - bias), c10::kFloat);
+  auto decoded = at::where(at::eq(exponent, 0), subnormal, normal);
+
+  const auto nan = constant(std::numeric_limits<float>::quiet_NaN(), c10::kFloat);
+  if (format.fnuz) {
+    decoded = at::where(at::eq(raw, 0x80), nan, decoded);
+  } else if (format.has_infinity) {
+    const auto inf = constant(std::numeric_limits<float>::infinity(), c10::kFloat);
+    const auto special = at::where(at::eq(mantissa, 0), inf, nan);
+    decoded = at::where(at::eq(exponent, 31), special, decoded);
+  } else {
+    decoded = at::where(at::eq(magnitude, 0x7f), nan, decoded);
+  }
+  const auto negative = at::ne(at::bitwise_and(raw, at::Scalar(0x80)), 0);
+  return at::where(negative, -decoded, decoded).to(c10::kBFloat16);
+}
+#endif
+
+at::Tensor CastMatrixToBfloat16(const at::Tensor& input) {
+#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+  if (IsFp8(input.scalar_type())) {
+    return DecodeFp8OnDevice(input);
+  }
+  return input.to(c10::kBFloat16);
+#else
+  auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
+  if (IsFp8(input.scalar_type())) {
+    DeviceBoxingGuard guard(input, result);
+    return at::native::copy_(result, input, false);
+  }
+  return result.copy_(input);
+#endif
+}
+
 at::Tensor DecodeMatrix(const at::Tensor& input, bool packed_dim0) {
   if (input.scalar_type() == c10::kFloat4_e2m1fn_x2) {
     auto raw = input.view(c10::kByte);
@@ -116,27 +184,7 @@ at::Tensor DecodeMatrix(const at::Tensor& input, bool packed_dim0) {
     return unpacked.reshape(shape);
   }
 
-  // FP8 handled via boxing. This is the one boxing site outside the guards, so
-  // it binds the device itself: the boxed copy goes through c10's CUDA
-  // machinery, and the `at::empty` below relies on the runtime's current device
-  // to place the result. See BoxingDeviceScope.
-  BoxingDeviceScope device;
-  if (input.device().is_privateuseone()) {
-    device.bind(input.device().index());
-  }
-  auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
-  if (IsFp8(input.scalar_type())) {
-    at::Tensor boxed = input;
-    at::Tensor boxed_result = result;
-    SetTensorDevice(boxed, c10::DeviceType::CUDA);
-    SetTensorDevice(boxed_result, c10::DeviceType::CUDA);
-    auto decoded = at::native::copy_(boxed_result, boxed, false);
-    UnboxToFlagos(decoded);
-    UnboxToFlagos(boxed);
-    return decoded;
-  }
-
-  return result.copy_(input);
+  return CastMatrixToBfloat16(input);
 }
 
 at::Tensor DecodeBatchMatrix(const at::Tensor& input, bool packed_dim1) {
@@ -154,24 +202,7 @@ at::Tensor DecodeBatchMatrix(const at::Tensor& input, bool packed_dim1) {
     return unpacked.reshape(shape);
   }
 
-  // FP8 handled via boxing; see the note in DecodeMatrix.
-  BoxingDeviceScope device;
-  if (input.device().is_privateuseone()) {
-    device.bind(input.device().index());
-  }
-  auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
-  if (IsFp8(input.scalar_type())) {
-    at::Tensor boxed = input;
-    at::Tensor boxed_result = result;
-    SetTensorDevice(boxed, c10::DeviceType::CUDA);
-    SetTensorDevice(boxed_result, c10::DeviceType::CUDA);
-    auto decoded = at::native::copy_(boxed_result, boxed, false);
-    UnboxToFlagos(decoded);
-    UnboxToFlagos(boxed);
-    return decoded;
-  }
-
-  return result.copy_(input);
+  return CastMatrixToBfloat16(input);
 }
 
 bool HasLowpInput(const at::Tensor& tensor) {

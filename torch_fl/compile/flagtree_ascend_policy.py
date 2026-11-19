@@ -175,16 +175,9 @@ def _register_strategies(registry) -> None:
 
     @register(POLICY_NAME, "get_current_stream")
     def get_current_stream(device):
-        # Must be the same aclrtStream the ACLNN ops producing this kernel's
-        # inputs ran on. Returning 0 would be accepted and silently produce
-        # wrong results, because rt stream 0 is not ordered against them.
-        import torch
+        from torch_fl.flagos._streams import get_raw_stream
 
-        from torch_fl.accelerator.ascend.acl_stream import current_acl_raw_stream
-
-        if device is None:
-            device = torch.flagos.current_device()
-        return current_acl_raw_stream(device)
+        return get_raw_stream(device)
 
     @register(POLICY_NAME, "header_file")
     def header_file(enable_taskqueue):

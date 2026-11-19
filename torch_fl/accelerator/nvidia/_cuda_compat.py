@@ -722,8 +722,17 @@ def patch_torch_cuda_for_flagos():
         torch.cuda.reset_max_memory_allocated = torch.cuda.reset_peak_memory_stats
 
     # triton reads torch._C._cuda_getCurrentRawStream(idx) -> raw handle.
+    native_stream = getattr(
+        getattr(_flagos, "_C", None),
+        "_get_native_current_raw_stream",
+        None,
+    )
+
+    def _current_raw_stream(idx=0):
+        return native_stream(idx) if native_stream is not None else 0
+
     try:
-        torch._C._cuda_getCurrentRawStream = lambda idx=0: 0
+        torch._C._cuda_getCurrentRawStream = _current_raw_stream
     except Exception:
         pass
     try:

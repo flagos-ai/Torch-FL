@@ -44,7 +44,7 @@ which is a change to the op layer and not to this class.
 Everything FSDP waits on was submitted to this queue, so ``wait_stream`` and
 ``wait_event`` have nothing to order. ``synchronize`` is real: it drains the
 device through ``flagos.synchronize``. ``flagos.current_stream`` needs no
-counterpart here -- ``flagos._DefaultStreamHandle`` already carries this same
+counterpart here -- ``flagos._streams._StreamHandle`` already carries this same
 handle on MUSA.
 """
 
@@ -144,7 +144,7 @@ class MusaStream:
     def query(self) -> bool:
         """Whether the queue has drained.
 
-        Always true, for the reason ``flagos._DefaultStreamHandle.query`` is: the
+        Always true, for the reason ``flagos._streams._StreamHandle.query`` is: the
         mudnn exit path drains the device after each op, so by the time a caller
         can ask, the op path has left nothing outstanding. A FlagGems Triton
         kernel launched since then is not covered by that -- there is no binding

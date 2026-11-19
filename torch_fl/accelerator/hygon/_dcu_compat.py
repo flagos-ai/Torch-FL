@@ -310,16 +310,13 @@ class _CudaDefaultGenerators:
 class _DcuStreamShim:
     """Minimal stream object exposing ``.cuda_stream`` for triton-hcu.
 
-    Handle 0 is the default/null stream, consistent with the boxing path, where
-    the caching allocator is handed ``stream=nullptr`` and the DTK kernels run on
-    the default stream. Triton's GPUDriver reads either
-    ``torch._C._cuda_getCurrentRawStream(idx)`` or
-    ``torch.cuda.current_stream(idx).cuda_stream``; both are patched to agree
-    with this.
+    Native builds read the device runtime's queue. Boxing uses the null queue.
+    Triton's GPUDriver can read the handle here or through
+    ``torch._C._cuda_getCurrentRawStream(idx)``.
     """
 
-    def __init__(self, index=0):
-        self.cuda_stream = 0
+    def __init__(self, index=0, handle=0):
+        self.cuda_stream = handle
         self.device_index = index
 
     def synchronize(self):
@@ -548,16 +545,19 @@ def patch_torch_cuda_for_dcu() -> bool:
     torch.cuda._exchange_device = _exchange_device
     torch.cuda._maybe_exchange_device = _exchange_device
 
-    torch.cuda.current_stream = lambda device=None: _DcuStreamShim(
-        _device_index(device)
-    )
-    torch.cuda.default_stream = lambda device=None: _DcuStreamShim(
-        _device_index(device)
-    )
-    # triton's GPUDriver prefers torch._C._cuda_getCurrentRawStream when it
-    # imports; keep the two answers identical (the DTK default stream, handle 0).
+    core = getattr(torch.flagos, "_C", None)
+    current_stream = getattr(core, "_get_native_current_raw_stream", lambda index: 0)
+    default_stream = getattr(core, "_get_native_default_raw_stream", lambda index: 0)
+
+    def _stream_view(device, get_handle):
+        index = _device_index(device)
+        return _DcuStreamShim(index, get_handle(index))
+
+    torch.cuda.current_stream = lambda device=None: _stream_view(device, current_stream)
+    torch.cuda.default_stream = lambda device=None: _stream_view(device, default_stream)
+    # Both Triton entry points resolve the same current queue.
     try:
-        torch._C._cuda_getCurrentRawStream = lambda idx=0: 0
+        torch._C._cuda_getCurrentRawStream = lambda idx=0: current_stream(idx)
     except Exception:
         pass
 

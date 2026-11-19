@@ -50,6 +50,11 @@ from torch._dynamo.device_interface import (
 )
 
 from torch_fl.compile.platform_profile import platform_profile
+from torch_fl.flagos._streams import (
+    get_raw_stream as _raw_stream,
+    set_stream as _set_stream,
+    set_stream_by_id as _set_stream_by_id,
+)
 
 
 DEVICE_TYPE = "flagos"
@@ -211,110 +216,6 @@ def _hardware_module():
     if platform_profile().is_cuda_like:
         return torch.cuda
     return torch.flagos
-
-
-def _raw_stream(device_idx: int) -> int:
-    """Return the raw stream handle generated launch code hands to the kernel.
-
-    On Ascend this is the aclrtStream from torch_fl's own stream registry. It
-    must not fall back to 0: rt stream 0 is not ordered against the aclnn ops
-    producing the kernel's inputs, which silently corrupts results rather than
-    failing (see scripts/vendor/patch_triton_ascend.py for the nan-loss regression).
-    """
-    profile = platform_profile()
-    if profile.is_cuda_like:
-        return torch._C._cuda_getCurrentRawStream(device_idx)
-    if profile.vendor == "mthreads":
-        from torch_fl.compile.flagtree_shim import get_musa_current_raw_stream
-
-        return get_musa_current_raw_stream(device_idx)
-    if profile.vendor == "enflame":
-        from torch_fl.compile.flagtree_shim import get_gcu_current_raw_stream
-
-        return get_gcu_current_raw_stream(device_idx)
-    if profile.vendor == "kunlunxin":
-        from torch_fl.compile.flagtree_shim import get_kunlunxin_current_raw_stream
-
-        return get_kunlunxin_current_raw_stream(device_idx)
-    if profile.vendor == "iluvatar":
-        from torch_fl.compile.flagtree_shim import get_iluvatar_current_raw_stream
-
-        return get_iluvatar_current_raw_stream(device_idx)
-    if profile.vendor == "cambricon":
-        # Handle 0 rather than a fallback: MLU has one default queue per device
-        # and the eager CNNL kernels already submit to it, so compiled and eager
-        # work are ordered against each other without an explicit synchronize.
-        from torch_fl.compile.flagtree_shim import get_cambricon_current_raw_stream
-
-        return get_cambricon_current_raw_stream(device_idx)
-    if profile.vendor == "tsingmicro":
-        # Unlike Ascend, handle 0 is the *right* answer here rather than a
-        # fallback: the TX runtime has one default queue per device and the eager
-        # FlagGems kernels this build already runs launch on it, so compiled and
-        # eager kernels are ordered against each other by construction.
-        from torch_fl.compile.flagtree_shim import get_tsingmicro_current_raw_stream
-
-        return get_tsingmicro_current_raw_stream(device_idx)
-
-    from torch_fl.accelerator.ascend.acl_stream import current_acl_raw_stream
-
-    return current_acl_raw_stream(device_idx)
-
-
-def _set_stream(stream: Any) -> None:
-    profile = platform_profile()
-    if profile.is_cuda_like:
-        torch.cuda.set_stream(stream)
-        return
-    native = getattr(stream, "_stream", stream)
-    if profile.vendor == "mthreads" and not hasattr(native, "set_current"):
-        # Native MUSA currently exposes the default stream only. Reject a
-        # foreign stream instead of silently switching CUDA state.
-        if getattr(stream, "musa_stream", None) is not None:
-            return
-        torch.cuda.set_stream(stream)
-        return
-    if profile.vendor == "kunlunxin":
-        # The XPU runtime has one queue per device, denoted by handle 0, and the
-        # stream stand-in carries it; there is no other stream to switch to.
-        return
-    if profile.vendor == "tsingmicro":
-        # Same shape as kunlunxin: the TX runtime has the one default queue, and
-        # the stand-in torch.flagos.current_stream returns for it has no
-        # set_current to call.
-        return
-    native.set_current()
-
-
-def _set_stream_by_id(stream_id: int, device_index: int, device_type: int) -> None:
-    profile = platform_profile()
-    if profile.is_cuda_like or profile.vendor == "mthreads":
-        torch.cuda._set_stream_by_id(
-            stream_id=stream_id, device_index=device_index, device_type=device_type
-        )
-        return
-    if profile.vendor == "enflame":
-        from torch_fl.accelerator.enflame.tops_stream import TopsStream
-
-        TopsStream.borrowed(stream_id, device=device_index).set_current()
-        return
-    if profile.vendor == "kunlunxin":
-        # Single-queue device (handle 0): there is nothing else to switch to and
-        # no torch stream-id registry to switch it through.
-        return
-    if profile.vendor == "iluvatar":
-        from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
-
-        IluStream.borrowed(stream_id, device=device_index).set_current()
-        return
-    if profile.vendor == "tsingmicro":
-        # Same as kunlunxin: single default queue, no torch stream-id registry.
-        return
-    # Native ACL streams have no torch stream-id registry; the id *is* the
-    # aclrtStream handle (see AclStream.stream_id), so switch on it directly.
-    from torch_fl.accelerator.ascend.acl_stream import AclStream
-
-    AclStream.borrowed(stream_id, device=device_index).set_current()
 
 
 def _exchange_device(device_idx: int) -> int:
