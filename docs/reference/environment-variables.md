@@ -240,6 +240,7 @@ import time.
 | `FLAGOS_USE_FLAGTREE` | Runtime | `0` (off) | Assert that a FlagTree build is the active Triton. Required on Ascend when the compiler is FlagTree: the check fails loudly if the installed Triton is not FlagTree |
 | `FLAGOS_COMPILE_FALLBACK_EAGER` | Runtime | `0` (off) | Fall back to eager mode when `torch.compile` encounters unsupported operations |
 | `FLAGOS_TILEOPS_PROVIDER` | Runtime | `tileops` | Python package TileOPs loads as the provider |
+| `FLAGOS_COMPILE_CUDAGRAPHS` | Runtime | `0` (off) unless the torch build has a native `CUDAGraph` binding | Let `torch.compile` capture its generated kernels into a `CUDAGraph` (`mode="reduce-overhead"`). Enabled automatically where `torch.cuda.CUDAGraph` is the torch build's own class. On a platform whose graph support is emulated (the flagos ctypes HIP graph on Hygon DCU) it stays off: instantiating a graph of Inductor-generated kernels currently aborts in the vendor runtime, so enabling it turns a working eager fallback into a crash. Set `1` only to reproduce or test that path |
 | `FLAGOS_TILEOPS_DEBUG` | Runtime | `0` (off) | Emit a warning when a TileOPs route declines after dispatch selected it; useful when correlating fallback with provider device checks |
 | `FLAGOS_TILEOPS_USE_L2` | Runtime | `0` (off) | Use the TileOps L2-cache tier |
 | `FLAGOS_TILEOPS_CACHE_MAX` | Runtime | `512` | TileOps instance-cache capacity. Past the cap, results are rebuilt per call: slower but bounded |
