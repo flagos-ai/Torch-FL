@@ -591,7 +591,7 @@ def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
     if change in {"source", "missing_source"}:
         _replace_wheel_entry(
             path,
-            prefix + "csrc/backends/" + record["vendor"] + ".cc",
+            f"{prefix}csrc/backends/{record['vendor']}/launch.cc",
             b"changed source" if change == "source" else None,
         )
     elif change == "driver_binding":

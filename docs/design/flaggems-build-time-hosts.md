@@ -148,12 +148,13 @@ entry point and supplies a hook to preserve the published `NPUUtils` class
 identity and normalize launch metadata. Enflame's hook enables TOPS stream
 interop and binds the published driver's wrapper and underlying driver.
 
-The C++ launcher, typed-host headers, and generated vendor extensions live in
-`csrc/native_host/`. The wheel builder stages the selected launch ABI inputs at
-their existing wheel-relative paths under `torch_fl/native_host/csrc/`, where
-preflight can verify them without a source checkout. The sources under
-`csrc/bindings/` build the separate `torch_bindings` library and the `torch_fl._C`
-extension stub.
+The shared C++ launcher and headers live in `csrc/native_host/`.
+`csrc/native_host/backends/<vendor>/launch.cc` submits work to the device.
+Backends with measured dtype exceptions also have a generated `precision.cc`
+in the same directory. The wheel builder mirrors the selected launch ABI inputs
+under `torch_fl/native_host/csrc/` so preflight can verify the sources listed
+in the manifest without a source checkout. The separate `torch_bindings`
+library and `torch_fl._C` extension stub build from `csrc/bindings/`.
 
 Hygon's generated `add.out`, `mul.out`, `mean.out` and `cat.out` adapters call
 the configured functional route and preserve the output tensor's storage,

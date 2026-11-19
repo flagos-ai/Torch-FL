@@ -17,7 +17,6 @@ class Backend:
     utility_module = "maca_utils"
     capabilities = 141
     scratch_alignment = 256
-    sources = ("backends/metax.cc",)
 
     def extension_options(self, driver, _source_dir):
         maca = Path(

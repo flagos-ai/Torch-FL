@@ -74,7 +74,7 @@ class Backend:
     utility_module = "npu_utils"
     capabilities = 132
     scratch_alignment = 512
-    sources = ("backends/ascend.cc", "ascend_abi.h")
+    launcher_headers = ("abi.h",)
 
     def prepare_runtime(self):
         from torch_fl import _patch_flaggems_codegen_config

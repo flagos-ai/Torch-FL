@@ -137,7 +137,7 @@ def test_a_conf_is_still_named_for_its_platform_id():
         "csrc/aten/generated/register.inc",
         "csrc/bindings/module.cc",
         "csrc/native_host/launcher.cc",
-        "csrc/native_host/backends/ascend.cc",
+        "csrc/native_host/backends/ascend/launch.cc",
         "csrc/runtime/generator.cc",
         ".github/scripts/set_env.sh",
         ".github/scripts/lib/set_env_common.sh",

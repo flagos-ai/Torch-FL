@@ -24,6 +24,7 @@ def build(source_root, output, build_temp, vendor_library):
     from torch.utils.cpp_extension import load
 
     source_root, output, build_temp = map(Path, (source_root, output, build_temp))
+    entry_source = Path("csrc/native_host/backends/metax/precision.cc")
     policy = load_build_policy(source_root).precision_policy("metax")
     cohort = describe(vendor_library, policy)
     if (
@@ -79,7 +80,7 @@ def build(source_root, output, build_temp, vendor_library):
     try:
         module = load(
             name="_metax_vendor",
-            sources=[str(source_root / "csrc/native_host/metax_ops.cc")],
+            sources=[str(source_root / entry_source)],
             extra_include_paths=[
                 str(source_root / "csrc/include"),
                 str(headers),
@@ -130,8 +131,8 @@ def build(source_root, output, build_temp, vendor_library):
             for name in (
                 "scripts/codegen/native_host_policy.py",
                 "scripts/codegen/codegen_metax_native_vendor.py",
-                "csrc/native_host/metax_ops.cc",
-                "csrc/native_host/metax_ops.h",
+                entry_source.as_posix(),
+                entry_source.with_suffix(".h").as_posix(),
             )
         },
     }

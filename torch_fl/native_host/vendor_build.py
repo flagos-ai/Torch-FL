@@ -52,7 +52,7 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
     package = output / "torch_fl"
     sources = source_root / "csrc/native_host"
     hygon = vendor == "hygon"
-    entry_source = f"{vendor}_ops.cc"
+    entry_source = f"backends/{vendor}/precision.cc"
     policy = load_build_policy(source_root).precision_policy(vendor)
     cohort = describe(vendor_library, policy)
     artifacts = {
@@ -161,7 +161,7 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
                 "scripts/codegen/native_host_policy.py",
                 "scripts/codegen/codegen_native_vendor.py",
                 f"csrc/native_host/{entry_source}",
-                "csrc/native_host/vendor_runtime.h",
+                "csrc/native_host/precision_runtime.h",
             )
         },
     }

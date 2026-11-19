@@ -50,6 +50,9 @@ def test_backend_record_and_compiled_extension_agree(contract):
     assert record["compiler_backend"] == adapter.compiler_backend
     assert record["abi_version"] == 2
     assert record == backend.build_record(adapter, root, native_dir=NATIVE_SOURCE)
+    selected = f"csrc/backends/{adapter.vendor}"
+    assert f"{selected}/launch.cc" in record["native_sources"]
+    assert f"{selected}/precision.cc" not in record["native_sources"]
     assert set(record["native_sources"]) == {
         "csrc/" + path.relative_to(backend._ROOT / "csrc").as_posix()
         for path in (backend._ROOT / "csrc").rglob("*")
@@ -90,7 +93,7 @@ def test_patched_loader_or_native_source_is_rejected(contract, kind):
         "driver": next(iter(backend.driver_sources(adapter, root).values())),
         "adapter": backend._ROOT / "backends" / (adapter.vendor + ".py"),
         "shared_binding": backend._ROOT / "backends/driver.py",
-        "native": backend._ROOT / "csrc" / adapter.sources[0],
+        "native": backend._ROOT / "csrc/backends" / adapter.vendor / "launch.cc",
     }
     with paths[kind].open("a") as output:
         output.write("\n// changed\n")
@@ -127,7 +130,11 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     launcher, utilities = backend.build_extensions(
         adapter, "test_hosts", NATIVE_SOURCE, torch, record, root, source_dir
     )
-    assert str(NATIVE_SOURCE / adapter.sources[0]) in launcher.sources
+    assert launcher.sources == [
+        str(NATIVE_SOURCE / "launcher.cc"),
+        str(NATIVE_SOURCE / "backends" / adapter.vendor / "launch.cc"),
+    ]
+    assert str(NATIVE_SOURCE) in launcher.include_dirs
     assert str(NATIVE_SOURCE / "backend_api.h") in launcher.depends
     assert launcher.extra_compile_args == [
         "-O3",

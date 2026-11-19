@@ -65,7 +65,6 @@ class Backend:
     utility_module = "gcu_utils"
     capabilities = 177
     scratch_alignment = 256
-    sources = ("backends/enflame.cc",)
 
     def extension_options(self, driver, _source_dir):
         tops = Path(os.environ.get("TOPS_HOME") or "/opt/tops")

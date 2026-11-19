@@ -40,7 +40,6 @@ class Backend:
     # stream-capture query. The published HCU ABI always passes null global scratch.
     capabilities = 187
     scratch_alignment = 256
-    sources = ("backends/hygon.cc",)
 
     def extension_options(self, driver, source_dir):
         sdk = Path(os.environ.get("ROCM_PATH") or "/opt/dtk")

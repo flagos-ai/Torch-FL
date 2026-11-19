@@ -83,7 +83,7 @@ def _launcher_extension(
             *(str(root / path) for path in native_sources if path.endswith(".h")),
             *depends,
         ],
-        include_dirs=[str(torch_dir / "include"), *include_dirs],
+        include_dirs=[str(root), str(torch_dir / "include"), *include_dirs],
         library_dirs=[*library_dirs, str(torch_dir / "lib")],
         libraries=[*libraries, "torch_python", "torch_cpu", "c10", *system_libraries],
         define_macros=[
@@ -100,7 +100,13 @@ def _launcher_extension(
 
 
 def _native_sources(adapter):
-    return (_LAUNCHER_SOURCE, *_LAUNCHER_HEADERS, *adapter.sources)
+    directory = f"backends/{adapter.vendor}"
+    return (
+        _LAUNCHER_SOURCE,
+        *_LAUNCHER_HEADERS,
+        f"{directory}/launch.cc",
+        *(f"{directory}/{name}" for name in getattr(adapter, "launcher_headers", ())),
+    )
 
 
 def _native_source_dir():

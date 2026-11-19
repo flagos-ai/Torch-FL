@@ -417,13 +417,16 @@ nor the legacy `cuda` spelling of it.
   wrong, fix the route.
 - The only place a `boxing` key may appear is the opt-in day-0 file below.
 
-### Native-host routing confs
+### Native-host source layout
 
-Native-host C++ sources belong in `csrc/native_host/`. Generated numerical
-extensions in that directory use `<vendor>_ops.cc`. Wheel builds stage the
-selected launch ABI sources at their existing `torch_fl/native_host/csrc/`
-paths for fingerprint verification. The `_C` extension stub and
-`torch_bindings` sources belong in `csrc/bindings/`.
+Shared native-host C++ lives in `csrc/native_host/`. Each backend keeps its
+device launcher in `backends/<vendor>/launch.cc`, with a generated
+`precision.cc` beside it when the backend has measured dtype exceptions.
+Wheel builds mirror the selected launch ABI sources under
+`torch_fl/native_host/csrc/` for fingerprint verification. The `_C` extension
+stub and `torch_bindings` sources belong in `csrc/bindings/`.
+
+### Native-host routing confs
 
 The experimental MetaX native-host wheel selects generated
 `backends_metax_native_host.conf` when its build record has `NATIVE_HOSTS=True`.

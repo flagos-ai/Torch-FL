@@ -249,7 +249,7 @@ def test_packed_arguments_match_the_published_launcher_struct(tmp_path):
     # published FlagTree 0.7.0+ascend3.5 driver (SHA256 da34b0e53e48056980cb8dfe8e5120f8dd3bae279004ceab730cb6314ec6445d).
     source = tmp_path / "conformance.cc"
     source.write_text(
-        '#include "ascend_abi.h"\n#include <cassert>\n#include <cstddef>\n'
+        '#include "abi.h"\n#include <cassert>\n#include <cstddef>\n'
         "using flagos::native_host::ascend::Layout;\n"
         "struct __attribute__((packed)) Published {\n"
         "void* ffts __attribute__((aligned(8)));\n"
@@ -293,7 +293,7 @@ def test_packed_arguments_match_the_published_launcher_struct(tmp_path):
             compiler,
             "-std=c++17",
             "-Werror",
-            "-I" + str(ROOT / "csrc/native_host"),
+            "-I" + str(ROOT / "csrc/native_host/backends/ascend"),
             str(source),
             "-o",
             str(tmp_path / "conformance"),
@@ -343,7 +343,8 @@ def test_native_backend_syntax_with_cpu_torch_and_runtime_declarations(tmp_path)
             "-I" + str(tmp_path),
             "-I" + sysconfig.get_path("include"),
             "-I" + str(Path(torch.__file__).parent / "include"),
-            str(ROOT / "csrc/native_host/backends/ascend.cc"),
+            "-I" + str(ROOT / "csrc/native_host"),
+            str(ROOT / "csrc/native_host/backends/ascend/launch.cc"),
         ],
         capture_output=True,
         text=True,
