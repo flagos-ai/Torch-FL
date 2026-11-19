@@ -999,6 +999,107 @@ def test_final_environment_labels_deferred_dependencies_incomplete(
     assert [item["exit_code"] for item in report["validation"]] == [0, 1, 1]
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "known-missing",
+        "default-lane",
+        "non-boxing-wheel",
+        "other-vendor-version",
+        "undeclared",
+        "other-cu12-package",
+        "pip-extra-error",
+        "preflight-extra-error",
+        "version-conflict",
+        "different-missing-packages",
+        "truncated",
+        "ci-tools",
+    ],
+)
+def test_final_environment_defers_only_known_cuda_boxing_dependencies(
+    tmp_path, monkeypatch, case
+):
+    version = "2.10.0+cuda13.3"
+    dependency = "nvidia-cuda-runtime-cu12"
+    if case == "other-cu12-package":
+        dependency = "nvidia-new-cu12"
+    requirement = f"{dependency}>=12.8"
+    manifest = {
+        "platform": "cuda",
+        "wheel_version": version,
+        "build": {
+            "kernels": ["flaggems"] if case == "non-boxing-wheel" else ["boxing"],
+            "vendor_torch_libraries": True,
+        },
+        "requirements": [
+            "nvidia-cublas-cu12>=12.8",
+            *([] if case == "undeclared" else [requirement]),
+        ],
+    }
+    monkeypatch.setenv(
+        "REPORT_PLATFORM", "nvidia" if case == "default-lane" else "nvidia-boxing"
+    )
+    monkeypatch.setenv(
+        "TORCH_FL_VENDOR_TORCH_VERSION",
+        "2.10.0+cu128" if case == "other-vendor-version" else "2.10.0+cu130",
+    )
+    monkeypatch.setattr(
+        SEED,
+        "environment_report",
+        lambda: {"packages": [{"name": "torch-fl", "version": version}]},
+    )
+    monkeypatch.setattr(SEED.metadata, "distributions", lambda: [])
+    monkeypatch.setattr(SEED, "tool_requirements", lambda _: {"pytest": ""})
+    monkeypatch.setattr(SEED, "requirement_satisfied", lambda _: case != "ci-tools")
+
+    def missing(name):
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(SEED.metadata, "distribution", missing)
+    pip_stdout = f"torch-fl {version} requires {dependency}, which is not installed.\n"
+    preflight_stderr = (
+        "WARNING: SDK compatibility unverified\n"
+        f"ERROR: Required {requirement}; installed missing\n"
+    )
+    if case == "pip-extra-error":
+        pip_stdout += (
+            f"other-package 1.0 requires {dependency}, which is not installed.\n"
+        )
+    if case == "preflight-extra-error":
+        preflight_stderr += "ERROR: Required torch>=2.10,<2.11; installed missing\n"
+    if case == "version-conflict":
+        preflight_stderr = f"ERROR: Required {requirement}; installed 12.6\n"
+    if case == "different-missing-packages":
+        preflight_stderr = (
+            "ERROR: Required nvidia-cublas-cu12>=12.8; installed missing\n"
+        )
+    if case == "truncated":
+        pip_stdout = "unrelated output" * 2000 + "\n" + pip_stdout
+
+    def run(command, **kwargs):
+        if command[-1] == "check":
+            return SimpleNamespace(returncode=1, stdout=pip_stdout, stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr=preflight_stderr)
+
+    monkeypatch.setattr(SEED.subprocess, "run", run)
+    wheel = tmp_path / "torch_fl.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("torch_fl/compatibility.json", json.dumps(manifest))
+    output = tmp_path / "environment.json"
+    allowed = case == "known-missing"
+    assert SEED.finalize_environment(wheel, output) == (0 if allowed else 1)
+    report = json.loads(output.read_text())
+    assert not report["valid"]
+    assert report["ready_for_tests"] is allowed
+    assert [item["exit_code"] for item in report["validation"][-2:]] == [1, 1]
+    if allowed:
+        assert report["deferred_dependencies"][0]["packages"] == [dependency]
+        assert all(
+            item["deferred_dependency"] == "nvidia-*-cu12"
+            for item in report["validation"][-2:]
+        )
+
+
 @pytest.mark.parametrize("missing_field", ["Name", "Version"])
 def test_final_environment_retains_corrupt_package_metadata(
     tmp_path, monkeypatch, missing_field

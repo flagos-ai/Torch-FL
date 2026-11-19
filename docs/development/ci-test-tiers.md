@@ -68,14 +68,17 @@ therefore does not establish FlagCX collective-communication support. Published
 wheel requirements and the `cuda-comm` release extra remain unchanged.
 
 The migrated runtime lanes retain raw `pip check` and installed-wheel preflight
-results in their final environment snapshots. Only the missing FlagCX dependency
+results in their final environment snapshots. The missing FlagCX dependency
 of Torch-FL is marked as deferred, and only when FlagCX was absent at build time
 and remains absent in the test venv. Other missing packages, version conflicts,
 preflight failures and an unexpectedly installed FlagCX still fail the gate.
 A snapshot with a deferred dependency records `valid=false` while allowing the
 remaining functional tests to run through `ready_for_tests=true`. CUDA retains
 its existing dependency checks and disables FlagTree's optional distributed
-loader; no FlagCX import or communication check is scheduled.
+loader; no FlagCX import or communication check is scheduled. The temporary
+[CUDA boxing exception](ci-controls.md#final-test-environment-validation) for
+#878 allows functional tests with the known CUDA 12 dependency mismatch and
+retains the failed checks in the snapshot.
 
 Release publication continues through the existing wheel-build and publishing
 workflows, with platform names and boxing-mode propagation kept consistent with

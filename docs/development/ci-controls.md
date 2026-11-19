@@ -100,6 +100,15 @@ explicit functional-CI policy. This is not a claim that the published wheel's
 complete dependency contract or communication support has been validated.
 MetaX, Ascend and Hygon do not receive this exception.
 
+Pending resolution of [Torch-FL #878](https://github.com/flagos-ai/Torch-FL/issues/878),
+the final gate also allows functional tests on `nvidia-boxing` using
+vendor Torch `2.10.0+cu130` when both dependency checkers report the same
+missing CUDA 12 packages from the known wheel declaration. The snapshot lists
+the deferred packages and retains both failing checker results
+(`valid=false`, `ready_for_tests=true`). Other errors remain blocking.
+The exception applies only to integration CI. Wheel metadata and release
+checks are unchanged.
+
 The interpreter, compiler backend and SDK follow each chosen runtime, while CPU
 Torch and published package pins retain their existing lane contracts. PPU retains
 its two existing lanes: default uses CPU Torch without a vendor bundle; boxing
