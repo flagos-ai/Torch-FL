@@ -85,16 +85,27 @@ def test_policy_change_invalidates_all_entry_abis(generator):
     assert {row["abi"] for row in original}.isdisjoint(row["abi"] for row in changed)
 
 
-def test_wheel_builder_generates_catalog_without_source_json(generator, monkeypatch):
+@pytest.mark.parametrize("vendor", ["nvidia", "hygon", "metax"])
+def test_wheel_builder_generates_catalog_without_source_json(
+    generator, monkeypatch, vendor
+):
     monkeypatch.syspath_prepend(str(ROOT / "torch_fl/native_host"))
     spec = importlib.util.spec_from_file_location(
         "vendor_builder_test", ROOT / "torch_fl/native_host/vendor_build.py"
     )
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
-    assert (
-        builder.generate_catalog(ROOT) == generator.render(generator.load_policy())[1]
-    )
+    if vendor == "metax":
+        spec = importlib.util.spec_from_file_location(
+            "metax_vendor_codegen_test",
+            ROOT / "scripts/codegen/codegen_metax_native_vendor.py",
+        )
+        metax = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(metax)
+        expected = metax.render()[1]
+    else:
+        expected = generator.render(generator.load_policy(vendor))[1]
+    assert builder.generate_catalog(ROOT, vendor) == expected
     for name in (
         "source_variants.json",
         "vendor_precision.json",

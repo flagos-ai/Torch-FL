@@ -1091,6 +1091,11 @@ separately admitted and validated for MetaX. Only
 nor loaded. The compatibility manifest records this bundle and its vendor Torch
 version. Wheel preflight validates every numerical artifact hash.
 
+`vendor_build.py` shares cohort validation, extension compilation, and
+manifest emission across the optional precision modules. Its MetaX build
+specification selects the verified header overlay, links the two GPU libraries
+and preloads them after the official CPU Torch frontend.
+
 `codegen_metax_native_vendor.py` derives signatures and the schema/policy ABI
 from Torch schemas. CPU host glue supplies FlagOS storage and the current stream
 to the original published GPU implementations; real tensor devices and dispatch keys stay

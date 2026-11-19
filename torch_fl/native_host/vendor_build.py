@@ -1,9 +1,13 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build the optional typed vendor module; never imported by the runtime."""
+"""Build the optional typed vendor precision module during wheel packaging."""
 
 import argparse
+from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+import ctypes
+from dataclasses import dataclass
 import importlib.metadata
 import json
 import os
@@ -13,7 +17,110 @@ import shutil
 import subprocess
 import sys
 
-from vendor_cohort import bundle, describe, digest, load_build_policy
+from vendor_cohort import bundle, bundle_directory, describe, digest, load_build_policy
+
+
+@dataclass(frozen=True)
+class _LinkOptions:
+    includes: tuple[Path, ...]
+    libraries: tuple[Path, ...]
+    rpaths: tuple[str, ...]
+    cflags: tuple[str, ...] = ()
+
+
+def _nvidia_links(cohort, bundled, _build_temp):
+    vendor_root = Path(cohort["library_dir"]).parent
+    matches = list(vendor_root.parent.glob("nvidia/*/lib/libcublas.so.13"))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "cannot uniquely resolve the validated vendor cuBLAS library"
+        )
+    return _LinkOptions(
+        includes=(vendor_root / "include", Path(os.environ["CUDA_HOME"]) / "include"),
+        libraries=(
+            bundled / "libtorch_cuda.so",
+            bundled / "libc10_cuda.so",
+            matches[0],
+        ),
+        rpaths=("$ORIGIN/../../lib",),
+    )
+
+
+def _hygon_links(cohort, bundled, _build_temp):
+    vendor_root = Path(cohort["library_dir"]).parent
+    toolkit = Path(os.environ.get("DTK_ROOT", "/opt/dtk"))
+    return _LinkOptions(
+        includes=(vendor_root / "include", toolkit / "include"),
+        libraries=(bundled / "libtorch_hip.so", bundled / "libc10_hip.so"),
+        rpaths=("$ORIGIN/../../lib_hygon", "$ORIGIN/../../lib"),
+        cflags=("-DUSE_ROCM", "-D__HIP_PLATFORM_AMD__"),
+    )
+
+
+def _metax_links(cohort, bundled, build_temp):
+    # Expose only the verified host headers to the official CPU Torch frontend.
+    headers = build_temp / "published_headers"
+    for relative, record in cohort["host_headers"].items():
+        target = headers / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(record["path"], target)
+        if digest(target) != record["sha256"]:
+            raise RuntimeError("published MetaX host header copy changed")
+    maca = Path(os.environ.get("MACA_PATH", "/opt/maca"))
+    return _LinkOptions(
+        includes=(
+            headers,
+            maca / "tools/cu-bridge/include",
+            maca / "include",
+            maca / "include/mcr",
+        ),
+        libraries=tuple(bundled / name for name in cohort["libraries"]),
+        rpaths=("$ORIGIN/metax_vendor",),
+        cflags=("-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",),
+    )
+
+
+@contextmanager
+def _preload_libraries(libraries):
+    flags = os.RTLD_LAZY | os.RTLD_GLOBAL
+    for path in libraries:
+        ctypes.CDLL(str(path), mode=flags)
+    previous = sys.getdlopenflags()
+    sys.setdlopenflags(flags)
+    try:
+        yield
+    finally:
+        sys.setdlopenflags(previous)
+
+
+@dataclass(frozen=True)
+class _BuildSpec:
+    links: Callable[[dict, Path, Path], _LinkOptions]
+    catalog: tuple[str, ...]
+    module: str = "_vendor"
+    header: str = "precision_runtime.h"
+    official_cpu_first: bool = False
+    explicit_cxx11_abi: bool = True
+    load: Callable[[tuple[Path, ...]], AbstractContextManager] = nullcontext
+
+
+_BUILD_SPECS = {
+    "nvidia": _BuildSpec(
+        _nvidia_links, ("codegen_native_vendor.py", "--vendor", "nvidia")
+    ),
+    "hygon": _BuildSpec(
+        _hygon_links, ("codegen_native_vendor.py", "--vendor", "hygon")
+    ),
+    "metax": _BuildSpec(
+        _metax_links,
+        ("codegen_metax_native_vendor.py",),
+        module="_metax_vendor",
+        header="backends/metax/precision.h",
+        official_cpu_first=True,
+        explicit_cxx11_abi=False,
+        load=_preload_libraries,
+    ),
+}
 
 
 def dispatch_definitions(torch_library):
@@ -28,48 +135,33 @@ def dispatch_definitions(torch_library):
 
 
 def generate_catalog(source_root, vendor="nvidia"):
+    script, *selection = _BUILD_SPECS[vendor].catalog
     return json.loads(
         subprocess.check_output(
             [
                 sys.executable,
-                str(Path(source_root) / "scripts/codegen/codegen_native_vendor.py"),
+                str(Path(source_root) / "scripts/codegen" / script),
                 "--check",
                 "--print-catalog",
-                "--vendor",
-                vendor,
+                *selection,
             ],
             text=True,
         )
     )
 
 
-def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
-    if os.environ.get("_TORCH_FL_BUILDING_NATIVE_HOST") != "1":
-        raise RuntimeError("native vendor compilation is a wheel-build operation")
-    source_root, output, build_temp = (
-        Path(path).resolve() for path in (source_root, output, build_temp)
-    )
-    package = output / "torch_fl"
-    sources = source_root / "csrc/native_host"
-    hygon = vendor == "hygon"
-    entry_source = f"backends/{vendor}/precision.cc"
-    policy = load_build_policy(source_root).precision_policy(vendor)
-    cohort = describe(vendor_library, policy)
-    artifacts = {
-        ("lib_hygon/" if hygon else "lib/") + name: value
-        for name, value in bundle(cohort, package, source_root=source_root).items()
-    }
-    # torch_fl preloads the platform libraries before Torch inspects the device.
-    # Native-host activation is disabled in this build process.
-
-    import torch_fl
+def _load_cpu_torch(policy, cohort, *, exact_cpu=False):
     import torch
-    from torch.utils.cpp_extension import load
 
-    if torch_fl._build_config.ACCELERATOR != vendor:
-        raise RuntimeError("native vendor selection differs from the build record")
+    version = str(torch.__version__)
+    expected = cohort["version"].split("+", 1)[0]
+    version_matches = (
+        version == expected + "+cpu"
+        if exact_cpu
+        else version.split("+", 1)[0] == expected
+    )
     if (
-        str(torch.__version__).split("+", 1)[0] != cohort["version"].split("+", 1)[0]
+        not version_matches
         or torch.version.git_version
         != policy.get("cpu_torch_git_version", cohort["git_version"])
         or torch.version.cuda is not None
@@ -78,6 +170,39 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
         raise RuntimeError(
             "native vendor build must match the CPU Torch and published FlagGems cohort"
         )
+    return torch
+
+
+def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
+    if os.environ.get("_TORCH_FL_BUILDING_NATIVE_HOST") != "1":
+        raise RuntimeError("native vendor compilation is a wheel-build operation")
+    source_root, output, build_temp = (
+        Path(path).resolve() for path in (source_root, output, build_temp)
+    )
+    spec = _BUILD_SPECS[vendor]
+    policy = load_build_policy(source_root).precision_policy(vendor)
+    cohort = describe(vendor_library, policy)
+    # The MetaX GPU libraries use the official CPU Torch frontend. The other
+    # builds let torch_fl select the platform libraries before importing Torch.
+    torch = (
+        _load_cpu_torch(policy, cohort, exact_cpu=True)
+        if spec.official_cpu_first
+        else None
+    )
+    package = output / "torch_fl"
+    bundle_dir = bundle_directory(vendor)
+    artifacts = {
+        (bundle_dir / name).as_posix(): checksum
+        for name, checksum in bundle(cohort, package, source_root=source_root).items()
+    }
+
+    import torch_fl
+    from torch.utils.cpp_extension import load
+
+    if torch_fl._build_config.ACCELERATOR != vendor:
+        raise RuntimeError("native vendor selection differs from the build record")
+    if torch is None:
+        torch = _load_cpu_torch(policy, cohort)
     if "boxing" in torch_fl._build_config.KERNELS:
         raise RuntimeError("native vendor precision cannot be built with boxing")
     catalog = generate_catalog(source_root, vendor)
@@ -85,63 +210,51 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
         raise RuntimeError(
             "rebuild the core library after generating native vendor entries"
         )
-    vendor_root = Path(cohort["library_dir"]).parent
-    if hygon:
-        toolkit_root = Path(os.environ.get("DTK_ROOT", "/opt/dtk"))
-        includes = [str(toolkit_root / "include")]
-        numerical_links = []
-    else:
-        matches = list(vendor_root.parent.glob("nvidia/*/lib/libcublas.so.13"))
-        if len(matches) != 1:
-            raise RuntimeError(
-                "cannot uniquely resolve the validated vendor cuBLAS library"
-            )
-        includes = [str(Path(os.environ["CUDA_HOME"]) / "include")]
-        numerical_links = [str(matches[0])]
-    torch_library = Path(torch.__file__).parent / "lib/libtorch_cpu.so"
-    definitions = dispatch_definitions(torch_library)
-    build_temp.mkdir(parents=True, exist_ok=True)
-    module = load(
-        name="_vendor",
-        sources=[str(sources / entry_source)],
-        extra_include_paths=[
-            str(sources),
-            str(source_root / "csrc/include"),
-            str(vendor_root / "include"),
-            *includes,
-        ],
-        extra_cflags=[
-            "-O3",
-            f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
-            *("-D" + value for value in definitions),
-            *(["-DUSE_ROCM", "-D__HIP_PLATFORM_AMD__"] if hygon else []),
-        ],
-        extra_ldflags=[
-            str(package / "lib/libflagos.so"),
-            str(
-                package
-                / ("lib_hygon/libtorch_hip.so" if hygon else "lib/libtorch_cuda.so")
-            ),
-            str(
-                package / ("lib_hygon/libc10_hip.so" if hygon else "lib/libc10_cuda.so")
-            ),
-            *numerical_links,
-            *(["-Wl,-rpath,'$$ORIGIN/../../lib_hygon'"] if hygon else []),
-            "-Wl,-rpath,'$$ORIGIN/../../lib'",
-        ],
-        build_directory=str(build_temp),
-        with_cuda=False,
-        verbose=True,
+
+    native_dir = Path("csrc/native_host")
+    source = native_dir / "backends" / vendor / "precision.cc"
+    header = native_dir / spec.header
+    definitions = dispatch_definitions(
+        Path(torch.__file__).parent / "lib/libtorch_cpu.so"
     )
+    build_temp.mkdir(parents=True, exist_ok=True)
+    links = spec.links(cohort, package / bundle_dir, build_temp)
+    includes = [source_root / "csrc/include", *links.includes]
+    if header.parent != source.parent:
+        includes.insert(0, source_root / header.parent)
+    cflags = ["-O3"]
+    if spec.explicit_cxx11_abi:
+        cflags.append(
+            f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}"
+        )
+    with spec.load(links.libraries):
+        module = load(
+            name=spec.module,
+            sources=[str(source_root / source)],
+            extra_include_paths=[str(path) for path in includes],
+            extra_cflags=[
+                *cflags,
+                *("-D" + value for value in definitions),
+                *links.cflags,
+            ],
+            extra_ldflags=[
+                str(package / "lib/libflagos.so"),
+                *(str(path) for path in links.libraries),
+                *(f"-Wl,-rpath,'${path}'" for path in links.rpaths),
+            ],
+            build_directory=str(build_temp),
+            with_cuda=False,
+            verbose=True,
+        )
     dynamic = subprocess.check_output(["readelf", "-d", module.__file__], text=True)
-    if "$ORIGIN/../../lib" not in dynamic:
+    if any(path not in dynamic for path in links.rpaths):
         raise RuntimeError(
             "native vendor module is missing its relocatable library path"
         )
-    target = package / "native_host/_generated/_vendor.so"
+
+    target = package / "native_host/_generated" / (spec.module + ".so")
     shutil.copy2(module.__file__, target)
     artifacts[str(target.relative_to(package))] = digest(target)
-    libraries = module.libraries()
     manifest = {
         "schema_version": 1,
         "vendor": vendor,
@@ -154,26 +267,34 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
         "catalog": catalog,
         "policy": policy,
         "artifacts": artifacts,
-        "numerical_libraries": {name: digest(path) for name, path in libraries.items()},
+        "numerical_libraries": {
+            name: digest(path) for name, path in module.libraries().items()
+        },
         "sources": {
-            name: digest(source_root / name)
-            for name in (
-                "scripts/codegen/native_host_policy.py",
-                "scripts/codegen/codegen_native_vendor.py",
-                f"csrc/native_host/{entry_source}",
-                "csrc/native_host/precision_runtime.h",
+            path.as_posix(): digest(source_root / path)
+            for path in (
+                Path("scripts/codegen/native_host_policy.py"),
+                Path("scripts/codegen") / spec.catalog[0],
+                source,
+                header,
             )
         },
     }
+    if cohort["host_headers"]:
+        manifest["published_host_headers"] = {
+            name: record["sha256"] for name, record in cohort["host_headers"].items()
+        }
     (target.parent / "vendor_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
-    print(f"Built {len(catalog)} typed vendor precision entries", flush=True)
+    print(
+        f"Built {len(catalog)} typed vendor precision entries for {vendor}", flush=True
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vendor", choices=("nvidia", "hygon"), default="nvidia")
+    parser.add_argument("--vendor", choices=tuple(_BUILD_SPECS), default="nvidia")
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--build-temp", type=Path, required=True)

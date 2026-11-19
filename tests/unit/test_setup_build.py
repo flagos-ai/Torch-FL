@@ -392,7 +392,7 @@ def test_native_host_build_uses_staged_package(
     namespace, kwargs = _load_setup(monkeypatch)
     globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
     monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", vendor)
-    native_precision = vendor != "ascend"
+    native_precision = vendor in {"nvidia", "hygon", "dcu", "metax"}
     monkeypatch.setitem(
         globals_,
         "_native_vendor_cohort",
@@ -432,14 +432,10 @@ def test_native_host_build_uses_staged_package(
     assert len(calls) == 1 + native_precision
     if native_precision:
         vendor_args, _ = calls[1]
-        if vendor == "metax":
-            assert vendor_args[1].endswith("native_host/metax_vendor_build.py")
-            assert "--vendor" not in vendor_args
-        else:
-            assert vendor_args[1].endswith("native_host/vendor_build.py")
-            assert vendor_args[vendor_args.index("--vendor") + 1] == (
-                {"dcu": "hygon", "gcu": "enflame"}.get(vendor, vendor)
-            )
+        assert vendor_args[1].endswith("native_host/vendor_build.py")
+        assert vendor_args[vendor_args.index("--vendor") + 1] == (
+            "hygon" if vendor == "dcu" else vendor
+        )
 
 
 def test_native_metax_rejects_staged_vendor_libtorch(

@@ -145,17 +145,18 @@ def describe(library_dir, policy):
     }
 
 
+def bundle_directory(vendor):
+    return Path(
+        {"hygon": "lib_hygon", "metax": "native_host/_generated/metax_vendor"}.get(
+            vendor, "lib"
+        )
+    )
+
+
 def bundle(cohort, package, source_root=None):
     package = Path(package)
     source = Path(cohort["library_dir"])
-    vendor = cohort.get("vendor")
-    destination = package / (
-        "lib_hygon"
-        if vendor == "hygon"
-        else "native_host/_generated/metax_vendor"
-        if vendor == "metax"
-        else "lib"
-    )
+    destination = package / bundle_directory(cohort.get("vendor"))
     destination.mkdir(parents=True, exist_ok=True)
     hashes = {}
     if cohort.get("vendor") == "hygon":

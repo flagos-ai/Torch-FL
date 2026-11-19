@@ -1293,15 +1293,7 @@ class BuildExtWithCmake(_build_ext):
             subprocess.check_call(
                 [
                     sys.executable,
-                    os.path.join(
-                        SOURCE_DIR,
-                        "torch_fl/native_host/"
-                        + (
-                            "metax_vendor_build.py"
-                            if vendor == "metax"
-                            else "vendor_build.py"
-                        ),
-                    ),
+                    os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_build.py"),
                     "--source-root",
                     SOURCE_DIR,
                     "--output",
@@ -1310,7 +1302,8 @@ class BuildExtWithCmake(_build_ext):
                     os.path.abspath(os.path.join(self.build_temp, "native_vendor")),
                     "--vendor-library",
                     native_vendor[1]["library_dir"],
-                    *(["--vendor", vendor] if vendor != "metax" else []),
+                    "--vendor",
+                    vendor,
                 ],
                 env=env,
                 cwd=destination,
