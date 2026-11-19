@@ -901,7 +901,7 @@ def test_a_pre_release_suffix_lands_between_the_version_and_the_sdk(
 
     _, setup_kwargs = _load_setup(monkeypatch)
 
-    assert setup_kwargs["version"] == "2.10.0rc1+dtk2610"
+    assert setup_kwargs["version"] == "2.10.0rc1+dtk2604"
 
 
 def test_no_pre_release_suffix_leaves_the_release_version_alone(
@@ -912,7 +912,7 @@ def test_no_pre_release_suffix_leaves_the_release_version_alone(
 
     _, setup_kwargs = _load_setup(monkeypatch)
 
-    assert setup_kwargs["version"] == "2.10.0+dtk2610"
+    assert setup_kwargs["version"] == "2.10.0+dtk2604"
 
 
 @pytest.mark.parametrize("value", ["final", "rc", "1", "rc1.post1", ""])

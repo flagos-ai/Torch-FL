@@ -26,6 +26,7 @@ These checks use source inspection and a recording interpreter, without a DCU
 or a network.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -84,8 +85,6 @@ def test_no_while_loop_terminates_on_a_pip_command():
 
 @pytest.mark.parametrize("usable", [True, False])
 def test_flagtree_replacement_uninstalls_its_metadata_owner_once(tmp_path, usable):
-    import os
-
     python = tmp_path / "python"
     python.write_text(
         "#!/bin/bash\n"
@@ -121,3 +120,88 @@ def test_flagtree_replacement_uninstalls_its_metadata_owner_once(tmp_path, usabl
         if usable
         else ["-m pip uninstall -y flagtree triton triton_kernels", "install"]
     )
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_vendor_python_survives_sdk_path_changes(tmp_path, override):
+    image_python = tmp_path / "python"
+    image_python.write_text("#!/bin/sh\nexit 0\n")
+    image_python.chmod(0o755)
+    explicit_python = tmp_path / "vendor-python"
+    explicit_python.write_text("#!/bin/sh\nexit 0\n")
+    explicit_python.chmod(0o755)
+    capture = _SCRIPT[
+        _SCRIPT.index("TORCH_FL_VENDOR_PYTHON=") : _SCRIPT.index("# Locate the DTK")
+    ]
+    select = _SCRIPT[
+        _SCRIPT.index("select_vendor_python()") : _SCRIPT.index("VENDOR_INFO=")
+    ]
+    env = {**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin"}
+    env.pop("TORCH_FL_VENDOR_PYTHON", None)
+    if override:
+        env["TORCH_FL_VENDOR_PYTHON"] = str(explicit_python)
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail\n"
+            + capture
+            + "\nPATH=/unavailable-sdk-bin\n"
+            + select
+            + '\nprintf "%s\\n" "$VENDOR_PYTHON"',
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(explicit_python if override else image_python)
+
+
+@pytest.mark.parametrize(
+    ("target", "vendor", "sdk", "accepted"),
+    [
+        ("2.10.0", "2.10.0", "2604", True),
+        ("2.10.0+cpu", "2.10.0+das.opt1.dtk2604", "26.04.4", True),
+        ("2.10.0", "2.13.0+dtk2610.test", "26.10", False),
+        ("2.9.1", "2.10.0", "2604", False),
+        ("2.10.0", "2.10.0", "", True),
+        ("2.10.0", "2.10.0", "unverified", True),
+    ],
+)
+def test_matching_cohort_restores_checks_and_records_only_verified_sdk(
+    target, vendor, sdk, accepted
+):
+    start = _SCRIPT.index('CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:')
+    end = _SCRIPT.index("# FlagGems C++ package is optional", start)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + _SCRIPT[start:end]
+            + '\nprintf "CHECKS=%s,%s SDK=%s\\n" "$FLAGOS_DCU_SKIP_RUNTIME_CHECK" '
+            '"$FLAGOS_DCU_SKIP_LEGACY_SMOKE" "${FLAGOS_SDK_VERSION:-unknown}"',
+        ],
+        env={
+            **os.environ,
+            "TORCH_FL_CPU_TORCH_VERSION": target,
+            "VENDOR_TORCH_VERSION": vendor,
+            "VENDOR_TORCH_BASE_VERSION": vendor.split("+", 1)[0],
+            "DTK_VERSION": sdk,
+            "FLAGOS_SDK_VERSION": "stale",
+            "FLAGOS_DCU_SKIP_RUNTIME_CHECK": "1",
+            "FLAGOS_DCU_SKIP_LEGACY_SMOKE": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        expected_sdk = sdk if sdk in ("2604", "26.04.4") else "unknown"
+        assert f"CHECKS=0,0 SDK={expected_sdk}" in result.stdout
+    else:
+        assert result.returncode == 1
+        assert "must match vendor Torch" in result.stderr

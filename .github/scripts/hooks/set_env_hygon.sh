@@ -15,10 +15,10 @@
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
 
-# The runtime owns /flagos and /opt/flagtree; neither is the CI environment.
-# Capture its interpreter before DTK env.sh changes PATH, and prevent child
-# shells from restoring the image-wide activation after CI selects its venv.
-TORCH_FL_VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-/flagos/bin/python}"
+# Capture the image interpreter before DTK env.sh changes PATH. The retained
+# development image provides /usr/bin/python rather than /flagos/bin/python;
+# neither its system packages nor its prebuilt venv are the CI environment.
+TORCH_FL_VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-$(command -v python 2>/dev/null || true)}"
 export BASH_ENV=/dev/null
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
@@ -135,31 +135,19 @@ fi
 export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
 export FLAGOS_VENDOR_TORCH_VERSION="$VENDOR_TORCH_VERSION"
 
-# Legacy images select a matching frontend. The runtime trial below explicitly
-# keeps the project's 2.10 frontend while measuring 2.13 device libraries.
+# Keep the shared frontend pin and reject mismatched vendor device libraries
+# before constructing the venv. The bundle's symbol ABI guard remains mandatory.
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}"
-if [[ "$CPU_TORCH_VERSION" != 2.10.0 || "$VENDOR_TORCH_VERSION" != 2.13.0+dtk2610.* ]]; then
-  echo "::error::The DTK 26.10 trial requires CPU Torch 2.10.0 and DTK Torch 2.13.0" >&2
+if [[ "$CPU_TORCH_VERSION" != "$VENDOR_TORCH_BASE_VERSION" ]]; then
+  echo "::error::CPU Torch $CPU_TORCH_VERSION must match vendor Torch $VENDOR_TORCH_VERSION" >&2
   exit 1
 fi
-if ! "$VENDOR_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
-  echo "::error::The DTK 26.10 runtime cohort requires Python 3.12" >&2
-  exit 1
-fi
-# The existing opt-out allows this explicitly experimental cross-version
-# combination to reach the original import/computation gates and hardware
-# suite. Those gates below still assert all four CUDA dispatch registrations;
-# the bundle's symbol ABI guard remains mandatory and unchanged.
-export FLAGOS_DCU_SKIP_RUNTIME_CHECK=1
-# A full vendor-core facade is a different configuration and requires a
-# matching Python frontend. Do not claim its legacy smoke passed on 2.10.
-export FLAGOS_DCU_SKIP_LEGACY_SMOKE=1
-echo "::warning::Experimental CPU Torch 2.10 / DTK Torch 2.13 device-library cohort; version-equality gate bypassed, ABI and hardware checks retained"
-echo "::warning::Legacy full-vendor-core smoke is excluded from this decoupled-only trial"
+export FLAGOS_DCU_SKIP_RUNTIME_CHECK=0
+export FLAGOS_DCU_SKIP_LEGACY_SMOKE=0
 # Record only a version actually provided by the sourced SDK. A missing
 # SDK version remains unknown rather than being inferred from the image tag.
-if [[ "${DTK_VERSION:-}" =~ ^26\.10(\.[0-9]+)*$ ]]; then
+if [[ "${DTK_VERSION:-}" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
   export FLAGOS_SDK_VERSION="$DTK_VERSION"
 else
   unset FLAGOS_SDK_VERSION

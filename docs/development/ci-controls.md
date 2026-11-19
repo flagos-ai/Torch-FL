@@ -7,7 +7,7 @@ test groups come from the shared integration manifest.
 ## Runtime environment preparation
 
 Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same preparation layout:
-`.github/configs/<platform>.yml` selects the digest-pinned runtime and device
+`.github/configs/<platform>.yml` selects the image and device
 access; `.github/scripts/set_env.sh` dispatches to
 `.github/scripts/hooks/set_env_<platform>.sh`; and
 `.github/requirements-<platform>.txt` declares each isolated environment's
@@ -26,7 +26,7 @@ cache have separate lifecycles: cached downloads never skip the native build,
 wheel validation or tests. CPU-only provisioning and cache regression tests run
 in the shared platform-agnostic job.
 
-The eight migrated platforms use `.github/constraints-runtime-ci.txt` as their
+The eight platforms sharing this preparation use `.github/constraints-runtime-ci.txt` as their
 shared CI-only version policy. It includes the existing global constraints and
 sets compatibility ranges for Python build tools, test plugins and common
 runtime dependencies. Platform requirements select which packages are needed
@@ -41,7 +41,8 @@ It checks target/source/checkout boundaries before clearing the target, creates
 the venv with the selected interpreter (or the image's `uv` fallback), then
 requires pip and verifies interpreter ownership and disabled system-site
 inheritance through the common environment checker. CI never reuses a prebuilt
-venv or selects an old development-image provisioning branch. Explicit
+venv or selects a separate legacy provisioning branch. Hygon temporarily keeps
+its old development image while using these same preparation phases. Explicit
 `TORCH_FL_VENDOR_PYTHON` and `TORCH_FL_VENV_ROOT` inputs remain available for
 the runtime interpreter and job-owned destination.
 
@@ -102,12 +103,11 @@ Torch and published package pins retain their existing lane contracts. PPU retai
 its two existing lanes: default uses CPU Torch without a vendor bundle; boxing
 bundles vendor libtorch after the existing native build. No additional native
 build, source-built Torch or hardware test-selection exclusions are introduced
-by this migration. Hygon's [DTK 26.10 trial](../vendors/dcu/installation.md#dtk-2610-runtime-ci-trial)
-explicitly pairs CPU Torch 2.10 with vendor Torch 2.13 device libraries. It
-bypasses the existing version-equality gate, retains ABI/dispatch/computation
-checks and the two existing hardware suites, and excludes the separate
-full-vendor-core legacy smoke. This experimental cohort is not an accepted
-cross-version runtime contract.
+by this migration. Hygon [retains its compatible development image](../vendors/dcu/installation.md#ci-image-and-isolated-environment)
+after the DTK 26.10 / vendor Torch 2.13 trial failed the symbol ABI guard.
+It keeps the shared venv, package policy and cache mechanisms, restores matching
+Torch base versions and enables both the normal runtime checks and the separate
+full-vendor-core legacy smoke.
 
 ### Organization of environment checks
 

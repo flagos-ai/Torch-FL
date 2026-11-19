@@ -18,10 +18,10 @@ display_name: Hygon DCU
 setup_script: .github/scripts/set_env.sh
 setup_platform: hygon
 
-# Experimental decoupled cohort: CPU Torch 2.10 with DTK 26.10 device libraries
-# from the runtime's Torch 2.13. Both existing hardware lanes validate it;
-# a successful image pull or environment setup does not establish compatibility.
-ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-hygon-dtk26.10:2.3.0@sha256:8b0c171807b0a25358cf1ce8a269728a9de392ea6a0c280f88250807ba4cccf0
+# Keep the known Torch 2.10-compatible development image until a compatible
+# runtime is available. Both lanes still create fresh isolated venvs through
+# the shared provisioning, package-reuse and pip-cache helpers.
+ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
 
 runner_labels:
   - hg-8g-cicd-pytorch
