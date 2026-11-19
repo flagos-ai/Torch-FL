@@ -124,11 +124,11 @@ scratch arguments, tensor-map encoding and published FlagTree module loader.
 This adapter contains no numerical kernels. Other adapters must describe their
 own compiler metadata and loader instead of inheriting CUDA behavior.
 
-`backend.py` is the single admission registry. NVIDIA and Hygon have separate
-launch adapters. A native-host build or activation for another vendor fails
-explicitly;
-it cannot select a CUDA adapter, boxing route or alternate host implementation.
-MetaX and Ascend admission requires separate validation under
+`backend.py` is the single admission registry. NVIDIA, Hygon and the experimental
+MetaX and Ascend backends have separate launch adapters. A native-host build or
+activation for an unregistered vendor fails explicitly; it cannot select a CUDA
+adapter, boxing route or alternate host implementation. MetaX and Ascend
+qualification is tracked separately under
 [issue #832](https://github.com/flagos-ai/Torch-FL/issues/832) and
 [issue #833](https://github.com/flagos-ai/Torch-FL/issues/833).
 The [Hygon validation](hygon-native-host-validation.md) records the initial

@@ -1,9 +1,77 @@
 # Hygon native-host validation
 
-Date: 2026-11-18. Base: `eba6b82e95b4ae3cc7f1784c54fd8724596f3845`,
-plus the changes in this checkout.
+## PR qualification: 2026-11-19
 
-This validation uses a non-boxing HCU native-host wheel, independent published
+**The repeated performance gate remains open; the PR is a draft.** Fresh
+qualification after rebasing onto upstream `f0b41362390a41e0d1d598379f658910eaf02ac1`
+retains bitwise-identical logits, but short pairs `s03` and `s05` exceed the
+1.25x latency limit. Worst short prefill/decode ratios are **1.264/1.260**;
+both 512-step pairs pass, with worst ratios **1.212/1.210**. The earlier passing
+qualification below does not override these fresh failures. The remaining
+latency variation has not been isolated to a specific rebased change.
+
+The [PR validation record](../../benchmarks/host_compiler/results/hygon_native_host_pr_validation.json)
+contains all eight fresh pairs, commands, timings, actual test output, source and
+wheel fingerprints, and the independent saved-logit byte checks. It reports
+`performance_gap_remaining`, `correctness_passed=true` and
+`performance_passed=false`. No failing pair is discarded or hidden by pooling.
+
+The measured source commit is
+`200d07988035a454b889c1960718148f70ea0771`; 1,113 transported source files match
+between local and remote checkouts. Subsequent changes update documentation and
+evidence. The rebuilt wheel is `torch_fl-2.10.0+dtk2604-cp310-cp310-linux_x86_64.whl`,
+SHA-256 `c8c9f8793cded49158cbdf7a66042a5fe9d66f55170f5c1e6c9baa519ee88793`.
+It has not been published.
+
+The protocol is unchanged: six independent short pairs each use 15 timed rounds,
+two independent 512-step pairs each use three timed rounds, one full warmup is
+excluded in every process, and vendor/native order alternates. Every forward
+is synchronized before and after timing. This yields 90/720 short
+prefill/decode samples and 6/3,072 long samples per backend.
+
+Complete-forward medians in milliseconds:
+
+| Pair | Steps | Order | Vendor prefill | Native prefill | Ratio | Vendor decode | Native decode | Ratio | Gate |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| s01 | 8 | vendor then native | 21.216 | 25.978 | 1.224 | 20.174 | 24.690 | 1.224 | PASS |
+| s02 | 8 | native then vendor | 21.037 | 25.754 | 1.224 | 20.056 | 24.613 | 1.227 | PASS |
+| s03 | 8 | vendor then native | 21.033 | 26.580 | 1.264 | 20.111 | 25.322 | 1.259 | **FAIL** |
+| s04 | 8 | native then vendor | 21.647 | 25.794 | 1.192 | 20.775 | 24.588 | 1.184 | PASS |
+| s05 | 8 | vendor then native | 21.122 | 26.635 | 1.261 | 20.153 | 25.387 | 1.260 | **FAIL** |
+| s06 | 8 | native then vendor | 21.834 | 26.976 | 1.235 | 20.838 | 25.695 | 1.233 | PASS |
+| l01 | 512 | vendor then native | 22.188 | 26.886 | 1.212 | 21.064 | 25.479 | 1.210 | PASS |
+| l02 | 512 | native then vendor | 22.584 | 26.305 | 1.165 | 21.232 | 25.268 | 1.190 | PASS |
+
+All eight pairs preserve every prefill position and requested decode step:
+1,080 checkpoint comparisons and 190,831,616 logit elements have identical bytes,
+with maximum absolute error zero. All 20 paired operator cases also have
+identical inputs and output bytes. Warm model execution launches 22 distinct
+published FlagGems kernel variants and has no FlagGems/Triton Python calls.
+Numerical CPU fallback, boxing and model capture remain forbidden; host-plan
+and capture counters are zero. Eight boxing attempts are rejected before
+metadata or value changes.
+
+```text
+Installed HCU regressions: 216 passed in 44.82s
+Linux CPU unit cohort:    791 passed, 4 skipped, 183 warnings in 119.69s (0:01:59)
+ruff check:               All checks passed!
+ruff format --check:      641 files already formatted
+```
+
+Two generator reruns leave artifacts unchanged and all six consistency checks
+pass. Wheel preflight passes. A macOS/Python 3.14 comparison without Torch has
+the same eight upstream iterator-region failures on base and candidate: base
+470 passed/24 skipped, candidate 507 passed/29 skipped, with no new failing test
+IDs. Those tests pass in the selected Linux Python 3.10 cohort. NVIDIA, MetaX
+and Ascend hardware have not been rerun for shared ABI/compiler changes; older
+native-host bundles require rebuilding.
+
+## Earlier qualification: 2026-11-18
+
+Date: 2026-11-18. Base: `eba6b82e95b4ae3cc7f1784c54fd8724596f3845`,
+plus the HCU changes in the original measured source snapshot.
+
+This earlier validation uses a non-boxing HCU native-host wheel, independent published
 DTK PyTorch, and the complete official Qwen3-0.6B BF16 eager model. The gate
 requires elementwise `atol=rtol=1e-3` over every prefill position and requested
 decode step, and synchronized complete-forward latency no greater than 1.25
@@ -17,7 +85,7 @@ and [readiness record](../../benchmarks/host_compiler/results/hygon_native_host_
 are historical failures preceding these repairs. Their CPU-fallback diagnostic
 timings do not count toward acceptance.
 
-**The final wheel passes every independent correctness and performance pair.**
+**The 2026-11-18 wheel passed every independent correctness and performance pair.**
 Six short-sequence pairs and two 512-step pairs alternate vendor-first and
 native-first execution. Every pair passes both prefill and decode latency gates.
 Direct byte comparison of the saved tensors verifies all prefill positions and
@@ -46,7 +114,7 @@ Each process excludes an additional complete warmup round. The gate applies
 separately to every pair's synchronized complete-forward medians; passing pairs
 are not pooled to conceal a failing one.
 
-Artifact: `torch_fl-2.10.0+dtk2604-cp310-cp310-linux_x86_64.whl`, SHA-256
+2026-11-18 artifact: `torch_fl-2.10.0+dtk2604-cp310-cp310-linux_x86_64.whl`, SHA-256
 `d8a6115e6c004f1f5a436d5c3e0cb529a890312605bca1cd4292c1fef1c568f7`.
 The wheel was installed for validation and has not been published.
 
@@ -285,7 +353,7 @@ preparation and release of input tensors after specialization.
 
 ## Scope and limitations
 
-The acceptance record reports `passed` for the fixed six-short/two-long protocol
+The 2026-11-18 acceptance record reports `passed` for the fixed six-short/two-long protocol
 and retains the previous failed acceptance's artifact hash and measurements.
 Earlier main-thread pinning and inference-mode diagnostics did not resolve the
 gap. Warm Python-call tracing records no FlagGems/Triton Python calls. C++ timer
@@ -299,6 +367,5 @@ Individual operator submission latency may exceed 1.25 times vendor latency;
 the performance gate concerns synchronized complete-model forwards.
 
 TDM, cooperative and multi-CTA descriptors were checked for construction and
-rejection; no numerical workload for these features was measured. NVIDIA hardware
-was not rerun for shared ABI/compiler changes. Older native-host bundles require
-rebuilding.
+rejection; no numerical workload for these features was measured. NVIDIA, MetaX and Ascend hardware were not rerun for shared ABI/compiler changes.
+Older native-host bundles require rebuilding.
