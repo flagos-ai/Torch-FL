@@ -83,7 +83,7 @@
 // memcpy path stock falls back to without NCCL, which is the path DataParallel
 // uses on every backend that has no nccl.is_available().
 
-#include "dataparallel_comm.h"
+#include "dataparallel.h"
 
 #include <torch/csrc/Exceptions.h>
 #include <torch/csrc/autograd/variable.h>

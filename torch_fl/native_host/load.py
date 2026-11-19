@@ -81,25 +81,37 @@ def function_identity(function):
     return f"{function.__module__}:{function.__qualname__}:{Path(code.co_filename).name}:{code.co_firstlineno}"
 
 
-def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
-    global _audit_installed, _launcher_module
+def _validate_launcher(record, package, path, launcher):
     import triton
     from torch_fl import _build_config
-    from torch_fl.native_host.backend import get_backend, validate_record
+    from torch_fl.native_host.backend import WHEEL_PACKAGE, get_backend, validate_record
 
-    package_module = importlib.import_module(package)
-    manifest = json.loads(
-        (Path(package_module.__file__).parent / "manifest.json").read_text()
-    )
     backend = get_backend(_build_config.ACCELERATOR)
-    _launcher_module = importlib.import_module(package + "._launcher")
+    # Standalone build probes carry their verification inputs with the launcher.
+    sources = path / "csrc"
+    native_dir = sources if package != WHEEL_PACKAGE and sources.is_dir() else None
     validate_record(
-        manifest.get("backend"),
+        record,
         backend,
         Path(triton.__file__).parent,
-        _launcher_module.backend_contract(),
+        launcher.backend_contract(),
+        native_dir=native_dir,
     )
-    backend.install(package, _launcher_module, kernel_launcher)
+    return backend
+
+
+def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
+    global _audit_installed, _launcher_module
+    from torch_fl.native_host.backends.driver import install_driver
+
+    package_module = importlib.import_module(package)
+    path = Path(package_module.__file__).parent
+    manifest = json.loads((path / "manifest.json").read_text())
+    _launcher_module = importlib.import_module(package + "._launcher")
+    backend = _validate_launcher(
+        manifest.get("backend"), package, path, _launcher_module
+    )
+    install_driver(backend, package, _launcher_module, kernel_launcher)
     if enforce_native_compilation and not _audit_installed:
         sys.addaudithook(audit_native_compilers)
         _audit_installed = True
@@ -152,16 +164,10 @@ class Hosts:
             raise RuntimeError(
                 "native hosts require their build-time Torch/FlagTree cohort"
             )
-        from torch_fl import _build_config
-        from torch_fl.native_host.backend import get_backend, validate_record
-
         self.package = self.manifest.get("package", "fg_aot")
         _launcher = importlib.import_module(self.package + "._launcher")
-        validate_record(
-            self.manifest.get("backend"),
-            get_backend(_build_config.ACCELERATOR),
-            Path(triton.__file__).parent,
-            _launcher.backend_contract(),
+        _validate_launcher(
+            self.manifest.get("backend"), self.package, self.path, _launcher
         )
         runtime = importlib.import_module(self.package + ".runtime")
         self.modules = {}

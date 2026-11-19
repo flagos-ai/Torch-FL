@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Submission mechanics of the original published FlagTree Ascend launcher.
-#include "../backend_api.h"
-#include "../ascend_abi.h"
+#include "abi.h"
+#include "backend_api.h"
 
 #include <algorithm>
 #include <ATen/ATen.h>

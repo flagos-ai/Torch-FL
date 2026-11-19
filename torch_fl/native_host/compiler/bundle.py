@@ -536,6 +536,7 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             "typed_rejected": typed_rejected,
         }
     torch_dir = Path(torch.__file__).parent
+    native_dir = source_root / "csrc/native_host"
     extension = Extension(
         "_source_hosts",
         [str(path)],
@@ -543,8 +544,9 @@ def build(directory, hosts, names, *, source_root, build_temp, emit_only=False):
             str(torch_dir / "include"),
             str(torch_dir / "include/torch/csrc/api/include"),
             str(source_root / "csrc/aten/backends/flagos"),
-            str(source_root / "torch_fl/native_host/csrc"),
+            str(native_dir),
         ],
+        depends=[str(native_dir / name) for name in ("host_runtime.h", "host_abi.h")],
         library_dirs=[str(torch_dir / "lib")],
         libraries=["torch_python", "torch_cpu", "c10"],
         define_macros=(

@@ -1227,7 +1227,14 @@ class BuildExtWithCmake(_build_ext):
     """Run cmake before setuptools builds torch_fl._C."""
 
     def _build_native_hosts(self):
+        destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         if not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST"):
+            if not self.inplace:
+                # build_lib can be reused when switching back to an ordinary wheel.
+                for name in ("csrc", "_generated"):
+                    path = os.path.join(destination, "torch_fl", "native_host", name)
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
             return
         kernels = _kernel_switches(FLAGOS_ACCELERATOR)
         if not kernels["FLAGOS_BUILD_FLAGGEMS"] or any(
@@ -1247,11 +1254,9 @@ class BuildExtWithCmake(_build_ext):
         )
         backend_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(backend_module)
-        backend = backend_module.get_backend(
-            _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
-        )
-        destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
-        if backend.vendor == "metax" and os.path.isdir(
+        vendor = _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
+        backend_module.require_backend(vendor)
+        if vendor == "metax" and os.path.isdir(
             os.path.join(destination, "torch_fl", "lib_metax")
         ):
             raise RuntimeError(
@@ -1259,7 +1264,7 @@ class BuildExtWithCmake(_build_ext):
                 "vendor libtorch; build from a clean source tree"
             )
         env = os.environ.copy()
-        if backend.vendor == "nvidia":
+        if vendor == "nvidia":
             _setup_cuda_build_env(env)
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         env["_TORCH_FL_BUILDING_NATIVE_HOST"] = "1"
@@ -1274,7 +1279,7 @@ class BuildExtWithCmake(_build_ext):
                 "--output",
                 destination,
                 "--package",
-                "torch_fl.native_host._generated",
+                backend_module.WHEEL_PACKAGE,
                 "--jobs",
                 str(min(8, _cmake_build_jobs())),
                 "--build-temp",
@@ -1288,15 +1293,7 @@ class BuildExtWithCmake(_build_ext):
             subprocess.check_call(
                 [
                     sys.executable,
-                    os.path.join(
-                        SOURCE_DIR,
-                        "torch_fl/native_host/"
-                        + (
-                            "metax_vendor_build.py"
-                            if backend.vendor == "metax"
-                            else "vendor_build.py"
-                        ),
-                    ),
+                    os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_build.py"),
                     "--source-root",
                     SOURCE_DIR,
                     "--output",
@@ -1305,11 +1302,8 @@ class BuildExtWithCmake(_build_ext):
                     os.path.abspath(os.path.join(self.build_temp, "native_vendor")),
                     "--vendor-library",
                     native_vendor[1]["library_dir"],
-                    *(
-                        ["--vendor", backend.vendor]
-                        if backend.vendor != "metax"
-                        else []
-                    ),
+                    "--vendor",
+                    vendor,
                 ],
                 env=env,
                 cwd=destination,
@@ -1478,7 +1472,7 @@ def _get_setup_kwargs():
     ext_modules = [
         Extension(
             name="torch_fl._C",
-            sources=["torch_fl/csrc/stub.c"],
+            sources=["csrc/bindings/stub.c"],
             language="c",
             extra_compile_args=extra_compile_args,
             libraries=["torch_bindings"],
@@ -1504,9 +1498,6 @@ def _get_setup_kwargs():
 
     package_data = {
         "torch_fl": [
-            "native_host/csrc/*.cc",
-            "native_host/csrc/*.h",
-            "native_host/csrc/backends/*.cc",
             "native_host/_generated/*.so",
             "native_host/_generated/*.json",
             "native_host/_generated/*.py",

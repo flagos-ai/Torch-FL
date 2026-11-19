@@ -82,6 +82,51 @@ def test_metax_unmeasured_vendor_assets_are_rejected(published, mutation):
         cohort.describe(library, policy)
 
 
+def test_vendor_builder_checks_the_metax_catalog_before_compiling(
+    published, tmp_path, monkeypatch
+):
+    _, policy, library = published
+    monkeypatch.syspath_prepend(str(ROOT / "torch_fl/native_host"))
+    builder = load("metax_vendor_builder_test", "torch_fl/native_host/vendor_build.py")
+    monkeypatch.setenv("_TORCH_FL_BUILDING_NATIVE_HOST", "1")
+    monkeypatch.setattr(
+        builder,
+        "load_build_policy",
+        lambda _: SimpleNamespace(precision_policy=lambda _: policy),
+    )
+    monkeypatch.setattr(builder, "generate_catalog", lambda *args: [{"op": "silu"}])
+
+    def native_catalog(vendor="nvidia"):
+        assert vendor == "metax"
+        return "[]"
+
+    monkeypatch.setattr(
+        builder,
+        "_load_cpu_torch",
+        lambda *args, **kwargs: SimpleNamespace(
+            ops=SimpleNamespace(
+                flagos=SimpleNamespace(native_vendor_catalog=native_catalog)
+            )
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_fl",
+        SimpleNamespace(
+            _build_config=SimpleNamespace(ACCELERATOR="metax", KERNELS=("vendor",))
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.utils.cpp_extension",
+        SimpleNamespace(
+            load=lambda **_: pytest.fail("invalid catalog reached compilation")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="rebuild the core library"):
+        builder.build(ROOT, tmp_path / "output", tmp_path / "build", library, "metax")
+
+
 def test_generated_metax_vendor_abi_and_dtype_are_immutable():
     pytest.importorskip("torchgen")
     generator = load(

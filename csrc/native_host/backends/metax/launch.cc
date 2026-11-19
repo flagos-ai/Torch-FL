@@ -3,7 +3,7 @@
 
 // Submission mechanics follow the published MetaX FlagTree launcher. Numerical
 // kernels and the prebuilt module loader remain the released implementations.
-#include "../backend_api.h"
+#include "backend_api.h"
 
 #include <mcr/mc_runtime.h>
 #include <pybind11/pybind11.h>

@@ -139,6 +139,11 @@ def test_native_host_package_data_only_includes_generated_manifests(
     assert command.find_data_files("torch_fl", str(package)) == [str(manifest)]
 
 
+def test_preflight_is_packaged_as_a_standalone_script():
+    source = (ROOT / "pyproject.toml").read_text()
+    assert 'script-files = ["scripts/tools/torch-fl-preflight"]' in source
+
+
 def test_iluvatar_native_build_uses_active_cpu_torch(monkeypatch, tmp_path):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "iluvatar")
     # A legacy image variable must not redirect the native build to vendor torch.
@@ -387,7 +392,7 @@ def test_native_host_build_uses_staged_package(
     namespace, kwargs = _load_setup(monkeypatch)
     globals_ = namespace["BuildExtWithCmake"]._build_native_hosts.__globals__
     monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", vendor)
-    native_precision = vendor != "ascend"
+    native_precision = vendor in {"nvidia", "hygon", "dcu", "metax"}
     monkeypatch.setitem(
         globals_,
         "_native_vendor_cohort",
@@ -427,14 +432,10 @@ def test_native_host_build_uses_staged_package(
     assert len(calls) == 1 + native_precision
     if native_precision:
         vendor_args, _ = calls[1]
-        if vendor == "metax":
-            assert vendor_args[1].endswith("native_host/metax_vendor_build.py")
-            assert "--vendor" not in vendor_args
-        else:
-            assert vendor_args[1].endswith("native_host/vendor_build.py")
-            assert vendor_args[vendor_args.index("--vendor") + 1] == (
-                {"dcu": "hygon", "gcu": "enflame"}.get(vendor, vendor)
-            )
+        assert vendor_args[1].endswith("native_host/vendor_build.py")
+        assert vendor_args[vendor_args.index("--vendor") + 1] == (
+            "hygon" if vendor == "dcu" else vendor
+        )
 
 
 def test_native_metax_rejects_staged_vendor_libtorch(
@@ -599,6 +600,28 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
         command._build_native_hosts()
 
 
+def test_ordinary_wheel_clears_stale_native_host_stage(
+    monkeypatch, tmp_path, clean_kernel_env
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "apple")
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "0")
+    _, kwargs = _load_setup(monkeypatch)
+    command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
+    command.ensure_finalized()
+    command.build_lib = str(tmp_path)
+    command.inplace = False
+    native = tmp_path / "torch_fl/native_host"
+    (native / "csrc").mkdir(parents=True)
+    (native / "csrc/launcher.cc").touch()
+    (native / "_generated").mkdir()
+    (native / "_generated/manifest.json").touch()
+    (native / "load.py").touch()
+
+    command._build_native_hosts()
+
+    assert sorted(path.name for path in native.iterdir()) == ["load.py"]
+
+
 @pytest.mark.parametrize("vendor", ["kunlunxin", "mthreads"])
 def test_native_host_build_requires_a_validated_backend_adapter(
     monkeypatch, clean_kernel_env, vendor
@@ -623,7 +646,6 @@ def test_native_host_build_requires_a_validated_backend_adapter(
         "check_call",
         lambda *args, **kwargs: pytest.fail("unvalidated backend reached the compiler"),
     )
-    assert "native_host/csrc/backends/*.cc" in kwargs["package_data"]["torch_fl"]
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
     command.ensure_finalized()
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
@@ -1092,7 +1114,7 @@ def test_build_ext_adds_torch_paths_to_the_comm_bridge_only(
     namespace, _ = _load_setup(monkeypatch)
     bridge_name = namespace["_load_nccl_ext_builder"]().WHEEL_EXTENSION_NAME
     bridge = Extension(name=bridge_name, sources=["nccl_backend.cpp"])
-    other = Extension(name="torch_fl._C", sources=["torch_fl/csrc/stub.c"])
+    other = Extension(name="torch_fl._C", sources=["csrc/bindings/stub.c"])
     command = SimpleNamespace(extensions=[other, bridge])
 
     namespace["BuildExtWithCmake"]._prepare_nccl_extension(command)

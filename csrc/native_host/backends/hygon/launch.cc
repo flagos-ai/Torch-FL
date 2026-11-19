@@ -3,7 +3,7 @@
 
 // Launch metadata and submission only; numerical kernels and module loading
 // remain the published FlagGems / FlagTree providers.
-#include "../backend_api.h"
+#include "backend_api.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>

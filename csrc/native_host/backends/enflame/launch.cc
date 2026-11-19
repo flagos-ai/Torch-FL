@@ -3,7 +3,7 @@
 
 // TOPS submission mechanics, derived from the published FlagTree launcher.
 // All numerical device code continues to come from the installed FlagGems wheel.
-#include "../backend_api.h"
+#include "backend_api.h"
 #include <tops/tops_runtime.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>

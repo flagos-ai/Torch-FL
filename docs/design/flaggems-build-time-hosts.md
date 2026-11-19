@@ -101,7 +101,7 @@ retain the original instantiation path on every call.
 ## Backend launch contract
 
 [Issue #831](https://github.com/flagos-ai/Torch-FL/issues/831) separates the shared
-host language from device submission. `csrc/backend_api.h` defines ABI version 2
+host language from device submission. `csrc/native_host/backend_api.h` defines ABI version 2
 without including a vendor SDK. The common launcher retains scalar packing,
 current-call tensor pointers, device guards, stream selection, workspace allocation
 and the generated host callbacks. A selected adapter owns immutable kernel launch
@@ -137,6 +137,30 @@ published HIP loader and TDM codec, its measured wavefront width, and null
 global scratch. ABI version 2 passes kernel metadata to descriptor factories
 so the TDM encoder receives the kernel's warp count. Older native-host bundles
 require a rebuild before runtime activation.
+
+The Python build and driver installation follow the interface and implementation
+split of [PyTorch's DeviceInterface](https://github.com/pytorch/pytorch/blob/v2.10.0/torch/_dynamo/device_interface.py#L34).
+Each backend implements `BackendInterface`, describes its published FlagTree
+driver in `BackendConfig`, and supplies launcher and utility build options.
+The shared builder applies the CPU Torch include paths, C++ ABI flags, and source
+fingerprint. Generated driver inputs, such as the HCU descriptor header, live
+with the other temporary build sources.
+
+The shared driver installer loads the selected driver and prebuilt utility, then
+calls the backend's binding hook. The default binds the prebuilt factories to
+current and future driver instances. Ascend overrides binding to preserve the
+published `NPUUtils` class identity and normalize launch metadata. Enflame's
+override enables TOPS stream interop and binds the published driver's wrapper and
+underlying driver. Runtime invokes the adapter's preparation hook before
+installing the launcher and its initialization hook before loading host functions.
+
+The shared C++ launcher and headers live in `csrc/native_host/`.
+`csrc/native_host/backends/<vendor>/launch.cc` submits work to the device.
+Backends with measured dtype exceptions also have a generated `precision.cc`
+in the same directory. The wheel builder mirrors the selected launch ABI inputs
+under `torch_fl/native_host/csrc/` so preflight can verify the sources listed
+in the manifest without a source checkout. The separate `torch_bindings`
+library and `torch_fl._C` extension stub build from `csrc/bindings/`.
 
 Hygon's generated `add.out`, `mul.out`, `mean.out` and `cat.out` adapters call
 the configured functional route and preserve the output tensor's storage,
@@ -1066,6 +1090,11 @@ separately admitted and validated for MetaX. Only
 `native_host/_generated/metax_vendor/`. Vendor CPU libraries are neither bundled
 nor loaded. The compatibility manifest records this bundle and its vendor Torch
 version. Wheel preflight validates every numerical artifact hash.
+
+`vendor_build.py` shares cohort validation, extension compilation, and
+manifest emission across the optional precision modules. Its MetaX build
+specification selects the verified header overlay, links the two GPU libraries
+and preloads them after the official CPU Torch frontend.
 
 `codegen_metax_native_vendor.py` derives signatures and the schema/policy ABI
 from Torch schemas. CPU host glue supplies FlagOS storage and the current stream

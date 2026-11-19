@@ -3,7 +3,7 @@
 
 // Backend mechanics only. Device code remains the published FlagGems kernels;
 // module loading remains the published FlagTree driver's prebuilt utilities.
-#include "../backend_api.h"
+#include "backend_api.h"
 
 #include <cuda.h>
 #include <pybind11/pybind11.h>

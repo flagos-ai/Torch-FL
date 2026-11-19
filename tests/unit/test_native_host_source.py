@@ -34,7 +34,11 @@ def test_builder_selects_vendor_core_before_importing_torch(tmp_path, accelerato
     (backend / "__init__.py").write_text("")
     (backend / "backend.py").write_text(
         "from pathlib import Path\n"
-        "def build_record(*args):\n"
+        "WHEEL_PACKAGE = 'torch_fl.native_host._generated'\n"
+        "def build_extensions(*args):\n"
+        "    raise AssertionError('startup fixture must not compile')\n"
+        "stage_native_sources = build_extensions\n"
+        "def build_record(*args, **kwargs):\n"
         "    raise AssertionError('startup fixture must not compile')\n"
         "def get_backend(accelerator):\n"
         "    (Path(__file__).parents[2] / 'selected-backend').write_text(accelerator)\n"
@@ -91,15 +95,19 @@ def test_builder_initializes_only_platforms_that_require_early_setup(
     )
     (backend / "backend.py").write_text(
         "from types import SimpleNamespace\n"
+        "WHEEL_PACKAGE = 'torch_fl.native_host._generated'\n"
         "def get_backend(accelerator):\n"
         "    import torch_fl\n"
-        "    result = SimpleNamespace(extensions=lambda *args: [], "
-        "vendor='nvidia' if accelerator == 'cuda' else accelerator)\n"
+        "    config = SimpleNamespace(vendor='nvidia' if accelerator == 'cuda' else accelerator)\n"
+        "    result = SimpleNamespace(config=config, initialize_runtime=lambda: None)\n"
         "    if accelerator == 'ascend':\n"
         "        result.initialize_runtime = torch_fl.flagos.init\n"
         "    return result\n"
-        "def build_record(*args):\n"
+        "def build_record(*args, **kwargs):\n"
         f"    return dict(vendor={accelerator!r})\n"
+        "def build_extensions(*args):\n"
+        "    return []\n"
+        "stage_native_sources = build_extensions\n"
     )
     (tmp_path / "torch.py").write_text("__version__ = '2.10.0+cpu'\n")
     (tmp_path / "triton.py").write_text("__version__ = '3.5.0'\n")

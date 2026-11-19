@@ -9,6 +9,9 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from ..backend import BackendConfig, BackendInterface, BuildOptions, LauncherOptions
+from .driver import active_drivers, bind_instances, reject_compilation
+
 
 def prepare(source, metadata, driver):
     """Resolve the published scalar-pointer ABI once per device specialization."""
@@ -49,74 +52,40 @@ def prepare(source, metadata, driver):
     return SimpleNamespace(**fields)
 
 
-class Backend:
-    vendor = "enflame"
-    compiler_backend = "gcu"
-    compiler_distribution = "flagtree"
-    utility_modules = ("gcu_utils",)
-    capabilities = 177
-    scratch_alignment = 256
-    sources = ("csrc/backends/enflame.cc",)
+class Backend(BackendInterface):
+    config = BackendConfig(
+        vendor="enflame",
+        compiler_backend="gcu",
+        driver_directory="enflame",
+        driver_entry="backend",
+        driver_files=(
+            "backend.py",
+            "driver.py",
+            "utils/gcu.cpp",
+            "compiler.py",
+            "VERSION",
+        ),
+        utility_module="gcu_utils",
+        capabilities=177,
+        scratch_alignment=256,
+    )
 
-    def driver_sources(self, triton_root):
-        return {
-            name: triton_root / name
-            for name in (
-                "backends/enflame/backend.py",
-                "backends/enflame/driver.py",
-                "backends/enflame/utils/gcu.cpp",
-                "backends/enflame/compiler.py",
-                "backends/enflame/VERSION",
-            )
+    def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
+        tops = Path(os.environ.get("TOPS_HOME") or "/opt/tops")
+        toolkit: LauncherOptions = {
+            "include_dirs": [str(tops / "include")],
+            "library_dirs": [str(tops / "lib"), str(tops / "lib64")],
+            "libraries": ["topsrt"],
+        }
+        return toolkit, {
+            **toolkit,
+            "sources": [str(driver / "utils/gcu.cpp")],
+            "language": "c++",
+            "extra_compile_args": ["-std=c++17"],
         }
 
-    def extensions(self, namespace, root, torch, record, triton_root):
-        from setuptools import Extension
-
-        tops = Path(os.environ.get("TOPS_HOME") or "/opt/tops")
-        libraries = [str(tops / "lib"), str(tops / "lib64")]
-        return [
-            Extension(
-                namespace + "._launcher",
-                [str(root / "csrc/launcher.cc"), str(root / self.sources[0])],
-                depends=[
-                    str(root / "csrc/backend_api.h"),
-                    str(root / "csrc/host_abi.h"),
-                ],
-                include_dirs=[
-                    str(Path(torch.__file__).parent / "include"),
-                    str(tops / "include"),
-                ],
-                library_dirs=[*libraries, str(Path(torch.__file__).parent / "lib")],
-                libraries=["topsrt", "torch_python", "torch_cpu", "c10"],
-                define_macros=[
-                    (
-                        "FLAGOS_NATIVE_HOST_BACKEND_SHA256",
-                        '"' + record["native_source_sha256"] + '"',
-                    )
-                ],
-                language="c++",
-                extra_compile_args=[
-                    "-O3",
-                    "-std=c++17",
-                    f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
-                ],
-            ),
-            Extension(
-                namespace + ".gcu_utils",
-                [str(triton_root / "backends/enflame/utils/gcu.cpp")],
-                include_dirs=[str(tops / "include")],
-                library_dirs=libraries,
-                libraries=["topsrt"],
-                language="c++",
-                extra_compile_args=["-O3", "-std=c++17"],
-            ),
-        ]
-
-    def install(self, package, launcher, kernel_launcher):
-        driver = importlib.import_module("triton.backends.enflame.backend")
+    def bind_driver(self, module, utilities, create_launcher, current_stream) -> None:
         wrapper = importlib.import_module("triton.backends.enflame.driver")
-        utilities = importlib.import_module(package + ".gcu_utils")
 
         runtime = (
             Path(importlib.import_module("torch_fl").__file__).parent
@@ -131,39 +100,31 @@ class Backend:
             raise RuntimeError("Enflame native-host stream interop ABI was rejected")
 
         def create(source, metadata):
-            return kernel_launcher(source, prepare(source, metadata, driver))
+            return create_launcher(source, prepare(source, metadata, module))
 
-        def reject(*args, **kwargs):
-            raise RuntimeError("runtime C/C++ launcher compilation is forbidden")
-
-        driver.GCUUtils = lambda: utilities
-        driver.GcuLauncher = create
-        driver.build_gcu_ext = reject
-        driver.compile_module_from_src = reject
-        driver._flagos_native_stream = launcher.current_stream
+        module.GCUUtils = lambda: utilities
+        module.GcuLauncher = create
+        module.build_gcu_ext = reject_compilation
+        module.compile_module_from_src = reject_compilation
+        module._flagos_native_stream = current_stream
         # The existing compatibility layer wraps both constructors to restore
         # current-device/stream binding. Keep that wrapper and apply ours last.
-        if not getattr(driver.GCUDriver.__init__, "_flagos_native_host", False):
-            original = driver.GCUDriver.__init__
+        if not getattr(module.GCUDriver.__init__, "_flagos_native_host", False):
+            original = module.GCUDriver.__init__
 
             def initialize(instance, *args, **kwargs):
                 original(instance, *args, **kwargs)
                 instance.get_current_stream = lambda device=0: (
-                    driver._flagos_native_stream(device)
+                    module._flagos_native_stream(device)
                 )
 
             initialize._flagos_native_host = True
-            driver.GCUDriver.__init__ = initialize
-        from triton.runtime import driver as runtime_driver
-
-        for active in (
-            getattr(runtime_driver, "_active", None),
-            getattr(runtime_driver, "_default", None),
-            getattr(wrapper._GCUDriver, "instance", None),
-        ):
-            if active is not None:
-                for instance in (active, getattr(active, "_driver", None)):
-                    if instance is not None:
-                        instance.utils = utilities
-                        instance.launcher_cls = create
-                        instance.get_current_stream = driver._flagos_native_stream
+            module.GCUDriver.__init__ = initialize
+        wrapped = getattr(wrapper._GCUDriver, "instance", None)
+        for active in (*active_drivers(), wrapped):
+            bind_instances(
+                (active, getattr(active, "_driver", None)),
+                utilities,
+                create,
+                current_stream,
+            )

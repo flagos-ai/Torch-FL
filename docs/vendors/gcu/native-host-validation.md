@@ -156,7 +156,7 @@ TOPS submissions are verified separately by the hardware adapter tests.
 ## Adapter, environment and artifact
 
 The [Python adapter](../../../torch_fl/native_host/backends/enflame.py) and
-[native launcher](../../../torch_fl/native_host/csrc/backends/enflame.cc) package
+[native launcher](../../../csrc/native_host/backends/enflame/launch.cc) package
 the TOPS module loader and unchanged published `gcu_utils` at wheel build time.
 They preserve the published Triton 3.6 software-descriptor and integer-pointer
 ABI, launch geometry, live output binding and stream refresh. Unsupported launch

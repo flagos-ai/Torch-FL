@@ -17,7 +17,7 @@
 namespace torch_fl::comm {
 
 /// Publishes the flagos implementations of torch._C's DataParallel
-/// communication primitives. See dataparallel_comm.cc for the whole story.
+/// communication primitives. See dataparallel.cc for the whole story.
 ///
 /// Idempotent: the first call captures torch._C's originals and rebinds them,
 /// every later call is a no-op. Rebinding twice would capture the previous

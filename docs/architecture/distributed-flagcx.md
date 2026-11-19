@@ -152,7 +152,7 @@ not re-run through the HF harness.
 ### 1.1 Zero-copy bridging
 
 flagos tensors and CUDA tensors share the same device memory. `flagos_to_cuda_view_impl` in
-`torch_fl/csrc/module.cc` builds a tensor carrying `DispatchKey::CUDA` over the same `data_ptr`
+`csrc/bindings/module.cc` builds a tensor carrying `DispatchKey::CUDA` over the same `data_ptr`
 (holding a reference to the original flagos tensor so the memory is not freed). The communication
 backend therefore receives what is, to it, a CUDA tensor, entirely unaware of flagos.
 

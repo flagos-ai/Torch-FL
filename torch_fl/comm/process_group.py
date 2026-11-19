@@ -633,7 +633,7 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
                 f"backend {backend!r}, but no flagos->device view is implemented "
                 f"for it (flagos tensors are not a zero-copy alias of "
                 f"'{prof.flagcx_dev}'). Implement the corresponding "
-                f"_flagos_to_*_view in torch_fl/csrc/module.cc, or use a FlagCX "
+                f"_flagos_to_*_view in csrc/bindings/module.cc, or use a FlagCX "
                 f"adaptor that consumes privateuseone tensors natively."
             )
         import torch_fl._C as _C

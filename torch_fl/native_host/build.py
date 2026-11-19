@@ -812,6 +812,8 @@ def main():
     from setuptools import Distribution, Extension
 
     output = args.output.resolve()
+    source_root = args.source_root.resolve()
+    native_dir = source_root / "csrc/native_host"
     namespace = args.package
     package = output.joinpath(*namespace.split("."))
     build_temp = args.build_temp.resolve() if args.build_temp else output / "build"
@@ -821,12 +823,20 @@ def main():
     (package / "__init__.py").write_text("")
     root = Path(__file__).resolve().parent
     from torch_fl import _build_config
-    from torch_fl.native_host.backend import build_record, get_backend
+    from torch_fl.native_host.backend import (
+        WHEEL_PACKAGE,
+        build_extensions,
+        build_record,
+        get_backend,
+        stage_native_sources,
+    )
 
     backend = get_backend(_build_config.ACCELERATOR)
     triton_root = Path(triton.__file__).parent
-    backend_record = build_record(backend, triton_root)
-    extensions = backend.extensions(namespace, root, torch, backend_record, triton_root)
+    backend_record = build_record(backend, triton_root, native_dir=native_dir)
+    extensions = build_extensions(
+        backend, namespace, native_dir, torch, backend_record, triton_root, source_dir
+    )
     manifest = {
         "package": namespace,
         "torch": torch.__version__,
@@ -837,17 +847,18 @@ def main():
     }
     from torch_fl.native_host.vendor_cohort import load_build_policy
 
-    policy = load_build_policy(args.source_root)
-    adaptation = policy.NATIVE_BMM_ADAPTATIONS.get(backend.vendor)
+    policy = load_build_policy(source_root)
+    vendor = backend.config.vendor
+    adaptation = policy.NATIVE_BMM_ADAPTATIONS.get(vendor)
     if adaptation is not None:
         manifest["matmul_adaptation"] = adaptation
-    copy_adaptation = policy.NATIVE_COPY_ADAPTATIONS.get(backend.vendor)
+    copy_adaptation = policy.NATIVE_COPY_ADAPTATIONS.get(vendor)
     if copy_adaptation is not None:
         manifest["copy_adaptation"] = copy_adaptation
-    reduction_adaptation = policy.NATIVE_REDUCTION_ADAPTATIONS.get(backend.vendor)
+    reduction_adaptation = policy.NATIVE_REDUCTION_ADAPTATIONS.get(vendor)
     if reduction_adaptation is not None:
         manifest["reduction_adaptation"] = reduction_adaptation
-    sdk_policy = policy.NATIVE_SDK_PRECISION.get(backend.vendor)
+    sdk_policy = policy.NATIVE_SDK_PRECISION.get(vendor)
     if sdk_policy is not None and "vendor" in _build_config.KERNELS:
         from torch_fl.native_host.vendor_cohort import digest
 
@@ -870,9 +881,7 @@ def main():
             },
         }
     if not args.launcher_only:
-        initialize = getattr(backend, "initialize_runtime", None)
-        if initialize is not None:
-            initialize()
+        backend.initialize_runtime()
         import flag_gems
         from torch_fl import _build_config
         from torch_fl.native_host import source_variants
@@ -899,7 +908,7 @@ def main():
             for _, function, *_ in flag_gems._FULL_CONFIG
             if isinstance(function, types.FunctionType)
         ]
-        policy = source_policy_for_build(_build_config, args.source_root)
+        policy = source_policy_for_build(_build_config, source_root)
         alternatives = source_variants.load(policy)
         if policy is not None:
             manifest["source_variants"] = policy
@@ -1014,6 +1023,10 @@ def main():
     command.parallel = args.jobs
     command.ensure_finalized()
     command.run()
+    if namespace != WHEEL_PACKAGE:
+        stage_native_sources(backend, native_dir, package / "csrc")
+    elif output != source_root:
+        stage_native_sources(backend, native_dir, package.parent / "csrc")
     expected = {
         Path(command.get_ext_fullpath(extension.name)).resolve()
         for extension in extensions
@@ -1034,7 +1047,7 @@ def main():
             package / "typed",
             hosts,
             set(manifest["ops"]),
-            source_root=root.parents[1],
+            source_root=source_root,
             build_temp=build_temp / "typed",
         )
         manifest["typed_hosts"] = {

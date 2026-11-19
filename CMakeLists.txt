@@ -1018,4 +1018,4 @@ include(${PROJECT_SOURCE_DIR}/cmake/FlagosRpath.cmake)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/csrc/runtime/accelerator)
 add_subdirectory(${PROJECT_SOURCE_DIR}/csrc)
-add_subdirectory(${PROJECT_SOURCE_DIR}/torch_fl/csrc)
+add_subdirectory(${PROJECT_SOURCE_DIR}/csrc/bindings)
