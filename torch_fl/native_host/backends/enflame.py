@@ -9,6 +9,9 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from ..backend import BackendConfig, BackendInterface, BuildOptions, LauncherOptions
+from .driver import active_drivers, bind_instances, reject_compilation
+
 
 def prepare(source, metadata, driver):
     """Resolve the published scalar-pointer ABI once per device specialization."""
@@ -49,26 +52,27 @@ def prepare(source, metadata, driver):
     return SimpleNamespace(**fields)
 
 
-class Backend:
-    vendor = "enflame"
-    compiler_backend = "gcu"
-    compiler_distribution = "flagtree"
-    driver_directory = "enflame"
-    driver_entry = "backend"
-    driver_files = (
-        "backend.py",
-        "driver.py",
-        "utils/gcu.cpp",
-        "compiler.py",
-        "VERSION",
+class Backend(BackendInterface):
+    config = BackendConfig(
+        vendor="enflame",
+        compiler_backend="gcu",
+        driver_directory="enflame",
+        driver_entry="backend",
+        driver_files=(
+            "backend.py",
+            "driver.py",
+            "utils/gcu.cpp",
+            "compiler.py",
+            "VERSION",
+        ),
+        utility_module="gcu_utils",
+        capabilities=177,
+        scratch_alignment=256,
     )
-    utility_module = "gcu_utils"
-    capabilities = 177
-    scratch_alignment = 256
 
-    def extension_options(self, driver, _source_dir):
+    def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         tops = Path(os.environ.get("TOPS_HOME") or "/opt/tops")
-        toolkit = {
+        toolkit: LauncherOptions = {
             "include_dirs": [str(tops / "include")],
             "library_dirs": [str(tops / "lib"), str(tops / "lib64")],
             "libraries": ["topsrt"],
@@ -80,13 +84,7 @@ class Backend:
             "extra_compile_args": ["-std=c++17"],
         }
 
-    def bind_driver(self, driver, utilities, kernel_launcher, current_stream):
-        from torch_fl.native_host.backends.driver import (
-            active_drivers,
-            bind_instances,
-            reject_compilation,
-        )
-
+    def bind_driver(self, module, utilities, create_launcher, current_stream) -> None:
         wrapper = importlib.import_module("triton.backends.enflame.driver")
 
         runtime = (
@@ -102,26 +100,26 @@ class Backend:
             raise RuntimeError("Enflame native-host stream interop ABI was rejected")
 
         def create(source, metadata):
-            return kernel_launcher(source, prepare(source, metadata, driver))
+            return create_launcher(source, prepare(source, metadata, module))
 
-        driver.GCUUtils = lambda: utilities
-        driver.GcuLauncher = create
-        driver.build_gcu_ext = reject_compilation
-        driver.compile_module_from_src = reject_compilation
-        driver._flagos_native_stream = current_stream
+        module.GCUUtils = lambda: utilities
+        module.GcuLauncher = create
+        module.build_gcu_ext = reject_compilation
+        module.compile_module_from_src = reject_compilation
+        module._flagos_native_stream = current_stream
         # The existing compatibility layer wraps both constructors to restore
         # current-device/stream binding. Keep that wrapper and apply ours last.
-        if not getattr(driver.GCUDriver.__init__, "_flagos_native_host", False):
-            original = driver.GCUDriver.__init__
+        if not getattr(module.GCUDriver.__init__, "_flagos_native_host", False):
+            original = module.GCUDriver.__init__
 
             def initialize(instance, *args, **kwargs):
                 original(instance, *args, **kwargs)
                 instance.get_current_stream = lambda device=0: (
-                    driver._flagos_native_stream(device)
+                    module._flagos_native_stream(device)
                 )
 
             initialize._flagos_native_host = True
-            driver.GCUDriver.__init__ = initialize
+            module.GCUDriver.__init__ = initialize
         wrapped = getattr(wrapper._GCUDriver, "instance", None)
         for active in (*active_drivers(), wrapped):
             bind_instances(

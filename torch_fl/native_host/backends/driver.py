@@ -5,6 +5,8 @@
 
 import importlib
 
+from ..backend import BackendInterface
+
 
 def reject_compilation(*args, **kwargs):
     raise RuntimeError("runtime C/C++ launcher compilation is forbidden")
@@ -60,21 +62,10 @@ def bind_driver(
     bind_instances(active_drivers(), utilities, create_launcher, current_stream)
 
 
-def install_driver(adapter, package, launcher, create_launcher):
-    entry = getattr(adapter, "driver_entry", "driver")
+def install_driver(adapter: BackendInterface, package, launcher, create_launcher):
+    config = adapter.config
     module = importlib.import_module(
-        f"triton.backends.{adapter.driver_directory}.{entry}"
+        f"triton.backends.{config.driver_directory}.{config.driver_entry}"
     )
-    utilities = importlib.import_module(f"{package}.{adapter.utility_module}")
-    install = getattr(adapter, "bind_driver", None)
-    if install is not None:
-        install(module, utilities, create_launcher, launcher.current_stream)
-    else:
-        bind_driver(
-            module,
-            adapter.driver_symbols,
-            utilities,
-            create_launcher,
-            launcher.current_stream,
-            utility_exports=getattr(adapter, "utility_exports", ()),
-        )
+    utilities = importlib.import_module(f"{package}.{config.utility_module}")
+    adapter.bind_driver(module, utilities, create_launcher, launcher.current_stream)

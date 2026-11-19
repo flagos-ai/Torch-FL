@@ -426,6 +426,12 @@ Wheel builds mirror the selected launch ABI sources under
 `torch_fl/native_host/csrc/` for fingerprint verification. The `_C` extension
 stub and `torch_bindings` sources belong in `csrc/bindings/`.
 
+Native-host Python adapters implement `BackendInterface` and declare their
+published driver and launch metadata in `BackendConfig`. The shared builder
+and driver installer own the common steps. Override a lifecycle or binding
+hook when the published backend requires a different operation. Device and
+stream management use the existing PyTorch `PrivateUse1` integration.
+
 ### Native-host routing confs
 
 The experimental MetaX native-host wheel selects generated

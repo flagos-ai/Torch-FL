@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from native_host_test_utils import import_native_host
+
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 PREFLIGHT_PATH = SOURCE_ROOT / "scripts" / "tools" / "torch-fl-preflight"
 loader = importlib.machinery.SourceFileLoader(
@@ -504,11 +506,7 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
 
 @pytest.fixture(params=["nvidia", "metax", "hygon", "ascend"])
 def native_wheel(tmp_path, manifest, monkeypatch, request):
-    spec = importlib.util.spec_from_file_location(
-        "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"
-    )
-    backend = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(backend)
+    backend = import_native_host("backend")
     driver_root = tmp_path / "compiler"
     vendor = request.param
     adapter = backend.get_backend(vendor)

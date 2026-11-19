@@ -1254,10 +1254,9 @@ class BuildExtWithCmake(_build_ext):
         )
         backend_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(backend_module)
-        backend = backend_module.get_backend(
-            _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
-        )
-        if backend.vendor == "metax" and os.path.isdir(
+        vendor = _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
+        backend_module.require_backend(vendor)
+        if vendor == "metax" and os.path.isdir(
             os.path.join(destination, "torch_fl", "lib_metax")
         ):
             raise RuntimeError(
@@ -1265,7 +1264,7 @@ class BuildExtWithCmake(_build_ext):
                 "vendor libtorch; build from a clean source tree"
             )
         env = os.environ.copy()
-        if backend.vendor == "nvidia":
+        if vendor == "nvidia":
             _setup_cuda_build_env(env)
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         env["_TORCH_FL_BUILDING_NATIVE_HOST"] = "1"
@@ -1299,7 +1298,7 @@ class BuildExtWithCmake(_build_ext):
                         "torch_fl/native_host/"
                         + (
                             "metax_vendor_build.py"
-                            if backend.vendor == "metax"
+                            if vendor == "metax"
                             else "vendor_build.py"
                         ),
                     ),
@@ -1311,11 +1310,7 @@ class BuildExtWithCmake(_build_ext):
                     os.path.abspath(os.path.join(self.build_temp, "native_vendor")),
                     "--vendor-library",
                     native_vendor[1]["library_dir"],
-                    *(
-                        ["--vendor", backend.vendor]
-                        if backend.vendor != "metax"
-                        else []
-                    ),
+                    *(["--vendor", vendor] if vendor != "metax" else []),
                 ],
                 env=env,
                 cwd=destination,

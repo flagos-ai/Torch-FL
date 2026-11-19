@@ -30,7 +30,9 @@ def test_native_startup_prepares_platform_and_launcher_before_device_init(
     monkeypatch.delenv("_TORCH_FL_BUILDING_NATIVE_HOST", raising=False)
     calls = []
     backend = ModuleType(spec.name + ".backend")
-    adapter = SimpleNamespace()
+    adapter = SimpleNamespace(
+        prepare_runtime=lambda: None, initialize_runtime=lambda: None
+    )
     if prepare_hook:
         adapter.prepare_runtime = lambda: calls.append("compat")
     backend.get_backend = lambda name: adapter

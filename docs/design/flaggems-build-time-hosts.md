@@ -138,15 +138,21 @@ global scratch. ABI version 2 passes kernel metadata to descriptor factories
 so the TDM encoder receives the kernel's warp count. Older native-host bundles
 require a rebuild before runtime activation.
 
-The shared launcher builder applies the CPU Torch include paths, C++ ABI flags,
-and source fingerprint once. Each adapter supplies its SDK settings, the sources
-of its published FlagTree driver, and the utility extension it needs. The build
-keeps driver inputs it generates, such as the HCU descriptor header, beside its
-other temporary sources. `backends/driver.py` binds the prebuilt utilities and
-launchers to current and future driver instances. Ascend uses the same installation
-entry point and supplies a hook to preserve the published `NPUUtils` class
-identity and normalize launch metadata. Enflame's hook enables TOPS stream
-interop and binds the published driver's wrapper and underlying driver.
+The Python build and driver installation follow the interface and implementation
+split of [PyTorch's DeviceInterface](https://github.com/pytorch/pytorch/blob/v2.10.0/torch/_dynamo/device_interface.py#L34).
+Each backend implements `BackendInterface`, describes its published FlagTree
+driver in `BackendConfig`, and supplies launcher and utility build options.
+The shared builder applies the CPU Torch include paths, C++ ABI flags, and source
+fingerprint. Generated driver inputs, such as the HCU descriptor header, live
+with the other temporary build sources.
+
+The shared driver installer loads the selected driver and prebuilt utility, then
+calls the backend's binding hook. The default binds the prebuilt factories to
+current and future driver instances. Ascend overrides binding to preserve the
+published `NPUUtils` class identity and normalize launch metadata. Enflame's
+override enables TOPS stream interop and binds the published driver's wrapper and
+underlying driver. Runtime invokes the adapter's preparation hook before
+installing the launcher and its initialization hook before loading host functions.
 
 The shared C++ launcher and headers live in `csrc/native_host/`.
 `csrc/native_host/backends/<vendor>/launch.cc` submits work to the device.

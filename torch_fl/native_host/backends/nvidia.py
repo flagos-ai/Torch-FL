@@ -6,26 +6,29 @@
 import os
 from pathlib import Path
 
+from ..backend import BackendConfig, BackendInterface, BuildOptions, LauncherOptions
 
-class Backend:
-    vendor = "nvidia"
-    compiler_backend = "cuda"
-    compiler_distribution = "flagtree"
-    driver_directory = "nvidia"
-    driver_files = ("driver.py", "driver.c")
-    driver_symbols = ("CudaDriver", "CudaUtils", "CudaLauncher")
-    utility_module = "cuda_utils"
-    utility_exports = ("PyCUtensorMap",)
-    capabilities = 255
-    scratch_alignment = 256
 
-    def extension_options(self, driver, _source_dir):
+class Backend(BackendInterface):
+    config = BackendConfig(
+        vendor="nvidia",
+        compiler_backend="cuda",
+        driver_directory="nvidia",
+        driver_files=("driver.py", "driver.c"),
+        driver_symbols=("CudaDriver", "CudaUtils", "CudaLauncher"),
+        utility_module="cuda_utils",
+        utility_exports=("PyCUtensorMap",),
+        capabilities=255,
+        scratch_alignment=256,
+    )
+
+    def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         cuda = Path(
             os.environ.get("CUDA_HOME")
             or os.environ.get("CUDA_PATH")
             or "/usr/local/cuda"
         )
-        toolkit = {
+        toolkit: LauncherOptions = {
             "include_dirs": [str(cuda / "include")],
             "library_dirs": [str(cuda / "lib64/stubs"), str(cuda / "lib/stubs")],
             "libraries": ["cuda"],

@@ -6,6 +6,8 @@
 import os
 from pathlib import Path
 
+from ..backend import BackendConfig, BackendInterface, BuildOptions
+
 
 def _published_codec(source):
     """Reuse the pinned driver's descriptor layout and encoder unchanged."""
@@ -27,21 +29,22 @@ def _substitute(source, marker, value):
     return source.replace(marker, value, 1)
 
 
-class Backend:
-    vendor = "hygon"
-    compiler_backend = "hip"
-    compiler_distribution = "flagtree"
-    driver_directory = "hcu"
-    driver_files = ("driver.py", "driver.c", "compiler.py", "compiler_hcu.py")
-    driver_symbols = ("HIPDriver", "HIPUtils", "HIPLauncher")
-    utility_module = "hip_utils"
-    utility_exports = ("PyTDMDescriptor",)
-    # Software/TDM descriptors, profile scratch, cooperative/cluster launch,
-    # stream-capture query. The published HCU ABI always passes null global scratch.
-    capabilities = 187
-    scratch_alignment = 256
+class Backend(BackendInterface):
+    config = BackendConfig(
+        vendor="hygon",
+        compiler_backend="hip",
+        driver_directory="hcu",
+        driver_files=("driver.py", "driver.c", "compiler.py", "compiler_hcu.py"),
+        driver_symbols=("HIPDriver", "HIPUtils", "HIPLauncher"),
+        utility_module="hip_utils",
+        utility_exports=("PyTDMDescriptor",),
+        # Software/TDM descriptors, profile scratch, cooperative/cluster launch,
+        # stream-capture query. The published HCU ABI always passes null global scratch.
+        capabilities=187,
+        scratch_alignment=256,
+    )
 
-    def extension_options(self, driver, source_dir):
+    def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:
         sdk = Path(os.environ.get("ROCM_PATH") or "/opt/dtk")
         runtime = sdk / "lib/libgalaxyhip.so"
         if not runtime.is_file():

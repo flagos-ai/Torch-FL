@@ -3,7 +3,6 @@
 
 """Backend contracts are inspectable without importing Torch or any SDK."""
 
-import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,21 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from native_host_test_utils import import_native_host
+
 
 ROOT = Path(__file__).resolve().parents[2]
 NATIVE_SOURCE = ROOT / "csrc/native_host"
 SOURCE = ROOT / "torch_fl/native_host/backend.py"
-SPEC = importlib.util.spec_from_file_location("native_backend_under_test", SOURCE)
-backend = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(backend)
-DRIVER_SPEC = importlib.util.spec_from_file_location(
-    "native_driver_under_test", SOURCE.parent / "backends/driver.py"
-)
-driver_binding = importlib.util.module_from_spec(DRIVER_SPEC)
-DRIVER_SPEC.loader.exec_module(driver_binding)
+backend = import_native_host("backend")
+driver_binding = import_native_host("backends.driver")
 
 
-@pytest.fixture(params=tuple(backend._ADAPTERS))
+@pytest.fixture(params=sorted(backend._ADAPTERS))
 def contract(tmp_path, monkeypatch, request):
     adapter = backend.get_backend(request.param)
     root = tmp_path / "native_host"
@@ -46,11 +41,12 @@ def contract(tmp_path, monkeypatch, request):
 def test_backend_record_and_compiled_extension_agree(contract):
     adapter, root, record, compiled = contract
     backend.validate_record(record, adapter, root, compiled)
-    assert record["vendor"] == adapter.vendor
-    assert record["compiler_backend"] == adapter.compiler_backend
+    assert isinstance(adapter, backend.BackendInterface)
+    assert record["vendor"] == adapter.config.vendor
+    assert record["compiler_backend"] == adapter.config.compiler_backend
     assert record["abi_version"] == 2
     assert record == backend.build_record(adapter, root, native_dir=NATIVE_SOURCE)
-    selected = f"csrc/backends/{adapter.vendor}"
+    selected = f"csrc/backends/{adapter.config.vendor}"
     assert f"{selected}/launch.cc" in record["native_sources"]
     assert f"{selected}/precision.cc" not in record["native_sources"]
     assert set(record["native_sources"]) == {
@@ -66,6 +62,16 @@ def test_backend_record_and_compiled_extension_agree(contract):
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
         backend.get_backend(vendor)
+
+
+def test_registered_backend_must_implement_the_adapter_interface(monkeypatch):
+    name = backend.__package__ + ".backends.metax"
+    monkeypatch.setitem(sys.modules, name, SimpleNamespace(Backend=SimpleNamespace))
+    backend.get_backend.cache_clear()
+    with pytest.raises(
+        RuntimeError, match="invalid native-host launch adapter for metax"
+    ):
+        backend.get_backend("metax")
 
 
 @pytest.mark.parametrize(
@@ -89,11 +95,12 @@ def test_changed_contract_is_rejected(contract, field, value):
 @pytest.mark.parametrize("kind", ["driver", "adapter", "shared_binding", "native"])
 def test_patched_loader_or_native_source_is_rejected(contract, kind):
     adapter, root, record, compiled = contract
+    vendor = adapter.config.vendor
     paths = {
         "driver": next(iter(backend.driver_sources(adapter, root).values())),
-        "adapter": backend._ROOT / "backends" / (adapter.vendor + ".py"),
+        "adapter": backend._ROOT / "backends" / (vendor + ".py"),
         "shared_binding": backend._ROOT / "backends/driver.py",
-        "native": backend._ROOT / "csrc/backends" / adapter.vendor / "launch.cc",
+        "native": backend._ROOT / "csrc/backends" / vendor / "launch.cc",
     }
     with paths[kind].open("a") as output:
         output.write("\n// changed\n")
@@ -112,7 +119,8 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     contract, monkeypatch, tmp_path
 ):
     adapter, root, record, _ = contract
-    if adapter.vendor == "hygon":
+    vendor = adapter.config.vendor
+    if vendor == "hygon":
         sdk = tmp_path / "dtk/lib"
         sdk.mkdir(parents=True)
         (sdk / "libgalaxyhip.so").touch()
@@ -132,7 +140,7 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     )
     assert launcher.sources == [
         str(NATIVE_SOURCE / "launcher.cc"),
-        str(NATIVE_SOURCE / "backends" / adapter.vendor / "launch.cc"),
+        str(NATIVE_SOURCE / "backends" / vendor / "launch.cc"),
     ]
     assert str(NATIVE_SOURCE) in launcher.include_dirs
     assert str(NATIVE_SOURCE / "backend_api.h") in launcher.depends
@@ -144,7 +152,7 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     assert dict(launcher.define_macros)["FLAGOS_NATIVE_HOST_BACKEND_SHA256"] == (
         '"' + record["native_source_sha256"] + '"'
     )
-    if adapter.vendor == "hygon":
+    if vendor == "hygon":
         utility_path = Path(utilities.sources[0])
         assert utility_path.is_relative_to(source_dir)
         assert str(utility_path.with_name("hcu_descriptor.h")) in launcher.depends
@@ -152,7 +160,7 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
         assert '"hipGetDeviceProperties_v2"' in utility
         assert "/*py_libhip_search_path*/" not in utility
         assert "cuda" not in launcher.libraries
-        assert adapter.capabilities == 187
+        assert adapter.config.capabilities == 187
     else:
         assert utilities.sources == [
             str(path)
@@ -187,7 +195,7 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(
     assert "/published-maca/include" in launcher.include_dirs
     assert not any("/unrelated-cuda" in path for path in launcher.include_dirs)
     assert utilities.name == "test_hosts.maca_utils"
-    assert adapter.capabilities == 141
+    assert adapter.config.capabilities == 141
 
 
 @pytest.mark.parametrize("contract", ["nvidia", "metax", "hygon"], indirect=True)
@@ -195,8 +203,9 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
     monkeypatch, contract
 ):
     adapter, _, _, _ = contract
+    config = adapter.config
     driver = SimpleNamespace()
-    driver_name, utils_name, launcher_name = adapter.driver_symbols
+    driver_name, utils_name, launcher_name = config.driver_symbols
 
     class Driver:
         def __init__(self):
@@ -212,10 +221,10 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
         "triton.runtime",
         SimpleNamespace(driver=SimpleNamespace(_active=active, _default=default)),
     )
-    exports = getattr(adapter, "utility_exports", ())
-    modules = {f"triton.backends.{adapter.driver_directory}.driver": driver}
+    exports = config.utility_exports
+    modules = {f"triton.backends.{config.driver_directory}.driver": driver}
     for package in ("first", "second"):
-        modules[f"{package}.{adapter.utility_module}"] = SimpleNamespace(
+        modules[f"{package}.{config.utility_module}"] = SimpleNamespace(
             **{name: object() for name in exports}
         )
     monkeypatch.setattr(
@@ -232,7 +241,7 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
         driver_binding.install_driver(
             adapter, package, SimpleNamespace(current_stream=provider), kernel
         )
-        utilities = modules[f"{package}.{adapter.utility_module}"]
+        utilities = modules[f"{package}.{config.utility_module}"]
         for instance in (active, default, Driver()):
             assert instance.utils is utilities
             assert instance.launcher_cls is kernel
@@ -247,7 +256,10 @@ def test_enflame_build_fingerprints_and_links_its_own_published_loader(
     tmp_path, monkeypatch
 ):
     adapter = backend.get_backend("enflame")
-    assert (adapter.vendor, adapter.compiler_backend) == ("enflame", "gcu")
+    assert (adapter.config.vendor, adapter.config.compiler_backend) == (
+        "enflame",
+        "gcu",
+    )
     for path in backend.driver_sources(adapter, tmp_path).values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("published backend source\n")
@@ -276,12 +288,7 @@ def test_enflame_build_fingerprints_and_links_its_own_published_loader(
 
 @pytest.mark.parametrize("pointers", [(0,), (2,), (-1,), (True,), (1,)])
 def test_enflame_validates_integer_pointer_slots(pointers):
-    # The registry loads by filename without publishing an importable module.
-    spec = importlib.util.spec_from_file_location(
-        "enflame_prepare", SOURCE.parent / "backends/enflame.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = import_native_host("backends.enflame")
     driver = SimpleNamespace(
         _triton_version=lambda: (3, 6), _expand_signature=lambda values: list(values)
     )
@@ -327,10 +334,9 @@ def test_enflame_installer_preserves_current_stream_after_reinstallation(monkeyp
         "hosts.gcu_utils": utilities,
     }
     adapter = backend.get_backend("enflame")
-    monkeypatch.setattr(importlib, "import_module", modules.__getitem__)
-    monkeypatch.setitem(
-        sys.modules, "torch_fl.native_host.backends.driver", driver_binding
-    )
+    loader = SimpleNamespace(import_module=modules.__getitem__)
+    monkeypatch.setattr(driver_binding, "importlib", loader)
+    monkeypatch.setattr(import_native_host("backends.enflame"), "importlib", loader)
     monkeypatch.setitem(sys.modules, "triton.runtime", SimpleNamespace(driver=runtime))
     driver_binding.install_driver(
         adapter,

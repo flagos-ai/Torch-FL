@@ -848,16 +848,17 @@ def main():
     from torch_fl.native_host.vendor_cohort import load_build_policy
 
     policy = load_build_policy(source_root)
-    adaptation = policy.NATIVE_BMM_ADAPTATIONS.get(backend.vendor)
+    vendor = backend.config.vendor
+    adaptation = policy.NATIVE_BMM_ADAPTATIONS.get(vendor)
     if adaptation is not None:
         manifest["matmul_adaptation"] = adaptation
-    copy_adaptation = policy.NATIVE_COPY_ADAPTATIONS.get(backend.vendor)
+    copy_adaptation = policy.NATIVE_COPY_ADAPTATIONS.get(vendor)
     if copy_adaptation is not None:
         manifest["copy_adaptation"] = copy_adaptation
-    reduction_adaptation = policy.NATIVE_REDUCTION_ADAPTATIONS.get(backend.vendor)
+    reduction_adaptation = policy.NATIVE_REDUCTION_ADAPTATIONS.get(vendor)
     if reduction_adaptation is not None:
         manifest["reduction_adaptation"] = reduction_adaptation
-    sdk_policy = policy.NATIVE_SDK_PRECISION.get(backend.vendor)
+    sdk_policy = policy.NATIVE_SDK_PRECISION.get(vendor)
     if sdk_policy is not None and "vendor" in _build_config.KERNELS:
         from torch_fl.native_host.vendor_cohort import digest
 
@@ -880,9 +881,7 @@ def main():
             },
         }
     if not args.launcher_only:
-        initialize = getattr(backend, "initialize_runtime", None)
-        if initialize is not None:
-            initialize()
+        backend.initialize_runtime()
         import flag_gems
         from torch_fl import _build_config
         from torch_fl.native_host import source_variants

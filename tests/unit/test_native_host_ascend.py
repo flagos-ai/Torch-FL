@@ -3,7 +3,6 @@
 
 """Ascend packed ABI: scalar promotion, layout, and immutable launch metadata."""
 
-import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,21 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from native_host_test_utils import import_native_host
+
 
 ROOT = Path(__file__).resolve().parents[2]
-NATIVE_HOST = ROOT / "torch_fl/native_host"
-
-
-def load_module(name, relative):
-    spec = importlib.util.spec_from_file_location(name, NATIVE_HOST / relative)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-adapter = load_module("ascend_host_adapter", "backends/ascend.py")
-backend = load_module("ascend_host_backend", "backend.py")
-driver_binding = load_module("ascend_host_driver", "backends/driver.py")
+adapter = import_native_host("backends.ascend")
+backend = import_native_host("backend")
+driver_binding = import_native_host("backends.driver")
 
 
 @pytest.fixture
@@ -151,9 +142,6 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
         adapter, "importlib", SimpleNamespace(import_module=modules.__getitem__)
     )
     monkeypatch.setattr(driver_binding, "importlib", adapter.importlib)
-    monkeypatch.setitem(
-        sys.modules, "torch_fl.native_host.backends.driver", driver_binding
-    )
     calls = []
 
     def factory(source, metadata):
