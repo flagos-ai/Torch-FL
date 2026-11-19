@@ -81,9 +81,10 @@ class Backend(BackendInterface):
     )
 
     def prepare_runtime(self) -> None:
-        from torch_fl import _patch_flaggems_codegen_config
+        from torch_fl import flagos
+        from torch_fl.compat.flaggems.runtime import configure_vendor
 
-        _patch_flaggems_codegen_config()
+        configure_vendor(self.config.vendor, flagos)
 
     def initialize_runtime(self) -> None:
         from torch_fl import flagos

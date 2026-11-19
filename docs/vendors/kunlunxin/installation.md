@@ -265,7 +265,7 @@ and empty rather than absent:
   surface.
 - `torch_fl/accelerator/kunlunxin/_klx_compat.py` supplies the two runtime pieces
   a CPU-torch FlagGems build needs — the device-name realignment and the
-  `torch.cuda` shim — and `_patch_flaggems_codegen_config`'s kunlunxin arm
+  `torch.cuda` shim — and `compat.flaggems.runtime.configure_vendor`'s Kunlunxin arm
   installs them. Before this module existed that arm labelled the vendor and
   returned before any shim ran, so a routed op reached FlagGems' kernel and then
   died in `torch.cuda._exchange_device`.

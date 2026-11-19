@@ -16,6 +16,7 @@ its own.
 import pytest
 import torch
 import torch_fl
+from torch_fl.compat.flaggems import autotune
 
 
 pytestmark = [pytest.mark.musa, pytest.mark.flaggems, pytest.mark.main_ops]
@@ -140,19 +141,19 @@ def test_the_space_the_tuner_is_given_fits_the_device():
     not being asserted in the fix's own terms.
     """
     _require_flaggems_mthreads()
-    limit = torch_fl.flagos._musa_shared_memory_limit()
+    limit = autotune._musa_shared_memory_limit()
     if limit is None:
         pytest.skip("this backend does not report a static shared-memory limit")
 
     seen = []
-    fit = torch_fl.flagos._fitted_tune_space
+    fit = autotune._fitted_tune_space
 
     def spy(configs, args, kwargs, limit_bytes):
         fitted = fit(configs, args, kwargs, limit_bytes)
         seen.append((list(configs), fitted, limit_bytes))
         return fitted
 
-    torch_fl.flagos._fitted_tune_space = spy
+    autotune._fitted_tune_space = spy
     try:
         # A shape no other test in the session uses, so the ConfigCache cannot
         # answer with a configuration tuned before the spy was installed.
@@ -160,7 +161,7 @@ def test_the_space_the_tuner_is_given_fits_the_device():
         b = torch.randn(95, 99, dtype=torch.float64)
         got = torch.mm(a.to(DEVICE), b.to(DEVICE)).cpu()
     finally:
-        torch_fl.flagos._fitted_tune_space = fit
+        autotune._fitted_tune_space = fit
 
     torch.testing.assert_close(got, torch.mm(a, b), rtol=1e-12, atol=1e-12)
 

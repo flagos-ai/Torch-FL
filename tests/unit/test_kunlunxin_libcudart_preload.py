@@ -28,52 +28,31 @@ These tests pin the selection logic: when it runs, which path it picks, and that
 it is inert off Kunlunxin. Loading a real library is faked, so the suite passes
 on hosts without the vendor tree.
 
-The function is loaded out of ``torch_fl/flagos/__init__.py`` by AST extraction
+The function is loaded out of ``torch_fl/triton_compat/__init__.py`` by AST extraction
 rather than by importing torch_fl: the unit environment has no torch, and
 ``import torch_fl`` claims the PrivateUse1 dispatch key.
 
 Run: pytest tests/unit/test_kunlunxin_libcudart_preload.py -v
 """
 
-import ast
+import importlib.util
 import ctypes
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
-_SOURCE = Path(__file__).resolve().parents[2] / "torch_fl" / "flagos" / "__init__.py"
-_UNDER_TEST = ("_preload_xcudart_for_kunlunxin", "_loaded_shared_objects")
-
-
-def _load_functions():
-    tree = ast.parse(_SOURCE.read_text())
-    wanted = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in _UNDER_TEST
-    ]
-    assert {node.name for node in wanted} == set(_UNDER_TEST), (
-        f"{_SOURCE} no longer defines {_UNDER_TEST}"
-    )
-    module = types.ModuleType("kunlunxin_preload_under_test")
-    exec(
-        compile(ast.Module(body=wanted, type_ignores=[]), str(_SOURCE), "exec"),
-        module.__dict__,
-    )
-    sys.modules[module.__name__] = module
-    return module
+_SOURCE = Path(__file__).resolve().parents[2] / "torch_fl/compat/triton.py"
 
 
 @pytest.fixture()
-def flagos():
-    module = _load_functions()
-    module._platform = lambda: "kunlunxin"
+def triton_compat():
+    spec = importlib.util.spec_from_file_location("triton_compat_under_test", _SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
-def test_loads_from_xpytorch_xcudart_path(flagos, tmp_path, monkeypatch):
+def test_loads_from_xpytorch_xcudart_path(triton_compat, tmp_path, monkeypatch):
     lib = tmp_path / "lib" / "libcudart.so.12"
     lib.parent.mkdir()
     lib.write_text("")
@@ -81,17 +60,17 @@ def test_loads_from_xpytorch_xcudart_path(flagos, tmp_path, monkeypatch):
 
     loaded = []
     monkeypatch.setattr(ctypes, "CDLL", lambda p, mode=None: loaded.append((p, mode)))
-    monkeypatch.setattr(flagos, "_loaded_shared_objects", lambda: iter(()))
+    monkeypatch.setattr(triton_compat, "_loaded_shared_objects", lambda: iter(()))
 
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("kunlunxin")
 
     assert loaded == [(str(lib), ctypes.RTLD_GLOBAL)]
 
 
-def test_uses_the_default_layout_when_no_env(flagos, monkeypatch):
+def test_uses_the_default_layout_when_no_env(triton_compat, monkeypatch):
     monkeypatch.delenv("XPYTORCH_XCUDART_PATH", raising=False)
     monkeypatch.delenv("XPU_CUDART_PATH", raising=False)
-    monkeypatch.setattr(flagos, "_loaded_shared_objects", lambda: iter(()))
+    monkeypatch.setattr(triton_compat, "_loaded_shared_objects", lambda: iter(()))
 
     seen = []
 
@@ -104,38 +83,37 @@ def test_uses_the_default_layout_when_no_env(flagos, monkeypatch):
     monkeypatch.setattr(real_os.path, "exists", _Stat.exists)
     monkeypatch.setattr(ctypes, "CDLL", lambda p, mode=None: seen.append((p, mode)))
 
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("kunlunxin")
 
     assert seen == [("/usr/local/xcudart/lib/libcudart.so.12", ctypes.RTLD_GLOBAL)]
 
 
-def test_skips_when_already_mapped(flagos, monkeypatch):
+def test_skips_when_already_mapped(triton_compat, monkeypatch):
     monkeypatch.setattr(
-        flagos,
+        triton_compat,
         "_loaded_shared_objects",
         lambda: iter(["/usr/lib/x86_64-linux-gnu/libcudart.so.12"]),
     )
     loaded = []
     monkeypatch.setattr(ctypes, "CDLL", lambda p, mode=None: loaded.append(p))
 
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("kunlunxin")
 
     assert loaded == []
 
 
-def test_noop_off_kunlunxin(flagos, monkeypatch):
-    monkeypatch.setattr(flagos, "_platform", lambda: "ascend")
-    monkeypatch.setattr(flagos, "_loaded_shared_objects", lambda: iter(()))
+def test_noop_off_kunlunxin(triton_compat, monkeypatch):
+    monkeypatch.setattr(triton_compat, "_loaded_shared_objects", lambda: iter(()))
     loaded = []
     monkeypatch.setattr(ctypes, "CDLL", lambda p, mode=None: loaded.append(p))
 
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("ascend")
 
     assert loaded == []
 
 
-def test_survives_a_missing_library(flagos, monkeypatch):
-    monkeypatch.setattr(flagos, "_loaded_shared_objects", lambda: iter(()))
+def test_survives_a_missing_library(triton_compat, monkeypatch):
+    monkeypatch.setattr(triton_compat, "_loaded_shared_objects", lambda: iter(()))
     monkeypatch.setattr(
         ctypes, "CDLL", lambda p, mode=None: (_ for _ in ()).throw(OSError)
     )
@@ -143,24 +121,24 @@ def test_survives_a_missing_library(flagos, monkeypatch):
     monkeypatch.setattr(real_os.path, "exists", lambda path: True)
 
     # Must not raise: a missing vendor tree is not device init's problem.
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("kunlunxin")
 
 
-def test_idempotent(flagos, monkeypatch):
+def test_idempotent(triton_compat, monkeypatch):
     """Second call after a successful load is a no-op."""
     monkeypatch.setattr(ctypes, "CDLL", lambda p, mode=None: object())
     real_os = __import__("os")
     monkeypatch.setattr(real_os.path, "exists", lambda path: True)
 
     mapped = []
-    monkeypatch.setattr(flagos, "_loaded_shared_objects", lambda: iter(mapped))
+    monkeypatch.setattr(triton_compat, "_loaded_shared_objects", lambda: iter(mapped))
 
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("kunlunxin")
     # A real load would put the path in /proc/self/maps; stand that in.
     mapped.append("/usr/local/xcudart/lib/libcudart.so.12")
 
     loaded = []
     monkeypatch.setattr(ctypes, "CDLL", lambda p, mode=None: loaded.append(p))
-    flagos._preload_xcudart_for_kunlunxin()
+    triton_compat.preload_kunlunxin_runtime("kunlunxin")
 
     assert loaded == []

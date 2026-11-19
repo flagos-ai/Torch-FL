@@ -14,9 +14,8 @@
 
 """Compatibility layers for third-party libraries.
 
-This module provides optional compatibility patches for libraries that bypass
-PyTorch's ATen dispatcher or make assumptions incompatible with Torch-FL's
-flagos device.
+These modules adapt dependencies that make assumptions about the device
+runtime or bypass PyTorch's ATen dispatcher.
 """
 
 __all__ = []

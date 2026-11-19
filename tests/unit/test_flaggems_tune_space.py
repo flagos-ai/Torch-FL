@@ -48,7 +48,7 @@ import types
 import pytest
 import torch
 
-from torch_fl import flagos
+from torch_fl.compat.flaggems import autotune
 
 triton = None
 try:
@@ -105,7 +105,7 @@ def _operand(dtype):
 def test_the_ask_matches_the_measured_table(dtype, bm, bn, bk, stages, ask):
     element_size = torch.empty(0, dtype=getattr(torch, dtype)).element_size()
 
-    assert flagos._pipeline_shared_memory(stages, (bm, bn, bk), element_size) == ask
+    assert autotune._pipeline_shared_memory(stages, (bm, bn, bk), element_size) == ask
 
 
 def test_the_limit_is_an_exclusive_bound():
@@ -117,10 +117,10 @@ def test_the_limit_is_an_exclusive_bound():
     measurement and not the message is what says the boundary is exclusive.
     """
     tile = (64, 64, 64)
-    assert flagos._pipeline_shared_memory(4, tile, 8) == LIMIT_S5000
+    assert autotune._pipeline_shared_memory(4, tile, 8) == LIMIT_S5000
     for stages in (4, 5):
         config = _dot_config(64, 64, 64, stages)
-        assert flagos._fitting_stages(config, tile, 8, LIMIT_S5000) == 3
+        assert autotune._fitting_stages(config, tile, 8, LIMIT_S5000) == 3
 
 
 def test_float32_keeps_the_declared_depth():
@@ -130,9 +130,11 @@ def test_float32_keeps_the_declared_depth():
     tile = (64, 64, 64)
     for stages in (5, 4):
         config = _dot_config(64, 64, 64, stages)
-        assert flagos._fitting_stages(config, tile, 4, LIMIT_S5000) == stages
+        assert autotune._fitting_stages(config, tile, 4, LIMIT_S5000) == stages
     assert (
-        flagos._fitted_tune_space(_mm_space(), _operand(torch.float32), {}, LIMIT_S5000)
+        autotune._fitted_tune_space(
+            _mm_space(), _operand(torch.float32), {}, LIMIT_S5000
+        )
         is None
     )
 
@@ -140,7 +142,7 @@ def test_float32_keeps_the_declared_depth():
 def test_collapsed_configs_are_deduped():
     """Both declared configurations cut back to the same 3-stage tile, and a
     duplicate would only cost a second benchmark."""
-    space = flagos._fitted_tune_space(
+    space = autotune._fitted_tune_space(
         _mm_space(), _operand(torch.float64), {}, LIMIT_S5000
     )
 
@@ -155,7 +157,7 @@ def test_the_declared_space_is_not_mutated():
     the process, and a float64 launch must not narrow it for the float32 one."""
     declared = _mm_space()
 
-    flagos._fitted_tune_space(declared, _operand(torch.float64), {}, LIMIT_S5000)
+    autotune._fitted_tune_space(declared, _operand(torch.float64), {}, LIMIT_S5000)
 
     assert [config.num_stages for config in declared] == [5, 4]
     assert [config.kwargs["BLOCK_K"] for config in declared] == [64, 64]
@@ -167,11 +169,11 @@ def test_the_widest_operand_decides():
     f32 = torch.empty(2, dtype=torch.float32)
     f64 = torch.empty(2, dtype=torch.float64)
 
-    assert flagos._operand_element_size((f32,), {}) == 4
-    assert flagos._operand_element_size((f32, f64), {}) == 8
-    assert flagos._operand_element_size((f32,), {"other": f64}) == 8
-    assert flagos._operand_element_size((), {}) is None
-    assert flagos._operand_element_size((1, 2), {"dtype": torch.float64}) is None
+    assert autotune._operand_element_size((f32,), {}) == 4
+    assert autotune._operand_element_size((f32, f64), {}) == 8
+    assert autotune._operand_element_size((f32,), {"other": f64}) == 8
+    assert autotune._operand_element_size((), {}) is None
+    assert autotune._operand_element_size((1, 2), {"dtype": torch.float64}) is None
 
 
 def test_a_space_without_a_dot_tile_is_left_alone():
@@ -183,9 +185,9 @@ def test_a_space_without_a_dot_tile_is_left_alone():
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_stages=5),
     ]
 
-    assert [flagos._dot_tile(config) for config in space] == [None, None, None]
+    assert [autotune._dot_tile(config) for config in space] == [None, None, None]
     assert (
-        flagos._fitted_tune_space(space, _operand(torch.float64), {}, LIMIT_S5000)
+        autotune._fitted_tune_space(space, _operand(torch.float64), {}, LIMIT_S5000)
         is None
     )
 
@@ -225,8 +227,7 @@ def as_musa(monkeypatch):
     """Force the configuration the patch is gated on rather than assuming it:
     this suite also runs on the MTT S5000, where the real detector agrees, and on
     hosts where it answers something else."""
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "mthreads")
-    monkeypatch.setattr(flagos, "_musa_shared_memory_limit", lambda: LIMIT_S5000)
+    monkeypatch.setattr(autotune, "_musa_shared_memory_limit", lambda: LIMIT_S5000)
 
 
 @pytest.fixture
@@ -254,7 +255,7 @@ def stub_libentry(monkeypatch):
             return module
         return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(flagos.importlib, "import_module", fake)
+    monkeypatch.setattr(autotune.importlib, "import_module", fake)
     return module
 
 
@@ -267,21 +268,20 @@ def fitted_tuner(as_musa, stub_libentry):
     instance across tests would also make the patch's own once-only guard the
     thing under test instead of the wrapper.
     """
-    flagos._patch_flaggems_tune_space()
-    assert getattr(stub_libentry.LibTuner, flagos._TUNE_SPACE_PATCHED, False)
+    autotune.patch_tune_space("mthreads")
+    assert getattr(stub_libentry.LibTuner, autotune._TUNE_SPACE_PATCHED, False)
     return stub_libentry
 
 
-def test_off_the_measured_backend_nothing_is_patched(monkeypatch, stub_libentry):
+def test_off_the_measured_backend_nothing_is_patched(stub_libentry):
     """Anywhere but a MUSA build the tuner is untouched, so no other platform's
     ``tl.dot`` space is rewritten by this."""
-    monkeypatch.setattr("torch_fl._build_accelerator", lambda: "cuda")
     before = stub_libentry.LibTuner.run
 
-    flagos._patch_flaggems_tune_space()
+    autotune.patch_tune_space("cuda")
 
     assert stub_libentry.LibTuner.run is before
-    assert not getattr(stub_libentry.LibTuner, flagos._TUNE_SPACE_PATCHED, False)
+    assert not getattr(stub_libentry.LibTuner, autotune._TUNE_SPACE_PATCHED, False)
 
 
 def test_a_launch_the_device_takes_is_never_refitted(monkeypatch, fitted_tuner):
@@ -303,7 +303,7 @@ def test_a_launch_the_device_takes_is_never_refitted(monkeypatch, fitted_tuner):
     def spy(*call):
         asked.append(call)
 
-    monkeypatch.setattr(flagos, "_fitted_tune_space", spy)
+    monkeypatch.setattr(autotune, "_fitted_tune_space", spy)
 
     assert tuner.run(torch.empty(2, dtype=torch.float64)) == "ran"
 
@@ -390,7 +390,7 @@ def test_the_patch_is_installed_once(fitted_tuner):
     fitted list as if it were the declared one."""
     first = fitted_tuner.LibTuner.run
 
-    flagos._patch_flaggems_tune_space()
+    autotune.patch_tune_space("mthreads")
 
     assert fitted_tuner.LibTuner.run is first
 
@@ -401,6 +401,6 @@ def test_failure_is_not_fatal(monkeypatch, as_musa):
     def boom(name, *args, **kwargs):
         raise RuntimeError("no FlagGems here")
 
-    monkeypatch.setattr(flagos.importlib, "import_module", boom)
+    monkeypatch.setattr(autotune.importlib, "import_module", boom)
 
-    flagos._patch_flaggems_tune_space()  # must not raise
+    autotune.patch_tune_space("mthreads")  # must not raise

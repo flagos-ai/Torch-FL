@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -19,6 +19,20 @@ ROOT = Path(__file__).resolve().parents[2]
 adapter = import_native_host("backends.ascend")
 backend = import_native_host("backend")
 driver_binding = import_native_host("backends.driver")
+
+
+def test_prepare_runtime_configures_flaggems_for_the_ascend_device(monkeypatch):
+    calls = []
+    torch_fl = ModuleType("torch_fl")
+    torch_fl.flagos = object()
+    runtime = ModuleType("torch_fl.compat.flaggems.runtime")
+    runtime.configure_vendor = lambda *args: calls.append(args)
+    monkeypatch.setitem(sys.modules, torch_fl.__name__, torch_fl)
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+
+    adapter.Backend().prepare_runtime()
+
+    assert calls == [("ascend", torch_fl.flagos)]
 
 
 @pytest.fixture

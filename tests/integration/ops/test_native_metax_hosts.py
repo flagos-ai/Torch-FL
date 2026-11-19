@@ -5,6 +5,7 @@
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -18,9 +19,10 @@ pytestmark = [pytest.mark.metax, pytest.mark.native_source_host, pytest.mark.fla
 
 
 @pytest.mark.parametrize("import_order", ["torch_first", "torch_fl_first"])
-def test_metax_import_order_preserves_the_installed_cpu_core(import_order):
+@pytest.mark.parametrize("profile", ["full", "minimal"])
+def test_metax_import_order_preserves_the_installed_cpu_core(import_order, profile):
     imports = (
-        "import torch; import torch_fl"
+        "import torch, sys\nassert 'torch_fl' not in sys.modules\nimport torch_fl"
         if import_order == "torch_first"
         else "import torch_fl; import torch"
     )
@@ -29,7 +31,7 @@ def test_metax_import_order_preserves_the_installed_cpu_core(import_order):
             sys.executable,
             "-c",
             imports + "\nfrom pathlib import Path\n"
-            "import importlib.metadata, json\n"
+            "import importlib.metadata, json, os\n"
             "distribution = importlib.metadata.distribution('torch')\n"
             "mapped = {Path(line.split()[-1]).resolve() "
             "for line in Path('/proc/self/maps').read_text().splitlines() "
@@ -40,8 +42,21 @@ def test_metax_import_order_preserves_the_installed_cpu_core(import_order):
             "    assert actual == {expected}, (name, actual, expected)\n"
             "assert torch_fl._build_config.NATIVE_HOSTS\n"
             "assert 'boxing' not in torch_fl._build_config.KERNELS\n"
+            "status = torch_fl.optional_integration_status()\n"
+            "if os.environ['FLAGOS_STARTUP_PROFILE'] == 'minimal':\n"
+            "    assert all(value == 'inactive' for value in status.values()), status\n"
+            "else:\n"
+            "    assert status['ddp'] == 'active' or status['ddp'].startswith('failed:'), status\n"
+            "assert torch.flagos is torch_fl.flagos\n"
+            "torch.flagos.init()\n"
+            "assert torch.empty(1, device='flagos').device.type == 'flagos'\n"
             "print(json.dumps({'torch': torch.__version__, 'devices': torch_fl.flagos.device_count()}))\n",
         ],
+        env={
+            **os.environ,
+            "FLAGOS_STARTUP_PROFILE": profile,
+            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+        },
         capture_output=True,
         text=True,
         timeout=60,

@@ -39,6 +39,12 @@ The import pipeline has five ordered phases:
 | `_phase_vendor_compat` | Install vendor shims and FlagGems codegen preparation | No |
 | `_phase_ecosystem` | Set up FlagGems operators, CUDA alias and the FlagOS distributed backend | No |
 
+The phases invoke the FlagGems and Triton hooks in `torch_fl/compat/` at the
+points where the required device and driver state is available.
+`torch.flagos.init()` runs the device-time hooks after the native device
+initializes. The Ascend native host shares `compat.flaggems.runtime.configure_vendor`
+with the import pipeline to prepare the vendor before installing the launcher.
+
 FlagTree, FlagGems and FlagCX are required parts of a supported Torch-FL
 environment. The startup profile does not make them optional, and the minimal
 profile still performs FlagGems and distributed setup. It only controls the
