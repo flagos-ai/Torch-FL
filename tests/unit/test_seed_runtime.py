@@ -510,6 +510,7 @@ def test_iluvatar_reuses_image_versions_with_checkout_requirements(
         "enflame",
         "metax",
         "hygon",
+        "nvidia",
     ],
 )
 @pytest.mark.parametrize(
@@ -575,6 +576,7 @@ def test_installed_dependency_closure_obeys_runtime_constraints(
     [
         ("ascend", True),
         ("thead", True),
+        ("nvidia", True),
         ("metax", False),
         ("mthreads", False),
         ("hygon", False),
@@ -624,6 +626,7 @@ def test_nested_constraints_keep_markers_and_intersect_repeated_limits(
         ("numpy", "2.0.0", False),
         ("torch", "2.13.0+cpu", False),
         ("torch", "2.10.0+corex.4.5.0.20260804", False),
+        ("torch", "2.10.0+cu130", False),
         ("torch", "2.10.0+cpu", True),
     ],
 )
@@ -945,6 +948,7 @@ def test_flagcx_deferral_never_hides_other_failures(monkeypatch, failure):
         "thead",
         "iluvatar",
         "kunlunxin",
+        "nvidia",
     ],
 )
 def test_final_environment_labels_deferred_dependencies_incomplete(

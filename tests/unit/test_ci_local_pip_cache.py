@@ -208,6 +208,7 @@ def test_each_platform_gets_its_own_directory(tmp_path, platform):
 
 CACHE_HELPER = ROOT / ".github/scripts/lib/pip_cache.sh"
 RUNTIME_PLATFORMS = [
+    "nvidia",
     "hygon",
     "ascend",
     "iluvatar",
@@ -401,7 +402,7 @@ def test_key_and_entrypoint_include_the_shared_helper():
     ]
     assert any(".github/constraints-runtime-ci.txt" in key for key in keys)
     runner = (ROOT / ".github/scripts/set_env.sh").read_text()
-    assert "ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)" in runner
+    assert 'uses_shared_ci_environment "$PLATFORM"' in runner
     assert 'prepare_pip_cache "$PLATFORM"' in runner
 
 

@@ -4,6 +4,13 @@
 # Shared cache selection for the migrated runtime-image lanes. No package
 # installation or device access belongs here. The optional key is supplied only
 # by the integration workflow for its dedicated runner-cache directories.
+uses_shared_ci_environment() {
+  case "${1:-}" in
+    hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax|nvidia) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 pip_cache_try_directory() {
   local candidate="$1" key="${2:-}" probe="" key_file="" old_key=""
   [[ "$candidate" != *$'\n'* && "$candidate" != *$'\r'* ]] || return 1
@@ -38,10 +45,10 @@ pip_cache_try_directory() {
 prepare_pip_cache() {
   local platform="$1" key="${2:-}" requested="" candidate="" uid="" selected=0
   local job_root="${RUNNER_TEMP:-${REPO_ROOT:-$PWD}/.ci}"
-  case "$platform" in
-    hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax) ;;
-    *) echo "::error::Unsupported shared pip-cache platform: $platform" >&2; return 1 ;;
-  esac
+  if ! uses_shared_ci_environment "$platform"; then
+    echo "::error::Unsupported shared pip-cache platform: $platform" >&2
+    return 1
+  fi
   export PIP_RETRY_NO_CACHE="${PIP_RETRY_NO_CACHE:-0}"
   # pip treats even PIP_NO_CACHE_DIR=0/false as disabling the cache.
   if [[ -n "${PIP_NO_CACHE_DIR:-}" ]]; then export PIP_RETRY_NO_CACHE=1; fi

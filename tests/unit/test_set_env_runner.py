@@ -71,6 +71,13 @@ def test_runner_rejects_a_missing_platform():
     assert "--platform is required" in done.stderr
 
 
+def test_help_names_the_existing_vendor_hooks():
+    done = _run("--help")
+    assert done.returncode == 0
+    platforms = done.stdout.split("<", 1)[1].split(">", 1)[0].split("|")
+    assert set(platforms) == set(PLATFORMS)
+
+
 def test_runner_rejects_an_unknown_platform():
     done = _run("--platform", "bogus")
     assert done.returncode == 2

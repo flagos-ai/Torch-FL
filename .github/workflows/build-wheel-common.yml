@@ -128,14 +128,12 @@ jobs:
           CACHE_PLATFORM: ${{ inputs.setup_platform }}
         run: |
           PIP_CACHE_DIR="${RUNNER_TEMP:-$GITHUB_WORKSPACE/.ci}/pip-cache"
-          case "${CACHE_PLATFORM:-}" in
-            hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
-              source .github/scripts/lib/pip_cache.sh
-              export PIP_CACHE_DIR
-              prepare_pip_cache "$CACHE_PLATFORM"
-              exit 0
-              ;;
-          esac
+          source .github/scripts/lib/pip_cache.sh
+          if uses_shared_ci_environment "${CACHE_PLATFORM:-}"; then
+            export PIP_CACHE_DIR
+            prepare_pip_cache "$CACHE_PLATFORM"
+            exit 0
+          fi
           rm -rf "$PIP_CACHE_DIR"
           mkdir -p "$PIP_CACHE_DIR"
           printf 'PIP_CACHE_DIR=%s\n' "$PIP_CACHE_DIR" >> "$GITHUB_ENV"

@@ -24,7 +24,7 @@ PLATFORMS = [
 ]
 
 
-@pytest.mark.parametrize("platform", PLATFORMS)
+@pytest.mark.parametrize("platform", [*PLATFORMS, "nvidia"])
 def test_migrated_lanes_share_isolation_without_borrowing_another_core_policy(platform):
     config = platform_config(platform)
     for key in ("environment_check", "boxing_environment_check"):

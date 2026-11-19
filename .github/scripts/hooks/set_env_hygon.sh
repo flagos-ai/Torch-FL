@@ -210,10 +210,6 @@ if [[ "$CI_STAGE" == integration ]]; then
   ensure_runtime_requirement transformers "$PIP_INDEX_URL_ARG"
 fi
 
-# The FlagTree wheel supplies the hcu backend and its entry-point metadata;
-# do not copy a conflicting Triton provider from the vendor image.
-VENV_SITE="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-
 # --- Published Hygon wheels --------------------------------------------------
 # Installed for both stages, not just integration: build and integration share
 # one platform job, and restricting this to CI_STAGE=integration would leave the

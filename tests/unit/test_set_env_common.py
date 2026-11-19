@@ -48,6 +48,7 @@ SHARED_FUNCS = [
     "create_runtime_venv",
     "runtime_venv_is_isolated",
     "runtime_cpu_torch_is_usable",
+    "repair_runtime_cpu_torch",
     "runtime_flagtree_is_usable",
     "validate_runtime_build_tools",
 ]
@@ -135,22 +136,18 @@ def test_every_script_calls_the_common_phases():
                 text,
                 re.M,
             ), "set_env_apple.sh: build_flagos_inplace must be gated on build"
-        elif script.name == "set_env_iluvatar.sh":
-            for phase in (
-                "install_cpu_torch",
-                "install_flagtree",
-                "build_flagos_inplace",
-            ):
-                assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
-                    f"{script.name}: {phase}"
-                )
         else:
             for phase in (
                 "install_cpu_torch",
                 "install_flagtree",
                 "build_flagos_inplace",
             ):
-                assert re.search(rf"^[ \t]*{phase}\b", text, re.M), (
+                allowed = (
+                    r"(?:install_cpu_torch|repair_runtime_cpu_torch)"
+                    if phase == "install_cpu_torch"
+                    else phase
+                )
+                assert re.search(rf"^[ \t]*{allowed}\b", text, re.M), (
                     f"{script.name}: {phase}"
                 )
 
@@ -332,6 +329,9 @@ fi
         "base-child",
         "checkout",
         "checkout-parent",
+        "checkout-child",
+        "checkout-scratch",
+        "non-venv-directory",
     ],
 )
 def test_runtime_venv_target_guard_stops_before_creation_even_in_a_conditional(
@@ -345,6 +345,10 @@ def test_runtime_venv_target_guard_stops_before_creation_even_in_a_conditional(
     repo = tmp_path / "checkout"
     for directory in (source, base, repo):
         directory.mkdir(parents=True)
+    unrelated = tmp_path / "existing"
+    unrelated.mkdir()
+    marker = unrelated / "keep"
+    marker.touch()
     destinations = {
         "source": source,
         "source-parent": source.parent,
@@ -353,6 +357,9 @@ def test_runtime_venv_target_guard_stops_before_creation_even_in_a_conditional(
         "base-child": base / "child",
         "checkout": repo,
         "checkout-parent": tmp_path,
+        "checkout-child": repo / "docs",
+        "checkout-scratch": repo / ".ci",
+        "non-venv-directory": unrelated,
     }
     python = tmp_path / "vendor-python"
     python.write_text(r"""#!/bin/bash
@@ -387,17 +394,24 @@ exit 42
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert not log.exists()
+    assert marker.exists()
     assert source.is_dir() and base.is_dir() and repo.is_dir()
 
 
+@pytest.mark.parametrize("checkout_scratch", [False, True])
 def test_shared_runtime_venv_creation_clears_only_the_destination_and_verifies_isolation(
-    tmp_path,
+    tmp_path, checkout_scratch
 ):
     import os
     import sys
 
-    target = tmp_path / "ci-venv"
-    target.mkdir()
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".github").symlink_to(REPO_ROOT / ".github", target_is_directory=True)
+    target = checkout / ".ci/ci-venv" if checkout_scratch else tmp_path / "ci-venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(target)], check=True
+    )
     marker = target / "stale-package"
     marker.touch()
     result = subprocess.run(
@@ -410,7 +424,7 @@ def test_shared_runtime_venv_creation_clears_only_the_destination_and_verifies_i
             **os.environ,
             "COMMON": str(LIB),
             "SOURCE_PYTHON": sys.executable,
-            "REPO_ROOT": str(REPO_ROOT),
+            "REPO_ROOT": str(checkout),
             "VENV_ROOT": str(target),
             "VIRTUAL_ENV": "/flagos",
         },

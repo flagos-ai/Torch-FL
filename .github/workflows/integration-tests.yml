@@ -176,13 +176,11 @@ jobs:
           root="$(dirname "${RUNNER_WORKSPACE:-${GITHUB_WORKSPACE}/..}")"
           cache_root="$root/.pip-cache"
           PIP_CACHE_DIR="$cache_root/${PLATFORM:?platform is required}"
-          case "$PLATFORM" in
-            hygon|ascend|iluvatar|kunlunxin|mthreads|thead|enflame|metax)
-              source .github/scripts/lib/pip_cache.sh
-              prepare_pip_cache "$PLATFORM" "$PIP_CACHE_KEY"
-              exit 0
-              ;;
-          esac
+          source .github/scripts/lib/pip_cache.sh
+          if uses_shared_ci_environment "$PLATFORM"; then
+            prepare_pip_cache "$PLATFORM" "$PIP_CACHE_KEY"
+            exit 0
+          fi
           key_file="$cache_root/${PLATFORM}.key"
           if [[ -f "$key_file" && "$(cat "$key_file")" != "$PIP_CACHE_KEY" ]]; then
             echo "pip cache key changed for ${PLATFORM}; discarding the previous downloads"

@@ -6,7 +6,7 @@ test groups come from the shared integration manifest.
 
 ## Runtime environment preparation
 
-Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same preparation layout:
+CUDA, Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same preparation layout:
 `.github/configs/<platform>.yml` selects the image and device
 access; `.github/scripts/set_env.sh` dispatches to
 `.github/scripts/hooks/set_env_<platform>.sh`; and
@@ -26,7 +26,7 @@ cache have separate lifecycles: cached downloads never skip the native build,
 wheel validation or tests. CPU-only provisioning and cache regression tests run
 in the shared platform-agnostic job.
 
-The eight platforms sharing this preparation use `.github/constraints-runtime-ci.txt` as their
+The nine platforms sharing this preparation use `.github/constraints-runtime-ci.txt` as their
 shared CI-only version policy. It includes the existing global constraints and
 sets compatibility ranges for Python build tools, test plugins and common
 runtime dependencies. Platform requirements select which packages are needed
@@ -37,8 +37,10 @@ common patch version: SQLAlchemy 2.0.55 and 2.0.57 both satisfy the shared
 provisioning limits, not changes to the published wheel's supported versions.
 
 Every migrated hook uses `create_runtime_venv` in `lib/set_env_common.sh`.
-It checks target/source/checkout boundaries before clearing the target, creates
-the venv with the selected interpreter (or the image's `uv` fallback), then
+It checks target/source/checkout boundaries before clearing the target. Inside
+the checkout, only a child of `.ci/` is allowed. An existing nonempty directory
+must contain a virtual environment configuration. The helper creates the
+venv with the selected interpreter (or the image's `uv` fallback), then
 requires pip and verifies interpreter ownership and disabled system-site
 inheritance through the common environment checker. CI never reuses a prebuilt
 venv or selects a separate legacy provisioning branch. Hygon temporarily keeps
@@ -109,6 +111,20 @@ It keeps the shared venv, package policy and cache mechanisms, restores matching
 Torch base versions and enables both the normal runtime checks and the separate
 full-vendor-core legacy smoke.
 
+CUDA also retains its existing development image. Its test venv uses the same
+creation, RECORD-owned package reuse, requirement checks, cache recovery and
+final environment gate. `.github/requirements-nvidia.txt` retains the existing
+`setuptools>=64,<77`, `setuptools-scm>=8,<10` and `wheel==0.46.2` build-frontend
+requirements within the shared policy. Other Python tools use the shared
+ranges, including SQLAlchemy `>=2.0.55,<2.0.58` instead of the former CUDA-only
+`2.0.48` pin. Reuse never copies the image's CUDA Torch into the CPU test venv.
+The existing boxing-only device-library staging and optional vendor-Torch
+bootstrap remain separate from that venv. The bootstrap venv uses the same
+creation and protected-path checks through function-local venv variables.
+The default lane does not bootstrap
+GPU Torch. Native FlagGems selection, the FlagTune workaround, image-provided
+CUDA tools and hardware test selections are retained. FlagCX remains deferred.
+
 ### Organization of environment checks
 
 Environment preparation, installed-wheel validation, hardware-environment
@@ -119,7 +135,7 @@ ranges and the wheel contract. The first integration group runs
 the platform's `environment_check` or `boxing_environment_check` mapping.
 Computation and runtime-contract suites retain their existing groups and coverage.
 
-All eight migrated platforms enable `venv_isolation` in both applicable lanes.
+All nine platforms using shared preparation enable `venv_isolation` in both applicable lanes.
 It verifies the active venv, disabled system-site inheritance, package locations
 and absence of runtime Python search paths. Optional native checks are driven by
 configuration: exact Torch metadata/module versions, C++ ABI, loaded Torch
@@ -129,6 +145,7 @@ YAML, not embedded Python or shell commands.
 
 | Platform | Preparation/build checks retained | Hardware checks and functional owner |
 | --- | --- | --- |
+| CUDA | Existing Python selection, glibc/Triton checks, native FlagGems selection and boxing-only CUDA assets | Common lane-specific environment group; existing default and boxing suites |
 | Ascend | CANN/driver assets and isolated Python | Common environment group; existing operator suites |
 | Iluvatar | CoreX assets/header syntax probe; shared isolation assertions | Common group audits CPU core mappings, ELF dependencies and CoreX target; the existing `iluvatar_runtime` group retains both add computations |
 | Enflame | TOPS assets and isolated Python | Common environment group; existing native and FlagGems suites |
@@ -182,7 +199,7 @@ container starts and remains unchanged throughout preparation and testing.
 
 ## Download caching for the runtime-migration lanes
 
-Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same cache-selection helper,
+CUDA, Ascend, Iluvatar, Kunlunxin, MUSA, PPU, GCU, MetaX and Hygon use the same cache-selection helper,
 `.github/scripts/lib/pip_cache.sh`, before their platform environment hooks run.
 The integration workflow prefers the existing runner-local
 `/__w/.pip-cache/<platform>` directory. It checks ownership, directory access

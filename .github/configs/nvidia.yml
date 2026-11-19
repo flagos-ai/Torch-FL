@@ -44,6 +44,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/nvidia_memory.h
   - .github/scripts/hooks/set_env_nvidia.sh
   - .github/scripts/set_env_nvidia.sh
+  - .github/requirements-nvidia.txt
   - scripts/vendor/with_nvidia_libtorch.sh
 
 container_volumes:
@@ -93,6 +94,7 @@ wheel_artifact_name: wheel-cuda
 boxing_lane: true
 
 environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
@@ -110,6 +112,7 @@ environment_check:
   model_dir: true
 
 boxing_environment_check:
+  venv_isolation: true
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:

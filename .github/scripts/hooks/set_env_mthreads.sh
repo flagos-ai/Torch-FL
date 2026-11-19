@@ -126,8 +126,7 @@ prepare_musa_environment() {
   local requirement
   ensure_runtime_requirements "$REPO_ROOT/.github/requirements-mthreads.txt" "$PIP_INDEX_URL_ARG"
   if ! runtime_cpu_torch_is_usable 2>/dev/null; then
-    CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
-    install_cpu_torch
+    repair_runtime_cpu_torch
   fi
   validate_runtime_build_tools
   if [[ "$CI_STAGE" == integration ]]; then

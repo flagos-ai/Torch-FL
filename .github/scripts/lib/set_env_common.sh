@@ -360,17 +360,31 @@ venv_is_usable() {
 # interpreter, its parent, or a directory containing the checkout.
 create_runtime_venv() {
   local source_python="$1"
-  "$source_python" -I - "$VENV_ROOT" "$REPO_ROOT" <<'PY' || return $?
+  "$source_python" -I - "$VENV_ROOT" "$REPO_ROOT" "${3:-}" <<'PY' || return $?
 from pathlib import Path
 import sys
 
-target, repo = (Path(value).resolve() for value in sys.argv[1:])
+requested = Path(sys.argv[1])
+target, repo = requested.resolve(), Path(sys.argv[2]).resolve()
 for prefix in (sys.prefix, sys.base_prefix):
     source = Path(prefix).resolve()
     if source.is_relative_to(target) or target.is_relative_to(source):
         raise SystemExit("CI venv must be separate from the runtime Python prefixes")
 if repo.is_relative_to(target):
     raise SystemExit("CI venv must not contain the source checkout")
+scratch = repo / ".ci"
+if target.is_relative_to(repo) and (target == scratch or not target.is_relative_to(scratch)):
+    raise SystemExit("CI venv must be outside the checkout or under its .ci scratch directory")
+if len(sys.argv) > 3 and sys.argv[3]:
+    peer = Path(sys.argv[3]).resolve()
+    if peer.is_relative_to(target) or target.is_relative_to(peer):
+        raise SystemExit("CI venv must be separate from the other CUDA environment")
+if requested.is_symlink() or (target.exists() and not target.is_dir()):
+    raise SystemExit("CI venv must be a directory and cannot be a symlink")
+if target.is_dir() and any(target.iterdir()):
+    config = target / "pyvenv.cfg"
+    if not config.is_file() or config.is_symlink():
+        raise SystemExit("CI venv must not clear a nonempty directory without pyvenv.cfg")
 PY
   if ! "$source_python" -m venv --clear "$VENV_ROOT"; then
     if ! command -v uv >/dev/null 2>&1; then
@@ -433,6 +447,12 @@ expected = sys.argv[1].removesuffix("+cpu") + "+cpu"
 assert torch.__version__ == expected, torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 PY
+}
+
+repair_runtime_cpu_torch() {
+  "$VENV_PYTHON" -m pip uninstall -y torch || return $?
+  CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu" install_cpu_torch || return $?
+  runtime_cpu_torch_is_usable
 }
 
 runtime_flagtree_is_usable() {

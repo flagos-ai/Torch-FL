@@ -101,7 +101,14 @@ def test_boxing_bundle_loads_after_vendor_python_is_removed(tmp_path, attention)
 
 
 def run_hook(
-    tmp_path, *, boxing=False, stage="integration", prepared=True, fail="", target="ci"
+    tmp_path,
+    *,
+    boxing=False,
+    stage="integration",
+    prepared=True,
+    fail="",
+    target="ci",
+    lane_value=None,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -224,7 +231,7 @@ fi
         TORCH_FL_VENV_ROOT=str(tmp_path / target),
         PPU_SDK=str(sdk),
         PPU_VERSION="v2.1.0",
-        BOXING_LANE="1" if boxing else "",
+        BOXING_LANE=lane_value if lane_value is not None else ("1" if boxing else ""),
         GITHUB_ENV=str(env_file),
         GITHUB_PATH=str(path_file),
         CALL_LOG=str(calls),
@@ -268,6 +275,9 @@ build_flagos_inplace() {
 bash() { test "$1" = scripts/vendor/bundle_thead_libtorch.sh; echo bundle >> "$CALL_LOG"; }
 source "$1"
 """
+    if lane_value is not None:
+        env.pop("TORCH_FL_VENV_ROOT")
+        env["RUNNER_TEMP"] = str(tmp_path)
     done = subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", script, "test", str(hook)],
         env=env,
@@ -323,6 +333,13 @@ def test_build_stage_preserves_existing_compile_count_without_model_packages(tmp
     assert calls.count("native-build") == 1
     assert "flag-gems" not in calls and "flagtree" not in calls
     assert not any("transformers" in row for row in calls)
+
+
+def test_zero_boxing_value_uses_the_default_lane_venv(tmp_path):
+    done, _, _, env_file, _ = run_hook(tmp_path, stage="build", lane_value="0")
+    assert done.returncode == 0, done.stderr
+    rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
+    assert rows["VIRTUAL_ENV"] == str(tmp_path / "torch-fl-ppu-build")
 
 
 @pytest.mark.parametrize(

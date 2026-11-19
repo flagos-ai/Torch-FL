@@ -233,7 +233,9 @@ if [[ "${BOXING_LANE:-}" == "1" ]]; then
   fi
 fi
 
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}${BOXING_LANE:+-boxing}}"
+suffix=""
+if [[ "${BOXING_LANE:-}" == 1 ]]; then suffix=-boxing; fi
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}${suffix}}"
 if ! "$VENDOR_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
   echo "::error::PPU FlagTree requires Python 3.12" >&2
   exit 1
@@ -265,7 +267,7 @@ assert torch.__version__ == sys.argv[1].removesuffix("+cpu") + "+cpu"
 assert torch.version.cuda is None
 PYCODE
 then
-  install_cpu_torch
+  repair_runtime_cpu_torch
 fi
 
 

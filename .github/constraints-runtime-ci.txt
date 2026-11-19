@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Shared CI-only compatibility ranges for the migrated runtime-image lanes.
+# Shared CI-only compatibility ranges for platforms using shared preparation.
 # Keep compatible image packages instead of upgrading them to a common patch.
 # Requirements files select what to install; these constraints also apply to
 # transitive dependencies, runtime copies and already-installed checks.

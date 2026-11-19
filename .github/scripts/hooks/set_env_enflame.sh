@@ -149,8 +149,7 @@ prepare_gcu_environment() {
   ensure_runtime_requirements "$REPO_ROOT/.github/requirements-enflame.txt" "$PIP_INDEX_URL_ARG"
   validate_runtime_build_tools
   if ! runtime_cpu_torch_is_usable 2>/dev/null; then
-    CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}+cpu"
-    install_cpu_torch
+    repair_runtime_cpu_torch
   fi
 }
 

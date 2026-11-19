@@ -27,6 +27,32 @@ HOOK = (ROOT / ".github/scripts/hooks/set_env_ascend.sh").read_text()
 COMMON = ROOT / ".github/scripts/lib/set_env_common.sh"
 
 
+def test_invalid_flagtree_removes_the_metadata_owner_before_installing(tmp_path):
+    log = tmp_path / "calls"
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n')
+    python.chmod(0o755)
+    start = HOOK.index("  # Remove a conflicting Triton")
+    end = HOOK.index("\nfi", start)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\ninstall_flagtree() { echo install >> "$CALL_LOG"; }\n'
+            + HOOK[start:end],
+        ],
+        env={**os.environ, "VENV_PYTHON": str(python), "CALL_LOG": str(log)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert log.read_text().splitlines() == [
+        "-m pip uninstall -y flagtree triton triton_kernels",
+        "install",
+    ]
+
+
 def test_ci_python_survives_a_new_workflow_shell(tmp_path):
     """Replay an image's PATH/PYTHONPATH reset, then the real hook's env export."""
     image_bin = tmp_path / "image/bin"

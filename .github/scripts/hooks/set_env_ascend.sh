@@ -253,9 +253,7 @@ then
   echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
 else
   # Remove a conflicting Triton before installing the pinned compiler.
-  for _ in 1 2 3; do
-    "$VENV_PYTHON" -m pip uninstall -y triton >/dev/null 2>&1 || true
-  done
+  "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
   install_flagtree
 fi
 
