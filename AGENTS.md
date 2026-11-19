@@ -419,7 +419,8 @@ nor the legacy `cuda` spelling of it.
 
 ### Native-host routing confs
 
-Native-host C++ sources belong in `csrc/native_host/`. Wheel builds stage the
+Native-host C++ sources belong in `csrc/native_host/`. Generated numerical
+extensions in that directory use `<vendor>_ops.cc`. Wheel builds stage the
 selected launch ABI sources at their existing `torch_fl/native_host/csrc/`
 paths for fingerprint verification. The `_C` extension stub and
 `torch_bindings` sources belong in `csrc/bindings/`.

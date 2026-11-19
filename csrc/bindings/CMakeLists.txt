@@ -15,7 +15,7 @@
 set(LIBRARY_NAME torch_bindings)
 
 add_library(${LIBRARY_NAME} SHARED
-    dataparallel_comm.cc
+    dataparallel.cc
     module.cc
 )
 

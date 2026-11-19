@@ -106,7 +106,7 @@ def test_wheel_builder_generates_catalog_without_source_json(generator, monkeypa
 def test_catalog_emission_rejects_stale_core_sources(
     generator, monkeypatch, tmp_path, capsys
 ):
-    monkeypatch.setattr(generator, "SOURCE_PATH", tmp_path / "stale.cc")
+    monkeypatch.setattr(generator, "SOURCE_DIR", tmp_path)
     monkeypatch.setattr(generator, "ROOT", tmp_path)
     monkeypatch.setattr(
         generator.sys, "argv", ["codegen", "--check", "--print-catalog"]

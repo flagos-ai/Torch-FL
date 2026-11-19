@@ -52,7 +52,7 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
     package = output / "torch_fl"
     sources = source_root / "csrc/native_host"
     hygon = vendor == "hygon"
-    entry_source = "vendor_hygon_generated.cc" if hygon else "vendor_generated.cc"
+    entry_source = f"{vendor}_ops.cc"
     policy = load_build_policy(source_root).precision_policy(vendor)
     cohort = describe(vendor_library, policy)
     artifacts = {

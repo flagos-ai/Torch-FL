@@ -62,7 +62,7 @@
 
 #include <aten/common.h>
 
-#include "dataparallel_comm.h"
+#include "dataparallel.h"
 
 namespace {
 
@@ -776,7 +776,7 @@ PyObject* _set_backend_config_path(PyObject* self, PyObject* arg) {
 }
 
 // Publishes the flagos implementations of torch._C's DataParallel comm
-// primitives. See csrc/bindings/dataparallel_comm.cc for what they are and why
+// primitives. See csrc/bindings/dataparallel.cc for what they are and why
 // they cannot be left to the CUDA ones. Safe to call more than once.
 PyObject* _init_data_parallel_comm(PyObject* self, PyObject* noargs) {
   HANDLE_TH_ERRORS

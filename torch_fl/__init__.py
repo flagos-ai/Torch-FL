@@ -2268,7 +2268,7 @@ def _patch_comm_for_flagos():
              index 0 has device flagos:0"
 
     The flagos implementations live in the extension
-    (csrc/bindings/dataparallel_comm.cc) and are published by rebinding those
+    (csrc/bindings/dataparallel.cc) and are published by rebinding those
     seven attributes on ``torch._C``, which is how torch_npu reaches the same
     symbols (its ``initCommMethods()``). They read and write flagos tensors the
     way the CUDA ones read and write CUDA ones, and each delegates to the
@@ -2367,7 +2367,7 @@ def _patch_dataparallel_for_flagos():
         # Tells torch._C._scatter that the integer device ids it is about to
         # receive name flagos devices. Only load-bearing for a CPU input, which
         # carries no device type of its own; see SetScatterScope in
-        # csrc/bindings/dataparallel_comm.h for why the ids alone are ambiguous
+        # csrc/bindings/dataparallel.h for why the ids alone are ambiguous
         # here.
         from torch_fl import _C
 

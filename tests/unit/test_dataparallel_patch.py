@@ -43,7 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INIT = REPO_ROOT / "torch_fl" / "__init__.py"
-COMM_CC = REPO_ROOT / "csrc" / "bindings" / "dataparallel_comm.cc"
+COMM_CC = REPO_ROOT / "csrc" / "bindings" / "dataparallel.cc"
 
 _DEVICE_TYPES = "_FLAGOS_DEVICE_TYPES"
 _HELPERS = ("_flagos_device_type_of_tensors", "_flagos_module_device_type")
