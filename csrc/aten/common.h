@@ -111,7 +111,7 @@ bool HasBackendForOp(const std::string& op_name);
 // for the rest of the process.
 //
 // FLAGOS_EXPORT because of who calls it: the binding is
-// torch_fl._C._set_backend_config_path, and torch_fl/csrc/module.cc is linked
+// torch_fl._C._set_backend_config_path, and csrc/bindings/module.cc is linked
 // into libtorch_bindings.so, not into libtorch_fl.so. CMakeLists.txt sets
 // CMAKE_CXX_VISIBILITY_PRESET hidden, so an unannotated definition here is
 // local to libtorch_fl.so and the import fails with an undefined symbol rather

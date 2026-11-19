@@ -69,10 +69,12 @@ class Backend:
     vendor = "ascend"
     compiler_backend = "npu"
     compiler_distribution = "flagtree"
-    utility_modules = ("npu_utils",)
+    driver_directory = "ascend"
+    driver_files = ("driver.py", "npu_utils.cpp", "compiler.py", "utils.py")
+    utility_module = "npu_utils"
     capabilities = 132
     scratch_alignment = 512
-    sources = ("csrc/backends/ascend.cc", "csrc/ascend_abi.h")
+    sources = ("backends/ascend.cc", "ascend_abi.h")
 
     def prepare_runtime(self):
         from torch_fl import _patch_flaggems_codegen_config
@@ -84,20 +86,7 @@ class Backend:
 
         flagos.init()
 
-    def driver_sources(self, triton_root):
-        return {
-            name: triton_root / name
-            for name in (
-                "backends/ascend/driver.py",
-                "backends/ascend/npu_utils.cpp",
-                "backends/ascend/compiler.py",
-                "backends/ascend/utils.py",
-            )
-        }
-
-    def extensions(self, namespace, root, torch, record, triton_root):
-        from setuptools import Extension
-
+    def extension_options(self, driver, _source_dir):
         cann = Path(
             os.environ.get("ASCEND_HOME")
             or os.environ.get("ASCEND_HOME_PATH")
@@ -115,53 +104,26 @@ class Backend:
             includes.extend(
                 str(cann / name) for name in ("pkg_inc", "pkg_inc/profiling")
             )
-        libraries = [str(cann / "lib64")]
-        return [
-            Extension(
-                namespace + "._launcher",
-                [str(root / "csrc/launcher.cc"), str(root / self.sources[0])],
-                depends=[
-                    str(root / "csrc/backend_api.h"),
-                    str(root / "csrc/host_abi.h"),
-                    str(root / "csrc/ascend_abi.h"),
-                ],
-                include_dirs=[str(Path(torch.__file__).parent / "include"), *includes],
-                library_dirs=[*libraries, str(Path(torch.__file__).parent / "lib")],
-                libraries=["runtime", "ascendcl", "torch_python", "torch_cpu", "c10"],
-                define_macros=[
-                    (
-                        "FLAGOS_NATIVE_HOST_BACKEND_SHA256",
-                        '"' + record["native_source_sha256"] + '"',
-                    )
-                ],
-                language="c++",
-                extra_compile_args=[
-                    "-O3",
-                    "-std=c++17",
-                    f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
-                ],
-            ),
-            Extension(
-                namespace + ".npu_utils",
-                [
-                    str(
-                        self.driver_sources(triton_root)[
-                            "backends/ascend/npu_utils.cpp"
-                        ]
-                    )
-                ],
-                include_dirs=includes,
-                library_dirs=libraries,
-                libraries=["runtime", "ascendcl"],
-                language="c++",
-                extra_compile_args=["-O3", "-std=c++17"],
-            ),
-        ]
+        toolkit = {
+            "include_dirs": includes,
+            "library_dirs": [str(cann / "lib64")],
+            "libraries": ["runtime", "ascendcl"],
+        }
+        return toolkit, {
+            **toolkit,
+            "sources": [str(driver / "npu_utils.cpp")],
+            "language": "c++",
+            "extra_compile_args": ["-std=c++17"],
+        }
 
-    def install(self, package, launcher, kernel_launcher):
-        driver = importlib.import_module("triton.backends.ascend.driver")
+    def bind_driver(self, driver, utilities, kernel_launcher, stream_for_device):
+        from torch_fl.native_host.backends.driver import (
+            active_drivers,
+            bind_instances,
+            reject_compilation,
+        )
+
         utils = importlib.import_module("triton.backends.ascend.utils")
-        utilities = importlib.import_module(package + ".npu_utils")
         # Bypass the original singleton constructor, which compiles C++ at
         # runtime. Keep its published property/loader methods unchanged.
         original = getattr(driver, "_flagos_npu_utils_class", driver.NPUUtils)
@@ -179,15 +141,12 @@ class Backend:
             source, metadata = prepare(source, metadata, utils, runtime)
             return kernel_launcher(source, metadata)
 
-        def reject(*args, **kwargs):
-            raise RuntimeError("runtime C/C++ launcher compilation is forbidden")
-
         def current_stream(instance, device=None):
             if device is None:
                 import torch
 
                 device = torch.flagos.current_device()
-            return launcher.current_stream(device)
+            return stream_for_device(device)
 
         def active_device(instance):
             import torch
@@ -195,16 +154,8 @@ class Backend:
             return torch.device("flagos", instance.get_current_device())
 
         driver.NPULauncher = create
-        driver.make_npu_launcher_stub = reject
-        driver._build_npu_ext = reject
+        driver.make_npu_launcher_stub = reject_compilation
+        driver._build_npu_ext = reject_compilation
         driver.NPUDriver.get_current_stream = current_stream
         driver.NPUDriver.get_active_torch_device = active_device
-        from triton.runtime import driver as runtime_driver
-
-        for active in (
-            getattr(runtime_driver, "_active", None),
-            getattr(runtime_driver, "_default", None),
-        ):
-            if active is not None:
-                active.utils = runtime
-                active.launcher_cls = create
+        bind_instances(active_drivers(), runtime, create)

@@ -502,7 +502,7 @@ def test_every_ci_wheel_build_checks_the_embedded_manifest():
             assert verify_at < install_at, path
 
 
-@pytest.fixture(params=["nvidia", "metax", "ascend"])
+@pytest.fixture(params=["nvidia", "metax", "hygon", "ascend"])
 def native_wheel(tmp_path, manifest, monkeypatch, request):
     spec = importlib.util.spec_from_file_location(
         "wheel_native_backend_test", SOURCE_ROOT / "torch_fl/native_host/backend.py"
@@ -512,7 +512,7 @@ def native_wheel(tmp_path, manifest, monkeypatch, request):
     driver_root = tmp_path / "compiler"
     vendor = request.param
     adapter = backend.get_backend(vendor)
-    for path in adapter.driver_sources(driver_root).values():
+    for path in backend.driver_sources(adapter, driver_root).values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("// published backend source\n")
     monkeypatch.setattr(
@@ -520,8 +520,12 @@ def native_wheel(tmp_path, manifest, monkeypatch, request):
         "version",
         lambda name: manifest["build"]["distributions"][name],
     )
-    record = backend.build_record(backend.get_backend(vendor), driver_root)
-    manifest["platform"] = "cuda" if vendor == "nvidia" else vendor
+    record = backend.build_record(adapter, driver_root)
+    staged_native = tmp_path / "staged_native"
+    backend.stage_native_sources(
+        adapter, SOURCE_ROOT / "csrc/native_host", staged_native / "csrc"
+    )
+    manifest["platform"] = {"nvidia": "cuda", "hygon": "dcu"}.get(vendor, vendor)
     manifest["build"]["kernels"] = ["vendor", "flaggems"]
     path = _wheel(tmp_path, manifest)
     prefix = "torch_fl/native_host/"
@@ -535,9 +539,12 @@ def native_wheel(tmp_path, manifest, monkeypatch, request):
         )
         for category in ("native_sources", "adapter_sources"):
             for name in record[category]:
-                wheel.writestr(
-                    prefix + name, (SOURCE_ROOT / prefix / name).read_bytes()
+                root = (
+                    staged_native
+                    if category == "native_sources"
+                    else SOURCE_ROOT / prefix
                 )
+                wheel.writestr(prefix + name, (root / name).read_bytes())
         wheel.writestr(
             prefix + "_generated/_launcher.cpython-312-test.so", b"not loaded"
         )
@@ -567,17 +574,28 @@ def test_versioned_native_backend_is_verified_without_imports(native_wheel):
 
 
 @pytest.mark.parametrize(
-    "change", ["target", "version", "source", "utility", "compiler"]
+    "change",
+    [
+        "target",
+        "version",
+        "source",
+        "missing_source",
+        "driver_binding",
+        "utility",
+        "compiler",
+    ],
 )
 def test_native_backend_rejects_mismatched_artifacts(native_wheel, change):
     path, record, _ = native_wheel
     prefix = "torch_fl/native_host/"
-    if change == "source":
+    if change in {"source", "missing_source"}:
         _replace_wheel_entry(
             path,
             prefix + "csrc/backends/" + record["vendor"] + ".cc",
-            b"changed source",
+            b"changed source" if change == "source" else None,
         )
+    elif change == "driver_binding":
+        _replace_wheel_entry(path, prefix + "backends/driver.py", b"changed binding")
     elif change == "utility":
         _replace_wheel_entry(
             path, prefix + "_generated/" + record["utility_modules"][0] + ".so", None
@@ -606,7 +624,7 @@ def test_native_backend_verifies_installed_driver_sources(native_wheel, monkeypa
     # The distribution root contains triton/, as in the actual published wheel.
     (root.parent / "triton").symlink_to(root, target_is_directory=True)
     preflight.load_wheel(path, native_backend=True, check_driver=True)
-    (root / "backends" / record["vendor"] / "driver.py").write_text("# changed ABI\n")
+    (root / next(iter(record["driver_sources"]))).write_text("# changed ABI\n")
     with pytest.raises(ValueError, match="driver ABI differs"):
         preflight.load_wheel(path, native_backend=True, check_driver=True)
     assert record["compiler_distribution"]["name"] == "flagtree"

@@ -419,6 +419,11 @@ nor the legacy `cuda` spelling of it.
 
 ### Native-host routing confs
 
+Native-host C++ sources belong in `csrc/native_host/`. Wheel builds stage the
+selected launch ABI sources at their existing `torch_fl/native_host/csrc/`
+paths for fingerprint verification. The `_C` extension stub and
+`torch_bindings` sources belong in `csrc/bindings/`.
+
 The experimental MetaX native-host wheel selects generated
 `backends_metax_native_host.conf` when its build record has `NATIVE_HOSTS=True`.
 `gen_vendor_confs.py` owns this variant and `codegen_boxing_flaggems_register.py`

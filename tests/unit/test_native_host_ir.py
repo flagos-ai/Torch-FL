@@ -407,7 +407,7 @@ void BindMetadataHost(py::module_& module, const char* name, R (*function)(A...)
         include_dirs=[
             str(torch_dir / "include"),
             str(torch_dir / "include/torch/csrc/api/include"),
-            str(ROOT / "torch_fl/native_host/csrc"),
+            str(ROOT / "csrc/native_host"),
         ],
         library_dirs=[str(torch_dir / "lib")],
         libraries=["torch_python", "torch_cpu", "c10"],

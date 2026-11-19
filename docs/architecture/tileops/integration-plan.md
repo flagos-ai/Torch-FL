@@ -98,7 +98,7 @@ is not exposed by the default tvm_ffi backend).
 ### 2.3 Zero-copy boxing -- works, and the overhead is negligible
 
 The repository already has the primitives exposed to Python
-(`torch_fl/csrc/module.cc`): `_C._flagos_to_cuda_view(t)` /
+(`csrc/bindings/module.cc`): `_C._flagos_to_cuda_view(t)` /
 `_C._cuda_to_flagos_view(t, idx)`. Both only rewrite the TensorImpl's device
 metadata and hold the source tensor via `shared_ptr` to keep it alive; **no data
 is copied**.

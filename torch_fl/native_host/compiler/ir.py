@@ -5,7 +5,8 @@
 
 import json
 import math
-from pathlib import Path
+
+HEADER = '#include "host_runtime.h"\n'
 
 
 def emit(
@@ -840,6 +841,3 @@ PYBIND11_MODULE(source_host_ir, module) {
 }
 """
     )
-
-
-HEADER = (Path(__file__).resolve().parents[1] / "csrc/host_runtime.h").read_text()

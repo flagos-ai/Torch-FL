@@ -135,6 +135,9 @@ def test_a_conf_is_still_named_for_its_platform_id():
     [
         "torch_fl/__init__.py",
         "csrc/aten/generated/register.inc",
+        "csrc/bindings/module.cc",
+        "csrc/native_host/launcher.cc",
+        "csrc/native_host/backends/ascend.cc",
         "csrc/runtime/generator.cc",
         ".github/scripts/set_env.sh",
         ".github/scripts/lib/set_env_common.sh",

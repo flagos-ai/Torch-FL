@@ -58,7 +58,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The seven names ``torch_fl/csrc/dataparallel_comm.cc`` publishes. torch_npu
+#: The seven names ``csrc/bindings/dataparallel_comm.cc`` publishes. torch_npu
 #: reaches the same set from its own ``initCommMethods()``.
 COMM_NAMES = (
     "_broadcast_coalesced",

@@ -1227,7 +1227,14 @@ class BuildExtWithCmake(_build_ext):
     """Run cmake before setuptools builds torch_fl._C."""
 
     def _build_native_hosts(self):
+        destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         if not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST"):
+            if not self.inplace:
+                # build_lib can be reused when switching back to an ordinary wheel.
+                for name in ("csrc", "_generated"):
+                    path = os.path.join(destination, "torch_fl", "native_host", name)
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
             return
         kernels = _kernel_switches(FLAGOS_ACCELERATOR)
         if not kernels["FLAGOS_BUILD_FLAGGEMS"] or any(
@@ -1250,7 +1257,6 @@ class BuildExtWithCmake(_build_ext):
         backend = backend_module.get_backend(
             _platform_entry(FLAGOS_ACCELERATOR)["vendor"]
         )
-        destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         if backend.vendor == "metax" and os.path.isdir(
             os.path.join(destination, "torch_fl", "lib_metax")
         ):
@@ -1274,7 +1280,7 @@ class BuildExtWithCmake(_build_ext):
                 "--output",
                 destination,
                 "--package",
-                "torch_fl.native_host._generated",
+                backend_module.WHEEL_PACKAGE,
                 "--jobs",
                 str(min(8, _cmake_build_jobs())),
                 "--build-temp",
@@ -1478,7 +1484,7 @@ def _get_setup_kwargs():
     ext_modules = [
         Extension(
             name="torch_fl._C",
-            sources=["torch_fl/csrc/stub.c"],
+            sources=["csrc/bindings/stub.c"],
             language="c",
             extra_compile_args=extra_compile_args,
             libraries=["torch_bindings"],
@@ -1504,9 +1510,6 @@ def _get_setup_kwargs():
 
     package_data = {
         "torch_fl": [
-            "native_host/csrc/*.cc",
-            "native_host/csrc/*.h",
-            "native_host/csrc/backends/*.cc",
             "native_host/_generated/*.so",
             "native_host/_generated/*.json",
             "native_host/_generated/*.py",

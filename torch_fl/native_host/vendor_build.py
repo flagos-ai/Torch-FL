@@ -50,8 +50,9 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
         Path(path).resolve() for path in (source_root, output, build_temp)
     )
     package = output / "torch_fl"
-    sources = source_root / "torch_fl/native_host"
+    sources = source_root / "csrc/native_host"
     hygon = vendor == "hygon"
+    entry_source = "vendor_hygon_generated.cc" if hygon else "vendor_generated.cc"
     policy = load_build_policy(source_root).precision_policy(vendor)
     cohort = describe(vendor_library, policy)
     artifacts = {
@@ -102,18 +103,9 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
     build_temp.mkdir(parents=True, exist_ok=True)
     module = load(
         name="_vendor",
-        sources=[
-            str(
-                sources
-                / (
-                    "csrc/vendor_hygon_generated.cc"
-                    if hygon
-                    else "csrc/vendor_generated.cc"
-                )
-            )
-        ],
+        sources=[str(sources / entry_source)],
         extra_include_paths=[
-            str(sources / "csrc"),
+            str(sources),
             str(source_root / "csrc/include"),
             str(vendor_root / "include"),
             *includes,
@@ -168,10 +160,8 @@ def build(source_root, output, build_temp, vendor_library, vendor="nvidia"):
             for name in (
                 "scripts/codegen/native_host_policy.py",
                 "scripts/codegen/codegen_native_vendor.py",
-                "torch_fl/native_host/csrc/vendor_hygon_generated.cc"
-                if hygon
-                else "torch_fl/native_host/csrc/vendor_generated.cc",
-                "torch_fl/native_host/csrc/vendor_runtime.h",
+                f"csrc/native_host/{entry_source}",
+                "csrc/native_host/vendor_runtime.h",
             )
         },
     }

@@ -101,7 +101,7 @@ retain the original instantiation path on every call.
 ## Backend launch contract
 
 [Issue #831](https://github.com/flagos-ai/Torch-FL/issues/831) separates the shared
-host language from device submission. `csrc/backend_api.h` defines ABI version 2
+host language from device submission. `csrc/native_host/backend_api.h` defines ABI version 2
 without including a vendor SDK. The common launcher retains scalar packing,
 current-call tensor pointers, device guards, stream selection, workspace allocation
 and the generated host callbacks. A selected adapter owns immutable kernel launch
@@ -137,6 +137,23 @@ published HIP loader and TDM codec, its measured wavefront width, and null
 global scratch. ABI version 2 passes kernel metadata to descriptor factories
 so the TDM encoder receives the kernel's warp count. Older native-host bundles
 require a rebuild before runtime activation.
+
+The shared launcher builder applies the CPU Torch include paths, C++ ABI flags,
+and source fingerprint once. Each adapter supplies its SDK settings, the sources
+of its published FlagTree driver, and the utility extension it needs. The build
+keeps driver inputs it generates, such as the HCU descriptor header, beside its
+other temporary sources. `backends/driver.py` binds the prebuilt utilities and
+launchers to current and future driver instances. Ascend uses the same installation
+entry point and supplies a hook to preserve the published `NPUUtils` class
+identity and normalize launch metadata. Enflame's hook enables TOPS stream
+interop and binds the published driver's wrapper and underlying driver.
+
+The C++ launcher, typed-host headers, and generated vendor extensions live in
+`csrc/native_host/`. The wheel builder stages the selected launch ABI inputs at
+their existing wheel-relative paths under `torch_fl/native_host/csrc/`, where
+preflight can verify them without a source checkout. The sources under
+`csrc/bindings/` build the separate `torch_bindings` library and the `torch_fl._C`
+extension stub.
 
 Hygon's generated `add.out`, `mul.out`, `mean.out` and `cat.out` adapters call
 the configured functional route and preserve the output tensor's storage,

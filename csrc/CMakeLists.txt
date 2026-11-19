@@ -20,10 +20,23 @@ option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
 
+# The main library owns ATen, profiling, and the common runtime. Each
+# accelerator runtime, the Python bindings, and the AOT hosts have their own
+# build entry points.
 file(GLOB_RECURSE SOURCE_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aten/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aten/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/profiler/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/profiler/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/allocator/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/allocator/*.cu"
 )
+file(GLOB _runtime_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/*.cu"
+)
+list(APPEND SOURCE_FILES ${_runtime_sources})
+list(SORT SOURCE_FILES)
 
 # The TsingMicro rocprofiler tool is built as its own shared library (below)
 # and must never be linked into libtorch_fl.so: rocprofiler dlopens its tools
@@ -47,11 +60,6 @@ if(FLAGOS_PLATFORM_VENDOR STREQUAL "apple")
   )
   list(APPEND SOURCE_FILES ${MPS_ATEN_OBJCXX_SOURCES})
 endif()
-
-# Exclude runtime/accelerator (built separately as subdirectory)
-list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/.*")
-# stream_api is built as a separate shared lib
-list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/runtime/accelerator/ascend/stream_api\\.cc")
 
 # Select exactly one vendor-specific DeviceTracer implementation. CUDA and PPU
 # use the CUPTI-compatible tracer, MetaX uses that same tracer against MCPTI,

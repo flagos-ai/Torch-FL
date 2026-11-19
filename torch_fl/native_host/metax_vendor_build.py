@@ -79,9 +79,7 @@ def build(source_root, output, build_temp, vendor_library):
     try:
         module = load(
             name="_metax_vendor",
-            sources=[
-                str(source_root / "torch_fl/native_host/csrc/metax_vendor_generated.cc")
-            ],
+            sources=[str(source_root / "csrc/native_host/metax_vendor_generated.cc")],
             extra_include_paths=[
                 str(source_root / "csrc/include"),
                 str(headers),
@@ -132,8 +130,8 @@ def build(source_root, output, build_temp, vendor_library):
             for name in (
                 "scripts/codegen/native_host_policy.py",
                 "scripts/codegen/codegen_metax_native_vendor.py",
-                "torch_fl/native_host/csrc/metax_vendor_generated.cc",
-                "torch_fl/native_host/csrc/metax_vendor_runtime.h",
+                "csrc/native_host/metax_vendor_generated.cc",
+                "csrc/native_host/metax_vendor_runtime.h",
             )
         },
     }
