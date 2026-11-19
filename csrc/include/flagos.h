@@ -140,6 +140,14 @@ FLAGOS_EXPORT Error_t EventQuery(Event_t event);
 FLAGOS_EXPORT Error_t
 EventElapsedTime(float* ms, Event_t start, Event_t end);
 
+// CUDA/HIP graph capture flag. SetStreamCapturing marks the stream currently
+// being captured (nullptr = not capturing); GetStreamCapturing returns it.
+// DeviceSynchronize and synchronous Memcpy skip their capture-illegal
+// synchronize while a capture is active, and the index-family bounds check in
+// csrc/aten/index_bounds.h skips its host read-back for the same reason.
+FLAGOS_EXPORT void SetStreamCapturing(Stream_t stream);
+FLAGOS_EXPORT Stream_t GetStreamCapturing(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

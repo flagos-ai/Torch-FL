@@ -31,6 +31,8 @@
 
 #pragma once
 
+#include <flagos.h>
+
 #include <ATen/core/List.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/aminmax.h>
@@ -117,6 +119,14 @@ inline void CheckIndexTensorInRangeImpl(
     int64_t dim,
     const at::Tensor& index,
     int64_t message_dim) {
+  // During HIP stream capture the device kernels that compute `index` are only
+  // recorded, not executed, so reading its min/max back to the host below would
+  // observe uninitialized memory and raise a spurious out-of-range error. The
+  // capture path has its own correctness guarantees (fixed shapes, bounded cache
+  // positions), so skip the host read-back entirely while capturing.
+  if (GetStreamCapturing() != nullptr) {
+    return;
+  }
   // An entry past self.dim() is not an addressable dimension; ATen rejects the
   // call itself ("too many indices for tensor of dimension N"), and it does so
   // on every route, so there is nothing to add here. A `dim` outside
