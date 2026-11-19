@@ -1825,6 +1825,12 @@ NATIVE_TRITON_GAPS = {
         "topk",
     },
     "enflame": {
+        # FlagGems 5.4.0 + FlagTree 0.7.0+enflame3.6, S60, 2026-11-18:
+        # Isolated substitutions confirm mean.dim changes full Qwen3-0.6B
+        # logits beyond atol=rtol=1e-3. SiLU alone is bitwise identical for
+        # full prefill and eight decode logits, so its earlier joint hold
+        # with mean.dim was too broad and has been removed.
+        "mean.dim",
         # Pointwise overloads broken by ATen's float64 wrapped-number boxing.
         "add.Tensor",
         "add_.Tensor",
@@ -3705,6 +3711,49 @@ def native_measured_python_ops(vendor: str) -> set:
     return NATIVE_FLAGGEMS_MEASURED.get(vendor, set()) & flaggems_python_ops_for(vendor)
 
 
+# This opt-in model experiment uses the published native-host cohort rather
+# than the default lane's older FlagTree cohort. It does not promote coverage
+# for other models or change a wheel's automatic config selection. All nine
+# routes have successful TOPS submissions and complete Qwen3-0.6B logit checks.
+ENFLAME_NATIVE_HOST_FLAGGEMS = frozenset(
+    {
+        "mul.Tensor",
+        "add.Tensor",
+        "neg",
+        "cos",
+        "sin",
+        "where.self",
+        "silu",
+        "_softmax",
+        "bmm",
+    }
+)
+
+
+def enflame_native_host_conf(built: dict) -> str:
+    """Generate the explicit FlagGems-first Qwen3 native-host experiment."""
+    routes = dict(built["enflame"][1])
+    missing = ENFLAME_NATIVE_HOST_FLAGGEMS - vendor_registered_ops("enflame")
+    if missing:
+        raise SystemExit(f"unregistered Enflame native-host routes: {sorted(missing)}")
+    routes.update({op: "flaggems; Long:enflame" for op in ENFLAME_NATIVE_HOST_FLAGGEMS})
+    # Floating add passes; integer add corrupts the int32 carry/word
+    # composition used by the vendor int64 implementation.
+    routes["add.Tensor"] = "flaggems; Int:enflame; Long:enflame"
+    _reject_boxing_routes("enflame_native_host", routes)
+    header = (
+        "# Opt-in Qwen3-0.6B native-host experiment; never selected automatically.\n"
+        "# Measured cohort: FlagGems 5.4.0, FlagTree 0.7.0+enflame3.6,\n"
+        "# TOPS 1.7.2.2402, BF16, eager attention, batch 1, 23 prompt tokens,\n"
+        "# eight cached decode steps. This is not a general coverage claim.\n"
+        "# The generated FP32 pow(2) path composes through this mul.Tensor route.\n"
+        "# Larger softmax grids and other model shapes retain their existing\n"
+        "# default-config holds; use backends_enflame.conf for those workloads.\n"
+        "# Regenerate with gen_vendor_confs.py --enflame-native-host-conf PATH.\n\n"
+    )
+    return header + render("enflame", "enflame", routes)
+
+
 def boxing_to_none_notes(notes) -> tuple:
     """The BOXING_GAP_NOTES lines as a default conf needs them.
 
@@ -4593,7 +4642,25 @@ def main() -> int:
     ap.add_argument(
         "--stats", action="store_true", help="print a coverage table and exit"
     )
+    ap.add_argument(
+        "--enflame-native-host-conf",
+        type=Path,
+        help="generate an opt-in Qwen3 native-host experiment at this path",
+    )
     args = ap.parse_args()
+
+    if args.enflame_native_host_conf:
+        path = args.enflame_native_host_conf
+        text = enflame_native_host_conf(build_all(CONF_DIR))
+        if args.check:
+            if not path.is_file() or path.read_text() != text:
+                print(f"error: stale native-host experiment: {path}", file=sys.stderr)
+                return 1
+            print("Enflame native-host experiment up to date")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return 0
 
     # build_boxing_variants() reads each platform's triton gap set back from the
     # conf file, and this run is about to rewrite those files, so one pass can

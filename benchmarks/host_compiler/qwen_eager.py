@@ -26,9 +26,10 @@ backend in its own process on an otherwise idle GPU.
 
 import argparse
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import contextmanager, ExitStack, nullcontext
 import json
 import importlib.util
+import importlib.metadata
 import os
 from pathlib import Path
 import statistics
@@ -87,11 +88,53 @@ def vendor_audit():
     return vendor.audit()
 
 
+@contextmanager
+def tops_capture(enabled):
+    if not enabled:
+        yield
+        return
+    import ctypes
+
+    runtime = ctypes.CDLL("/opt/tops/lib/libtopsrt.so")
+    for name in ("topsProfilerStart", "topsProfilerStop"):
+        function = getattr(runtime, name)
+        function.argtypes = []
+        function.restype = ctypes.c_int
+    if runtime.topsProfilerStart():
+        raise RuntimeError("TOPS hardware profiling did not start")
+    try:
+        yield
+    finally:
+        if runtime.topsProfilerStop():
+            raise RuntimeError("TOPS hardware profiling did not stop")
+
+
+@contextmanager
+def api_capture(path):
+    if path is None:
+        yield
+        return
+    import ctypes
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    observer = ctypes.CDLL(None)
+    observer.flagos_api_trace_begin.argtypes = []
+    observer.flagos_api_trace_begin.restype = None
+    observer.flagos_api_trace_end.argtypes = [ctypes.c_char_p]
+    observer.flagos_api_trace_end.restype = ctypes.c_int
+    observer.flagos_api_trace_begin()
+    try:
+        yield
+    finally:
+        if observer.flagos_api_trace_end(str(path).encode()):
+            raise RuntimeError("could not write the preloaded TOPS API observer report")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument(
-        "--device", required=True, choices=["cuda:0", "npu:0", "flagos:0"]
+        "--device", required=True, choices=["cuda:0", "npu:0", "gcu:0", "flagos:0"]
     )
     parser.add_argument(
         "--mode", choices=["plain", "collect", "compile", "load"], default="plain"
@@ -104,6 +147,17 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--profile-kernels", type=Path, help="Export a separate kernel-provenance trace"
+    )
+    parser.add_argument(
+        "--profile-trace", type=Path, help="Export a separate host/device timing trace"
+    )
+    parser.add_argument(
+        "--api-profile", type=Path, help="Record a preloaded TOPS API observer report"
+    )
+    parser.add_argument(
+        "--tops-profile",
+        action="store_true",
+        help="Bracket profiled forwards for topsprof --capture-range topsProfilerApi",
     )
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--logits-atol", type=float, default=1e-3)
@@ -124,6 +178,9 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument(
         "--main-cpu", type=int, help="Pin the timing thread after runtime workers start"
+    )
+    parser.add_argument(
+        "--token-selection-device", choices=["device", "cpu"], default="device"
     )
     parser.add_argument(
         "--skip-sampling",
@@ -158,6 +215,10 @@ def main():
         parser.error("--model-host requires --device flagos:0 --mode plain")
     if args.profile_kernels and args.device != "flagos:0":
         parser.error("--profile-kernels audits FlagGems launches on --device flagos:0")
+    if args.tops_profile and (
+        not args.profile_trace or args.device not in ("gcu:0", "flagos:0")
+    ):
+        parser.error("--tops-profile requires --profile-trace on Enflame")
     hosts = None
     native_scope = nullcontext()
     report = {
@@ -184,6 +245,13 @@ def main():
                 "rtol": args.logits_rtol,
             }
         ),
+        "python": sys.version,
+        "transformers": importlib.metadata.version("transformers"),
+        "cpu_affinity": sorted(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else None,
+        "torch_threads": torch.get_num_threads(),
+        "token_selection_device": args.token_selection_device,
     }
     if args.device.startswith("flagos"):
         if args.hosts:
@@ -232,6 +300,11 @@ def main():
         }
         if report["npu_math_settings"]["matmul_allow_hf32"]:
             raise RuntimeError("paired native-host acceptance requires HF32 disabled")
+    elif args.device.startswith("gcu"):
+        import torch_gcu  # noqa: F401
+
+        synchronize = torch.gcu.synchronize
+        report["vendor_torch"] = importlib.metadata.version("torch-gcu")
     else:
         synchronize = torch.cuda.synchronize
 
@@ -343,10 +416,18 @@ def main():
         logits = [prefill_logits[:, -1, :]]
         predictions, inputs = [], []
         for step in range(args.steps):
-            predicted = out.logits[:, -1, :].argmax(-1, keepdim=True)
+            # Token selection is outside timed forwards on both providers.
+            prediction_logits = (
+                logits[-1]
+                if args.token_selection_device == "cpu"
+                else out.logits[:, -1, :]
+            )
+            predicted = prediction_logits.argmax(-1, keepdim=True)
             predictions.append(predicted.cpu())
             token = (
-                reference["inputs"][step].to(args.device) if reference else predicted
+                reference["inputs"][step].to(args.device)
+                if reference
+                else predicted.to(args.device)
             )
             inputs.append(token.cpu())
             out = model(token, past_key_values=out.past_key_values, use_cache=True)
@@ -408,7 +489,10 @@ def main():
         if not args.skip_sampling:
             out = model(ids, use_cache=True)
             for _ in range(args.steps):
-                token = out.logits[:, -1, :].argmax(-1, keepdim=True)
+                prediction_logits = out.logits[:, -1, :]
+                if args.token_selection_device == "cpu":
+                    prediction_logits = prediction_logits.cpu()
+                token = prediction_logits.argmax(-1, keepdim=True).to(args.device)
                 generated.append(int(token.item()))
                 out = model(token, past_key_values=out.past_key_values, use_cache=True)
             report["generated_tokens"] = generated
@@ -495,29 +579,70 @@ def main():
         finally:
             sys.setprofile(None)
         report["warm_python_calls"] = dict(calls)
-        if args.profile_kernels:
-            if hosts is None:
+        if args.profile_kernels or args.profile_trace or args.api_profile:
+            if args.profile_kernels and hosts is None:
                 raise RuntimeError("kernel provenance requires the native-host wheel")
             from torch.profiler import ProfilerActivity, profile as torch_profile
 
-            with torch_profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
-            ) as profiler:
-                out = model(ids, use_cache=True)
-                out = model(
-                    device_inputs[0],
-                    past_key_values=out.past_key_values,
-                    use_cache=True,
-                )
-                synchronize()
-            args.profile_kernels.parent.mkdir(parents=True, exist_ok=True)
-            profiler.export_chrome_trace(str(args.profile_kernels))
-            trace = json.loads(args.profile_kernels.read_text())
-            events = trace["traceEvents"]
-            from kernel_provenance import audit_kernels
+            if args.device == "gcu:0":
+                from torch_gcu.gcu.profiler import profile as torch_profile
 
-            admitted = hosts.audit()["launched_kernels"]
-            report["gpu_kernel_audit"] = audit_kernels(events, admitted, vendor_audit())
+            activities = [ProfilerActivity.CPU]
+            if not (args.tops_profile or args.api_profile):
+                activities.append(ProfilerActivity.PrivateUse1)
+            ranges = {}
+            with ExitStack() as stack:
+                profiler = stack.enter_context(torch_profile(activities=activities))
+                stack.enter_context(tops_capture(args.tops_profile))
+                stack.enter_context(api_capture(args.api_profile))
+                with torch.profiler.record_function("qwen::prefill"):
+                    started_ns = time.time_ns()
+                    out = model(ids, use_cache=True)
+                    synchronize()
+                    ranges["prefill"] = {
+                        "start_ns": started_ns,
+                        "end_ns": time.time_ns(),
+                    }
+                with torch.profiler.record_function("qwen::decode"):
+                    started_ns = time.time_ns()
+                    out = model(
+                        device_inputs[0],
+                        past_key_values=out.past_key_values,
+                        use_cache=True,
+                    )
+                    synchronize()
+                    ranges["decode"] = {
+                        "start_ns": started_ns,
+                        "end_ns": time.time_ns(),
+                    }
+            report["profile_ranges_ns"] = ranges
+            trace_path = args.profile_kernels or args.profile_trace
+            if trace_path:
+                trace_path.parent.mkdir(parents=True, exist_ok=True)
+                profiler.export_chrome_trace(str(trace_path))
+            report["profile_operator_times"] = sorted(
+                [
+                    {
+                        "name": event.key,
+                        "calls": event.count,
+                        "self_cpu_us": event.self_cpu_time_total,
+                        "cpu_total_us": event.cpu_time_total,
+                        "self_device_us": event.self_device_time_total,
+                        "device_total_us": event.device_time_total,
+                    }
+                    for event in profiler.key_averages()
+                ],
+                key=lambda event: event["self_cpu_us"],
+                reverse=True,
+            )
+            if args.profile_kernels:
+                trace = json.loads(trace_path.read_text())
+                from kernel_provenance import audit_kernels
+
+                admitted = hosts.audit()["launched_kernels"]
+                report["gpu_kernel_audit"] = audit_kernels(
+                    trace["traceEvents"], admitted, vendor_audit()
+                )
         if hosts is not None:
             report["kernel_sources"] = hosts.provenance
             report["native_audit"] = hosts.audit()
@@ -539,7 +664,7 @@ def main():
     producer = {
         "backend": (
             "vendor"
-            if args.device in {"cuda:0", "npu:0"}
+            if args.device in {"cuda:0", "npu:0", "gcu:0"}
             and "torch_fl" not in sys.modules
             and "flag_gems" not in sys.modules
             else "torch_fl"

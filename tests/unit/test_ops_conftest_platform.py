@@ -80,6 +80,37 @@ def test_cuda_profiling_skips_other_platforms_before_runtime_access(
         spec.loader.exec_module(module)
 
 
+def test_enflame_hosts_collect_without_optional_backend_packages(monkeypatch):
+    torch = ModuleType("torch")
+    for name in (
+        "float32",
+        "float16",
+        "bfloat16",
+        "int64",
+        "add",
+        "sub",
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+    ):
+        setattr(torch, name, object())
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch_fl", ModuleType("torch_fl"))
+    for name in ("flag_gems", "triton"):
+        monkeypatch.setitem(sys.modules, name, None)
+    path = _OPS_CONFTEST_PATH.parent / "test_enflame_native_hosts.py"
+    spec = importlib.util.spec_from_file_location("enflame_hosts_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    # Collection needs no backend package, but executing an admitted GCU test
+    # must still report a missing FlagGems installation as an error.
+    with pytest.raises(ModuleNotFoundError, match="flag_gems"):
+        module.test_warm_silu_dispatch_uses_the_compiled_vendor_host()
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
@@ -340,6 +371,12 @@ def test_native_vendor_precision_gate_reads_the_installed_build(monkeypatch, ena
         ("dcu", True, ("dcu", "native_source_host"), None),
         ("dcu", False, ("dcu", "native_source_host"), "build_record"),
         ("dcu", True, ("nvidia", "native_source_host"), "platform_support"),
+        ("gcu", True, ("native_source_host",), "platform_support"),
+        ("gcu", False, ("native_source_host",), "platform_support"),
+        ("gcu", True, ("enflame_native_host",), None),
+        ("gcu", False, ("enflame_native_host",), "build_record"),
+        ("cuda", True, ("enflame_native_host",), "platform_support"),
+        ("mps", False, ("enflame_native_host",), "platform_support"),
         ("cuda", True, ("native_vendor_precision",), None),
         ("cuda", False, ("native_vendor_precision",), "build_record"),
         ("mps", True, ("native_vendor_precision",), "platform_support"),

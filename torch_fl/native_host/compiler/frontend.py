@@ -2551,6 +2551,98 @@ class Transform(ast.NodeTransformer):
                 return native
         return call
 
+    def inline_variadic_metadata_predicate(self, function, call):
+        """Unroll a read-only any/all predicate over known positional names."""
+        source = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
+        if (
+            source.decorator_list
+            or not source.args.vararg
+            or source.args.args
+            or source.args.posonlyargs
+            or source.args.kwarg
+            or source.args.kwonlyargs
+            or call.keywords
+            or any(
+                not isinstance(value, (ast.Name, ast.Constant)) for value in call.args
+            )
+            or len(source.body) != 1
+            or not isinstance(source.body[0], ast.Return)
+        ):
+            return None
+        reduction = source.body[0].value
+        if (
+            not isinstance(reduction, ast.Call)
+            or not isinstance(reduction.func, ast.Name)
+            or reduction.func.id not in ("any", "all")
+            or reduction.keywords
+            or len(reduction.args) != 1
+            or not isinstance(reduction.args[0], ast.GeneratorExp)
+        ):
+            return None
+        expression = reduction.args[0]
+        if (
+            function.__globals__.get(
+                reduction.func.id, getattr(builtins, reduction.func.id)
+            )
+            is not getattr(builtins, reduction.func.id)
+            or function.__globals__.get("isinstance", isinstance) is not isinstance
+        ):
+            return None
+        if len(expression.generators) != 1:
+            return None
+        generator = expression.generators[0]
+        if (
+            generator.ifs
+            or generator.is_async
+            or not isinstance(generator.target, ast.Name)
+            or not isinstance(generator.iter, ast.Name)
+            or generator.iter.id != source.args.vararg.arg
+        ):
+            return None
+        target = generator.target.id
+        parents = {
+            child: parent
+            for parent in ast.walk(expression.elt)
+            for child in ast.iter_child_nodes(parent)
+        }
+        for item in ast.walk(expression.elt):
+            if isinstance(item, ast.Call) and (
+                not isinstance(item.func, ast.Name) or item.func.id != "isinstance"
+            ):
+                return None
+            if isinstance(item, ast.Name):
+                if item.id == target:
+                    parent = parents.get(item)
+                    if not (
+                        isinstance(parent, ast.Attribute)
+                        and parent.attr in ("dtype", "ndim")
+                        or isinstance(parent, ast.Call)
+                        and isinstance(parent.func, ast.Name)
+                        and parent.func.id == "isinstance"
+                    ):
+                        return None
+                elif function.__globals__.get(
+                    item.id, getattr(builtins, item.id, None)
+                ) is not self.globals.get(item.id, getattr(builtins, item.id, None)):
+                    return None
+        values = []
+        for argument in call.args:
+
+            class Bind(ast.NodeTransformer):
+                def visit_Name(inner, value):
+                    return copy.deepcopy(argument) if value.id == target else value
+
+            values.append(Bind().visit(copy.deepcopy(expression.elt)))
+        if not values:
+            return ast.Constant(reduction.func.id == "all")
+        return (
+            values[0]
+            if len(values) == 1
+            else ast.BoolOp(
+                ast.Or() if reduction.func.id == "any" else ast.And(), values
+            )
+        )
+
     def visit_Call(self, node):
         ordered = self.metadata_sort(node)
         if ordered is not None:
@@ -2937,9 +3029,14 @@ class Transform(ast.NodeTransformer):
         if isinstance(node.func, ast.Name) and node.func.id in self.globals:
             function = self.globals[node.func.id]
             if type(function).__name__ == "PointwiseDynamicFunction":
-                slot = self.frontend.launcher.register_pointwise(
-                    self.frontend.hosts.resolve(function)
-                )
+                resolved = self.frontend.hosts.resolve(function)
+                if not hasattr(function, "_call_real_impl") and not hasattr(
+                    resolved, "_native_pointwise_module"
+                ):
+                    raise NotImplementedError(
+                        "vendor pointwise schedule retains compiled object semantics"
+                    )
+                slot = self.frontend.launcher.register_pointwise(resolved)
                 call = ast.Call(
                     ast.parse("torch.ops.flagos_source_native.pointwise_apply")
                     .body[0]
@@ -2962,6 +3059,16 @@ class Transform(ast.NodeTransformer):
                 inspect.isfunction(function)
                 and function.__module__ in self.frontend.hosts.originals
             ):
+                if any(
+                    parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                    for parameter in inspect.signature(function).parameters.values()
+                ):
+                    predicate = self.inline_variadic_metadata_predicate(function, node)
+                    if predicate is None:
+                        raise NotImplementedError(
+                            "variadic helper requires compiled object semantics"
+                        )
+                    return self.visit(predicate)
                 parameters = list(inspect.signature(function).parameters)
                 types = {p: self.annotation(a) for p, a in zip(parameters, node.args)}
                 types.update({k.arg: self.annotation(k.value) for k in node.keywords})

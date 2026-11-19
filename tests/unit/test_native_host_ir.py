@@ -233,6 +233,19 @@ def optional_dtype_fallback_host(value, dtype):
     return unsupported_dtype_helper(value, dtype)
 
 
+def variadic_dtype_predicate(*values):
+    return any(
+        isinstance(value, torch.Tensor)
+        and value.dtype == torch.float64
+        and value.ndim == 0
+        for value in values
+    )
+
+
+def variadic_dtype_host(first, second, scalar):
+    return variadic_dtype_predicate(first, second, scalar)
+
+
 PROGRAMS = (
     ReadOnly,
     Aliased,
@@ -344,6 +357,11 @@ def compiled_hosts(tmp_path_factory):
             filtered_metadata_range,
             "def f(start: int, stop: int, step: int, excluded: List[int]) -> Tuple[List[int], str]: pass",
         ),
+        (
+            "VariadicDtype",
+            variadic_dtype_host,
+            "def f(first: torch.Tensor, second: torch.Tensor, scalar: float) -> bool: pass",
+        ),
     ):
         recorder = SimpleNamespace(
             register_global=lambda module, name, kind: 0,
@@ -412,6 +430,21 @@ void BindMetadataHost(py::module_& module, const char* name, R (*function)(A...)
     compiled = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(compiled)
     return compiled
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (torch.ones(3), torch.tensor(1.0)),
+        (torch.ones(3, dtype=torch.float64), torch.tensor(1.0)),
+        (torch.ones(3), torch.tensor(1.0, dtype=torch.float64)),
+        (torch.tensor(1.0, dtype=torch.float64), torch.ones(3)),
+    ],
+)
+def test_variadic_metadata_predicate_keeps_all_arguments(compiled_hosts, first, second):
+    assert compiled_hosts.VariadicDtype(first, second, 0.5) == variadic_dtype_host(
+        first, second, 0.5
+    )
 
 
 @pytest.mark.parametrize("program", PROGRAMS[:4])

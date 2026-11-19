@@ -47,6 +47,10 @@ namespace at::native::flagos::gcu {
 // which case the caller must fall back to its host round-trip.
 bool StridedCopy(const at::Tensor& dst, const at::Tensor& src);
 
+// A metadata-only view of the two little-endian int32 words in each int64
+// element. The extra final axis is {low, high}; strides and offsets are kept.
+at::Tensor Int64Words(const at::Tensor& tensor);
+
 // Returns a contiguous on-device copy of `src` converted to `dtype`, or an
 // undefined tensor when the cast is one this path declines.
 at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype);

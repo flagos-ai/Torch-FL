@@ -3,6 +3,7 @@
 
 """Load prebuilt host artifacts and bind original FlagGems device functions."""
 
+import ast
 import hashlib
 import importlib
 import importlib.util
@@ -290,10 +291,12 @@ class Hosts:
                         for k, v in value.__dict__.items()
                     }
                 )
-                if isinstance(value, self.Pointwise):
+                if type(value).__name__ == "PointwiseDynamicFunction":
                     found.overloads = {}
                     found._kernel_info_cache = {}
                     found._capture_output_pool = {}
+                    if not isinstance(value, self.Pointwise):
+                        found._native_pointwise_module = kind.__module__
             else:
                 return value
         self.objects[id(value)] = found
@@ -302,7 +305,10 @@ class Hosts:
     def pointwise_kernel(self, owner, ndim):
         # The upstream generator emits only its original device kernel here.
         # The rank-independent host adapter was compiled during the build.
-        pointwise = self.originals["flag_gems.utils.pointwise_dynamic"]
+        provider = getattr(
+            owner, "_native_pointwise_module", "flag_gems.utils.pointwise_dynamic"
+        )
+        pointwise = self.originals[provider]
 
         name = f"{owner._scalar_fn.__name__}_kernel_rank_{ndim}"
         generator = pointwise.ModuleGenerator(
@@ -310,6 +316,19 @@ class Hosts:
         )
         code = pointwise.IndentedBuffer()
         generator.generate_imports(code)
+        if provider != "flag_gems.utils.pointwise_dynamic":
+            helpers = [
+                node.module
+                for node in ast.walk(ast.parse(code.getvalue()))
+                if isinstance(node, ast.ImportFrom)
+                and any(
+                    alias.name == "heuristics_for_tile_size_with_mmu_constraint"
+                    for alias in node.names
+                )
+            ]
+            if len(helpers) != 1:
+                raise RuntimeError("unsupported published vendor pointwise host ABI")
+            owner._native_pointwise_helpers = helpers[0]
         if owner.config.prefer_1d_tile:
             generator.kernel_gen.codegen_1d_tile(code)
         else:
@@ -323,22 +342,31 @@ class Hosts:
         spec.loader.exec_module(module)
         module.__dict__.update(owner._scalar_fn.__globals__)
         module.__dict__[owner._scalar_fn.__name__] = owner._scalar_fn
-        entry = getattr(module, name)
-        self.provenance.append(
-            {
-                "kernel": name,
-                "source": str(path),
-                "sha256": digest,
-                "generator": "flag_gems.utils.pointwise_dynamic.KernelGenerator",
-                "scalar_kernel": owner._scalar_fn.__name__,
-                "jit_sha256": hashlib.sha256(
-                    entry.jit_function.src.encode()
-                ).hexdigest(),
-            }
-        )
-        _admitted_kernels[id(entry.jit_function)] = self.provenance[-1]
+        entries = []
+        for kernel_name in (name, name + "_stride_constexpr"):
+            if not hasattr(module, kernel_name):
+                continue
+            entry = getattr(module, kernel_name)
+            self.provenance.append(
+                {
+                    "kernel": kernel_name,
+                    "source": str(path),
+                    "sha256": digest,
+                    "generator": provider + ".KernelGenerator",
+                    "scalar_kernel": owner._scalar_fn.__name__,
+                    "jit_sha256": hashlib.sha256(
+                        entry.jit_function.src.encode()
+                    ).hexdigest(),
+                }
+            )
+            _admitted_kernels[id(entry.jit_function)] = self.provenance[-1]
+            entries.append(self.runtime.KernelEntry(entry, entry))
         # Generated device code is admitted only through the wheel's generator.
-        return self.runtime.KernelEntry(entry, entry)
+        return (
+            entries[0]
+            if provider == "flag_gems.utils.pointwise_dynamic"
+            else tuple(entries)
+        )
 
     def op(self, name):
         return self.resolve(self.original_ops[name])
@@ -374,6 +402,9 @@ class Hosts:
             "source_variant_hits": hits,
             "subprocess_commands": _native_commands,
             "launched_kernels": _launched_kernels,
+            "enqueued_kernels": _launcher_module.enqueue_stats()
+            if hasattr(_launcher_module, "enqueue_stats")
+            else {},
         }
 
     def activate(self):

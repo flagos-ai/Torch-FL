@@ -14,6 +14,7 @@
 
 #include <flagos.h>
 #include <tops_runtime_api.h>
+#include "interop.h"
 
 #include <mutex>
 #include <unordered_map>
@@ -93,6 +94,7 @@ Error_t StreamGetPriority(Stream_t /*stream*/, int* priority) {
 
 Error_t StreamDestroy(Stream_t stream) {
   topsError_t err = topsStreamDestroy(reinterpret_cast<topsStream_t>(stream));
+  if (err == topsSuccess) FlagosEnflameForgetStream(stream);
   return (err == topsSuccess) ? Success : ErrorUnknown;
 }
 

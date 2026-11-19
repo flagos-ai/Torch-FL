@@ -46,10 +46,10 @@ static bool TopsatenCopyDtype(at::ScalarType type) {
 // A topsatenCopy-family call, bracketed the way EXEC_TOPSATEN_CMD brackets
 // every other topsaten op.
 //
-// This op is a consumer of whatever the previous producer queued -- on this
-// backend that includes FlagGems work, which a topsaten call may otherwise read
-// before it has finished -- and a later consumer in turn reads its result, so
-// the stream has to be drained on both sides of the call. Unlike
+// The submission guard preserves producer ordering. Native-host builds drain
+// only at a change between the Triton and topsaten producers with ABI 1;
+// ABI 2 orders the transition with a device event. Ordinary builds retain the
+// legacy pre/post synchronization. Unlike
 // EXEC_TOPSATEN_CMD this reports a vendor refusal as a status instead of
 // raising, because a refusal is exactly what the caller's host fallback is for:
 // only a stream error, which no fallback can serve, is fatal here.
@@ -59,14 +59,11 @@ class TopsCopyCall {
       : guard_(device_tensor) {
     EnsureTopsatenInit();
     stream_ = GetCurrentTopsStream();
-    const topsError_t pre = topsStreamSynchronize(stream_);
-    TORCH_CHECK(
-        pre == topsSuccess, "topsaten copy pre-stream sync failed: ",
-        topsGetErrorString(pre));
+    submission_ = std::make_unique<TopsSubmission>(stream_);
   }
 
-  topsatenStatus_t finish(topsatenStatus_t status) const {
-    const topsError_t post = topsStreamSynchronize(stream_);
+  topsatenStatus_t finish(topsatenStatus_t status) {
+    const topsError_t post = submission_->Finish();
     TORCH_CHECK(
         post == topsSuccess, "topsaten copy stream sync failed: ",
         topsGetErrorString(post));
@@ -80,9 +77,21 @@ class TopsCopyCall {
  private:
   TopsDeviceGuard guard_;
   topsStream_t stream_ = nullptr;
+  std::unique_ptr<TopsSubmission> submission_;
 };
 
 }  // namespace
+
+at::Tensor Int64Words(const at::Tensor& tensor) {
+  TORCH_CHECK(tensor.scalar_type() == at::kLong, "expected int64 storage");
+  auto sizes = tensor.sizes().vec(), strides = tensor.strides().vec();
+  for (auto& stride : strides) stride *= 2;
+  sizes.push_back(2);
+  strides.push_back(1);
+  auto alias = at::empty({0}, tensor.options().dtype(at::kInt));
+  alias.set_(tensor.storage(), tensor.storage_offset() * 2, sizes, strides);
+  return alias;
+}
 
 bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   if (!dst.defined() || !src.defined()) {
@@ -101,6 +110,11 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
   // through DtypeCast below, where the matrix covers it.
   if (dst.scalar_type() != src.scalar_type()) {
     return false;
+  }
+  if (src.scalar_type() == at::kLong) {
+    // Copy both 32-bit words, preserving every int64 bit and arbitrary strides.
+    // The vendor has no int64 arithmetic kernel; this is a storage alias only.
+    return StridedCopy(Int64Words(dst), Int64Words(src));
   }
   if (!TopsatenCopyDtype(dst.scalar_type())) {
     return false;
@@ -138,6 +152,26 @@ bool StridedCopy(const at::Tensor& dst, const at::Tensor& src) {
 at::Tensor DtypeCast(const at::Tensor& src, at::ScalarType dtype) {
   if (!src.defined() || !src.is_privateuseone()) {
     return {};
+  }
+  if (src.scalar_type() == at::kInt && dtype == at::kLong) {
+    auto out = at::empty(src.sizes(), src.options().dtype(dtype));
+    if (src.numel() == 0) return out;
+    auto words = Int64Words(out);
+    words.select(-1, 0).copy_(src);
+    words.select(-1, 1).copy_(-at::lt(src, 0).to(at::kInt));
+    return out;
+  }
+  if (src.scalar_type() == at::kLong && TopsatenCopyDtype(dtype)) {
+    if (src.numel() == 0) return at::empty(src.sizes(), src.options().dtype(dtype));
+    // A truncating vendor int64 cast silently changes large indices. Check the
+    // sign extension on the device before using the measured int32 cast. Only
+    // the scalar validity flag reaches the host; tensor arithmetic stays here.
+    auto words = Int64Words(src);
+    auto low = words.select(-1, 0), high = words.select(-1, 1);
+    auto sign = -at::lt(low, 0).to(at::kInt);
+    if (!at::all(at::eq(high, sign)).item<bool>()) return {};
+    if (dtype == at::kInt) return low.contiguous();
+    return DtypeCast(low, dtype);
   }
   if (!TopsatenCopyDtype(src.scalar_type()) || !TopsatenCopyDtype(dtype)) {
     return {};
