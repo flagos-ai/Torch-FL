@@ -26,6 +26,7 @@ Run: pytest tests/unit/test_ops_conftest_platform.py -v
 """
 
 import importlib.util
+from importlib import import_module
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -165,6 +166,8 @@ def _fake_torch_fl(
         (package / "lib_thead").mkdir()
     sys.path.insert(0, str(tmp_path))
     try:
+        if resolved_conf is not None:
+            import_module("torch_fl")
         yield package
     finally:
         sys.path.remove(str(tmp_path))

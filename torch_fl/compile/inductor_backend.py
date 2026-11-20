@@ -36,24 +36,7 @@ import torch
 import torch.fx
 import torch.cuda
 
-from torch_fl import _env
-
-
-def _platform_of_record() -> str:
-    """The platform id a build record's accelerator names.
-
-    ``_build_config.ACCELERATOR`` carries the *vendor* spelling of a platform
-    (setup.py writes it), while the branches in this file name the platform id
-    CMake, the confs and the CI lanes use: "mthreads" for what they call "musa",
-    "enflame" for "gcu", "hygon" for "dcu". Resolving once here keeps those
-    branches in one vocabulary. A name the table does not know -- a test stub, a
-    record older than the table -- is returned as it is, so they answer for it
-    as they did before.
-    """
-    from torch_fl._build_config import ACCELERATOR as recorded
-    from torch_fl._platform import platform_for
-
-    return platform_for(recorded) or recorded
+from torch_fl import _env, _platform
 
 
 def _patch_native_triton_autotune() -> None:
@@ -65,7 +48,7 @@ def _patch_native_triton_autotune() -> None:
     configuration for each kernel. Selecting the first compiled configuration
     keeps execution native; it does not claim autotuning performance parity.
     """
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
     from torch_fl.compile.device_interface import is_native_accelerator
 
     if not is_native_accelerator():
@@ -160,7 +143,7 @@ def _bind_musa_flagtree_runtime() -> None:
     and one stream. This must run before any Triton driver instance exists, hence
     module load time.
     """
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
 
     if platform != "musa":
         return
@@ -202,7 +185,7 @@ def _patch_native_cache_system_key() -> None:
     import hashlib
     import json
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
 
     @staticmethod
     @functools.cache
@@ -361,7 +344,7 @@ def pin_compile_threads() -> bool:
     if os.environ.get(_COMPILE_THREADS_ENV) is not None:
         return False
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
     from torch_fl.compile.device_interface import _torch_has_cuda_kernels
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
@@ -457,7 +440,7 @@ def _resolve_config_patches(
         # turn it back off; the kernels still compile and run, just untuned.
         patches["coordinate_descent_tuning"] = False
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
 
     # 2D tiling is what makes Inductor emit a transposed load (`in_ptr0 + (y0 +
     # 128*x1)` against an x-major store), and Triton lowers that pair to
@@ -506,7 +489,7 @@ def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> No
     if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
         return
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
     if platform == "gcu":

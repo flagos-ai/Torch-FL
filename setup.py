@@ -25,6 +25,7 @@ import subprocess
 import sys
 import sysconfig
 from distutils.command.clean import clean
+from pathlib import Path
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as _build_ext
@@ -35,95 +36,49 @@ from setuptools.command.editable_wheel import editable_wheel as _editable_wheel
 IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
-#: Vendor layer -> build-table platform id, mirroring ``vendor`` in
-#: cmake/flagos_platforms.json (a test keeps the two equal). A build may name
-#: either half: the vendor (nvidia, hygon, mthreads, enflame, thead, drobotics,
-#: apple) or the platform id that keys the table (cuda, dcu, musa, gcu, ppu,
-#: bpu, mps). The vendor is the public name -- it is also the
-#: flagos-pypi-<lane> a wheel publishes to -- while the platform id stays the
-#: table/cmake/CI key, so a wheel built as either lands on the same row.
-_VENDOR_TO_PLATFORM = {
-    "ascend": "ascend",
-    "apple": "mps",
-    "drobotics": "bpu",
-    "enflame": "gcu",
-    "hygon": "dcu",
-    "iluvatar": "iluvatar",
-    "kunlunxin": "kunlunxin",
-    "metax": "metax",
-    "mthreads": "musa",
-    "nvidia": "cuda",
-    "thead": "ppu",
-    "tsingmicro": "tsingmicro",
-    "cambricon": "cambricon",
-}
-
-
-def _normalize_accelerator(raw: str) -> str:
-    """Build-table platform id for a FLAGOS_ACCELERATOR value.
-
-    Identity for a platform id (the historical spelling every CI lane and doc
-    uses), a mapping for a vendor name, "" for anything unknown (the caller
-    reports it against the table's own list). A vendor name prints one line
-    saying which row it resolved to, so a log of the build names both halves.
-    """
-    value = raw.strip().lower()
-    if value in _VENDOR_TO_PLATFORM:
-        platform = _VENDOR_TO_PLATFORM[value]
-        if platform != value:
-            print(
-                f"[setup] FLAGOS_ACCELERATOR={value} is the vendor name; "
-                f"building the '{platform}' platform ({value})"
-            )
-        return platform
-    # The vendor is also accepted as the value the build switches resolve for:
-    # an accelerator whose vendor is not a table key (apple for mps, drobotics
-    # for bpu) arrives at _platform_entry() as that vendor, and the row it needs
-    # is keyed by the platform id `_VENDOR_TO_PLATFORM` maps it back to.
-
-    # The Nexus lane spells D-Robotics with a hyphen; identifiers cannot.
-    if value == "d-robotics":
-        # The Nexus lane spelling; identifiers and the table drop the hyphen.
-        return "bpu"
-    return value
-
-
-FLAGOS_ACCELERATOR = _normalize_accelerator(
-    os.environ.get("FLAGOS_ACCELERATOR", "cuda")
-)
-
-#: Build-table platform id -> vendor, for the build record. A wheel records the
-#: vendor, because that is the name every runtime reader compares against (the
-#: accelerator selects a conf, drives the packaging policy and picks the vendor
-#: hooks); the platform id stays the table/cmake/CI key so the switch lists, the
-#: pins and the lane files keep resolving.
-_PLATFORM_TO_VENDOR = {
-    platform: vendor for vendor, platform in _VENDOR_TO_PLATFORM.items()
-}
-
-# Where the sources live. Distinct from BASE_DIR, which is repointed at a
-# scratch tree when the generated files are redirected somewhere else -- the
-# files this build reads back (torch_fl/_env.py, cmake/flagos_platforms.json) do
-# not move with them.
+# Generated build files can be redirected to a staging tree.
 SOURCE_DIR = os.path.dirname(os.path.realpath(__file__))
-
 BASE_DIR = SOURCE_DIR
 
 _PLATFORM_TABLE = None
 
 
 def _platform_table() -> dict:
-    """cmake/flagos_platforms.json: the platform/build matrix shared with CMake.
-
-    CMakeLists.txt reads the same file, so the kernel switches, the
-    bundled-libtorch dir, the platform list and the pins have one definition.
-    """
+    """Read the platform and kernel matrix shared with CMake."""
     global _PLATFORM_TABLE
     if _PLATFORM_TABLE is None:
         path = os.path.join(SOURCE_DIR, "cmake", "flagos_platforms.json")
         with open(path, encoding="utf-8") as handle:
             _PLATFORM_TABLE = json.load(handle)
     return _PLATFORM_TABLE
+
+
+_PLATFORM_TO_VENDOR = {
+    platform: row["vendor"]
+    for platform, row in _platform_table()["accelerators"].items()
+}
+_VENDOR_TO_PLATFORM = {
+    vendor: platform for platform, vendor in _PLATFORM_TO_VENDOR.items()
+}
+
+
+def _normalize_accelerator(raw: str) -> str:
+    """Resolve a build input to the platform row used by CMake."""
+    value = raw.strip().lower()
+    if value == "d-robotics":
+        value = "drobotics"
+    platform = _VENDOR_TO_PLATFORM.get(value, value)
+    if platform != value:
+        print(
+            f"[setup] FLAGOS_ACCELERATOR={value} is the vendor name; "
+            f"building the '{platform}' platform ({value})"
+        )
+    return platform
+
+
+FLAGOS_ACCELERATOR = _normalize_accelerator(
+    os.environ.get("FLAGOS_ACCELERATOR", "cuda")
+)
 
 
 def _platform_entry(accelerator: str) -> dict:
@@ -135,13 +90,9 @@ def _platform_entry(accelerator: str) -> dict:
     """
     table = _platform_table()
     rows = table["accelerators"]
-    try:
-        return rows[accelerator]
-    except KeyError:
-        pass
-    for row in rows.values():
-        if row.get("vendor") == accelerator:
-            return row
+    platform = _VENDOR_TO_PLATFORM.get(accelerator, accelerator)
+    if platform in rows:
+        return rows[platform]
     known = ", ".join(sorted(set(rows) | {r["vendor"] for r in rows.values()}))
     raise ValueError(
         f"Unknown FLAGOS_ACCELERATOR '{accelerator}'. Expected one of: {known}"
@@ -757,15 +708,6 @@ def build_deps():
         cmake_args.append("-DFLAGOS_TORCH_CXX11_ABI=" + torch_cxx11_abi)
 
     cmake_args.append(f"-DFLAGOS_ACCELERATOR={FLAGOS_ACCELERATOR}")
-    aliases = _platform_aliases(FLAGOS_ACCELERATOR)
-    if aliases:
-        # The names, then the one CMake enters. A list (-D a;b), not a JSON
-        # array: it needs no quoting after `=`, and cmake/FlagosPlatforms.cmake
-        # reads the last item as the target for any of the others.
-        cmake_args.append(
-            "-DFLAGOS_ACCELERATOR_ALIASES=" + ";".join(aliases + [FLAGOS_ACCELERATOR])
-        )
-
     # What gets compiled in, resolved in one place so the wheel can describe
     # itself accurately. _kernel_switches() is also what _write_build_config()
     # reads, so the -D list and the KERNELS record cannot disagree.
@@ -855,32 +797,12 @@ def build_deps():
     _verify_built_native_libs()
     _bundle_cuda_assets()
     _write_build_config()
-    _write_environment_platform_alias()
 
 
 def _write_build_config() -> None:
-    """Record what this wheel was built for.
-
-    torch_fl._select_backend_config() runs at import time, before `import torch`,
-    so it cannot sniff torch.version.hip to tell a DCU build apart. Recording the
-    accelerator as ACCELERATOR here lets it pick backends_hygon.conf without the
-    user having to keep FLAGOS_ACCELERATOR set at run time.
-
-    The two attribute names are the record's own vocabulary, not the switches':
-    ACCELERATOR holds a platform value and KERNELS holds kernel-set values, while
-    the build inputs a user sets are FLAGOS_ACCELERATOR and the five
-    FLAGOS_BUILD_* flags.
-
-    KERNELS records the compiled kernel sets, because the accelerator alone does
-    not describe a wheel: two MetaX wheels built with different kernel-set flags
-    share a FLAGOS_ACCELERATOR and are not the same wheel. Run-time code that
-    used to infer the kernel set from an environment variable reads this
-    instead, so there is nothing left to keep in sync by hand.
-
-    Both values come from _kernel_switches(), the same function whose output
-    becomes the -D list handed to CMake, so this file cannot describe a build
-    other than the one that produced it.
-    """
+    """Write the platform ID, vendor name and kernel sets used by this build."""
+    platform = _VENDOR_TO_PLATFORM.get(FLAGOS_ACCELERATOR, FLAGOS_ACCELERATOR)
+    vendor = _platform_entry(platform)["vendor"]
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     compiled = tuple(sorted(KERNEL_SET_NAME[s] for s in KERNEL_SWITCHES if kernels[s]))
     body = ", ".join(f'"{name}"' for name in compiled)
@@ -889,81 +811,11 @@ def _write_build_config() -> None:
     path = os.path.join(BASE_DIR, "torch_fl", "_build_config.py")
     content = (
         "# AUTO-GENERATED by setup.py at build time. Do not edit.\n"
-        f'ACCELERATOR = "{_PLATFORM_TO_VENDOR.get(FLAGOS_ACCELERATOR, FLAGOS_ACCELERATOR)}"\n'
+        f'PLATFORM = "{platform}"\n'
+        f'ACCELERATOR = "{vendor}"\n'
         f"KERNELS = ({body})\n"
         f"NATIVE_HOSTS = {_env_module().flag('FLAGOS_BUILD_NATIVE_HOST')}\n"
         f"NATIVE_VENDOR = {_native_vendor_cohort() is not None}\n"
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-
-def _platform_aliases(accelerator: str) -> list[str]:
-    """Every other name for `accelerator`'s platform: its vendor, when it differs.
-
-    CMake's per-platform enters are one spelling per platform -- `_flagos_is_<id>`
-    for most, `_flagos_is_metax` for the row whose vendor is also its id -- so a
-    build told the vendor of a row whose id differs (`mthreads`, `hygon`,
-    `apple`, `nvidia`) was left on the default arms, and a build told the row
-    that shares `metax`'s vendor stayed there rather than entering the CUDA
-    arms its toolkit answers. Both sides resolve any name in this list to its
-    last item, which is the row. Takes its argument rather than reading the
-    build's: a later read of setup.py must answer for this build only.
-    """
-    target = _alias_target(accelerator)
-    return [] if target is None else [accelerator, target]
-
-
-def _alias_target(platform: str) -> str | None:
-    """The row `platform` resolves to, when that is not itself.
-
-    The vendor, when it differs from the id; for a row that is its own vendor
-    (`metax`) the id of the platform it shares a vendor with, because its
-    toolkit answers that platform's arms. No other row shares a vendor, so the
-    answer is a fact of the table rather than a lookup here.
-    """
-    vendor = _PLATFORM_TO_VENDOR.get(platform)
-    if vendor is None:
-        return None
-    if vendor != platform:
-        return vendor
-    return _SHARED_VENDOR.get(platform)
-
-
-#: A row whose vendor is also its id, and the row it shares that vendor with.
-_SHARED_VENDOR = {"metax": "cuda"}
-
-
-def _write_environment_platform_alias() -> None:
-    """Let this build enter the other spelling of its platform.
-
-    A build is told either its platform id or its vendor (`FLAGOS_ACCELERATOR`
-    accepts both), but the environment of a later process may carry the one
-    this build was not told. CMake enters exactly one spelling
-    (`_flagos_is_<id>`), so the other fell through to the default arms -- a
-    MetaX build told `nvidia` compiled the NVIDIA runtime sources and then
-    asked for Ascend's headers. The vendor of the value the environment
-    carried is an alias even where the table keys the platform by it (`metax`
-    is both), because CMake's per-platform enters for that name are `metax`'s
-    and the arms the platform needs are keyed on the id.
-
-    CMake writes the platform marker before any of this (it runs first); this
-    file carries the same facts to torch_fl, which reads it in preference to the
-    marker so a `metax` marker still resolves to `metax`.
-    """
-    path = os.path.join(BASE_DIR, "torch_fl", "_platform_alias.py")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    content = (
-        "# AUTO-GENERATED by setup.py at build time. Do not edit.\n"
-        '"""The table row this wheel was built for, and the other names for it."""\n'
-        "\n"
-        f"ACCELERATOR = {FLAGOS_ACCELERATOR!r}\n"
-        f"ALIASES = {_platform_aliases(FLAGOS_ACCELERATOR)!r}\n"
-        "\n"
-        "\n"
-        "def platform_from(name):\n"
-        '    """``name`` as the table id this wheel was built for."""\n'
-        "    return ACCELERATOR if name in ALIASES else name\n"
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -1353,7 +1205,6 @@ class BuildExtWithCmake(_build_ext):
         # list, so copy late-generated files explicitly into wheel staging.
         relative_paths = [
             "_build_config.py",
-            "_platform_alias.py",
             "compatibility.json",
             "lib/flagos_platform",
             "include/flagos.h",
@@ -1380,6 +1231,14 @@ class BuildExtWithCmake(_build_ext):
                 destination = os.path.join(self.build_lib, "torch_fl", relative_path)
                 self.mkpath(os.path.dirname(destination))
                 self.copy_file(source, destination)
+        wheel_package = Path(self.build_lib) / "torch_fl"
+        self.mkpath(str(wheel_package))
+        self.copy_file(
+            os.path.join(SOURCE_DIR, "cmake", "flagos_platforms.json"),
+            str(wheel_package / "_platforms.json"),
+        )
+        # build_py can stage a record left by an earlier in-place build.
+        (wheel_package / "_platform_alias.py").unlink(missing_ok=True)
         super().run()
         self._build_native_hosts()
 

@@ -87,7 +87,9 @@ def _load_closures():
         _orig_device=torch.device,
         _flagos_type=_FLAGOS,
         _VENDOR_DEVICE_ALIASES={"mthreads": ("cuda", "musa")},
-        _build_accelerator=lambda: "cuda",
+        _platform=types.SimpleNamespace(
+            build_info=lambda: types.SimpleNamespace(vendor="nvidia")
+        ),
     )
     exec(
         compile(ast.Module(body=wanted, type_ignores=[]), str(_SOURCE), "exec"),
@@ -181,12 +183,14 @@ class TestRemap:
 
     def test_a_vendor_alias_resolves_index_less_too(self, closures):
         """`musa` is the mthreads row's own spelling; same rule applies."""
-        closures._build_accelerator = lambda: "mthreads"
+        closures._platform.build_info = lambda: types.SimpleNamespace(vendor="mthreads")
         try:
             assert closures._remap("musa") == _FLAGOS
             assert closures._remap("musa:4") == f"{_FLAGOS}:4"
         finally:
-            closures._build_accelerator = lambda: "cuda"
+            closures._platform.build_info = lambda: types.SimpleNamespace(
+                vendor="nvidia"
+            )
 
 
 def test_neither_site_hardcodes_index_zero():

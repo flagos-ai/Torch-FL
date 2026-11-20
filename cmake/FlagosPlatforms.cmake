@@ -98,23 +98,8 @@ if(_flagos_accel_err)
     "${_flagos_known_str}.")
 endif()
 
-# The table row this build belongs to, and every other name for it that an
-# environment may carry. setup.py records them (torch_fl/_platform_alias.py) and
-# passes them here; this is their CMake-side twin, so a wheel built for a
-# platform enters that platform's arms whichever half of the name it was told.
-# `_flagos_is_<name>` below is what the target must match, and for the row whose
-# vendor is also its id that is the vendor's own name.
-#
-# FLAGOS_ACCELERATOR itself is read by the branches further down -- the MetaX
-# target name, the per-SDK messages -- so it keeps the name the build was given
-# and the row is resolved into FLAGOS_PLATFORM_ID beneath it.
+# The lookup above resolves both platform IDs and vendor names to a table row.
 set(FLAGOS_PLATFORM_ID "${FLAGOS_ACCELERATOR}")
-if(DEFINED FLAGOS_ACCELERATOR_ALIASES)
-  list(FIND FLAGOS_ACCELERATOR_ALIASES "${FLAGOS_ACCELERATOR}" _alias_index)
-  if(NOT _alias_index EQUAL -1)
-    list(GET FLAGOS_ACCELERATOR_ALIASES -1 FLAGOS_PLATFORM_ID)
-  endif()
-endif()
 
 # Every accelerator key that owns an aten/backends/<key>/ kernel tree, whatever
 # spelling this build was given, as one alternation: the vendor-kernel filter

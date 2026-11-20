@@ -19,6 +19,7 @@ import types
 import torch
 
 from .. import _C  # type: ignore[misc]
+from .._platform import build_info, detect_platform
 from ..compat import triton as _triton_compat
 
 from . import _streams
@@ -27,41 +28,9 @@ from . import meta  # noqa: F401
 
 _initialized = False
 
-# The platform cannot change while the process runs, so it is resolved once. The
-# stream helpers below consult it on every call, and a call happens once per
-# FlagGems kernel launch -- 483 a step on the Qwen-Image transformer -- while
-# detect_platform() stats the wheel on each call, which made this 0.34 s of every
-# step before it was cached.
-_platform_name: str | None = None
-
 
 def _platform() -> str:
-    """The accelerator this wheel was built for, as torch_fl itself names it.
-
-    Delegates to ``torch_fl._platform.detect_platform()`` -- the one detector
-    ``_select_backend_config()`` and the integration trees read too -- so the
-    stream helpers below cannot disagree with the conf this wheel routes its ops
-    through.
-
-    Reading ``lib/flagos_platform`` alone, as this used to, is wrong for every
-    CUDA-ABI boxing platform: ``cmake/flagos_platforms.json`` leaves
-    ``writes_platform_marker`` false for cuda, ppu, metax, kunlunxin and dcu,
-    because their conf follows from the build record rather than from a file the
-    build writes. On a DCU wheel the marker read therefore returned ``""`` -- an
-    accelerator no arm below knows -- while ``_select_backend_config()`` had
-    already resolved that same wheel to ``backends_hygon.conf``. That empty token
-    is what reached ``Stream.__init__``'s final arm and raised.
-
-    detect_platform() consults the marker too, but after the build record: the
-    marker names a native-kernel platform, and those are exactly the ones with a
-    stream class of their own.
-    """
-    global _platform_name
-    if _platform_name is None:
-        from .._platform import detect_platform
-
-        _platform_name = detect_platform()
-    return _platform_name
+    return detect_platform()
 
 
 def _has_cuda_runtime() -> bool:
@@ -160,15 +129,13 @@ def is_initialized():
 
 
 def _lazy_init():
-    from .. import _build_accelerator
-
     global _initialized
     if is_initialized():
         from ..compat.flaggems.autotune import refresh_tune_space
 
         # A lane whose first device touch happened after `import flag_gems`
         # reaches the tune-space repair only here; see the function.
-        refresh_tune_space(_build_accelerator())
+        refresh_tune_space(build_info().vendor)
         return
     _C._init()
     _initialized = True
@@ -176,7 +143,7 @@ def _lazy_init():
     from .. import _cuda_alias_active
     from ..compat.flaggems.runtime import initialize
 
-    initialize(_build_accelerator(), _cuda_alias_active)
+    initialize(build_info().vendor, _cuda_alias_active)
 
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from

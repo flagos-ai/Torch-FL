@@ -59,11 +59,12 @@ python scripts/tools/torch-fl-preflight --wheel dist/torch_fl-*.whl --platform c
 optional package differs from the build environment, and warns when PyTorch is
 within the declared range but not the exact build version. `--check-build-env`
 requires exact build dependency versions and is used by every wheel CI job.
-`--require-sdk` rejects wheels without a declared SDK version. The CLI lives in
-`scripts/tools/torch-fl-preflight`; it runs from that path against a wheel file
-(`--wheel dist/*.whl`) and is not installed as a console script. It runs
-without importing `torch_fl`, so checks do not trigger backend import side
-effects. SDK/driver compatibility still requires platform-specific testing.
+`--require-sdk` rejects wheels without a declared SDK version. Use
+`scripts/tools/torch-fl-preflight` to inspect files before installation or run
+`torch-fl-preflight --installed` to inspect the installed wheel. Both accept a
+platform ID or its vendor name, such as `mps` or `apple`. The CLI reads
+metadata without loading PyTorch or the native extension. SDK and driver
+compatibility still requires platform-specific testing.
 Generate a release table from the final wheel files with
 `python scripts/tools/torch-fl-preflight --wheel dist/*.whl --release --markdown-table`;
 the command fails if any artifact lacks its required provenance.
