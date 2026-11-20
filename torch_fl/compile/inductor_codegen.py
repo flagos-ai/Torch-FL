@@ -25,10 +25,9 @@ Two things get registered here:
    Python-level device guard and set_device switch to `torch.flagos`, so
    generated code moves the flagos current device rather than desyncing the two.
 
-   Ascend cannot inherit those: there is no CUDA runtime, so
-   `_cuda_getCurrentRawStream` does not exist and the C++/AOTI snippets name
-   CUDA types. Its overrides emit the ACL raw stream instead, and raise for the
-   C++ wrapper paths rather than emitting code that cannot compile.
+   All builds query the current stream through the flagos device runtime.
+   Ascend uses Python wrapper snippets because the CUDA C++ and AOTI wrappers
+   depend on CUDA types.
 
 2. The scheduling + wrapper codegen classes. These are the stock CUDA ones --
    flagos wants exactly the Triton/CUDA pipeline -- registered under the
@@ -56,15 +55,8 @@ from torch_fl.compile.platform_profile import platform_profile
 DEVICE_TYPE = "flagos"
 
 
-class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
-    """Code snippets inductor emits into generated flagos kernels.
-
-    Inherits the CUDA implementation for everything C++/driver related (kernel
-    headers, stream types, TMA helpers, AOTI guards) because those operate on
-    the underlying CUDA runtime, which is exactly what flagos runs on. Only the
-    Python-level device manipulation is overridden, to go through torch.flagos
-    so generated code doesn't desync the flagos and CUDA current device.
-    """
+class _FlagOSDeviceQueries:
+    """Python snippets backed by the flagos device runtime."""
 
     def set_device(self, device_idx: int) -> str:
         return f"torch.flagos.set_device({device_idx})"
@@ -79,106 +71,19 @@ class FlagOSDeviceOpOverrides(CUDADeviceOpOverrides):
         return "torch.flagos.synchronize()"
 
     def import_get_raw_stream_as(self, name: str) -> str:
-        from torch_fl._build_config import ACCELERATOR
-
-        if ACCELERATOR == "mthreads":
-            # MThreads FlagTree's launcher consumes a raw musaStream_t.  Do not
-            # import the CUDA binding on native MUSA, where CPU PyTorch has no
-            # CUDA runtime symbols.
-            return (
-                "from torch_fl.compile.flagtree_shim import "
-                f"get_musa_current_raw_stream as {name}"
-            )
-        if ACCELERATOR == "enflame":
-            # Same on GCU: triton_gcu's launcher takes a topsStream_t and there
-            # is no CUDA runtime behind torch.flagos.
-            return (
-                "from torch_fl.compile.flagtree_shim import "
-                f"get_gcu_current_raw_stream as {name}"
-            )
-        if ACCELERATOR == "kunlunxin":
-            # Same on Kunlunxin: FlagTree's XPU launcher takes a raw XPU stream
-            # handle and the de-boxed build has no CUDA runtime to import one
-            # from.
-            return (
-                "from torch_fl.compile.flagtree_shim import "
-                f"get_kunlunxin_current_raw_stream as {name}"
-            )
-        if ACCELERATOR == "iluvatar":
-            # Same on iluvatar: corex's launcher takes a cudaStream_t, and the
-            # build links the CPU torch wheel, which has no
-            # _cuda_getCurrentRawStream. The handle comes from the platform's own
-            # stream registry so a compiled kernel is ordered against eager work.
-            return (
-                "from torch_fl.compile.flagtree_shim import "
-                f"get_iluvatar_current_raw_stream as {name}"
-            )
-        if ACCELERATOR == "tsingmicro":
-            # Same on TsingMicro: FlagTree's TX launcher takes a raw txStream_t
-            # and this wheel pairs with a CPU-only torch, so there is no CUDA
-            # runtime to import one from.
-            return (
-                "from torch_fl.compile.flagtree_shim import "
-                f"get_tsingmicro_current_raw_stream as {name}"
-            )
-        if ACCELERATOR == "cambricon":
-            # Same on MLU: the launcher takes a raw cnrtQueue_t and this wheel
-            # pairs with the CPU-only torch, which has no
-            # _cuda_getCurrentRawStream. The handle comes from torch_fl's own
-            # stream registry, so a compiled kernel is ordered against the eager
-            # CNNL kernels producing its inputs.
-            return (
-                "from torch_fl.compile.flagtree_shim import "
-                f"get_cambricon_current_raw_stream as {name}"
-            )
-        # Boxing-backed flagos streams are CUDA streams on the same device.
-        return f"from torch._C import _cuda_getCurrentRawStream as {name}"
+        return f"from torch_fl.flagos._streams import get_raw_stream as {name}"
 
 
-class FlagOSAscendDeviceOpOverrides(DeviceOpOverrides):
-    """Generated-code snippets for flagos on Ascend.
+class FlagOSDeviceOpOverrides(_FlagOSDeviceQueries, CUDADeviceOpOverrides):
+    """Use the CUDA driver and C++ wrapper snippets for CUDA-shaped runtimes."""
 
-    Deliberately *not* derived from CUDADeviceOpOverrides. The CUDA versions of
-    the C++/AOTI members name CUDA types (`cudaStream_t`, `CUdeviceptr`) and its
-    `import_get_raw_stream_as` emits `torch._C._cuda_getCurrentRawStream`, which
-    does not exist in this build -- generated code would fail at import.
 
-    The Python members are all that the Python wrapper path needs, and they are
-    the whole supported surface here. The C++ wrapper members are left to the
-    base class, which raises NotImplementedError: an explicit failure beats
-    emitting a translation unit that cannot compile against CANN.
-    """
-
-    def set_device(self, device_idx: int) -> str:
-        return f"torch.flagos.set_device({device_idx})"
-
-    def device_guard(self, device_idx: int) -> str:
-        return f"torch.flagos.device({device_idx})"
-
-    def synchronize(self) -> str:
-        return "torch.flagos.synchronize()"
-
-    def import_get_raw_stream_as(self, name: str) -> str:
-        # The ACL stream torch_fl's own aclnn ops run on. Ordering matters: a
-        # kernel launched on rt stream 0 is not ordered against the ops producing
-        # its inputs (see scripts/vendor/patch_triton_ascend.py).
-        return (
-            "from torch_fl.accelerator.ascend.acl_stream import "
-            f"current_acl_raw_stream as {name}"
-        )
+class FlagOSAscendDeviceOpOverrides(_FlagOSDeviceQueries, DeviceOpOverrides):
+    """Device snippets for Ascend's Python wrapper."""
 
 
 def _device_op_overrides() -> DeviceOpOverrides:
-    """Pick the overrides matching this build's runtime.
-
-    Keyed on the vendor rather than on ``is_cuda_like``. MUSA and GCU are not
-    CUDA-like either, but their raw-stream imports are the ``musa``/``gcu``
-    branches of ``FlagOSDeviceOpOverrides.import_get_raw_stream_as`` -- selecting
-    the Ascend class for them emits ``current_acl_raw_stream`` into generated
-    code, which fails at call time on ``libflagos.so: undefined symbol:
-    GetCurrentStream``. Ascend is the only build whose device snippets come from
-    the ACL runtime.
-    """
+    """Select the C++ wrapper capabilities for the build."""
     if platform_profile().vendor == "ascend":
         return FlagOSAscendDeviceOpOverrides()
     return FlagOSDeviceOpOverrides()

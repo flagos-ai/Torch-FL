@@ -75,7 +75,7 @@ def test_event_elapsed_time_is_non_negative():
     start = torch_fl.flagos.Event(enable_timing=True)
     end = torch_fl.flagos.Event(enable_timing=True)
     start.record()
-    x = torch.randn(64, 64, device=DEVICE)
+    x = torch.ones(64, 64, device=DEVICE)
     torch.mm(x, x)
     end.record()
     end.synchronize()

@@ -294,6 +294,22 @@ def test_streams_agree_on_the_default_handle(shim):
     assert torch.cuda.current_stream(1).device_index == 1
 
 
+def test_native_stream_views_follow_the_device_registry(shim):
+    selected = {1: 13}
+    shim.flagos._C = types.SimpleNamespace(
+        _get_native_current_raw_stream=selected.__getitem__,
+        _get_native_default_raw_stream=lambda index: 10 + index,
+    )
+    _dcu_compat.patch_torch_cuda_for_dcu()
+
+    previous = torch.cuda.current_stream(1)
+    selected[1] = 19
+    assert previous.cuda_stream == 13
+    assert torch.cuda.current_stream(1).cuda_stream == 19
+    assert torch._C._cuda_getCurrentRawStream(1) == 19
+    assert torch.cuda.default_stream(1).cuda_stream == 11
+
+
 def test_event_is_constructible_for_the_triton_autotuner(shim):
     """triton.testing.do_bench times candidates with Event(enable_timing=True).
 

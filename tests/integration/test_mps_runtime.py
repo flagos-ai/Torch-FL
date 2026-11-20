@@ -67,11 +67,18 @@ def test_host_to_device_round_trip():
 
 
 def test_stream_and_timing_event_synchronize():
+    from torch_fl.flagos._streams import get_raw_stream
+
     stream = flagos.Stream()
+    default = get_raw_stream(0)
+    assert stream.cuda_stream != default
     event = flagos.Event(enable_timing=True)
     with flagos.stream(stream):
+        assert get_raw_stream(0) == flagos.current_stream(0).cuda_stream
+        assert get_raw_stream(0) == stream.cuda_stream
         y = torch.empty(1 << 20, device=DEVICE)
         y.fill_(1.0)
+    assert get_raw_stream(0) == default
     event.record(stream)
     stream.synchronize()
     event.synchronize()

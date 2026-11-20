@@ -306,25 +306,21 @@ static PyObject* _getMusaDeviceProperties(PyObject* self, PyObject* arg) {
   END_HANDLE_TH_ERRORS
 }
 
-#ifdef FLAGOS_NATIVE_NVIDIA_STREAM
-static PyObject* _getNvidiaRawStream(PyObject* arg, bool use_default) {
+static PyObject* _getOwnedRawStream(PyObject* arg, bool use_default) {
   HANDLE_TH_ERRORS
-  TORCH_CHECK(THPUtils_checkLong(arg), "native CUDA stream expects a device index");
-  const auto index = static_cast<int>(THPUtils_unpackLong(arg));
-  auto stream = use_default ? GetDefaultStreamForDevice(index) : GetCurrentStreamForDevice(index);
-  TORCH_CHECK(stream != nullptr, "native CUDA stream is unavailable for device ", index);
-  return PyLong_FromUnsignedLongLong(reinterpret_cast<unsigned long long>(stream));
+  TORCH_CHECK(THPUtils_checkLong(arg), "native stream expects a device index");
+  return PyLong_FromUnsignedLongLong(
+      c10::flagos::OwnedStreamHandle(THPUtils_unpackLong(arg), use_default));
   END_HANDLE_TH_ERRORS
 }
 
-static PyObject* _getNvidiaCurrentRawStream(PyObject*, PyObject* arg) {
-  return _getNvidiaRawStream(arg, false);
+static PyObject* _getNativeCurrentRawStream(PyObject*, PyObject* arg) {
+  return _getOwnedRawStream(arg, false);
 }
 
-static PyObject* _getNvidiaDefaultRawStream(PyObject*, PyObject* arg) {
-  return _getNvidiaRawStream(arg, true);
+static PyObject* _getNativeDefaultRawStream(PyObject*, PyObject* arg) {
+  return _getOwnedRawStream(arg, true);
 }
-#endif
 
 static PyObject* _getMusaCurrentRawStream(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
@@ -802,8 +798,8 @@ static PyMethodDef methods[] = {
     {"_get_default_generator", _getDefaultGenerator, METH_O, nullptr},
     {"_reserve_rng_seed", _reserveRngSeed, METH_VARARGS, nullptr},
 #ifdef FLAGOS_NATIVE_NVIDIA_STREAM
-    {"_get_nvidia_current_raw_stream", _getNvidiaCurrentRawStream, METH_O, nullptr},
-    {"_get_nvidia_default_raw_stream", _getNvidiaDefaultRawStream, METH_O, nullptr},
+    {"_get_nvidia_current_raw_stream", _getNativeCurrentRawStream, METH_O, nullptr},
+    {"_get_nvidia_default_raw_stream", _getNativeDefaultRawStream, METH_O, nullptr},
 #endif
 #ifdef USE_MUSA
     {"_get_musa_device_properties", _getMusaDeviceProperties, METH_O, nullptr},
@@ -850,6 +846,14 @@ extern "C" FLAGOS_EXPORT PyObject* initFlagosModule(void) {
   static struct PyModuleDef flagos_C_module = {
       PyModuleDef_HEAD_INIT, "torch_fl._C", nullptr, -1, methods};
   PyObject* mod = PyModule_Create(&flagos_C_module);
-
+  static PyMethodDef nativeStreamMethods[] = {
+      {"_get_native_current_raw_stream", _getNativeCurrentRawStream, METH_O, nullptr},
+      {"_get_native_default_raw_stream", _getNativeDefaultRawStream, METH_O, nullptr},
+      {nullptr, nullptr, 0, nullptr}};
+  if (mod && c10::flagos::HasOwnedStreams() &&
+      PyModule_AddFunctions(mod, nativeStreamMethods) < 0) {
+    Py_DECREF(mod);
+    return nullptr;
+  }
   return mod;
 }

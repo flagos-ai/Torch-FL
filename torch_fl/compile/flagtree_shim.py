@@ -148,119 +148,19 @@ def get_musa_device_capability(device: Any = None) -> Tuple[int, int]:
     return props.major, props.minor
 
 
-def get_musa_current_raw_stream(device: Any = None) -> int:
-    """The ``musaStream_t`` handle kernels must be launched on.
+def _get_raw_stream(device: Any = None) -> int:
+    from torch_fl.flagos._streams import get_raw_stream
 
-    This is the same handle the native mudnn kernels submit to, which is what
-    makes a compiled kernel ordered against eager MUSA work without an explicit
-    synchronize between them. Also the import target of the raw-stream line
-    inductor writes into generated code (see ``inductor_codegen.py``).
-    """
-    from torch_fl import _C
-
-    return _C._get_musa_current_raw_stream(_musa_device_index(device))
+    return get_raw_stream(device)
 
 
-def get_gcu_current_raw_stream(device: Any = None) -> int:
-    """The Enflame ``topsStream_t`` handle kernels must be launched on.
-
-    The GCU counterpart of ``get_musa_current_raw_stream``, and the import target
-    of the raw-stream line inductor writes into generated code. torch_fl's
-    ``TopsStream`` exposes the handle as ``gcu_stream`` -- the same name
-    FlagTree's enflame backend (and Enflame's ``triton_gcu`` plugin) reads off
-    its own stream objects -- so a compiled kernel submits to the stream the
-    eager topsaten kernels already use.
-
-    Unlike MUSA, no driver rebinding happens here: ``import torch_fl`` already
-    points the vendor Triton backend at flagos through
-    ``torch_fl.accelerator.enflame._gcu_compat.patch_gcu_triton_for_flagos()``.
-    """
-    from torch_fl import flagos
-    from torch_fl.compile.device_interface import FlagOSDeviceInterface
-
-    index = int(FlagOSDeviceInterface._vendor_device(device))
-    return flagos.current_stream(index).gcu_stream
-
-
-def get_kunlunxin_current_raw_stream(device: Any = None) -> int:
-    """The raw XPU stream handle kernels must be launched on.
-
-    Kunlunxin's de-boxed backend has one queue per device, denoted by handle 0,
-    and ``torch.flagos.current_stream`` returns the stand-in that carries it
-    (there is no CUDA ``_cuda_getCurrentRawStream`` and no vendor raw-stream
-    binding in ``_C`` to read it from). This is the import target of the
-    raw-stream line inductor writes into generated code (see
-    ``inductor_codegen.py``), so a compiled kernel records the same default
-    stream the eager xdnn kernels submit to.
-    """
-    from torch_fl import flagos
-    from torch_fl.compile.device_interface import FlagOSDeviceInterface
-
-    index = int(FlagOSDeviceInterface._vendor_device(device))
-    return flagos.current_stream(index).handle
-
-
-def get_iluvatar_current_raw_stream(device: Any = None) -> int:
-    """The ``cudaStream_t`` handle vendor and FlagGems kernels must share.
-
-    This is the same handle the eager iluvatar kernels submit to
-    (``IluvatarCurrentStream`` in ``aten/backends/iluvatar/iluvatar_common.h``),
-    which is what makes a compiled kernel ordered against eager work without an
-    explicit synchronize between them.
-
-    Read from ``torch_fl._C`` for the same reason MUSA's is: corex's runtime is
-    CUDA-shaped, so torch_fl's own registry creates an actual stream per device
-    (``runtime/accelerator/iluvatar/stream.cc``), but the build links the CPU
-    torch wheel -- there is no ``_cuda_getCurrentRawStream``, and no ``c10::cuda``
-    anywhere in the build -- so the registry has to be asked through a binding of
-    its own rather than through torch.
-    """
-    from torch_fl import _C
-
-    return _C._get_iluvatar_current_raw_stream(_musa_device_index(device))
-
-
-def get_cambricon_current_raw_stream(device: Any = None) -> int:
-    """The ``cnrtQueue_t`` handle compiled and eager kernels both submit to.
-
-    Handle 0 is the right answer rather than a fallback, the same way it is for
-    TsingMicro: MLU has one default queue per device, and the eager CNNL kernels
-    this backend already runs are submitted to ``GetCurrentStreamForDevice``,
-    whose value for the default queue is 0. Sharing that handle is what orders a
-    compiled kernel against the eager work producing its inputs.
-
-    Read through ``torch.flagos`` rather than ``torch._C`` because the build
-    links the CPU torch wheel, which has no ``_cuda_getCurrentRawStream``.
-    """
-    from torch_fl import flagos
-    from torch_fl.compile.device_interface import FlagOSDeviceInterface
-
-    index = int(FlagOSDeviceInterface._vendor_device(device))
-    return flagos.current_stream(index).handle
-
-
-def get_tsingmicro_current_raw_stream(device: Any = None) -> int:
-    """The raw TX stream handle kernels must be launched on.
-
-    The TX runtime has one default queue per device, denoted by handle 0, and
-    ``torch.flagos.current_stream`` returns the stand-in that carries it as
-    ``.txda_stream``. Reading that attribute rather than a literal 0 keeps the
-    value definitionally identical to what FlagTree's TsingMicro driver resolves
-    in ``get_txda_stream`` -- the stream the eager FlagGems kernels this build
-    already runs are launched on -- so compiled and eager kernels stay ordered
-    against each other.
-
-    There is no CUDA ``_cuda_getCurrentRawStream`` here and, unlike MUSA, no
-    vendor raw-stream binding in ``_C`` to read it from: the ``txStream_t`` the
-    C++ runtime creates for ``GetCurrentStreamForDevice`` is not reachable from
-    Python. This is the import target of the raw-stream line inductor writes into
-    generated code (see ``inductor_codegen.py``).
-    """
-    from torch_fl import flagos
-    from torch_fl.compile.device_interface import FlagOSDeviceInterface
-
-    index = int(FlagOSDeviceInterface._vendor_device(device))
-    return flagos.current_stream(index).txda_stream
+# Keep the imports in existing generated Inductor wrappers valid.
+get_musa_current_raw_stream = _get_raw_stream
+get_gcu_current_raw_stream = _get_raw_stream
+get_kunlunxin_current_raw_stream = _get_raw_stream
+get_iluvatar_current_raw_stream = _get_raw_stream
+get_cambricon_current_raw_stream = _get_raw_stream
+get_tsingmicro_current_raw_stream = _get_raw_stream
 
 
 _musa_driver_bound = False
