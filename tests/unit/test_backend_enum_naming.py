@@ -34,6 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCES = (
     "csrc/aten/common.h",
     "csrc/aten/common.cc",
+    "csrc/aten/route.h",
+    "csrc/aten/route.cc",
     "csrc/aten/dispatcher.h",
     "csrc/aten/generated/cuda_kernels.cc",
     "csrc/aten/backends/soft_lowp/ops.cc",
@@ -75,15 +77,6 @@ def test_cuda_codegen_emits_the_boxing_slot():
 
 def test_cuda_spelling_stays_an_accepted_alias():
     """Field confs and FLAGOS_OP_<name>=cuda predate the rename."""
-    common = (REPO_ROOT / "csrc/aten/common.cc").read_text(encoding="utf-8")
-    assert "Backend::kCuda" not in common
-    parse = common[common.index("bool ParseBackendName") :]
-    parse = parse[: parse.index("const char* BackendName")]
-    assert '"cuda"' in parse and '"boxing"' in parse, (
-        "ParseBackendName must accept both 'boxing' (canonical) and 'cuda' "
-        "(legacy alias)"
-    )
-    # The canonical name is what BackendName reports back.
-    name_fn = common[common.index("const char* BackendName") :]
-    name_fn = name_fn[: name_fn.index("// Parse one conf file")]
-    assert 'case Backend::kBoxing:       return "boxing";' in name_fn
+    routes = (REPO_ROOT / "csrc/aten/route.cc").read_text(encoding="utf-8")
+    assert re.search(r'\{"cuda",\s*Backend::kBoxing\}', routes)
+    assert re.search(r'\{Backend::kBoxing,\s*"boxing",', routes)

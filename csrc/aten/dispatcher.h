@@ -308,8 +308,7 @@ class Dispatcher {
       if (stay.empty()) {
         throw std::runtime_error(DecodedRefusalFor(route_key, backend));
       }
-      backend = ParseBackendName(stay);
-      fn = DecodedFallbackFn(backend);
+      fn = DecodedFallbackFn(stay, backend);
       if (!fn) throw std::runtime_error(DecodedRefusalFor(route_key, backend));
     }
     LogDispatch(route_key, backend);
@@ -341,34 +340,6 @@ class Dispatcher {
   }
 
  private:
-  // FLAGOS_FORCE_BACKEND asks for one backend family across the whole routing
-  // table, so a miss for the family it named is a hard error rather than a
-  // silent fall-through. Only `flaggems` and `vendor` get here: `tileops` is a
-  // repin of ops the conf already annotates `# tileops`, so a miss there means
-  // the op was never a TileOPs candidate and nothing was asked of it.
-  void ThrowIfForcedBackendMissing(const std::string& op_name,
-                                   Backend backend) const {
-    const std::string& forced = ForcedBackendMode();
-    if (forced.empty()) return;
-
-    if (forced == "flaggems" &&
-        (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
-      throw std::runtime_error(
-          op_name +
-          ": FLAGOS_FORCE_BACKEND=flaggems but no FlagGems implementation is "
-          "compiled into this wheel (rebuild with FLAGOS_BUILD_FLAGGEMS_CPP=1 "
-          "or FLAGOS_BUILD_FLAGGEMS=1)");
-    }
-    if (forced == "vendor" && backend != Backend::kFlagGemsCpp &&
-        backend != Backend::kFlagGems && backend != Backend::kNone &&
-        backend != Backend::kTileOps) {
-      throw std::runtime_error(
-          op_name +
-          ": FLAGOS_FORCE_BACKEND=vendor but no vendor kernel is registered "
-          "for this op");
-    }
-  }
-
   // GetFn, plus the dtype escape from the FlagGems route.
   //
   // Existing platform capability guards predate configured dtype clauses.
@@ -501,64 +472,20 @@ class Dispatcher {
     return nullptr;
   }
 
-  // Distinguishes "conf says none but the op was registered anyway" from a
-  // genuinely missing kernel. The first is a codegen/conf mismatch and the
-  // operator-support docs are the place to fix it; the second is a build gap.
-  //
-  // Every message keeps the phrase "backend not registered": it is what callers
-  // and tests match on to tell "this wheel cannot do that" from "the op is
-  // broken". The build set, when the wheel records one, is appended as the
-  // reason rather than replacing it.
-  static std::string DispatchFailureMessage(Backend backend) {
-    if (backend == Backend::kNone) {
-      return ": routed to 'none' (no accelerated impl on this platform) but the "
-             "op is registered on PrivateUse1 -- regenerate the vendor conf so "
-             "registration and routing agree";
-    }
-    std::string message = ": backend not registered";
-#if defined(FLAGOS_BUILTIN_KERNELS)
-    // The compile definition setup.py derives from the same kernel switches as
-    // the build record, so the wheel can name the missing set instead of
-    // leaving the user to guess whether it is a build gap or a broken install.
-    const char* kernel_set = KernelSetOf(backend);
-    if (kernel_set != nullptr &&
-        !flagos_env::ListedIn(FLAGOS_BUILTIN_KERNELS, kernel_set)) {
-      message += std::string(" (the '") + kernel_set +
-                 "' kernel set was not compiled into this wheel)";
-    }
-#endif
-    return message;
-  }
-
-  // That slot's kernel, or nullptr when the build has none.
-  FnPtr DecodedFallbackFn(Backend backend) const {
-    switch (backend) {
-      case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
-      case Backend::kBoxing:      return cuda_fn_;
-      case Backend::kNvidia:      return nvidia_fn_.load(std::memory_order_acquire);
-      case Backend::kHygon:       return hygon_fn_.load(std::memory_order_acquire);
-      default:                    return nullptr;
-    }
-  }
-
-  // The slots a decoded pair may be asked for by
-  // FLAGOS_SOFT_LOWP_STAY_ON_ROUTE, spelled the way a conf spells them. Only
-  // the two that can answer a decoded pair: a C++ FlagGems kernel (real, and
-  // does not run Python), or boxing.
-  static Backend ParseBackendName(const std::string& raw) {
-    if (flagos_env::EnvIs(raw.c_str(), "hygon")) return Backend::kHygon;
-    if (flagos_env::EnvIs(raw.c_str(), "nvidia")) return Backend::kNvidia;
-    const char* boxing[] = {"boxing", "cuda"};
-    for (const char* name : boxing) {
-      if (flagos_env::EnvIs(raw.c_str(), name)) return Backend::kBoxing;
-    }
-    const char* gemm[] = {"flaggems_cpp", "flagos"};
-    for (const char* name : gemm) {
-      if (flagos_env::EnvIs(raw.c_str(), name)) return Backend::kFlagGemsCpp;
+  // Decoded pairs only accept raw kernels from these slots.
+  FnPtr DecodedFallbackFn(const std::string& name, Backend& backend) const {
+    if (ParseBackendName(name, &backend)) {
+      switch (backend) {
+        case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
+        case Backend::kBoxing: return cuda_fn_;
+        case Backend::kNvidia: return nvidia_fn_.load(std::memory_order_acquire);
+        case Backend::kHygon: return hygon_fn_.load(std::memory_order_acquire);
+        default: break;
+      }
     }
     TORCH_CHECK(false,
                 "FLAGOS_SOFT_LOWP_STAY_ON_ROUTE=\"",
-                raw,
+                name,
                 "\" names no live slot for a decoded pair; use boxing or "
                 "flaggems_cpp");
   }
@@ -594,72 +521,11 @@ class Dispatcher {
            "registered for";
   }
 
-  // Which kernel set provides a backend, named the way setup.py::KERNEL_SET_NAME
-  // and the KERNELS tuple in torch_fl/_build_config.py name it. nullptr for a
-  // backend that no kernel set owns.
-  static const char* KernelSetOf(Backend backend) {
-    switch (backend) {
-      case Backend::kBoxing:        return "boxing";
-      case Backend::kFlagGemsCpp: return "flaggems_cpp";
-      case Backend::kFlagGems:    return "flaggems";
-      case Backend::kTileOps:     return "tileops";
-      // Every remaining backend is the accelerator's own native kernel library
-      // (ACLNN, mudnn, topsaten, ...), which the single FLAGOS_BUILD_VENDOR switch
-      // compiles. There is one such library per build, never two.
-      case Backend::kAscend:
-      case Backend::kMthreads:
-      case Backend::kMetax:
-      case Backend::kTsingMicro:
-      case Backend::kEnflame:     return "vendor";
-      case Backend::kKunlunxin:   return "vendor";
-      case Backend::kIluvatar:    return "vendor";
-      case Backend::kCambricon:   return "vendor";
-      case Backend::kApple:       return "vendor";
-      case Backend::kDrobotics:   return "vendor";
-      case Backend::kNvidia:     return "vendor";
-      case Backend::kHygon:      return "vendor";
-      case Backend::kNone:
-      case Backend::kUncached:    return nullptr;
-    }
-    return nullptr;
-  }
-
-  // The names the dispatch log prints. Several are what the SDK-era conf spelled
-  // the same kernel (`musa`, `gcu`, `mps`, `flagos`, `flagos_python`) and are kept
-  // for the tests and logs that read them. tests/unit/test_ops_conf_log_names.py
-  // holds this list against the shipped confs: a conf key the log cannot print
-  // has no dispatch line to assert against.
   static void LogDispatch(const std::string& op_name, Backend backend) {
     static const bool enabled = LogEnabled("dispatch");
     if (!enabled) return;
     fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(),
-            NameOf(backend));
-  }
-
-  // The name the dispatch log prints for `backend`.
-  static const char* NameOf(Backend backend) {
-    const char* name;
-    switch (backend) {
-      case Backend::kBoxing:        name = "boxing"; break;
-      case Backend::kFlagGemsCpp:   name = "flagos"; break;  // keep old name for test compat
-      case Backend::kFlagGems:      name = "flagos_python"; break;  // keep old name for test compat
-      case Backend::kAscend:        name = "ascend"; break;
-      case Backend::kMthreads:      name = "musa"; break;
-      case Backend::kMetax:         name = "metax"; break;
-      case Backend::kTsingMicro:    name = "tsingmicro"; break;
-      case Backend::kEnflame:       name = "gcu"; break;
-      case Backend::kKunlunxin:     name = "kunlunxin"; break;
-      case Backend::kIluvatar:      name = "iluvatar"; break;
-      case Backend::kCambricon:     name = "cambricon"; break;
-      case Backend::kTileOps:       name = "tileops"; break;
-      case Backend::kApple:         name = "mps"; break;
-      case Backend::kDrobotics:     name = "drobotics"; break;
-      case Backend::kNvidia:        name = "nvidia"; break;
-      case Backend::kHygon:         name = "hygon"; break;
-      case Backend::kNone:          name = "none"; break;
-      default:                      name = "unknown"; break;
-    }
-    return name;
+            BackendLogName(backend));
   }
 
   const char* op_name_ = nullptr;
