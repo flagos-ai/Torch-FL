@@ -73,6 +73,11 @@
     "names the build variant, and a platform publishes to one lane however many",
     "SDK variants it builds. Empty where nothing is published (tsingmicro, bpu).",
     "",
+    "registration: generated ATen registration fragments relative to csrc/aten.",
+    "base is always included for its platform. vendor and flaggems follow the",
+    "compiled kernel sets. native_host extends the FlagGems registration.",
+    "boxing and tileops replace the default set when their variant is selected.",
+    "",
     "vendor_torch_libraries: whether the platform sources a vendor libtorch in",
     "the wheel. vendor_torch_gate, when present, names the one kernel switch the",
     "build has to compile for that to actually happen (the CUDA-ABI platforms",
@@ -82,6 +87,10 @@
   "accelerators": {
     "cuda": {
       "vendor": "nvidia",
+      "registration": {
+        "flaggems": "generated/register_flaggems_nvidia.inc",
+        "boxing": "generated/register.inc"
+      },
       "_comment": [
         "NVIDIA CUDA. FlagGems-primary by default: FLAGOS_BUILD_BOXING is off,",
         "so the wheel does not compile the generated CUDA boxing kernels and",
@@ -115,6 +124,10 @@
     },
     "ppu": {
       "vendor": "thead",
+      "registration": {
+        "flaggems": "generated/register_flaggems_thead.inc",
+        "boxing": "generated/register.inc"
+      },
       "_comment": [
         "T-Head PPU: CUDA toolchain + a bundled PPU libtorch, no native kernel",
         "dir. FlagGems-primary by default now that FLAGOS_BUILD_BOXING is off:",
@@ -146,6 +159,12 @@
     },
     "metax": {
       "vendor": "metax",
+      "registration": {
+        "flaggems": "generated/register_flaggems_metax.inc",
+        "boxing": "generated/register.inc",
+        "native_host": "generated/register_flaggems_metax_native_host.inc",
+        "tileops": "generated/register_tileops_metax.inc"
+      },
       "_comment": [
         "MetaX is a CUDA-boxing build: the generated CUDA boxing kernels",
         "re-dispatch PrivateUse1 -> CUDA into maca's libtorch_cuda.so; the",
@@ -187,6 +206,10 @@
     },
     "kunlunxin": {
       "vendor": "kunlunxin",
+      "registration": {
+        "vendor": "backends/kunlunxin/generated/kunlunxin_register.inc",
+        "flaggems": "backends/kunlunxin/generated/kunlunxin_flaggems_register.inc"
+      },
       "_comment": [
         "Kunlunxin XPU: a native PrivateUse1 backend. The ops live in the vendor",
         "op library (xdnn_pytorch) and the runtime sources under kunlunxin/ call",
@@ -230,6 +253,10 @@
     },
     "iluvatar": {
       "vendor": "iluvatar",
+      "registration": {
+        "vendor": "backends/iluvatar/generated/iluvatar_register.inc",
+        "flaggems": "backends/iluvatar/generated/iluvatar_flaggems_register.inc"
+      },
       "_comment": [
         "Iluvatar BI-V150 (Tianshu), corex 4.5.0 SDK. The SDK is CUDA-shaped",
         "(cuda_runtime.h, libcudart.so.10.2, libcupti.so.10.2) but there is no",
@@ -286,6 +313,9 @@
     },
     "ascend": {
       "vendor": "ascend",
+      "registration": {
+        "base": "backends/ascend/generated/ascend_register.inc"
+      },
       "_comment": [
         "Huawei CANN: ACLNN is the only operator library, FlagGems Python is on by",
         "default (FlagTree Triton), boxing is off (the conf routes nothing to the",
@@ -319,6 +349,10 @@
     },
     "tsingmicro": {
       "vendor": "tsingmicro",
+      "registration": {
+        "flaggems": "generated/register_flaggems_tsingmicro.inc",
+        "boxing": "generated/register_boxing_tsingmicro.inc"
+      },
       "_comment": [
         "TsingMicro Kuiper: FlagGems Python is the operator path; boxing is an explicit",
         "opt-in, so the default wheel compiles no CUDA boxing kernels. Nothing routes to",
@@ -363,6 +397,10 @@
     },
     "dcu": {
       "vendor": "hygon",
+      "registration": {
+        "flaggems": "generated/register_flaggems_hygon.inc",
+        "boxing": "generated/register.inc"
+      },
       "_comment": [
         "Hygon DTK: the vendor torch is a hipified build registering its HIP",
         "kernels under the CUDA key, so the generated boxing kernels dispatch into",
@@ -400,6 +438,10 @@
     },
     "gcu": {
       "vendor": "enflame",
+      "registration": {
+        "vendor": "backends/enflame/generated/gcu_register.inc",
+        "flaggems": "backends/enflame/generated/gcu_flaggems_register.inc"
+      },
       "_comment": [
         "Enflame GCU: no CUDA runtime, topsaten provides the native compute ops",
         "(FLAGOS_BUILD_VENDOR), ops without a topsaten kernel fall back to CPU.",
@@ -428,6 +470,10 @@
     },
     "musa": {
       "vendor": "mthreads",
+      "registration": {
+        "vendor": "backends/mthreads/generated/musa_register.inc",
+        "flaggems": "backends/mthreads/generated/musa_flaggems_register.inc"
+      },
       "_comment": [
         "Moore Threads MUSA: native operator route (mudnn), no CUDA runtime, so",
         "boxing is off and the vendor kernels are mandatory. FlagGems Python is on",
@@ -465,6 +511,9 @@
     },
     "bpu": {
       "vendor": "drobotics",
+      "registration": {
+        "base": "backends/bpu/generated/bpu_register.inc"
+      },
       "_comment": [
         "D-Robotics RDK BPU: the runtime layer (UCP allocator, device/stream stubs)",
         "is native, and so is the generated operator layer in backends/bpu/.",
@@ -507,6 +556,10 @@
     "cambricon": {
 
       "vendor": "cambricon",
+      "registration": {
+        "vendor": "backends/cambricon/generated/cambricon_register.inc",
+        "flaggems": "backends/cambricon/generated/cambricon_flaggems_register.inc"
+      },
       "_comment": [
         "Cambricon MLU (BANG). A native backend like kunlunxin/mps, not a",
         "boxing one: the runtime sources under csrc/runtime/accelerator/",
@@ -568,6 +621,9 @@
     },
     "mps": {
       "vendor": "apple",
+      "registration": {
+        "base": "backends/apple/generated/mps_register.inc"
+      },
       "_comment": [
         "Apple Silicon (M-series) via Metal. A native backend, not a boxing one:",
         "no CUDA runtime exists and none is faked, so boxing, FlagGems and FlagTree",
