@@ -52,7 +52,7 @@ def _select_backend_config() -> None:
     """Resolve the routing file before the first operator dispatch.
 
     A user-supplied path wins. The built platform selects the vendor's default
-    conf, with separate generated native-host configurations where needed.
+    conf, with a separate generated conf for MetaX native hosts.
     """
     global _BACKEND_CONFIG_PATH
 
@@ -102,15 +102,16 @@ def _select_backend_config() -> None:
 
     build = _platform.build_info()
     vendor = build.vendor if build.platform else "nvidia"
-    native_conf = build.has_native_host_config
+    native_metax = build.platform == "metax" and build.native_hosts
     conf_dir = os.path.join(os.path.dirname(__file__), "configs")
-    suffix = "_native_host" if native_conf else ""
-    conf_name = f"backends_{vendor}{suffix}.conf"
+    conf_name = (
+        "backends_metax_native_host.conf" if native_metax else f"backends_{vendor}.conf"
+    )
     conf_path = os.path.join(conf_dir, conf_name)
     if os.path.exists(conf_path):
         _BACKEND_CONFIG_PATH = conf_path
         return
-    if native_conf:
+    if native_metax:
         raise RuntimeError(
             f"native-host wheel is missing its generated config: {conf_path}"
         )

@@ -94,23 +94,19 @@ def test_native_claim_generation_rejects_an_unavailable_kernel():
 
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("runtime_value", ["0", "1"])
-@pytest.mark.parametrize(
-    ("platform_id", "vendor", "has_variant"),
-    [("metax", "metax", True), ("dcu", "hygon", True), ("ascend", "ascend", False)],
-)
 def test_build_record_selects_native_config_before_torch_import(
-    tmp_path, monkeypatch, native, runtime_value, platform_id, vendor, has_variant
+    tmp_path, monkeypatch, native, runtime_value
 ):
-    platform = load("torch_fl/_platform.py", "native_routing_platform")
+    platform = load("torch_fl/_platform.py", "metax_routing_platform")
     (tmp_path / "_build_config.py").write_text(
-        f'PLATFORM = "{platform_id}"\nACCELERATOR = "{vendor}"\nNATIVE_HOSTS = {native}\n'
+        f'PLATFORM = "metax"\nACCELERATOR = "metax"\nNATIVE_HOSTS = {native}\n'
     )
     monkeypatch.setattr(platform, "_torch_fl_package_dir", lambda: tmp_path)
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", runtime_value)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     directory = tmp_path / "configs"
     directory.mkdir()
-    for name in (f"backends_{vendor}.conf", f"backends_{vendor}_native_host.conf"):
+    for name in ("backends_metax.conf", "backends_metax_native_host.conf"):
         (directory / name).write_text("")
     namespace = functions(
         "torch_fl/__init__.py",
@@ -123,12 +119,10 @@ def test_build_record_selects_native_config_before_torch_import(
         },
     )
     namespace["_select_backend_config"]()
-    select_native = native and has_variant
-    suffix = "_native_host" if select_native else ""
-    name = f"backends_{vendor}{suffix}.conf"
+    name = "backends_metax_native_host.conf" if native else "backends_metax.conf"
     assert namespace["_BACKEND_CONFIG_PATH"] == str(directory / name)
     assert "FLAGOS_BACKEND_CONFIG" not in os.environ
-    if select_native:
+    if native:
         (directory / name).unlink()
         with pytest.raises(RuntimeError, match="missing its generated config"):
             namespace["_select_backend_config"]()

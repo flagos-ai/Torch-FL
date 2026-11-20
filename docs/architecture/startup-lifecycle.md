@@ -43,9 +43,8 @@ The build writes the platform ID and vendor name into `torch_fl/_build_config.py
 as `PLATFORM` and `ACCELERATOR`. The same record carries the compiled kernel
 sets and native-host flags. Startup and the compiler read it through
 `torch_fl/_platform.py`. Wheels ship a copy of `cmake/flagos_platforms.json` for
-name resolution and native-host configuration selection. Older wheel records
-can resolve their platform from the accelerator, platform marker, or legacy
-PPU bundle.
+name resolution. Older wheel records can resolve their platform from the
+accelerator, platform marker, or legacy PPU bundle.
 
 The phases call `torch_fl/accelerator/_loader.py` to preload the vendor
 libraries before importing PyTorch and expose the launcher symbols before

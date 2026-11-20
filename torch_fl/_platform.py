@@ -36,8 +36,9 @@ def _platform_table():
     return json.loads(table.read_text(encoding="utf-8"))["accelerators"]
 
 
-_PLATFORMS = _platform_table()
-PLATFORM_VENDOR = {platform: row["vendor"] for platform, row in _PLATFORMS.items()}
+PLATFORM_VENDOR = {
+    platform: row["vendor"] for platform, row in _platform_table().items()
+}
 _VENDOR_TO_PLATFORM = {vendor: platform for platform, vendor in PLATFORM_VENDOR.items()}
 _ACCELERATOR_TO_PLATFORM = {
     **{platform: platform for platform in PLATFORM_VENDOR},
@@ -73,12 +74,6 @@ class BuildInfo(NamedTuple):
     @property
     def vendor(self) -> str:
         return vendor_for(self.platform) or self.accelerator
-
-    @property
-    def has_native_host_config(self) -> bool:
-        # Codegen emits a registration fragment for each native-host conf.
-        registration = _PLATFORMS.get(self.platform, {}).get("registration", {})
-        return self.native_hosts and bool(registration.get("native_host"))
 
 
 def _torch_fl_package_dir() -> Path | None:

@@ -139,7 +139,7 @@ def test_hcu_entries_use_published_structured_implementations(generator):
     assert "StructuredCall<at::native::structured_bmm_out_cuda>" in source
     assert "Matrix<" not in source
     assert "DeviceBoxingGuard" not in source and "redispatch" not in source
-    routes = (ROOT / "torch_fl/configs/backends_hygon_native_host.conf").read_text()
+    routes = (ROOT / "torch_fl/configs/backends_hygon.conf").read_text()
     for row in catalog:
         assert row["vendor"] == "hygon"
         expected = ",".join(row["dtypes"]) + ":hygon"

@@ -492,8 +492,6 @@ def test_metax_tileops_experiment_registration_matches_its_conf():
         ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "OFF"}, ["flaggems"]),
         ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "ON"}, ["vendor", "flaggems"]),
         ("metax", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
-        ("hygon", {}, ["flaggems"]),
-        ("hygon", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
         ("metax", {"FLAGOS_BUILD_TILEOPS": "ON"}, ["tileops"]),
         (
             "metax",
@@ -761,8 +759,7 @@ def test_conf_route_counts_are_stable():
         # "Day-0 boxing confs"): what FlagGems does not cover -- including each
         # platform's measured triton gaps -- is `none` (cpu_fallback). The
         # boxing routes live in backends_<platform>_boxing.conf.
-        # Only the native-host variant carries the mean.dim and mean.out hosts.
-        "hygon": {"none": 1580, "flaggems": 462},
+        "hygon": {"none": 1578, "flaggems": 464},
         # embedding and embedding.out gained a native topsaten kernel and now
         # route to gcu instead of falling through to none; see
         # NATIVE_TRITON_GAPS in scripts/codegen/gen_vendor_confs.py.

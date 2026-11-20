@@ -912,9 +912,6 @@ frontend revision. Its measured exceptions are BF16 `mm`/`bmm` and FP32
 implementation or reduction stub on PrivateUse1 storage and the current HIP
 stream. The generated conf states conditions such as
 `bmm = flaggems; BFloat16:hygon`; explicit FlagGems overrides remove them.
-The Hygon native-host wheel selects `backends_hygon_native_host.conf`, which
-retains the measured `mean.dim` and `mean.out` host routes. The ordinary wheel
-keeps those reductions on CPU fallback when the FP32 DTK kernel is unavailable.
 Hygon's per-exception ablations and full-model results are recorded in the
 [Hygon validation report](hygon-native-host-validation.md).
 

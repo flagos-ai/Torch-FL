@@ -10,7 +10,7 @@
 // claim without a route raises "routed to 'none' ... but the op is registered
 // on PrivateUse1" instead of reaching cpu_fallback.
 //
-// Total: 459 ops registered here.
+// Total: 461 ops registered here.
 //
 // Held back from the boxing claim: the conf routes them to `none`, or
 // `register.inc` has no wrapper for them:
@@ -1060,9 +1060,7 @@
 //   - maximum
 //   - maximum.out
 //   - mean
-//   - mean.dim
 //   - mean.dtype_out
-//   - mean.out
 //   - median.dim_values
 //   - median.out
 //   - min.dim_min
@@ -1876,6 +1874,8 @@
   m.impl("max_pool2d_with_indices", WrapperMaxPool2dWithIndices);
   m.impl("max_pool3d_with_indices", WrapperMaxPool3dWithIndices);
   m.impl("max_unpool2d", WrapperMaxUnpool2d);
+  m.impl("mean.dim", WrapperMeanDim);
+  m.impl("mean.out", WrapperMeanOut);
   m.impl("median", WrapperMedian);
   m.impl("median.dim", WrapperMedianDim);
   m.impl("min", WrapperMin);
