@@ -26,6 +26,7 @@ import pytest
 import torch_fl
 import torch
 
+from torch_fl import _platform
 from torch_fl._build_config import ACCELERATOR
 
 
@@ -891,11 +892,17 @@ def test_torch_backends_entry_point_init_is_idempotent():
     assert torch.flagos.is_available()
 
 
+def _set_compile_platform(monkeypatch, platform):
+    build = _platform.BuildInfo(platform=platform)
+    monkeypatch.setattr(_platform, "build_info", lambda: build)
+
+
 def test_ppu_flagtree_defaults_to_serial_compile(monkeypatch):
     """PPU FlagTree must avoid CUDA initialization in forked compile workers."""
     from torch_fl.compile import inductor_backend
 
     monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    _set_compile_platform(monkeypatch, "ppu")
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "ppu"
     )
@@ -910,6 +917,7 @@ def test_ppu_flagtree_preserves_explicit_compile_threads(monkeypatch):
     """An explicit per-compile or environment setting remains authoritative."""
     from torch_fl.compile import inductor_backend
 
+    _set_compile_platform(monkeypatch, "ppu")
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "ppu"
     )
@@ -936,7 +944,7 @@ def test_non_ppu_flagtree_keeps_default_compile_threads(monkeypatch):
     # backend, so pin it: on a GCU build the vendor driver serializes regardless
     # of the FlagTree backend name, which is a different rule than the one under
     # test here.
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
+    _set_compile_platform(monkeypatch, "cuda")
 
     patches = {}
     inductor_backend._patch_ppu_flagtree_compile_workers(patches)
@@ -952,7 +960,7 @@ def test_musa_flagtree_defaults_to_serial_compile(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "mthreads"
     )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
+    _set_compile_platform(monkeypatch, "musa")
 
     patches = {}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -967,7 +975,7 @@ def test_musa_flagtree_preserves_explicit_compile_threads(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "mthreads"
     )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
+    _set_compile_platform(monkeypatch, "musa")
 
     patches = {"compile_threads": 4}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -1368,7 +1376,6 @@ def test_gcu_guard_leaves_32bit_kernels_alone(device):
     torch.testing.assert_close(compiled, fn(x, y), rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.gcu
 def test_gcu_defaults_to_serial_compile(monkeypatch):
     """A tops pointer only resolves against the current device, so no forking.
 
@@ -1378,7 +1385,7 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
     from torch_fl.compile import inductor_backend
 
     monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "enflame")
+    _set_compile_platform(monkeypatch, "gcu")
 
     patches = {}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -1388,8 +1395,6 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
     patches = {"compile_threads": 4}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
     assert patches["compile_threads"] == 4
-
-    _skip_unless_gcu(needs_triton=False)
 
 
 # The generic FlagTree test above also covers the MThreads runtime when the
