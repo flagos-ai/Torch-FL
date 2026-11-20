@@ -49,6 +49,24 @@ nightly requests require `platforms=all`. `weekly` is reserved and rejected
 before hardware dispatch. Both CI and FlagCICD Entry expose these profile names.
 See [Functional CI profiles](ci-test-tiers.md) for execution and evidence rules.
 
+## TileOPs experiment lane
+
+TileOPs has a dedicated `tileops-ci.yml` workflow rather than an entry in
+`.github/configs/`. Its source job runs on relevant changes to the TileOPs
+runtime, generators, generated products, experiment configs and pins. It installs
+the pinned CPU torch/TileLang/TileOPs stack, checks generated products through
+`scripts/tools/tileops_source_check.py`, and runs the routing/runtime contract
+tests. The ordinary platform matrix does not build or select a `_tileops` config.
+
+The MetaX job runs on a daily schedule or an explicit `metax=true` workflow
+dispatch. It fetches the private provider at its full commit pin, builds a wheel
+with exactly the `tileops` kernel set, installs that wheel, and requires four
+native routes plus one CPU-fallback route to pass. A missing
+`TILEOPS_GITHUB_TOKEN`, a skipped case, or a wheel containing boxing or FlagGems
+fails the lane. Ascend and MUSA remain source/routing integrations until their
+`flagos` storage boundary is resolved; this workflow does not claim native
+hardware support for either.
+
 ## One required check
 
 The top-level job named **CI complete** runs after the shared checks and every

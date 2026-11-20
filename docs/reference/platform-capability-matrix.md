@@ -78,7 +78,11 @@ sets a wheel compiles: `vendor` (the platform's native tree), `flaggems`
 CUDA boxing kernels) and `tileops`. Which are on by default is a property of the
 platform, not a per-build choice. `boxing` is off on every platform by default —
 a CUDA-ABI wheel is FlagGems-primary and carries no vendor libtorch unless a
-build opts into boxing.
+build opts into boxing. The three `backends_<vendor>_tileops.conf` files are
+separate experiments: a default wheel never selects them. The dedicated
+`tileops-ci.yml` lane builds with `FLAGOS_BUILD_TILEOPS=1` and FlagGems off.
+MetaX is hardware-tested; Ascend and MUSA remain source-level routing
+integrations until their providers accept the `flagos` storage identity.
 
 ## Known gaps
 

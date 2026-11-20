@@ -82,6 +82,7 @@ def test_fallback_runs_nested_arguments_on_cpu(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clear_provider_state(monkeypatch):
+    _clear_global_provider_state()
     monkeypatch.setattr(runtime, "import_tileops", lambda: object())
     monkeypatch.setattr(runtime, "_instances", {})
     monkeypatch.setattr(runtime, "_ADAPTERS", {})
@@ -90,6 +91,18 @@ def _clear_provider_state(monkeypatch):
     monkeypatch.setattr(runtime, "configure_device", lambda target: None)
     monkeypatch.setattr(runtime, "_tileops_platform", lambda: "cuda")
     yield
+
+
+def _clear_global_provider_state():
+    """Remove a real provider cached before this module's monkeypatches.
+
+    The TileOPs source job installs the pinned provider in the same interpreter
+    collection. ``import_tileops`` is cached globally, so without this reset a
+    later test that replaces discovery modules can keep observing the real
+    provider. Tests that only exercise pure runtime code remain unchanged.
+    """
+    runtime._provider = None
+    runtime._provider_failure = None
 
 
 def _provider(monkeypatch, targets=(), detected=None):
@@ -194,6 +207,7 @@ def test_musa_provider_without_target_api_does_not_claim_cuda(monkeypatch):
 
 def test_flagos_tensor_selects_a_registered_native_provider(monkeypatch):
     """Provider target tables bridge torch_fl's PrivateUse1 device names."""
+    _clear_global_provider_state()
     monkeypatch.setattr(runtime, "_tileops_platform", lambda: "musa")
     _provider(monkeypatch, {"musa"}, {"musa": "musa"})
     assert runtime.resolve_target(_device("flagos")) == "musa"
@@ -330,6 +344,7 @@ def test_provider_serving_target_supports_settled_target_name():
 
 
 def test_target_comes_from_provider_or_platform(monkeypatch):
+    _clear_global_provider_state()
     monkeypatch.setattr(runtime, "_tileops_platform", lambda: "musa")
     _provider(monkeypatch, {"musa", "cuda"}, {"musa": "musa"})
     runtime.register_device_adapter(
