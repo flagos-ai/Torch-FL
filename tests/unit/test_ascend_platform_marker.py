@@ -58,33 +58,13 @@ def _fake_tree(tmp_path, monkeypatch, accelerator, marker=""):
     conf_dir.mkdir()
     record = f'ACCELERATOR = "{accelerator}"\nKERNELS = ()\n'
     (tree / "_build_config.py").write_text(record)
-    (tree / "_platform_alias.py").write_text(
-        f'ACCELERATOR = "{accelerator}"\nALIASES = ["{accelerator}"]\n'
-    )
     if marker:
         (lib_dir / "flagos_platform").write_text(f"{marker}\n")
     (conf_dir / "backends_ascend.conf").write_text("")
     (conf_dir / "backends_apple.conf").write_text("")
     (conf_dir / "backends_metax.conf").write_text("")
-    # The build record answers from _env.py's directory and is cached, so it is
-    # read from the scratch tree here. conftest's _restore_build_record fixture
-    # clears that cache after every test, so the real record comes back.
-    env_module = torch_fl._env
-    cached_lookup = env_module._build_record
-    monkeypatch.setattr(env_module, "__file__", str(tree / "_env.py"))
-    cached_lookup.cache_clear()
-    cached_lookup()
-    del cached_lookup
-    # _select_backend_config() answers from _build_config.py beside the package
-    # (torch_fl.__file__), and _platform.build_accelerator() resolves the
-    # package with find_spec() -- which reads sys.modules for an imported
-    # package, not sys.path -- so the record is pinned there for this test too.
     monkeypatch.setattr(torch_fl, "__file__", str(tree / "__init__.py"))
-    monkeypatch.setattr(
-        torch_fl._build_accelerator.__globals__["_platform"],
-        "build_accelerator",
-        lambda: accelerator,
-    )
+    monkeypatch.setattr(torch_fl._platform, "_torch_fl_package_dir", lambda: tree)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     monkeypatch.delenv("FLAGOS_FORCE_BACKEND", raising=False)
     return conf_dir

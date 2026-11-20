@@ -97,9 +97,11 @@ def test_native_claim_generation_rejects_an_unavailable_kernel():
 def test_build_record_selects_native_config_before_torch_import(
     tmp_path, monkeypatch, native, runtime_value
 ):
-    package = ModuleType("torch_fl")
-    package._build_config = SimpleNamespace(NATIVE_HOSTS=native)
-    monkeypatch.setitem(sys.modules, "torch_fl", package)
+    platform = load("torch_fl/_platform.py", "metax_routing_platform")
+    (tmp_path / "_build_config.py").write_text(
+        f'PLATFORM = "metax"\nACCELERATOR = "metax"\nNATIVE_HOSTS = {native}\n'
+    )
+    monkeypatch.setattr(platform, "_torch_fl_package_dir", lambda: tmp_path)
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", runtime_value)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
     directory = tmp_path / "configs"
@@ -113,11 +115,7 @@ def test_build_record_selects_native_config_before_torch_import(
             "os": os,
             "__file__": str(tmp_path / "__init__.py"),
             "_env": SimpleNamespace(value=os.getenv),
-            "_platform": SimpleNamespace(
-                platform_for=lambda value: value, vendor_for=lambda value: value
-            ),
-            "_build_accelerator": lambda: "metax",
-            "_is_ppu_build": lambda: False,
+            "_platform": platform,
         },
     )
     namespace["_select_backend_config"]()

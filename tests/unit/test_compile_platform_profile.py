@@ -35,7 +35,15 @@ import pytest
 
 import torch
 
+from torch_fl import _platform
 from torch_fl.compile import platform_profile as pp
+
+
+def _set_accelerator(monkeypatch, accelerator):
+    build = _platform.BuildInfo(
+        accelerator=accelerator, platform=_platform.platform_for(accelerator)
+    )
+    monkeypatch.setattr(_platform, "build_info", lambda: build)
 
 
 @pytest.fixture
@@ -47,6 +55,7 @@ def as_ascend(monkeypatch):
             lambda: pp._ASCEND_PROFILE,
             raising=False,
         )
+    _set_accelerator(monkeypatch, "ascend")
     return pp._ASCEND_PROFILE
 
 
@@ -58,7 +67,7 @@ def as_cuda(monkeypatch):
             lambda: pp._CUDA_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
+    _set_accelerator(monkeypatch, "cuda")
     return pp._CUDA_PROFILE
 
 
@@ -80,7 +89,7 @@ def as_musa(monkeypatch):
     # The record carries the *vendor* name setup.py writes for a MUSA build;
     # `platform_profile()` accepts either, and the generated-code branches key
     # on this one.
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
+    _set_accelerator(monkeypatch, "mthreads")
     return pp._MUSA_PROFILE
 
 
@@ -99,7 +108,7 @@ def as_kunlunxin(monkeypatch):
             lambda: pp._KUNLUNXIN_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "kunlunxin")
+    _set_accelerator(monkeypatch, "kunlunxin")
     return pp._KUNLUNXIN_PROFILE
 
 
@@ -137,7 +146,7 @@ def as_iluvatar(monkeypatch):
             lambda: pp._ILUVATAR_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "iluvatar")
+    _set_accelerator(monkeypatch, "iluvatar")
     return pp._ILUVATAR_PROFILE
 
 
@@ -156,7 +165,7 @@ def as_tsingmicro(monkeypatch):
             lambda: pp._TSINGMICRO_PROFILE,
             raising=False,
         )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "tsingmicro")
+    _set_accelerator(monkeypatch, "tsingmicro")
     # Triton's driver resolution reaches a real device on whichever accelerator
     # this suite happens to run on, and on Cambricon that loads the mlu driver --
     # which recompiles and reloads bang_utils and kills the process, so an
@@ -199,9 +208,9 @@ def as_tsingmicro(monkeypatch):
         ("", pp._CUDA_PROFILE),
     ],
 )
-def test_profile_selected_by_accelerator(monkeypatch, accelerator, expected):
-    """ACCELERATOR picks the profile; unknown values fall back to CUDA."""
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", accelerator)
+def test_profile_selected_by_platform(monkeypatch, accelerator, expected):
+    """The platform ID picks the profile, with CUDA as the default."""
+    _set_accelerator(monkeypatch, accelerator)
     assert pp.platform_profile() == expected
 
 
@@ -1230,11 +1239,10 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
     ],
 )
 def test_generated_wrappers_import_the_shared_stream_getter(vendor, monkeypatch):
-    from torch_fl import _build_config
     from torch_fl.compile import inductor_codegen as ic
     from torch_fl.flagos._streams import get_raw_stream
 
-    monkeypatch.setattr(_build_config, "ACCELERATOR", vendor)
+    _set_accelerator(monkeypatch, vendor)
     overrides = ic._device_op_overrides()
     assert isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides) == (
         vendor == "ascend"

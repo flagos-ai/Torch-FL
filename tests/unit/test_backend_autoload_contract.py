@@ -89,15 +89,14 @@ def test_native_metax_never_selects_a_vendor_torch_core(
     monkeypatch, native_hosts, build_override
 ):
     calls = []
-    package = SimpleNamespace(_build_config=SimpleNamespace(NATIVE_HOSTS=native_hosts))
     linker = SimpleNamespace(ensure_maca_libtorch_links=lambda: calls.append("vendor"))
-    monkeypatch.setitem(sys.modules, "torch_fl", package)
     monkeypatch.setitem(
         sys.modules, "torch_fl.accelerator.metax._metax_libtorch_link", linker
     )
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", build_override)
     function = _function("_relink_vendor_libtorch")
-    function.__globals__["_build_accelerator"] = lambda: "metax"
+    build = SimpleNamespace(platform="metax", native_hosts=native_hosts)
+    function.__globals__["_platform"] = SimpleNamespace(build_info=lambda: build)
     function()
     assert calls == ([] if native_hosts else ["vendor"])
 
@@ -207,14 +206,14 @@ def test_foreign_privateuse1_claim_fails_before_native_extension(current):
     assert "TORCH_DEVICE_BACKEND_AUTOLOAD=0" in message
 
 
-@pytest.mark.parametrize("accelerator,expected", [("mthreads", ["0"]), ("nvidia", [])])
-def test_only_musa_disables_vendor_entry_points_before_torch_import(
-    accelerator, expected
-):
+@pytest.mark.parametrize("platform,expected", [("musa", ["0"]), ("cuda", [])])
+def test_only_musa_disables_vendor_entry_points_before_torch_import(platform, expected):
     disable = _function("_disable_vendor_backend_autoload")
     values = []
     disable.__globals__.update(
-        _build_accelerator=lambda: accelerator,
+        _platform=SimpleNamespace(
+            build_info=lambda: SimpleNamespace(platform=platform)
+        ),
         _env=SimpleNamespace(set_foreign=lambda key, value: values.append(value)),
     )
     disable()

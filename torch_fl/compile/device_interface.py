@@ -49,6 +49,7 @@ from torch._dynamo.device_interface import (
     caching_worker_device_properties,
 )
 
+from torch_fl import _platform
 from torch_fl.compile.platform_profile import platform_profile
 from torch_fl.flagos._streams import (
     get_raw_stream as _raw_stream,
@@ -74,16 +75,12 @@ DEVICE_TYPE = "flagos"
 # backend on a wheel that pairs with a CPU-only torch. The distinction that
 # matters to this module is the same for all of them, so keep the checks keyed
 # on this set rather than on a vendor name.
-_NATIVE_ACCELERATORS = frozenset(
-    {"mthreads", "enflame", "kunlunxin", "iluvatar", "tsingmicro"}
-)
+_NATIVE_PLATFORMS = frozenset({"musa", "gcu", "kunlunxin", "iluvatar", "tsingmicro"})
 
 
 def is_native_accelerator() -> bool:
     """Whether the active accelerator runs without a usable CUDA runtime."""
-    from torch_fl._build_config import ACCELERATOR
-
-    return ACCELERATOR in _NATIVE_ACCELERATORS
+    return _platform.build_info().platform in _NATIVE_PLATFORMS
 
 
 def _triton_backend() -> tuple[str, str]:
@@ -402,8 +399,6 @@ class FlagOSDeviceInterface(DeviceInterface):
 
         _, triton_backend = _triton_backend()
         if triton_backend not in triton.backends.backends:
-            from torch_fl._build_config import ACCELERATOR
-
             hint = {
                 "mthreads": "install the MThreads FlagTree runtime for MUSA",
                 "enflame": (
@@ -414,7 +409,7 @@ class FlagOSDeviceInterface(DeviceInterface):
                     "install the TsingMicro FlagTree build, whose triton carries "
                     "the 'tsingmicro' backend"
                 ),
-            }.get(ACCELERATOR, "install the vendor Triton runtime")
+            }.get(_platform.build_info().vendor, "install the vendor Triton runtime")
             raise RuntimeError(
                 f"triton not built with the '{triton_backend}' backend; {hint}"
             )

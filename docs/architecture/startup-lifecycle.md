@@ -39,6 +39,13 @@ The import pipeline has five ordered phases:
 | `_phase_vendor_compat` | Install vendor shims and FlagGems codegen preparation | No |
 | `_phase_ecosystem` | Set up FlagGems operators, CUDA alias and the FlagOS distributed backend | No |
 
+The build writes the platform ID and vendor name into `torch_fl/_build_config.py`
+as `PLATFORM` and `ACCELERATOR`. The same record carries the compiled kernel
+sets and native-host flags. Startup and the compiler read it through
+`torch_fl/_platform.py`. Wheels ship a copy of `cmake/flagos_platforms.json` for
+name resolution. Older wheel records can resolve their platform from the
+accelerator, platform marker, or legacy PPU bundle.
+
 The phases invoke the FlagGems and Triton hooks in `torch_fl/compat/` at the
 points where the required device and driver state is available.
 `torch.flagos.init()` runs the device-time hooks after the native device

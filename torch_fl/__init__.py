@@ -26,69 +26,7 @@ from torch_fl import _env  # noqa: F401
 from torch_fl import _platform
 
 
-# The answer is fixed for the life of the process: a different wheel is a
-# different process, and nothing in this one can swap _build_config.py out from
-# under it. Reading it is not cheap, though -- find_spec, a Path.resolve (a
-# realpath syscall) and an exec_module -- and _remap asks for it on every call
-# that carries a device argument, which is every factory call in a model.
-# Measured on an MLU590 with no cache: torch.device("flagos:0") took 197us and
-# torch.empty(4, device=...) 207.5us, against 2us and 6.8us with it.
-#
-# The memo lives here rather than in _platform.build_accelerator() on purpose.
-# The integration test trees load _platform.py by path -- under their own module
-# names, and not through sys.modules -- to stand in for "a process running a
-# different wheel", and a memo inside _platform would follow them across the
-# swap and answer with the previous test's platform. Here, only the alias the
-# runtime itself calls is memoised and those callers keep reading through.
-_ACCELERATOR = (None, "")
-
-
-def _build_accelerator() -> str:
-    """Accelerator this wheel was built for, lowercased ("" if unknown).
-
-    Thin alias for torch_fl._platform.build_accelerator(), which the integration
-    test trees read too (loaded by path). Read from the _build_config.py setup.py
-    writes at build time, and never from the environment. The generated file is
-    what makes a DCU wheel self-describing: _select_backend_config() runs before
-    `import torch`, so it cannot inspect torch.version.hip to detect DCU on its
-    own. A stale FLAGOS_ACCELERATOR from another build must not select a conf the
-    wheel was not built for; to route through a different conf on purpose,
-    FLAGOS_BACKEND_CONFIG names the file directly.
-
-    Memoised after the first call; see _ACCELERATOR.
-    """
-    global _ACCELERATOR
-    # Keyed on the delegate's identity, not on nothing. In a real process
-    # _platform.build_accelerator is the same function object for the life of the
-    # runtime and this is a hit every time. A test that pins a different record
-    # replaces that attribute on the module (tests/unit/test_ascend_platform_marker.py
-    # does exactly this), which makes the identity differ and re-reads -- so the
-    # memo cannot shadow a monkeypatched source.
-    source = _platform.build_accelerator
-    if _ACCELERATOR[0] is source:
-        return _ACCELERATOR[1]
-    value = source()
-    _ACCELERATOR = (source, value)
-    return value
-
-
-def _is_ppu_build() -> bool:
-    """True for a PPU wheel, which needs backends_thead.conf rather than CUDA's.
-
-    PPU has its own value in the build record's ACCELERATOR now (it is a CUDA-ABI
-    boxing vendor like MetaX/DCU), so the record already answers this -- no
-    environment probe. The lib_thead/ bundle directory stays as a fallback so a
-    wheel built before PPU had an accelerator value of its own is still
-    recognised.
-
-    Without this, PPU read backends_nvidia.conf and inherited its FlagGems routes.
-    That is what sent mm/bmm through the _hygon kernel PPU's triton cannot
-    compile: 28 minutes inside a single test_mm and a SIGSEGV at interpreter
-    exit, on a runner where every assertion still passed.
-    """
-    if _build_accelerator() == "thead":
-        return True
-    return os.path.isdir(os.path.join(os.path.dirname(__file__), "lib_thead"))
+_build_accelerator = _platform.build_accelerator
 
 
 # The conf _select_backend_config() resolved, or "" when the user named one
@@ -111,53 +49,10 @@ def _mps_shutdown_allocator() -> None:
 
 
 def _select_backend_config() -> None:
-    """Pick the op-routing config file for this build.
+    """Resolve the routing file before the first operator dispatch.
 
-    Ordinary wheels select backends_<vendor>.conf. Experimental MetaX native
-    hosts select backends_metax_native_host.conf with their additional claims.
-    Selection is a property of the build, not of a runtime mode variable.
-    The platform is read from the build record setup.py writes
-    (torch_fl/_build_config.py): the wheel records the platform it resolved
-    FLAGOS_ACCELERATOR to, and that record, not the environment and not a file
-    in the install directory, is what this reads.
-
-    It used to read lib/flagos_platform first. That file is an install()
-    artifact in torch_fl/lib/, a directory no build cleans in a source tree
-    (and one the marker tests write "ascend"/"mps" into), so whichever platform
-    built there last decided the conf for every later build: a MetaX build that
-    inherited an "mps" marker read the empty backends_apple.conf and raised
-    "routed to 'none'" for every op that conf does not list. It is no longer
-    consulted, and builds that write no marker now remove a stale one.
-
-    Within that build family, numerical kernel switches decide which entry
-    point an op takes once dispatched: flaggems_cpp is Backend::kFlagGemsCpp and
-    needs FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor);
-    tileops is Backend::kTileOps and needs FLAGOS_BUILD_TILEOPS=ON plus an SM90
-    device. Where the slot is empty Dispatcher::GetFn degrades to the boxing
-    kernel rather than raising, so one file stays correct across both builds.
-    FLAGOS_FORCE_BACKEND survives as a table transform in common.cc
-    (ApplyForcedBackend): the tileops mode repins every op the conf annotates
-    `# tileops` onto that path, the same op set backends_tileops.conf used to
-    carry.
-
-    Which entry point an op actually takes is then decided by what got compiled
-    in, not by which file was read. flaggems_cpp is Backend::kFlagGemsCpp and needs
-    FLAGOS_BUILD_FLAGGEMS_CPP=ON (liboperators.so built for the vendor); tileops
-    needs FLAGOS_BUILD_TILEOPS=ON and a provider for the actual device. Where the
-    slot is empty Dispatcher::GetFn degrades to the boxing kernel rather than
-    raising, so one file stays correct across both builds. Every conf states all
-    five keys per op directly, and a route a build cannot serve degrades at
-    dispatch rather than being swapped for another file.
-
-    An explicit FLAGOS_BACKEND_CONFIG always wins (advanced/testing use), and
-    the per-op FLAGOS_OP_<name> overrides in common.cc still apply on top. This
-    must run before the first op dispatch triggers BackendTable() init; setting
-    it at import time (before any flagos tensor op) is well before that.
-
-    The choice is handed to the C++ reader through
-    _C._set_backend_config_path(), not written to os.environ. It used to be an
-    environment write, which made the wheel's own selection indistinguishable
-    from a user's for the rest of the process -- see backend_config_path().
+    A user-supplied path wins. The built platform selects the vendor's default
+    conf, with a separate generated conf for MetaX native hosts.
     """
     global _BACKEND_CONFIG_PATH
 
@@ -205,44 +100,27 @@ def _select_backend_config() -> None:
         _BACKEND_CONFIG_PATH = resolved
         return
 
-    # The conf follows from the build itself, not from a runtime mode switch: the
-    # recorded accelerator says what the wheel was built for, and the conf is
-    # named after the vendor it resolves to. The record is the answer; the two
-    # wheels that predate their record value still resolve: an older PPU wheel
-    # reports cuda and is recognised by lib_thead/, an older MetaX wheel
-    # reports maca.
-    platform = _platform.platform_for(_build_accelerator())
-    if _is_ppu_build():
-        platform = "ppu"
-    vendor = _platform.vendor_for(platform) or "nvidia"
-    conf_name = f"backends_{vendor}.conf"
-    if vendor == "metax":
-        from torch_fl import _build_config
-
-        if getattr(_build_config, "NATIVE_HOSTS", False):
-            conf_name = f"backends_{vendor}_native_host.conf"
-    conf_path = os.path.join(os.path.dirname(__file__), "configs", conf_name)
+    build = _platform.build_info()
+    vendor = build.vendor if build.platform else "nvidia"
+    native_metax = build.platform == "metax" and build.native_hosts
+    conf_dir = os.path.join(os.path.dirname(__file__), "configs")
+    conf_name = (
+        "backends_metax_native_host.conf" if native_metax else f"backends_{vendor}.conf"
+    )
+    conf_path = os.path.join(conf_dir, conf_name)
     if os.path.exists(conf_path):
         _BACKEND_CONFIG_PATH = conf_path
         return
-    if conf_name.endswith("_native_host.conf"):
+    if native_metax:
         raise RuntimeError(
             f"native-host wheel is missing its generated config: {conf_path}"
         )
-    # A vendor conf named for the build's own accelerator but shipped under the
-    # other of its names: `musa` and `mthreads` are the same vendor (the record,
-    # the CI platform and the conf generator each use one of them). Without the
-    # fallback no conf is selected at all, which leaves every op unclaimed while
-    # the build still has its vendor and FlagGems kernels -- the call reaches
-    # the dispatcher from the other side. The `[flagos] loading backend config`
-    # line names the file that was taken.
-    alias_path = os.path.join(
-        os.path.dirname(__file__),
-        "configs",
-        f"backends_{_platform.vendor_alias(_build_accelerator())}.conf",
-    )
-    if alias_path != conf_path and os.path.exists(alias_path):
-        _BACKEND_CONFIG_PATH = alias_path
+
+    # Older packages shipped the conf under the platform ID.
+    if build.platform and build.platform != vendor:
+        alias_path = os.path.join(conf_dir, f"backends_{build.platform}.conf")
+        if os.path.exists(alias_path):
+            _BACKEND_CONFIG_PATH = alias_path
 
 
 def backend_config_path() -> str:
@@ -263,39 +141,19 @@ def backend_config_path() -> str:
 
 
 def _relink_vendor_libtorch() -> None:
-    """Select bundled vendor libtorch before importing torch.
+    """Select the vendor's libtorch before PyTorch maps its core libraries.
 
-    MetaX, DCU and PPU all run on a *forked* libtorch whose core .so
-    (libc10/libtorch_cpu/libtorch_python/...) differ from the upstream ones a
-    stock ``torch==X.Y.Z+cpu`` wheel ships.  A self-contained wheel bundles them
-    under torch_fl/lib_{maca,dcu,ppu}/ and expose them through a private torch
-    package facade without modifying the installed PyTorch wheel;
-    see torch_fl.accelerator._vendor_libtorch for why a ctypes preload alone is
-    not enough there.
-
-    This MUST run before `import torch` -- afterwards libc10 is already mapped
-    and selecting another core is too late. Every backend's entry point is idempotent and a
-    no-op when its bundle dir is absent (a plain in-place build, where torch
-    already IS the vendor wheel), so this is safe to call unconditionally.
-
-    MetaX native-host wheels retain the official CPU core. Other MetaX builds
-    select the vendor core (an in-place build reaches it through
-    FLAGOS_VENDOR_TORCH_LIB, a self-contained wheel through lib_metax/).
-    DCU and PPU have no native-kernel
-    mode, so bundle-dir presence alone decides.  The CUDA backend is not here:
-    the official +cpu wheel's core .so ARE the upstream ones, so only the extra
-    CUDA libs are missing and _preload_cuda_assets() below handles those with
-    ctypes.
+    MetaX native-host builds use the official CPU core. Hygon normally
+    layers its device libraries over that core. Older PPU wheels identify
+    their runtime through the bundled libraries.
     """
-    accel = _build_accelerator()
+    build = _platform.build_info()
 
-    if accel == "metax":
-        from torch_fl import _build_config
-
+    if build.platform == "metax":
         # Native hosts link the official CPU core and submit through MACA's
         # runtime. Selecting a discoverable vendor core here would make that
         # contract depend on which package the application imports first.
-        if getattr(_build_config, "NATIVE_HOSTS", False):
+        if build.native_hosts:
             return
         from torch_fl.accelerator.metax._metax_libtorch_link import (
             ensure_maca_libtorch_links,
@@ -304,7 +162,7 @@ def _relink_vendor_libtorch() -> None:
         ensure_maca_libtorch_links()
         return
 
-    if accel == "hygon":
+    if build.platform == "dcu":
         # Decoupled by default: preload only DTK's device libraries on top of the
         # official core, leaving torch/lib untouched. FLAGOS_DCU_VENDOR_CORE=1
         # selects the full vendor core through a private facade. See
@@ -316,7 +174,7 @@ def _relink_vendor_libtorch() -> None:
 
     # PPU is its own accelerator now; an older PPU wheel reports "cuda" and is
     # recognised by its lib_thead/ bundle instead.
-    if accel in ("nvidia", "", "thead"):
+    if build.platform == "ppu":
         from torch_fl.accelerator._vendor_libtorch import bundled_lib_dir
 
         if bundled_lib_dir("lib_thead", "libtorch_cuda.so"):
@@ -442,7 +300,7 @@ def _disable_vendor_backend_autoload() -> None:
     TORCH_DEVICE_BACKEND_AUTOLOAD=1 restores stock torch_musa behaviour (useful
     for A/B testing against the vendor plugin, with torch_fl not imported).
     """
-    if _build_accelerator() != "mthreads":
+    if _platform.build_info().platform != "musa":
         return
     _env.set_foreign("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
 
@@ -456,7 +314,7 @@ def _validate_dcu_decoupled_runtime() -> None:
     FLAGOS_DCU_SKIP_RUNTIME_CHECK=1 to bypass (e.g. when deliberately testing a
     non-matching wheel pair).
     """
-    if _build_accelerator() != "hygon":
+    if _platform.build_info().platform != "dcu":
         return
     if _env.flag("FLAGOS_DCU_SKIP_RUNTIME_CHECK"):
         return
@@ -724,7 +582,9 @@ def _alias_cuda_to_flagos():
     def _remap(dev):
         """Vendor accelerator aliases -> flagos; everything else untouched."""
         if isinstance(dev, str):
-            aliases = _VENDOR_DEVICE_ALIASES.get(_build_accelerator(), ("cuda",))
+            aliases = _VENDOR_DEVICE_ALIASES.get(
+                _platform.build_info().vendor, ("cuda",)
+            )
             for alias in aliases:
                 if dev == alias:
                     return _flagos_type
@@ -1272,7 +1132,7 @@ def _register_bpu_compile_backend() -> None:
     The optional integration runner reports import failures independently. A
     board without the ONNX toolchain can still use its eager fallback.
     """
-    if _build_accelerator() != "bpu":
+    if _platform.build_info().platform != "bpu":
         raise RuntimeError("BPU compile backend requires a BPU build")
     from torch_fl.accelerator import bpu
 
@@ -1324,7 +1184,7 @@ def activate_optional_integrations(*names: str, strict: bool = True) -> dict:
     selected = names or tuple(
         name
         for name in _OPTIONAL_INTEGRATIONS
-        if name != "bpu" or _build_accelerator() == "bpu"
+        if name != "bpu" or _platform.build_info().platform == "bpu"
     )
     unknown = sorted(set(selected) - set(_OPTIONAL_INTEGRATIONS))
     if unknown:
@@ -1436,7 +1296,7 @@ def _phase_claim() -> None:
     # the official torch+cpu Python wheel. The actual runtime then supports CUDA
     # dispatch while torch/version.py still reports cuda=None. Restore that build
     # metadata before optional packages inspect it and select a native library.
-    if _is_ppu_build():
+    if _platform.build_info().platform == "ppu":
         from torch_fl.accelerator.thead._ppu_libtorch_link import (  # noqa: E402
             restore_ppu_cuda_version,
         )
@@ -1495,7 +1355,7 @@ def _phase_claim() -> None:
 
     from . import flagos  # noqa: E402
 
-    if _build_accelerator() == "apple":
+    if _platform.build_info().platform == "mps":
         # Finish the allocator before torch's module teardown clears Storage
         # objects. A DataPtr can then be deleted without the caching allocator
         # reinitialising during static destruction.
@@ -1507,7 +1367,7 @@ def _phase_claim() -> None:
     torch._register_device_module("flagos", flagos)
     torch.utils.generate_methods_for_privateuse1_backend(for_storage=True)
 
-    if _build_accelerator() == "enflame":
+    if _platform.build_info().platform == "gcu":
         from .compat.flaggems.device import install_gcu_device_probes
 
         install_gcu_device_probes(flagos)
@@ -1540,7 +1400,7 @@ def _phase_vendor_compat() -> None:
     from .compat.flaggems import device, runtime
 
     native_host._bootstrap_launcher()
-    device.install_device_shims(_build_accelerator(), flagos)
+    device.install_device_shims(_platform.build_info().vendor, flagos)
 
     # torch::utils::device_lazy_init(PrivateUse1) imports the module named
     # `torch_<backend_name>` and calls its _lazy_init(). It only does so once some
@@ -1559,7 +1419,7 @@ def _phase_vendor_compat() -> None:
         activate_optional_integrations("apex", strict=False)
 
     # Patch FlagGems codegen config before any FlagGems code is imported
-    runtime.configure_vendor(_build_accelerator(), flagos)
+    runtime.configure_vendor(_platform.build_info().vendor, flagos)
     # patch_philox() is deliberately NOT called here: it imports
     # flag_gems, and on a build where the vendor's own device name has to be
     # aliased first (TsingMicro) that import needs _alias_cuda_to_flagos to have
@@ -1577,7 +1437,7 @@ def _phase_ecosystem() -> None:
     from .compat import triton
     from .compat.flaggems import device, ops, random, runtime
 
-    accelerator = _build_accelerator()
+    accelerator = _platform.build_info().vendor
     device.prepare_cuda(accelerator)
 
     # Capture the CUDA probe at the only point that answers the guard's
@@ -1646,7 +1506,7 @@ def _phase_ecosystem() -> None:
             "flex_attention",
             strict=False,
         )
-        if _build_accelerator() == "bpu":
+        if _platform.build_info().platform == "bpu":
             activate_optional_integrations("bpu", strict=False)
 
     from . import native_host

@@ -31,6 +31,7 @@ and must not need torch or a device.
 
 import ast
 import importlib.util
+import runpy
 import sys
 from pathlib import Path
 
@@ -355,27 +356,16 @@ _MIGRATION_EXEMPTIONS = frozenset(
 
 
 def test_platform_detector_covers_every_vendor_conf():
-    """A new vendor is a detector/conf naming change, not a suite branch.
-
-    Boxing, TileOPs and native-host files are variants of an existing platform;
-    they do not add a detector name.
-    """
+    """Each default routing file names a vendor from the platform table."""
     confs = {
         path.stem.removeprefix("backends_")
         for path in (REPO_ROOT / "torch_fl/configs").glob("backends_*.conf")
         if not path.stem.endswith(("_boxing", "_tileops", "_native_host"))
     }
-    platform_source = ast.parse(
-        (REPO_ROOT / "torch_fl/_platform.py").read_text(encoding="utf-8")
-    )
-    string_literals = {
-        node.value
-        for node in ast.walk(platform_source)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
+    detector = runpy.run_path(str(REPO_ROOT / "torch_fl/_platform.py"))
     assert confs
     for vendor in confs:
-        assert vendor in string_literals, vendor
+        assert detector["vendor_for"](detector["platform_for"](vendor)) == vendor
 
 
 def test_probe_recognizes_imported_and_qualified_detectors():
