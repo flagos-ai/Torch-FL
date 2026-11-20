@@ -26,6 +26,8 @@ environments), but the pin wiring is fully visible in their source.
 """
 
 import json
+import importlib.machinery
+import importlib.util
 import os
 import re
 import subprocess
@@ -49,6 +51,7 @@ PLATFORMS = [
     "hygon",
     "enflame",
     "iluvatar",
+    "kunlunxin",
     "metax",
     "mthreads",
     "thead",
@@ -217,6 +220,54 @@ def test_the_wheel_declares_the_flagtree_pin_its_platform_script_installs():
         assert f"flagtree=={version}" in _declared(platform), platform
 
 
+@pytest.mark.parametrize("compiler_present", [True, False])
+def test_kunlunxin_wheel_validates_its_xpu_compiler_without_stock_triton(
+    monkeypatch, compiler_present
+):
+    """The installed-wheel gate must accept XPU FlagTree and reject its absence."""
+    globals_ = _setup_globals()
+    monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "kunlunxin")
+    kwargs = globals_["_get_setup_kwargs"]()
+    loader = importlib.machinery.SourceFileLoader(
+        "kunlunxin_preflight_test", str(REPO_ROOT / "scripts/tools/torch-fl-preflight")
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    preflight = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(preflight)
+    versions = {
+        "torch": "2.10.0+cpu",
+        "packaging": "26.3",
+        "flagtree": _pins()["FLAGTREE_VERSION_kunlunxin"],
+        "flag_gems": _pins()["FLAGGEMS_VERSION_DEFAULT"],
+    }
+    monkeypatch.setattr(preflight, "installed_version", versions.get)
+    manifest = preflight.make_manifest(
+        platform="kunlunxin",
+        wheel_version=kwargs["version"],
+        kernels=["vendor", "flaggems"],
+        bundle_libdir="lib",
+        vendor_torch_libraries=False,
+        requirements=kwargs["install_requires"],
+        torch_abi=True,
+    )
+    if not compiler_present:
+        versions.pop("flagtree")
+    errors, _ = preflight.check_environment(
+        manifest,
+        platform="kunlunxin",
+        check_installed=True,
+        check_build_env=True,
+    )
+    if compiler_present:
+        assert not errors, errors
+    else:
+        assert any(
+            error.startswith("Required flagtree==") and error.endswith("missing")
+            for error in errors
+        ), errors
+    assert kwargs["python_requires"] == ">=3.10,<3.11"
+
+
 def test_flag_gems_is_declared_everywhere_at_the_pinned_version():
     pins = _pins()
     version = pins["FLAGGEMS_VERSION_DEFAULT"]
@@ -271,50 +322,24 @@ def test_cuda_package_metadata_makes_flagcx_an_explicit_extra(tmp_path, accelera
     assert "cuda-comm" in metadata.get_all("Provides-Extra", [])
 
 
-@pytest.mark.parametrize(
-    ("enabled", "cuda_version", "expected_code"),
-    [("0", "13.0.88", 0), ("0", "13.3.0", 0), ("1", "13.3.0", 0), ("1", "13.0.88", 1)],
-)
-def test_cuda_flagcx_provisioning_requires_explicit_compatible_opt_in(
-    enabled, cuda_version, expected_code, tmp_path
-):
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_cuda_flagcx_is_deferred_even_with_the_former_opt_in(enabled):
     hook = (HOOKS_DIR / "set_env_nvidia.sh").read_text()
-    branch = hook.split("# CUDA functional CI", 1)[1].split(
-        "# Install the published FlagGems wheel", 1
-    )[0]
-    branch = "# CUDA functional CI" + branch
-    script = (
-        'set -euo pipefail\nsource "$1"\npip_retry() { printf "INSTALL %s\\n" "$*"; }\n'
-        + branch
-        + "\nexport_ci_env FLAGCX_TORCH_BACKEND\n"
-        + '\nprintf "AUTOLOAD=%s TLE=%s\\n" "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" "${USE_TLE_DIST:-}"\n'
+    branch = (
+        "# FlagCX is deferred across CI."
+        + hook.split("# FlagCX is deferred across CI.", 1)[1].split(
+            "# Install the published FlagGems wheel", 1
+        )[0]
     )
     result = subprocess.run(
-        ["bash", "-c", script, "cuda-test", str(SCRIPTS_DIR / "lib/set_env_common.sh")],
-        env={
-            "PATH": "/usr/bin:/bin",
-            "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled,
-            "CUDA_VERSION": cuda_version,
-            "VENV_PYTHON": sys.executable,
-            "FLAGGEMS_INDEX_URL": "https://example.invalid/simple",
-            "FLAGCX_VERSION": _pins()["FLAGCX_VERSION_cuda"],
-            "GITHUB_ENV": str(tmp_path / "github-env"),
-        },
+        ["bash", "-c", "set -euo pipefail\n" + branch + '\ntest "$USE_TLE_DIST" = 0'],
+        env={"PATH": "/usr/bin:/bin", "TORCH_FL_CUDA_FLAGCX_WHEEL": enabled},
         capture_output=True,
         text=True,
     )
-    assert result.returncode == expected_code, result.stdout + result.stderr
-    if enabled == "0":
-        assert "INSTALL" not in result.stdout
-        assert "FlagCX communication is not validated" in result.stdout
-        assert "TLE=0" in result.stdout
-        assert (tmp_path / "github-env").read_text() == "FLAGCX_TORCH_BACKEND=vendor\n"
-    elif expected_code == 0:
-        assert f"flagcx==={_pins()['FLAGCX_VERSION_cuda']}" in result.stdout
-        assert "AUTOLOAD=0" in result.stdout
-    else:
-        assert "INSTALL" not in result.stdout
-        assert "CUDA 13.3" in result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FlagCX communication is deferred" in result.stdout
+    assert "TORCH_FL_CUDA_FLAGCX_WHEEL" not in hook
 
 
 def test_triton_is_declared_only_where_no_flagtree_build_is_pinned():
@@ -426,32 +451,31 @@ def test_cuda_runtime_wheels_still_follow_boxing(monkeypatch):
     assert [r for r in globals_["_install_requires"]() if r.startswith("nvidia-")]
 
 
-def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
-    """The two travel together: both describe the one published artifact.
+def test_published_sdk_or_flagtree_cohort_has_an_interpreter_pin():
+    """Interpreter restrictions follow the published compiler or SDK cohort.
 
-    An SDK segment (``+cuda13.3``) names the FlagTree build the wheel links, so
-    it must come with that build's interpreter. A platform-id segment (``+mps``)
-    names the wheel's platform and nothing else -- MPS links no FlagTree -- so it
-    must not borrow a pin it does not have; ``Requires-Python`` then falls back
-    to the base builds' range.
+    Kunlunxin keeps a platform-id wheel segment but depends on a cp310-only
+    FlagTree. Metal has neither an SDK segment nor a FlagTree dependency and
+    retains the base interpreter range.
     """
     pins = _pins()
     for platform in _platforms_in_the_table():
         segment = _wheel_local(platform)
-        if segment == platform:
-            assert f"FLAGTREE_PYTHON_VERSION_{platform}" not in pins, platform
-        else:
-            assert bool(segment) == bool(
-                pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-            ), platform
+        compiler = pins.get(f"FLAGTREE_VERSION_{_table_vendor(platform)}")
+        needs_pin = bool(compiler) or bool(segment and segment != platform)
+        assert bool(pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")) == needs_pin, (
+            platform
+        )
 
 
-def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
+def test_the_wheel_segment_matches_the_flagcx_sdk_where_flagcx_exists():
     """One SDK spelling, not two.
 
     The segment names the SDK the wheel was built against, and for every
-    platform that has a FlagCX build that is the same token FlagCX is published
-    under (`+cuda13.3`, `+dtk2604`). Ascend was aligned to CANN for this reason.
+    platform that has a FlagCX build that is the same SDK token FlagCX is
+    published under (`+cuda13.3`, `+dtk2604`). Ascend's official FlagCX package
+    additionally names the 910C build variant; that suffix is not a CANN version
+    and must not put a chip name into torch_fl's platform-wide wheel filename.
     PPU has no FlagCX build yet, so it has no counterpart to check against.
     """
     pins = _pins()
@@ -461,6 +485,8 @@ def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
             continue
         _, _, sdk = flagcx.partition("+")
         assert sdk, (platform, flagcx)
+        if platform == "ascend":
+            sdk = sdk.removesuffix(".910c")
         assert _wheel_local(platform) == sdk, (platform, _wheel_local(platform), sdk)
 
 

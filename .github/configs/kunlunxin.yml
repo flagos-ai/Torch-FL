@@ -24,11 +24,9 @@ setup_platform: kunlunxin
 # at `integration`, so this is the one stage that is not the default.
 setup_stage: build
 
-# Pinned Kunlunxin XRE image (driver 5.37.1). The hook creates the isolated
-# Python 3.10 venv inside the job, reusing the image's TORCH_FL_PREBUILT_KUNLUNXIN_VENV
-# when it provides one; a derived CI image should bake python3.10-venv in to
-# avoid the apt fallback on every job.
-ci_image: harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-kunlunxin-dev
+# Official XRE 5.37.1 runtime. Prepare an independent Python 3.10 / CPU Torch
+# venv, selectively copying compatible Python packages from the runtime.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-kunlunxin-xre5.37.1:2.3.0@sha256:cc0deb9c09cd49977e754892e85f4414835d142379949cc2d66261f63b47959d
 
 runner_labels:
   - p800-8g-cicd-pytorch
@@ -49,17 +47,9 @@ container_volumes: []
 
 integration_environment: {}
 
-# The image ships no `build` module, and a missing one does not fail cleanly: the
-# checkout's own CMake `build/` directory shadows it as a namespace package, so
-# `python -m build` resolves to the wrong module. Upgrade it before the build.
-integration_build_tools:
-  - python -m pip install --upgrade build
-
-# The isolated venv carries neither an upgraded pip nor pytest; the pipeline
-# installs both after the wheel.
-integration_test_dependencies:
-  - python -m pip install --upgrade pip
-  - python -m pip install pytest
+# Build and test tools are prepared once by the platform hook.
+integration_build_tools: []
+integration_test_dependencies: []
 
 container_options: >-
   --privileged
@@ -80,12 +70,14 @@ wheel_artifact_name: wheel-kunlunxin
 #
 # The FlagGems stack has to be the flagtree build, not a stock triton wheel left
 # behind by the image: only flagtree carries the xpu backend the XPU kernels are
-# compiled for. One P800 is enough for the suites that run here.
+# compiled for. The shared hardware gate requires two visible devices so
+# CI resource requirements agree with the other runtime-migration lanes.
 environment_check:
+  venv_isolation: true
   torch_version_base: "2.10.0"
   cuda_version: null
   torch_path_forbidden:
     - /usr/local/lib/python3.10/dist-packages
   flagos_devices:
-    at_least: 1
+    at_least: 2
   triton_backend: xpu

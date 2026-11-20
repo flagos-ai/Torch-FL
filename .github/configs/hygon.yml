@@ -18,9 +18,9 @@ display_name: Hygon DCU
 setup_script: .github/scripts/set_env.sh
 setup_platform: hygon
 
-# Pinned CI image: DTK base plus the /opt/torch-fl-dcu-venv Python environment
-# used by set_env_hygon.sh. The script still falls back to creating a fresh venv
-# when the prebuilt one is absent, but the CI image should avoid network installs.
+# Keep the known Torch 2.10-compatible development image until a compatible
+# runtime is available. Both lanes still create fresh isolated venvs through
+# the shared provisioning, package-reuse and pip-cache helpers.
 ci_image: harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci
 
 runner_labels:
@@ -37,6 +37,7 @@ paths_watch:
   - csrc/runtime/allocator/backends/hygon_memory.h
   - .github/scripts/hooks/set_env_hygon.sh
   - .github/scripts/set_env_hygon.sh
+  - .github/requirements-hygon.txt
   - scripts/vendor/bundle_hygon_libtorch.sh
   - scripts/vendor/check_hygon_core_abi.py
 
@@ -108,26 +109,32 @@ wheel_artifact_name: wheel-dcu
 boxing_lane: true
 
 environment_check:
+  venv_isolation: true
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
+    - /flagos/
+    - /opt/flagtree/
   require_package_files:
     - lib/libtorch_fl.so
   flagos_devices:
-    more_than: 0
+    at_least: 2
   require_build_kernels:
     - flaggems
   forbid_build_kernels:
     - boxing
 
 boxing_environment_check:
+  venv_isolation: true
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
+    - /flagos/
+    - /opt/flagtree/
   require_package_files:
     - lib/libtorch_fl.so
   flagos_devices:
-    more_than: 0
+    at_least: 2
   require_build_kernels:
     - flaggems
     - boxing

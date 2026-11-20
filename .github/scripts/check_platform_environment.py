@@ -38,6 +38,7 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,6 +65,8 @@ SUPPORTED_KEYS = frozenset(
     {
         "torch_version_prefix",
         "torch_version_base",
+        "torch_version_exact",
+        "torch_distribution_version",
         "cuda_version",
         "torch_path_prefix",
         "torch_path_forbidden",
@@ -82,6 +85,13 @@ SUPPORTED_KEYS = frozenset(
         "flagtree",
         "model_dir",
         "require_torch_backends_hook",
+        "venv_isolation",
+        "torch_first",
+        "torch_cxx11_abi",
+        "loaded_torch_libraries",
+        "forbidden_loaded_library_prefixes",
+        "elf_dependencies",
+        "triton_target",
     }
 )
 
@@ -115,7 +125,76 @@ def load_spec():
             f"script does not read; supported keys are "
             f"{', '.join(sorted(SUPPORTED_KEYS))}"
         )
+    validate_spec(spec)
     return spec
+
+
+def validate_spec(spec):
+    """Reject malformed optional policies before importing accelerator packages."""
+    unknown = set(spec) - SUPPORTED_KEYS
+    if unknown:
+        raise ValueError(f"Unsupported environment expectations: {sorted(unknown)}")
+    for key in ("venv_isolation", "torch_first", "torch_cxx11_abi"):
+        if key in spec and type(spec[key]) is not bool:
+            raise ValueError(f"{key} must be a boolean")
+    libraries = spec.get("loaded_torch_libraries")
+    prefixes = spec.get("forbidden_loaded_library_prefixes")
+    for key, value in (
+        ("loaded_torch_libraries", libraries),
+        ("forbidden_loaded_library_prefixes", prefixes),
+    ):
+        if value is not None and (
+            not isinstance(value, list)
+            or not value
+            or any(
+                not isinstance(name, str) or not name or "/" in name for name in value
+            )
+        ):
+            raise ValueError(
+                f"{key} must be a non-empty list of library names/prefixes"
+            )
+    elf = spec.get("elf_dependencies")
+    if elf is not None:
+        if not isinstance(elf, dict) or set(elf) != {"files", "forbidden"}:
+            raise ValueError("elf_dependencies must contain files and forbidden")
+        for key in ("files", "forbidden"):
+            if (
+                not isinstance(elf[key], list)
+                or not elf[key]
+                or not all(isinstance(value, str) and value for value in elf[key])
+            ):
+                raise ValueError(
+                    f"elf_dependencies.{key} must be a non-empty string list"
+                )
+        if any(
+            Path(value).is_absolute() or ".." in Path(value).parts
+            for value in elf["files"]
+        ):
+            raise ValueError("ELF files must be relative paths inside torch_fl")
+    target = spec.get("triton_target")
+    if target is not None:
+        keys = {"backend", "arch", "warp_size", "device_capability"}
+        if not isinstance(target, dict) or set(target) != keys:
+            raise ValueError(f"triton_target must contain {sorted(keys)}")
+        if not isinstance(target["backend"], str) or not target["backend"]:
+            raise ValueError("triton_target.backend must be a non-empty string")
+        if (
+            type(target["arch"]) not in (str, int)
+            or type(target["warp_size"]) is not int
+            or target["warp_size"] <= 0
+        ):
+            raise ValueError(
+                "triton_target must state an architecture and positive warp_size"
+            )
+        capability = target["device_capability"]
+        if (
+            not isinstance(capability, list)
+            or len(capability) != 2
+            or any(type(value) is not int for value in capability)
+        ):
+            raise ValueError(
+                "triton_target.device_capability must contain two integers"
+            )
 
 
 def import_dependencies(spec):
@@ -131,8 +210,12 @@ def import_dependencies(spec):
     about them. A platform whose image carries neither still gets its wheel and
     device assertions, rather than an ImportError standing in for them.
     """
-    import torch_fl
-    import torch
+    if spec.get("torch_first"):
+        import torch
+        import torch_fl
+    else:
+        import torch_fl
+        import torch
 
     # Anything else the platform needs present before its tests can run. The
     # import is the whole check: a platform that lists `flag_gems` here has
@@ -148,7 +231,7 @@ def import_dependencies(spec):
         flag_gems=None,
         flagtree_is_active=None,
     )
-    if spec.get("triton_backend") or spec.get("flagtree"):
+    if spec.get("triton_backend") or spec.get("flagtree") or spec.get("triton_target"):
         import triton
 
         dependencies.triton = triton
@@ -161,6 +244,112 @@ def import_dependencies(spec):
 
         dependencies.flagtree_is_active = is_flagtree_active
     return dependencies
+
+
+def isolated_venv_root(interpreter=None):
+    """The CI interpreter must own its packages and exclude runtime site-packages."""
+    interpreter = interpreter or sys
+    root = Path(interpreter.prefix).resolve()
+    expected = os.environ.get("VIRTUAL_ENV")
+    assert expected and root == Path(expected).resolve(), (root, expected)
+    assert interpreter.prefix != interpreter.base_prefix, (
+        "CI must use an independent venv"
+    )
+    assert not root.is_relative_to("/flagos"), root
+    settings = {}
+    for line in (root / "pyvenv.cfg").read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            settings[key.strip().lower()] = value.strip().lower()
+    assert settings.get("include-system-site-packages") == "false", settings
+    return root
+
+
+def assert_venv_package(root, path):
+    resolved = Path(path).resolve()
+    assert resolved.is_relative_to(root), f"Package outside CI venv: {resolved}"
+
+
+def assert_import_isolation(root, paths=None):
+    for value in sys.path if paths is None else paths:
+        path = Path(value).resolve()
+        assert not (
+            str(path).startswith(("/flagos/", "/opt/flagtree", "/opt/triton"))
+            or (
+                ("site-packages" in path.parts or "dist-packages" in path.parts)
+                and not path.is_relative_to(root)
+            )
+        ), f"Runtime Python import path leaked: {path}"
+
+
+def assert_venv_isolation(dependencies):
+    root = isolated_venv_root()
+    assert_import_isolation(root)
+    locations = {}
+    for name in ("torch", "torch_fl", "triton", "flag_gems"):
+        module = getattr(dependencies, name, None)
+        if module is not None:
+            assert_venv_package(root, module.__file__)
+            locations[name] = str(Path(module.__file__).resolve())
+    return {"venv": str(root), "packages": locations}
+
+
+def assert_loaded_torch_libraries(torch_root, names, forbidden=(), mappings=None):
+    """Audit actual loaded core libraries; Python package versions are insufficient."""
+    mappings = Path("/proc/self/maps").read_text() if mappings is None else mappings
+    paths = {
+        Path(fields[5]).resolve()
+        for line in mappings.splitlines()
+        if len(fields := line.split(None, 5)) == 6 and fields[5].startswith("/")
+    }
+    actual = {}
+    for name in names:
+        expected = (torch_root / "lib" / name).resolve()
+        loaded = sorted(str(path) for path in paths if path.name == name)
+        assert expected in paths, (
+            f"{name} did not load from expected torch/lib: {expected}; loaded {loaded}"
+        )
+        assert loaded == [str(expected)], (
+            f"A second {name} was loaded outside expected torch/lib: {loaded}"
+        )
+        actual[name] = loaded
+    bad = (
+        sorted(str(path) for path in paths if path.name.startswith(tuple(forbidden)))
+        if forbidden
+        else []
+    )
+    assert not bad, f"Forbidden vendor Torch libraries loaded: {bad}"
+    return actual
+
+
+def assert_elf_dependencies(package_root, policy):
+    actual = {}
+    for relative in policy["files"]:
+        path = (package_root / relative).resolve()
+        assert path.is_relative_to(package_root.resolve()), path
+        dynamic = subprocess.check_output(
+            ["readelf", "-d", str(path)], text=True, timeout=60
+        )
+        for forbidden in policy["forbidden"]:
+            assert forbidden not in dynamic, (
+                f"{path} contains forbidden dependency {forbidden}: {dynamic}"
+            )
+        actual[relative] = dynamic
+    return actual
+
+
+def assert_triton_target(dependencies, expected):
+    capability = list(dependencies.torch.cuda.get_device_capability())
+    assert capability == expected["device_capability"], capability
+    target = dependencies.triton.runtime.driver.active.get_current_target()
+    actual = {
+        "backend": target.backend,
+        "arch": target.arch,
+        "warp_size": target.warp_size,
+        "device_capability": capability,
+    }
+    assert actual == expected, f"Expected compiler target {expected}; found {actual}"
+    return actual
 
 
 def assert_bound(bound, value, what):
@@ -187,6 +376,13 @@ def assert_bound(bound, value, what):
 
 
 def assert_torch_version(dependencies, spec):
+    if spec.get("torch_version_exact"):
+        assert dependencies.torch.__version__ == spec["torch_version_exact"], (
+            dependencies.torch.__version__
+        )
+    if spec.get("torch_distribution_version"):
+        actual = importlib.metadata.version("torch")
+        assert actual == spec["torch_distribution_version"], actual
     prefix = spec.get("torch_version_prefix")
     if prefix:
         assert dependencies.torch.__version__.startswith(prefix), (
@@ -198,6 +394,13 @@ def assert_torch_version(dependencies, spec):
             dependencies.torch.__version__
         )
 
+    return {
+        "module": dependencies.torch.__version__,
+        "distribution": importlib.metadata.version("torch")
+        if spec.get("torch_distribution_version")
+        else None,
+    }
+
 
 def assert_torch_path(spec, torch_path):
     expected_prefix = spec.get("torch_path_prefix")
@@ -205,6 +408,8 @@ def assert_torch_path(spec, torch_path):
         assert str(torch_path).startswith(expected_prefix), torch_path
     for forbidden in spec.get("torch_path_forbidden") or []:
         assert forbidden not in str(torch_path), f"{forbidden} in {torch_path}"
+
+    return str(torch_path)
 
 
 def assert_build_kernels(spec, torch_fl):
@@ -242,6 +447,14 @@ def assert_package_files(spec, package_root):
         assert (package_root / relative).is_file(), package_root / relative
     for relative in spec.get("forbid_package_files") or []:
         assert not (package_root / relative).is_file(), package_root / relative
+
+    return {
+        relative: (package_root / relative).exists()
+        for relative in [
+            *spec.get("require_package_files", []),
+            *spec.get("forbid_package_files", []),
+        ]
+    }
 
 
 def assert_torch_backends_hook():
@@ -283,6 +496,8 @@ def assert_cuda_version(dependencies, spec):
             dependencies.torch.version.cuda
         )
 
+    return dependencies.torch.version.cuda
+
 
 def assert_torch_musa_shim():
     """MUSA: the vendor package must not have leaked into the isolated venv.
@@ -312,12 +527,15 @@ def assert_triton_backend(dependencies, backend):
     """The Triton in the image has to be the one carrying this backend."""
     available = sorted(dependencies.triton.backends.backends)
     assert backend in available, available
+    return available
 
 
 def assert_flaggems_vendor(dependencies, vendor):
     assert dependencies.flag_gems.vendor_name == vendor, (
         dependencies.flag_gems.vendor_name
     )
+
+    return dependencies.flag_gems.vendor_name
 
 
 def assert_flagtree(dependencies, flagtree):
@@ -435,76 +653,219 @@ def assert_native_extensions_arch(dependencies, expected):
     print(f"native extension: {path} built for {arches}")
 
 
+def retain_validation(spec, checks):
+    """Keep hardware evidence in the existing report directory and pytest artifact."""
+    record = {
+        "schema_version": "torch-fl.ci-hardware-environment/v1",
+        "phase": "hardware-environment",
+        "expected": spec,
+        "checks": checks,
+        "valid": bool(checks) and all(item["status"] == "passed" for item in checks),
+    }
+    print("Hardware environment validation: " + json.dumps(record, default=str))
+    directory = os.environ.get("FLAGCICD_REPORT_DIR")
+    platform = os.environ.get("REPORT_PLATFORM")
+    if not directory or not platform:
+        return
+    path = Path(directory) / f"hardware-environment-{platform}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            try:
+                json.dump(record, stream, indent=2, default=str)
+                stream.write("\n")
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+        try:
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError) as error:
+        print(f"::warning::Cannot retain hardware environment validation: {error}")
+
+
+def validate_environment(spec=None):
+    checks = []
+
+    def checked(name, expected, operation):
+        record = {"name": name, "expected": expected, "status": "failed"}
+        checks.append(record)
+        try:
+            actual = operation()
+        except (Exception, SystemExit) as error:
+            record["error"] = str(error)
+            raise
+        record["status"] = "passed"
+        # Namespace/module objects are runtime handles, not report data.
+        record["actual"] = actual if not isinstance(actual, SimpleNamespace) else None
+        return actual
+
+    try:
+
+        def resolve_spec():
+            if spec is None:
+                return load_spec()
+            validate_spec(spec)
+            return spec
+
+        spec = checked(
+            "policy",
+            spec if spec is not None else os.environ.get(ENVIRONMENT_VARIABLE),
+            resolve_spec,
+        )
+        dependencies = checked(
+            "imports",
+            {"torch_first": spec.get("torch_first", False)},
+            lambda: import_dependencies(spec),
+        )
+        torch, torch_fl = dependencies.torch, dependencies.torch_fl
+        torch_path = Path(torch.__file__).resolve()
+        package_root = Path(torch_fl.__file__).resolve().parent
+        checked(
+            "torch-version",
+            {
+                key: value
+                for key, value in spec.items()
+                if key.startswith("torch_version")
+                or key == "torch_distribution_version"
+            },
+            lambda: assert_torch_version(dependencies, spec),
+        )
+        checked(
+            "cuda-version",
+            spec.get("cuda_version"),
+            lambda: assert_cuda_version(dependencies, spec),
+        )
+        checked(
+            "torch-path",
+            {
+                "prefix": spec.get("torch_path_prefix"),
+                "forbidden": spec.get("torch_path_forbidden", []),
+            },
+            lambda: assert_torch_path(spec, torch_path),
+        )
+        checked(
+            "package-files",
+            {
+                key: spec.get(key, [])
+                for key in ("require_package_files", "forbid_package_files")
+            },
+            lambda: assert_package_files(spec, package_root),
+        )
+        checked(
+            "build-kernels",
+            {
+                key: spec.get(key, [])
+                for key in ("require_build_kernels", "forbid_build_kernels")
+            },
+            lambda: assert_build_kernels(spec, torch_fl),
+        )
+        if spec.get("venv_isolation"):
+            checked("venv-isolation", True, lambda: assert_venv_isolation(dependencies))
+        if "torch_cxx11_abi" in spec:
+
+            def check_abi():
+                actual = torch._C._GLIBCXX_USE_CXX11_ABI
+                assert actual == spec["torch_cxx11_abi"], actual
+                return actual
+
+            checked("torch-cxx11-abi", spec["torch_cxx11_abi"], check_abi)
+        if spec.get("loaded_torch_libraries") or spec.get(
+            "forbidden_loaded_library_prefixes"
+        ):
+            checked(
+                "loaded-torch-libraries",
+                {
+                    "names": spec.get("loaded_torch_libraries", []),
+                    "forbidden": spec.get("forbidden_loaded_library_prefixes", []),
+                },
+                lambda: assert_loaded_torch_libraries(
+                    torch_path.parent,
+                    spec.get("loaded_torch_libraries", []),
+                    spec.get("forbidden_loaded_library_prefixes", []),
+                ),
+            )
+        if spec.get("elf_dependencies"):
+            checked(
+                "extension-dependencies",
+                spec["elf_dependencies"],
+                lambda: assert_elf_dependencies(package_root, spec["elf_dependencies"]),
+            )
+        if spec.get("torch_musa_shim_only"):
+            checked("torch-musa-isolation", True, assert_torch_musa_shim)
+
+        def check_devices():
+            assert torch_fl.flagos.is_available(), "flagos device is unavailable"
+            actual = {"flagos": torch_fl.flagos.device_count()}
+            assert_bound(
+                spec.get("flagos_devices"), actual["flagos"], "flagos device count"
+            )
+            if spec.get("cuda_available"):
+                assert torch.cuda.is_available(), "torch.cuda reports no device"
+            if spec.get("cuda_devices") is not None:
+                actual["cuda"] = torch.cuda.device_count()
+                assert_bound(
+                    spec["cuda_devices"], actual["cuda"], "torch.cuda device count"
+                )
+            return actual
+
+        checked(
+            "devices",
+            {
+                key: spec[key]
+                for key in ("flagos_devices", "cuda_available", "cuda_devices")
+                if key in spec
+            },
+            check_devices,
+        )
+        if spec.get("triton_backend"):
+            checked(
+                "triton-backend",
+                spec["triton_backend"],
+                lambda: assert_triton_backend(dependencies, spec["triton_backend"]),
+            )
+        if spec.get("flaggems_vendor"):
+            checked(
+                "flaggems-vendor",
+                spec["flaggems_vendor"],
+                lambda: assert_flaggems_vendor(dependencies, spec["flaggems_vendor"]),
+            )
+        if spec.get("flagtree"):
+            checked(
+                "flagtree",
+                spec["flagtree"],
+                lambda: assert_flagtree(dependencies, spec["flagtree"]),
+            )
+        if spec.get("triton_target"):
+            checked(
+                "triton-target",
+                spec["triton_target"],
+                lambda: assert_triton_target(dependencies, spec["triton_target"]),
+            )
+        if spec.get("model_dir"):
+            checked("model-directory", os.environ.get("MODEL_PATH"), assert_model_dir)
+        if spec.get("require_torch_backends_hook"):
+            checked("autoload-hook", True, assert_torch_backends_hook)
+        if spec.get("native_extensions_arch"):
+            checked(
+                "extension-architecture",
+                spec["native_extensions_arch"],
+                lambda: assert_native_extensions_arch(
+                    dependencies, spec["native_extensions_arch"]
+                ),
+            )
+        print(f"CPU PyTorch: {torch.__version__}; torch path: {torch_path}")
+        return 0
+    finally:
+        retain_validation(spec, checks)
+
+
 def main():
-    spec = load_spec()
-    dependencies = import_dependencies(spec)
-    torch = dependencies.torch
-    torch_fl = dependencies.torch_fl
-
-    assert_torch_version(dependencies, spec)
-    assert_cuda_version(dependencies, spec)
-
-    torch_path = Path(torch.__file__).resolve()
-    torch_fl_path = Path(torch_fl.__file__).resolve()
-    package_root = torch_fl_path.parent
-    assert_torch_path(spec, torch_path)
-    assert_package_files(spec, package_root)
-    build_kernels = assert_build_kernels(spec, torch_fl)
-
-    if spec.get("torch_musa_shim_only"):
-        assert_torch_musa_shim()
-
-    assert torch_fl.flagos.is_available(), "flagos device is unavailable"
-    flagos_devices = torch_fl.flagos.device_count()
-    assert_bound(spec.get("flagos_devices"), flagos_devices, "flagos device count")
-
-    cuda_available = spec.get("cuda_available")
-    if cuda_available:
-        assert torch.cuda.is_available(), "torch.cuda reports no device"
-    if spec.get("cuda_devices") is not None:
-        assert_bound(
-            spec.get("cuda_devices"),
-            torch.cuda.device_count(),
-            "torch.cuda device count",
-        )
-
-    if spec.get("triton_backend"):
-        assert_triton_backend(dependencies, spec["triton_backend"])
-    if spec.get("flaggems_vendor"):
-        assert_flaggems_vendor(dependencies, spec["flaggems_vendor"])
-    flagtree_version = None
-    if spec.get("flagtree"):
-        flagtree_version = assert_flagtree(dependencies, spec["flagtree"])
-    if spec.get("model_dir"):
-        assert_model_dir()
-    if spec.get("require_torch_backends_hook"):
-        assert_torch_backends_hook()
-    if spec.get("native_extensions_arch"):
-        assert_native_extensions_arch(dependencies, spec["native_extensions_arch"])
-
-    print(f"environment expectations: {json.dumps(spec, sort_keys=True)}")
-    print(f"CPU PyTorch: {torch.__version__}")
-    print(f"torch path: {torch_path}")
-    print(f"torch_fl path: {torch_fl_path}")
-    print(f"torch.version.cuda: {torch.version.cuda}")
-    print(f"flagos devices: {flagos_devices}")
-    if build_kernels is not None:
-        print(f"Kernel sets: {sorted(build_kernels)}")
-    if cuda_available or spec.get("cuda_devices") is not None:
-        print(f"torch.cuda devices: {torch.cuda.device_count()}")
-    if dependencies.triton is not None:
-        print(
-            f"Triton: {dependencies.triton.__version__} "
-            f"(backends: {sorted(dependencies.triton.backends.backends)})"
-        )
-    if dependencies.flag_gems is not None:
-        print(
-            f"FlagGems: {getattr(dependencies.flag_gems, '__version__', 'unknown')} "
-            f"({dependencies.flag_gems.__file__})"
-        )
-    if flagtree_version:
-        print(f"FlagTree: {flagtree_version}")
-    return 0
+    return validate_environment()
 
 
 if __name__ == "__main__":

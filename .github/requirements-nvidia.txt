@@ -1,0 +1,14 @@
+# Python tools for the isolated CUDA CI venv; shared ranges apply to reuse and pip.
+# Preserve the existing CUDA build-frontend restrictions within that policy.
+pip>=23.2
+setuptools>=64,<77
+setuptools-scm>=8,<10
+wheel==0.46.2
+cmake
+ninja
+build
+pytest
+packaging
+PyYAML
+sqlalchemy
+numpy

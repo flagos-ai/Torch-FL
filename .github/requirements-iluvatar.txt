@@ -1,0 +1,14 @@
+# Python package selection for the isolated iluvatar CI venv.
+# Version ranges come from constraints-runtime-ci.txt for runtime copies,
+# installed-package checks and pip. Keep only platform restrictions here.
+pip>=23.2
+setuptools
+wheel
+cmake>=3.19,<4
+build
+pytest
+pybind11
+packaging
+PyYAML
+sqlalchemy
+numpy

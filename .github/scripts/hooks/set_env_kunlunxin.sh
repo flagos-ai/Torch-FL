@@ -28,15 +28,33 @@
 # presence, so a stock CPU PyTorch wheel is enough to build and run the backend.
 # See docs/vendors/kunlunxin/installation.md.
 #
-# The isolated venv needs a Triton build carrying the "xpu" backend (flagtree)
-# for the XPU kernels. Kunlunxin is not yet in the FlagGems Python platform
-# allowlist, so the generated configs/backends_kunlunxin.conf routes nothing to
-# FlagGems; the FlagGems wheel is provisioned here the way every other vendor
-# hook provisions it, so the fleet keeps one FlagGems release and a single
-# --check-build-env contract across platforms.
+# The runtime's Bash startup has already initialized the SDK. Do not replay
+# its compiler selector in child shells or later Actions steps: it would put
+# /opt/flagtree back on PYTHONPATH outside the isolated CI environment.
+KUNLUNXIN_PREPARE_STARTED=$SECONDS
+export BASH_ENV=/dev/null
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=""
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+if [[ "${BOXING_LANE:-}" == 1 ]]; then
+  echo "::error::Kunlunxin uses the native XPU backend and has no boxing lane" >&2
+  exit 1
+fi
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
+# Keep the CI compiler aligned with the published wheel's dependency.
+FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_kunlunxin}"
+FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
+FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
+FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-kunlunxin/simple}"
+
+VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-$(command -v python3.10 || true)}"
+if [[ ! -x "$VENDOR_PYTHON" ]] || ! "$VENDOR_PYTHON" -I -c \
+    'import sys; raise SystemExit(sys.version_info[:2] != (3, 10))'; then
+  echo "::error::Kunlunxin requires Python 3.10 for the FlagTree XPU wheel" >&2
+  exit 1
+fi
 
 # --- XPU SDK -----------------------------------------------------------------
 # XPU_ROOT has to carry both header trees: xpu/runtime.h is the native libxpurt
@@ -113,7 +131,7 @@ else
   )
   # torch_xmlir/ ships inside the image's own venv site-packages (VIRTUAL_ENV is
   # /flagos in the runtime image), not the isolated build venv this hook creates
-  # below -- torch_xmlir is deliberately uninstalled from the build interpreter
+  # below -- torch_xmlir is deliberately absent from the build interpreter
   # (see the assertion further down). Mirror setup.py::_kunlunxin_xdnn_root()'s
   # site-packages fallback, retargeted at the image venv and so resolved here
   # (before the build venv replaces VIRTUAL_ENV). The trailing python3 probe is
@@ -124,7 +142,7 @@ else
       xdnn_candidates+=("$sp/torch_xmlir")
     done
   fi
-  if sp_site="$(python3 -c 'import site; print("\n".join(p for p in site.getsitepackages() if p))' 2>/dev/null)"; then
+  if sp_site="$("$VENDOR_PYTHON" -I -c 'import site; print("\n".join(p for p in site.getsitepackages() if p))' 2>/dev/null)"; then
     while IFS= read -r sp; do
       if [[ -n "$sp" ]]; then
         xdnn_candidates+=("$sp/torch_xmlir")
@@ -153,6 +171,7 @@ export FLAGOS_BUILD_VENDOR=1
 # this variable is applied afterwards and would otherwise switch it back off.
 export FLAGOS_BUILD_FLAGGEMS_CPP=0
 export FLAGOS_BUILD_FLAGGEMS=1
+export FLAGOS_BUILD_BOXING=0
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 unset CUDA_HOME 2>/dev/null || true
 unset CUDA_PATH 2>/dev/null || true
@@ -166,64 +185,39 @@ export LIBRARY_PATH="$XCUDART_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$XCUDART_DIR:$XDNN_ROOT:$XDNN_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # --- Isolated interpreter ----------------------------------------------------
-# 3.10 specifically: the FlagTree XPU wheel is published for cp310 only, so a
-# 3.12 venv would simply fail to resolve flagtree at pip time. Prefer the
-# interpreter the wheel needs instead of discovering that later.
-VENDOR_PYTHON="${TORCH_FL_VENDOR_PYTHON:-}"
-if [[ -z "$VENDOR_PYTHON" || ! -x "$VENDOR_PYTHON" ]]; then
-  for candidate in python3.10 python3 python; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      VENDOR_PYTHON="$(command -v "$candidate")"
-      break
-    fi
-  done
-fi
-if [[ -z "$VENDOR_PYTHON" || ! -x "$VENDOR_PYTHON" ]]; then
-  echo "::error::Unable to find a Python interpreter to bootstrap the venv"
-  exit 1
-fi
-if ! "$VENDOR_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 10) else 1)'; then
-  echo "::error::Kunlunxin needs Python 3.10: the FlagTree xpu wheel is cp310-only, and $VENDOR_PYTHON is $("$VENDOR_PYTHON" -V 2>&1)"
-  exit 1
-fi
+# A job owns its venv. Never clear the runtime, its managed base interpreter,
+# or the checkout itself through an overridden target path.
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-kunlunxin-${CI_STAGE}}"
+create_runtime_venv "$VENDOR_PYTHON"
+"$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+  --target-python "$VENV_PYTHON" \
+  --torch-version "$CPU_TORCH_VERSION" \
+  --flagtree-version "$FLAGTREE_VERSION" \
+  --flaggems-version "$FLAGGEMS_VERSION" \
+  --requirements-file "$REPO_ROOT/.github/requirements-kunlunxin.txt"
+export VIRTUAL_ENV="$VENV_ROOT"
+export PATH="$VENV_ROOT/bin:$PATH"
 
-PREBUILT_VENV="${TORCH_FL_PREBUILT_KUNLUNXIN_VENV:-/opt/torch-fl-kunlunxin-venv}"
-if [[ -z "${TORCH_FL_VENV_ROOT:-}" && -x "$PREBUILT_VENV/bin/python" ]]; then
-  VENV_ROOT="$PREBUILT_VENV"
-  echo "Using prebuilt Kunlunxin venv: $VENV_ROOT"
+# Python 3.10 can seed an older pip that rejects equivalent distribution
+# names in PEP 658 metadata. Bootstrap before resolving Torch dependencies;
+# the later tools loop is too late. Retain the runner's pip download cache.
+if ! "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed 'pip>=23.2'; then
+  pip_retry --only-binary=:all: --index-url "$PIP_INDEX_URL_ARG" 'pip>=23.2'
+fi
+"$VENV_PYTHON" -m pip --version
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+  --check-installed 'pip>=23.2'
+
+if "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --check-installed "torch==${CPU_TORCH_VERSION}+cpu"; then
+  echo "Using prepared CPU torch $CPU_TORCH_VERSION"
 else
-  VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-kunlunxin-${CI_STAGE}}"
-  "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT" || true
-fi
-
-VENV_PYTHON="$VENV_ROOT/bin/python"
-if ! venv_is_usable; then
-  # Keep the dependency in the chip-specific setup path so the common workflow
-  # stays image agnostic; a derived CI image should still bake python3.10-venv
-  # in to avoid the apt fallback on every job.
-  if command -v apt-get >/dev/null 2>&1 && [[ "$(id -u)" -eq 0 ]]; then
-    python_mm="$($VENDOR_PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends "python${python_mm}-venv"
-    "$VENDOR_PYTHON" -m venv --clear "$VENV_ROOT"
-  fi
-fi
-
-if ! venv_is_usable; then
-  echo "::error::Isolated Python was not created at $VENV_ROOT; install python3.10-venv in the CI image" >&2
-  exit 1
-fi
-
-if [[ "$VENV_ROOT" != "$PREBUILT_VENV" ]]; then
-  "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel cmake ninja build
   install_cpu_torch
 fi
 
-export VIRTUAL_ENV="$VENV_ROOT"
-export PATH="$VENV_ROOT/bin:$PATH"
-export PYTHONNOUSERSITE=1
-export PYTHONPATH=""
+# The wheel frontend requires CMake distribution metadata as well as its executable.
+ensure_runtime_requirements "$REPO_ROOT/.github/requirements-kunlunxin.txt" "$PIP_INDEX_URL_ARG"
 
 "$VENV_PYTHON" - <<'PY'
 from pathlib import Path
@@ -233,6 +227,9 @@ import sys
 import torch
 
 torch_path = Path(torch.__file__).resolve()
+venv_root = Path(os.environ["VIRTUAL_ENV"]).resolve()
+assert Path(sys.prefix).resolve() == venv_root, sys.prefix
+assert torch_path.is_relative_to(venv_root), torch_path
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/usr/local/lib/python3.10/dist-packages" not in str(torch_path), torch_path
@@ -247,48 +244,36 @@ print(f"XPU SDK: {os.environ['XPU_ROOT']}")
 print(f"xdnn op library root: {os.environ['XDNN_ROOT']}")
 PY
 
-# --- Kunlun Triton (flagtree) + FlagGems -------------------------------------
-# Installed for both stages, not just integration: build and integration share
-# one platform job, and restricting this to CI_STAGE=integration would leave the
-# build job's venv without the Triton build that carries the xpu backend.
-#
-# --no-deps on both source packages so pip cannot replace the pinned CPU torch
-# 2.10 with something a transitive requirement prefers.
-# An NVIDIA triton wheel must not be present: it carries no "xpu" backend, so
-# flag_gems' backend discovery fails and every FlagGems route raises at import.
-# flagtree installs its own `triton` package under the same import name without
-# registering a `triton` distribution, so remove any real one first --
-# repeatedly, because a partially uninstalled triton leaves a dist record that
-# keeps the stale files in place.
-while "$VENV_PYTHON" -m pip show triton >/dev/null 2>&1; do
-  "$VENV_PYTHON" -m pip uninstall -y triton || break
-done
-"$VENV_PYTHON" -m pip uninstall -y torch_xmlir 2>/dev/null || true
+# FlagTree must own the isolated triton package and its XPU backend. A matching
+# version outside this venv is not proof of reuse. Never install stock Triton
+# or copy the old development image's .pth/metadata bridge.
+if "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
+from importlib import metadata, util
+from pathlib import Path
+import sys
 
-# flagtree is the Triton build carrying the "xpu" backend. The version is local
-# to this hook rather than a FLAGTREE_VERSION_kunlunxin row in the pin table:
-# only platforms with a wheel segment carry an interpreter pin beside their
-# FlagTree pin, and kunlunxin publishes no wheel segment. Adding either row
-# without the other breaks the pin table's invariants, and adding both would
-# make setup.py declare a cp310-only FlagTree as a runtime requirement of a
-# wheel that builds and runs on a stock CPU torch.
-FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-0.7.0+xpu3.6}"
-FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
-install_flagtree
-
-# FlagTree is published to flagos-pypi-hosted for every platform; FlagGems sits
-# in the per-vendor lane. Select the Kunlunxin lane so this job never needs a
-# GitHub source checkout for either.
-FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
-FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-kunlunxin/simple}"
+try:
+    dist = metadata.distribution("flagtree")
+    root = Path(dist.locate_file("triton")).resolve()
+    spec = util.find_spec("triton")
+    assert dist.version == sys.argv[1]
+    assert root.is_relative_to(Path(sys.prefix).resolve())
+    assert spec is not None and spec.origin
+    assert Path(spec.origin).resolve().parent == root
+    assert (root / "backends/xpu").is_dir()
+except (metadata.PackageNotFoundError, AssertionError):
+    raise SystemExit(1)
+PY
+then
+  echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
+else
+  "$VENV_PYTHON" -m pip uninstall -y flagtree triton
+  install_flagtree
+fi
 install_flag_gems
-
-# FlagGems' own runtime deps, installed one at a time for the same
-# IncompleteRead reason pip_retry exists for. numpy is deliberately not listed:
-# the CPU torch wheel does not pull it in, and nothing on this path imports it.
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'packaging>=26.0'
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'PyYAML==6.0.1'
-pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
+"$VENV_PYTHON" -m pip check
+echo "Prepared Kunlunxin CI environment (runtime reuse and pip installs above):"
+"$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
 
 # --- Verify the Triton stack imports -----------------------------------------
 # flagtree must be the only provider of the `triton` package, and it must carry
@@ -298,11 +283,17 @@ pip_retry --index-url "$PIP_INDEX_URL_ARG" 'sqlalchemy==2.0.48'
 # through the torch_fl device surface, which does not exist until the wheel is
 # installed, so a bare `import flag_gems` raises before that point. The
 # integration environment group does that import once torch_fl is importable.
-"$VENV_PYTHON" - <<'PY'
+KUNLUNXIN_EXPECTED_FLAGTREE="$FLAGTREE_VERSION" "$VENV_PYTHON" - <<'PY'
 import importlib.util
+from importlib import metadata
+from pathlib import Path
+import os
+import sys
 
 import triton
 
+assert Path(triton.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+assert metadata.version("flagtree") == os.environ["KUNLUNXIN_EXPECTED_FLAGTREE"]
 assert "xpu" in triton.backends.backends, sorted(triton.backends.backends)
 assert importlib.util.find_spec("flag_gems") is not None, "flag_gems is not installed"
 print(f"Triton: {triton.__version__} (backends: {sorted(triton.backends.backends)})")
@@ -313,8 +304,10 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS XPU_ROOT XCUDART_ROOT XDNN_ROOT CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV BASH_ENV PYTHONNOUSERSITE PYTHONPATH TORCH_DEVICE_BACKEND_AUTOLOAD FLAGOS_ACCELERATOR FLAGOS_BUILD_VENDOR FLAGOS_BUILD_BOXING FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS FLAGOS_DISABLE_CUDA_ASSETS XPU_ROOT XCUDART_ROOT XDNN_ROOT CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi
+
+echo "Kunlunxin dependency preparation completed in $((SECONDS - KUNLUNXIN_PREPARE_STARTED))s"
 
 cd "$REPO_ROOT"
 if [[ "$CI_STAGE" == "build" ]]; then

@@ -87,6 +87,35 @@ facade can select the matching runtime.
 
 Full measurements and rationale: [vendor-free-core-libs.md](vendor-free-core-libs.md).
 
+## CI image and isolated environment
+
+Both DCU lanes retain the Torch 2.10-compatible development image
+`harbor.baai.ac.cn/flagos-dev/pytorch-plugin-fl:manual-20260816-dcu-ci`.
+The official DTK 26.10 runtime trial used vendor Torch 2.13 device libraries
+with CPU Torch 2.10 and failed the bundle's symbol ABI guard. That runtime is
+not selected until a compatible cohort is available.
+
+The retained image supplies Python 3.10, DTK and the vendor device libraries.
+Each default and boxing job creates a fresh isolated venv through the shared
+`create_runtime_venv` helper; the image's prebuilt `/opt/torch-fl-dcu-venv` is
+not reused as the test environment. Compatible RECORD-owned Python packages
+are copied, missing requirements are installed through the common helpers,
+and `.github/constraints-runtime-ci.txt` applies to both paths. The shared
+pip download-cache and cache-failure recovery mechanisms remain enabled.
+
+The frontend remains CPU Torch 2.10.0, with FlagTree `0.7.0+hcu3.6` and the
+shared FlagGems pin. The hook rejects a vendor Torch base version that differs
+from the selected CPU frontend. It records SDK metadata only from a verified
+version supplied by the sourced SDK; the current image reports `2604`.
+FlagCX remains deferred under the functional-CI policy.
+
+The ordinary runtime version/dispatch checks, symbol ABI guard, decoupled
+computation checks and separate full-vendor-core legacy smoke are enabled.
+The existing hardware test selections on both lanes are retained. Returning
+to the old image removes the known cross-version ABI mismatch; compatibility
+with the fresh venv and current checkout still requires a complete hardware
+CI run.
+
 ## Verification
 
 ### Basic Device Check

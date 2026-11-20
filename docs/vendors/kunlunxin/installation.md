@@ -46,8 +46,7 @@ follow-up (see [FlagGems on Kunlunxin](#flaggems-on-kunlunxin)).
 - Kunlun vendor PyTorch, if you are taking the xdnn op library from a vendor
   install. The build itself never imports it, so its version is not part of the
   requirement (see below)
-- Python 3.8 or later, matching the FlagTree XPU wheel's interpreter (cp310 in
-  the pinned configuration)
+- Python 3.10, matching the pinned FlagTree XPU wheel's cp310 interpreter tag
 - `cmake >= 3.18`, `ninja`, and a host C++17 compiler
 
 The build never imports or links the vendor torch. All a vendor install supplies
@@ -59,6 +58,67 @@ run the backend, and the vendor `torch_xmlir` extension does not load in that
 interpreter. The vendor torch is therefore a convenient place to find xdnn, not a
 build requirement: any supported torch wheel works provided `XDNN_ROOT` (or
 `FLAGOS_VENDOR_TORCH_LIB`) resolves to the library.
+
+## CI runtime image
+
+CI uses the official runtime directly, without a derived development image:
+
+```text
+harbor.baai.ac.cn/flagos-runtime/flagos-runtime-kunlunxin-xre5.37.1:2.3.0@sha256:cc0deb9c09cd49977e754892e85f4414835d142379949cc2d66261f63b47959d
+```
+
+The image targets P800 and host driver 5.37.1. It provides the XPU SDK, XDNN
+assets, GCC/G++ and make. Its Python 3.10, FlagTree `0.7.0+xpu3.6` and FlagGems
+`5.4.0` match the CI cohort. Its vendor Torch `2.9.0+cu129` remains outside the
+build interpreter: CI continues to use the existing official CPU Torch 2.10.0
+wheel, not a Torch source build.
+
+The compiler pin is shared with the published Torch-FL wheel through
+`.github/version-pins.env`: `flagtree==0.7.0+xpu3.6`. The wheel declares this
+dependency instead of ordinary `triton`, and its `Requires-Python` is
+`>=3.10,<3.11`. FlagTree provides the `triton` import module with the XPU backend;
+no separate `triton` distribution is needed to satisfy the final environment
+checks.
+
+The platform hook creates a fresh job-owned venv using the image interpreter,
+with the image's uv as a fallback when Python's venv module cannot seed pip.
+It never installs system packages with apt and refuses venv targets that overlap
+the source interpreter or contain the checkout. `seed_runtime.py` copies only
+compatible, RECORD-owned Python packages; missing or unsafe packages are
+installed with pip. CMake's Python distribution (3.19 through 3.x) must also be
+present in the venv: the wheel frontend checks the build requirements declared
+in `pyproject.toml`, so a system executable alone is insufficient. It follows
+the same package reuse/install path as the other Python tools. GCC/G++, make
+and the SDK continue to come from the image. The tool list is
+`.github/requirements-kunlunxin.txt`.
+
+Before installing CPU Torch, the hook verifies pip is at least 23.2 and installs
+a compatible binary release from the ordinary Python index only when needed.
+This bootstrap precedes Torch dependency resolution: older pip versions reject
+equivalent names in PEP 658 metadata (for example, `typing-extensions` versus
+`typing_extensions`) and can fall back to an unnecessary source build. The hook
+logs and rechecks the selected pip version. Ordinary downloads still use the
+runner-local `PIP_CACHE_DIR`; rebuilding a job venv does not remove that cache.
+
+The prior development image added a `.pth` exposing `/opt/flagtree` plus a
+Triton metadata bridge to its vendor venv. CI does not copy either workaround:
+FlagTree's own files and metadata must live in the independent venv, and the
+actual imported compiler must expose its XPU backend there. Later workflow
+shells keep `BASH_ENV=/dev/null`, an empty `PYTHONPATH`, and the CI venv first on
+PATH. XDNN is located before the runtime venv is replaced and is used as native
+SDK assets, without importing or copying `torch_xmlir`.
+
+FlagGems 5.4.0 and FlagTree remain pinned. Compatible Python tools may be newer
+than in the old image; SQLAlchemy uses the shared migrated-CI range
+`>=2.0.55,<2.0.58`, within FlagGems' dependency range, instead of the previous
+exact 2.0.48 pin, and NumPy stays below 2. No FlagCX Python package is added to
+the CI venv. A final `pip check`, CPU
+Torch/compiler isolation checks and a JSON package/tool inventory run before
+the existing native build. Build-stage precompilation, wheel preflight and the
+existing integration test selection are retained. No native source, shared
+CMake definition, profiler feature or operator route is changed by the image
+migration. P800 build and integration results on this exact image digest are
+required before accepting the migration.
 
 ## Build From Source
 

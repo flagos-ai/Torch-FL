@@ -158,7 +158,6 @@ def test_accelerator_download_keeps_its_exact_release_and_original_bytes(
     [
         ("install_flagtree", "flagtree", "FLAGTREE"),
         ("install_flag_gems", "flag-gems", "FLAGGEMS"),
-        ("install_flagcx", "flagcx", "FLAGCX"),
     ],
 )
 @pytest.mark.parametrize("changed", [False, True])
