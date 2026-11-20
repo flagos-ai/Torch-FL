@@ -1478,11 +1478,14 @@ T_LAYER_NORM = """\
   auto mean = at::empty(stat_shape, input_c.options());
   auto rstd = at::empty(stat_shape, input_c.options());
 
+  // weight/bias are moved onto input's device: an unmoved CPU one reaches mudnn
+  // through the raw-pointer wrapper as device memory (#524). The generated
+  // default is already on input's device, so this is a no-op for that case.
   auto w = weight.has_value() && weight.value().defined()
-      ? weight.value().contiguous()
+      ? weight.value().to(input_c.device()).contiguous()
       : at::ones(normalized_shape, input_c.options());
   auto b = bias.has_value() && bias.value().defined()
-      ? bias.value().contiguous()
+      ? bias.value().to(input_c.device()).contiguous()
       : at::zeros(normalized_shape, input_c.options());
 
   std::vector<int> axes;
@@ -1551,8 +1554,9 @@ T_LAYER_NORM_BWD = """\
   const int64_t ndim = input_c.dim();
   const int64_t naxes = static_cast<int64_t>(normalized_shape.size());
 
+  // See the forward above: an unmoved CPU weight would be read as device memory.
   auto w = weight.has_value() && weight.value().defined()
-      ? weight.value().contiguous()
+      ? weight.value().to(input_c.device()).contiguous()
       : at::ones(normalized_shape, input_c.options());
   auto d_input = at::empty(input_c.sizes(), input_c.options());
   auto d_weight = at::empty(normalized_shape, input_c.options());
