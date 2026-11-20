@@ -51,8 +51,7 @@ def _mps_shutdown_allocator() -> None:
 def _select_backend_config() -> None:
     """Resolve the routing file before the first operator dispatch.
 
-    A user-supplied path wins. The built platform selects the vendor's default
-    conf, with a separate generated conf for MetaX native hosts.
+    A user-supplied path wins, then the generated build record and vendor default.
     """
     global _BACKEND_CONFIG_PATH
 
@@ -102,16 +101,17 @@ def _select_backend_config() -> None:
 
     build = _platform.build_info()
     vendor = build.vendor if build.platform else "nvidia"
-    native_metax = build.platform == "metax" and build.native_hosts
-    conf_dir = os.path.join(os.path.dirname(__file__), "configs")
-    conf_name = (
-        "backends_metax_native_host.conf" if native_metax else f"backends_{vendor}.conf"
+    package = os.path.dirname(__file__)
+    conf_dir = os.path.join(package, "configs")
+    conf_path = (
+        os.path.join(package, build.backend_config)
+        if build.backend_config
+        else os.path.join(conf_dir, f"backends_{vendor}.conf")
     )
-    conf_path = os.path.join(conf_dir, conf_name)
     if os.path.exists(conf_path):
         _BACKEND_CONFIG_PATH = conf_path
         return
-    if native_metax:
+    if build.backend_config:
         raise RuntimeError(
             f"native-host wheel is missing its generated config: {conf_path}"
         )

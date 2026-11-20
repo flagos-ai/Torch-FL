@@ -20,9 +20,7 @@ pytestmark = [pytest.mark.metax, pytest.mark.native_source_host, pytest.mark.fla
 def native_contract():
     assert torch_fl._build_config.NATIVE_HOSTS
     assert "boxing" not in torch_fl._build_config.KERNELS
-    assert (
-        Path(torch_fl.backend_config_path()).name == "backends_metax_native_host.conf"
-    )
+    assert Path(torch_fl.backend_config_path()).name == "backends_metax.conf"
     import flag_gems
 
     assert flag_gems.runtime.device.name == "flagos"

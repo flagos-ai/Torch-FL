@@ -3843,6 +3843,7 @@ def render(
     variant: bool = False,
     cuda_abi: bool = False,
     tileops_only: bool = False,
+    include_gap_notes: bool = True,
 ) -> str:
     """Build the conf text for one platform.
 
@@ -3973,7 +3974,7 @@ def render(
         f"# Coverage: {covered}/{total} ops accelerated "
         f"({100.0 * covered / total:.1f}%)",
     ]
-    notes = BOXING_GAP_NOTES.get(platform)
+    notes = BOXING_GAP_NOTES.get(platform) if include_gap_notes else None
     if notes and cuda_abi and not variant:
         notes = boxing_to_none_notes(notes)
     if variant and _variant_routes_flaggems_override(routes):
@@ -4224,49 +4225,6 @@ def build_all(conf_dir: Path) -> dict:
                 "none",
             )
 
-    for platform, operators in NATIVE_HOST_FLAGGEMS_OPS.items():
-        python_ops = flaggems_python_ops_for(platform)
-        routes = {
-            op: ("flaggems" if op in python_ops else "none")
-            if value == "flaggems_cpp"
-            else value
-            for op, value in out[platform][1].items()
-        }
-        # Composite measurements from the ordinary wheel do not establish
-        # native-host lowering. Qwen's eager attention uses its explicit ops.
-        if platform == "metax":
-            routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
-        missing = operators - routes.keys()
-        if missing:
-            raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
-        routes.update({op: "flaggems" for op in operators})
-        name = f"{platform}_native_host"
-        text = render(name, "", routes)
-        if platform == "metax":
-            from native_host_policy import (
-                NATIVE_SDK_PRECISION,
-                precision_policy,
-                render_config_routes,
-            )
-
-            policy = {
-                "operators": [
-                    *NATIVE_SDK_PRECISION[platform]["operators"],
-                    *precision_policy(platform)["operators"],
-                ]
-            }
-            text = render_config_routes(text, platform, policy=policy)
-        text = text.replace(
-            "# Full-coverage config:",
-            "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"
-            "# Selected by the wheel build record; numerical CPU fallback is rejected.\n"
-            "# These routes require the compiled original hosts and device-name alignment.\n"
-            "# Full-model accuracy and performance remain separate acceptance gates.\n#\n"
-            "# Full-coverage config:",
-            1,
-        )
-        out[name] = (text, routes, "")
-
     # The contract from AGENTS.md ("Day-0 boxing confs"), enforced rather than
     # documented: no default conf may route an op to the boxing kernel. It would
     # claim coverage the platform's own vendor / FlagGems routes do not have,
@@ -4289,6 +4247,55 @@ def build_all(conf_dir: Path) -> dict:
             continue
         _reject_boxing_routes(path.name, _read_conf_routes(path))
     return out
+
+
+def native_host_routes(platform: str, base: dict) -> dict:
+    """Derive native-host routes from the ordinary platform's generated table."""
+    python_ops = flaggems_python_ops_for(platform)
+    routes = {
+        op: ("flaggems" if op in python_ops else "none")
+        if value == "flaggems_cpp"
+        else value
+        for op, value in base.items()
+    }
+    # MetaX's ordinary composite measurement does not establish native-host
+    # lowering. Qwen's eager attention uses its explicit ops.
+    if platform == "metax":
+        routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
+    operators = NATIVE_HOST_FLAGGEMS_OPS[platform]
+    missing = operators - routes.keys()
+    if missing:
+        raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
+    routes.update({op: "flaggems" for op in operators})
+    return routes
+
+
+def render_native_host_config(platform: str, base: dict) -> str:
+    """Render the configuration staged as backends_<platform>.conf in a wheel."""
+    routes = native_host_routes(platform, base)
+    _reject_boxing_routes(f"backends_{platform}.conf", routes)
+    text = render(platform, "", routes, include_gap_notes=False)
+    if platform == "metax":
+        from native_host_policy import (
+            NATIVE_SDK_PRECISION,
+            precision_policy,
+            render_config_routes,
+        )
+
+        policy = {
+            "operators": [
+                *NATIVE_SDK_PRECISION[platform]["operators"],
+                *precision_policy(platform)["operators"],
+            ]
+        }
+        text = render_config_routes(text, platform, policy=policy)
+    return text.replace(
+        "# Full-coverage config:",
+        "# Experimental CPU-Torch native-host build (FLAGOS_BUILD_NATIVE_HOST=1).\n"
+        "# These routes require the compiled hosts and reject numerical CPU fallback.\n#\n"
+        "# Full-coverage config:",
+        1,
+    )
 
 
 def _read_conf_routes(path: Path) -> dict:

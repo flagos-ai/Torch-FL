@@ -183,7 +183,7 @@ def test_build_ext_stages_generated_build_config(
     monkeypatch.setitem(
         setup_globals,
         "build_deps",
-        lambda: setup_globals["_write_build_config"](),
+        lambda *, inplace: setup_globals["_write_build_config"](inplace=inplace),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -563,6 +563,50 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
     command.ensure_finalized()
     with pytest.raises(RuntimeError, match="boxing"):
         command._build_native_hosts()
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+def test_metax_stages_one_config_and_restores_the_default(
+    monkeypatch, tmp_path, clean_kernel_env, inplace
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    namespace, kwargs = _load_setup(monkeypatch)
+    write_record = namespace["_write_build_config"]
+    monkeypatch.setitem(write_record.__globals__, "FLAGOS_ACCELERATOR", "metax")
+    monkeypatch.setitem(write_record.__globals__, "BASE_DIR", str(tmp_path))
+    monkeypatch.setitem(write_record.__globals__, "_native_vendor_cohort", lambda: None)
+    command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
+    command.ensure_finalized()
+    command.inplace = inplace
+
+    package = tmp_path / "torch_fl"
+    default = package / "configs/backends_metax.conf"
+    source = ROOT / "torch_fl/configs/backends_metax.conf"
+    ordinary = source.read_bytes()
+    default.parent.mkdir(parents=True)
+    default.write_bytes(ordinary)
+    legacy = default.with_name("backends_metax_native_host.conf")
+    if not inplace:
+        legacy.touch()
+
+    write_record(inplace=inplace)
+    command._stage_metax_config(tmp_path, native=True)
+    record = runpy.run_path(str(package / "_build_config.py"))
+    expected = "lib/backends_metax.conf" if inplace else "configs/backends_metax.conf"
+    assert record["BACKEND_CONFIG"] == expected
+    staged = package / expected
+    assert "bmm = flaggems; BFloat16:metax\n" in staged.read_text()
+    assert source.read_bytes() == ordinary
+    assert not legacy.exists()
+
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "0")
+    write_record(inplace=inplace)
+    command._stage_metax_config(tmp_path, native=False)
+    assert "BACKEND_CONFIG" not in runpy.run_path(str(package / "_build_config.py"))
+    assert default.read_bytes() == ordinary
+    if inplace:
+        assert not staged.exists()
 
 
 def test_ordinary_wheel_clears_stale_native_host_stage(

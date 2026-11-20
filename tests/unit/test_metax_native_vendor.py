@@ -152,12 +152,15 @@ def test_generated_metax_vendor_abi_and_dtype_are_immutable():
 
 
 def test_silu_exception_is_only_in_explicit_native_configuration():
-    native = ROOT / "torch_fl/configs/backends_metax_native_host.conf"
+    generator = load("metax_vendor_confs_test", "scripts/codegen/gen_vendor_confs.py")
     ordinary = ROOT / "torch_fl/configs/backends_metax.conf"
+    native = generator.render_native_host_config(
+        "metax", generator.parse_conf(ordinary)
+    )
     clause = "silu = flaggems; BFloat16:metax\n"
-    assert clause in native.read_text()
+    assert clause in native
     assert clause not in ordinary.read_text()
-    assert "_softmax = flaggems; Float:metax\n" in native.read_text()
+    assert "_softmax = flaggems; Float:metax\n" in native
     assert "_softmax = flaggems; Float:metax\n" not in ordinary.read_text()
 
 

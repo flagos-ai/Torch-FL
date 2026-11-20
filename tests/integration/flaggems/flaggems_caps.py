@@ -379,14 +379,24 @@ def accel_label() -> str:
     ``torch_fl._platform.platform_for``. A day-0 variant
     (``backends_<platform>_boxing.conf``) is the same platform's other conf and
     is reported as ``<platform id>_boxing``.
+    The build record identifies a staged native-host conf that uses the
+    platform's ordinary basename.
     """
-    name = conf_path().name
+    path = conf_path()
+    name = path.name
     if not (name.startswith("backends_") and name.endswith(".conf")):
         return ""
     label = name[len("backends_") : -len(".conf")]
     if label.endswith("_boxing"):
         platform = label[: -len("_boxing")]
         return f"{_platform_id(platform)}_boxing"
+    from torch_fl import _platform
+
+    build = _platform.build_info()
+    if build.native_hosts and build.backend_config:
+        recorded = Path(_platform.__file__).parent / build.backend_config
+        if path.resolve() == recorded.resolve():
+            return f"{_platform_id(label)}_native_host"
     return _platform_id(label)
 
 
