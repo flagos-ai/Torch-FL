@@ -60,7 +60,7 @@
 #include <macros.h>
 #include <runtime/allocator/caching_device_allocator.h>
 
-#include <aten/common.h>
+#include <aten/route.h>
 
 #include "dataparallel.h"
 

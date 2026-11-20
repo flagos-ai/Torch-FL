@@ -29,8 +29,8 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-COMMON_CC = REPO_ROOT / "csrc" / "aten" / "common.cc"
-COMMON_H = REPO_ROOT / "csrc" / "aten" / "common.h"
+ROUTE_CC = REPO_ROOT / "csrc" / "aten" / "route.cc"
+ROUTE_H = REPO_ROOT / "csrc" / "aten" / "route.h"
 
 #: The values a conf may route to that are not a vendor's kernel.
 #: `boxing` is the day-0 files' spelling of the same kernel: those are not
@@ -52,30 +52,29 @@ def _platforms() -> dict:
 
 
 def _backend_name_table() -> dict:
-    """`BackendName()`: enumerator -> the string it reports."""
-    text = COMMON_CC.read_text(encoding="utf-8")
-    body = text[text.index("const char* BackendName") :]
-    body = body[: body.index("// Parse one conf file")]
-    return dict(re.findall(r'case Backend::(\w+):\s+return "([a-z_]+)";', body))
+    """Canonical conf name by backend enumerator."""
+    table = ROUTE_CC.read_text(encoding="utf-8").split("kBackends[] = {")[1]
+    table = table.split("};", 1)[0]
+    return dict(re.findall(r'\{Backend::(\w+),\s*"([a-z_]+)",', table))
 
 
 def test_every_vendor_has_a_backend_enumerator_named_after_it():
-    enum = COMMON_H.read_text(encoding="utf-8")
+    enum = ROUTE_H.read_text(encoding="utf-8")
     enum = enum[enum.index("enum class Backend {") : enum.index("};")]
     enumerators = set(re.findall(r"^\s+(k\w+),", enum, flags=re.M))
     names = _backend_name_table()
-    for vendor in sorted({row["vendor"] for row in _platforms().values()}):
-        expected = "k" + vendor[0].upper() + vendor[1:]
-        if expected in enumerators:
-            assert names.get(expected) == vendor, (
-                f"{expected} reports {names.get(expected)!r}, not {vendor!r}"
+    vendors = {row["vendor"] for row in _platforms().values()}
+    for slot in enumerators:
+        vendor = slot[1:].lower()
+        if vendor in vendors:
+            assert names.get(slot) == vendor, (
+                f"{slot} reports {names.get(slot)!r}, expected {vendor!r}"
             )
-        # A vendor with no native slot (hygon and thead) need not have one.
 
 
 def test_no_enumerator_still_names_an_sdk():
     """kMusa / kGcu / kMps were the SDK spellings; the vendor name replaced them."""
-    enum = COMMON_H.read_text(encoding="utf-8")
+    enum = ROUTE_H.read_text(encoding="utf-8")
     enum = enum[enum.index("enum class Backend {") : enum.index("};")]
     for dead in ("kMusa", "kGcu", "kMps"):
         assert dead not in enum, f"{dead} is back; the enum names vendors (AGENTS.md)"
@@ -109,9 +108,12 @@ def test_shipped_confs_route_to_vendor_keys_only():
 
 def test_the_old_spellings_still_parse():
     """An out-of-tree conf or FLAGOS_OP_* written before the rename."""
-    text = COMMON_CC.read_text(encoding="utf-8")
-    parse = text[text.index("bool ParseBackendName") :]
-    parse = parse[: parse.index("const char* BackendName")]
+    text = ROUTE_CC.read_text(encoding="utf-8")
+    parse = text[
+        text.index("constexpr BackendInfo kBackends[]") : text.index(
+            "const BackendInfo* FindBackend"
+        )
+    ]
     for legacy in ('"cuda"', '"gcu"', '"musa"', '"mps"', '"flagos_python"'):
         assert legacy in parse, f"{legacy} must stay accepted"
     # `nvidia` is the emitted key the other tests require; the parser has to

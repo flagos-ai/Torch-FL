@@ -427,6 +427,14 @@ claims in the backend's code generator so `register.cc` can include the selected
 fragments inside its shared `TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)`.
 Add a handwritten claim only for logic the generated wrappers cannot express.
 
+### Runtime operator routing
+
+`csrc/aten/route.h` and `csrc/aten/route.cc` own the loaded route table. Declare
+each backend's conf key, kernel set and compatible log spelling in the route
+metadata. Keep legacy keys accepted where existing configs and environment
+overrides use them. `Dispatcher` selects a registered kernel from the route
+entry and call arguments.
+
 ### Native-host source layout
 
 Shared native-host C++ lives in `csrc/native_host/`. Each backend keeps its

@@ -6,134 +6,17 @@
 
 #pragma once
 
+#include "route.h"
+
 #include <ATen/ATen.h>
 #include <ATen/native/CPUFallback.h>
 
 #include <flagos.h>
 
-#include <string>
 #include <cstdint>
 #include <vector>
 
 namespace at::native::flagos {
-
-// Backend selector for unified op wrappers.
-// Determines which physical backend impl() dispatches to.
-// kUncached is a reserved sentinel, never stored in the BackendTable or
-// returned by GetBackendForOp. Dispatcher caches a complete immutable entry.
-// Keep it last so the real backends stay contiguous.
-enum class Backend {
-  // The CUDA-ABI boxing kernel: re-dispatch PrivateUse1 to CUDA into a vendor's
-  // own libtorch (DeviceBoxingGuard) instead of launching a kernel of our own.
-  // Named for what it does, not for the runtime it borrows -- MetaX, Hygon DCU
-  // and the T-Head PPU all route through this one slot. Conf key: boxing
-  // ("cuda" is the legacy spelling, still parsed).
-  kBoxing,
-  kFlagGemsCpp,    // FlagGems C++ runtime (liboperators.so, conf key: flaggems_cpp)
-  kFlagGems,       // FlagGems Python/Triton path (conf key: flaggems)
-  // One value per vendor, spelled the way its conf key is (see AGENTS.md,
-  // "Platform names"). These three used to be named after the SDK rather than
-  // the vendor.
-  kAscend,
-  kMthreads,       // conf key: mthreads
-  kMetax,
-  kTsingMicro,
-  kEnflame,        // conf key: enflame
-  kKunlunxin,
-  kIluvatar,
-  kCambricon,      // conf key: cambricon
-  kTileOps,
-  kApple,          // Apple Metal / MPSGraph (conf key: apple)
-  // D-Robotics RDK BPU. The kernels submit compiled operator artifacts from
-  // the operator library named by FLAGOS_BPU_OPLIB; without it every kernel
-  // takes the CPU round-trip. Conf key: drobotics.
-  kDrobotics,
-  kNvidia,         // Published vendor-native precision entries; never boxing.
-  kHygon,          // Published HCU precision entries on PrivateUse1 storage.
-  // No accelerated implementation on this platform. The op is deliberately not
-  // registered on PrivateUse1, so it reaches the boxed cpu_fallback instead of
-  // arriving here with an empty kernel slot. Recorded explicitly (rather than
-  // by omission) so a vendor conf states coverage for every op and support can
-  // be counted from the file.
-  kNone,
-  kUncached
-};
-
-struct ConditionalBackend {
-  uint64_t dtype_mask;
-  Backend backend;
-};
-
-struct BackendConfigEntry {
-  Backend backend = Backend::kFlagGems;
-  std::vector<ConditionalBackend> dtypes;
-};
-
-// Optional input-dtype clauses share the op's config row, e.g.
-// "mm = flaggems; BFloat16:nvidia". A clause applies when an input matches and
-// its kernel is registered; otherwise the unconditional backend remains.
-// Clauses name kernel backends; `none` is only an unconditional coverage value.
-const BackendConfigEntry& GetBackendConfigForOp(const std::string& op_name);
-
-// Returns the unconditional backend for an op, before input-dtype resolution.
-// The full entry is exposed by GetBackendConfigForOp and loaded once at startup.
-// Config file path, in order of precedence:
-//   1. SetBackendConfigPath(), called by torch_fl._select_backend_config()
-//   2. $FLAGOS_BACKEND_CONFIG
-//   3. torch_fl/configs/backends_nvidia.conf, located from this library's own path
-// Format: "op_name = backend[; dtype[,dtype]:backend ...]"
-//   backend: "flaggems_cpp" -- FlagGems C++ path (liboperators.so)
-//            "flaggems"     -- FlagGems Python (Triton) path
-//            "tileops"      -- TileOps Triton shims
-//            "<vendor>"     -- vendor-native kernel (nvidia | ascend | mthreads |
-//                              metax | enflame | tsingmicro | kunlunxin | iluvatar)
-//            "boxing"       -- opt-in CUDA boxing (legacy spelling: cuda)
-//            "none"         -- no accelerated impl; reaches cpu_fallback
-// Default when op is not listed: kFlagGems.
-Backend GetBackendForOp(const std::string& op_name);
-
-// True when the conf names `op_name` at all, i.e. whether the value above is
-// the file's routing decision or the unlisted default. Most callers do not need
-// this: for a generated leaf kernel the two are equivalent, because the
-// default and the absence of an override lead to the same kernel. It matters
-// for an op whose FlagGems support is per-platform and opt-in by measurement --
-// a conf that predates that route, or a third party's, has not asked for it, so
-// "unlisted" has to keep the pre-existing path instead of silently acquiring a
-// new one. A caller that reads false must therefore do what the op did before
-// the FlagGems route existed, not pick a default of its own; see
-// csrc/aten/sdp_choice_stub.cc.
-bool HasBackendForOp(const std::string& op_name);
-
-// Record the conf path Python resolved at import time. Must be called before
-// the first op dispatch, which is when the table is built. It is not written to
-// os.environ: the wheel's own selection has to stay distinguishable from a
-// user's FLAGOS_BACKEND_CONFIG, and an environment write makes them identical
-// for the rest of the process.
-//
-// FLAGOS_EXPORT because of who calls it: the binding is
-// torch_fl._C._set_backend_config_path, and csrc/bindings/module.cc is linked
-// into libtorch_bindings.so, not into libtorch_fl.so. CMakeLists.txt sets
-// CMAKE_CXX_VISIBILITY_PRESET hidden, so an unannotated definition here is
-// local to libtorch_fl.so and the import fails with an undefined symbol rather
-// than a link error -- shared-library linking leaves undefined symbols alone.
-FLAGOS_EXPORT void SetBackendConfigPath(const std::string& path);
-
-// The value of FLAGOS_FORCE_BACKEND -- "flaggems", "vendor" or "tileops" -- or an
-// empty string when it is unset (or was unparseable, which warns and reads as
-// unset). Resolved once per process, so Dispatcher can consult it on the
-// dispatch-miss path without re-reading the environment per op.
-const std::string& ForcedBackendMode();
-
-// True when FLAGOS_LOG -- a comma-separated list -- names `item`, one of
-// "dispatch", "fallback" or "op_cache". Three separate booleans used to gate
-// these, and none could be discovered by reading the environment: you had to
-// know the name first. One list puts the whole menu in one place, in the
-// variable's own value.
-//
-// An item that names nothing is reported once per process, because a typo would
-// otherwise turn a diagnostic off silently -- which is exactly what those
-// booleans did not do.
-bool LogEnabled(const char* item);
 
 // Dtypes this build's FlagGems (Triton) route cannot serve, whatever op is
 // asking. Consulted by Dispatcher so a `flaggems` route falls back to the

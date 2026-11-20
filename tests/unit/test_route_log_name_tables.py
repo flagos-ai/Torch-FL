@@ -39,36 +39,7 @@ TABLES = (
     ROOT / "tests" / "integration" / "runtime" / "runtime_caps.py",
     ROOT / "tests" / "integration" / "flaggems" / "flaggems_caps.py",
 )
-DISPATCHER = ROOT / "csrc" / "aten" / "dispatcher.h"
-
-#: conf value -> the name LogDispatch prints for the backend it parses to.
-#: Native NVIDIA precision entries are distinct from CUDA boxing.
-LOGGED_AS = {
-    "flaggems": "flagos_python",
-    "flaggems_python": "flagos_python",
-    "flagos_python": "flagos_python",
-    "flaggems_cpp": "flagos",
-    "flagos": "flagos",
-    "apple": "mps",
-    "mps": "mps",
-    "drobotics": "drobotics",
-    "bpu": "drobotics",
-    "enflame": "gcu",
-    "gcu": "gcu",
-    "mthreads": "musa",
-    "musa": "musa",
-    "nvidia": "nvidia",
-    "hygon": "hygon",
-    "boxing": "boxing",
-    "ascend": "ascend",
-    "metax": "metax",
-    "tsingmicro": "tsingmicro",
-    "kunlunxin": "kunlunxin",
-    "iluvatar": "iluvatar",
-    "cambricon": "cambricon",
-    "tileops": "tileops",
-    "none": "none",
-}
+ROUTE_CC = ROOT / "csrc" / "aten" / "route.cc"
 
 
 def _conf_values():
@@ -84,9 +55,23 @@ def _conf_values():
 
 
 def _logged_names():
-    text = DISPATCHER.read_text(encoding="utf-8")
-    log = text[text.index("LogDispatch") :]
-    return set(re.findall(r'name = "(\w+)"', log))
+    source = ROUTE_CC.read_text(encoding="utf-8")
+    table = source.split("kBackends[] = {", 1)[1].split("};", 1)[0]
+    aliases = source.split("kAliases[] = {", 1)[1].split("};", 1)[0]
+    slots = {}
+    names = {}
+    for slot, key, legacy in re.findall(
+        r'\{Backend::(\w+), "([a-z_]+)", (?:nullptr|"[a-z_]+")(?:, "([a-z_]+)")?\}',
+        table,
+    ):
+        label = legacy or key
+        slots[slot] = label
+        names[key] = label
+        if legacy:
+            names[legacy] = label
+    for key, slot in re.findall(r'\{"([a-z_]+)", Backend::(\w+)\}', aliases):
+        names[key] = slots[slot]
+    return names
 
 
 def _table(path):
@@ -106,15 +91,13 @@ def _resolve(table, value):
 
 def test_every_conf_value_resolves_to_a_logged_name():
     logged = _logged_names()
-    assert logged, "no dispatch-log names found in dispatcher.h"
-    assert set(_conf_values()) <= set(LOGGED_AS), sorted(
-        _conf_values() - set(LOGGED_AS)
-    )
+    assert logged, "no dispatch-log names found in route.cc"
+    assert _conf_values() <= logged.keys(), sorted(_conf_values() - logged.keys())
     problems = {}
     for path in TABLES:
         table = _table(path)
         for value in sorted(_conf_values()):
-            if _resolve(table, value) not in logged:
+            if _resolve(table, value) != logged[value]:
                 problems[(str(path.relative_to(ROOT)), value)] = _resolve(table, value)
     assert not problems, problems
 
@@ -138,5 +121,4 @@ def test_every_table_entry_names_a_logged_backend():
     logged = _logged_names()
     for path in TABLES:
         for value, name in _table(path).items():
-            assert name in logged, (path.relative_to(ROOT), value, name)
-            assert LOGGED_AS.get(value) == name, (path.relative_to(ROOT), value, name)
+            assert logged.get(value) == name, (path.relative_to(ROOT), value, name)
