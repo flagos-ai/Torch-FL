@@ -15,15 +15,13 @@
 """Conf-route / registration consistency checks.
 
 Every platform conf lists a route for every op the build can route, and each
-route names a backend family. The call only reaches a kernel if the platform's
-registration ``.inc`` also claims the op: an unregistered op with an
-accelerated route is a "backend not registered" raise at runtime, and a
-registered op left at ``none`` sends a real kernel to ``cpu_fallback``.
+route names a backend family. An accelerated route can run only when the
+platform registers its wrapper. An operator routed to ``none`` can reach
+the boxed CPU fallback when the platform leaves it unregistered.
 
-This is a pure text/parse check over the committed confs and generated
-``.inc`` files. It needs no GPU, no ``flag_gems`` install, and no built
-``torch_fl``, so it runs in milliseconds on any platform and is safe to wire
-into the platform-agnostic CI job.
+The coverage checks read the committed confs and generated ``.inc`` files.
+The selection check runs CMake in script mode. Neither needs a built wheel
+or an accelerator SDK.
 
 Run: pytest tests/unit/test_conf_registration_consistency.py -v
 """
@@ -33,6 +31,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
+import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -72,87 +72,11 @@ EXTRA_NATIVE = {
 }
 EXTRA_ROUTED = {"scaled_dot_product_attention"}
 
-# Platform -> registration ``.inc`` set that ``csrc/aten/register.cc`` compiles
-# for that platform (the ``#include`` lines under each ``USE_*`` guard,
-# register.cc:549-614).  Paths are relative to ``csrc/aten``.
 PLATFORM_REGISTRATION = {
-    "ascend": ["backends/ascend/generated/ascend_register.inc"],
-    "enflame": [
-        "backends/enflame/generated/gcu_register.inc",
-        "backends/enflame/generated/gcu_flaggems_register.inc",
-    ],
-    "mthreads": [
-        "backends/mthreads/generated/musa_register.inc",
-        "backends/mthreads/generated/musa_flaggems_register.inc",
-    ],
-    # The BPU is native like apple, under the vendor's conf name: the generated
-    # kernels submit single-operator .hbm artifacts from FLAGOS_BPU_OPLIB.
-    "drobotics": ["backends/bpu/generated/bpu_register.inc"],
-    # Kunlunxin is a native vendor backend like musa/gcu/ascend: it compiles its
-    # own generated registration, which claims exactly the ops it routes to the
-    # vendor XPU SDK operator library.  It no longer falls through to
-    # generated/register.inc.
-    #
-    # The second file is the FlagGems half. It is empty until the P800 survey
-    # lands (KUNLUNXIN_FLAGGEMS_MEASURED), so it claims nothing today, but it is
-    # named here because VENDORS in gen_vendor_confs.py names it: an op promoted
-    # to a `flaggems` route goes into that file, and this replica has to describe
-    # the same registration surface the generator reads.
-    "kunlunxin": [
-        "backends/kunlunxin/generated/kunlunxin_register.inc",
-        "backends/kunlunxin/generated/kunlunxin_flaggems_register.inc",
-    ],
-    # Iluvatar is FlagGems-primary with a native, non-boxing vendor slot
-    # alongside it: the FlagGems dispatcher list is the default path, and a
-    # separate native .inc (the corex ixdnn/ixblas kernels) claims exactly the
-    # ops the conf routes to `iluvatar`. register.cc has an arm of its own
-    # precisely so it does not reach the generated/register.inc fallback below,
-    # which would claim every op and turn its `none` entries into "backend not
-    # registered" instead of cpu_fallback. The two .inc files are disjoint --
-    # both are included into the same PrivateUse1 TORCH_LIBRARY_IMPL body, so an
-    # op in both would be a duplicate m.impl compile error.
-    "iluvatar": [
-        "backends/iluvatar/generated/iluvatar_register.inc",
-        "backends/iluvatar/generated/iluvatar_flaggems_register.inc",
-    ],
-    # Boxing platforms (cuda, dcu, metax, ppu) and tsingmicro share the
-    # register.cc ``#else`` arm. With boxing ON it includes
-    # generated/register_boxing_<platform>.inc -- every op the conf routes
-    # somewhere other than ``none`` that this wheel has a kernel for; with
-    # boxing OFF -- the FlagGems-primary default -- it includes the matching
-    # generated/register_flaggems_<platform>.inc, which claims only the ops the
-    # conf routes to a FlagGems backend. Both are listed here because a build
-    # compiles one or the other. A boxing build also includes the full
-    # generated/register.inc after the boxed list, so the claimed set of that
-    # arm is the boxed list plus whatever register.inc adds; the checks below
-    # ask that the boxed list is a subset of it, which is what the claim gating
-    # guarantees.
-    "nvidia": [
-        "generated/register_boxing_nvidia.inc",
-        "generated/register_flaggems_nvidia.inc",
-    ],
-    "hygon": [
-        "generated/register_boxing_hygon.inc",
-        "generated/register_flaggems_hygon.inc",
-    ],
-    "metax": [
-        "generated/register_boxing_metax.inc",
-        "generated/register_flaggems_metax.inc",
-    ],
-    "thead": [
-        "generated/register_boxing_thead.inc",
-        "generated/register_flaggems_thead.inc",
-    ],
-    "tsingmicro": [
-        "generated/register_boxing_tsingmicro.inc",
-        "generated/register_flaggems_tsingmicro.inc",
-    ],
-    # MPS is a native vendor backend: register.cc's USE_MPS arm includes the
-    # codegen'd apple registration, which claims only the ops with a MPSGraph
-    # kernel (the `unary`, `binary`, `binary_scalar` and `reduce` categories so
-    # far).  Note this is a PrivateUse1-dispatched include, not built-in MPS --
-    # so the conf routes those ops to ``mps``, and the rest to ``none``.
-    "apple": ["backends/apple/generated/mps_register.inc"],
+    row["vendor"]: row["registration"]
+    for row in json.loads(
+        (REPO_ROOT / "cmake/flagos_platforms.json").read_text(encoding="utf-8")
+    )["accelerators"].values()
 }
 
 # CUDA-boxing platforms spell the fallback key ``cuda`` (BOXING_FALLBACK in
@@ -362,8 +286,10 @@ def _platform_registered(platform: str) -> set[str]:
     which are invisible to the ``m.impl`` scan of any ``.inc``.
     """
     ops: set[str] = set(EXTRA_NATIVE.get(platform, set()))
-    for rel in PLATFORM_REGISTRATION[platform]:
-        ops |= _registered_ops(ATEN_DIR / rel)
+    fragments = PLATFORM_REGISTRATION[platform]
+    for kind in ("base", "vendor", "flaggems", "boxing"):
+        if kind in fragments:
+            ops |= _registered_ops(ATEN_DIR / fragments[kind])
     return ops
 
 
@@ -557,13 +483,57 @@ def test_metax_tileops_experiment_registration_matches_its_conf():
     )
 
 
-def test_metax_tileops_subset_requires_the_non_boxing_experiment_define():
-    """The subset include must never compile into a normal boxing wheel."""
-    register = (REPO_ROOT / "csrc/aten/register.cc").read_text()
-    assert "#if defined(FLAGOS_TILEOPS_METAX_NO_BOXING)" in register
-    assert register.index("FLAGOS_TILEOPS_METAX_NO_BOXING") < register.index(
-        "#elif defined(FLAGOS_BOXING_BUILD)"
+@pytest.mark.anyplatform
+@pytest.mark.parametrize(
+    "platform,overrides,expected",
+    [
+        ("apple", {}, ["base"]),
+        ("enflame", {"FLAGOS_BUILD_VENDOR": "OFF"}, ["flaggems"]),
+        ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "OFF"}, ["flaggems"]),
+        ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "ON"}, ["vendor", "flaggems"]),
+        ("metax", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
+        ("metax", {"FLAGOS_BUILD_TILEOPS": "ON"}, ["tileops"]),
+        (
+            "metax",
+            {"FLAGOS_BUILD_TILEOPS": "ON", "FLAGOS_BUILD_BOXING": "ON"},
+            ["boxing"],
+        ),
+        ("tsingmicro", {"FLAGOS_BUILD_BOXING": "ON"}, ["boxing"]),
+    ],
+)
+def test_cmake_selects_registration_fragments(tmp_path, platform, overrides, expected):
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        pytest.skip("CMake is unavailable")
+    output = tmp_path / "register_ops.inc"
+    script = tmp_path / "registration.cmake"
+    script.write_text(
+        "cmake_minimum_required(VERSION 3.19)\n"
+        f'include("{REPO_ROOT}/cmake/FlagosPlatforms.cmake")\n'
+        f'include("{REPO_ROOT}/cmake/FlagosRegistration.cmake")\n'
+        'if(FLAGOS_PLATFORM_ID STREQUAL "musa")\n'
+        "  set(_flagos_is_musa ON)\n"
+        "endif()\n"
+        f'flagos_write_registration("{ATEN_DIR}" "{output}")\n'
     )
+    switches = {"FLAGOS_BUILD_VENDOR": "ON", "FLAGOS_BUILD_FLAGGEMS": "ON", **overrides}
+    result = subprocess.run(
+        [
+            cmake,
+            f"-DFLAGOS_ACCELERATOR={platform}",
+            *(f"-D{name}={value}" for name, value in switches.items()),
+            "-P",
+            str(script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = output.read_text()
+    paths = re.findall(r'^#include "aten/(.*)"$', generated, re.M)
+    assert paths == [PLATFORM_REGISTRATION[platform][kind] for kind in expected]
+    assert ("#define FLAGOS_REGISTER_TILEOPS" in generated) == ("tileops" in expected)
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,7 @@ BOXING_VARIANT_PLATFORMS for what it is and when it goes away.
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -90,10 +91,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # touching PPU, and PPU overriding a value in a file it also enumerates from is
 # the round trip this script avoids everywhere else.
 #
-# generated/register.inc is the artifact the CUDA line and the PPU line both
-# compile (the `#else` branch of csrc/aten/register.cc), which is the same reason
-# the vendor kernel sets below are read from the generated C++ rather than from a
-# conf.
+# generated/register.inc is the full list of generated registrations. Vendor
+# kernel sets are read from the platform's selected fragments of that surface.
 GENERATED_REGISTER_INC = REPO_ROOT / "csrc/aten/generated/register.inc"
 
 # Where the backend coverage sets come from. These used to be three shared conf
@@ -110,114 +109,18 @@ from backend_coverage import (  # noqa: E402
     TILEOPS_OPS,
 )
 
-# Vendors that get a full-coverage conf.
-#
-# Only a platform whose PrivateUse1 registration is a *subset* of the op list
-# belongs here, because that is what makes `none` honest. Claiming an op on
-# PrivateUse1 with no kernel behind it does not fall back -- the call reaches the
-# dispatcher and raises on the empty slot -- whereas leaving it unregistered lets
-# it box to cpu_fallback. So `none` means cpu_fallback only where registration
-# skips the op, and these three platforms are the ones that skip:
-#
-#   platform  registration branch in csrc/aten/register.cc   m.impl count
-#   musa      musa_register.inc + musa_flaggems_register.inc  517
-#   gcu       gcu_register.inc + gcu_flaggems_register.inc     401
-#   ascend    ascend_register.inc                              372
-#
-# metax and dcu fall through to the `#else` branch and register the full
-# generated list (~2034), so a `none` entry there would be a guaranteed raise
-# rather than a fallback; both are handled as CUDA-boxing platforms below (see
-# BOXING_PLATFORMS). tsingmicro no longer falls through -- register.cc gives it
-# register_boxing_tsingmicro.inc, the 81 ops derived from its own conf -- but
-# backends_tsingmicro.conf stays hand-written, because that conf is the source of
-# the claim and generating it full-coverage would restore the raise.
-#
-#   vendor -> (conf naming its native kernels, other .inc files it registers)
-#
-# The sets are read from the generated C++ rather than from the conf this script
-# rewrites, so there is no round trip to survive: registration and routing are
-# derived from the same artifact the compiler sees.
-VENDORS = {
-    "mthreads": (
-        "backends/mthreads/generated/musa_register.inc",
-        ("backends/mthreads/generated/musa_flaggems_register.inc",),
-    ),
-    "enflame": (
-        "backends/enflame/generated/gcu_register.inc",
-        ("backends/enflame/generated/gcu_flaggems_register.inc",),
-    ),
-    "ascend": ("backends/ascend/generated/ascend_register.inc", ()),
-    # Kunlunxin is a native backend with a second registration file for the
-    # FlagGems Python path. Unlike the other native vendors that file is not
-    # generated from the shared FlagGems ceiling: kunlunxin is absent from
-    # FLAGGEMS_PYTHON_PLATFORMS, so only an op a P800 survey has vouched for may
-    # appear in it (KUNLUNXIN_FLAGGEMS_MEASURED, read by
-    # codegen_kunlunxin_flaggems.py). It is empty today, which is why
-    # backends_kunlunxin.conf routes nothing to `flaggems` and why this entry
-    # changes no route -- the file exists so the follow-up that measures an op
-    # has one value to edit instead of a registration path to invent.
-    #
-    # The blocker the earlier version of this comment recorded -- the SDK's torch
-    # shim naming the FlagGems runtime device something other than torch_fl's
-    # "flagos", so every guarded kernel falls through -- is a real defect and is
-    # still unremediated for this vendor: patch_flaggems_device_name's
-    # _ALIGNED_VENDORS (torch_fl/accelerator/nvidia/_cuda_compat.py) lists nvidia
-    # and hygon only. Naming the device right is a prerequisite of the first
-    # measured op, not of this file.
-    "kunlunxin": (
-        "backends/kunlunxin/generated/kunlunxin_register.inc",
-        ("backends/kunlunxin/generated/kunlunxin_flaggems_register.inc",),
-    ),
-    # Apple Silicon (Metal). Like kunlunxin this is a native backend with a
-    # single registration .inc and no FlagGems file to fold in: no Metal
-    # FlagTree/Triton line exists, so backends_apple.conf routes the ops
-    # backends/apple/generated/mps_register.inc claims to the `mps` kernel and
-    # everything else to `none` (cpu_fallback). After stage 2 that is the
-    # `unary`, `binary`, `binary_scalar` and `reduce` categories; see
-    # scripts/codegen/codegen_mps.py.
-    "apple": ("backends/apple/generated/mps_register.inc", ()),
-    # D-Robotics RDK BPU. Like apple this is native with a single registration
-    # .inc and no FlagGems file: the BPU has no FlagTree/Triton line, so
-    # backends_drobotics.conf routes the ops
-    # backends/bpu/generated/bpu_register.inc claims to the `drobotics` kernel
-    # and everything else to `none` (cpu_fallback).
-    #
-    # Those kernels submit single-operator .hbm artifacts from the library named
-    # by FLAGOS_BPU_OPLIB. Without that variable each kernel takes its own CPU
-    # round-trip, so the route is correct but unaccelerated -- which is the
-    # state the conf cannot express, since it is a routing table and not a
-    # capability probe.
-    "drobotics": ("backends/bpu/generated/bpu_register.inc", ()),
-    # Iluvatar is still FlagGems-primary, but it now has a native (non-boxing)
-    # .inc for the first cohort of corex ixdnn/ixblas kernels, so the native slot
-    # is no longer empty. backends_iluvatar.conf routes an op to `flaggems` where
-    # FlagGems covers it, to `iluvatar` where only the vendor kernel does, and to
-    # `none` otherwise (cpu_fallback). The two .inc files are included into the
-    # same PrivateUse1 TORCH_LIBRARY_IMPL body, so they must be disjoint -- the
-    # generator (scripts/codegen/codegen_iluvatar.py) intersects its claims
-    # against the FlagGems .inc for exactly that reason.
-    "iluvatar": (
-        "backends/iluvatar/generated/iluvatar_register.inc",
-        ("backends/iluvatar/generated/iluvatar_flaggems_register.inc",),
-    ),
-    # Cambricon MLU is FlagGems-primary with no native half yet: the CNNL
-    # kernels under aten/backends/cambricon/ do not exist, so the native slot is
-    # the empty string -- the explicit "no native kernels" declaration, not a
-    # file that should exist. Every op FlagGems does not cover therefore routes
-    # to `none` (cpu_fallback) rather than to a vendor kernel. The FlagGems .inc
-    # comes from codegen_cambricon_flaggems.py; when a cnnl_register.inc lands,
-    # name it in this slot and that generator subtracts its ops automatically,
-    # keeping the two disjoint inside the one PrivateUse1 TORCH_LIBRARY_IMPL
-    # body.
-    # Cambricon is FlagGems-primary with a small CNNL vendor half. The native
-    # slot names the CNNL register file, emitted by codegen_cambricon.py; the
-    # extra slot is the FlagGems ceiling. An op in neither stays `none` and
-    # reaches cpu_fallback, which is where most of this backend sits today.
-    "cambricon": (
-        "backends/cambricon/generated/cambricon_register.inc",
-        ("backends/cambricon/generated/cambricon_flaggems_register.inc",),
-    ),
-}
+# Native coverage comes from the same generated fragments CMake selects.
+# Additional FlagGems claims can extend that surface without adding vendor kernels.
+_platforms = json.loads(
+    (REPO_ROOT / "cmake/flagos_platforms.json").read_text(encoding="utf-8")
+)["accelerators"]
+VENDORS = {}
+for _row in _platforms.values():
+    _registration = _row["registration"]
+    _native = _registration.get("base") or _registration.get("vendor")
+    if _native:
+        _flaggems = _registration.get("flaggems")
+        VENDORS[_row["vendor"]] = (_native, (_flaggems,) if _flaggems else ())
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
 # are invisible to the .inc scan. Ascend claims aten::matmul (and the
@@ -4119,20 +4022,8 @@ def build_all(conf_dir: Path) -> dict:
             "run scripts/codegen/codegen_ops.py first"
         )
 
-    # A missing .inc is a silent disaster. registered_impls() returns the empty
-    # set for a path that does not exist, so that vendor's whole coverage set
-    # reads as empty, every one of its ops routes to `none`, and --check reports
-    # success -- while the C++ build fails on the very same #include register.cc
-    # emits. Fail loudly here instead: the VENDORS table names files that
-    # register.cc actually includes, so a name with no file behind it is always
-    # a bug, never a platform that happens to cover nothing. (A platform that
-    # genuinely covers nothing belongs in BOXING_PLATFORMS or has no row at all.)
-    #
-    # The one documented exception is a FlagGems-primary vendor: iluvatar has no
-    # vendor kernel library, so its native slot is the empty string -- an explicit
-    # "no native kernels" declaration, not a file that should exist. Only the
-    # extra (FlagGems) paths are real includes for such a vendor, and they are
-    # checked like any other.
+    # Validate the declared fragments before deriving coverage. A missing file
+    # would otherwise look like an empty registration set.
     for _vendor, (_native_inc, _extra_incs) in VENDORS.items():
         for _inc in (_native_inc, *_extra_incs):
             if not _inc:
@@ -4140,10 +4031,8 @@ def build_all(conf_dir: Path) -> dict:
             if not (CSRC_DIR / _inc).exists():
                 raise SystemExit(
                     f"error: {_vendor}: {_inc} does not exist. Its coverage set "
-                    "would read as empty and every op would route to `none`, "
-                    "silently -- while register.cc fails to compile on the same "
-                    "include. Generate it (see scripts/codegen/) or remove the "
-                    "entry from VENDORS."
+                    "would read as empty. Generate the fragment or correct the "
+                    "registration entry in cmake/flagos_platforms.json."
                 )
 
     # No shared fg_py here: each platform's ceiling is resolved per platform

@@ -43,6 +43,7 @@ if(NOT EXISTS "${_flagos_platforms_json}")
   message(FATAL_ERROR "flagos platform table not found: ${_flagos_platforms_json}")
 endif()
 file(READ "${_flagos_platforms_json}" _flagos_platforms)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_flagos_platforms_json}")
 
 # JSON array at <path>... -> a CMake list in <out>.
 function(flagos_json_list out json)

@@ -417,6 +417,16 @@ nor the legacy `cuda` spelling of it.
   wrong, fix the route.
 - The only place a `boxing` key may appear is the opt-in day-0 file below.
 
+### ATen operator registration
+
+Declare the generated PrivateUse1 registration fragments in the platform's
+`registration` entry in `cmake/flagos_platforms.json`. CMake resolves the
+fragments into `register_ops.inc` in the build directory. The routing generator
+reads the same platform entry to determine native coverage. Keep generated
+claims in the backend's code generator so `register.cc` can include the selected
+fragments inside its shared `TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)`.
+Add a handwritten claim only for logic the generated wrappers cannot express.
+
 ### Native-host source layout
 
 Shared native-host C++ lives in `csrc/native_host/`. Each backend keeps its
