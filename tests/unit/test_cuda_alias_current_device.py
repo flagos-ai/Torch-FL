@@ -33,7 +33,7 @@ Two sites, reached by different spellings:
 The fix is to pass `None` through in both, letting torch's own device guard
 resolve it -- so these tests assert on the *target* each site produces rather
 than on a device index, which needs no accelerator and no multi-rank job. The
-two functions are closures inside `_alias_cuda_to_flagos` and are extracted by
+two functions are closures inside `install_alias` and are extracted by
 AST, in the style of tests/unit/test_kunlunxin_triton_stream.py; the structural
 check in tests/unit/test_cuda_alias_guard.py parses the same function.
 
@@ -50,15 +50,15 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-_SOURCE = Path(__file__).resolve().parents[2] / "torch_fl" / "__init__.py"
-_OUTER = "_alias_cuda_to_flagos"
+_SOURCE = Path(__file__).resolve().parents[2] / "torch_fl" / "compat" / "cuda.py"
+_OUTER = "install_alias"
 _UNDER_TEST = ("_remap", "_tensor_cuda")
 
 _FLAGOS = "flagos"
 
 
 def _load_closures():
-    """Compile `_alias_cuda_to_flagos`'s two device-target closures standalone.
+    """Compile the two device-target closures from `install_alias`.
 
     They are nested functions, so `inspect.getsource` on the module attribute
     would hand back the whole 200-line installer. Pulling just these two out

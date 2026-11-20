@@ -2783,6 +2783,9 @@ NATIVE_HOST_FLAGGEMS_OPS = {
             "slice.Tensor",
         }
     ),
+    # The generated mean.out adapter calls mean.dim. Keep the measured HCU
+    # host paths together and preserve the ordinary wheel's reduction hold.
+    "hygon": frozenset({"mean.dim", "mean.out"}),
 }
 
 # The hand-registered composite (EXTRA_ROUTED), on the platform that measured
@@ -3561,11 +3564,9 @@ def boxing_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
 HYGON_HOST_FLAGGEMS_MEASURED = {
     "add.Tensor",
     "mul.Tensor",
-    "mean.dim",
     "cat",
     "add.out",
     "mul.out",
-    "mean.out",
     "cat.out",
 }
 
@@ -4202,12 +4203,7 @@ def build_all(conf_dir: Path) -> dict:
                 1,
             )
             text = render_config_routes(text, platform)
-            routes = {
-                name.strip(): value.strip()
-                for line in text.splitlines()
-                for name, sep, value in [line.split("#", 1)[0].partition("=")]
-                if sep
-            }
+            routes = _conf_routes(text)
         out[platform] = (text, routes, "")
         if platform == "metax":
             experimental = {
@@ -4256,6 +4252,11 @@ def build_all(conf_dir: Path) -> dict:
                 ]
             }
             text = render_config_routes(text, platform, policy=policy)
+        elif platform == "hygon":
+            from native_host_policy import render_config_routes
+
+            text = render_config_routes(text, platform)
+            routes = _conf_routes(text)
         text = text.replace(
             "# Full-coverage config:",
             "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"
@@ -4293,8 +4294,12 @@ def build_all(conf_dir: Path) -> dict:
 
 def _read_conf_routes(path: Path) -> dict:
     """``{op: route value}`` for a shipped conf, comments stripped."""
+    return _conf_routes(path.read_text())
+
+
+def _conf_routes(text: str) -> dict:
     routes = {}
-    for line in path.read_text().splitlines():
+    for line in text.splitlines():
         name, sep, value = line.split("#", 1)[0].partition("=")
         if sep:
             routes[name.strip()] = value.strip()

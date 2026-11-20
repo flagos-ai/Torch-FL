@@ -399,6 +399,7 @@
       "vendor": "hygon",
       "registration": {
         "flaggems": "generated/register_flaggems_hygon.inc",
+        "native_host": "generated/register_flaggems_hygon_native_host.inc",
         "boxing": "generated/register.inc"
       },
       "_comment": [

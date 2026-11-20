@@ -101,11 +101,9 @@ def _patch_native_cuda_probe() -> None:
     initialization ("Torch not compiled with CUDA enabled"). The compiler still
     receives a ``flagos`` device and never executes a CUDA kernel.
 
-    What it replaces is kept as ``torch.cuda._flagos_original_is_available``,
-    which is torch_fl's only way to ask what torch itself answers once this has
-    run. `torch_fl._real_cuda_is_available` reads it, and the ``cuda`` device
-    alias installs only when torch reports no CUDA device -- which is what the
-    saved copy answers, and what the redirected probe no longer does.
+    Save the binding in ``torch.cuda._flagos_original_is_available`` for
+    diagnostics. The CUDA alias captures the runtime probe earlier, immediately
+    after vendor preparation.
     """
     from torch_fl.compile.device_interface import is_native_accelerator
 
@@ -118,15 +116,8 @@ def _patch_native_cuda_probe() -> None:
 
     original = torch.cuda.is_available
     torch.cuda.is_available = torch.flagos.is_available
-    # Read back by torch_fl._real_cuda_is_available, which has to tell this
-    # redirect from a real CUDA runtime; the alias's guard depends on it.
-    #
-    # An already-stashed copy wins: torch_fl's own earlier redirect (the
-    # ``torch.cuda.is_available = lambda: flagos.device_count() > 0`` in
-    # ``_alias_cuda_to_flagos``'s phase) has usually run by the time this does,
-    # and storing *that* keeps a torch_fl lambda rather than torch's answer --
-    # which is the one value the copy exists to preserve, and reading it back as
-    # "there is real CUDA" would mislabel every native accelerator.
+    # Preserve the first binding for diagnostics. It may already be the alias
+    # installed by compat.cuda.
     torch.cuda._flagos_original_is_available = getattr(
         torch.cuda, "_flagos_original_is_available", original
     )

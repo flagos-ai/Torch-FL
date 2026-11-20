@@ -16,17 +16,21 @@ not enough to make them agree with the logical `flagos` device.
 
 What exists today is an **input alias**, not a compatibility contract:
 
-- `torch_fl.__init__._alias_cuda_to_flagos` conditionally remaps `cuda` device
+- `torch_fl.compat.cuda.install_alias` conditionally remaps `cuda` device
   arguments through a `TorchFunctionMode`, wraps the `torch.device` constructor, and
   redirects `Tensor.cuda()` / `Module.cuda()`. The remap is table-driven by
   `_VENDOR_DEVICE_ALIASES`: `cuda` on every row, plus the vendor's *own* device
   name where torch_fl does not register it — `musa` (torch_musa) and `txda`
   (FlagTree's TsingMicro Triton driver, which resolves its active device that way
   while `flag_gems` is being imported).
-- It stands down when the original PyTorch probe reports real CUDA, and can be
-  disabled with `FLAGOS_ALIAS_CUDA=0`; `torch_fl._cuda_alias_active` reports whether
-  it is on.
+- It stands down when the captured PyTorch probe reports real CUDA. Set
+  `FLAGOS_ALIAS_CUDA=0` to disable it. `torch_fl._cuda_alias_active` reports
+  whether it is active.
 - Per-vendor `torch.cuda` facades (CUDA-ABI vendors) supply a `torch.cuda` surface.
+
+CUDA boxing is a temporary day-0 execution path scheduled for retirement.
+Refactoring and regression coverage for the transition focus on the vendor
+and native-host wheels.
 
 The output of an alias is still a logical `flagos`/PrivateUse1 tensor. Frameworks
 that branch on the accelerator class, `device.type == "cuda"`, CUDA-only AMP

@@ -760,7 +760,7 @@ def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
     built = g.build_all(CONF_DIR)
     for platform, (_, routes, _) in built.items():
         route = routes["scaled_dot_product_attention"].split("#", 1)[0].strip()
-        if platform in ("hygon", "metax"):
+        if platform in ("hygon", "hygon_native_host", "metax"):
             assert route == "flaggems", f"{platform} routes the op to {route}"
         elif platform == "iluvatar":
             assert route == "iluvatar", f"{platform} routes the op to {route}"
@@ -950,7 +950,9 @@ def test_default_confs_route_only_measured_flaggems(platform):
     with the platform's measured routes -- nothing else is claimable here."""
     routes = g.build_all(CONF_DIR)[platform][1]
     accelerated = {
-        op for op, v in routes.items() if v.split("#", 1)[0].strip() != "none"
+        op
+        for op, value in routes.items()
+        if value.split("#", 1)[0].split(";", 1)[0].strip() != "none"
     }
     fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
     measured = g.boxing_measured_python_ops(f"backends_{platform}.conf")
@@ -958,6 +960,21 @@ def test_default_confs_route_only_measured_flaggems(platform):
         measured |= g.HYGON_HOST_FLAGGEMS_MEASURED
     stray = sorted(accelerated - (fg | measured))
     assert not stray, f"{platform} accelerates {stray[:5]} with no FlagGems route"
+
+
+def test_hygon_mean_routes_preserve_the_native_host_and_default_wheel_contracts():
+    built = g.build_all(CONF_DIR)
+    ordinary = built["hygon"][1]
+    native = built["hygon_native_host"][1]
+    assert native.keys() == ordinary.keys()
+    assert {op for op in native if native[op] != ordinary[op]} == {
+        "mean.dim",
+        "mean.out",
+    }
+    assert ordinary["mean.dim"] == "none; Float:hygon"
+    assert ordinary["mean.out"] == "none"
+    assert native["mean.dim"] == "flaggems; Float:hygon"
+    assert native["mean.out"] == "flaggems"
 
 
 @pytest.mark.parametrize("platform", sorted(g.BOXING_VARIANT_PLATFORMS))

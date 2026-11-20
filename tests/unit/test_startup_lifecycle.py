@@ -33,10 +33,10 @@ HOOKS = (
 )
 INSTALLERS = (
     "_install_apex_compat",
-    "_patch_ddp_for_flagos",
-    "_patch_comm_for_flagos",
-    "_patch_dataparallel_for_flagos",
-    "_patch_data_parallel_for_flagos",
+    "install_ddp",
+    "install_comm",
+    "install_dataparallel",
+    "install_data_parallel",
     "_register_compile_backend",
     "_install_flex_attention_compat",
     "_register_bpu_compile_backend",
@@ -59,6 +59,13 @@ def _lifecycle(installers, platform="cuda"):
     namespace = dict(zip(INSTALLERS, installers))
     messages = []
     namespace.update(
+        parallel=SimpleNamespace(
+            **{
+                name: namespace[name]
+                for name in INSTALLERS
+                if name.startswith("install_")
+            }
+        ),
         _OPTIONAL_INTEGRATIONS=HOOKS,
         _optional_integration_state={},
         _env=SimpleNamespace(warn=messages.append),
