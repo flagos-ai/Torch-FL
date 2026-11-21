@@ -4,6 +4,8 @@
 """Load prebuilt host artifacts and bind original FlagGems device functions."""
 
 import ast
+from contextvars import ContextVar
+from functools import wraps
 import hashlib
 import importlib
 import importlib.util
@@ -20,6 +22,7 @@ _admitted_kernels = {}
 _launched_kernels = {}
 _audit_installed = False
 _launcher_module = None
+_inductor_autotuner = ContextVar("inductor_autotuner", default=None)
 
 
 def audit_native_compilers(event, values):
@@ -65,11 +68,42 @@ def audit_native_compilers(event, values):
 def kernel_launcher(source, metadata):
     provenance = _admitted_kernels.get(id(source.fn))
     if provenance is None:
-        raise RuntimeError(f"kernel has no admitted FlagGems source: {source.fn}")
-    if hashlib.sha256(source.fn.src.encode()).hexdigest() != provenance["jit_sha256"]:
-        raise RuntimeError("FlagGems JIT source changed after admission")
-    _launched_kernels[metadata.name] = provenance
+        tuner = _inductor_autotuner.get()
+        if tuner is None or tuner.custom_kernel or source.fn is not tuner.fn:
+            raise RuntimeError(f"kernel has no admitted FlagGems source: {source.fn}")
+    else:
+        if (
+            hashlib.sha256(source.fn.src.encode()).hexdigest()
+            != provenance["jit_sha256"]
+        ):
+            raise RuntimeError("FlagGems JIT source changed after admission")
+        _launched_kernels[metadata.name] = provenance
     return _launcher_module.Launcher(source, metadata)
+
+
+def _with_inductor_autotuner(method):
+    @wraps(method)
+    def with_autotuner(tuner, *args, **kwargs):
+        token = _inductor_autotuner.set(tuner)
+        try:
+            return method(tuner, *args, **kwargs)
+        finally:
+            _inductor_autotuner.reset(token)
+
+    with_autotuner._flagos_native_host = True
+    return with_autotuner
+
+
+def bind_inductor_launcher():
+    """Use the wheel's launcher while Inductor binds a generated Triton kernel."""
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+    # Both initial binding (including worker results) and coordinate descent
+    # create launchers in the parent process, where the wheel's driver is active.
+    for name in ("_make_launchers", "_coordinate_descent_tuning"):
+        method = getattr(CachingAutotuner, name)
+        if not getattr(method, "_flagos_native_host", False):
+            setattr(CachingAutotuner, name, _with_inductor_autotuner(method))
 
 
 def module_name(name):

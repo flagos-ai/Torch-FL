@@ -140,6 +140,13 @@ def register_flagos_codegen() -> None:
         init_backend_registration,
     )
 
+    from torch_fl.native_host import _prepared
+
+    if _prepared:
+        from torch_fl.native_host.load import bind_inductor_launcher
+
+        bind_inductor_launcher()
+
     # Populate the built-in registrations first, so our checks below see the
     # real state and so the CUDA overrides module is imported.
     init_backend_registration()
