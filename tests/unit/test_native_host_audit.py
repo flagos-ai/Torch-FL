@@ -151,3 +151,51 @@ def test_launcher_rejects_source_changed_after_admission(monkeypatch):
         loader.kernel_launcher(
             SimpleNamespace(fn=function), SimpleNamespace(name="changed_kernel")
         )
+
+
+@pytest.mark.parametrize("method", ["_make_launchers", "_coordinate_descent_tuning"])
+def test_inductor_launcher_admits_only_its_generated_kernel(monkeypatch, method):
+    metadata = SimpleNamespace(name="inductor_kernel")
+
+    class Autotuner:
+        custom_kernel = False
+
+        def _make_launchers(self, source):
+            return loader.kernel_launcher(source, metadata)
+
+        _coordinate_descent_tuning = _make_launchers
+
+    module_name = "torch._inductor.runtime.triton_heuristics"
+    monkeypatch.setitem(
+        sys.modules, module_name, SimpleNamespace(CachingAutotuner=Autotuner)
+    )
+    monkeypatch.setattr(
+        loader, "_launcher_module", SimpleNamespace(Launcher=lambda src, _: src)
+    )
+    loader.bind_inductor_launcher()
+    wrapped = getattr(Autotuner, method)
+    loader.bind_inductor_launcher()
+    assert getattr(Autotuner, method) is wrapped
+
+    tuner = Autotuner()
+    tuner.fn = SimpleNamespace(src="changed source")
+    source = SimpleNamespace(fn=tuner.fn)
+    bind = getattr(tuner, method)
+    assert bind(source) is source
+    with pytest.raises(RuntimeError, match="no admitted FlagGems source"):
+        bind(SimpleNamespace(fn=object()))
+    with pytest.raises(RuntimeError, match="no admitted FlagGems source"):
+        loader.kernel_launcher(source, metadata)
+
+    tuner.custom_kernel = True
+    with pytest.raises(RuntimeError, match="no admitted FlagGems source"):
+        bind(source)
+
+    tuner.custom_kernel = False
+    monkeypatch.setitem(
+        loader._admitted_kernels,
+        id(tuner.fn),
+        {"jit_sha256": hashlib.sha256(b"original source").hexdigest()},
+    )
+    with pytest.raises(RuntimeError, match="JIT source changed after admission"):
+        bind(source)
