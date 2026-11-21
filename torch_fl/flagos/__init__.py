@@ -275,9 +275,23 @@ def reset_peak_memory_stats(device=None):
 
 
 class Stream(torch.cuda.Stream):
-    """Stream facade for the wheel's device runtime."""
+    """Create a stream for the wheel's device runtime.
+
+    On native Hygon builds, the public constructor returns a ``torch.Stream``
+    backed by the PrivateUse1 guard. Check the result against ``torch.Stream``
+    when passing it to APIs such as ``Tensor.record_stream``.
+    """
 
     def __new__(cls, device=None, priority=0, **kwargs):
+        if (
+            cls is Stream
+            and not kwargs
+            and _platform() == "dcu"
+            and hasattr(_C, "_get_native_current_raw_stream")
+        ):
+            # FSDP passes the object directly to Tensor.record_stream. The
+            # CUDA-derived facade cannot supply a PrivateUse1 c10 stream.
+            return _streams.create_guard_stream(_device_index(device), priority)
         if device is None:
             device = current_device()
         try:

@@ -228,6 +228,12 @@ class _GuardStreams:
             yield
 
 
+def create_guard_stream(index, priority):
+    return _GuardStream(
+        torch.Stream(device=torch.device("flagos", index), priority=priority)
+    )
+
+
 # Load only the device library selected by the wheel.
 _DEVICE_STREAMS = {
     "ascend": ("ascend.acl_stream", "AclStream", "current_acl_stream"),
