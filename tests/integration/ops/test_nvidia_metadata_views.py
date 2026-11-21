@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native views must preserve storage under the default non-boxing NVIDIA build."""
+"""Native views must preserve storage on the NVIDIA wheel."""
 
 import contextlib
 
@@ -20,8 +20,6 @@ import pytest
 import torch
 import torch_fl  # noqa: F401
 
-# The repository's `cuda` mark requires boxing; this regression exercises the
-# default NVIDIA build, where there is deliberately no boxing kernel set.
 pytestmark = [
     pytest.mark.anyplatform,
     pytest.mark.nvidia,

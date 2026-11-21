@@ -72,55 +72,23 @@ _platform = _load_platform()
 # MUSA hardware and its 13 NaN-placement cases failed: mudnn's reductions do not
 # name a NaN the way the host reference does, and no Metal kernel is involved.
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
-    "metax": ("cuda", "ascend", "musa", "dcu", "mps"),
-    "ascend": ("cuda", "metax", "musa", "dcu", "mps"),
-    # MUSA builds compile no CUDA boxing kernels (no cudart on the platform), so
-    # `-> boxing` routing assertions cannot hold; nor is FlagGems built.
-    "musa": ("cuda", "metax", "ascend", "dcu", "mps", "flaggems_python"),
-    # GCU has no CUDA boxing runtime, but it does compile the FlagGems Python
-    # dispatcher alongside topsaten and selects between them per overload.
-    "gcu": ("cuda", "metax", "ascend", "musa", "dcu", "mps"),
-    # PPU is a CUDA-ABI platform: when its wheel carries the boxing kernels the
-    # CUDA dispatch key serves the vendor kernels and cuda-marked tests run
-    # here -- same skip set as cuda, which is where PPU implicitly landed before
-    # it was named. Naming it makes the platform first-class in this gate
-    # instead of correct by accident of the fallback bucket. On a default
-    # (FlagGems-primary) wheel the build-record gate below adds `cuda` to this
-    # set, because that key has no kernel behind it.
+    "metax": ("ascend", "musa", "dcu", "mps"),
+    "ascend": ("metax", "musa", "dcu", "mps"),
+    "musa": ("metax", "ascend", "dcu", "mps", "flaggems_python"),
+    "gcu": ("metax", "ascend", "musa", "dcu", "mps"),
     "ppu": ("metax", "ascend", "musa", "dcu", "mps"),
-    # cuda -- and an unidentified wheel, which detect_platform() defaults to --
-    # runs the CUDA-marked tests when its wheel carries the boxing kernels, and
-    # skips every other backend's. The build-record gate below covers the
-    # default FlagGems-primary wheel, where the `cuda` route has no kernels.
     "cuda": ("metax", "ascend", "musa", "dcu", "mps"),
     "dcu": ("metax", "ascend", "musa", "gcu", "mps"),
-    # Kunlunxin is a native-kernel vendor like musa/gcu/ascend: backends_kunlunxin.conf
-    # routes ops to the native `kunlunxin` key (the xdnn op library) or leaves them at
-    # `none` (CPU fallback), with no `cuda` route, so a `-> boxing` dispatch assertion
-    # cannot hold. Every other backend's marker is skipped for the same reason.
-    "kunlunxin": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps"),
-    # Apple Silicon (MPS) is a native Metal backend: it compiles neither the CUDA
-    # boxing kernels nor any other vendor's kernels, and FlagGems/Triton has no
-    # Metal line, so every other backend's marked tests are skipped here. The
-    # FlagGems Python mark is a wheel capability question, not a platform
-    # exclusion: a migrated case checks inside its body whether this build can
-    # serve the override, then records the gap when it cannot.
-    "mps": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "ppu"),
-    # TsingMicro is FlagGems-primary and compiles no CUDA boxing kernels and no
-    # vendor op library, so `-> boxing` and every other backend's dispatch
-    # assertions cannot hold. Without this row the platform fell through to the
-    # empty skip set and the cuda/ascend-marked tests ran here and failed.
-    #
+    "kunlunxin": ("metax", "ascend", "musa", "dcu", "gcu", "mps"),
+    "mps": ("metax", "ascend", "musa", "dcu", "gcu", "ppu"),
     # `flaggems`/`flaggems_python` are deliberately NOT skipped: this platform
     # does build the FlagGems Python path, so those tests are real coverage. They
     # still fail on a TsingMicro host for an unrelated reason -- the TX runtime
     # allows one process per device, and the tests that spawn a subprocess leave
     # it on the device the parent already holds, so the child blocks until the
     # test's 60 s subprocess timeout. Skipping them would hide that.
-    "tsingmicro": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
-    # CoreX exposes a CUDA-shaped runtime, but Iluvatar uses its native vendor
-    # slot rather than CUDA boxing. Keep FlagGems coverage enabled.
-    "iluvatar": ("cuda", "metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    "tsingmicro": ("metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
+    "iluvatar": ("metax", "ascend", "musa", "dcu", "gcu", "mps", "ppu"),
 }
 
 
@@ -139,21 +107,6 @@ def _flaggems_cpp_enabled() -> bool:
     return "flaggems_cpp" in _env.build_kernels()
 
 
-def _boxing_enabled() -> bool:
-    """True when this wheel has the generated CUDA boxing kernels compiled in.
-
-    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``),
-    for the same reason ``_flaggems_cpp_enabled()`` is: the record cannot
-    disagree with the wheel it lives in. Boxing became an explicit opt-in on
-    every CUDA-ABI platform in #520, so the default wheel answers False here and
-    a ``cuda``-marked case -- which asserts that an op dispatches to the CUDA
-    dispatch key -- has no kernel behind that key to reach.
-    """
-    from torch_fl import _env
-
-    return "boxing" in _env.build_kernels()
-
-
 def _host_compiler_enabled() -> bool:
     """The experimental compiler targets NVIDIA's CPU-Torch FlagGems build."""
     import torch
@@ -164,7 +117,6 @@ def _host_compiler_enabled() -> bool:
         torch.__version__.split("+")[0] == "2.10.0"
         and torch.version.cuda is None
         and "flaggems" in kernels
-        and "boxing" not in kernels
         and not getattr(_build_config, "NATIVE_HOSTS", False)
     )
 
@@ -185,18 +137,8 @@ def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
     platform = _platform.detect_platform()
-    markers_to_skip = list(_PLATFORM_SKIP_MARKERS.get(platform, ()))
+    markers_to_skip = _PLATFORM_SKIP_MARKERS.get(platform, ())
     flaggems_cpp_on = _flaggems_cpp_enabled()
-    # The `cuda` mark asserts a `-> boxing` dispatch, and on a CUDA-ABI platform
-    # that route is served by the generated boxing kernels. A FlagGems-primary
-    # wheel (the default since #520, and the only wheel the CUDA-ABI CI lanes
-    # build now) compiles none, so the ops the conf routes to `cuda` are left
-    # unregistered and reach cpu_fallback: the assertion has nothing to hold on
-    # and the case skips rather than failing. Platforms whose conf has no `cuda`
-    # route at all (ascend, gcu, musa, kunlunxin, bpu, mps) already skip the mark
-    # from the table above; appending it again is a no-op for them.
-    if not _boxing_enabled():
-        markers_to_skip.append("cuda")
     for item in items:
         # Legacy @metax cases assert the unbuilt handwritten mxcc operator
         # backend. Native-source-host cases instead exercise published FlagGems
@@ -273,7 +215,7 @@ def pytest_collection_modifyitems(
             add_platform_skip(
                 item,
                 gate="build_record",
-                detail="host compiler requires CPU Torch 2.10.0 and FlagGems without boxing",
+                detail="host compiler requires CPU Torch 2.10.0 and FlagGems",
                 reason="native host compiler build contract",
             )
             continue
@@ -343,7 +285,6 @@ def pytest_collection_modifyitems(
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "anyplatform: runs on any platform")
-    config.addinivalue_line("markers", "cuda: requires CUDA platform")
     config.addinivalue_line("markers", "nvidia: requires the NVIDIA runtime")
     config.addinivalue_line(
         "markers", "enflame_native_host: requires Enflame native hosts"

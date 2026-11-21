@@ -33,7 +33,6 @@ FLAGOS_ACCELERATOR=gcu pip install --no-build-isolation -v -e .
 Build flags:
 - `FLAGOS_ACCELERATOR=gcu`: selects the GCU build path and enables `FLAGOS_BUILD_VENDOR=ON`
 - `FLAGOS_BUILD_VENDOR=ON`: compiles generated `topsaten` operator kernels (automatic when `FLAGOS_ACCELERATOR=gcu`)
-- `FLAGOS_BUILD_BOXING=OFF`: automatically disabled (no CUDA runtime exists on GCU)
 - `FLAGOS_BUILD_FLAGGEMS=ON`: compiled into the same PrivateUse1 wrapper set as native GCU kernels; runtime routing selects native or FlagGems implementations without duplicate registration. It is on by default under `FLAGOS_ACCELERATOR=gcu`, but the environment variable is applied afterwards, so export `FLAGOS_BUILD_FLAGGEMS=1` explicitly if you also set the other kernel flags in the same shell
 - `--no-build-isolation`: ensures the build uses your installed CPU torch
 

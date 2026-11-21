@@ -272,21 +272,9 @@ def override_is_logged(op: str, backend: str) -> bool:
 def route_is_served(op: str) -> bool:
     """True when this wheel compiled the backend the conf routes ``op`` to.
 
-    A conf states per-op routing for a *platform*, not for one build of it: it
-    names the CUDA boxing kernels whether or not ``FLAGOS_BUILD_BOXING`` pulled
-    them in, and the FlagGems path whether or not ``FLAGOS_BUILD_FLAGGEMS`` did.
-    When the named backend is not compiled in, the op is not claimed on
-    PrivateUse1 at all, so the call reaches ATen's cpu_fallback and nothing logs
-    a dispatch -- a test asserting ``[flagos dispatch] <op> -> <backend>`` then
-    has nothing to hold on and has to skip rather than fail. That is exactly the
-    default (FlagGems-primary) wheel's shape for every op
-    ``backends_nvidia.conf`` routes to ``cuda``: no boxing kernels, no dispatch.
-
-    Both facts are asked of the wheel (``torch_fl._env.build_kernels()``), never
-    of an environment variable, so the answer cannot disagree with the build it
-    describes. ``none`` and an op the conf does not list both answer False:
-    neither names a backend this wheel reaches, which is what a caller asking
-    this question wants to hear.
+    The platform conf supplies the route and the build record supplies the
+    compiled kernel sets. An unlisted operator, a ``none`` route or a route to
+    an absent kernel set has no device dispatch log to assert.
     """
     backend = _conf_route(op)
     if backend == "none":

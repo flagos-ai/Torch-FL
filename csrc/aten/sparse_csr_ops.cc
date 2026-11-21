@@ -49,23 +49,8 @@
 //   `_sparse_compressed_tensor_unsafe`, whose device option is forwarded
 //   untouched, so they stay on flagos.
 //
-// The one op that is not structure work is the sparse matrix multiply:
-// `mm`/`mm.out` and `addmm`/`addmm.out`.  Those are handled in the second block
-// below by boxing the operands into the CUDA key frame and delegating to the
-// cuSPARSE implementations, in the same way the generated dense kernels box.
-//
-// The CSC<->CSR conversion also needs one DispatchStub slot that is set on the
-// stub object rather than through the dispatcher; see the block on
-// flatten_indices_stub below.
-//
-// This is also why a sparse tensor is boxed differently from a dense one.
-// DeviceBoxingGuard rewrites a tensor's Storage DataPtr, and a
-// SparseCsrTensorImpl is built without a Storage at all -- upstream constructs
-// it as TensorImpl(key_set, data_type, device) and only ever holds three dense
-// member tensors -- so the sparse tensor has no DataPtr of its own to rewrite
-// and the device the cuSPARSE path reads is the one on its own impl.  The
-// storage half of the rewrite therefore has to be skipped for it; see
-// SetTensorImplDevice in csrc/aten/device_boxing.h.
+// Conversions that flip the compressed dimension require a PrivateUse1
+// kernel for ATen's flatten_indices_stub. Torch-FL does not supply one.
 //
 // WHAT IS DELIBERATELY NOT REGISTERED
 //
@@ -91,7 +76,6 @@
 // See flagos-ai/Torch-FL#293 for the measured before/after behaviour of every
 // operation in this table.
 
-#include <ATen/native/DispatchStub.h>
 #include <ATen/native/SparseTensorUtils.h>
 #include <ATen/ops/_nnz_native.h>
 #include <ATen/ops/_to_dense_native.h>
@@ -100,7 +84,6 @@
 #include <ATen/ops/_to_sparse_csc_native.h>
 #include <ATen/ops/_to_sparse_csr_native.h>
 #include <ATen/ops/_to_sparse_native.h>
-#include <ATen/ops/addmm_native.h>
 #include <ATen/ops/ccol_indices_native.h>
 #include <ATen/ops/clone_native.h>
 #include <ATen/ops/col_indices_native.h>
@@ -109,7 +92,6 @@
 #include <ATen/ops/dense_dim_native.h>
 #include <ATen/ops/empty_like_native.h>
 #include <ATen/ops/empty_native.h>
-#include <ATen/ops/mm_native.h>
 #include <ATen/ops/resize_as_sparse_native.h>
 #include <ATen/ops/resize_native.h>
 #include <ATen/ops/row_indices_native.h>
@@ -118,51 +100,6 @@
 #include <ATen/ops/zero_native.h>
 #include <torch/library.h>
 
-
-// flatten_indices_stub, the one ATen entry point on this path that is not
-// reachable through the dispatcher.
-//
-// `_to_sparse_csr`/`_to_sparse_csc` and their BSR/BSC counterparts all go
-// through sparse_compressed_to_flipped, which for a 2-D compressed tensor
-// rebuilds the flipped layout's index tensors and hashes them with
-// at::sparse::flatten_indices on a *dense* flagos int64 tensor.  That helper
-// forwards to at::native::flatten_indices_stub -- an instruction-set dispatch
-// stub with a CPU kernel and a CUDA kernel and no PrivateUse1 entry -- and
-// DispatchStubImpl::get_call_ptr internal-asserts on a device that has no
-// kernel rather than falling back to another device's, so the conversion dies
-// with
-//   DispatchStub: missing kernel for flagos
-// even though every op below it on the path is registered and works.
-//
-// ATen reserves a PrivateUse1 slot on every DispatchStub for exactly this
-// situation (set_privateuse1_dispatch_ptr, reachable from the
-// REGISTER_PRIVATEUSE1_DISPATCH macro), so the slot registered below is what
-// turns the assert into a call.  Filling the slot needs the stub's *type*
-// only, which is why the stub is redeclared here: upstream declares it in
-// ATen/native/sparse/SparseStubs.h, and the torch wheel ships no
-// torch/include/ATen/native/sparse/ at all.  The redeclaration below is
-// upstream's own DECLARE_DISPATCH line and binds to the single exported
-// `at::native::flatten_indices_stub` object in libtorch_cpu.so.
-//
-// The slot's kernel then re-enters *the same helper* with the index tensor
-// boxed into the CUDA key frame, so the stub is stepped on by libtorch_cpu's
-// own inlined copy rather than by this translation unit, and the CUDA kernel
-// (FlattenIndicesCommon.h: an arange plus a hash over the index tensor's raw
-// pointers, device-agnostic) runs as it does for raw CUDA/DCU.  Calling the
-// stub from here instead would mean naming DispatchStub::operator(), which is
-// an inline that passes a build-internal set of CPU-capability arguments to
-// DispatchStubImpl::get_call_ptr -- that header is not self-contained across
-// the wheel boundary and would leave an undefined symbol at import time.  The
-// result is allocated inside the boxed frame and is unboxed before it is
-// returned, because sparse_compressed_to_flipped goes straight on to `.sort()`
-// and `index_select` on flagos tensors and would find a CUDA-tagged operand
-// there.
-namespace at::native {
-
-using flatten_indices_fn = Tensor (*)(const Tensor& indices, IntArrayRef size);
-DECLARE_DISPATCH(flatten_indices_fn, flatten_indices_stub)
-
-} // namespace at::native
 
 namespace at::native::flagos {
 namespace {
@@ -238,19 +175,6 @@ TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
   // all of which act on the dense operand and are already served for flagos.
   m.impl("_to_dense", at::native::sparse_compressed_to_dense);
 
-  // Sparse matrix multiply.  `mm`/`addmm` are structured delegates of their
-  // `.out` forms, and on this key the structured meta function is unreachable
-  // in the form upstream implements it -- it allocates its output through the
-  // very `empty.memory_format` this key had no kernel for, and it runs before
-  // any backend kernel would.  Registering the op itself resolves it on the key
-  // directly, the same way upstream serves SparseCsrCPU/CUDA/Meta.
-  //
-  // The four travel with addmm.out and not without it: upstream implements mm,
-  // _sparse_csr_mm, _sparse_csr_mm_out and addmm_sparse_compressed_dense as
-  // delegation to at::addmm_out plus a result allocation, so registering them
-  // on a platform where addmm.out is not compiled would only move the failure
-  // one frame, and the CSC inputs _sparse_csr_mm accepts would reach
-  // _to_sparse_csr first anyway.
 }
 
 } // namespace at::native::flagos

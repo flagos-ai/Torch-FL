@@ -380,10 +380,8 @@ CLEAN_LD_LIBRARY_PATH="$(strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
 export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${VENDOR_FLAGGEMS_DIR:+:$VENDOR_FLAGGEMS_DIR}${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
 export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib/stubs:$CUDA_HOME/lib64${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
-# Both lanes load the CPU wheel's core. The boxing build packages its staged
-# CUDA assets and preloads them at import. Exposing the accelerator torch's
-# entire lib/ here can load its libtorch_cpu before torch_fl loads the CPU
-# wheel's copy, which aborts startup on duplicate dispatcher registrations.
+# Load the CPU wheel's core. Putting the accelerator torch's entire lib/ on
+# this path can load its libtorch_cpu first and duplicate dispatcher registrations.
 export LD_LIBRARY_PATH="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}$CPU_TORCH_ROOT/lib${VENDOR_FLAGGEMS_LIB:+:$VENDOR_FLAGGEMS_LIB}:$CUDA_HOME/lib64${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 cd "$REPO_ROOT"

@@ -4078,12 +4078,7 @@ def _read_conf_routes(path: Path) -> dict:
 
 
 def _reject_boxing_routes(name: str, routes: dict) -> None:
-    """Refuse a default conf that names the boxing kernel for any op.
-
-    Both spellings that reach ``Backend::kBoxing`` in ``csrc/aten/common.cc``:
-    ``boxing`` and the legacy ``cuda``. The native ``nvidia`` slot is distinct.
-    Conditional dtype clauses must obey the same prohibition as the base route.
-    """
+    """Reject the retired route keys ``boxing`` and ``cuda`` in every clause."""
     from native_host_policy import route_backends
 
     boxed = sorted(

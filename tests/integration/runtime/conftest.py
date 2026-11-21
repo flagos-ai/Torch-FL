@@ -17,7 +17,7 @@
 Three jobs:
 
     * register the package's markers (``backend_route``, ``anyplatform``,
-      ``flaggems_cpp``, ``flaggems_python``, ``boxing``);
+      ``flaggems_cpp``, ``flaggems_python``);
     * skip a test that needs a kernel set this wheel did not compile -- the one
       build-driven skip the mandate allows, keyed off the build record, not a
       platform name;
@@ -103,11 +103,6 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers", "flaggems_python: requires the FlagGems Python kernel set"
-    )
-    config.addinivalue_line(
-        "markers",
-        "boxing: requires the generated CUDA boxing kernel set "
-        "(built with FLAGOS_BUILD_BOXING=ON)",
     )
     config.pluginmanager.register(_ConformanceReport(), "runtime-conformance-report")
 

@@ -86,13 +86,6 @@
 //   change.  Those are value kernels, several of which have real per-backend
 //   CUDA implementations, and they need their own numerical validation.
 //
-// One member of that family has since been added, in the second block below:
-// `bmm` with a sparse COO left operand (flagos-ai/Torch-FL#793).  It is a value
-// kernel, so it is registered where a value kernel can actually run -- by
-// boxing the operands onto the vendor's CUDA kernels, the same way
-// csrc/aten/sparse_csr_ops.cc serves the compressed-sparse SpMM -- and not on
-// the structure-surface reasoning above.  Nothing else of the family moved.
-//
 // See flagos-ai/Torch-FL#294 for the measured before/after behaviour of every
 // operation in this table.
 
@@ -168,9 +161,6 @@ TORCH_LIBRARY_IMPL(aten, SparsePrivateUse1, m) {
   m.impl("copy_", at::native::copy_sparse_wrapper_);
   m.impl("copy_sparse_to_sparse_", at::native::copy_sparse_);
 
-  // Sparse COO bmm (#793). A value kernel, so it is boxed onto the vendor's
-  // CUDA implementation rather than registered on an ATen symbol the way the
-  // structure surface above is; the kernel is defined above this body.
 }
 
 } // namespace

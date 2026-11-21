@@ -295,11 +295,8 @@ def test_metax_inductor_launches_on_the_selected_native_stream(device, monkeypat
     from torch_fl.compile.device_interface import FlagOSDeviceInterface
     from torch_fl.flagos import _streams
 
-    if (
-        getattr(_build_config, "NATIVE_HOSTS", False)
-        or "boxing" in _build_config.KERNELS
-    ):
-        pytest.skip("Requires the standard non-boxing MetaX wheel")
+    if getattr(_build_config, "NATIVE_HOSTS", False):
+        pytest.skip("Requires the standard MetaX wheel")
 
     cpu = torch.linspace(-1.0, 1.0, 2048)
     value = cpu.to(device)

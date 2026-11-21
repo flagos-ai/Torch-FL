@@ -15,12 +15,8 @@
 """Unit coverage for tests/integration/ops/conftest.py platform detection.
 
 The ops gate skips backend-specific tests per detected platform
-(_PLATFORM_SKIP_MARKERS). PPU is a CUDA-ABI boxing backend, but it has its own
-value in the wheel's build record like every other chip; wheels built before it
-had one report cuda there and are still recognised through the PPU_SDK
-environment or the lib_thead/ bundle directory. These tests pin the record
-mapping, the legacy PPU fallbacks, and the skip-set parity with cuda that
-keeps those changes behavior-neutral.
+(_PLATFORM_SKIP_MARKERS). These tests cover platform detection from the build
+record, older PPU wheels and backend-specific test selection.
 
 Run: pytest tests/unit/test_ops_conftest_platform.py -v
 """
@@ -279,13 +275,10 @@ def test_ppu_skip_set_matches_cuda():
         ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
         == ops_conftest._PLATFORM_SKIP_MARKERS["cuda"]
     )
-    assert "cuda" not in ops_conftest._PLATFORM_SKIP_MARKERS["ppu"]
 
 
-def test_iluvatar_skips_boxing_assertions_and_keeps_flaggems():
-    """A CUDA-shaped SDK does not imply a CUDA boxing dispatch route."""
+def test_iluvatar_keeps_flaggems():
     markers = ops_conftest._PLATFORM_SKIP_MARKERS["iluvatar"]
-    assert "cuda" in markers
     assert "flaggems" not in markers
     assert "flaggems_python" not in markers
 
@@ -320,7 +313,6 @@ def test_every_non_mps_platform_skips_the_mps_mark():
     "version,cuda,kernels,expected",
     [
         ("2.10.0+cpu", None, ("flaggems", "vendor"), True),
-        ("2.10.0+cpu", None, ("flaggems", "boxing"), False),
         ("2.10.0+cpu", None, ("vendor",), False),
         ("2.10.0+cu130", "13.0", ("flaggems", "vendor"), False),
         ("2.9.0+cpu", None, ("flaggems", "vendor"), False),
@@ -406,7 +398,6 @@ def test_native_host_cases_keep_one_collection_shape(
         ops_conftest, "_native_vendor_precision_enabled", lambda: compiler
     )
     monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
-    monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
     item = Item()
     ops_conftest.pytest_collection_modifyitems(None, [item])
     marker = item.get_closest_marker("flagos_platform_gate")
@@ -450,7 +441,6 @@ def test_source_host_runtime_requirements_are_collection_gates(
     monkeypatch.setattr(ops_conftest._platform, "detect_platform", lambda: "cuda")
     monkeypatch.setattr(ops_conftest, "_native_source_host_enabled", lambda: enabled)
     monkeypatch.setattr(ops_conftest, "_flaggems_cpp_enabled", lambda: False)
-    monkeypatch.setattr(ops_conftest, "_boxing_enabled", lambda: False)
     monkeypatch.setattr(
         ops_conftest,
         "sys",

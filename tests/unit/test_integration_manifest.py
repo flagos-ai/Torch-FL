@@ -339,7 +339,8 @@ def test_each_platform_runs_the_manifest_in_manifest_order(platform):
 def test_portable_operator_contracts_run_on_the_ordinary_wheel(platform):
     groups = [g for g in composed_steps(platform) if g["manifest_id"] == "vendor_ops"]
     assert len(groups) == 1
-    assert "not cuda" in groups[0]["command"]
+    assert "main_ops" in groups[0]["command"]
+    assert "not cuda" not in groups[0]["command"]
 
 
 @pytest.mark.parametrize("profile", ["pr", "nightly"])

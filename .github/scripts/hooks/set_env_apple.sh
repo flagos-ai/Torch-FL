@@ -54,10 +54,7 @@ fi
 echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-path)"
 
 # --- Backend selection -------------------------------------------------------
-# Chip selection is FLAGOS_ACCELERATOR's job alone. FLAGOS_BUILD_VENDOR selects
-# this platform's native kernels and defaults ON to match setup.py; boxing stays
-# off, which is pinned in cmake/flagos_platforms.json for mps rather than left
-# to the environment. MPS has no libtorch_cuda.so to preload.
+# FLAGOS_ACCELERATOR selects MPS. FLAGOS_BUILD_VENDOR enables the Metal kernels.
 export FLAGOS_ACCELERATOR=mps
 export FLAGOS_BUILD_VENDOR="${FLAGOS_BUILD_VENDOR:-1}"
 export FLAGOS_DISABLE_CUDA_ASSETS=1

@@ -16,7 +16,6 @@ assignees: ''
 
 ## Integration Approach
 <!-- Which integration path is appropriate for this platform? -->
-- [ ] **CUDA Boxing** (CUDA-compatible GPU, reuse CUDA kernels via libtorch_cuda.so)
 - [ ] **Custom Backend** (vendor-specific SDK, requires new csrc/aten/backends/<vendor>/)
 - [ ] **FlagGems Triton** (Triton backend available, use flagos_python path)
 - [ ] **Hybrid** (combination of above)
