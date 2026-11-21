@@ -142,9 +142,15 @@ def test_unavailable_or_invalid_heads_fail_before_checkout(tmp_path, pr):
     assert output == ""
 
 
-def test_label_events_and_dispatches_do_not_cancel_each_other_or_main_runs():
+def test_pr_ci_does_not_depend_on_labels_or_target_branch():
     events = WORKFLOW[True]
-    assert {"labeled", "unlabeled"} <= set(events["pull_request"]["types"])
+    assert set(events["pull_request"]["types"]) == {
+        "opened",
+        "synchronize",
+        "reopened",
+        "ready_for_review",
+    }
+    assert "branches" not in events["pull_request"]
     assert "paths-ignore" not in events["push"]
     group = WORKFLOW["concurrency"]["group"]
     assert "github.event_name" in group

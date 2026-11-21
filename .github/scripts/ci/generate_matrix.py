@@ -14,7 +14,9 @@
 # limitations under the License.
 
 """
-CI platform matrix generator with changed-file filtering and label routing.
+Standalone diagnostic matrix generator with changed-file and label routing.
+
+Ordinary pull request CI uses the full matrix in flagcicd_plan.py.
 
 For schedule / push: returns all configured platforms.
 For workflow_dispatch: uses ``--dispatch-platforms`` (``all`` by default).

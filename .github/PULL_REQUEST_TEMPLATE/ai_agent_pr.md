@@ -81,6 +81,11 @@ PRs missing required sections will be automatically closed.
 - [ ] **Commit messages follow conventions** (type: description format)
 - [ ] **All text in English** (required per AGENTS.md)
 
+### Pre-merge Hardware Acceptance
+
+- [ ] The linked `PR hardware parity` check passed on the final revision.
+- [ ] Shared regression cases for the fix or feature passed on every lane.
+
 ### Linting Results
 <!-- REQUIRED: Paste actual output -->
 ```bash

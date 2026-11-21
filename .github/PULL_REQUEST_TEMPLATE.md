@@ -69,6 +69,8 @@ FLAGOS_BACKEND_CONFIG=... pytest ...
 
 ### Pre-merge Checklist
 - [ ] All tests pass (see test results above)
+- [ ] The linked `PR hardware parity` check passed on the final revision.
+- [ ] Shared regression cases for the fix or feature passed on every lane.
 - [ ] Code follows project style (ran linters)
 - [ ] Documentation updated (if applicable)
 - [ ] AGENTS.md updated (if adding new conventions)

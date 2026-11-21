@@ -30,6 +30,7 @@ from ci.generate_matrix import (
     _platforms_from_files,
     select_platforms,
 )
+from ci.hardware_parity import validate_pr_plan
 from platform_config import compile_platform, load_platform_data, plan_hash
 from compose_integration_manifest import validate_profile
 
@@ -142,28 +143,28 @@ def build_ci_plan(
     if profile == "nightly" and dispatch not in ("", "all"):
         raise ValueError("nightly requires platforms=all")
     platform_configs, raw_configs = load_platform_data(source)
-    selected, reasons = select_platforms(
-        event_name,
-        source / ".github/configs",
-        changed,
-        labels,
-        dispatch,
-        platform_configs=platform_configs,
-    )
+    if event_name == "pull_request":
+        selected = sorted(platform_configs)
+        reasons = [{"kind": "pr_full_matrix"}]
+    else:
+        selected, reasons = select_platforms(
+            event_name,
+            source / ".github/configs",
+            changed,
+            labels,
+            dispatch,
+            platform_configs=platform_configs,
+        )
     _inferred, risk, matched, diff_status = infer_level(changed, contract)
-    # Ordinary CI always runs all required shared checks, including documentation
-    # PRs. An empty hardware matrix is valid here, even when risk inference
-    # would raise an explicit external request to L2.
-    level = "L2" if selected else "L1"
-    return complete_plan(
+    plan = complete_plan(
         {
             "schema_version": "flagcicd.plan/v1",
             **request,
             "profile": profile,
             "entry": "ci",
             "event_name": event_name,
-            "test_level": level,
-            "scope": contract["levels"][level]["scope"],
+            "test_level": "L2",
+            "scope": contract["levels"]["L2"]["scope"],
             "risk_level": risk,
             "risk_rule_version": contract["risk_rules"]["version"],
             "diff_status": diff_status,
@@ -187,6 +188,9 @@ def build_ci_plan(
         platform_configs,
         raw_configs,
     )
+    if event_name == "pull_request":
+        validate_pr_plan(plan)
+    return plan
 
 
 def complete_plan(plan, contract, source, platform_configs, raw_configs):

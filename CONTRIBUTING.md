@@ -151,6 +151,13 @@ If you drafted text in another language during development, translate it before 
 - **Validation evidence**: Paste test results, operator correctness checks, or benchmark numbers.
 - **Known limitations**: Document unsupported operators, performance gaps, or environment constraints.
 
+### Hardware Acceptance
+
+Every PR requires a passing `PR hardware parity` check on the final revision.
+Link the run and list the common cases that exercise the fix or feature on all
+ten lanes. See
+[Cross-platform PR acceptance](AGENTS.md#cross-platform-pr-acceptance).
+
 ### Exclude
 
 - **Credentials**: No API keys, tokens, registry passwords, or SSH keys.
@@ -159,15 +166,15 @@ If you drafted text in another language during development, translate it before 
 
 ### Example PR Description
 
-```
+````markdown
 ## Summary
 
-Add operator correctness tests for `torch.nn.functional.gelu` on the MetaX backend.
+Fix `torch.nn.functional.gelu` on MetaX and verify the shared GELU contract.
 
 ## Changes
 
-- `tests/integration/ops/test_gelu.py`: Test GELU forward and backward against PyTorch reference
-- Mark as `@pytest.mark.metax` for MetaX-specific routing assertions
+- Run the shared GELU forward and backward tests on every hardware lane.
+- Add a MetaX-specific routing assertion for the changed backend path.
 
 ## Validation
 
@@ -187,10 +194,14 @@ test_gelu_forward PASSED
 test_gelu_backward PASSED
 ```
 
+## Hardware Acceptance
+
+<!-- Link the `PR hardware parity` check for the final revision. -->
+
 ## Known Limitations
 
 None.
-```
+````
 
 ### Review and Iteration
 

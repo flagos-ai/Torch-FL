@@ -85,6 +85,7 @@ class FakeGitHub:
         self.jobs = [
             {"id": 11, "name": "Build and test (CUDA)", "conclusion": "failure"},
             {"id": 12, "name": "CI complete", "conclusion": "failure"},
+            {"id": 13, "name": "PR hardware parity", "conclusion": "failure"},
         ]
         self.log = "pip download: ReadTimeoutError: server timed out"
         self.logs = {}
