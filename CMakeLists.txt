@@ -67,9 +67,8 @@ _flagos_resolve_platforms()
 # A -D on the command line lands in the cache before option() runs, so this loop
 # is the last point at which an explicit request can still be told apart from the
 # option() default. flagos_apply_platform_kernel_policy() below uses it to refuse
-# a contradictory -D instead of force-set()ting it away: setup.py resolves the
-# same combination into the build record, so a switch quietly overridden here
-# would ship a wheel describing a kernel set it does not contain.
+# a contradictory -D. SDK probes below resolve optional kernel availability
+# before the ATen targets and the build record are generated.
 foreach(_switch IN LISTS FLAGOS_KERNEL_SWITCHES)
   if(DEFINED ${_switch})
     set(${_switch}_EXPLICIT TRUE)
@@ -380,58 +379,7 @@ elseif(_flagos_is_musa)
   # Embed the MUSA library path in RPATH so LD_LIBRARY_PATH is not needed.
   list(APPEND CMAKE_INSTALL_RPATH "${MUSA_HOME}/lib")
 
-  # Compute ops go through mudnn (libmudnn.so), the vendor's kernel library.
-  # It links against musart only and pulls in no torch symbols, so it ships in
-  # the MUSA toolkit next to musart and needs no separate root: no torch_musa
-  # package, no extracted tree, no version pinning against the active torch.
-  #
-  # (The earlier route called torch_musa's flat at::musa::* API from
-  # libmusa_python.so. That library links against torch and embeds its C++
-  # object layout, which pinned the plugin to one exact torch build --
-  # sizeof(c10::MessageLogger) changed 408 -> 400 between 2.9.1 and 2.10 and
-  # corrupted the vendor .so's stack. mudnn has no such coupling.)
-  # A toolkit image may ship the mudnn runtime without its C++ headers: the
-  # 5.2 image on the MTT S5000 CI runner has ${MUSA_HOME}/lib/libmudnn.so and no
-  # ${MUSA_HOME}/include/mudnncxx/, and the 4.3 toolkit beside it with headers
-  # declares another library. The MUSA vendor slot is then not buildable at
-  # all, which is a property of the environment rather than of this tree: leave
-  # it unbuilt and let the FlagGems routes serve the ops -- they are the conf's
-  # primary route anyway. The one thing the build must not do is keep the
-  # vendor slot's registrations, which would claim ops whose kernels do not
-  # exist. Set -DFLAGOS_MUSA_REQUIRE_VENDOR=ON to make the absence fatal.
-  set(FLAGOS_MUSA_VENDOR_SLOT OFF)
-  if(FLAGOS_BUILD_VENDOR)
-    find_library(MUDNN_LIB mudnn PATHS "${MUSA_HOME}/lib" NO_DEFAULT_PATH)
-    if(MUDNN_LIB AND EXISTS "${MUSA_HOME}/include/mudnncxx/mudnn.h")
-      set(FLAGOS_MUSA_VENDOR_SLOT ON)
-    elseif(FLAGOS_MUSA_REQUIRE_VENDOR)
-      message(FATAL_ERROR
-          "FLAGOS_MUSA_REQUIRE_VENDOR=ON but this MUSA toolkit has no mudnn "
-          "C++ SDK (libmudnn.so under ${MUSA_HOME}/lib: '${MUDNN_LIB}'; C++ "
-          "headers ${MUSA_HOME}/include/mudnncxx/mudnn.h missing).")
-    else()
-      message(WARNING
-          "this MUSA toolkit has no mudnn C++ SDK (libmudnn.so under "
-          "${MUSA_HOME}/lib: '${MUDNN_LIB}'; C++ headers "
-          "${MUSA_HOME}/include/mudnncxx/mudnn.h). Building without the vendor "
-          "kernel slot: backends/mthreads/ and its registrations are left "
-          "out, and every op the conf routes to the vendor falls back to CPU.")
-    endif()
-  endif()
-  if(FLAGOS_MUSA_VENDOR_SLOT)
-    message(STATUS "mudnn op library: ${MUDNN_LIB}")
-    find_library(MURAND_LIB murand PATHS "${MUSA_HOME}/lib" NO_DEFAULT_PATH)
-    if(NOT MURAND_LIB)
-      message(FATAL_ERROR
-          "FLAGOS_BUILD_VENDOR=ON but libmurand.so was not found under ${MUSA_HOME}/lib. "
-          "Install the murand component of the MUSA toolkit.")
-    endif()
-    if(NOT EXISTS "${MUSA_HOME}/include/murand.h")
-      message(FATAL_ERROR
-          "FLAGOS_BUILD_VENDOR=ON but murand.h was not found under ${MUSA_HOME}/include.")
-    endif()
-    message(STATUS "murand RNG library: ${MURAND_LIB}")
-  endif()
+  include("${PROJECT_SOURCE_DIR}/cmake/MusaKernels.cmake")
 
   add_library(torch::cudart INTERFACE IMPORTED)
   if(NOT TARGET CUDA::nvToolsExt)
@@ -989,7 +937,6 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
   message(STATUS "FlagGems liboperators RPATH: ${_flaggems_libdir}")
   list(APPEND CMAKE_INSTALL_RPATH "${_flaggems_libdir}")
 elseif(_flagos_is_metax)
-  message(STATUS "MetaX build: CUDA boxing kernels + bundled maca libtorch (no native mxcc)")
   if(FLAGOS_BUILD_VENDOR)
     # The vendor kernels are the CUDA tree built against cu-bridge; MACA's
     # compat layer is what they call, so its include and lib dirs are needed

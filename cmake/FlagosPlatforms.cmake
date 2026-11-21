@@ -18,7 +18,7 @@
 # after flagos_pin_build_switch() is defined. It publishes, in the including
 # scope (and therefore to every add_subdirectory below it):
 #
-#   FLAGOS_KERNEL_SWITCHES            the five FLAGOS_BUILD_* names, in order
+#   FLAGOS_KERNEL_SWITCHES            the FLAGOS_BUILD_* kernel options, in order
 #   FLAGOS_PLATFORM_LANGUAGES         project() language list
 #   FLAGOS_PLATFORM_VENDOR            the platform's vendor (apple, nvidia, ...)
 #   FLAGOS_ATEN_VENDOR_DIRS           accelerator keys owning an
@@ -58,6 +58,35 @@ function(flagos_json_list out json)
     endforeach()
   endif()
   set(${out} "${_items}" PARENT_SCOPE)
+endfunction()
+
+# Write the effective settings after the SDK probes and return the kernel set
+# names for the runtime diagnostics.
+function(flagos_write_build_config output kernel_sets)
+  set(_compiled "")
+  foreach(_switch IN LISTS FLAGOS_KERNEL_SWITCHES)
+    if(${_switch})
+      string(JSON _kernel GET "${_flagos_platforms}" kernel_set_names "${_switch}")
+      list(APPEND _compiled "${_kernel}")
+    endif()
+  endforeach()
+  set(${kernel_sets} "${_compiled}" PARENT_SCOPE)
+  list(TRANSFORM _compiled PREPEND "\"")
+  list(TRANSFORM _compiled APPEND "\"")
+  list(JOIN _compiled ", " _kernels)
+  set(_native_hosts false)
+  if(FLAGOS_NATIVE_HOSTS)
+    set(_native_hosts true)
+  endif()
+  file(CONFIGURE OUTPUT "${output}" CONTENT [=[
+{
+  "platform": "@FLAGOS_PLATFORM_ID@",
+  "vendor": "@FLAGOS_PLATFORM_VENDOR@",
+  "bundle_libdir": "@FLAGOS_BUNDLE_LIBDIR@",
+  "kernels": [@_kernels@],
+  "native_hosts": @_native_hosts@
+}
+]=] @ONLY)
 endfunction()
 
 # Reject an unknown accelerator here, the way setup.py does, instead of falling
