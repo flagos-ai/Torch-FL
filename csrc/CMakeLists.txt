@@ -16,7 +16,6 @@ set(LIBRARY_NAME torch_fl)
 
 option(FLAGOS_BUILD_VENDOR "Build the FLAGOS_ACCELERATOR vendor's native kernels (no-op where the vendor ships none)" ON)
 option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
-option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
 
@@ -255,41 +254,8 @@ else()
   message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR} (vendor ${FLAGOS_PLATFORM_VENDOR})")
 endif()
 
-# Generated CUDA boxing kernels (CUDA-ABI vendor path: the wheel bundles the
-# vendor's libtorch_cuda.so and these wrappers re-dispatch PrivateUse1 ->
-# CUDA into it). Vendors with no CUDA runtime at all (gcu: the tops stack
-# exports no cuda symbols; musa: torch_musa registers under PrivateUse1,
-# never the CUDA key) build with FLAGOS_BUILD_BOXING=OFF, which drops them; the
-# mthreads wrappers under aten/backends/mthreads/generated/ replace them there.
-if(NOT FLAGOS_BUILD_BOXING)
-  list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/generated/cuda_kernels\\.cc$")
-  message(STATUS "FLAGOS_BUILD_BOXING=OFF: no generated CUDA boxing kernels")
-endif()
-
-# FLAGOS_BUILD_FLAGGEMS path: keep csrc/aten/backends/flagos/python_op_caller.cc and
-# build csrc/aten/generated/flaggems_python_kernels.cc with FLAGOS_FLAGGEMS_PYTHON
-# defined (below). The stale C++/python_wrapper files were removed; nothing to
-# exclude here.
-
-# Drop the flagos backend (only python_op_caller.{h,cc} lives here) when nothing
-# left in SOURCE_FILES needs it. Three independent consumers:
-#
-#   * the FlagGems dispatch paths (FLAGOS_BUILD_FLAGGEMS_CPP / FLAGOS_BUILD_FLAGGEMS), which call
-#     into Python through it;
-#   * the TileOPs path (FLAGOS_BUILD_TILEOPS), which reaches its TileLang kernels the
-#     same way;
-#   * generated/cuda_kernels.cc, whose native RNG kernels call
-#     GetFlagosDefaultCudaGenerator() unconditionally since the unified-RNG
-#     generator injection, regardless of the FlagGems dispatch path;
-#   * the MetaX boxing build, whose vendor runtime calls the same provider even
-#     with FlagGems off.
-#
-# The second consumer is why this test runs *here* and reads SOURCE_FILES
-# instead of options: cuda_kernels.cc is generated code under aten/generated/,
-# governed by FLAGOS_BUILD_BOXING -- not by any vendor switch (the gcu/musa builds
-# exclude it through FLAGOS_BUILD_BOXING=OFF). Keying on options instead once left
-# dcu linking with an undefined GetFlagosDefaultCudaGenerator (its boxing
-# kernels ride the hipified DTK torch, not any switch).
+# The FlagGems and TileOPs wrappers call their Python kernels through this
+# bridge. MetaX and GCU also use it from their runtime.
 set(_needs_python_op_caller OFF)
 if(FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_TILEOPS)
   set(_needs_python_op_caller ON)
@@ -300,11 +266,6 @@ endif()
 if(_flagos_is_gcu)
   set(_needs_python_op_caller ON)
 endif()
-foreach(_src IN LISTS SOURCE_FILES)
-  if(_src MATCHES ".*/aten/generated/cuda_kernels\\.cc$")
-    set(_needs_python_op_caller ON)
-  endif()
-endforeach()
 if(NOT _needs_python_op_caller)
   list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/flagos/.*")
 endif()
@@ -471,8 +432,8 @@ if(FLAGOS_BUILD_FLAGGEMS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_FLAGGEMS_PYTHON)
 endif()
 if(FLAGOS_NATIVE_HOSTS)
-  if(NOT FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_BOXING OR FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_TILEOPS)
-    message(FATAL_ERROR "Native hosts require FlagGems with boxing, FlagGems C++ and TileOPs disabled")
+  if(NOT FLAGOS_BUILD_FLAGGEMS OR FLAGOS_BUILD_FLAGGEMS_CPP OR FLAGOS_BUILD_TILEOPS)
+    message(FATAL_ERROR "Native hosts require FlagGems with FlagGems C++ and TileOPs disabled")
   endif()
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_HOSTS=1)
   if(_flagos_is_metax AND FLAGOS_BUILD_VENDOR)
@@ -485,11 +446,6 @@ include("${PROJECT_SOURCE_DIR}/cmake/FlagosRegistration.cmake")
 flagos_write_registration("${CMAKE_CURRENT_SOURCE_DIR}/aten"
     "${CMAKE_CURRENT_BINARY_DIR}/register_ops.inc")
 target_include_directories(${LIBRARY_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-
-# Used by the wrappers and runtime code that need the boxing kernels.
-if(FLAGOS_BUILD_BOXING)
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_BOXING_BUILD=1)
-endif()
 
 # Compile the FlagGems C++ dispatch kernels (flaggems_cpp_kernels.cc, guarded by
 # this macro) only when linking against liboperators.so is requested.
@@ -520,9 +476,6 @@ endif()
 if(FLAGOS_BUILD_FLAGGEMS)
   string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems,")
 endif()
-if(FLAGOS_BUILD_BOXING)
-  string(APPEND FLAGOS_BUILTIN_KERNELS "boxing,")
-endif()
 if(FLAGOS_BUILD_FLAGGEMS_CPP)
   string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems_cpp,")
 endif()
@@ -534,13 +487,8 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE
     FLAGOS_BUILTIN_KERNELS="${FLAGOS_BUILTIN_KERNELS}"
 )
 
-# The CPU-only torch wheel ships c10/cuda headers but not the CUDA-build-only
-# c10/cuda/impl/cuda_cmake_macros.h. A boxing build's nvidia_memory.h includes
-# CUDACachingAllocator.h to delegate flagos allocation to the CUDA caching
-# allocator; this macro tells CUDAMacros.h to skip that generated configure
-# file. Not needed for Ascend (which does not include c10/cuda headers), and
-# inert on the default FlagGems-primary wheel, where boxing is off and no
-# c10/cuda header is pulled in at all -- the flag is per platform in the table.
+# The CPU torch wheel omits c10/cuda/impl/cuda_cmake_macros.h. The platform
+# table selects this define for builds that can include those CUDA headers.
 if(FLAGOS_PLATFORM_C10_CUDA_CONFIGURE)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE C10_CUDA_NO_CMAKE_CONFIGURE_FILE)
 endif()
@@ -551,11 +499,7 @@ if(NOT FLAGOS_PLATFORM_USE_MACRO STREQUAL "")
   target_compile_definitions(${LIBRARY_NAME} PRIVATE ${FLAGOS_PLATFORM_USE_MACRO}=1)
 endif()
 
-# FLAGOS_ACCEL_<UPPER> for every accelerator. The USE_* macro above is empty for
-# cuda and ppu and names a vendor SDK (USE_MACA, USE_DCU) at that, so it cannot
-# tell register.cc which FlagGems-primary register list a boxing-OFF CUDA-ABI
-# build should compile: cuda, metax, dcu, ppu and tsingmicro all share the one
-# `#else` arm there. This define is that discriminator and nothing else.
+# Publish the platform identifier to the native code.
 string(TOUPPER "${FLAGOS_ACCELERATOR}" _FLAGOS_ACCEL_UPPER)
 target_compile_definitions(${LIBRARY_NAME} PRIVATE
     FLAGOS_ACCEL_${_FLAGOS_ACCEL_UPPER}=1
@@ -613,23 +557,6 @@ if(FLAGOS_BUILD_FLAGGEMS_CPP)
     list(APPEND _torch_fl_link_libs FlagGems::operators)
   elseif(TARGET operators)
     list(APPEND _torch_fl_link_libs operators)
-  endif()
-endif()
-
-if(_flagos_is_metax AND NOT FLAGOS_BUILD_VENDOR AND FLAGOS_BUILD_BOXING)
-  # The CPU TorchConfig used for the isolated Python environment does not
-  # declare MetaX's forked CUDA runtime. Link it directly so vendor-only ATen
-  # symbols are resolved by ELF instead of being left to process-global lookup.
-  # A build without boxing has no consumer of that runtime. In particular,
-  # native hosts keep the official CPU core, which cannot resolve its at::maca
-  # dependencies. MACA's device runtime is linked independently above.
-  set(_metax_torch_lib "$ENV{FLAGOS_VENDOR_TORCH_LIB}")
-  if(IS_DIRECTORY "${_metax_torch_lib}")
-    if(EXISTS "${_metax_torch_lib}/libtorch_cuda.so")
-      list(APPEND _torch_fl_link_libs
-        "${_metax_torch_lib}/libtorch_cuda.so")
-      target_link_options(${LIBRARY_NAME} PRIVATE "-Wl,--no-as-needed")
-    endif()
   endif()
 endif()
 

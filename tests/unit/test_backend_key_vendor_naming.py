@@ -114,7 +114,7 @@ def test_the_old_spellings_still_parse():
             "const BackendInfo* FindBackend"
         )
     ]
-    for legacy in ('"cuda"', '"gcu"', '"musa"', '"mps"', '"flagos_python"'):
+    for legacy in ('"gcu"', '"musa"', '"mps"', '"flagos_python"'):
         assert legacy in parse, f"{legacy} must stay accepted"
     # `nvidia` is the emitted key the other tests require; the parser has to
     # accept it too, or the conf is read as an unknown backend and every op it

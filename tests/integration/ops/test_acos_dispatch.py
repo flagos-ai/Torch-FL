@@ -102,17 +102,6 @@ class TestAcosCorrectness:
         ref = torch.acos(a.cpu())
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_acos_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(3)
-        a_cuda = torch.rand(64, 64, device="cuda:0") * 2 - 1
-        ref = torch.acos(a_cuda)
-        a = a_cuda.to(DEVICE)
-        out = torch.acos(a)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
 
 class TestAcosDispatch:
     """Verify dispatch routing for acos op."""
@@ -129,14 +118,3 @@ class TestAcosDispatch:
             check=False,
         )
         assert "[flagos dispatch] acos -> flagos_python" in result.stderr
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_acos_subprocess(
-            {
-                "FLAGOS_LOG": "dispatch",
-                "FLAGOS_OP_acos": "cuda",
-            },
-            check=False,
-        )
-        assert "[flagos dispatch] acos -> boxing" in result.stderr

@@ -98,7 +98,6 @@ int main(int argc, char** argv) {
     if (mode == "hygon") op.RegisterKernel(Backend::kHygon, &Vendor);
     auto bf = at::empty({1}, at::TensorOptions().dtype(at::kBFloat16));
     if (mode == "decoded") {
-      op.RegisterKernel(Backend::kBoxing, &Vendor);
       op.RegisterKernel(Backend::kFlagGemsCpp, &Vendor);
       op.RegisterKernel(Backend::kHygon, &Vendor);
       op.RegisterKernel(Backend::kNvidia, &Vendor);
@@ -258,7 +257,6 @@ def test_plain_override_replaces_an_included_dtype_rule(executable, tmp_path):
 @pytest.mark.parametrize(
     "key,log_name",
     [
-        ("CuDa", "boxing"),
         ("FLAGOS", "flagos"),
         ("flaggems_python", "flagos_python"),
         ("FLAGOS_PYTHON", "flagos_python"),
@@ -280,24 +278,44 @@ def test_legacy_conf_names_resolve_to_the_expected_backend(
     assert result.stdout.strip() == log_name
 
 
+@pytest.mark.parametrize("key", ["boxing", "CuDa"])
+@pytest.mark.parametrize("source", ["base", "dtype", "override", "decoded"])
+def test_retired_boxing_route_requires_migration(executable, tmp_path, key, source):
+    config = "mm = flaggems"
+    mode = "name"
+    environment = {}
+    if source == "base":
+        config = f"mm = {key}"
+    elif source == "dtype":
+        config += f"; Float:{key}"
+    elif source == "override":
+        environment["FLAGOS_OP_mm"] = key
+    else:
+        config = "mm = metax"
+        mode = "decoded"
+        environment["FLAGOS_SOFT_LOWP_STAY_ON_ROUTE"] = key
+    result = run(executable, tmp_path, config, mode=mode, **environment)
+    assert result.returncode != 0
+    assert "boxing route has been removed" in result.stderr
+
+
 def test_path_from_binding_takes_priority_over_the_env(executable, tmp_path):
     env_conf = tmp_path / "env.conf"
     env_conf.write_text("mm = none\n")
     result = run(
         executable,
         tmp_path,
-        "mm = boxing",
+        "mm = flaggems_cpp",
         mode="name",
         FLAGOS_BACKEND_CONFIG=str(env_conf),
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "boxing"
+    assert result.stdout.strip() == "flagos"
 
 
 @pytest.mark.parametrize(
     "key,log_name",
     [
-        ("CuDa", "boxing"),
         ("flagos", "flagos"),
         ("hygon", "hygon"),
         ("nvidia", "nvidia"),

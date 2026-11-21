@@ -306,17 +306,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "OFF",
         "Generate and compile FlagGems host source into the NVIDIA CPU-Torch "
         "wheel. Experimental; requires FlagGems, Cython and the CUDA toolkit at "
-        "build time. Boxing, FlagGems C++ and TileOPs must be disabled",
+        "build time. FlagGems C++ and TileOPs must be disabled",
     ),
     "FLAGOS_BUILD_BOXING": (
         SCOPE_BUILD,
         "OFF",
-        "Compile the generated CUDA boxing kernels, the CUDA-ABI vendor path. "
-        "Off on every platform by default: the default wheel is FlagGems-primary "
-        "(routed ops go to FlagGems, the rest to cpu_fallback) and depends on no "
-        "vendor torch package. Set FLAGOS_BUILD_BOXING=1 (or "
-        "-DFLAGOS_BUILD_BOXING=ON) to build a boxing wheel that reuses the "
-        "vendor's CUDA-ABI kernels",
+        "Retired. Enabling this setting raises a build error. Install or build "
+        "the platform's default FlagGems and vendor wheel",
     ),
     "FLAGOS_BUILD_FLAGGEMS_CPP": (
         SCOPE_BUILD,

@@ -19,65 +19,17 @@
 // a *backend*, then still routes the chosen backend's leaf by
 // query_.device().type().
 //
-// The fix: intercept the composite itself at PrivateUse1, box q/k/v(+mask) to
-// CUDA (one DeviceBoxingGuard round-trip for the whole attention), and call the
-// native composite on the CUDA tensors. The composite then sees device == CUDA,
-// runs the vendor's own _fused_sdp_choice selector (flash for Qwen3 decode
-// shapes), and returns the exact tensor the vendor route returns -- numerics
-// match by construction, and the decomposed math path (_safe_softmax + bmm) is
-// never taken. Nothing about the composite is hardcoded here: shapes the vendor
-// selector refuses fall back to its own math path exactly as on the CUDA route.
+// The PrivateUse1 wrapper selects measured fused attention routes for eligible
+// inputs. The default uses ATen's composite on the original FlagOS tensors,
+// which dispatches to the PrivateUse1 leaf operators.
 //
-// That boxed route is what every conf gets by default. A platform whose conf
-// routes scaled_dot_product_attention to flaggems takes FlagGems' Triton fused
-// attention instead, for the calls that kernel implements -- see
-// FlagGemsEligible() for the bounds and METAX_COMPOSITE_FLAGGEMS /
-// DCU_COMPOSITE_FLAGGEMS in scripts/codegen/gen_vendor_confs.py for the
-// measurements behind the confs that ask for it. Those calls include the ones a
-// caller passes an
-// explicit key-valid mask to, which this file converts twice: FlagGems reads a
-// bool mask with the opposite polarity to torch and indexes the mask with
-// unbound strides, so the bool row becomes an fp32 additive with stride 0 on its
-// broadcast axes before the call (RouteMask). Everything else keeps the boxed
-// route: the calls outside those bounds, the other boxing confs (which name the
-// op `cuda`), and the confs that do not name it at all (backends_nvidia.conf,
-// TsingMicro).
-// HasBackendForOp() is what keeps that last case out of the route, because an
-// unlisted op reads as flaggems -- the right default for the generated leaf
-// kernels, the wrong reading of silence for a route that has to be measured on
-// each platform. Turning it off is FLAGOS_OP_scaled_dot_product_attention=cuda
-// at runtime or one line of the generator's measured set at build time.
+// FlagGems expects the opposite boolean mask polarity and an additive mask
+// with stride zero on broadcast axes. See FlagGemsEligible and RouteMask.
 //
-// Like every other hand-written wrapper in this tree (register.cc's
-// WrapperMatmul), this one reads the conf and not FLAGOS_FORCE_BACKEND: that
-// variable is the Dispatcher's cohort switch, and a wrapper that never dispatches
-// is not covered by it.
-//
-// Scope: inference only. Under grad mode with a grad-requiring input the wrapper
-// falls through to the composite on the flagos tensors (the pre-change math
-// decomposition over autograd-aware leaf kernels), because a boxed CUDA forward
-// would leave backward with PrivateUse1 tensors where the autograd graph
-// recorded CUDA. See WrapperScaledDotProductAttention below.
-//
-// The wrapper is registered on two dispatch keys: PrivateUse1 for the calls that
-// arrive without an autograd key, and AutogradPrivateUse1 for the ones that carry
-// a graph. A Python TorchDispatchMode is what forces the second registration --
-// it is measured and explained at the registrations at the end of this file.
-//
-// Compiled for the CUDA-ABI platforms, in both build states. On a boxing build
-// (FLAGOS_BOXING_BUILD) the default tail boxes q/k/v and calls the composite on
-// the vendor's CUDA kernels. On a FlagGems-primary build there is nothing to box
-// onto, so the tail calls the composite on the flagos tensors and lets it
-// decompose onto the PrivateUse1 FlagGems leaf kernels. Ascend (USE_ASCEND)
-// keeps its own PrivateUse1 _fused_sdp_choice stub (returns efficient_attention
-// for its aclnn kernel) in backends/ascend/scaled_dot_product_attention.cc;
-// MUSA, GCU, TsingMicro, BPU and Kunlunxin do not run CUDA-compatible kernels
-// and must keep their own paths. Kunlunxin registers nothing here: xdnn_pytorch
-// exposes no fused attention op, so it is left to ATen's decomposition (matmul,
-// softmax and the rest all route to the native XPU kernels), which is the same
-// answer MUSA's backend gives.
-// Without this guard the PrivateUse1 stub registration below would collide with
-// Ascend's registration of the same DispatchStub slot.
+// Register the wrapper on PrivateUse1 and AutogradPrivateUse1 so Python
+// TorchDispatchMode and autograd-aware calls reach the same routing decision.
+// Ascend and other platforms with separate attention implementations keep
+// their own registrations.
 
 #include <ATen/core/Tensor.h>
 #include <ATen/core/grad_mode.h>
@@ -581,36 +533,9 @@ at::Tensor WrapperScaledDotProductAttention(
     return result;
   }
 #endif
-#ifdef FLAGOS_BOXING_BUILD
-  // Boxing build: hand the flagos tensors to the vendor's CUDA kernels for the
-  // whole attention, then unbox the result.
-  //
-  // DeviceBoxingGuard records raw TensorImpl* and must only be handed named
-  // lvalues that outlive the guard, so the optional mask is bound to a local
-  // first. An undefined mask Tensor is left untouched by the guard (matching the
-  // CUDA path where attn_mask is None).
-  at::Tensor mask_t = attn_mask.has_value() ? *attn_mask : at::Tensor();
-  at::native::flagos::DeviceBoxingGuard guard(query, key, value, mask_t);
-  // Call the native composite directly (register.cc's WrapperMatmul does the
-  // same for aten::matmul): inside the guard the tensors are CUDA, so dispatch
-  // cannot re-enter this PrivateUse1 impl (no recursion), and the composite's
-  // backend decision runs on the same device type the vendor route sees.
-  at::Tensor output = at::native::scaled_dot_product_attention(
-      query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
-  // The output was produced by CUDA kernels, so it is a fresh CUDA tensor (not
-  // one of the boxed inputs) and must be explicitly unboxed back to flagos.
-  at::native::flagos::UnboxToFlagos(output);
-  return output;
-#else
-  // FlagGems-primary build: there are no CUDA kernels and no vendor torch to
-  // box onto, so DeviceBoxingGuard would only move the tensors to a device with
-  // nothing behind it. Call the composite directly on the flagos tensors
-  // instead; it decomposes into leaf ops (mm/bmm/_softmax/...) that dispatch
-  // through the PrivateUse1 FlagGems kernels, or reach cpu_fallback where the
-  // conf has no route.
+  // Let ATen compose the PrivateUse1 operators for unhandled routes.
   return at::native::scaled_dot_product_attention(
       query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
-#endif
 }
 
 } // namespace

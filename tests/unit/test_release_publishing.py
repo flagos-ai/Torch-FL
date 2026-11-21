@@ -199,33 +199,10 @@ def test_duplicate_legacy_and_vendor_artifacts_cannot_upload_the_same_wheel(tmp_
         _publisher().collect(tmp_path)
 
 
-def test_wheel_builder_receives_the_loaders_boxing_mode():
-    wrapper = yaml.safe_load(
-        (REPO_ROOT / ".github/workflows/build-wheel.yml").read_text()
-    )
-    common = yaml.safe_load(
-        (REPO_ROOT / ".github/workflows/build-wheel-common.yml").read_text()
-    )
-    assert (
-        wrapper["jobs"]["build"]["with"]["boxing_lane"]
-        == "${{ needs.configuration.outputs.boxing_lane }}"
-    )
-    assert common[True]["workflow_call"]["inputs"]["boxing_lane"]["default"] == ""
-    setup = next(
-        s
-        for s in common["jobs"]["build"]["steps"]
-        if s.get("name") == "Prepare platform environment"
-    )
-    assert setup["env"]["BOXING_LANE"] == "${{ inputs.boxing_lane }}"
-
-
-@pytest.mark.parametrize(
-    "requested,compiled,accepted",
-    [("", False, True), ("1", True, True), ("", True, False), ("1", False, False)],
-)
-@pytest.mark.parametrize("source_boxing", [False, True])
-def test_installed_wheel_must_match_requested_boxing_mode(
-    tmp_path, requested, compiled, accepted, source_boxing
+@pytest.mark.parametrize("installed_boxing", [False, True])
+@pytest.mark.parametrize("installed_boxing_config", [False, True])
+def test_verify_installed_wheel_rejects_retired_assets(
+    tmp_path, installed_boxing, installed_boxing_config
 ):
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github/workflows/build-wheel-common.yml").read_text()
@@ -234,13 +211,12 @@ def test_installed_wheel_must_match_requested_boxing_mode(
         s for s in workflow["jobs"]["build"]["steps"] if s.get("name") == "Verify wheel"
     )
     assert "--force-reinstall" in step["run"]
-    assert step["env"]["EXPECTED_BOXING_LANE"] == "${{ inputs.boxing_lane }}"
     script = textwrap.dedent(
         step["run"].split("python -I - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     )
     checkout = tmp_path / "checkout"
     installed = tmp_path / "site-packages"
-    for root, boxing in [(checkout, source_boxing), (installed, compiled)]:
+    for root, boxing in [(checkout, True), (installed, installed_boxing)]:
         package = root / "torch_fl"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("raise RuntimeError('must not import')\n")
@@ -259,9 +235,13 @@ def test_installed_wheel_must_match_requested_boxing_mode(
         )
         if root == installed:
             (info / "WHEEL").write_text("Wheel-Version: 1.0\n")
-            (info / "RECORD").write_text(
-                "torch_fl/__init__.py,,\ntorch_fl/compatibility.json,,\n"
-            )
+            files = "torch_fl/__init__.py,,\ntorch_fl/compatibility.json,,\n"
+            if installed_boxing_config:
+                conf = package / "configs" / "backends_nvidia_boxing.conf"
+                conf.parent.mkdir()
+                conf.write_text("mm = boxing\n")
+                files += f"{conf.relative_to(root)},,\n"
+            (info / "RECORD").write_text(files)
     result = subprocess.run(
         [
             sys.executable,
@@ -274,18 +254,20 @@ def test_installed_wheel_must_match_requested_boxing_mode(
             **os.environ,
             "PYTHONPATH": str(checkout),
             "WHEEL_SOURCE_ROOT": str(checkout),
-            "EXPECTED_BOXING_LANE": requested,
         },
         capture_output=True,
         text=True,
         timeout=10,
     )
-    if accepted:
+    if not installed_boxing and not installed_boxing_config:
         assert result.returncode == 0, result.stderr
         assert str(installed / "torch_fl/compatibility.json") in result.stdout
     else:
         assert result.returncode != 0
-        assert "kernel sets" in result.stderr
+        expected = (
+            "retired kernel set" if installed_boxing else "retired boxing configuration"
+        )
+        assert expected in result.stderr
 
 
 @pytest.mark.parametrize("publish_succeeds", [True, False])

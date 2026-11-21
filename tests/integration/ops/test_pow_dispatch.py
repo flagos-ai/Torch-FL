@@ -80,17 +80,6 @@ class TestPowTensorScalarCorrectness:
         ref = torch.pow(a.cpu(), exp)
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_pow_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0").abs() + 0.1
-        ref = torch.pow(a_cuda, 2.5)
-        a = a_cuda.to(DEVICE)
-        out = torch.pow(a, 2.5)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.anyplatform
     def test_pow_dtypes(self, dtype):
@@ -198,14 +187,6 @@ class TestPowTensorScalarDispatch:
             check=False,
         )
         assert "[flagos dispatch] pow.Tensor_Scalar -> flagos_python" in result.stderr
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_pow_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_pow__Tensor_Scalar": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] pow.Tensor_Scalar -> boxing" in result.stderr
 
 
 class TestPowTensorScalarAscendDispatch:

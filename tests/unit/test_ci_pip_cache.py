@@ -396,50 +396,11 @@ def test_cache_cleanup_actions_and_setup_share_one_directory(
             assert step["with"]["path"] == "${{ env.PIP_CACHE_DIR }}"
 
 
-def test_cuda_caches_cpu_torch_without_the_vendor_wheel_set():
+def test_cuda_installs_cpu_torch_without_bootstrapping_vendor_torch():
     hook = (ROOT / ".github/scripts/hooks/set_env_nvidia.sh").read_text()
     assert re.search(r"^install_cpu_torch\s*$", hook, re.M)
-    assert re.search(
-        r"pip_retry --no-cache-dir --index-url \"\$VENDOR_TORCH_INDEX_URL\"", hook
-    )
-
-
-def test_cuda_bootstraps_the_vendor_torch_only_on_the_boxing_lane():
-    """The vendor lane runs on the +cpu torch; only boxing stages a libtorch_cuda.
-
-    The vendor lane builds the wheel whose premise is that it carries no
-    libtorch_cuda.so, and nothing downstream of the bootstrap reads
-    VENDOR_PYTHON there. Bootstrapping it anyway downloaded the multi-GB
-    torch+cu130 wheel for an unread path, and that download is what failed the
-    lane while the PyTorch index answered 503 through the runner proxy.
-    """
-    hook = (ROOT / ".github/scripts/hooks/set_env_nvidia.sh").read_text()
-
-    # The bootstrap is guarded by BOXING_LANE: the vendor lane resolves the
-    # source as "none" instead of installing one.
-    assert (
-        'elif [[ "${BOXING_LANE:-}" == "1" ]]; then\n'
-        '  VENDOR_SOURCE="bootstrap"\n'
-        "  ensure_system_prerequisites\n"
-        "  bootstrap_vendor_python\n"
-        "else\n"
-        "  # The vendor lane: no accelerator torch is installed, and none is read below.\n"
-        '  VENDOR_SOURCE="none"\n'
-        "fi" in hook
-    )
-
-    # The explicit mode override cannot smuggle a bootstrap onto the vendor lane.
-    assert "TORCH_FL_CUDA_VENDOR_MODE=bootstrap asks for an accelerator PyTorch" in hook
-
-    # The probe reads the accelerator torch, so it must not run without one.
-    assert (
-        'if [[ "$VENDOR_SOURCE" != "none" ]]; then\n'
-        "  resolve_vendor_torch\n"
-        "else\n"
-        '  echo "Vendor lane: no accelerator PyTorch is resolved or installed; '
-        'tests run on the +cpu torch"\n'
-        "fi" in hook
-    )
+    assert "bootstrap_vendor_python" not in hook
+    assert "TORCH_FL_VENDOR_TORCH_LIB" in hook or "FLAGOS_VENDOR_TORCH_LIB" in hook
 
 
 def test_reporting_tools_install_through_the_pypi_fallback():

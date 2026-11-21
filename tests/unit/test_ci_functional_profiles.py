@@ -37,8 +37,6 @@ from merge_pytest_reports import merge_reports  # noqa: E402
 from ci.generate_matrix import (  # noqa: E402
     _load_platforms,
     _platforms_from_files,
-    _schedule,
-    boxing_platforms,
 )
 from compose_integration_manifest import compose, ManifestError  # noqa: E402
 
@@ -132,11 +130,7 @@ def request(profile="pr", platforms="all"):
 )
 def test_pr_router_and_external_entry_agree(changed, expected):
     known = _load_platforms(CONFIGS)
-    expected = (
-        _schedule(known, boxing_platforms(CONFIGS, known))
-        if expected is None
-        else expected
-    )
+    expected = known if expected is None else expected
     assert _platforms_from_files(changed, known, CONFIGS) == expected
     assert (
         build_plan(request(), CONTRACT, ROOT, changed)["expected_platforms"] == expected
@@ -149,9 +143,7 @@ def test_pr_router_and_external_entry_agree(changed, expected):
 def test_nightly_always_selects_every_configured_platform(changed):
     planned = build_plan(request("nightly"), CONTRACT, ROOT, changed)
     known = _load_platforms(CONFIGS)
-    assert planned["expected_platforms"] == _schedule(
-        known, boxing_platforms(CONFIGS, known)
-    )
+    assert planned["expected_platforms"] == known
     assert planned["test_level"] == "L2"
     assert planned["profile"] == "nightly"
 
@@ -168,14 +160,12 @@ def test_profile_identity_and_reserved_weekly():
         build_plan(request("nightly", "mthreads"), CONTRACT, ROOT, changed)
 
 
-@pytest.mark.parametrize("boxing_lane", [False, True])
-def test_omitted_compose_profile_selects_pr(boxing_lane):
+def test_omitted_compose_profile_selects_pr():
     manifest = yaml.safe_load((ROOT / ".github/integration-manifest.yml").read_text())
     config = yaml.safe_load((CONFIGS / "nvidia.yml").read_text())
     known = _load_platforms(CONFIGS)
-    kwargs = {"boxing_lane": boxing_lane, "boxing": boxing_platforms(CONFIGS, known)}
-    assert compose(manifest, config, "nvidia", known, **kwargs) == compose(
-        manifest, config, "nvidia", known, profile="pr", **kwargs
+    assert compose(manifest, config, "nvidia", known) == compose(
+        manifest, config, "nvidia", known, profile="pr"
     )
 
 
@@ -266,30 +256,18 @@ def test_identity_device_count_failure_keeps_diagnostic_json(
 def test_nightly_keeps_all_existing_groups_and_isolates_cuda_profiling():
     manifest = yaml.safe_load((ROOT / ".github/integration-manifest.yml").read_text())
     known = _load_platforms(CONFIGS)
-    boxing = boxing_platforms(CONFIGS, known)
     for platform in known:
         config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
-        for boxing_lane in (False, True) if platform in boxing else (False,):
-            kwargs = {"boxing": boxing, "boxing_lane": boxing_lane}
-            pr = compose(manifest, config, platform, known, profile="pr", **kwargs)
-            nightly = compose(
-                manifest, config, platform, known, profile="nightly", **kwargs
-            )
-            assert {g["name"] for g in pr} <= {g["name"] for g in nightly}
-            extras = {g["name"] for g in nightly} - {g["name"] for g in pr}
-            expected = set()
-            if platform == "nvidia":
-                expected = {
-                    "CUDA dtype cast transfer regression"
-                    if boxing_lane
-                    else "CUDA FlagGems multiplication route regression"
-                }
-            assert extras == expected
-            for group in nightly:
-                if group["name"] in extras:
-                    assert group["min_passed"] == (9 if boxing_lane else 5)
+        pr = compose(manifest, config, platform, known, profile="pr")
+        nightly = compose(manifest, config, platform, known, profile="nightly")
+        assert {g["name"] for g in pr} <= {g["name"] for g in nightly}
+        extras = [g for g in nightly if g["name"] not in {p["name"] for p in pr}]
+        assert len(extras) == int(platform == "nvidia")
+        if extras:
+            assert extras[0]["name"] == "CUDA FlagGems multiplication route regression"
+            assert extras[0]["min_passed"] == 5
     with pytest.raises(ManifestError, match="weekly is reserved"):
-        compose(manifest, config, platform, known, boxing=boxing, profile="weekly")
+        compose(manifest, config, platform, known, profile="weekly")
 
 
 def test_profile_is_threaded_through_both_workflow_entries():
@@ -542,11 +520,14 @@ def test_automatic_workflow_profile_selection_before_hardware(
     assert done.returncode == expected_code, done.stdout + done.stderr
     if expected_code == 0:
         known = _load_platforms(CONFIGS)
-        assert json.loads(
-            dict(line.split("=", 1) for line in output.read_text().splitlines())[
-                "platforms"
-            ]
-        ) == _schedule(known, boxing_platforms(CONFIGS, known))
+        assert (
+            json.loads(
+                dict(line.split("=", 1) for line in output.read_text().splitlines())[
+                    "platforms"
+                ]
+            )
+            == known
+        )
     else:
         assert (
             "nightly requires platforms=all" if dispatch else "weekly is reserved"

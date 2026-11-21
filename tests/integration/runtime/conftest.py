@@ -66,17 +66,10 @@ def _is_runtime_item(item: pytest.Item) -> bool:
         return False
 
 
-#: capability marker -> the kernel set the build record must list for it to run.
-#:
-#: ``boxing`` is here for the ``cuda`` conf route: on this project's CPU-torch
-#: wheels that dispatch key is provided by the generated CUDA boxing kernels, so
-#: a ``= cuda`` route with no boxing in the build record has no kernel to reach
-#: and the op lands on cpu_fallback instead. Same build-driven skip, same source
-#: of truth as the two FlagGems entries.
+#: Capability marker to required kernel set.
 _CAPABILITY_KERNEL = {
     "flaggems_cpp": "flaggems_cpp",
     "flaggems_python": "flaggems",
-    "boxing": "boxing",
 }
 
 #: The JSON doc's directory. Overridable so a CI job can route it into its

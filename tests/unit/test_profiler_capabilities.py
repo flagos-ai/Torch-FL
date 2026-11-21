@@ -12,25 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit coverage for the profiler capability table's `memset` row.
-
-`tests/integration/profiler_support.py::capabilities_for_platform` decides
-whether the cross-backend profiler suite asserts on `gpu_memset`. The row is
-a platform set intersected with the build record carrying boxing kernels, so
-it is pure data: it can be checked without an accelerator and without the
-integration conftest.
-
-The DCU entry is covered here because it is otherwise only observable as a
-green PCIe-free integration lane. The `hygon-boxing` job failed
-`test_profiler_parity.py::test_category_coverage` with "missing categories
-torch-cuda emits: ['gpu_memset']" precisely because the row answered False on
-DCU, which also meant `append_boxing_path_probe()` never appended the
-`linalg_lu_factor` call that makes rocBLAS zero its workspace. Dropping the
-platform back out of the set would re-open the same failure silently, and the
-memset cases would report as skipped rather than failing.
-
-Run: pytest tests/unit/test_profiler_capabilities.py -v
-"""
+"""Test profiler transfer detection and its CUDA fixture."""
 
 import importlib.util
 import ast
@@ -160,12 +142,8 @@ def test_invisible_or_partial_positive_control_rejects_measurement(monkeypatch, 
         profiler_support.device_copy_profiler.__wrapped__()
 
 
-@pytest.mark.parametrize(
-    "boxing,cuda_torch", [(False, False), (True, False), (False, True)]
-)
-def test_native_copy_gate_uses_the_wheel_build_not_only_the_torch_package(
-    monkeypatch, tmp_path, boxing, cuda_torch
-):
+@pytest.mark.parametrize("cuda_torch", [False, True])
+def test_native_copy_gate_requires_cuda_linked_torch(tmp_path, cuda_torch):
     tree = ast.parse(
         (_INTEGRATION_DIR / "ops/test_dtype_cast_performance.py").read_text()
     )
@@ -179,15 +157,6 @@ def test_native_copy_gate_uses_the_wheel_build_not_only_the_torch_package(
         "Path": Path,
         "torch": SimpleNamespace(__file__=str(tmp_path / "torch/__init__.py")),
     }
-    monkeypatch.setitem(
-        sys.modules,
-        "torch_fl",
-        SimpleNamespace(
-            _env=SimpleNamespace(
-                build_kernels=lambda: ["boxing"] if boxing else ["flaggems"]
-            )
-        ),
-    )
     if cuda_torch:
         lib = tmp_path / "torch/lib/libtorch_cuda.so"
         lib.parent.mkdir(parents=True)
@@ -198,83 +167,8 @@ def test_native_copy_gate_uses_the_wheel_build_not_only_the_torch_package(
         ),
         namespace,
     )
-    if boxing or cuda_torch:
+    if cuda_torch:
         namespace["native_cuda_copy"]()
     else:
-        with pytest.raises(AssertionError, match="require a boxing wheel"):
+        with pytest.raises(AssertionError, match="require CUDA-linked PyTorch"):
             namespace["native_cuda_copy"]()
-
-
-# Platforms the row may claim, and platforms it must never claim. Kept as two
-# lists rather than one parametrization so a new platform has to be placed
-# deliberately instead of inheriting whichever list is closer.
-_MEMSET_PLATFORMS = ["cuda", "metax", "dcu"]
-_NEVER_MEMSET_PLATFORMS = [
-    "ascend",
-    "gcu",
-    "iluvatar",
-    "kunlunxin",
-    "mps",
-    "musa",
-    "ppu",
-    "tsingmicro",
-]
-
-
-def _set_boxing_built(monkeypatch, built):
-    monkeypatch.setattr(profiler_support, "_boxing_built", lambda: built)
-
-
-@pytest.mark.parametrize("platform", _MEMSET_PLATFORMS)
-def test_memset_row_follows_the_boxing_build_record(monkeypatch, platform):
-    """A boxing wheel claims memset; the same platform without boxing does not.
-
-    The memset the row asserts is the vendor blas zeroing its gemm workspace,
-    and that library is reachable only through the generated boxing kernels.
-    """
-    _set_boxing_built(monkeypatch, True)
-    assert profiler_support.capabilities_for_platform(platform).memset is True
-
-    _set_boxing_built(monkeypatch, False)
-    assert profiler_support.capabilities_for_platform(platform).memset is False
-
-
-def test_dcu_boxing_wheel_claims_memset(monkeypatch):
-    """The DCU row added for the hygon-boxing lane, stated on its own.
-
-    Tested separately from the parametrization above so a failure names the
-    platform this row was actually added for.
-    """
-    _set_boxing_built(monkeypatch, True)
-    capabilities = profiler_support.capabilities_for_platform("dcu")
-    assert capabilities.platform == "dcu"
-    assert capabilities.memset is True
-
-
-def test_dcu_vendor_wheel_leaves_memset_off(monkeypatch):
-    """`backends_hygon.conf` routes linalg_lu_factor_ex `none`, so no fill.
-
-    The default DCU wheel reaches cpu_fallback for the probe op and makes no
-    rocBLAS call, so claiming the capability there would turn a skip into a
-    failure on a record the wheel cannot produce.
-    """
-    _set_boxing_built(monkeypatch, False)
-    assert profiler_support.capabilities_for_platform("dcu").memset is False
-
-
-@pytest.mark.parametrize("platform", _NEVER_MEMSET_PLATFORMS)
-def test_memset_row_stays_off_where_the_tracer_emits_no_fill(monkeypatch, platform):
-    """Boxing kernels alone are not the signal; the vendor blas call is."""
-    _set_boxing_built(monkeypatch, True)
-    assert profiler_support.capabilities_for_platform(platform).memset is False
-
-
-def test_boxing_path_probe_is_a_noop_without_the_capability(monkeypatch):
-    """The probe is gated on the same row, so it costs nothing when off.
-
-    `append_boxing_path_probe` imports torch only after the gate, which is what
-    lets this check run on a machine with no torch installed.
-    """
-    _set_boxing_built(monkeypatch, False)
-    assert profiler_support.append_boxing_path_probe(platform="dcu") is None
-    assert profiler_support.append_boxing_path_probe(platform="cuda") is None

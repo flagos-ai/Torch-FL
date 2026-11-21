@@ -29,7 +29,7 @@ from torch_fl.tileops.generated.routes import ROUTES, WORKLOADS
 from torch_fl.tileops.generated.shims import SHIM_NAMES
 
 pytestmark = [
-    pytest.mark.cuda,
+    pytest.mark.nvidia,
     pytest.mark.skipif(
         not tileops_runtime.is_tileops_available(),
         reason="TileOPs unavailable or no provider serves this device",
@@ -167,10 +167,10 @@ def test_dispatches_through_cpp():
 
     out = subprocess.run(
         [sys.executable, "-c", prog],
-        env=dict(base, FLAGOS_OP_relu="cuda"),
+        env=dict(base, FLAGOS_OP_relu="flaggems"),
         capture_output=True,
         text=True,
     )
-    assert "[flagos dispatch] relu -> boxing" in out.stdout + out.stderr, (
+    assert "[flagos dispatch] relu -> flagos_python" in out.stdout + out.stderr, (
         f"stdout={out.stdout}\nstderr={out.stderr}"
     )

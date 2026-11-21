@@ -2,7 +2,7 @@
 
 ## Overview
 
-MetaX is **FlagGems-primary by default**: the wheel routes the ops `backends_metax.conf` names to FlagGems and sends the rest to `cpu_fallback`, with no vendor torch package. An opt-in **boxing** wheel (`FLAGOS_BUILD_BOXING=1`) instead reuses PyTorch's CUDA boxing kernels (compiled with host `g++`, no `mxcc`) and bundles the MetaX-forked libtorch C++ runtime inside the wheel; that target machine needs only the stock `torch==2.10.0+cpu` wheel, this `torch_fl` wheel, and the `/opt/maca` driver runtime. Unless a section says otherwise, the rest of this guide describes the boxing wheel.
+The ordinary MetaX wheel uses FlagGems on the MACA runtime. The optional native-host wheel uses the same `backends_metax.conf` name with measured routes staged at build time.
 
 **Status:** Stable. CI validates representative operator dispatch and factory/autograd tests on 8-GPU MetaX runners. FlagGems and model-level validation are not covered in CI.
 
@@ -34,7 +34,7 @@ No separate `torch+metax` wheel, no manual `LD_LIBRARY_PATH` configuration.
 
 ### Building the Wheel
 
-#### Step 1: Build the Boxing Artifacts
+#### Step 1: Build the FlagGems Artifacts
 
 On a machine with the MetaX SDK and `torch+metax` wheel available:
 
@@ -42,16 +42,10 @@ On a machine with the MetaX SDK and `torch+metax` wheel available:
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-# Default build: FlagGems-primary, no boxing kernels, no vendor libtorch
+# Build the ordinary MetaX wheel
 FLAGOS_ACCELERATOR=metax \
   python setup.py bdist_wheel
 
-# Boxing build (opt-in): CUDA boxing kernels + bundled forked libtorch
-FLAGOS_ACCELERATOR=metax \
-  FLAGOS_BUILD_VENDOR=OFF \
-  FLAGOS_BUILD_BOXING=1 \
-  FLAGOS_VENDOR_TORCH_LIB=<path-to-torch+metax>/torch/lib \
-  python setup.py bdist_wheel
 ```
 
 **Parameters:**
@@ -153,9 +147,7 @@ pytest tests/integration/test_factory_ops.py -v --tb=short
 
 ### Automatic Mixed Precision
 
-MetaX boxing reuses the CUDA operator path while exposing PyTorch's device-generic
-AMP API through `flagos`. Both FP16 and BF16 are supported autocast targets, and
-`GradScaler` uses the boxed CUDA non-finite check and unscale kernels:
+Use the PyTorch AMP API with the `flagos` device name:
 
 ```python
 import torch_fl  # Import first on MetaX.
@@ -185,12 +177,11 @@ pytest tests/integration/test_amp_contract.py -m amp -v --tb=short
 The measured C550/MACA 3.8.0 coverage includes FP16 and BF16 lower-precision,
 FP32, optional-dtype, and promote autocast policies; nested state; non-finite
 unscale; finite scale growth; overflow backoff; and a forward/backward optimizer
-step. This validation applies to the boxing path, not the legacy handwritten
-MetaX kernel mode.
+step. These measurements were taken on the former boxing wheel.
 
 ### Low-Precision Matrix Operations
 
-MetaX boxing also provides software emulation for scalar FP8 and packed FP4 matrix
+The MetaX runtime provides software emulation for scalar FP8 and packed FP4 matrix
 inputs. The supported dtypes are `float8_e4m3fn`, `float8_e5m2`,
 `float8_e4m3fnuz`, `float8_e5m2fnuz`, `float8_e8m0fnu`, and
 `float4_e2m1fn_x2`. The shared device-side path decodes inputs to BF16 and uses
@@ -211,7 +202,7 @@ On the C550/MACA 3.8.0 environment used for this checkout, the complete marked s
 passed (`37 passed`), including all five FP8 formats, packed FP4, `mm`/`bmm`/`addmm`,
 `dtype`/`out` variants, non-square packed layouts, in-place `addmm_`, and the fail-closed
 scaled-mm check. Re-run the command above after changing the build or vendor runtime;
-the result applies to the CUDA-boxing path and not the legacy handwritten MetaX kernel mode.
+The recorded 37 passes came from the former boxing wheel.
 
 The suite is measured with the tests' own 4x4 and `(2, 4, 4)` operands. A decoded BF16
 pair is still handed to the route the conf names rather than computed in place, so an
@@ -223,7 +214,7 @@ way; they are outside what this path was measured on.
 
 ### torch.compile and FlagTree
 
-The boxing path supports `torch.compile(backend="flagos")` with either the MetaX
+The MetaX backend uses `torch.compile(backend="flagos")` with either the MetaX
 Triton distribution or a MetaX-enabled [FlagTree](https://github.com/flagos-ai/FlagTree)
 build. FlagTree installs the module named `triton`; `FLAGOS_USE_FLAGTREE=1`
 asserts that this replacement is active rather than switching it at runtime.
@@ -272,7 +263,7 @@ outside a FlagTree environment.
 
 ## FlagGems on MetaX
 
-Every MetaX wheel compiles the FlagGems Python dispatch slot, and `backends_metax.conf` is FlagGems-first. `import torch_fl` therefore routes 586 of the conf's 2037 ops to the FlagGems Python path and 15 to the FlagGems C++ path on its own; everything else -- including the ops `triton-metax` cannot compile (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and others, where FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects) -- is `none` and reaches `cpu_fallback`. A default conf never routes boxing. A boxing wheel that needs those ops on the CUDA kernel selects the opt-in day-0 table explicitly (`FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_metax_boxing.conf`); see `AGENTS.md`, "Day-0 boxing confs".
+Every MetaX wheel compiles the FlagGems Python dispatch slot, and `backends_metax.conf` is FlagGems-first. `import torch_fl` therefore routes 586 of the conf's 2037 ops to the FlagGems Python path and 15 to the FlagGems C++ path on its own; everything else -- including the ops `triton-metax` cannot compile (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and others, where FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects) -- is `none` and reaches `cpu_fallback`.
 
 The ten `flaggems_cpp` routes need a FlagGems built for MACA (the `cpp/` half, `-DFLAGGEMS_BACKEND=MACA`) linked into the wheel; without it the dispatcher sees an empty C++ slot and boxes them. `_softmax` and `embedding` are on the Python path rather than the C++ one until that C++ wiring lands — see *Native Backend Route Changes* in the operator-support reference.
 
@@ -319,7 +310,7 @@ print(f'FlagGems SILU result: {result.cpu().item():.4f}')
 
 The dispatch log line the run prints for `silu` names the backend that served it (`[flagos dispatch] silu -> flagos_python`) — the conf's route, not an environment switch. `tests/integration/ops/backend_conf.py:routed_backend()` resolves that name from the conf so a test can assert it on any platform.
 
-Without FlagTree or FlagGems installed, the 604 ops routed to a FlagGems backend raise at dispatch. `backends_metax.conf` is FlagGems-first in both the default and the boxing wheel, so those routes raise instead of falling back. The only pure-boxing table is the opt-in day-0 `backends_metax_boxing.conf` (`FLAGOS_BACKEND_CONFIG=...`), which routes nothing to FlagGems beyond what `backends_metax.conf` measured.
+Install the pinned FlagTree and FlagGems wheels before using the MetaX operator routes.
 
 ## Distributed (Experimental)
 

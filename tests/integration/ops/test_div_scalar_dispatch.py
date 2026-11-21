@@ -51,17 +51,6 @@ class TestDivScalarCorrectness:
         ref = a.cpu() / 4.0
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_div_scalar_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = torch.div(a_cuda, 5.0)
-        a = a_cuda.to(DEVICE)
-        out = torch.div(a, 5.0)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.anyplatform
     def test_div_scalar_dtype(self, dtype):

@@ -20,8 +20,7 @@ backend named in ``[flagos dispatch] <op> -> <backend>`` has to be the one the
 conf lists. A test that asserts a dispatch log should therefore ask this module
 for the route instead of hard-coding ``cuda`` or ``flagos_python``: a hard-coded
 name describes the platform the test was written on and silently becomes wrong on
-every other one. ``add.Tensor``/``cat`` are the measured examples -- ``cuda`` on
-CUDA/DCU/PPU, ``musa`` on MUSA.
+every other one. Use the loaded config to resolve the expected route.
 
 The two sides do not share one vocabulary. The conf names the FlagGems Python
 path ``flaggems`` while the log prints ``flagos_python``, and the C++ path is
@@ -51,7 +50,7 @@ _LOG_NAME = {
     "flaggems_cpp": "flagos",
     # Rows in the vendor spelling, against the name the log prints: the conf
     # names Apple's kernels and the other vendors' by vendor; the log keeps
-    # `mps`/`musa`/`gcu`, and NVIDIA's kernels register into `boxing`.
+    # `mps`/`musa`/`gcu`.
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
@@ -67,21 +66,6 @@ def _conf_path() -> str:
     set, and the wheel's own selection lives in torch_fl.backend_config_path().
     """
     return torch_fl.backend_config_path()
-
-
-#: The build a test is running against, when the wheel cannot say.
-#:
-#: A platform that builds both a vendor and a CUDA-boxing wheel runs one CI job
-#: per build, and the loader tells each job which one it is. The build record
-#: names the kernel sets, but a conf can route a `boxing` op on a vendor build
-#: too (DCU's libtorch_hip is reached through the CUDA key), so the kernel set
-#: alone is not the selector: the job is.
-_BUILD_ENV = "BOXING_LANE"
-
-
-def boxing_build() -> bool:
-    """Whether the wheel under test is the CUDA-boxing build of its platform."""
-    return os.environ.get(_BUILD_ENV) == "1"
 
 
 def _conf_route(op: str) -> str:
@@ -203,7 +187,6 @@ _BACKEND_KERNEL_SET = {
     "flaggems_python": "flaggems",
     "flagos_python": "flaggems",
     "flaggems_cpp": "flaggems_cpp",
-    "cuda": "boxing",
     "tileops": "tileops",
 }
 
@@ -239,13 +222,13 @@ def _flaggems_claim_list() -> frozenset[str] | None:
     a vendor-named platform's FlagGems arm claims from its own file, and a
     source tree without the generated directory answers nothing.
     """
-    platform = torch_fl._platform.build_accelerator()
-    if not platform:
+    vendor = torch_fl._platform.build_info().vendor
+    if not vendor:
         return None
     list_dir = _claim_list_dir()
     if list_dir is None:
         return None
-    path = list_dir / f"register_flaggems_{platform}.inc"
+    path = list_dir / f"register_flaggems_{vendor}.inc"
     if not path.is_file():
         return None
     return frozenset(re.findall(r'm\.impl\("([^"]+)"', path.read_text()))
@@ -268,42 +251,18 @@ def _claim_list_dir() -> Path | None:
 def override_is_logged(op: str, backend: str) -> bool:
     """True when ``FLAGOS_OP_<op>=<backend>`` can produce a dispatch line.
 
-    The env override binds the op to the backend it names, but only a slot the
-    wheel registered can be bound. Each build arm of ``register.cc`` claims a
-    different set, so the question is asked of the arm rather than of the conf:
-
-    * ``boxing`` -- a boxing build claims every op its conf routes to any
-      backend whose kernel it has; ``OP=<boxing>`` is logged iff the wheel
-      compiled boxing and the conf has the op registered (``route_is_served``).
-    * a FlagGems backend -- the FlagGems-primary arm claims the ops its conf
-      routes to FlagGems, so the override is logged iff the conf already routes
-      the op to a FlagGems arm and this wheel compiled it.
-
-    Neither arm registers an op its conf leaves to cpu_fallback, and on those
-    the process the test starts logs no dispatch at all -- the override is a
-    no-op (PPU, runs 40127851880 and 40135954656: ``FLAGOS_OP_mm=cuda`` on
-    ``backends_thead_boxing.conf``). Both halves are asked of the wheel, never
-    of a platform name.
-
-    The conf's own route is not enough, which is how issue #555's first sentence
-    ("Five ... tests are unsatisfiable") was measured as wrong: the FlagGems
-    routes codegen holds an op off -- ``measured_flaggems_rollback`` in
-    ``scripts/codegen/codegen_ops.py``, e.g. ``sum.dim_IntList`` on NVIDIA,
-    whose FlagGems kernel returns no result in time -- leave it ``none`` in that
-    platform's conf, and the generated claim list is built from the conf. So the
-    claim list is read too, the way issue #555 asks ``register_flaggems_nvidia.inc``
-    its question, and an op absent from it answers False whatever the conf says.
+    The override needs a compiled FlagGems slot and a PrivateUse1 registration
+    for the operator. Both the configured route and the generated claim list
+    can leave an operator to CPU fallback.
     """
     kernels = torch_fl._env.build_kernels()
-    if backend == "boxing":
-        return "boxing" in kernels and route_is_served(op)
     kernel_set = _BACKEND_KERNEL_SET.get(backend)
     if kernel_set is None or kernel_set not in kernels:
         return False
     if _conf_route(op) not in _FLAGGEMS_BACKENDS:
         return False
     # `register_flaggems_<platform>.inc` is built only for the CUDA-ABI
-    # platforms (codegen_boxing_flaggems_register.PLATFORMS); a vendor-named
+    # platforms (codegen_flaggems_register.PLATFORMS); a vendor-named
     # platform's FlagGems arm claims from its own list, so the conf is the
     # whole answer there.
     claim_list = _flaggems_claim_list()

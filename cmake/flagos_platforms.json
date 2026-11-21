@@ -14,14 +14,12 @@
   "kernel_switches": [
     "FLAGOS_BUILD_VENDOR",
     "FLAGOS_BUILD_FLAGGEMS",
-    "FLAGOS_BUILD_BOXING",
     "FLAGOS_BUILD_FLAGGEMS_CPP",
     "FLAGOS_BUILD_TILEOPS"
   ],
   "kernel_set_names": {
     "FLAGOS_BUILD_VENDOR": "vendor",
     "FLAGOS_BUILD_FLAGGEMS": "flaggems",
-    "FLAGOS_BUILD_BOXING": "boxing",
     "FLAGOS_BUILD_FLAGGEMS_CPP": "flaggems_cpp",
     "FLAGOS_BUILD_TILEOPS": "tileops"
   },
@@ -76,28 +74,21 @@
     "registration: generated ATen registration fragments relative to csrc/aten.",
     "base is always included for its platform. vendor and flaggems follow the",
     "compiled kernel sets. native_host extends the FlagGems registration.",
-    "boxing and tileops replace the default set when their variant is selected.",
+    "tileops replaces the default set when selected.",
     "",
-    "vendor_torch_libraries: whether the platform sources a vendor libtorch in",
-    "the wheel. vendor_torch_gate, when present, names the one kernel switch the",
-    "build has to compile for that to actually happen (the CUDA-ABI platforms",
-    "gate on boxing); setup.py writes the resolved value into the compatibility",
-    "manifest and CMake ignores it."
+    "vendor_torch_libraries: whether the platform ships a vendor libtorch in",
+    "the wheel. setup.py also records explicit native precision cohorts and",
+    "the Hygon device runtime in the compatibility manifest."
   ],
   "accelerators": {
     "cuda": {
       "vendor": "nvidia",
       "registration": {
-        "flaggems": "generated/register_flaggems_nvidia.inc",
-        "boxing": "generated/register.inc"
+        "flaggems": "generated/register_flaggems_nvidia.inc"
       },
       "_comment": [
-        "NVIDIA CUDA. FlagGems-primary by default: FLAGOS_BUILD_BOXING is off,",
-        "so the wheel does not compile the generated CUDA boxing kernels and",
-        "does not need a bundled libtorch_cuda.so -- ops route to the FlagGems",
-        "Python path and everything else reaches cpu_fallback. Boxing stays",
-        "available as an explicit opt-in (-DFLAGOS_BUILD_BOXING=ON /",
-        "FLAGOS_BUILD_BOXING=1), which is what a boxing wheel is built with."
+        "NVIDIA CUDA. FlagGems serves the default operator routes. Optional",
+        "native precision libraries are staged separately by setup.py."
       ],
       "project_languages": [
         "CUDA",
@@ -106,8 +97,7 @@
       ],
       "runtime_dir": "nvidia",
       "bundle_libdir": "lib",
-      "vendor_torch_libraries": true,
-      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
+      "vendor_torch_libraries": false,
       "wheel_local": "cuda13.3",
       "pypi_lane": "nvidia",
       "use_macro": "",
@@ -116,7 +106,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": true,
         "FLAGOS_BUILD_TILEOPS": true
       },
@@ -125,14 +114,11 @@
     "ppu": {
       "vendor": "thead",
       "registration": {
-        "flaggems": "generated/register_flaggems_thead.inc",
-        "boxing": "generated/register.inc"
+        "flaggems": "generated/register_flaggems_thead.inc"
       },
       "_comment": [
-        "T-Head PPU: CUDA toolchain + a bundled PPU libtorch, no native kernel",
-        "dir. FlagGems-primary by default now that FLAGOS_BUILD_BOXING is off:",
-        "the default wheel needs no PPU libtorch bundle and routes to FlagGems",
-        "(cpu_fallback for the rest). A boxing wheel is an explicit opt-in."
+        "T-Head PPU uses the PPU SDK CUDA-compatible runtime and FlagGems.",
+        "Operators outside the configured routes reach cpu_fallback."
       ],
       "project_languages": [
         "CUDA",
@@ -141,8 +127,7 @@
       ],
       "runtime_dir": "nvidia",
       "bundle_libdir": "lib_thead",
-      "vendor_torch_libraries": true,
-      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
+      "vendor_torch_libraries": false,
       "wheel_local": "ppu2.0.0",
       "pypi_lane": "thead",
       "use_macro": "",
@@ -151,7 +136,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -161,22 +145,13 @@
       "vendor": "metax",
       "registration": {
         "flaggems": "generated/register_flaggems_metax.inc",
-        "boxing": "generated/register.inc",
         "native_host": "generated/register_flaggems_metax_native_host.inc",
         "tileops": "generated/register_tileops_metax.inc"
       },
       "_comment": [
-        "MetaX is a CUDA-boxing build: the generated CUDA boxing kernels",
-        "re-dispatch PrivateUse1 -> CUDA into maca's libtorch_cuda.so; the",
-        "hand-written mxcc kernels under backends/metax/ are retired. No",
-        "MACA-built liboperators exists by default, so the FlagGems C++ wrappers",
-        "stay off (an explicit FLAGGEMS_CPP=1 with FLAGGEMS_DIR still wins -- the",
-        "MACA case is a documented opt-in). FlagGems Python stays on so the",
-        "default FlagGems-primary wheel routes to the python path.",
-        "",
-        "Boxing is now an explicit opt-in (-DFLAGOS_BUILD_BOXING=ON /",
-        "FLAGOS_BUILD_BOXING=1); the default wheel compiles no boxing kernels and",
-        "needs neither the MACA libtorch bundle nor a vendor torch package."
+        "MetaX uses the MACA device runtime and FlagGems. FlagGems C++ wrappers",
+        "may be enabled explicitly with a MACA-built liboperators. Native-host",
+        "builds can include measured SDK and vendor precision routes."
       ],
       "project_languages": [
         "CXX",
@@ -188,8 +163,7 @@
         "cuda"
       ],
       "bundle_libdir": "lib_metax",
-      "vendor_torch_libraries": true,
-      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
+      "vendor_torch_libraries": false,
       "wheel_local": "maca3.8.1.3",
       "pypi_lane": "metax",
       "use_macro": "USE_MACA",
@@ -198,7 +172,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": false,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -214,7 +187,7 @@
         "Kunlunxin XPU: a native PrivateUse1 backend. The ops live in the vendor",
         "op library (xdnn_pytorch) and the runtime sources under kunlunxin/ call",
         "the XPU SDK's own C runtime (libxpurt) directly, so no tensor is ever",
-        "re-dispatched onto the CUDA dispatch key and boxing stays off. The SDK",
+        "re-dispatched onto the CUDA dispatch key. The SDK",
         "also ships a CUDA-shaped surface (cuda_runtime.h from XPU_ROOT,",
         "libcudart.so.12 from XCUDART_ROOT) which the vendor torch uses, but the",
         "flagos runtime does not: it is what the de-boxed backend deliberately",
@@ -236,7 +209,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -265,14 +237,9 @@
         "their own stream registry, so the wheel links the CPU torch and never",
         "libtorch_cuda.so / libc10_cuda.so. That is what makes a compliant",
         "test environment (torch 2.x+cpu) possible at all.",
-        "This is NOT a boxing platform: the FlagGems Python path (FlagTree",
-        "Triton, iluvatar backend) stays primary through backends_iluvatar.conf,",
-        "and the ops FlagGems does not cover route to a native, non-boxing",
-        "vendor kernel in aten/backends/iluvatar/ that calls corex's CUDA-shaped",
-        "C ABI (cudnn.h -> ixdnn, cublas_v2.h -> ixblas) directly. Boxing stays",
-        "off, so the CUDA boxing kernels and the flaggems_cpp/tileops modes are",
-        "all disabled. vendor_torch_libraries is false accordingly: nothing in",
-        "the build sources a vendor libtorch.",
+        "FlagGems Python uses the Iluvatar FlagTree backend. Native routes call",
+        "the CoreX libraries (ixdnn, ixblas) directly. The build uses CPU torch",
+        "without a bundled vendor libtorch.",
         "The wheel carries a local version segment (corex4.5.0) but no pypi_lane:",
         "the self-hosted CI lane builds and tests the wheel without publishing",
         "it to a package index."
@@ -292,7 +259,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -304,10 +270,6 @@
         "FLAGOS_BUILD_FLAGGEMS_CPP": {
           "value": false,
           "reason": "no FlagGems liboperators.so exists for corex"
-        },
-        "FLAGOS_BUILD_BOXING": {
-          "value": false,
-          "reason": "FlagGems-primary: ops route to the FlagTree Triton iluvatar backend, not the CUDA boxing kernels"
         }
       }
     },
@@ -317,9 +279,8 @@
         "base": "backends/ascend/generated/ascend_register.inc"
       },
       "_comment": [
-        "Huawei CANN: ACLNN is the only operator library, FlagGems Python is on by",
-        "default (FlagTree Triton), boxing is off (the conf routes nothing to the",
-        "CUDA boxing kernels)."
+        "Huawei CANN: ACLNN serves the native operator routes and FlagGems",
+        "Python is on by default with FlagTree Triton."
       ],
       "project_languages": [
         "CXX",
@@ -336,7 +297,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -351,13 +311,10 @@
       "vendor": "tsingmicro",
       "registration": {
         "flaggems": "generated/register_flaggems_tsingmicro.inc",
-        "boxing": "generated/register_boxing_tsingmicro.inc"
+        "base": "generated/register_tsingmicro.inc"
       },
       "_comment": [
-        "TsingMicro Kuiper: FlagGems Python is the operator path; boxing is an explicit",
-        "opt-in, so the default wheel compiles no CUDA boxing kernels. Nothing routes to",
-        "them anyway -- backends_tsingmicro.conf names no `cuda` entry -- but the switch",
-        "no longer compiles kernels the conf never selects.",
+        "TsingMicro Kuiper uses FlagGems Python for its operator routes.",
         "FLAGOS_BUILD_VENDOR is NOT a no-op: aten/backends/tsingmicro/rng.cc holds the",
         "host-draw RNG kernels (rand/randn/uniform_/normal_/randint/randperm), and",
         "register.cc claims them unconditionally on USE_TSINGMICRO. Excluding that",
@@ -384,7 +341,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -398,16 +354,11 @@
     "dcu": {
       "vendor": "hygon",
       "registration": {
-        "flaggems": "generated/register_flaggems_hygon.inc",
-        "boxing": "generated/register.inc"
+        "flaggems": "generated/register_flaggems_hygon.inc"
       },
       "_comment": [
-        "Hygon DTK: the vendor torch is a hipified build registering its HIP",
-        "kernels under the CUDA key, so the generated boxing kernels dispatch into",
-        "libtorch_hip.so unchanged. No FlagGems liboperators exists for DTK.",
-        "FlagGems-primary by default: FLAGOS_BUILD_BOXING is off, so the default",
-        "wheel needs no vendor torch package and routes to FlagGems (cpu_fallback",
-        "for the rest). A boxing wheel is an explicit opt-in."
+        "Hygon uses the DTK device runtime and FlagGems with the official",
+        "CPU torch core. Native-host builds can include HCU precision routes."
       ],
       "project_languages": [
         "CXX",
@@ -415,8 +366,7 @@
       ],
       "runtime_dir": "nvidia",
       "bundle_libdir": "lib_hygon",
-      "vendor_torch_libraries": true,
-      "vendor_torch_gate": "FLAGOS_BUILD_BOXING",
+      "vendor_torch_libraries": false,
       "wheel_local": "dtk2604",
       "pypi_lane": "hygon",
       "use_macro": "USE_DCU",
@@ -425,7 +375,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -445,7 +394,7 @@
       "_comment": [
         "Enflame GCU: no CUDA runtime, topsaten provides the native compute ops",
         "(FLAGOS_BUILD_VENDOR), ops without a topsaten kernel fall back to CPU.",
-        "FlagGems Python shares the same dispatcher; boxing is off."
+        "FlagGems Python shares the same dispatcher."
       ],
       "project_languages": [
         "CXX",
@@ -462,7 +411,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -475,9 +423,8 @@
         "flaggems": "backends/mthreads/generated/musa_flaggems_register.inc"
       },
       "_comment": [
-        "Moore Threads MUSA: native operator route (mudnn), no CUDA runtime, so",
-        "boxing is off and the vendor kernels are mandatory. FlagGems Python is on",
-        "for the hybrid path."
+        "Moore Threads MUSA: native mudnn operator routes with FlagGems Python",
+        "where the operator is covered by the vendor Triton backend."
       ],
       "project_languages": [
         "CXX",
@@ -494,7 +441,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -520,7 +466,6 @@
         "Those kernels submit single-operator .hbm artifacts from the library named",
         "by FLAGOS_BPU_OPLIB; without that variable each one takes its own CPU",
         "round-trip, so the route is correct but unaccelerated.",
-        "FLAGOS_BUILD_BOXING is off: the BPU has no CUDA ABI to box onto.",
         "Whole-graph acceleration is the torch.compile backend."
       ],
       "project_languages": [
@@ -538,7 +483,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": false,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
@@ -552,20 +496,15 @@
         "bpu"
       ]
     },
-
     "cambricon": {
-
       "vendor": "cambricon",
       "registration": {
         "vendor": "backends/cambricon/generated/cambricon_register.inc",
         "flaggems": "backends/cambricon/generated/cambricon_flaggems_register.inc"
       },
       "_comment": [
-        "Cambricon MLU (BANG). A native backend like kunlunxin/mps, not a",
-        "boxing one: the runtime sources under csrc/runtime/accelerator/",
-        "cambricon/ call libcnrt directly (cnrtMalloc, cnrtQueue_t,",
-        "cnrtNotifier_t) and the op kernels go through CNNL, so no tensor is",
-        "re-issued onto the CUDA key and boxing is off.",
+        "Cambricon MLU (BANG). Its runtime calls libcnrt directly for allocation,",
+        "streams, and events. Native operator routes use CNNL.",
         "",
         "The wheel runs on the stock torch+cpu. torch_mlu is intentionally NOT",
         "a dependency -- it hard-links its own libtorch and is ABI-bound to one",
@@ -592,7 +531,10 @@
         "same change that adds the config file and the hook.",
         "The chip layer (MLU370/MLU590) is source-only and never appears here."
       ],
-      "project_languages": ["CXX", "C"],
+      "project_languages": [
+        "CXX",
+        "C"
+      ],
       "runtime_dir": "cambricon",
       "bundle_libdir": "lib",
       "vendor_torch_libraries": false,
@@ -604,15 +546,10 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": true,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },
       "pins": {
-        "FLAGOS_BUILD_BOXING": {
-          "value": false,
-          "reason": "native MLU backend: ops route to the CNNL kernels, never to the CUDA boxing kernels"
-        },
         "FLAGOS_BUILD_FLAGGEMS_CPP": {
           "value": false,
           "reason": "no FlagGems liboperators.so exists for the Neuware SDK"
@@ -625,8 +562,8 @@
         "base": "backends/apple/generated/mps_register.inc"
       },
       "_comment": [
-        "Apple Silicon (M-series) via Metal. A native backend, not a boxing one:",
-        "no CUDA runtime exists and none is faked, so boxing, FlagGems and FlagTree",
+        "Apple Silicon (M-series) via Metal.",
+        "FlagGems and FlagTree",
         "are all off (there is no Metal Triton line to build against).",
         "csrc/runtime/accelerator/apple/ is Objective-C++ (OBJCXX) because Metal is an",
         "Objective-C API; the runtime links -framework Metal/-framework Foundation.",
@@ -650,7 +587,6 @@
       "kernel_defaults": {
         "FLAGOS_BUILD_VENDOR": true,
         "FLAGOS_BUILD_FLAGGEMS": false,
-        "FLAGOS_BUILD_BOXING": false,
         "FLAGOS_BUILD_FLAGGEMS_CPP": false,
         "FLAGOS_BUILD_TILEOPS": false
       },

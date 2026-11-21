@@ -14,10 +14,6 @@
 
 """MetaX complex tensor routing and device-residency regression tests."""
 
-import os
-import subprocess
-import sys
-
 import pytest
 import torch_fl
 import torch
@@ -28,7 +24,7 @@ pytestmark = pytest.mark.main_ops
 
 def _require_metax() -> None:
     if not torch_fl.backend_config_path().endswith("backends_metax.conf"):
-        pytest.skip("requires the MetaX boxing runtime")
+        pytest.skip("requires a MetaX wheel")
     if torch_fl.flagos.device_count() < 1:
         pytest.skip("MetaX device is unavailable")
 
@@ -47,47 +43,3 @@ def test_complex_zero_and_fill_stay_on_flagos(dtype):
     assert returned is tensor
     assert tensor.device.type == "flagos"
     torch.testing.assert_close(tensor.cpu(), torch.full((8,), 2 + 3j, dtype=dtype))
-
-
-@pytest.mark.parametrize("dtype", (torch.complex64, torch.complex128))
-def test_complex_flip_uses_native_metax_kernel(dtype):
-    """A FlagGems kernel cannot lower a complex pointer on MetaX."""
-    _require_metax()
-    host = torch.tensor([1 + 2j, 3 + 4j, 5 + 6j], dtype=dtype)
-    tensor = host.to("flagos:0")
-
-    result = torch.flip(tensor, (0,))
-
-    assert result.device.type == "flagos"
-    torch.testing.assert_close(result.cpu(), torch.flip(host, (0,)))
-
-
-def test_complex_flip_leaves_flaggems_route_only_for_complex_dtype():
-    """The runtime dtype escape must not change the configured float route."""
-    _require_metax()
-    code = """
-import torch_fl
-import torch
-
-for dtype in (torch.float32, torch.complex64, torch.complex128):
-    value = torch.ones(4, dtype=dtype, device="flagos:0")
-    torch.flip(value, (0,))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env={**os.environ, "FLAGOS_LOG": "dispatch"},
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    routes = [
-        line
-        for line in result.stderr.splitlines()
-        if line.startswith("[flagos dispatch] flip -> ")
-    ]
-    assert routes == [
-        "[flagos dispatch] flip -> flagos_python",
-        "[flagos dispatch] flip -> boxing",
-        "[flagos dispatch] flip -> boxing",
-    ], result.stderr

@@ -88,17 +88,6 @@ class TestNegCorrectness:
         ref = -a_view.cpu()
         torch.testing.assert_close(out.cpu(), ref, rtol=0, atol=0)
 
-    @pytest.mark.cuda
-    def test_neg_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = torch.neg(a_cuda)
-        a = a_cuda.to(DEVICE)
-        out = torch.neg(a)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=0, atol=0)
-
     @pytest.mark.parametrize(
         "dtype", [torch.float16, torch.bfloat16, torch.float32, torch.int32]
     )
@@ -145,15 +134,6 @@ class TestNegDispatch:
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("neg")
         assert f"[flagos dispatch] neg -> {expected}" in result.stderr
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_neg_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_neg": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] neg -> boxing" in result.stderr
 
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):

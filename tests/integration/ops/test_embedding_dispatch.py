@@ -111,23 +111,6 @@ class TestEmbeddingDispatch:
             atol=1e-5,
         )
 
-    @pytest.mark.cuda
-    def test_embedding_matches_cuda_ref(self, cuda_ref):
-        """flagos embedding must match CUDA reference."""
-        if cuda_ref is None:
-            pytest.skip("CUDA not available for reference")
-        w_cuda, idx_cuda, ref = cuda_ref
-        w = w_cuda.to(DEVICE)
-        idx = idx_cuda.to(DEVICE)
-        out = F.embedding(idx, w)
-        torch.testing.assert_close(
-            out.cpu(),
-            ref.cpu(),
-            rtol=1e-5,
-            atol=1e-5,
-            msg="embedding on flagos differs from CUDA",
-        )
-
     @pytest.mark.anyplatform
     def test_embedding_half(self):
         torch.manual_seed(3)
@@ -224,19 +207,6 @@ class TestEmbeddingDispatchLog:
         expected = routed_backend("embedding")
         assert f"[flagos dispatch] embedding -> {expected}" in result.stderr, (
             f"Expected embedding -> {expected}, got:\n{result.stderr}"
-        )
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_embedding_subprocess(
-            {
-                "FLAGOS_LOG": "dispatch",
-                "FLAGOS_OP_embedding": "cuda",
-            }
-        )
-        assert "[flagos dispatch] embedding -> boxing" in result.stderr, (
-            f"Expected cuda log, got:\n{result.stderr}"
         )
 
     @pytest.mark.ascend

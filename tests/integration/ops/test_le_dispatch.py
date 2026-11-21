@@ -149,14 +149,6 @@ class TestLeDispatch:
         )
         assert "[flagos dispatch] le.Tensor -> flagos_python" in result.stderr
 
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_le__Tensor": "cuda"}
-        )
-        assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] le.Tensor -> boxing" in result.stderr
-
 
 class TestLeAscendDispatch:
     """Verify Ascend backend correctness."""

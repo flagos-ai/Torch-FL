@@ -203,19 +203,6 @@ def test_profiler_memcpy_events(profile_result, profiler_capabilities):
 
 
 @pytest.mark.profiler_device
-@pytest.mark.profiler_memset
-def test_profiler_memset_events(profile_result, profiler_capabilities):
-    """Backends advertising memset support expose positive byte-count records."""
-    if not profiler_capabilities.memset:
-        pytest.skip(f"{profiler_capabilities.platform} does not emit memset events")
-
-    memsets = events_in(profile_result[1], "gpu_memset")
-    assert memsets, "profiler produced no gpu_memset events"
-    assert all(event.get("dur", 0) > 0 for event in memsets)
-    assert all((event.get("args") or {}).get("bytes", 0) > 0 for event in memsets)
-
-
-@pytest.mark.profiler_device
 @pytest.mark.profiler_metadata
 def test_profiler_device_arg_keys(profile_result, profiler_capabilities):
     """Required neutral metadata fields remain present across device events."""

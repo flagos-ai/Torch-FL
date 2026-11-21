@@ -118,7 +118,6 @@
 #include <ATen/ops/zero_native.h>
 #include <torch/library.h>
 
-#include "device_boxing.h"
 
 // flatten_indices_stub, the one ATen entry point on this path that is not
 // reachable through the dispatcher.
@@ -187,89 +186,6 @@ using ToSparseSparseDimFn = Tensor (*)(const Tensor&, int64_t);
 // rebuild the member tensors with at::empty and the dense kernels, on whatever
 // device the sparse tensor is tagged for.
 //
-// The two registrations below are the exception.  addmm.out with a
-// compressed-sparse operand computes the product with cuSPARSE, and the CUDA
-// implementation is the only one this plugin can reach; flatten_indices_stub's
-// PrivateUse1 slot delegates to the stub's CUDA kernel.  Both therefore need
-// the CUDA-compatible libtorch (libtorch_hip.so / libtorch_cuda.so, i.e. the
-// cuSPARSE symbols and the stub's CUDA slot) that the CUDA-boxing platforms
-// link and the others do not: Ascend, Enflame GCU, MUSA, TsingMicro, BPU and
-// the de-boxed Kunlunxin XPU backend.  On those the guards keep an undefined
-// cuSPARSE symbol out of the shared library, and a PrivateUse1 slot that could
-// only assert on its way to CUDA out of the stub, so the ops stay unimplemented
-// there -- the same "DispatchStub: missing kernel" / "Could not run" errors the
-// stock wheel raises -- instead of half-registered.  Kunlunxin belongs here for
-// the same reason it is excluded from the copy guards: it drives the vendor XPU
-// SDK directly and never links the CUDA-compatible libtorch, so
-// at::native::addmm_out_sparse_compressed_cuda has no definition to bind.  This
-// is the same predicate csrc/aten/sdp_choice_stub.cc uses, for the same reason.
-//
-// FLAGOS_BOXING_BUILD is that predicate's other half on the CUDA-ABI platforms
-// (cuda, metax, dcu, ppu, tsingmicro): they are the ones the USE_* list above
-// admits, and the libtorch they would bind against is exactly what a
-// FlagGems-primary build -- the default since boxing became an opt-in -- does
-// not ship.  Without it a default wheel carries an undefined
-// addmm_out_sparse_compressed_cuda and a PrivateUse1 slot on
-// flatten_indices_stub that can only dispatch to a CUDA kernel that is not
-// there, so it fails at import rather than at the call.  csrc/aten/
-// sdp_choice_stub.cc makes the same split for the same build switch.
-#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON) && \
-    defined(FLAGOS_BOXING_BUILD)
-
-namespace {
-
-// A DispatchStub slot is set on the stub object, not through the dispatcher, so
-// this kernel and its registrar sit at namespace scope rather than among the
-// m.impl calls below.  The macro resolves the unqualified stub and the
-// `flatten_indices_stub_DECLARE_DISPATCH_type` it names out of the enclosing
-// at::native, which is where the redeclaration above put them.
-Tensor flatten_indices_flagos(const Tensor& indices, IntArrayRef size) {
-  DeviceBoxingGuard guard(indices);
-  auto flattened = at::sparse::flatten_indices(indices, size);
-  UnboxToFlagos(flattened);
-  return flattened;
-}
-
-// Sparse matrix multiply.  addmm.out is the only kernel here that has to leave
-// the key it is registered on.
-//
-// addmm.out with a compressed-sparse operand is not structure work: the
-// SparseCsrCPU/CUDA kernels compute the product with a library SpMM, and the
-// CUDA one is the only implementation available on this platform.  It begins
-// with sparse::impl::_check_is_cuda on self, mat1, mat2 and result, and builds
-// cuSPARSE descriptors from the sparse operand's member tensors, so every
-// operand has to read as CUDA for the duration of the call.
-//
-// DeviceBoxingGuard does that for the dense operands (these are storage-backed,
-// so the ordinary in-place rewrite applies) and, after the storage skip in
-// SetTensorImplDevice, for the compressed-sparse operand too.  Which of
-// mat1/mat2 is the sparse one depends on the call, and a sparse-sparse product
-// produces a sparse result, so all four operands are handed to the guard and
-// each is retagged according to what it actually is.
-//
-// The result's own device metadata matters here as well: the CUDA kernel
-// resizes it with resize_output/resize_as_sparse_ when it does not match, and
-// both of those run under the CUDA key for the duration of the call.
-Tensor& addmm_out_sparse_compressed_flagos(
-    const Tensor& self,
-    const Tensor& mat1,
-    const Tensor& mat2,
-    const Scalar& beta,
-    const Scalar& alpha,
-    Tensor& result) {
-  DeviceBoxingGuard guard(self, mat1, mat2, result);
-  return at::native::addmm_out_sparse_compressed_cuda(
-      self, mat1, mat2, beta, alpha, result);
-}
-
-} // namespace
-
-REGISTER_PRIVATEUSE1_DISPATCH(flatten_indices_stub, &flatten_indices_flagos)
-
-#endif // CUDA-boxing builds
-
 TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
   // Structure queries.  These read the SparseCsrTensorImpl's own metadata
   // (sparse_dim is 2 for every compressed layout, dense_dim and nnz come from
@@ -335,15 +251,6 @@ TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
   // on a platform where addmm.out is not compiled would only move the failure
   // one frame, and the CSC inputs _sparse_csr_mm accepts would reach
   // _to_sparse_csr first anyway.
-#if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON) && \
-    defined(FLAGOS_BOXING_BUILD)
-  m.impl("mm", at::native::_sparse_csr_mm);
-  m.impl("mm.out", at::native::_sparse_csr_mm_out);
-  m.impl("addmm", at::native::addmm_sparse_compressed_dense);
-  m.impl("addmm.out", addmm_out_sparse_compressed_flagos);
-#endif // CUDA-boxing builds
 }
 
 } // namespace at::native::flagos

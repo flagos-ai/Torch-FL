@@ -74,16 +74,6 @@ class TestZerosCorrectness:
         assert out.cpu().item() == 0.0
 
 
-class TestZerosDispatch:
-    """Verify dispatch routing."""
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda(self):
-        result = _run_subprocess({"FLAGOS_LOG": "dispatch", "FLAGOS_OP_zeros": "cuda"})
-        assert result.returncode == 0
-        assert "[flagos dispatch] zeros -> boxing" in result.stderr
-
-
 class TestZerosAscendDispatch:
     """Verify Ascend backend correctness."""
 

@@ -83,8 +83,9 @@ _MODULE = None
 def conf(monkeypatch):
     module = _load_module()
 
-    def as_platform(name: str):
-        platform = types.SimpleNamespace(build_accelerator=lambda: name)
+    def as_vendor(name: str):
+        build = types.SimpleNamespace(vendor=name)
+        platform = types.SimpleNamespace(build_info=lambda: build)
         monkeypatch.setattr(module.torch_fl, "_platform", platform)
 
     def routing(op: str, value: str):
@@ -96,19 +97,15 @@ def conf(monkeypatch):
         env = types.SimpleNamespace(build_kernels=lambda: frozenset(names))
         monkeypatch.setattr(module.torch_fl, "_env", env)
 
-    def boxing_route_is_served(answer: bool):
-        monkeypatch.setattr(module, "route_is_served", lambda op: answer)
-
-    module.as_platform = as_platform
+    module.as_vendor = as_vendor
     module.routing = routing
     module.kernels = kernels
-    module.boxing_route_is_served = boxing_route_is_served
     return module
 
 
 def test_flag_override_is_unserved_when_the_conf_leaves_the_op_none(conf):
     """NVIDIA's ``sum.dim_IntList``: the assertion #555 measured as unsatisfiable."""
-    conf.as_platform("nvidia")
+    conf.as_vendor("nvidia")
     conf.routing("sum.dim_IntList", "none")
     conf.kernels("flaggems", "tileops")
     assert conf.override_is_logged("sum.dim_IntList", "flaggems_python") is False
@@ -116,7 +113,7 @@ def test_flag_override_is_unserved_when_the_conf_leaves_the_op_none(conf):
 
 def test_flag_override_is_logged_where_the_conf_and_the_claim_list_agree(conf):
     """MetaX's ``sum.dim_IntList``: ``flaggems_cpp`` and named in its list."""
-    conf.as_platform("metax")
+    conf.as_vendor("metax")
     conf.routing("sum.dim_IntList", "flaggems_cpp")
     conf.kernels("flaggems", "flaggems_cpp")
     assert conf.override_is_logged("sum.dim_IntList", "flaggems_python") is True
@@ -131,7 +128,7 @@ def test_a_flaggems_route_is_not_enough_without_a_claim(conf, monkeypatch):
     every unguarded case had, and it must answer False rather than let the
     case fail on hardware.
     """
-    conf.as_platform("nvidia")
+    conf.as_vendor("nvidia")
     monkeypatch.setattr(conf, "_claim_list_dir", lambda: CLAIM_DIR)
     conf.routing("definitely_not_claimed", "flaggems")
     conf.kernels("flaggems")
@@ -139,7 +136,7 @@ def test_a_flaggems_route_is_not_enough_without_a_claim(conf, monkeypatch):
 
 
 def test_a_claimed_op_on_a_conf_that_routes_it_flaggems_is_logged(conf):
-    conf.as_platform("hygon")
+    conf.as_vendor("hygon")
     conf.routing("sum.dim_IntList", "flaggems")
     conf.kernels("flaggems")
     assert conf.override_is_logged("sum.dim_IntList", "flaggems_python") is True
@@ -147,7 +144,7 @@ def test_a_claimed_op_on_a_conf_that_routes_it_flaggems_is_logged(conf):
 
 def test_no_claim_list_for_the_platform_falls_back_to_the_conf(conf, monkeypatch):
     """A vendor-named platform claims from its own list; the conf is the answer."""
-    conf.as_platform("ascend")
+    conf.as_vendor("ascend")
     monkeypatch.setattr(conf, "_claim_list_dir", lambda: CLAIM_DIR)
     conf.routing("sum.dim_IntList", "flaggems")
     conf.kernels("flaggems")
@@ -155,15 +152,15 @@ def test_no_claim_list_for_the_platform_falls_back_to_the_conf(conf, monkeypatch
 
 
 def test_the_wheel_must_compile_flaggems_regardless_of_the_claim(conf):
-    conf.as_platform("metax")
+    conf.as_vendor("metax")
     conf.routing("sum.dim_IntList", "flaggems_cpp")
-    conf.kernels("boxing")
+    conf.kernels("vendor")
     assert conf.override_is_logged("sum.dim_IntList", "flaggems_python") is False
 
 
-def test_boxing_override_asks_the_route_not_the_claim_list(conf):
-    conf.as_platform("nvidia")
-    conf.routing("sum.dim_IntList", "none")
-    conf.kernels("boxing")
-    conf.boxing_route_is_served(False)
-    assert conf.override_is_logged("sum.dim_IntList", "boxing") is False
+@pytest.mark.parametrize("backend", ["boxing", "cuda"])
+def test_retired_overrides_are_unserved(conf, backend):
+    conf.as_vendor("nvidia")
+    conf.routing("abs", "flaggems")
+    conf.kernels("flaggems", "boxing")
+    assert conf.override_is_logged("abs", backend) is False

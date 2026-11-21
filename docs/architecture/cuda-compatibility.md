@@ -28,9 +28,9 @@ What exists today is an **input alias**, not a compatibility contract:
   whether it is active.
 - Per-vendor `torch.cuda` facades (CUDA-ABI vendors) supply a `torch.cuda` surface.
 
-CUDA boxing is a temporary day-0 execution path scheduled for retirement.
-Refactoring and regression coverage for the transition focus on the vendor
-and native-host wheels.
+Torch-FL has retired the day-0 CUDA boxing operator route. CUDA device strings,
+Torch compatibility facades and the internal `DeviceBoxingGuard` continue to
+serve interoperability.
 
 The output of an alias is still a logical `flagos`/PrivateUse1 tensor. Frameworks
 that branch on the accelerator class, `device.type == "cuda"`, CUDA-only AMP
@@ -144,7 +144,7 @@ Per platform class, a subprocess conformance test that validates the **actual**
 behavior, not API labels:
 
 1. Placement: `torch.ones(..., device="cuda")`, `model.cuda()` land on the backend.
-2. Dispatch: the overload reaches the intended route (boxing / native / FlagGems),
+2. Dispatch: the overload reaches the intended native or FlagGems route,
    traced via `FLAGOS_LOG=dispatch`.
 3. AMP: autocast + scaler produce the expected dtype and finite/overflow behavior.
 4. Streams: multi-stream ordering is real (not a no-op `wait_stream`).

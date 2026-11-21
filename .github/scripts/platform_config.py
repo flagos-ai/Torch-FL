@@ -44,12 +44,11 @@ def load_platform_data(source):
     return configs, raw
 
 
-def compile_platform(source, lane, profile, manifest, platform_configs, boxing):
+def compile_platform(source, lane, profile, manifest, platform_configs):
     """Compile a lane from the same data used by routing and hashing."""
     known = list(platform_configs)
-    platform = lane.removesuffix("-boxing")
-    is_boxing = lane != platform
-    if platform not in known or (is_boxing and platform not in boxing):
+    platform = lane
+    if platform not in known:
         raise ValueError(f"unsupported platform lane: {lane}")
     config = copy.deepcopy(platform_configs[platform])
     if not isinstance(config, dict):
@@ -100,17 +99,12 @@ def compile_platform(source, lane, profile, manifest, platform_configs, boxing):
     stage = string("setup_stage", "integration")
     if stage not in ("build", "integration"):
         raise ValueError("setup_stage must be build or integration")
-    artifact = string("wheel_artifact_name") + ("-boxing" if is_boxing else "")
-    if not re.fullmatch(r"wheel-[a-z0-9]+(-boxing)?", artifact):
-        raise ValueError(
-            "wheel_artifact_name must be wheel-<platform> (optionally -boxing)"
-        )
-    config["display_name"] = string("display_name") + (
-        " (CUDA boxing)" if is_boxing else ""
-    )
+    artifact = string("wheel_artifact_name")
+    if not re.fullmatch(r"wheel-[a-z0-9]+", artifact):
+        raise ValueError("wheel_artifact_name must be wheel-<platform>")
+    config["display_name"] = string("display_name")
     outputs = {
         "platform": platform,
-        "boxing_lane": "1" if is_boxing else "",
         "display_name": config["display_name"],
         "setup_script": setup_script,
         "setup_platform": string("setup_platform"),
@@ -129,17 +123,11 @@ def compile_platform(source, lane, profile, manifest, platform_configs, boxing):
             strings("integration_test_dependencies", [])
         ),
     }
-    check = config.get("boxing_environment_check" if is_boxing else "environment_check")
-    if is_boxing and not check:
-        raise ValueError(f"{lane} has no boxing_environment_check")
     groups = compose(
         manifest,
         config,
         platform,
         known,
-        boxing_lane=is_boxing,
-        environment_check=check,
-        boxing=boxing,
         profile=profile,
     )
     environment = config.get("integration_environment")
@@ -149,7 +137,7 @@ def compile_platform(source, lane, profile, manifest, platform_configs, boxing):
     return {
         "name": lane,
         "platform": platform,
-        "lane": "boxing" if is_boxing else "default",
+        "lane": "default",
         "configuration": outputs,
         "environment": environment,
         "groups": [{"group_id": group["manifest_id"], **group} for group in groups],
@@ -283,8 +271,6 @@ def main():
     else:
         import yaml
 
-        from ci.generate_matrix import boxing_platforms
-
         configs, _raw = load_platform_data(source)
         lane = compile_platform(
             source,
@@ -292,7 +278,6 @@ def main():
             args.profile,
             yaml.safe_load((source / ".github/integration-manifest.yml").read_text()),
             configs,
-            boxing_platforms(source / ".github/configs", list(configs), configs),
         )
     emit_outputs(lane, args.output)
 

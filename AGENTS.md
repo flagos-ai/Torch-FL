@@ -265,7 +265,7 @@ per-operator kernels.
   the required runtime behavior. The PR must document that concrete limitation
   and receive explicit human approval before the handwritten implementation is
   added.
-- CUDA-compatible platforms may follow their existing CUDA boxing/codegen path;
+- CUDA-compatible platforms may reuse the shared operator code generators;
   this rule does not require vendor-specific native kernels for them.
 
 ## Testing Requirements
@@ -293,7 +293,7 @@ After implementing changes:
 
 When making changes, consider impact on all platforms:
 - **CUDA** - Primary development platform
-- **MetaX** - Boxing mode (reuses CUDA kernels)
+- **MetaX** - MACA runtime, FlagGems, and optional native-host precision
 - **Ascend** - ACL-based backend
 - **PPU** - CUDA-compatible via PPU SDK
 
@@ -358,7 +358,7 @@ so older scripts and docs keep working.
 The **wheel filename** keeps the SDK segment (`+cuda13.3`, `+dtk2604`,
 `+maca3.8.1.3`, `+ppu2.0.0`): that is the build variant, it is what every
 published `flagtree`/`torch_fl` artifact on `resource.flagos.net` uses, and the
-lane already carries the vendor. `FLAGOS_BUILD_BOXING`-style switches and
+lane already carries the vendor. Kernel build switches and
 `Backend` spellings follow the same rule: a name a user types resolves either
 half; a name the tree produces is the vendor.
 
@@ -373,7 +373,7 @@ test_platform_vendor_naming.py` enforces this.
 Do not introduce a third spelling. A new platform declares both a `vendor` and
 an accelerator id, and the vendor must equal its `pypi_lane` where it publishes.
 
-### Default confs never route boxing
+### Configured operator routes
 
 Every default `torch_fl/configs/backends_<platform>.conf`, on every chip, may
 only use these keys: `flaggems` / `flaggems_cpp`, `tileops`, the platform's own
@@ -392,8 +392,8 @@ nor the legacy `cuda` spelling of it.
   policy, not a default-conf coverage claim. Generate its entries from
   `scripts/codegen/native_host_policy.py`; require measured published-wheel
   failures, paired vendor precision/performance evidence and an explicit removal
-  condition. `nvidia` names this native slot; only `boxing` and legacy `cuda`
-  name CUDA boxing. Do not expand a measured dtype exception into an unmeasured
+  condition. `nvidia` names this native slot. Do not expand a measured dtype
+  exception into an unmeasured
   vendor fallback or change the default conf to imply general native coverage.
   Backend selection must be explicit in the generated conf, for example
   `mm = flaggems; BFloat16:nvidia`. A dtype clause applies only when an input
@@ -415,7 +415,7 @@ nor the legacy `cuda` spelling of it.
 - `scripts/codegen/gen_vendor_confs.py` enforces this — `build_all()` exits if any
   default conf would emit `boxing`/`cuda`. Do not relax that check; if a route is
   wrong, fix the route.
-- The only place a `boxing` key may appear is the opt-in day-0 file below.
+- The former `boxing` route and its `cuda` alias raise a migration error.
 
 ### ATen operator registration
 
@@ -454,11 +454,10 @@ stream management use the existing PyTorch `PrivateUse1` integration.
 
 The experimental MetaX native-host wheel stages the measured routes in
 `configs/backends_metax.conf`. `gen_vendor_confs.py` derives this file from the
-ordinary platform table at build time. `codegen_boxing_flaggems_register.py` uses
+ordinary platform table at build time. `codegen_flaggems_register.py` uses
 the same routing policy to generate additional claims for `FLAGOS_NATIVE_HOSTS`.
 An in-place build writes its generated conf under `torch_fl/lib/` to preserve
 the checked-in default. The build record identifies the staged path.
-Ordinary and day-0 boxing coverage continue to use their own measured routes.
 Native activation must reject numerical CPU fallback and report a missing
 recorded conf at import.
 With `FLAGOS_BUILD_VENDOR=1`, this opt-in build may use measured BF16 SDK matrix
@@ -469,74 +468,13 @@ and during audit. This does not enable a MetaX slot in an ordinary build or
 authorize an unmeasured dtype fallback. Reduction normalization must retain the
 published numerical source and record its layout/launch contract in that policy.
 
-### Day-0 boxing confs
+### Hardware CI
 
-`torch_fl/configs/backends_<platform>_boxing.conf` is a **temporary**,
-boxing-only routing table for a CUDA-compatible platform — one that can
-re-dispatch PrivateUse1 to CUDA through the vendor's own `libtorch` (via
-`DeviceBoxingGuard`). Today that is NVIDIA (`cuda`), MetaX (`metax`), Hygon DCU
-(`dcu`) and the T-Head PPU (`ppu`). Its only purpose is **day-0 model bring-up**: a
-model whose ops FlagGems does not cover yet runs on the vendor's real CUDA-ABI
-kernels instead of falling back to CPU per op, so bringing up a new model does
-not wait on a FlagGems or vendor-native kernel for every op in it.
-
-Rules for these files:
-
-- **They are not the default.** Each platform's default conf stays
-  `backends_<platform>.conf` (FlagGems-primary + measured gaps), and a wheel's
-  import-time selection never picks a `_boxing` file. The user opts in explicitly:
-  `FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_<platform>_boxing.conf`
-  on a boxing build (`FLAGOS_BUILD_BOXING=1`).
-- **Generated, never hand-edited.** They come from
-  `scripts/codegen/gen_vendor_confs.py` (`BOXING_VARIANT_PLATFORMS`), same as the
-  default confs; `--check` covers them. A hand edit is overwritten on the next
-  regeneration.
-- **FlagGems + boxing only.** The variant routes `flaggems` (and `flaggems_cpp`
-  where the platform compiles that slot) and puts `boxing` behind everything else.
-  Measured composite routes (for example `scaled_dot_product_attention` on DCU) are
-  deliberately *not* applied — the file's premise is that FlagGems is not what a
-  day-0 model is trusted to.
-- **Do not extend the platform list casually.** Adding a row is a statement that
-  the platform needs a day-0 escape hatch and a boxing wheel exists for it. It is
-  not a way to make an operator test pass, and it is not a substitute for
-  implementing the vendor or FlagGems route.
-- **They go away.** Once a platform's vendor-native + FlagGems routes cover the
-  day-0 models, its `_boxing` conf and its `BOXING_VARIANT_PLATFORMS` row are
-  deleted. Do not build anything on their continued existence: no CI lane, no
-  documentation, no test may depend on `backends_<platform>_boxing.conf` being
-  present.
-
-### The two CI lanes of a boxing platform
-
-NVIDIA, Hygon DCU, MetaX and the T-Head PPU each run **two** integration lanes:
-`<platform>` builds and tests the default (vendor + FlagGems) wheel, and
-`<platform>-boxing` builds and tests the CUDA-boxing wheel of the same source.
-The second lane is opted into by `boxing_lane: true` in `.github/configs/<p>.yml`
-and always runs alongside the first; do not add a way to schedule one alone.
-
-Rules for these lanes:
-
-- **One manifest, two selections.** The boxing lane composes the same
-  `.github/integration-manifest.yml` groups in the same order. A step whose
-  selection differs per build is spelled per build, on the same entry: list the
-  platforms in `boxing_variant` (`boxing_variant: [nvidia]`), and that entry then
-  runs on their boxing build instead of their vendor build. `vendor_only: true`
-  marks the other half -- a step that asserts routing only the vendor build can
-  have. The composer runs one build per job; `validate_manifest` refuses a boxing
-  platform that left one of these unscoped.
-- **Two expectation blocks.** `.github/configs/<p>.yml` states
-  `environment_check` for the vendor lane and `boxing_environment_check` for the
-  boxing lane. The loader hands the boxing block to the environment step in place
-  of the vendor one; the hook asserts the build record (`torch_fl/_build_config.py`)
-  carries `boxing` in `KERNELS` on the boxing lane and not on the vendor lane.
-- **The hook reads `BOXING_LANE`.** `set_env_<platform>.sh` sets
-  `FLAGOS_BUILD_BOXING=1` and `FLAGOS_BACKEND_CONFIG=backends_<platform>_boxing.conf`
-  only when `BOXING_LANE=1`, and the two venvs are separate
-  (`torch-fl-<vendor>-<stage>-boxing`). Do not reintroduce a mode variable the
-  build and the runtime both have to agree on.
-- **Separate artifacts.** The boxing lane publishes as
-  `wheel-<platform>-boxing` (`load-platform-config.yml` appends the suffix) so a
-  release's two builds cannot overwrite each other.
+Each hardware platform has one CI lane for its ordinary wheel. The platform
+config supplies the environment and artifact identity. The shared
+`.github/integration-manifest.yml` selects applicable test groups. Supported
+native-host builds run their additional wheel and conformance checks on the
+same hardware lane. Every wheel goes through preflight before installation.
 
 ### Dependency sources
 

@@ -377,10 +377,8 @@ def test_a_decoded_pair_is_not_routed_by_a_key_the_conf_has_no_route_for():
         "before asking the family's dispatcher"
     )
     factory = _function_body(source, "at::Tensor RunMatrix(")
-    start = factory.find("case OrdinaryRoute::kFactory:")
-    assert start != -1, factory
-    arm = factory[start:]
-    arm = arm[: arm.find("case OrdinaryRoute::kDtype:")]
+    start = factory.index("if (IsOrdinaryMatrixPair")
+    arm = factory[start : factory.index("  CheckMatrixInputs(", start)]
     assert "AnswerKeyHasRoute(" in arm, (
         "the factory arm must not take the plain key's kernel for a pair that "
         "was refused its own key:\n" + arm

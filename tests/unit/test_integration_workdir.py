@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from manifest_composer import boxing_platforms, composed_steps, platform_names
+from manifest_composer import composed_steps, platform_names
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -174,7 +174,7 @@ def _copied_paths(run_script: str) -> list[str]:
     return copied
 
 
-def _manifest_commands(platform: str, boxing_lane: bool = False) -> list[str]:
+def _manifest_commands(platform: str) -> list[str]:
     """The command of every group one platform's build runs, in order.
 
     Composed from the shared manifest rather than read out of the platform's
@@ -185,9 +185,7 @@ def _manifest_commands(platform: str, boxing_lane: bool = False) -> list[str]:
     script too, but the workflow runs that one outside this workspace, so it is
     not among these.
     """
-    return [
-        group["command"] for group in composed_steps(platform, boxing_lane=boxing_lane)
-    ]
+    return [group["command"] for group in composed_steps(platform)]
 
 
 def _script_references(platform: str) -> list[tuple[str, str]]:
@@ -447,18 +445,11 @@ def _selection_of(command: str) -> _Selection | None:
 
 
 def _manifest_selections(platform: str) -> list[_Selection]:
-    """What every pytest invocation in one platform's manifest runs.
-
-    A boxing platform runs two builds, and each composes its own selection of
-    the same manifest; a file counts as reached when either build runs it.
-    """
+    """What every pytest invocation in one platform's manifest runs."""
     selections = []
-    builds = (False, True) if platform in boxing_platforms() else (False,)
-    for boxing_lane in builds:
-        for command in _manifest_commands(platform, boxing_lane=boxing_lane):
-            selection = _selection_of(command)
-            if selection is not None:
-                selections.append(selection)
+    for command in _manifest_commands(platform):
+        if selection := _selection_of(command):
+            selections.append(selection)
     return selections
 
 
@@ -629,20 +620,9 @@ _KNOWN_UNREACHABLE: dict[str, str] = {
         "without its C++ path (FLAGOS_BUILD_FLAGGEMS_CPP=0). Accepted "
         "exclusion until one job opts into that build"
     ),
-    "tests/integration/ops/test_full_cuda_coverage.py": (
-        "written against the CUDA boxing path, and the default conf no longer "
-        "names it: its routing cases read a route out of backends_nvidia.conf "
-        "and assert the op logs that backend rather than reaching cpu_fallback, "
-        "which only holds for a route a wheel has a kernel for. `addmm` is one "
-        "of the four, and the default conf routes it `none` -- cpu_fallback is "
-        "now the correct outcome, so the case would assert against the route it "
-        "is reading. The file's own docstring also says its ops need the "
-        "external libtorch_cuda.so. Both CUDA lanes carry the `cuda` marker "
-        "unselected (composed vendor and boxing step lists: no step selects it "
-        "and none names this file), so no job runs it either way. Accepted "
-        "exclusion until the vendor-SDK native kernels that replace the boxing "
-        "path land; re-pointing it at the day-0 `_boxing` conf would make it "
-        "runnable on the nvidia-boxing lane, which is the smaller follow-up"
+    "tests/integration/ops/test_dtype_cast_performance.py": (
+        "measures copies linked to CUDA PyTorch; the ordinary NVIDIA CI wheel "
+        "uses CPU PyTorch"
     ),
     "tests/integration/ops/test_tileops_generated.py": (
         "carries `cuda` for the same reason -- its routes are bound on the CUDA "
@@ -730,17 +710,6 @@ def test_the_known_unreachable_list_has_not_gone_stale():
 # The check above is per file, and a file counts as reached when any one of its
 # cases is. That is the weaker half of the same question, and the gap between
 # the two halves is where coverage goes missing without a red build:
-#
-#   * `multi_device_contracts` deselects twenty case names with `-k`, and five
-#     of them are every case in `test_nonzero_device_dtype_cast.py`. The file
-#     is selected by that command, so the orphan check counts it -- and it has
-#     no record on any of the fourteen lanes. The manifest comment says `-k`
-#     was chosen over `--ignore` *because* `--ignore` trips the orphan check,
-#     which makes the bypass a documented one.
-#   * Fifty-four `cuda`- and `metax`-marked cases and twenty-seven
-#     `flaggems_python` ones live in files a sweep does select, under marks no
-#     sweep's `-m` accepts. Issue #555 registered five of them; the class is
-#     larger.
 #
 # So this half asks the question per case: for each test function, is there a
 # composed command whose paths cover its file, whose `-m` accepts its marks,
@@ -906,87 +875,10 @@ def _unselected_cases() -> list[_Case]:
 # files are not repeated below; what is left is the cases inside files that do
 # reach a job.
 _KNOWN_UNSELECTED_CASES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "cuda_reference": (
+    "dcu_batch_norm_statistics": (
+        "The ordinary Hygon wheel does not update running statistics in place.",
         (
-            "asserts flagos against a live `cuda:0` reference, or overrides the "
-            "op to the boxing route, and no lane has both: every platform's "
-            "torch is CPU-only or vendor-CUDA-ABI, and `FLAGOS_OP_<op>=cuda` "
-            "needs a boxing wheel. The cases self-skip on "
-            "`torch.cuda.is_available()` where they can, so wiring them in on a "
-            "boxing lane is the fix rather than deleting them. Tracked by issue "
-            "#555"
-        ),
-        (
-            "tests/integration/ops/test_abs_dispatch.py::TestAbsCorrectness::test_abs_matches_cuda",
-            "tests/integration/ops/test_acos_dispatch.py::TestAcosCorrectness::test_acos_matches_cuda",
-            "tests/integration/ops/test_acos_dispatch.py::TestAcosDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_add_dispatch.py::TestAddTensorCorrectness::test_add_matches_cuda",
-            "tests/integration/ops/test_bitwise_and_dispatch.py::TestBitwiseAndDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatch::test_bmm_matches_cuda_ref",
-            "tests/integration/ops/test_bmm_dispatch.py::TestBmmDispatchLog::test_dispatch_log_bmm_out_cuda_override",
-            "tests/integration/ops/test_cat_dispatch.py::TestCatDispatch::test_cat_matches_cuda_ref",
-            "tests/integration/ops/test_constant_pad_nd_dispatch.py::TestConstantPadNdDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_cos_dispatch.py::TestCosCorrectness::test_cos_matches_cuda",
-            "tests/integration/ops/test_cos_dispatch.py::TestCosDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_div_scalar_dispatch.py::TestDivScalarCorrectness::test_div_scalar_matches_cuda",
-            "tests/integration/ops/test_embedding_dense_backward_dispatch.py::TestEmbeddingDenseBackwardDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_embedding_dispatch.py::TestEmbeddingDispatch::test_embedding_matches_cuda_ref",
-            "tests/integration/ops/test_le_dispatch.py::TestLeDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_mean_dispatch.py::TestMeanDimCorrectness::test_mean_matches_cuda",
-            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatch::test_mm_matches_cuda_ref",
-            "tests/integration/ops/test_mm_dispatch.py::TestMmDispatchLog::test_dispatch_log_mm_out_cuda_override",
-            "tests/integration/ops/test_mul_dispatch.py::TestMulTensorCorrectness::test_mul_matches_cuda",
-            "tests/integration/ops/test_mul_scalar_dispatch.py::TestMulScalarCorrectness::test_mul_scalar_matches_cuda",
-            "tests/integration/ops/test_neg_dispatch.py::TestNegCorrectness::test_neg_matches_cuda",
-            "tests/integration/ops/test_new_ones_dispatch.py::TestNewOnesDispatch::test_dispatch_log_cuda",
-            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_backward_cuda",
-            "tests/integration/ops/test_nll_loss_dispatch.py::TestNllLossDispatch::test_dispatch_log_forward_cuda",
-            "tests/integration/ops/test_ones_like_dispatch.py::TestOnesLikeDispatch::test_dispatch_log_cuda",
-            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarCorrectness::test_pow_matches_cuda",
-            "tests/integration/ops/test_pow_dispatch.py::TestPowTensorScalarDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtCorrectness::test_rsqrt_matches_cuda",
-            "tests/integration/ops/test_rsqrt_dispatch.py::TestRsqrtDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_scalar_tensor_dispatch.py::TestScalarTensorDispatch::test_dispatch_log_cuda",
-            "tests/integration/ops/test_silu_backward_dispatch.py::TestSiluBackwardDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_silu_dispatch.py::TestSiluCorrectness::test_silu_matches_cuda",
-            "tests/integration/ops/test_sin_dispatch.py::TestSinCorrectness::test_sin_matches_cuda",
-            "tests/integration/ops/test_sin_dispatch.py::TestSinDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_slice_backward_dispatch.py::TestSliceBackwardDispatch::test_dispatch_log_cuda_override",
-            "tests/integration/ops/test_sum_dispatch.py::TestSumDimCorrectness::test_sum_dim_matches_cuda",
-            "tests/integration/ops/test_zeros_dispatch.py::TestZerosDispatch::test_dispatch_log_cuda",
-        ),
-    ),
-    "multi_device_boxing_gaps": (
-        (
-            "deselected by name from `multi_device_contracts`, the one group "
-            "that sweeps `-m multi_device`, because each reaches an op the "
-            "boxing confs route to `none`. The `-k` was chosen over `--ignore` "
-            "so the file-level check above keeps counting the files as "
-            "selected, which is why the cases have to be named here. Five of "
-            "them are every case in test_nonzero_device_dtype_cast.py, so that "
-            "file runs nowhere at all"
-        ),
-        (
-            "tests/integration/test_allocator.py::TestCachingAllocatorOps::test_matmul",
-            "tests/integration/test_compute_device_index.py::test_binary_tensor_op",
-            "tests/integration/test_compute_device_index.py::test_binary_tensor_scalar_op",
-            "tests/integration/test_compute_device_index.py::test_cpu_scalar_operand_lands_on_operand_device",
-            "tests/integration/test_compute_device_index.py::test_current_device_is_restored",
-            "tests/integration/test_compute_device_index.py::test_kwarg_op",
-            "tests/integration/test_compute_device_index.py::test_multinomial_on_nonzero_device",
-            "tests/integration/test_compute_device_index.py::test_random_inplace_op",
-            "tests/integration/test_compute_device_index.py::test_tensor_list_op",
-            "tests/integration/test_compute_device_index.py::test_tensor_scalar_op",
-            "tests/integration/test_compute_device_index.py::test_ternary_tensor_op",
-            "tests/integration/test_compute_device_index.py::test_unary_inplace_op",
-            "tests/integration/test_compute_device_index.py::test_unary_op",
-            "tests/integration/test_factory_device_index.py::test_full_like_defaults_to_source_device",
-            "tests/integration/test_factory_device_index.py::test_like_factory_defaults_to_source_device",
-            "tests/integration/test_nonzero_device_dtype_cast.py::test_boxed_op_leaves_current_device_untouched",
-            "tests/integration/test_nonzero_device_dtype_cast.py::test_cast_on_nonzero_device_leaves_current_device_alone",
-            "tests/integration/test_nonzero_device_dtype_cast.py::test_cast_values_are_exact_on_nonzero_device",
-            "tests/integration/test_nonzero_device_dtype_cast.py::test_int64_to_bool_cast_on_nonzero_device",
-            "tests/integration/test_nonzero_device_dtype_cast.py::test_issue_313_repro_in_a_fresh_process",
+            "tests/integration/ops/test_dcu_flaggems_pinned_routes.py::TestNativeBatchNormTrainingMode::test_running_statistics_are_updated_in_place",
         ),
     ),
     "unmarked_in_swept_dir": (

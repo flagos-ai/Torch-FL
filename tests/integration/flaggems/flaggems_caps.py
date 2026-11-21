@@ -149,16 +149,13 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
         "scatter_add_",
         "argmin",
         "mean",
-        "mean.dim",
+        # Hygon native-host policy restored the FlagGems base for mean.dim.
+        # TestEmptyMeanIsNan covers the empty-reduction contract on ordinary wheels.
         "native_batch_norm",
     ),
 }
 
-#: The two seeded-drawout operators: an op whose boxing kernel is ATen's own
-#: ``native_dropout``, which draws from a generator ``torch.manual_seed`` cannot
-#: write on a CPU-torch wheel. Every day-0 boxing variant routes them to FlagGems
-#: for that reason (see ``BOXING_VARIANT_FLAGGEMS_OPS`` in
-#: ``scripts/codegen/gen_vendor_confs.py``), and the default confs do too.
+#: Seeded dropout routes are tracked separately.
 #:
 #: They are the one place where a conf's ``flaggems`` route is about the kernel
 #: rather than coverage, and not every conf routes them there -- NVIDIA's default
@@ -223,71 +220,23 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # measurement, not the cohort size -- see KUNLUNXIN_FLAGGEMS_MEASURED.
     "kunlunxin": 256,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
-    # soft-lowp matrix claim has a registered key to follow. The day-0 variant
-    # below is unchanged -- it keeps `mm` on the boxing kernel.
+    # soft-lowp matrix claim has a registered key to follow.
     "metax": 585,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,
     "musa": 464,
-    #: The two confs the PPU lane can run. `ppu` is the default
-    #: backends_thead.conf, which a FlagGems-primary wheel reads; `ppu_boxing`
-    #: is the day-0 variant the boxing wheel selects (FLAGOS_BACKEND_CONFIG),
-    #: identical to it except that the ops without a FlagGems route go to
-    #: `boxing`. Both counts are the conf's text less the two ``SEEDED_DRAWOPS``
-    #: routes -- 590, which both PPU lanes of CI run 40341912173 measured.
     "ppu": 590,
-    "ppu_boxing": 590,
-    # The CUDA lane's own conf, and its day-0 variant. The default conf keeps
-    # FlagGems for the 549 operators the CUDA generation measured it on; the
-    # day-0 variant routes everything else to `boxing` -- on NVIDIA the boxed
-    # CUDA kernel *is* the covered route -- and keeps FlagGems for exactly the
-    # two seeded-drawout ops (native_dropout, native_dropout_backward): the
-    # boxing kernel there is ATen's own draw, which torch.manual_seed cannot
-    # reach on a CPU-torch wheel (run 40255168276). It was 0 before those two
-    # moved, and it is 0 again for this suite's purposes: those are the
-    # variant's only two routes, neither op is in ``FLAGGEMS_ROUTING_CALLS``,
-    # and ``flaggems_coverage_count`` leaves them out (see ``SEEDED_DRAWOPS``).
-    # The suite's FlagGems cases skip by the conf's own route on this lane,
-    # which is the designed behaviour.
-    #
-    # All counts are `flaggems` only: `backends_metax.conf` also carries 15
-    # `flaggems_cpp` routes and `backends_metax_boxing.conf` 12, which neither
-    # metax number includes.
     "nvidia": 549,
-    "nvidia_boxing": 0,
-    # metax's day-0 conf keeps the 12 C++ routes and moves everything else to
-    # the boxed CUDA kernel the C550 build dispatches to; the DCU conf keeps its
-    # FlagGems coverage and boxes the rest. Counted from the shipped confs the
-    # same way ``flaggems_route_count`` counts (``= flaggems`` only) less the two
-    # ``SEEDED_DRAWOPS`` routes (583 - 2 on metax, and the same - 2 on DCU's 453:
-    # the seeded ops reach FlagGems in the day-0 tables of every platform).
-    "metax_boxing": 581,
-    # 453: the same two soft-lowp matrix routes as `dcu` above, which the day-0
-    # variant keeps for the same claim reason, less the
-    # `scaled_dot_product_attention` route that variant never meant to carry
-    # (see BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS in
-    # scripts/codegen/gen_vendor_confs.py). The boxing lane reported the gap as
-    # `assert 454 == 451` while that composite was still routed.
-    "dcu_boxing": 453,
-    # TsingMicro's conf is the other hand-maintained one: 81 routes, of which 65
-    # are the plain `flaggems` key, 2 spell it `flagos_python` (a log name this
-    # conf uses as a route value) and 14 are metadata-view routes on the vendor.
-    # No CI lane runs this suite on TsingMicro yet, but the row is what the conf
-    # states, so the suite is correct the first time one does. `bpu` is not here:
-    # its conf is empty and an unlisted op defaults to FlagGems, so it has no
-    # route count to record.
-    "tsingmicro": 65,
+    # The sparse TsingMicro config also spells two aliases `flagos_python`.
+    "tsingmicro": 63,
 }
 
 #: The route ``scaled_dot_product_attention`` is expected to carry, per platform.
 #:
 #: ``None`` records that the conf does not name the operator at all, which the
-#: wrapper in ``csrc/aten/sdp_choice_stub.cc`` reads as "keep the boxed CUDA
-#: composite" -- a deliberate state, so it is spelled out rather than left to be
-#: inferred from a missing key. The operator is a composite whose route the
-#: dispatcher does not take on its own, which is why its text is pinned here as
-#: well as the leaf operators above.
+#: wrapper handles through ATen composition. The wrapper reads the composite
+#: route directly, so this table also pins its configured value.
 EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "ascend": "none",
     "dcu": "flaggems",
@@ -303,19 +252,8 @@ EXPECTED_SDPA_ROUTE: dict[str, str | None] = {
     "metax": "flaggems",
     "apple": "none",
     "musa": "none",
-    # `none` on PPU: backends_thead.conf leaves the composite to the boxed CUDA
-    # composite (`none` is cpu_fallback, which serves it on a wheel that does
-    # not register it), and the day-0 variant names `boxing` for the same
-    # kernel. Which arm a call takes on either is the operator tests' property,
-    # not this table's.
     "ppu": "none",
-    "ppu_boxing": "boxing",
-    # The day-0 confs name the boxed CUDA kernel for the composite, the arm the
-    # packaging wheel actually dispatches to.
     "nvidia": None,
-    "nvidia_boxing": "boxing",
-    "metax_boxing": "boxing",
-    "dcu_boxing": "boxing",
     # `backends_tsingmicro.conf` does not name the composite, like the CUDA conf.
     "tsingmicro": None,
 }
@@ -328,8 +266,7 @@ _LOG_NAME = {
     "flaggems_python": "flagos_python",
     "flagos_python": "flagos_python",
     "flaggems_cpp": "flagos",
-    # A conf row in the vendor spelling, against the id the log prints. The
-    # NVIDIA rows print "boxing" (the slot they register into).
+    # Vendor spellings can differ from the dispatch log.
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
@@ -375,10 +312,6 @@ def accel_label() -> str:
     the conf ships under. Five confs are named after the vendor while the tables
     record the platform id (``backends_thead.conf`` is ``ppu``, ``hygon`` is
     ``dcu``, ``enflame`` is ``gcu``, ``mthreads`` is ``musa``, ``nvidia`` is
-    ``cuda``), so a basename that is not already a row is looked up through
-    ``torch_fl._platform.platform_for``. A day-0 variant
-    (``backends_<platform>_boxing.conf``) is the same platform's other conf and
-    is reported as ``<platform id>_boxing``.
     The build record identifies a staged native-host conf that uses the
     platform's ordinary basename.
     """
@@ -387,9 +320,6 @@ def accel_label() -> str:
     if not (name.startswith("backends_") and name.endswith(".conf")):
         return ""
     label = name[len("backends_") : -len(".conf")]
-    if label.endswith("_boxing"):
-        platform = label[: -len("_boxing")]
-        return f"{_platform_id(platform)}_boxing"
     from torch_fl import _platform
 
     build = _platform.build_info()
@@ -413,12 +343,6 @@ def _platform_id(base: str) -> str:
     from torch_fl._platform import platform_for
 
     return platform_for(base) or base
-
-
-def daily_variant_label(base: str) -> str | None:
-    """``base``'s day-0 variant label when the tables carry one, else None."""
-    label = f"{base}_boxing"
-    return label if label in EXPECTED_FLAGGEMS_ROUTES else None
 
 
 def route_reason(op: str) -> tuple[str | None, str]:
@@ -450,7 +374,7 @@ def routes_to_flaggems(op: str) -> bool:
 def build_kernels() -> frozenset[str]:
     """Kernel sets compiled into this wheel, from the build record.
 
-    Names are setup.py's (``vendor``, ``flaggems``, ``boxing``, ``flaggems_cpp``,
+    Names are setup.py's (``vendor``, ``flaggems``, ``flaggems_cpp``,
     ``tileops``); empty for an unbuilt source checkout.
     """
     from torch_fl import _env

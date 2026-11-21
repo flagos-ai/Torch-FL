@@ -69,16 +69,10 @@ container_options: >-
   --ulimit memlock=-1
   --cap-add=SYS_PTRACE
 
-# 90, not the 60 the other platforms use. This is the only manifest that also
-# runs the whole tests/unit directory (per file, one process each) on top of a
-# wheel build and thirteen integration groups, and it does not fit in an hour:
-# measured on this job, 58m18s for one green run (2026-09-28T16:26Z) and 62m26s
-# for the next, which was cancelled by the limit with every test already
-# reported -- 72/72 unit files PASS and no failing step. The limit was the only
-# thing that was red. Raise this rather than trim the group: the unit directory
-# is the per-file coverage that caught the cp310 `tomllib` collection error, and
-# nothing else runs it. Ascend, the other long manifest, is already at 120.
 timeout_minutes: 90
+# The ordinary suites and AOT wheel build used almost 90 minutes in run
+# 44884257846. Allow time for native-host conformance and evidence upload.
+integration_timeout_minutes: 105
 # Release/manual wheel-build artifact; CI tests the wheel in the build job.
 wheel_artifact_name: wheel-dcu
 
@@ -88,25 +82,6 @@ wheel_artifact_name: wheel-dcu
 # that script; the values are this platform's, and they assert the same things
 # the hand-written heredoc that used to sit here did.
 #
-# DCU runs both builds of the wheel, one job each:
-#
-#   vendor lane (this file's `platform:` name)  backends_hygon.conf as it
-#       ships: the ops it routes to a DTK-native kernel on the hipified DTK
-#       libtorch, FlagGems for the rest. The DTK device libraries are always
-#       bundled -- they are what the platform's vendor route runs on -- so this
-#       is not the CUDA vendor lane's "no vendor libtorch" shape.
-#
-#   boxing lane (`hygon-boxing`)  the same platform built with
-#       FLAGOS_BUILD_BOXING=1: the generated CUDA boxing kernels registered, run
-#       against the day-0 conf backends_hygon_boxing.conf, which is what a
-#       user's boxing opt-in selects (AGENTS.md, "Day-0 boxing confs").
-#
-# `boxing_lane: true` is what schedules the second job
-# (.github/scripts/ci/generate_matrix.py reads it). Both lanes keep the
-# decoupled DCU runtime (the official +cpu core plus the DTK device libraries),
-# so `torch.version.cuda` is null on both and the kernel sets are what differ.
-boxing_lane: true
-
 environment_check:
   cuda_version: null
   torch_path_forbidden:
@@ -118,16 +93,4 @@ environment_check:
   require_build_kernels:
     - flaggems
   forbid_build_kernels:
-    - boxing
-
-boxing_environment_check:
-  cuda_version: null
-  torch_path_forbidden:
-    - /opt/conda/
-  require_package_files:
-    - lib/libtorch_fl.so
-  flagos_devices:
-    more_than: 0
-  require_build_kernels:
-    - flaggems
     - boxing

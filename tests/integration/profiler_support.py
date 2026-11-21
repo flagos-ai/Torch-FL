@@ -34,7 +34,6 @@ class ProfilerCapabilities:
     runtime: bool
     cbid: bool
     memcpy: bool
-    memset: bool
     flow: bool
     linkage: bool
     metadata: bool
@@ -50,19 +49,6 @@ def _torch_module():
     import torch
 
     return torch
-
-
-def _boxing_built() -> bool:
-    """True when this wheel carries the generated CUDA boxing kernels.
-
-    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``)
-    rather than inferred from the platform name: boxing became an explicit
-    opt-in on every CUDA-ABI platform in #520, so a ``cuda`` wheel answers False
-    here unless it was deliberately built with ``FLAGOS_BUILD_BOXING=1``.
-    """
-    from torch_fl import _env
-
-    return "boxing" in _env.build_kernels()
 
 
 def _mspti_in_link_map() -> bool:
@@ -204,93 +190,9 @@ def capabilities_for_platform(platform: str) -> ProfilerCapabilities:
         cbid=platform != "ascend",
         memcpy=(device and platform in {"cuda", "metax", "ppu", "musa"})
         or ascend_memcpy,
-        # Ascend memset stays off even with the MSPTI preload present, and this
-        # is a deliberate backend property rather than a gap to close. A direct
-        # ctypes probe of aclrtMemset/aclrtMemsetAsync under process-start
-        # preload does produce real positive-duration, positive-byte memset
-        # records, so the CANN interception itself works. But torch.zeros() --
-        # the only zeroing op the shared profile_result() workload and any
-        # current Ascend op registration reach -- routes through the
-        # aclnnInplaceZero kernel, not the allocator's aclrtMemset calls in
-        # csrc/runtime/accelerator/ascend/memory.cc. Rerouting it to match the
-        # MetaX allocator-memset path would make this record appear, and was
-        # measured on Ascend 910 to cost 12.7us -> 133us at 1 MiB and
-        # 17.4us -> 9080us at 64 MiB (aclrtMemsetAsync is worse still), so the
-        # kernel routing stays and the capability stays off.
-        # The memset this row asserts is cuBLAS zeroing its gemm workspace, and
-        # cuBLAS is reachable on a CUDA-ABI platform only through the generated
-        # boxing kernels: FlagGems' matmul is a Triton kernel that zeroes
-        # nothing, and a `cuda`-routed op on a wheel without boxing kernels
-        # reaches cpu_fallback rather than a device kernel. Boxing became an
-        # opt-in in #520, so the default (FlagGems-primary) CUDA wheel
-        # answers False here and the memset cases report as skipped instead of
-        # failing on a cuBLAS call the wheel cannot make. Keyed on the build
-        # record rather than the platform name for the same reason as the
-        # `cuda` marker gate in tests/integration/ops/conftest.py: the two
-        # stopped being interchangeable when boxing became an opt-in.
-        #
-        # DCU is in the set on the same terms. The emission path exists: the
-        # roctracer tracer classifies a device memset as
-        # `EventKind::Memset` (csrc/profiler/roctracer_device_tracer.cc:374)
-        # and the kineto layer maps that to `GPU_MEMSET`
-        # (csrc/profiler/flagos_kineto_profiler.cc:202-203), so a DCU trace can
-        # carry the category the parity baseline expects. What produces the
-        # event is DTK's rocBLAS zeroing its gemm workspace through hipMemset,
-        # which only a boxing wheel's route reaches -- hence `_boxing_built()`
-        # here, same as cuda and metax. The vendor build still answers False:
-        # `backends_hygon.conf` leaves the probe op `none`, so it reaches
-        # cpu_fallback and no rocBLAS call is made.
-        #
-        # The event count on a boxing DCU wheel is not pinned here because it
-        # is a property of DTK's rocBLAS, not of this tree; the parity test only
-        # asserts the category is present and its arg keys are a superset.
-        memset=device and platform in {"cuda", "metax", "dcu"} and _boxing_built(),
         flow=device,
         linkage=device,
         metadata=device,
-    )
-
-
-def append_boxing_path_probe(device=None, platform=None):
-    """Append the one workload op that still runs on the device backend.
-
-    Under a FlagGems-first conf (``backends_nvidia.conf``) every op the shared
-    workload used to reach cuBLAS with -- ``mm``, ``relu``, ``sort``, ``sum``,
-    ``randn`` -- is a Triton kernel. That costs the trace three things the
-    profiler contract asserts on, all measured on A100:
-
-    * no cuBLAS gemm-workspace zeroing, so no ``gpu_memset`` record at all
-      (the category disappears and ``test_profiler_memset_events`` fails);
-    * no ``External id`` among the kernel ``args``, so device time cannot be
-      attributed to the launching op;
-    * no ``::``-qualified kernel name, so the demangling assertion has no
-      subject and stops testing anything.
-
-    ``torch.linalg.lu_factor`` puts all three back. ``linalg_lu_factor_ex`` is
-    routed ``cuda`` by every conf that implements it, its cuSOLVER getrf zeroes
-    a workspace (a ``gpu_memset`` owned by ``aten::linalg_lu_factor_ex``, 512
-    bytes at this size) and its kernels are C++ templates whose names carry
-    ``::``.
-
-    64x64 is the smallest size measured to still allocate that workspace, and
-    costs ~32 KB plus one call -- far below the 1024x1024 ``linalg.solve`` that
-    was the first candidate. Sizes 16/32/64/128 were all measured to produce the
-    record; the larger ones buy nothing.
-
-    Gated on the memset capability rather than appended unconditionally. The
-    probe exists to produce a memset record, so a backend whose contract asserts
-    on one is the only place it earns its cost; elsewhere it adds a call the
-    platform does not check, and on backends routing ``linalg_lu_factor_ex`` to
-    ``none`` (ascend, gcu, musa) it is not on the device path at all.
-    """
-    platform = detect_platform() if platform is None else platform
-    if not capabilities_for_platform(platform).memset:
-        return
-
-    import torch
-
-    torch.linalg.lu_factor(
-        torch.randn(64, 64, device=_torch_device() if device is None else device)
     )
 
 
@@ -309,19 +211,6 @@ def profile_result():
     contract honest by skipping the fixture on that platform until the tracer
     can safely export this workload.
 
-    Shape and iteration count are kept identical to ``_run_traced_ops()`` in
-    test_profiler_parity.py, which is the workload proven to emit every activity
-    class this module asserts on. It matters for memsets specifically: cuBLAS
-    only allocates (and zeroes) a gemm workspace once the matmul is large enough
-    and repeated enough to pick a workspace-using kernel. A 256x256 x3 loop stays
-    under that threshold on CUDA and produced no gpu_memset events at all, while
-    still passing on backends whose sort allocates zeroed scratch -- so shrinking
-    this workload silently converts the memset assertion into a no-op on some
-    vendors and a failure on others.
-
-    ``append_boxing_path_probe`` closes the other half of that hole: a conf that
-    reroutes the matmul away from cuBLAS removes the memset for a reason that has
-    nothing to do with workload size. See its docstring.
     """
     if detect_platform() == "metax":
         pytest.skip("MetaX profiler trace export is currently unstable")
@@ -342,7 +231,6 @@ def profile_result():
         for _ in range(5):
             z = (x @ y).relu()
         torch.sort(small)
-        append_boxing_path_probe(device)
         z.sum().item()  # force sync so device activity lands inside the window
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as trace_file:

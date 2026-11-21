@@ -33,30 +33,9 @@
 #include "backends/mthreads/mudnn_common.h"
 #endif
 
-// Which backends are the CUDA ones, and whether their arms of contiguous()/
-// clone() below may hand the strided gather to ATen's native CUDA copy kernel.
-// Both halves are needed: DeviceBoxingGuard is header-only and gated on
-// nothing, but the kernel it makes reachable is ATen's TensorIterator strided
-// copy, a CUDA DispatchStub that lives in libtorch_cuda.so.
-//
-// FLAGOS_BOXING_BUILD answers it for a boxing wheel: that wheel is built and
-// run against the vendor's libtorch, so the stub is populated.
-//
-// The FlagGems-primary wheel answers it with FLAGOS_TORCH_LINKS_LIBTORCH_CUDA,
-// the CMake probe that records whether the torch this wheel links ships
-// libtorch_cuda.so beside it. The default CUDA and PPU wheels link the CPU-only
-// pip torch on purpose (`.github/configs/nvidia.yml` and `thead.yml` both pin
-// `torch_version_prefix: "2.10.0+cpu"`), so theirs is empty and a boxed call
-// aborts with "DispatchStub: missing kernel for cuda" -- measured on upstream
-// main, CI run 40656617119: PPU job 122709780467 (`clone(memory_format=...)`,
-// which took this file's clone() arm) and NVIDIA job 122709772556. A wheel
-// built against a torch that does ship the stub keeps the on-device gather;
-// that is the build this arm was measured on (8x H100, PR #674).
-//
-// The de-boxed non-CUDA backends (Ascend, GCU, Kunlunxin, MUSA, ...) keep using
-// copy_strided_via_host, and the USE_* exclusions below match the ones on the
-// arms.
-#if (defined(FLAGOS_BOXING_BUILD) || defined(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA)) && \
+// Use ATen's strided copy when the linked PyTorch provides its CUDA kernel.
+// The CPU PyTorch build uses the fallback copy paths below.
+#if defined(FLAGOS_TORCH_LINKS_LIBTORCH_CUDA) && \
     !defined(USE_ASCEND) && \
     !defined(USE_TSINGMICRO) && !defined(USE_GCU) && !defined(USE_MUSA) && \
     !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && !defined(USE_ILUVATAR) && \

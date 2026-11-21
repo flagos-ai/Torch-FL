@@ -31,11 +31,9 @@ torch-fl is built on five principles:
 
 ### Execution Paths
 
-torch-fl implements three principal operator execution strategies:
+torch-fl implements two accelerated operator execution strategies:
 
 - **Native vendor kernels**: Direct calls into vendor runtime and operator libraries (ACLNN, mudnn, topsaten). The plugin generates bindings to each vendor's C/C++ API.
-
-- **Compatibility boxing**: Zero-copy metadata conversion into an independent PyTorch dispatch key when the vendor stack exposes one that can coexist with PrivateUse1. CUDA boxing reuses the vendor's CUDA-ABI kernels via an external `libtorch_cuda.so`. It is an **opt-in** (`FLAGOS_BUILD_BOXING=1`): the default wheel for every CUDA-ABI platform is FlagGems-primary, so it compiles no boxing kernels and bundles no vendor libtorch.
 
 - **Portable compiler kernels**: FlagGems kernels generated through Triton or a compatible compiler backend. These kernels target multiple accelerator families without per-platform rewrites.
 
@@ -50,7 +48,7 @@ flagos device (PrivateUse1)
     |
 device runtime + per-operator routing
     |
-FlagGems/compiler kernels | compatibility boxing | native vendor kernels | CPU fallback
+FlagGems/compiler kernels | native vendor kernels | CPU fallback
     |
 accelerator runtime
 ```
@@ -75,11 +73,11 @@ Capability availability and validation status vary by platform. A feature existi
 
 | Platform | Execution path | Validated capabilities | Status | Guide |
 |---|---|---|---|---|
-| NVIDIA CUDA | FlagGems-primary; CUDA boxing over an external `libtorch_cuda.so` is opt-in | Eager, autograd, distributed (FlagCX/NCCL), profiler (CUPTI), FlagGems (Python + C++) | **Stable** | [CUDA](docs/vendors/cuda/installation.md) |
-| MetaX | FlagGems-primary; CUDA boxing via cu-bridge is opt-in, native MetaX kernels retired | Eager, autograd | **Stable** | [MetaX](docs/vendors/metax/installation.md) |
+| NVIDIA CUDA | FlagGems with optional native precision | Eager, autograd, distributed (FlagCX/NCCL), profiler (CUPTI), FlagGems (Python + C++) | **Stable** | [CUDA](docs/vendors/cuda/installation.md) |
+| MetaX | FlagGems with experimental native-host precision | Eager, autograd | **Stable** | [MetaX](docs/vendors/metax/installation.md) |
 | Ascend | Native ACLNN backend, FlagGems via FlagTree (Triton 3.5) | Eager, autograd, RNG suite | **Beta** | [Ascend](docs/vendors/ascend/installation.md) |
-| PPU | FlagGems-primary; CUDA boxing against PPU's CUDA-13-compatible SDK is opt-in | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
-| Hygon DCU | FlagGems-primary; CUDA boxing over the hipified DTK torch is opt-in | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
+| PPU | FlagGems on the PPU SDK runtime | Eager, autograd | **Experimental** | [PPU](docs/vendors/ppu/installation.md) |
+| Hygon DCU | FlagGems with optional HCU native precision | Eager, autograd, FP16/BF16 AMP, profiler | **Beta** | [DCU](docs/vendors/dcu/installation.md) |
 | Kunlunxin (Kunlun P800) | Native XPU backend over the vendor xdnn operator library | Eager, autograd | **Experimental** | [Kunlunxin](docs/vendors/kunlunxin/installation.md) |
 | Enflame GCU | Native topsaten backend, CPU fallback for unrouted ops and unsupported dtypes | Eager | **Experimental** | [GCU](docs/vendors/gcu/installation.md) |
 | Moore Threads MUSA | FlagGems-first Triton kernels, native mudnn fallback, CPU fallback for unrouted ops | Eager, FP16/BF16 AMP | **Experimental** | [MUSA](docs/vendors/musa/installation.md) |
@@ -130,7 +128,7 @@ y = torch.relu(x @ x)
 print(y.cpu())
 ```
 
-Operator routing (FlagGems, vendor kernels, compatibility boxing, or CPU fallback) is determined by platform detection and runtime configuration. The code above works unchanged across all supported accelerators.
+Operator routing (FlagGems, vendor kernels, or CPU fallback) is determined by platform detection and runtime configuration. The code above works unchanged across all supported accelerators.
 
 For device queries, synchronization, and multi-device usage patterns, see the [Quick Start Guide](docs/getting-started/quickstart.md).
 
@@ -142,7 +140,7 @@ published, pinned FlagGems/FlagTree wheels already installed:
 ```bash
 FLAGOS_ACCELERATOR=nvidia FLAGOS_BUILD_NATIVE_HOST=1 \
 FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 \
-FLAGOS_BUILD_TILEOPS=0 FLAGOS_BUILD_BOXING=0 python setup.py bdist_wheel
+FLAGOS_BUILD_TILEOPS=0 python setup.py bdist_wheel
 ```
 
 This opt-in build uses Cython 3.2.4 and a CUDA toolkit. The generated hosts and

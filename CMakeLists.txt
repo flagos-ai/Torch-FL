@@ -14,6 +14,11 @@
 
 cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 
+string(TOUPPER "$ENV{FLAGOS_BUILD_BOXING}" _retired_boxing)
+if(FLAGOS_BUILD_BOXING OR _retired_boxing MATCHES "^(1|TRUE|YES|ON)$")
+  message(FATAL_ERROR "FLAGOS_BUILD_BOXING has been removed. Use the platform's default FlagGems or vendor build.")
+endif()
+
 set(FLAGOS_ACCELERATOR "cuda" CACHE STRING "Accelerator platform: cuda, metax, ascend, tsingmicro, dcu, gcu, musa, kunlunxin, iluvatar, cambricon, or bpu")
 
 # Vendor driver/runtime dirs to embed in RUNPATH. Never bundled into the wheel
@@ -74,7 +79,6 @@ unset(_switch)
 
 option(FLAGOS_BUILD_VENDOR "Build the FLAGOS_ACCELERATOR vendor's native kernels (no-op where the vendor ships none)" ON)
 option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
-option(FLAGOS_BUILD_BOXING "Build generated CUDA boxing kernels (CUDA-ABI vendor path)" ON)
 option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
 option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
 option(FLAGOS_NATIVE_HOSTS "Enable compiled original FlagGems host routing" OFF)

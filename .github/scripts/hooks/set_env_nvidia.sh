@@ -31,23 +31,8 @@ FLAGGEMS_VERSION="${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}"
 FLAGGEMS_INDEX_URL="${TORCH_FL_FLAGGEMS_INDEX_URL:-$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-nvidia/simple}"
 FLAGCX_VERSION="${TORCH_FL_FLAGCX_VERSION:-$FLAGCX_VERSION_cuda}"
 
-# Where the accelerator-side PyTorch comes from. A FlagOS-built image already
-# carries one (`image`); the stock NVIDIA CUDA image does not, so `bootstrap`
-# installs the matching CUDA build into a job-local interpreter. The boxing lane
-# stages CUDA assets from it; the incompatible published native FlagGems wheel is
-# not installed on this bootstrap path. `auto` picks whichever applies.
-#
-# Only the boxing lane reads that interpreter. The vendor lane builds the wheel
-# whose whole premise is that it carries no libtorch_cuda.so, and its tests run
-# on the +cpu torch like every other platform's, so nothing downstream of the
-# bootstrap names VENDOR_PYTHON. Bootstrapping it there downloaded the
-# multi-GB `torch+cu130` wheel for a path that was never read, and that download
-# is what failed the lane while download.pytorch.org answered 503 through the
-# runner proxy (PR #712, #705). Resolve an image-provided accelerator torch when
-# the image has one -- its site-packages still supplies the flagcx package and
-# the FlagGems C++ route below -- but never install one on the vendor lane.
+# An image may supply a matching CUDA PyTorch and FlagGems C++ library.
 VENDOR_MODE="${TORCH_FL_CUDA_VENDOR_MODE:-auto}"
-VENDOR_TORCH_INDEX_URL="${TORCH_FL_CUDA_VENDOR_TORCH_INDEX_URL:-$VENDOR_TORCH_INDEX_URL_cuda}"
 
 find_image_vendor_python() {
   local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
@@ -103,89 +88,6 @@ python_has_headers() {
     >/dev/null 2>&1
 }
 
-# A stock NVIDIA CUDA image is a compiler image rather than an application
-# runtime: it ships nvcc and the CUDA libraries but may lack Python. Only the
-# bootstrap path needs the interpreter; the FlagOS images carry it already.
-ensure_system_prerequisites() {
-  local python_exe="python$FLAGTREE_PYTHON_VERSION"
-  local python_path
-  local attempt
-  local -a packages=()
-
-  python_path="$(command -v "$python_exe" 2>/dev/null || true)"
-  if [[ -z "$python_path" ]]; then
-    packages+=("$python_exe" "$python_exe-venv" "$python_exe-dev")
-  else
-    # Debian splits two pieces out of the interpreter package: `python -m venv`
-    # needs ensurepip from the -venv half, and compiling the extension modules
-    # below needs Python.h from the -dev half.
-    "$python_path" -c 'import ensurepip' >/dev/null 2>&1 || packages+=("$python_exe-venv")
-    python_has_headers "$python_path" || packages+=("$python_exe-dev")
-  fi
-
-  if (( ${#packages[@]} == 0 )); then
-    return 0
-  fi
-
-  echo "Installing system packages required by this image's bootstrap path: ${packages[*]}"
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "::error::This image provides no ${packages[*]} and no apt-get to install them; use an image that ships Python $FLAGTREE_PYTHON_VERSION with its development files, or prebuild the image"
-    exit 1
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-  for attempt in 1 2 3; do
-    if apt-get update -qq && apt-get install -y -qq --no-install-recommends "${packages[@]}"; then
-      return 0
-    fi
-    echo "::warning::apt-get attempt $attempt failed; retrying: ${packages[*]}"
-    sleep 10
-  done
-  echo "::error::Could not install ${packages[*]}; this image has to reach the distribution package archive"
-  exit 1
-}
-
-# Sets VENDOR_PYTHON. The interpreter is returned through that global rather than
-# on stdout: everything this function runs — the venv bootstrap, pip, the CUDA
-# wheel download — writes to stdout, and a command substitution would fold all of
-# it into the interpreter path (which fails as `File name too long` on the first
-# exec). Progress therefore stays visible in the job log and cannot reach the
-# variable.
-bootstrap_vendor_python() {
-  # The accelerator PyTorch assets are consumed by the same Python minor
-  # version as the isolated test environment.
-  local base_python="${TORCH_FL_VENDOR_PYTHON:-}"
-  if [[ -n "$base_python" && "$base_python" != */* ]]; then
-    base_python="$(command -v "$base_python" 2>/dev/null || true)"
-  fi
-  if [[ -z "$base_python" ]]; then
-    base_python="$(select_test_python || true)"
-  fi
-  if [[ -z "$base_python" ]]; then
-    echo "::error::This CUDA image has no accelerator PyTorch and no Python $FLAGTREE_PYTHON_VERSION to bootstrap one with; use an image that provides it or prebuild the image"
-    exit 1
-  fi
-  local base_version
-  base_version="$("$base_python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-  if [[ "$base_version" != "$FLAGTREE_PYTHON_VERSION" ]]; then
-    echo "::error::The bootstrapped accelerator PyTorch must run the Python that executes the tests ($FLAGTREE_PYTHON_VERSION), but $base_python is $base_version; use an image whose Python is $FLAGTREE_PYTHON_VERSION or prebuild the image"
-    exit 1
-  fi
-  local vendor_venv="${TORCH_FL_VENDOR_VENV:-${RUNNER_TEMP:-/tmp}/torch-fl-cuda-vendor}"
-  echo "Installing CUDA PyTorch $CPU_TORCH_VERSION into $vendor_venv"
-  rm -rf "$vendor_venv"
-  "$base_python" -m venv "$vendor_venv"
-  local vendor_python="$vendor_venv/bin/python"
-  "$vendor_python" -m pip install --upgrade pip
-  PIP_RETRY_PYTHON="$vendor_python" pip_retry --no-cache-dir --index-url "$VENDOR_TORCH_INDEX_URL" \
-    "torch==$CPU_TORCH_VERSION"
-  VENDOR_PYTHON="$vendor_python"
-}
-
-# Reads the accelerator torch's version, CUDA runtime and site-packages out of
-# $VENDOR_PYTHON, so the boxing gate stages a version-matched libtorch_cuda.so
-# and the flagcx copy below finds the image's package. Only called when a
-# VENDOR_SOURCE actually resolved one; the vendor lane installs no accelerator
-# torch and reads none of these.
 resolve_vendor_torch() {
   if [[ ! -x "$VENDOR_PYTHON" ]]; then
     echo "::error::The accelerator interpreter resolved to '$VENDOR_PYTHON', which is not an executable file"
@@ -256,33 +158,23 @@ case "$VENDOR_MODE" in
     fi
     ;;
   bootstrap)
-    if [[ "${BOXING_LANE:-}" != "1" ]]; then
-      echo "::error::TORCH_FL_CUDA_VENDOR_MODE=bootstrap asks for an accelerator PyTorch to stage into a boxing wheel, but BOXING_LANE is not 1. The vendor lane runs on the +cpu torch and installs nothing from the vendor index; drop the setting or run the boxing lane."
-      exit 1
-    fi
-    VENDOR_PYTHON=""
+    echo "::error::TORCH_FL_CUDA_VENDOR_MODE=bootstrap has been removed. Use auto or an image with the vendor libraries."
+    exit 1
     ;;
   auto) ;;
   *)
-    echo "::error::TORCH_FL_CUDA_VENDOR_MODE must be auto, image or bootstrap (got '$VENDOR_MODE')"
+    echo "::error::TORCH_FL_CUDA_VENDOR_MODE must be auto or image (got '$VENDOR_MODE')"
     exit 1
     ;;
 esac
 if [[ -n "$VENDOR_PYTHON" ]]; then
   VENDOR_SOURCE="image"
-elif [[ "${BOXING_LANE:-}" == "1" ]]; then
-  VENDOR_SOURCE="bootstrap"
-  ensure_system_prerequisites
-  bootstrap_vendor_python
 else
   # The vendor lane: no accelerator torch is installed, and none is read below.
   VENDOR_SOURCE="none"
 fi
 echo "Accelerator PyTorch source: $VENDOR_SOURCE ($VENDOR_PYTHON)"
-# The vendor lane resolves no accelerator torch, so the probe below is skipped
-# there rather than pointed at an empty path. Everything it fills in is read
-# only by the boxing gate and by the flagcx copy, which has nothing to copy when
-# the image carries no accelerator torch.
+# The optional image supplies FlagGems C++ and CUDA runtime libraries.
 VENDOR_TORCH_VERSION=""
 VENDOR_TORCH_BASE_VERSION=""
 VENDOR_CUDA_VERSION=""
@@ -293,8 +185,6 @@ VENDOR_TORCH_LIB=""
 VENDOR_NVIDIA_LIBS=""
 if [[ "$VENDOR_SOURCE" != "none" ]]; then
   resolve_vendor_torch
-else
-  echo "Vendor lane: no accelerator PyTorch is resolved or installed; tests run on the +cpu torch"
 fi
 
 # A matching prebuilt image may carry the FlagGems C++ operators. The only
@@ -331,61 +221,7 @@ else
   export FLAGOS_BUILD_FLAGGEMS_CPP=0
 fi
 
-# CUDA runs both builds of the wheel, and BOXING_LANE (set by
-# integration-tests.yml from the lane) says which one this job is.
-#
-# The vendor lane builds the default (FlagGems-primary) CUDA wheel: boxing is
-# off, so setup.py's _bundle_cuda_assets() returns early and the wheel carries
-# no libtorch_cuda.so to preload. Staging the vendor image's copy here would put
-# a libtorch_cuda.so on LD_LIBRARY_PATH that nothing in the wheel refers to,
-# which is exactly the hidden dependency on the vendor torch package that lane
-# exists to remove -- and the asset assertions used to require it, so a
-# boxing-off build could not pass them. The vendor image interpreter is still
-# resolved above, because its nvidia-*-cu12 runtime wheels are what the FlagTree
-# Triton kernels link against at run time.
-#
-# The boxing lane (BOXING_LANE=1) is the explicit opt-in a user makes with
-# FLAGOS_BUILD_BOXING=1: the generated CUDA boxing kernels plus the matching
-# libtorch_cuda.so they re-dispatch into, both bundled into the wheel
-# (setup.py::_bundle_cuda_assets) and preloaded at import. The .so is staged
-# from the same version-matched vendor torch resolved above, the way
-# docs/vendors/cuda/external-libtorch-cuda.md produces it, so the wheel's CUDA
-# kernels are the vendor torch's own.
-if [[ "${BOXING_LANE:-}" == "1" ]]; then
-  export FLAGOS_BUILD_BOXING=1
-  VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
-  export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
-  export TORCH_FL_VENDOR_TORCH_VERSION="$VENDOR_TORCH_VERSION"
-  for asset in libc10_cuda.so libtorch_cuda.so; do
-    if [[ ! -e "$VENDOR_TORCH_LIB/$asset" ]]; then
-      echo "::error::the boxing lane needs $VENDOR_TORCH_LIB/$asset from the accelerator torch"
-      exit 1
-    fi
-  done
-  CUDA_ASSETS_DIR="${FLAGOS_CUDA_ASSETS_DIR:-$REPO_ROOT/.libtorch_cuda_assets}"
-  mkdir -p "$CUDA_ASSETS_DIR"
-  for asset in libc10_cuda.so libtorch_cuda.so libtorch_cuda_linalg.so; do
-    if [[ -e "$VENDOR_TORCH_LIB/$asset" ]]; then
-      cp -f "$VENDOR_TORCH_LIB/$asset" "$CUDA_ASSETS_DIR/$asset"
-    fi
-  done
-  export FLAGOS_CUDA_ASSETS_DIR="$CUDA_ASSETS_DIR"
-  # A boxing wheel runs on the stock +cpu torch exactly as the vendor lane does;
-  # what it adds is the CUDA kernel set, not a different core.
-  export FLAGOS_SKIP_CUDA_ASSETS=0
-  export FLAGOS_DISABLE_CUDA_ASSETS=0
-  echo "CUDA boxing lane: staged $(ls "$CUDA_ASSETS_DIR") from $VENDOR_TORCH_LIB"
-fi
-
-# The isolated environment runs on the Python version FlagTree is built for, so
-# `python` inside it is the same interpreter that owns the Triton provider. The
-# accelerator interpreter above runs the same minor version (a bootstrapped one
-# is required to), so both can compile and import the same extension modules.
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}${BOXING_LANE:+-boxing}}"
-
-# Sets TEST_PYTHON, for the same reason bootstrap_vendor_python sets
-# VENDOR_PYTHON: the uv and apt-get branches below both write to stdout, and
-# capturing them would return a transcript instead of an interpreter path.
+# Sets TEST_PYTHON, after installing the interpreter through uv or the distribution.
 install_test_python() {
   if command -v uv >/dev/null 2>&1; then
     echo "Installing Python $FLAGTREE_PYTHON_VERSION with uv..."
@@ -409,7 +245,7 @@ install_test_python() {
   TEST_PYTHON="$(command -v "python$FLAGTREE_PYTHON_VERSION")"
 }
 
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}${BOXING_LANE:+-boxing}}"
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}}"
 TEST_PYTHON="$(select_test_python || true)"
 if [[ -z "$TEST_PYTHON" ]]; then
   if ! install_test_python; then
@@ -519,28 +355,6 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=cuda
-# The vendor lane builds and tests the default CUDA wheel: FlagGems-primary,
-# with boxing off. That is the shape a user gets from `pip install` -- boxing is
-# off by default for every accelerator (cmake/flagos_platforms.json) and the
-# opt-in is an explicit FLAGOS_BUILD_BOXING=1 that lane deliberately does not
-# set, so CI measures the configuration that actually ships. What boxing serves
-# -- the ops backends_nvidia.conf routes to `cuda` rather than to a FlagGems
-# kernel -- is consequently unregistered there and reaches cpu_fallback; the
-# `cuda` marker gate in tests/integration/ops/conftest.py skips the cases that
-# assert that routing rather than letting them fail on a kernel the wheel does
-# not have.
-#
-# The boxing lane sets FLAGOS_BUILD_BOXING=1 above, builds the same +cpu torch
-# with the CUDA kernel set, and runs against the day-0 conf
-# backends_nvidia_boxing.conf: FlagGems where this build has it, boxing
-# everywhere else, with the measured triton gaps applied as usual.
-if [[ "${BOXING_LANE:-}" == "1" ]]; then
-  export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_nvidia_boxing.conf}"
-  if [[ ! -f "$FLAGOS_BACKEND_CONFIG" ]]; then
-    echo "::error::the CUDA boxing lane needs the day-0 conf $FLAGOS_BACKEND_CONFIG"
-    exit 1
-  fi
-fi
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="${CUDA_PATH:-$CUDA_HOME}"
 export FLAGGEMS_DIR="$VENDOR_FLAGGEMS_DIR"
@@ -639,20 +453,7 @@ _loader = importlib.machinery.SourceFileLoader("_flagos_build_config", str(_reco
 _spec = importlib.util.spec_from_loader(_loader.name, _loader)
 _config = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_config)
-# The two lanes assert opposite halves of one record: the vendor lane must
-# carry no boxing kernels, the boxing lane must carry them.
-if os.environ.get("BOXING_LANE") == "1":
-    assert "boxing" in tuple(_config.KERNELS), _config.KERNELS
-    assert (Path("torch_fl/lib") / "libtorch_cuda.so").is_file(), (
-        "the boxing lane's wheel has no bundled libtorch_cuda.so"
-    )
-    _conf = os.environ.get("FLAGOS_BACKEND_CONFIG", "")
-    assert _conf.endswith("backends_nvidia_boxing.conf"), _conf
-else:
-    assert not os.environ.get("FLAGOS_BUILD_BOXING"), (
-        "this lane must not force FLAGOS_BUILD_BOXING; it tests the default wheel"
-    )
-    assert "boxing" not in tuple(_config.KERNELS), _config.KERNELS
+assert "boxing" not in tuple(_config.KERNELS), _config.KERNELS
 assert "flaggems" in tuple(_config.KERNELS), _config.KERNELS
 
 print(f"Isolated Python: {sys.executable}")
@@ -675,17 +476,13 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
 
-  # The boxing lane assigns these; the vendor lane leaves them unset, and
-  # export_ci_env reads every name under `set -u`. Assign the empty default here
-  # so both lanes persist an explicit value.
-  : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
   : "${FLAGOS_CUDA_ASSETS_DIR:=}"
   : "${FLAGOS_SKIP_CUDA_ASSETS:=}"
   : "${FLAGOS_DISABLE_CUDA_ASSETS:=}"
   : "${FLAGOS_VENDOR_TORCH_LIB:=}"
   : "${TORCH_FL_VENDOR_TORCH_VERSION:=}"
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG FLAGOS_CUDA_ASSETS_DIR FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR CUDA_HOME CUDA_PATH FLAGGEMS_DIR FLAGCX_PATH FLAGCX_TORCH_BACKEND FLAGTREE_VERSION GEMS_VENDOR FLAGOS_BUILD_FLAGGEMS_CPP USE_FLAGTUNE CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH FLAGOS_BACKEND_CONFIG FLAGOS_CUDA_ASSETS_DIR FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_VENDOR_TORCH_LIB TORCH_FL_VENDOR_TORCH_VERSION
   if [[ -n "${TORCH_DEVICE_BACKEND_AUTOLOAD:-}" ]]; then
     printf 'TORCH_DEVICE_BACKEND_AUTOLOAD=%s\n' "$TORCH_DEVICE_BACKEND_AUTOLOAD" >> "$GITHUB_ENV"
   fi
