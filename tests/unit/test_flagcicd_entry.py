@@ -1183,6 +1183,7 @@ def test_real_execution_through_both_workflow_gates(tmp_path, entry, scenario):
         "PYTHONPATH": str(SCRIPTS / "pytest_reporting"),
         "PYTEST_PLUGINS": "flagcicd_report",
         "PYTEST_ADDOPTS": "",
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_RUN_ID": "42",
         "GITHUB_RUN_ATTEMPT": "1",
         "GH_TOKEN": "",
