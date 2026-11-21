@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Memory-transfer round-trips, each checked against a CPU reference.
-
-Host->device, device->host, device->device, a non-contiguous source, and a
-dtype cast: all of them are equality claims about data, so the reference is
-always the same tensor computed on CPU. Nothing here depends on a chip's copy
-engines or bandwidth.
-"""
+"""Device dtype casts for platforms that serve the route."""
 
 import pytest
 import torch
@@ -26,37 +20,6 @@ import torch
 import torch_fl  # noqa: F401 -- importing claims the flagos device
 
 DEVICE = "flagos:0"
-
-
-def _cpu_tensor(seed: int, shape=(8, 8)) -> torch.Tensor:
-    torch.manual_seed(seed)
-    return torch.randn(*shape)
-
-
-@pytest.mark.anyplatform
-def test_host_to_device_round_trip():
-    cpu = _cpu_tensor(0)
-    device = cpu.to(DEVICE)
-    assert device.device.type == "flagos"
-    torch.testing.assert_close(device.cpu(), cpu)
-
-
-@pytest.mark.anyplatform
-def test_device_to_device_copy():
-    cpu = _cpu_tensor(1)
-    device = cpu.to(DEVICE)
-    copied = device.clone()
-    assert copied.device.type == "flagos"
-    torch.testing.assert_close(copied.cpu(), cpu)
-
-
-@pytest.mark.anyplatform
-def test_non_contiguous_source_round_trip():
-    cpu = _cpu_tensor(2)
-    transposed_cpu = cpu.t()
-    assert not transposed_cpu.is_contiguous()
-    device = transposed_cpu.to(DEVICE)
-    torch.testing.assert_close(device.cpu(), transposed_cpu)
 
 
 def _dtype_cast_is_served() -> bool:
@@ -87,7 +50,8 @@ def _dtype_cast_is_served() -> bool:
     "kernel for",
 )
 def test_dtype_cast_round_trip():
-    cpu = _cpu_tensor(3, (4, 4))
+    torch.manual_seed(3)
+    cpu = torch.randn(4, 4)
     device = cpu.to(DEVICE)
     half = device.to(torch.float16)
     assert half.dtype == torch.float16

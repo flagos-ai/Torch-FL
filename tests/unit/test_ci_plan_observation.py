@@ -105,46 +105,28 @@ def test_every_planned_lane_matches_the_existing_loader_cli(tmp_path, profile):
 @pytest.mark.parametrize(
     "event,changed,labels,dispatch,reason",
     [
-        ("pull_request", ["README.md"], [], "", "documentation_or_empty_diff"),
-        ("pull_request", None, [], "", "diff_unavailable"),
-        ("pull_request", ["unknown/runtime.cc"], [], "", "unmatched_path"),
+        ("pull_request", ["README.md"], [], "", "pr_full_matrix"),
+        ("pull_request", None, [], "", "pr_full_matrix"),
+        ("pull_request", ["unknown/runtime.cc"], [], "", "pr_full_matrix"),
         (
             "pull_request",
             ["csrc/aten/backends/mthreads/mudnn_copy.cc"],
             [],
             "",
-            "watch_paths",
+            "pr_full_matrix",
         ),
-        ("pull_request", ["README.md"], ["platform:nvidia"], "", "labels"),
-        ("pull_request", ["README.md"], ["platform:unknown"], "", "labels"),
+        ("pull_request", ["README.md"], ["platform:nvidia"], "", "pr_full_matrix"),
+        ("pull_request", ["README.md"], ["platform:unknown"], "", "pr_full_matrix"),
         ("workflow_dispatch", ["README.md"], [], "hygon", "dispatch"),
         ("push", [], [], "", "full_event"),
         ("schedule", [], [], "", "full_event"),
     ],
 )
-def test_observation_preserves_the_router_matrix(
+def test_ci_plan_selects_every_platform_for_prs(
     event, changed, labels, dispatch, reason
 ):
-    command = [
-        sys.executable,
-        str(SCRIPTS / "ci/generate_matrix.py"),
-        "--event-name",
-        event,
-        "--configs-dir",
-        str(ROOT / ".github/configs"),
-        "--pr-labels",
-        ",".join(labels),
-        "--dispatch-platforms",
-        dispatch,
-    ]
-    if changed is not None:
-        command += ["--changed-files", "\n".join(changed)]
-    else:
-        command += ["--base-sha", "missing-comparison-commit"]
-    expected = json.loads(
-        subprocess.check_output(
-            command, text=True, stderr=subprocess.PIPE
-        ).removeprefix("platforms=")
+    expected = (
+        [dispatch] if dispatch else MATRIX._load_platforms(ROOT / ".github/configs")
     )
     plan = PLANNER.build_ci_plan(
         request(), CONTRACT, ROOT, changed, event, labels, dispatch
@@ -161,12 +143,17 @@ def test_observation_preserves_the_router_matrix(
     ]
 
 
-def test_ci_documentation_does_not_inherit_external_l2_fallback():
-    req = request(requested_level="L2")
+def test_documentation_prs_require_hardware_with_the_ordinary_ci_entry():
+    req = request(requested_level="auto")
     observed = PLANNER.build_ci_plan(req, CONTRACT, ROOT, ["README.md"], "pull_request")
-    assert observed["expected_platforms"] == observed["execution_plan"] == []
-    assert observed["test_level"] == "L1"
-    assert PLANNER.build_plan(req, CONTRACT, ROOT, ["README.md"])["expected_platforms"]
+    assert observed["expected_platforms"] == MATRIX._load_platforms(
+        ROOT / ".github/configs"
+    )
+    assert observed["test_level"] == "L2"
+    assert (
+        PLANNER.build_plan(req, CONTRACT, ROOT, ["README.md"])["expected_platforms"]
+        == []
+    )
 
 
 def test_plan_hash_is_deterministic_and_ignores_run_and_task_identity():
@@ -208,18 +195,18 @@ def test_modified_audit_fields_are_rejected_by_plan_verification(
 
 
 @pytest.mark.parametrize("changed", [None, [".github/workflows/ci.yml"]])
-def test_execution_plan_retains_upstream_label_precedence(changed):
+def test_routing_labels_cannot_narrow_the_pr_matrix(changed):
     baseline = PLANNER.build_ci_plan(request(), CONTRACT, ROOT, changed, "pull_request")
     labeled = PLANNER.build_ci_plan(
         request(), CONTRACT, ROOT, changed, "pull_request", ["platform:nvidia"]
     )
-    assert labeled["expected_platforms"] == ["nvidia"]
+    assert labeled["expected_platforms"] == baseline["expected_platforms"]
     assert [lane["name"] for lane in labeled["execution_plan"]] == labeled[
         "expected_platforms"
     ]
     assert labeled["expected_shared_checks"] == baseline["expected_shared_checks"]
     assert labeled["changed_files"] == changed
-    assert labeled["selection_reasons"][-1]["policy"] == "label_priority"
+    assert labeled["selection_reasons"] == baseline["selection_reasons"]
 
 
 @pytest.mark.parametrize(
@@ -266,12 +253,9 @@ def test_large_execution_plan_stays_out_of_the_dispatch_context():
     assert context["plan_hash"] == plan["plan_hash"]
 
 
-@pytest.mark.parametrize(
-    "labels,selected", [([], []), (["platform:nvidia"], ["nvidia"])]
-)
-def test_real_plan_cli_records_identity_and_supplies_the_matrix(
-    tmp_path, labels, selected
-):
+@pytest.mark.parametrize("labels", [[], ["platform:nvidia"]])
+def test_real_plan_cli_records_identity_and_supplies_the_matrix(tmp_path, labels):
+    selected = MATRIX._load_platforms(ROOT / ".github/configs")
     sha = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -354,6 +338,10 @@ def test_observer_tests_are_conditional_for_older_source_checkouts():
 def test_observer_diffs_the_pr_head_but_records_the_tested_merge_commit(tmp_path):
     source = tmp_path / "source"
     shutil.copytree(ROOT / ".github/configs", source / ".github/configs")
+    (source / ".github/scripts").mkdir()
+    shutil.copyfile(
+        ROOT / ".github/scripts/set_env.sh", source / ".github/scripts/set_env.sh"
+    )
     shutil.copyfile(
         ROOT / ".github/integration-manifest.yml",
         source / ".github/integration-manifest.yml",
@@ -404,7 +392,7 @@ def test_observer_diffs_the_pr_head_but_records_the_tested_merge_commit(tmp_path
         "GITHUB_RUN_ATTEMPT": "1",
         "GITHUB_OUTPUT": str(tmp_path / "outputs"),
     }
-    subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             str(SCRIPTS / "flagcicd_plan.py"),
@@ -415,15 +403,17 @@ def test_observer_diffs_the_pr_head_but_records_the_tested_merge_commit(tmp_path
             str(output),
         ],
         env=env,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr
     plan = json.loads(output.read_text())
     assert plan["source_sha"] == merged != head
     assert plan["diff_head_sha"] == head
     assert plan["changed_files"] == ["README.md"]
-    assert plan["execution_plan"] == []
+    assert [lane["name"] for lane in plan["execution_plan"]] == MATRIX._load_platforms(
+        ROOT / ".github/configs"
+    )
 
 
 def test_ci_nightly_is_full_and_weekly_stays_reserved():

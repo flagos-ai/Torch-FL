@@ -1,18 +1,18 @@
 # Functional CI profiles
 
-This CI verifies the installed Torch-FL wheel on the configured accelerators.
-It reuses the existing diff router, platform configs and integration manifest.
+This CI verifies installed Torch-FL wheels using the platform configs and
+integration manifest.
 
 | Profile | Hardware selection | Tests |
 | --- | --- | --- |
-| PR | Changed-file routing; labels may add platforms | Existing applicable functional groups |
+| PR | Every configured platform, including the ten required lanes | A common regression suite plus each platform's applicable groups |
 | Nightly | Every configured platform, regardless of the diff | All existing applicable groups plus CUDA transfer regressions |
 | Weekly | Reserved | Rejected before hardware dispatch until a workload is defined |
 
 The daily nightly runs at 02:00 China Standard Time. A manually requested
-nightly requires `platforms=all`. Ordinary push events keep the existing full
-platform matrix. Shared lint, source and codegen checks still run for PRs.
-Only the hardware matrix is narrowed by the diff router.
+nightly requires `platforms=all`. Ordinary push events run the full matrix.
+PR acceptance requires the common suite to pass on all ten lanes for the
+same revision. Shared lint, source and codegen checks are also required.
 
 `profiles: [nightly]` on a manifest group keeps optional CUDA profiling out of
 ordinary PR checks. Groups without that field run in both profiles. The CUDA

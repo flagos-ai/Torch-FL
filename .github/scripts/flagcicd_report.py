@@ -22,6 +22,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from ci.hardware_parity import common_cases, validate_pr_plan
 from flagcicd_resolve import text as request_text
 from merge_pytest_reports import (
     summarize_groups,
@@ -255,7 +256,7 @@ def platform_report(plan, platform, jobs, raw, attempt):
     }
 
 
-def aggregate(plan, jobs, directory, attempt, entry="flagcicd"):
+def aggregate(plan, jobs, directory, attempt, entry="flagcicd", *, pr_sha=None):
     errors, latest, seen, duplicates, ignored = [], {}, set(), set(), []
     has_plan = plan is not None
     if not has_plan:
@@ -269,6 +270,10 @@ def aggregate(plan, jobs, directory, attempt, entry="flagcicd"):
                 "expected_platforms"
             ]:
                 raise ValueError("execution lanes differ from expected_platforms")
+            if pr_sha is not None:
+                if plan["entry"] != "ci" or plan["source_sha"] != pr_sha:
+                    raise ValueError("the PR plan belongs to another source revision")
+                validate_pr_plan(plan)
         except (KeyError, TypeError, ValueError) as error:
             errors.append(str(error))
     ordinary = plan.get("entry") == "ci"
@@ -364,11 +369,27 @@ def aggregate(plan, jobs, directory, attempt, entry="flagcicd"):
                 latest[platform] = report
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             errors.append(f"{path.name}: {error}")
+    reference_cases = None
+    reference_platform = ""
     for platform in plan["expected_platforms"]:
         if platform not in latest:
             errors.append(f"missing platform report: {platform}")
         elif (platform, latest[platform]["run_attempt"]) in duplicates:
             errors.append(f"duplicate latest platform report: {platform}")
+        elif pr_sha is not None and latest[platform]["status"] == "passed":
+            try:
+                cases = common_cases(latest[platform])
+                if reference_cases is None:
+                    reference_cases, reference_platform = cases, platform
+                elif cases != reference_cases:
+                    missing = sorted(reference_cases - cases)
+                    extra = sorted(cases - reference_cases)
+                    raise ValueError(
+                        f"common regression inventory differs from {reference_platform}. "
+                        f"Missing {missing}, extra {extra}"
+                    )
+            except (KeyError, TypeError, ValueError, AttributeError) as error:
+                errors.append(f"{platform}: {error}")
     statuses = [report["status"] for report in latest.values()]
     status = "passed"
     for candidate in (
@@ -505,7 +526,15 @@ def main():
             raise SystemExit("validated plan is unavailable: " + plan_error)
         report = platform_report(plan, args.platform, jobs, args.directory, attempt)
     else:
-        report = aggregate(plan, jobs, args.directory, attempt, args.entry)
+        pr_sha = (
+            os.environ["GITHUB_SHA"]
+            if args.entry == "ci"
+            and os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+            else None
+        )
+        report = aggregate(
+            plan, jobs, args.directory, attempt, args.entry, pr_sha=pr_sha
+        )
         report["run_id"] = os.environ["GITHUB_RUN_ID"]
         if not plan:
             report["repository"] = os.environ.get("GITHUB_REPOSITORY", "")
@@ -516,6 +545,8 @@ def main():
         diagnose_jobs()
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"FlagCICD {report['report_type']}: {report['status']}")
+    for error in report["errors"]:
+        print(error)
     # A platform outcome describes its upstream job; generating that outcome
     # must not add a false root failure for the bounded network retry policy.
     # The summary remains the gate, and real reporting failures still fail.

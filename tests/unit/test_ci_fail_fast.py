@@ -155,19 +155,13 @@ def test_gate_reads_all_job_pages_and_bounds_optional_diagnostics(
         assert "second page lane: timed_out" in output
 
 
-def test_the_gate_does_not_report_a_cancelled_run():
-    """A superseded run measured nothing, so it has no verdict to deliver.
-
-    The gate runs under `if: always()` because it has to speak when a
-    dependency failed. Cancellation is not that case: every input then reads
-    "cancelled", which tests/unit/test_flagcicd_reports.py counts as a failure
-    status, so the job reports FAILURE for a run the UI already shows as
-    Cancelled. That is what a PR gets when a second `pull_request` run starts --
-    a new push, or the label events every PR receives on creation, since
-    `labeled`/`unlabeled` are in the trigger list so that routing labels rerun
-    CI (docs/development/ci-controls.md).
-    """
+def test_the_required_pr_gate_reports_missing_or_cancelled_results():
     workflow = yaml.safe_load(CI.read_text())
-    gate_if = workflow["jobs"]["ci-complete"]["if"]
-    assert "always()" in gate_if
-    assert "!cancelled()" in gate_if
+    gate = workflow["jobs"]["ci-complete"]
+    assert (
+        gate["if"]
+        == "always() && (github.event_name == 'pull_request' || !cancelled())"
+    )
+    assert gate["name"] == (
+        "${{ github.event_name == 'pull_request' && 'PR hardware parity' || 'CI complete' }}"
+    )

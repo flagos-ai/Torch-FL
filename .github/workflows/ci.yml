@@ -25,8 +25,7 @@ on:
   push:
     branches: [main, dev, devops, dev-hygon, dev-thead, dev-musa, iluvatar_build_and_test]
   pull_request:
-    branches: [main, dev, devops, dev-hygon]
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       profile:
@@ -192,7 +191,6 @@ jobs:
         id: detect
         env:
           SOURCE_REPOSITORY: ${{ needs.resolve-checkout.outputs.repository }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms || '' }}
           EVENT_NAME: ${{ github.event_name }}
           TEST_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || inputs.profile || 'pr' }}
@@ -213,16 +211,7 @@ jobs:
   # One hardware pipeline per configured platform. The reusable workflow reads
   # runner, image, timeout, and test groups from the validated plan snapshot.
   #
-  # fail-fast is off on purpose. The PR is red whatever the other lanes do, so
-  # cancelling them on the first failure saves accelerator time only when the
-  # failure is the *only* one -- and that is exactly the case that is not true
-  # here. A cancelling matrix reports the first red and nothing else: fix it,
-  # push, wait a full round, and the next run reports the next. The cost is paid
-  # on every lane that turned out to be fine anyway (a cancelled lane is not a
-  # measurement), which is why the platform set stays as narrow as the diff
-  # allows (paths_watch in .github/configs/<platform>.yml). Letting every
-  # selected lane finish turns N rounds into one and still fails `CI complete`
-  # for any lane that did not pass -- see tests/unit/test_ci_fail_fast.py.
+  # Let all hardware lanes finish so the PR gate can compare their results.
   platform-pipeline:
     name: Platform pipeline (${{ matrix.platform }})
     needs: [resolve-checkout, discover-platforms]
@@ -243,15 +232,9 @@ jobs:
 
   # Single required-check gate for branch protection.
   ci-complete:
-    name: CI complete
-    # Not on a cancelled run. This job is the gate, so it runs even when its
-    # dependencies failed -- that is the whole point of always(). Cancellation
-    # is different: the run measured nothing, and every input here reads
-    # "cancelled", which the gate counts as a failure. A superseded run (a new
-    # push, or the label events a PR gets on creation) then leaves a failing
-    # "CI complete" check on the pull request next to a run the UI already
-    # shows as Cancelled. Nothing is being reported by failing here.
-    if: always() && !cancelled()
+    name: ${{ github.event_name == 'pull_request' && 'PR hardware parity' || 'CI complete' }}
+    # A PR still needs a failing verdict when a required lane is cancelled.
+    if: always() && (github.event_name == 'pull_request' || !cancelled())
     outputs:
       base_sha: ${{ needs.resolve-checkout.outputs.base_ref }}
     needs:

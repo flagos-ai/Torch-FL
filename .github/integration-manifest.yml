@@ -620,6 +620,10 @@ steps:
       --retain tests/unit/test_startup_subprocess.py
       --retain tests/unit/test_vendor_libtorch_overlay.py
 
+  - id: common_regression
+    name: Common regression
+    command: python -m pytest tests/integration/common -v --tb=short
+
   - id: runtime_conformance
     name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
