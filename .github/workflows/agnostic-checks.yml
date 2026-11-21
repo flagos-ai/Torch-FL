@@ -155,6 +155,7 @@ jobs:
             tests/unit/test_musa_ci_manifest.py
             tests/unit/test_musa_env_script.py
             tests/unit/test_ops_conftest_platform.py
+            tests/unit/test_flaggems_override_slots.py
             tests/unit/test_patch_triton_ascend.py
             tests/unit/test_platform_capability_matrix.py
             tests/unit/test_platform_detect.py
