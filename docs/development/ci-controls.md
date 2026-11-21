@@ -18,7 +18,7 @@ test groups come from the shared integration manifest.
 
 Routing labels take precedence over changed-file filtering, following upstream
 policy. For example, a shared workflow change with `platform:nvidia` selects
-NVIDIA and its boxing lane. Without routing labels, shared code or unavailable
+the NVIDIA lane. Without routing labels, shared code or unavailable
 diffs select every platform. The plan records the diff audit fields and the
 label's `label_priority` selection policy. The gate validates every lane in
 that selected matrix; it does not imply a full-platform run.
@@ -176,11 +176,10 @@ configuration jobs use sibling `control/` and `source/` directories; a path or
 symlink submitted inside the source tree cannot redirect the trusted checkout.
 Configuration outputs remain relative to the hardware job's source checkout.
 
-One planning call reads each platform file once. Routing, boxing selection,
-compilation and configuration fingerprinting reuse that call's parsed data and
-original bytes, without a process-global cache. Each lane receives its own copy
-so default and boxing expectations cannot mutate one another. Runner labels must
-be nonempty strings, including after whitespace is stripped.
+One planning call reads each platform file once. Routing, manifest composition
+and configuration fingerprinting share the parsed data and the original bytes.
+Each platform has one lane and its own environment expectations. Runner labels
+must be nonempty after whitespace is stripped.
 
 A failed-job rerun may reuse the original producer's artifact in the same run;
 the consumer still checks its exact context and hash, and rejects a future
@@ -281,10 +280,8 @@ A standalone codegen dispatch has this narrower scope; use full CI for both.
 
 Explicit test files and generator checks must not be listed in both CPU
 workflows. The routing contract tests check unique ownership and preserve the
-required dependencies. This policy does not remove device or installed-wheel
-checks: identical filenames on default/boxing or different vendor environments
-can represent different validation. Reducing those checks requires evidence of
-equivalent environments and behavior, not a filename-based exclusion list.
+required dependencies. Device and installed-wheel checks still run in the
+platform pipelines.
 
 Platform-agnostic CI runs regression tests for selection, routing, required gate
 results, checkout resolution, comment dispatch, network classification and retry

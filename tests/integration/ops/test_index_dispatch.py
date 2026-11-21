@@ -301,8 +301,10 @@ class TestIndexValueBounds:
         with pytest.raises((IndexError, RuntimeError)) as caught:
             run(DEVICE)
 
-        assert "out of bounds" in str(caught.value) or "out of range" in str(
-            caught.value
+        message = str(caught.value).lower()
+        assert any(
+            hint in message
+            for hint in ("out of bounds", "out of range", "out of data bounds")
         )
 
     @pytest.mark.dcu
@@ -348,14 +350,10 @@ class TestIndexValueBounds:
 
     @pytest.mark.dcu
     @pytest.mark.parametrize(
-        "run",
-        [
-            pytest.param(c[1], id=c[0])
-            for c in _OOB_CASES
-            if c[0] in _OOB_TYPE_DIVERGENT
-        ],
+        "name,run",
+        [pytest.param(*c, id=c[0]) for c in _OOB_CASES if c[0] in _OOB_TYPE_DIVERGENT],
     )
-    def test_divergent_exception_type_is_index_error(self, run):
+    def test_unclaimed_index_select_preserves_the_cpu_exception_type(self, name, run):
         # The two cases in _OOB_TYPE_DIVERGENT report RuntimeError on the CPU and
         # IndexError here. This pins the choice so that changing it is deliberate,
         # and so that the divergence cannot widen unnoticed: every other case is
@@ -366,7 +364,18 @@ class TestIndexValueBounds:
             run(DEVICE)
 
         assert type(on_cpu.value) is RuntimeError
-        assert type(on_device.value) is IndexError
+        # A non-leading index_select uses the CPU implementation on the
+        # admitted DCU route. The generated guards raise IndexError when they
+        # own the operator; the CPU fast path raises RuntimeError.
+        from backend_conf import routed_backend_or_none
+
+        expected = (
+            RuntimeError
+            if name == "index-select-nonleading-dim"
+            and routed_backend_or_none("index_select") is None
+            else IndexError
+        )
+        assert type(on_device.value) is expected
 
     @pytest.mark.dcu
     def test_device_survives_out_of_bounds(self):

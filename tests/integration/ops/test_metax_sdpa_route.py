@@ -87,7 +87,7 @@ def _active_conf() -> str:
 
 
 def _require_metax_flaggems() -> None:
-    """Skip unless this is a MetaX boxing build with a usable FlagGems runtime."""
+    """Skip unless this is a MetaX wheel with a usable FlagGems runtime."""
     if not _active_conf().endswith("backends_metax.conf"):
         pytest.skip(
             "the MetaX SDPA route is stated in backends_metax.conf; this "
@@ -318,7 +318,7 @@ def sdpa_shipped():
 def sdpa_switched_off():
     """The same cases with the documented runtime switch set."""
     _require_metax_flaggems()
-    result = _run_sdpa_cases({"FLAGOS_OP_scaled_dot_product_attention": "cuda"})
+    result = _run_sdpa_cases({"FLAGOS_OP_scaled_dot_product_attention": "none"})
     assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"
     return _sdpa_report(result)
 
@@ -379,8 +379,8 @@ class TestMetaXSdpaRoute:
             "admitted cases may reach it, and only with their own q, k, v"
         )
 
-    def test_off_switch_returns_every_call_to_the_boxing_route(self, sdpa_switched_off):
-        """``FLAGOS_OP_scaled_dot_product_attention=cuda`` is the whole switch.
+    def test_off_switch_uses_the_aten_composite(self, sdpa_switched_off):
+        """``FLAGOS_OP_scaled_dot_product_attention=none`` is the whole switch.
 
         The same conf is in use in both arms -- only this variable differs -- so
         this is also the check that the eligible case's route came from the conf

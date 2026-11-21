@@ -71,27 +71,6 @@ class TestSiluBackwardCorrectness:
         assert x.grad.shape == x.shape
         assert x.grad.device.type == "flagos"
 
-    @pytest.mark.cuda
-    @pytest.mark.anyplatform
-    def test_silu_backward_matches_cuda(self):
-        torch.manual_seed(1)
-        # Compute reference on CPU (avoid mixing cuda/flagos autograd streams)
-        x_cpu = torch.randn(64, 64, requires_grad=True)
-        y_cpu = torch.nn.functional.silu(x_cpu)
-        y_cpu.sum().backward()
-
-        # Use the SAME input values on flagos (copy from CPU) rather than
-        # re-seeding randn: flagos randn now uses the CUDA RNG, which does not
-        # match the CPU RNG for the same seed, so re-seeding would compare
-        # gradients of different inputs.
-        x_flagos = x_cpu.detach().to(DEVICE).requires_grad_(True)
-        y_flagos = torch.nn.functional.silu(x_flagos)
-        y_flagos.sum().backward()
-
-        torch.testing.assert_close(
-            x_flagos.grad.cpu(), x_cpu.grad, rtol=1e-4, atol=1e-4
-        )
-
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.anyplatform
     def test_silu_backward_dtype(self, dtype):
@@ -127,14 +106,6 @@ class TestSiluBackwardDispatch:
             check=False,
         )
         assert "[flagos dispatch] silu_backward -> flagos_python" in result.stderr
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu_backward": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] silu_backward -> boxing" in result.stderr
 
 
 class TestSiluBackwardAscendDispatch:

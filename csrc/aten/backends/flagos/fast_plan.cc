@@ -108,12 +108,7 @@ const DriverApi& Driver() {
 // torch wheel this plugin must stay loadable under - it is the plugin's per-device registry,
 // which is the only registry that exists there.
 Stream_t CurrentStreamOf(const at::Device& device) {
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-  return reinterpret_cast<Stream_t>(
-      c10::cuda::getCurrentCUDAStream(device.index()).stream());
-#else
   return ::GetCurrentStreamForDevice(device.index());
-#endif
 }
 
 bool Complete(Event_t event) {

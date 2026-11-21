@@ -4,15 +4,8 @@
 
 PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain (`PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit) but has its own `FLAGOS_ACCELERATOR=ppu` value like every other vendor. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`).
 
-The default build is **FlagGems-primary**: `FLAGOS_BUILD_BOXING` is off, so the wheel compiles no CUDA boxing kernels and bundles no vendor libtorch; `backends_thead.conf` routes the ops it names to FlagGems and everything else reaches `cpu_fallback`. Boxing is the explicit opt-in (`FLAGOS_BUILD_BOXING=1`), and it is the simplest compatibility-boxing case:
-
-- **No stock `+cpu` wheel and no external `libtorch_cuda.so`** are required — the PPU torch wheel ships its own CUDA runtime
-- PPU registers ops under the `CUDA` dispatch key (not `PrivateUse1`), so the generated CUDA boxing kernels are reused unchanged
-- `FLAGOS_ACCELERATOR=ppu` selects the build (CUDA toolchain + `lib_thead/` bundle) and is recorded in `torch_fl/_build_config.py`, which is what selects `backends_thead.conf` at runtime — the environment is not consulted there; `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets
-
-Unless a section says otherwise, the rest of this guide describes the default FlagGems-primary wheel; the boxing build is called out where it differs.
-
-**Status:** Experimental. CI covers the build plus the manifest in `.github/configs/thead.yml`; broader model validation still rests on the build-from-source instructions and setup-specific testing.
+The T-Head wheel uses FlagGems on the PPU SDK runtime.
+`backends_thead.conf` records the accelerated operators and CPU fallbacks.
 
 ## Prerequisites
 
@@ -39,41 +32,7 @@ FLAGOS_ACCELERATOR=ppu \
   pip install --no-build-isolation -vvv -e .
 ```
 
-This wheel compiles the FlagGems Python path and no CUDA boxing kernels; the ops `backends_thead.conf` does not route to FlagGems reach `cpu_fallback`. `FLAGOS_SKIP_CUDA_ASSETS=1` is still required here because the PPU `torch` wheel ships its own CUDA runtime.
-
-### From Source (Boxing Build, Opt-in)
-
-```bash
-git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
-cd PyTorch-Plugin-FL
-
-# CUDA_HOME points at the PPU CUDA_SDK; FLAGOS_SKIP_CUDA_ASSETS=1 skips
-# bundling an external libtorch_cuda.so AND skips pinned nvidia-*-cu12 deps
-# (PPU supplies CUDA 13 via PPU_SDK/CUDA_SDK).
-FLAGOS_ACCELERATOR=ppu \
-  CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
-  FLAGOS_BUILD_BOXING=1 \
-  FLAGOS_BUILD_FLAGGEMS_CPP=OFF \
-  FLAGOS_BUILD_FLAGGEMS=OFF \
-  FLAGOS_SKIP_CUDA_ASSETS=1 \
-  pip install --no-build-isolation -vvv -e .
-```
-
-**Key differences from NVIDIA CUDA build:**
-- `CUDA_HOME` points to `PPU_SDK/CUDA_SDK`, not `/usr/local/cuda`
-- `FLAGOS_SKIP_CUDA_ASSETS=1` disables bundling external CUDA assets (PPU torch provides them)
-- PPU torch already has `torch.cuda.is_available() == True`, so no CPU wheel is involved
-- `FLAGOS_BUILD_BOXING=1` is what opts into the CUDA boxing kernels; omitting it builds
-  the default FlagGems-primary wheel, and `FLAGOS_BUILD_FLAGGEMS=OFF` here is only
-  meaningful alongside boxing
-
-### Runtime Configuration
-
-Set `FLAGOS_DISABLE_CUDA_ASSETS=1` so the import-time preload of bundled `libtorch_cuda.so` is a no-op (there is none — PPU torch provides it):
-
-```bash
-export FLAGOS_DISABLE_CUDA_ASSETS=1
-```
+The wheel runs FlagGems kernels through the PPU runtime. Operators with a `none` route in `backends_thead.conf` use CPU fallback.
 
 ## Verification
 
@@ -129,10 +88,8 @@ or deliberately selecting a different worker configuration.
 
 ### AMP and GradScaler
 
-On the boxing build PPU uses the shared CUDA-boxing implementation, while the
-public AMP device name is `flagos`. Autocast supports `torch.float16` and
-`torch.bfloat16`; the AMP foreach kernels used by `GradScaler` are routed
-through the same PPU CUDA runtime:
+Use `flagos` as the AMP device name. The supported autocast dtypes are
+`torch.float16` and `torch.bfloat16`:
 
 ```python
 import torch
@@ -169,20 +126,16 @@ CUDA environment does not establish PPU AMP support. BF16 availability and
 GradScaler behavior must be checked against the installed PPU hardware and
 vendor torch wheel.
 
-### Operator Validation (Boxing Build)
-
-The boxing build validates the ops that reach the CUDA boxing kernels:
+### Operator validation
 
 ```bash
-FLAGOS_DISABLE_CUDA_ASSETS=1 \
-  pytest tests/unit tests/integration/ops \
-    tests/integration/test_factory_ops.py \
-  -q -m "not flaggems and not flaggems_python"
+python -m pytest tests/integration/ops/test_reference_ops.py -v --tb=short
+python -m pytest tests/integration/ -m multi_device -v --tb=short
 ```
 
-## FlagGems on PPU (default)
+## FlagGems on PPU
 
-`FLAGOS_BUILD_FLAGGEMS=ON` is the build default; `import torch_fl` then reads `torch_fl/configs/backends_thead.conf`, which routes discovered ops to FlagGems' Triton kernels first. In the default FlagGems-primary wheel the remaining ops reach `cpu_fallback`; in a boxing wheel they reach the vendor CUDA kernel instead. No runtime opt-in variable is needed.
+`import torch_fl` loads `torch_fl/configs/backends_thead.conf`.
 
 PPU needs no compatibility shim beyond the generic CUDA one: `libcuda.so` is a real driver, so `is_nvidia_cuda_available()` succeeds, `GEMS_VENDOR=nvidia` is set automatically, and `triton.language.extra.cuda.libdevice` resolves.
 

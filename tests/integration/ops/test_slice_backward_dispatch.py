@@ -127,14 +127,6 @@ class TestSliceBackwardDispatch:
         )
         assert "[flagos dispatch] slice_backward -> flagos_python" in result.stderr
 
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_slice_backward": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] slice_backward -> boxing" in result.stderr
-
 
 class TestSliceBackwardAscendDispatch:
     """Verify Ascend backend correctness."""

@@ -62,15 +62,11 @@ _LOG_NAME = {
     "flaggems_python": "flagos_python",
     "flagos_python": "flagos_python",
     "flaggems_cpp": "flagos",
-    # A conf row in the vendor spelling, against the id the log prints. The
-    # NVIDIA rows print "boxing" (the slot they register into).
+    # Vendor spellings can differ from the dispatch log.
     "apple": "mps",
     "mthreads": "musa",
     "enflame": "gcu",
     "nvidia": "nvidia",
-    # The day-0 variant spells the same slot `boxing` (setup.py's day-0 name is
-    # the log name), and the log prints `boxing` for it.
-    "boxing": "boxing",
 }
 
 
@@ -146,7 +142,7 @@ def unimplemented_runtime_ops() -> list[str]:
 def build_kernels() -> frozenset[str]:
     """Kernel sets compiled into this wheel, from the build record.
 
-    Names are setup.py's (``vendor``, ``flaggems``, ``boxing``, ``flaggems_cpp``,
+    Names are setup.py's (``vendor``, ``flaggems``, ``flaggems_cpp``,
     ``tileops``); empty for an unbuilt source checkout.
     """
     from torch_fl import _env

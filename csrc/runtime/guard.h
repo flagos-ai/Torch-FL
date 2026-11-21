@@ -40,47 +40,7 @@
 #include "runtime/allocator/caching_device_allocator.h"
 #endif
 
-// Real c10::cuda:: stream/event plumbing. Gated the same way as
-// backends/nvidia_memory.h's delegation to
-// c10::cuda::CUDACachingAllocator (NOT the looser cuda_runtime.h guard used
-// in hooks.h/contiguous_ops.cc/copy_ops.cc): the DCU wheel is hipified and
-// exports c10::hip::HIPCachingAllocator with zero c10::cuda symbols (see
-// backends/hygon_memory.h), so c10::cuda::getCurrentCUDAStream would fail to
-// resolve there even though DCU's CUDA-compat runtime satisfies plain
-// cudaStream_t calls. MUSA is excluded for the plainer reason that the Moore
-// Threads toolkit ships no CUDA runtime at all, so the header itself is absent
-// -- same exclusion as hooks.h and copy_ops.cc already carry. Kunlunxin is
-// excluded because the de-boxed XPU backend drives libxpurt directly and never
-// puts a tensor on the CUDA dispatch key; the XPU SDK does ship a CUDA-shaped
-// cuda_runtime.h, but c10::cuda:: (the C++ stream plumbing this branch needs)
-// is a hollow shell in this build, which is exactly why the backend was
-// de-boxed. Iluvatar is excluded because the platform links the CPU torch wheel:
-// its runtime has its own stream registry (runtime/accelerator/iluvatar/
-// stream.cc) rather than reading torch's, precisely so that no c10::cuda symbol
-// -- and therefore not libtorch_cuda.so / libc10_cuda.so, which a CPU wheel does
-// not ship -- enters the build.
-//
-// FLAGOS_BOXING_BUILD is required on top of that list, for the same reason
-// backends/nvidia_memory.h gates its allocator delegation: c10::cuda lives in
-// libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
-// links the CPU-only torch wheel), so the symbols this branch calls are absent
-// at load time even on a real NVIDIA box. Every CUDA-ABI platform that reaches
-// here -- cuda, ppu, metax -- builds with boxing on except the cuda lane the
-// default wheel is tested on, so this only ever flips the default
-// build. Its native stream registry is handled separately below, without any
-// libtorch_cuda dependency.
-#if defined(FLAGOS_BOXING_BUILD) && !defined(USE_ASCEND) && \
-    !defined(USE_TSINGMICRO) && !defined(USE_DCU) && !defined(USE_GCU) && \
-    !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
-    !defined(USE_MPS) && !defined(USE_ILUVATAR) && !defined(USE_CAMBRICON)
-#define FLAGOS_GUARD_HAS_CUDA_STREAM 1
-#include <c10/cuda/CUDAStream.h>
-#else
-#define FLAGOS_GUARD_HAS_CUDA_STREAM 0
-#endif
-
-#if !defined(FLAGOS_BOXING_BUILD) && \
-    (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA))
+#if defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA)
 #define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 1
 #include <c10/core/DeviceGuard.h>
 #include "runtime/allocator/caching_device_allocator.h"
@@ -88,7 +48,7 @@
 #define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 0
 #endif
 
-#if !defined(FLAGOS_BOXING_BUILD) && defined(USE_DCU)
+#if defined(USE_DCU)
 #define FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM 1
 #include <c10/core/DeviceGuard.h>
 #include "runtime/allocator/caching_device_allocator.h"
@@ -237,26 +197,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     ::SetDevice(d.index());
   }
 
-  // NB on all the FLAGOS_GUARD_HAS_CUDA_STREAM branches below: `d.index()`
-  // may be -1 (unresolved / "current device"), matching CUDAGuardImpl's own
-  // contract. c10::cuda resolves -1 to the real current device internally,
-  // but that resolution lives in the *returned* CUDAStream/DeviceIndex, not
-  // in `d`. Reusing the caller's original (possibly still -1) Device when
-  // building the returned c10::Stream would leak an unresolved index back
-  // into torch; a later setCurrentCUDAStream() on that leaked -1 corrupts
-  // CUDA's fixed-size per-device stream-pool bookkeeping (reproduced
-  // locally as a `free(): invalid pointer` crash from a plain
-  // `with torch.Stream(device="flagos"): ...`). Always reconstruct the
-  // returned Device from the resolved index.
-
   c10::Stream getStream(c10::Device d) const noexcept override {
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-    auto s = c10::cuda::getCurrentCUDAStream(d.index());
-    return c10::Stream(
-        c10::Stream::UNSAFE,
-        c10::Device(c10::DeviceType::PrivateUse1, s.device_index()),
-        s.id());
-#elif defined(USE_ASCEND)
+#if   defined(USE_ASCEND)
     auto device = ResolveAscendDevice(d);
     return MakeAscendStream(
         device,
@@ -273,13 +215,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream getDefaultStream(c10::Device d) const override {
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-    auto s = c10::cuda::getDefaultCUDAStream(d.index());
-    return c10::Stream(
-        c10::Stream::UNSAFE,
-        c10::Device(c10::DeviceType::PrivateUse1, s.device_index()),
-        s.id());
-#elif defined(USE_ASCEND)
+#if   defined(USE_ASCEND)
     auto device = ResolveAscendDevice(d);
     return MakeAscendStream(
         device,
@@ -296,13 +232,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream getStreamFromGlobalPool(c10::Device d, bool isHighPriority = false) const override {
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-    auto s = c10::cuda::getStreamFromPool(isHighPriority, d.index());
-    return c10::Stream(
-        c10::Stream::UNSAFE,
-        c10::Device(c10::DeviceType::PrivateUse1, s.device_index()),
-        s.id());
-#elif defined(USE_ASCEND)
+#if   defined(USE_ASCEND)
     auto device = ResolveAscendDevice(d);
     aclrtStream stream = nullptr;
     aclrtCreateStream(&stream);
@@ -348,26 +278,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream exchangeStream(c10::Stream s) const noexcept override {
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-    // CUDAStream::UNCHECKED does not itself validate device_type, but
-    // setCurrentCUDAStream() stores the wrapped c10::Stream verbatim in its
-    // per-device slot, and every later getCurrentCUDAStream() unpacks that
-    // slot assuming DeviceType::CUDA -- wrapping with s's PrivateUse1
-    // device (as the brief's snippet does) corrupts that slot. Re-tag as
-    // CUDA before handing to c10::cuda.
-    auto cs = c10::cuda::CUDAStream(
-        c10::cuda::CUDAStream::UNCHECKED,
-        c10::Stream(
-            c10::Stream::UNSAFE,
-            c10::Device(c10::DeviceType::CUDA, s.device_index()),
-            s.id()));
-    auto old = c10::cuda::getCurrentCUDAStream(cs.device_index());
-    c10::cuda::setCurrentCUDAStream(cs);
-    return c10::Stream(
-        c10::Stream::UNSAFE,
-        c10::Device(c10::DeviceType::PrivateUse1, old.device_index()),
-        old.id());
-#elif defined(USE_ASCEND)
+#if   defined(USE_ASCEND)
     auto device = ResolveAscendDevice(s.device());
     auto old = at::native::flagos::ascend::GetCurrentAclStreamForDevice(device);
     at::native::flagos::ascend::SetCurrentAclStreamForDevice(
@@ -389,13 +300,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   c10::Stream getNewStream(c10::Device d, int priority = 0) const override {
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-    auto s = c10::cuda::getStreamFromPool(priority, d.index());
-    return c10::Stream(
-        c10::Stream::UNSAFE,
-        c10::Device(c10::DeviceType::PrivateUse1, s.device_index()),
-        s.id());
-#elif defined(USE_ASCEND)
+#if   defined(USE_ASCEND)
     auto device = ResolveAscendDevice(d);
     aclrtStream stream = nullptr;
     aclrtCreateStream(&stream);
@@ -564,23 +469,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     if (!*event) {
       ::EventCreate((Event_t*)event);
     }
-#if FLAGOS_GUARD_HAS_CUDA_STREAM
-    // Re-tag as CUDA (see exchangeStream above) before wrapping -- CUDAStream
-    // only holds the c10::Stream, it does not re-validate device_type, but
-    // cs.stream()'s internal unpack does assume CUDA.
-    auto cs = c10::cuda::CUDAStream(
-        c10::cuda::CUDAStream::UNCHECKED,
-        c10::Stream(
-            c10::Stream::UNSAFE,
-            c10::Device(c10::DeviceType::CUDA, stream.device_index()),
-            stream.id()));
-    // cs.stream() returns cudaStream_t; Stream_t is flagos's opaque
-    // `struct Stream*` ABI handle. Both conventions alias a raw
-    // cudaStream_t under the hood (see the (cudaStream_t)stream casts in
-    // accelerator/nvidia/stream.cc), so this reinterpret is the established
-    // flagos<->CUDA stream conversion, not a new pattern.
-    ::EventRecord(*(Event_t*)event, (Stream_t)cs.stream());
-#elif defined(USE_ASCEND)
+#if   defined(USE_ASCEND)
     ::EventRecord(*(Event_t*)event, (Stream_t)AscendStreamHandle(stream));
 #elif defined(USE_KUNLUNXIN)
     ::EventRecord(*(Event_t*)event, KunlunxinStreamHandle(stream));

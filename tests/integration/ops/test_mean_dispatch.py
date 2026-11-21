@@ -100,17 +100,6 @@ class TestMeanDimCorrectness:
         ref = a.cpu().mean(dim=-1)
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_mean_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(3)
-        a_cuda = torch.randn(64, 128, device="cuda:0")
-        ref = torch.mean(a_cuda, dim=-1)
-        a = a_cuda.to(DEVICE)
-        out = torch.mean(a, dim=-1)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
 
 class TestMeanDimDispatch:
     """Verify dispatch routing for mean.dim op."""
@@ -152,15 +141,6 @@ class TestMeanDimDispatch:
         result = _run_mean_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert f"[flagos dispatch] mean.dim -> {expected}" in result.stderr
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_mean_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mean__dim": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] mean.dim -> boxing" in result.stderr
 
 
 class TestMeanDimAscendDispatch:

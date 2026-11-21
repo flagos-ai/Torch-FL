@@ -233,20 +233,10 @@ def test_build_ext_stages_generated_build_config(
     assert compatibility["build"]["vendor_torch_version"] is None
 
 
-@pytest.mark.parametrize("boxing, expected", [(None, False), ("1", True)])
-def test_cuda_manifest_vendor_torch_policy_follows_boxing(
-    monkeypatch, tmp_path, clean_kernel_env, boxing, expected
+def test_cuda_manifest_records_no_vendor_torch_in_an_ordinary_build(
+    monkeypatch, tmp_path, clean_kernel_env
 ):
-    """A FlagGems-primary CUDA wheel declares no vendor libtorch; boxing opts in.
-
-    ``torch-fl-preflight --release`` demands FLAGOS_VENDOR_TORCH_VERSION only
-    when the manifest says the wheel ships a vendor libtorch, so the manifest
-    has to record the build's actual policy: a default (boxing-off) wheel ships
-    none, and only the explicit boxing opt-in carries the vendor libraries.
-    """
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
-    if boxing is not None:
-        monkeypatch.setenv("FLAGOS_BUILD_BOXING", boxing)
     namespace, _ = _load_setup(monkeypatch)
     root = tmp_path / "src"
     (root / "torch_fl").mkdir(parents=True)
@@ -270,7 +260,7 @@ def test_cuda_manifest_vendor_torch_policy_follows_boxing(
     namespace["_write_compatibility_manifest"]("2.10.0+cuda13.3")
 
     manifest = json.loads((root / "torch_fl" / "compatibility.json").read_text())
-    assert manifest["build"]["vendor_torch_libraries"] is expected
+    assert manifest["build"]["vendor_torch_libraries"] is False
 
 
 @pytest.mark.parametrize("bundled", [False, True])
@@ -487,7 +477,6 @@ def test_native_host_ci_build_excludes_the_default_build(
         "    assert not (root / 'build').exists(), 'inherited build cache'\n"
         "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
         "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
-        "    assert os.environ['FLAGOS_BUILD_BOXING'] == '0'\n"
         "    if os.environ['FLAGOS_ACCELERATOR'] == 'metax':\n"
         "        assert 'FLAGOS_VENDOR_TORCH_LIB' not in os.environ, 'inherited optional vendor cohort'\n"
         "        assert os.environ['FLAGOS_BUILD_VENDOR'] == '1'\n"
@@ -561,7 +550,7 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
     _, kwargs = _load_setup(monkeypatch)
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
     command.ensure_finalized()
-    with pytest.raises(RuntimeError, match="boxing"):
+    with pytest.raises(ValueError, match="FLAGOS_BUILD_BOXING has been removed"):
         command._build_native_hosts()
 
 
@@ -707,7 +696,6 @@ def test_native_vendor_records_the_verified_cohort(
 @pytest.mark.parametrize(
     "flag,value",
     [
-        ("FLAGOS_BUILD_BOXING", "1"),
         ("FLAGOS_BUILD_VENDOR", "0"),
         ("FLAGOS_SKIP_CUDA_ASSETS", "1"),
     ],
@@ -720,7 +708,7 @@ def test_native_vendor_refuses_incompatible_build(
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
     monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(tmp_path / "torch/lib"))
     monkeypatch.setenv(flag, value)
-    with pytest.raises(RuntimeError, match="bundled non-boxing vendor libraries"):
+    with pytest.raises(RuntimeError, match="bundled vendor libraries"):
         namespace["_native_vendor_cohort"]()
 
 
@@ -840,7 +828,7 @@ def test_metax_can_opt_into_the_tileops_experiment(monkeypatch, clean_kernel_env
     monkeypatch.setenv("FLAGOS_BUILD_TILEOPS", "1")
     resolved = namespace["_kernel_switches"]("metax")
     assert resolved["FLAGOS_BUILD_TILEOPS"] is True
-    assert resolved["FLAGOS_BUILD_BOXING"] is False
+    assert "FLAGOS_BUILD_BOXING" not in resolved
 
 
 def test_cmake_kernel_set_names_match_the_build_record(monkeypatch):
@@ -896,7 +884,7 @@ def test_platform_table_is_internally_consistent():
     """
     table = _platform_table()
     switches = table["kernel_switches"]
-    assert len(switches) == 5 and len(set(switches)) == 5
+    assert len(switches) == 4 and len(set(switches)) == 4
     assert set(table["kernel_set_names"]) == set(switches)
 
     required = (

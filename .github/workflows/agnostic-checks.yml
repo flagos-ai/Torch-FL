@@ -138,7 +138,7 @@ jobs:
             tests/unit/test_native_host_metax_routes.py
           tests/unit/test_metax_sdk_precision.py
             tests/unit/test_metax_runtime_link.py
-            tests/unit/test_metax_native_link_contract.py
+            tests/unit/test_retired_boxing_build.py
             tests/unit/test_metax_device_properties_restore.py
             tests/unit/test_native_host_ascend.py
             tests/unit/test_ascend_device_runtime.py

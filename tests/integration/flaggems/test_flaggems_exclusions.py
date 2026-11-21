@@ -44,10 +44,7 @@ def test_pinned_operators_are_not_routed_to_flaggems():
     accel = accel_label()
     if not accel:
         pytest.skip("the active conf is not a named backends_<platform>.conf")
-    # A day-0 boxing variant carries the same holds as its platform: the conf
-    # differs in what serves the operators FlagGems cannot, not in which
-    # operators FlagGems answers wrongly.
-    pinned = FLAGGEMS_PINNED_OFF.get(accel.removesuffix("_boxing"), ())
+    pinned = FLAGGEMS_PINNED_OFF.get(accel, ())
     if not pinned:
         pytest.skip(f"no FlagGems hold has been measured for {accel}")
 

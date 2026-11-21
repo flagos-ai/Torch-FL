@@ -27,18 +27,8 @@ This file also carries forward the checks proven in the one-shot verification
 gate ``tests/scratch/verify_correlation_foundation.py``, which was deleted once
 these tests existed -- this is now their only home.
 
-Assertions 1, 3 and 5a are skipped where the wheel carries no CUDA boxing
-kernels, which is the default for every CUDA-ABI platform since #520. Each of
-the three reads metadata only a cuBLAS/cuSOLVER trace produces -- the
-``gpu_memset`` category, ``External id`` among the kernel args, a
-``::``-qualified kernel name -- and on that wheel every op in the workload is a
-Triton kernel, so the trace has none of the three. The gate is on the build
-record rather than on the accelerator name because DCU runs this file with
-boxing on and must keep checking all five assertions.
-
 Run:
-    PYTHONPATH=$(pwd) bash scripts/vendor/with_nvidia_libtorch.sh \
-        python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops
+    python -m pytest tests/integration/test_profiler_parity.py -v -m main_ops
 """
 
 import json
@@ -51,9 +41,6 @@ import torch
 
 import torch_fl  # noqa: F401  (registers the flagos PrivateUse1 backend)
 
-from torch_fl import _env
-from profiler_support import append_boxing_path_probe
-
 _BASELINE_PATH = (
     Path(__file__).resolve().parents[1] / "data" / "profiler_cuda_baseline.json"
 )
@@ -63,34 +50,6 @@ DEVICE = "flagos:0"
 # Names that carry no cbid information: the generic `default:` fallback, and the
 # one name every runtime record was hardcoded to before the cbid table existed.
 GENERIC_RUNTIME_NAMES = {"cudaRuntime", "cudaLaunchKernel"}
-
-# The C++ Itanium mangling prefix. Kernel names are demangled in C++ via
-# abi::__cxa_demangle; names that are already readable (`ampere_sgemm_128x64_nn`)
-# come back with status=-2 and are kept verbatim, so the check is "not mangled",
-# not "was transformed".
-MANGLED_PREFIX = "_ZN"
-
-
-def _boxing_built() -> bool:
-    """True when this wheel carries the generated CUDA boxing kernels.
-
-    Read from the build record (``KERNELS`` in ``torch_fl/_build_config.py``)
-    rather than inferred from the accelerator name: boxing became an explicit
-    opt-in on every CUDA-ABI platform in #520, so a ``cuda`` wheel answers False
-    here unless it was deliberately built with ``FLAGOS_BUILD_BOXING=1``.
-    """
-    return "boxing" in _env.build_kernels()
-
-
-#: Skip for the three assertions whose subject is supplied by the boxing path.
-_NEEDS_BOXING = pytest.mark.skipif(
-    not _boxing_built(),
-    reason=(
-        "this wheel carries no CUDA boxing kernels, so the workload is all "
-        "Triton kernels and produces none of the cuBLAS/cuSOLVER metadata this "
-        "assertion reads (gpu_memset, kernel External id, ::-qualified names)"
-    ),
-)
 
 
 @pytest.fixture(scope="module")
@@ -130,7 +89,7 @@ def _run_traced_ops():
 
     5x matmul+relu (Task 1's gate workload: proven to produce sgemm kernels,
     elementwise kernels, cuBLAS workspace memsets and a D2H copy), plus a
-    16-element sort, plus one LU factorisation.
+    16-element sort.
 
     The sort earns its place: ``bitonicSortKVInPlace`` launches at
     ``block=[16,1,1]``, the only kernel in reach whose block size is NOT a
@@ -139,16 +98,6 @@ def _run_traced_ops():
     kernel, assertion 3's warps-per-SM value could not distinguish a correct
     implementation from a ceil bug.
 
-    The LU factorisation earns its place the same way, for the baseline's
-    ``gpu_memset`` / ``External id`` / demangling requirements: it is the only
-    op here that is still on the CUDA boxing path. The other five are routed to
-    FlagGems by the default CUDA conf, and a Triton kernel allocates no cuBLAS
-    workspace, reports no ``External id`` and carries no ``::``-qualified symbol
-    -- so on that routing the trace has none of the three, and assertions 1, 3
-    and 5a lose their subject. ``append_boxing_path_probe`` owns the details and
-    the reason it is gated per platform; on a wheel with no boxing kernels at
-    all it appends nothing, and those three assertions skip (``_NEEDS_BOXING``)
-    instead of failing on a trace they have nothing to read.
     """
     x = torch.randn(1024, 1024, device=DEVICE)
     y = torch.randn(1024, 1024, device=DEVICE)
@@ -164,7 +113,6 @@ def _run_traced_ops():
         for _ in range(5):
             z = (x @ y).relu()
         torch.sort(small)
-        append_boxing_path_probe(DEVICE)
         z.sum().item()  # force sync so device activity lands inside the window
 
     return prof
@@ -223,39 +171,6 @@ def _op_name_by_external_id(trace):
 
 
 @pytest.mark.main_ops
-@_NEEDS_BOXING
-def test_category_coverage(profile_result, baseline):
-    """Assertion 1: flagos emits every category torch-cuda does.
-
-    Coverage, not equality: flagos may emit extra categories. One equivalence
-    class -- ``runtime_cat_equivalents`` lets flagos satisfy torch-cuda's
-    ``cuda_runtime`` with ``privateuse1_runtime`` (what actually ships), so
-    switching later does not break CI.
-
-    Every other category must match by exact spelling: ``kernel``, not
-    ``Kernel`` or ``gpu_kernel``. The baseline records ``overhead`` as a known,
-    documented gap rather than omitting it silently.
-    """
-    _, trace = profile_result
-    actual = _event_categories(trace)
-    equivalents = set(baseline["runtime_cat_equivalents"])
-
-    required = set(baseline["categories"])
-    missing = {c for c in required - equivalents if c not in actual}
-    assert not missing, (
-        f"flagos trace is missing categories torch-cuda emits: {sorted(missing)}\n"
-        f"  flagos:   {sorted(actual)}\n"
-        f"  baseline: {sorted(required)}"
-    )
-
-    if required & equivalents:
-        assert actual & equivalents, (
-            "flagos emits no runtime category. Expected one of "
-            f"{sorted(equivalents)}; trace has {sorted(actual)}"
-        )
-
-
-@pytest.mark.main_ops
 def test_flow_arrows_are_paired(profile_result):
     """Assertion 2: flow arrows are PAIRED, never merely present.
 
@@ -303,44 +218,6 @@ def test_flow_arrows_are_paired(profile_result):
         f"  {len(dangling_f)} 'f' without 's': {sorted(dangling_f)[:10]}"
     )
     assert start_ids, "Flow events exist but none carry an id"
-
-
-@pytest.mark.main_ops
-@_NEEDS_BOXING
-def test_arg_key_supersets(profile_result, baseline):
-    """Assertion 3: every category's args cover the baseline's keys.
-
-    Superset, not equality. The baseline is a floor, not a ceiling: a future
-    task adding a 14th kernel field should not turn CI red, while a field going
-    *missing* still fails. Exact match would make every addition a break.
-    """
-    _, trace = profile_result
-    runtime_cat = _runtime_category(trace, baseline)
-    assert runtime_cat is not None, (
-        "flagos emitted no runtime events under any of "
-        f"{baseline['runtime_cat_equivalents']}"
-    )
-
-    for category, baseline_key in (
-        ("kernel", "kernel_arg_keys"),
-        ("gpu_memcpy", "gpu_memcpy_arg_keys"),
-        ("gpu_memset", "gpu_memset_arg_keys"),
-        (runtime_cat, "runtime_arg_keys"),
-    ):
-        events = _events_in(trace, category)
-        assert events, (
-            f"No {category!r} events in the flagos trace, so its arg keys cannot "
-            "be checked. The workload is expected to produce at least one."
-        )
-
-        actual = _arg_key_union(trace, category)
-        expected = set(baseline[baseline_key])
-        missing = expected - actual
-        assert not missing, (
-            f"{category}: args are missing keys torch-cuda emits: {sorted(missing)}\n"
-            f"  flagos   ({len(actual)} keys over {len(events)} events): {sorted(actual)}\n"
-            f"  baseline ({len(expected)} keys): {sorted(expected)}"
-        )
 
 
 @pytest.mark.main_ops
@@ -433,42 +310,6 @@ def test_device_time_attribution(profile_result):
         f"({kernel_total:.1f}us of {truth:.1f}us, threshold={kernel_threshold:.0%}). "
         "Kernel collection has likely broken, leaving the cross-check above "
         "comparing memsets to memsets."
-    )
-
-
-@pytest.mark.main_ops
-@_NEEDS_BOXING
-def test_kernel_names_are_demangled(profile_result):
-    """Assertion 5a: kernel names are not raw C++ mangled symbols.
-
-    Checks "not mangled" rather than "was transformed": abi::__cxa_demangle
-    returns status=-2 for already-readable names like ``ampere_sgemm_128x64_nn``,
-    which are then kept verbatim, so demangling correctly performs no transform
-    on them.
-
-    Asserted over ALL kernels, not "at least one": the workload launches C++
-    template kernels (``at::native::vectorized_elementwise_kernel<...>``) whose
-    raw symbols DO start with _ZN, so a single-name check would pass on the
-    plain-C sgemm name even with demangling entirely disabled.
-    """
-    _, trace = profile_result
-    kernels = _events_in(trace, "kernel")
-    assert kernels, "No kernel events in the flagos trace"
-
-    mangled = [k for k in kernels if k.get("name", "").startswith(MANGLED_PREFIX)]
-    assert not mangled, (
-        f"{len(mangled)} of {len(kernels)} kernel names are still mangled "
-        f"(start with {MANGLED_PREFIX!r}):\n"
-        + "\n".join(f"  {k.get('name', '')[:100]}" for k in mangled[:5])
-    )
-
-    # The workload includes C++ template kernels, so a trace in which nothing
-    # needed demangling means the workload changed and this assertion has
-    # quietly stopped testing anything.
-    assert any("::" in k.get("name", "") for k in kernels), (
-        "No kernel name contains '::', so no name in this trace required "
-        "demangling and the check above is vacuous. The workload is expected "
-        "to launch at::native template kernels."
     )
 
 

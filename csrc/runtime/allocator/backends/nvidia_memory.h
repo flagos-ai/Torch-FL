@@ -6,18 +6,6 @@
 
 #include <cuda_runtime.h>
 
-// The caching-allocator delegation below reaches into c10::cuda, which only
-// exists when torch was built with CUDA and that build's libtorch_cuda.so is in
-// the process. The default FlagGems-primary wheel (FLAGOS_BUILD_BOXING=OFF)
-// ships neither -- it links the CPU-only torch wheel and drives the vendor
-// runtime's cudaMalloc/cudaFree through the block pool instead -- so the
-// includes and the whole delegation block are gated on the boxing build.
-#ifdef FLAGOS_BOXING_BUILD
-#include <c10/cuda/CUDACachingAllocator.h>
-#include <c10/cuda/CUDAStream.h>
-#include <mutex>
-#endif
-
 namespace c10::flagos {
 
 // CUDA implementation of DeviceMemoryInterface.
@@ -117,91 +105,11 @@ class CudaDeviceMemory final : public DeviceMemoryInterface {
   // memory lives in one pool -> stats/empty_cache/OOM-retry are unified, and
   // torch.randn (a compute-factory that allocates on the CUDA device) is now
   // reflected in flagos memory stats.
-#ifdef FLAGOS_BOXING_BUILD
-  bool provides_caching() const override { return true; }
-
-  void* caching_alloc(size_t nbytes, Stream_t stream) override {
-    ensure_initialized();
-    if (stream != nullptr) {
-      return c10::cuda::CUDACachingAllocator::raw_alloc_with_stream(
-          nbytes, reinterpret_cast<cudaStream_t>(stream));
-    }
-    return c10::cuda::CUDACachingAllocator::raw_alloc(nbytes);
-  }
-
-  void caching_free(void* ptr) override {
-    c10::cuda::CUDACachingAllocator::raw_delete(ptr);
-  }
-
-  void caching_empty_cache() override {
-    ensure_initialized();
-    c10::cuda::CUDACachingAllocator::emptyCache();
-  }
-
-  void caching_record_stream(void* ptr, Stream_t stream) override {
-    if (ptr == nullptr || stream == nullptr) {
-      return;
-    }
-    int device = 0;
-    cudaGetDevice(&device);
-    // Non-owning DataPtr: the real deleter lives with the owning tensor; here
-    // we only need a handle for recordStream to associate the block.
-    at::DataPtr dp(
-        ptr, ptr, [](void*) {},
-        c10::Device(c10::DeviceType::CUDA, static_cast<c10::DeviceIndex>(device)));
-    auto cuda_stream = c10::cuda::getStreamFromExternal(
-        reinterpret_cast<cudaStream_t>(stream),
-        static_cast<c10::DeviceIndex>(device));
-    c10::cuda::CUDACachingAllocator::recordStream(dp, cuda_stream);
-    // dp holds a no-op deleter, so its destruction here frees nothing; the
-    // owning tensor's DataPtr remains the sole owner of the block.
-  }
-
-  bool caching_get_stats(int device, AllocatorStats* out) override {
-    ensure_initialized();
-    auto st = c10::cuda::CUDACachingAllocator::getDeviceStats(
-        static_cast<c10::DeviceIndex>(device));
-    constexpr auto kAgg =
-        static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
-    out->bytes_allocated =
-        static_cast<size_t>(st.allocated_bytes[kAgg].current);
-    out->bytes_reserved = static_cast<size_t>(st.reserved_bytes[kAgg].current);
-    out->peak_allocated = static_cast<size_t>(st.allocated_bytes[kAgg].peak);
-    out->peak_reserved = static_cast<size_t>(st.reserved_bytes[kAgg].peak);
-    out->num_alloc_calls = static_cast<size_t>(st.allocation[kAgg].allocated);
-    out->num_free_calls = static_cast<size_t>(st.allocation[kAgg].freed);
-    out->num_device_malloc = static_cast<size_t>(st.num_device_alloc);
-    out->num_device_free = static_cast<size_t>(st.num_device_free);
-    out->num_alloc_retries = static_cast<size_t>(st.num_alloc_retries);
-    return true;
-  }
-
-  void caching_reset_peak_stats(int device) override {
-    ensure_initialized();
-    c10::cuda::CUDACachingAllocator::resetPeakStats(
-        static_cast<c10::DeviceIndex>(device));
-  }
-
- private:
-  // The CUDA caching allocator asserts unless its per-device tables are sized
-  // by init(device_count). PyTorch normally does this in torch.cuda lazy init;
-  // in the flagos external-libtorch scheme we may allocate before that runs, so
-  // initialize it ourselves (C++-only, no Python lazy-init needed).
-  void ensure_initialized() {
-    static std::once_flag flag;
-    std::call_once(flag, []() {
-      int n = 0;
-      cudaGetDeviceCount(&n);
-      c10::cuda::CUDACachingAllocator::init(n);
-    });
-  }
-#else
   // No c10::cuda in the process (see the include guard above), so there is
   // nothing to delegate to. Returning false leaves CachingDeviceAllocator on
   // its own block pool over this backend's cudaMalloc/cudaFree, which are plain
   // runtime calls the vendor toolkit backs.
   bool provides_caching() const override { return false; }
-#endif
 };
 
 } // namespace c10::flagos

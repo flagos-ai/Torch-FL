@@ -161,7 +161,7 @@ def test_hcu_metadata_adapters_reuse_existing_aten_primitives(functions, op):
     )
     target = codegen.FLAGGEMS_HCU_METADATA_ADAPTERS[op]
     assert f"return at::native::flagos::{target}(" in source
-    assert "defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)" in source
+    assert "#if defined(USE_DCU)" in source
     assert "DeviceBoxingGuard" not in source
     assert (
         source in (ROOT / "csrc/aten/generated/flaggems_python_kernels.cc").read_text()

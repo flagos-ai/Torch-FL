@@ -20,7 +20,7 @@ output = compiled_model(input)
 **Key benefits**:
 - Automatic kernel fusion (no manual optimization needed), cutting per-op dispatch overhead
 - Graph stays on flagos: no cuda round trip, no copy at the graph boundary
-- Compatible with existing flagos dispatch (FlagGems Python/C++, CUDA boxing)
+- Compatible with existing flagos dispatch (FlagGems Python and C++ or vendor kernels)
 - Optional FlagTree compilation for multi-backend kernel generation (drop-in: it
   replaces `triton` at install time, so no code change is needed)
 
@@ -409,7 +409,7 @@ inductor generates Triton kernels that operate on flagos tensors directly.
 
 4. **Dispatch integration**
    - Ops inductor does not fuse fall back to eager flagos dispatch
-     (FlagGems Python/C++ or CUDA boxing) with no changes needed
+     (FlagGems Python and C++ or vendor kernels) with no changes needed
 
 5. **GCU 64-bit guard** (`torch_fl/compile/triton_64bit_guard.py`)
    - GCU300 cannot compile a kernel that needs a 64-bit value, and one of the

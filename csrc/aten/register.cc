@@ -303,7 +303,7 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   // Convert at::Stream to flagos Stream_t.
   // The stream id encodes the underlying device stream pointer.
   Stream_t stream = reinterpret_cast<Stream_t>(s.id());
-#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_DCU))
+#if (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_DCU))
   c10::OptionalDeviceGuard device_guard(s.device());
 #endif
   alloc->record_stream(self.storage().data_ptr(), stream);
@@ -744,7 +744,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
       FlagosPrivAddScalar);
 #endif
 
-#if defined(FLAGOS_FLAGGEMS_PYTHON) && !defined(FLAGOS_BOXING_BUILD) && \
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && \
     !defined(FLAGOS_REGISTER_TILEOPS)
 #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
   // Keep the low-precision prelude reachable for the forms the generated

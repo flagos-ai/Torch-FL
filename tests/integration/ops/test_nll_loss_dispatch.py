@@ -209,22 +209,6 @@ class TestNllLossDispatch:
         )
         assert "[flagos dispatch] nll_loss_backward -> flagos_python" in result.stderr
 
-    @pytest.mark.cuda
-    def test_dispatch_log_forward_cuda(self):
-        result = _run_subprocess_forward(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_nll_loss_forward": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] nll_loss_forward -> boxing" in result.stderr
-
-    @pytest.mark.cuda
-    def test_dispatch_log_backward_cuda(self):
-        result = _run_subprocess_backward(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_nll_loss_backward": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] nll_loss_backward -> boxing" in result.stderr
-
 
 class TestNllLossForwardAscendDispatch:
     """Verify Ascend backend correctness."""

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CUDA backend is **FlagGems-primary by default**: the operations its conf routes go to the FlagGems/Triton path and the rest reach `cpu_fallback`, with no vendor torch package required. An opt-in **boxing** build (`FLAGOS_BUILD_BOXING=1`) instead reuses PyTorch's optimized CUDA kernels through compatibility-key boxing — CPU-only PyTorch via pip plus a version-matched external `libtorch_cuda.so` that carries the full CUDA operator set.
+The NVIDIA wheel uses FlagGems and the CUDA runtime. Operators outside the configured routes reach CPU fallback.
 
 **Status:** Stable. CI builds and validates the **default** wheel — FlagGems-primary, no boxing kernels, no bundled `libtorch_cuda.so` — running the FlagGems operator suite, factory ops, profiler parity, and Qwen3-0.6B inference/training on 8-GPU A100 runners. The boxing build is not on the CUDA lane.
 
@@ -39,20 +39,12 @@ This build:
 - Compiles **no** CUDA boxing kernels and does **not** bundle `libtorch_cuda.so`; operations the conf does not route to FlagGems reach `cpu_fallback`
 - Depends on no `nvidia-*-cu12` runtime wheels
 
-### From Source (Boxing Build, Opt-in)
+### Migrating from a boxing wheel
 
-Set `FLAGOS_BUILD_BOXING=1` to build the CUDA boxing path, where each routed operation runs on the vendor's CUDA-ABI kernels:
-
-```bash
-FLAGOS_ACCELERATOR=cuda \
-  FLAGOS_BUILD_BOXING=1 \
-  pip install --no-build-isolation -vvv -e .
-```
-
-This build:
-- Generates CUDA boxing kernels from PyTorch's ATen schema (`csrc/aten/generated/cuda_kernels.cc`)
-- Bundles `libtorch_cuda.so` and related CUDA dispatcher libraries into `torch_fl/lib/`
-- Pins matching `nvidia-*-cu12` runtime dependencies for the bundled CUDA assets
+Use the ordinary NVIDIA wheel and its shipped `backends_nvidia.conf`. Remove
+`FLAGOS_BUILD_BOXING` and replace any `boxing` or `cuda` route values in custom
+configs and per-operator overrides. The `cuda` accelerator identifier is still
+accepted by `FLAGOS_ACCELERATOR`.
 
 ### With FlagGems C++ Dispatch (Optional)
 

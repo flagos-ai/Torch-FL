@@ -68,13 +68,7 @@
 // does have a stream to name; it just cannot be asked for through c10::cuda. It
 // still needs *some* barrier; see the arm below.
 //
-// FLAGOS_COPY_CUDA_ABI marks the platforms that DO share the vendor's CUDA
-// streams -- cuda, ppu, metax -- i.e. where a barrier is required but
-// the stream cannot be named without c10::cuda. On those, the actual stream
-// query is still gated on FLAGOS_BOXING_BUILD: c10::cuda lives in
-// libtorch_cuda.so, which the default FlagGems-primary wheel does not ship (it
-// links the CPU-only torch wheel), so getCurrentCUDAStream is an unresolved
-// symbol there. The de-boxed arm below covers both cases.
+// CUDA-ABI runtimes use the CUDA synchronization calls below.
 #if !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_DCU) && !defined(USE_BPU) && \
     !defined(USE_KUNLUNXIN) && !defined(USE_MPS) && !defined(USE_ILUVATAR) && \
@@ -84,10 +78,6 @@
 #define FLAGOS_COPY_CUDA_ABI 0
 #endif
 
-#if defined(FLAGOS_BOXING_BUILD) && FLAGOS_COPY_CUDA_ABI
-#define FLAGOS_COPY_HAS_CUDA_STREAM 1
-#include <c10/cuda/CUDAStream.h>
-#endif
 
 #if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX) && !defined(FLAGOS_GEMS_DEVICE_COPY)
 #define FLAGOS_GEMS_DEVICE_COPY 1
@@ -207,12 +197,7 @@ class BlockingCopyGuard {
 
  private:
   void DrainCurrentQueue() {
-#if defined(FLAGOS_COPY_HAS_CUDA_STREAM)
-    auto stream = c10::cuda::getCurrentCUDAStream();
-    if (stream.stream() != nullptr) {
-      stream.synchronize();
-    }
-#elif defined(USE_DCU)
+#if   defined(USE_DCU)
     // DCU shares the vendor's streams, so it needs this barrier just as much as
     // the other CUDA-family backends -- but it cannot ask which stream is
     // current (no c10::cuda symbols in a hipified wheel; see the guard above).
@@ -542,7 +527,7 @@ at::Tensor _copy_from(
 
   // Both flagos tensors: copy on-device.
   if (self.is_privateuseone() && dst.is_privateuseone()) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
     // The published copy host orders against the current HCU stream. Prefer it
     // for same-device copies, including contiguous copies, before the blocking
     // memcpy path drains the whole device.
@@ -570,18 +555,6 @@ at::Tensor _copy_from(
 #elif !defined(USE_ASCEND) && !defined(USE_TSINGMICRO) && !defined(USE_GCU) && \
     !defined(USE_MUSA) && !defined(USE_BPU) && !defined(USE_KUNLUNXIN) && \
     !defined(USE_ILUVATAR) && !defined(USE_MPS) && !defined(USE_CAMBRICON)
-#if defined(FLAGOS_BOXING_BUILD)
-      // CUDA platform: use DeviceBoxingGuard to dispatch to native CUDA
-      // strided copy kernel (handles strides, dtype casts on-device). The
-      // native copy kernel has no UInt16/UInt32/UInt64 case, so those casts
-      // take the host round-trip instead.
-      if (cast_needs_cpu_roundtrip(self.scalar_type(), dst.scalar_type())) {
-        strided_copy_cast_via_cpu(self, dst);
-      } else {
-        DeviceBoxingGuard guard(self, dst);
-        at::native::copy_(const_cast<at::Tensor&>(dst), self, false);
-      }
-#else
       // CUDA platform without the boxing kernels. `DeviceBoxingGuard` does not
       // need them: it only rewrites a tensor's device metadata to CUDA, and the
       // kernel it makes reachable is ATen's native TensorIterator strided copy
@@ -609,7 +582,6 @@ at::Tensor _copy_from(
         strided_copy_cast_via_cpu(self, dst);
 #endif
       }
-#endif
 #else
       // Ascend copies on-device via aclnnInplaceCopy, GCU via topsatenCopy and
       // Kunlunxin via the XPU op library's own strided copy; all honor the src
@@ -739,9 +711,6 @@ at::Tensor _copy_from(
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
       at::native::flagos::_copy_from(tmp, dst, false);
-#elif defined(FLAGOS_BOXING_BUILD)
-      DeviceBoxingGuard guard(tmp, dst);
-      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
 #else
       // CUDA platform without the boxing kernels: there is no native CUDA copy
       // kernel to scatter `tmp` into the strided `dst` with, so take the flagos
@@ -800,9 +769,6 @@ at::Tensor _copy_from(
     defined(USE_MUSA) || defined(USE_BPU) || defined(USE_KUNLUNXIN) || \
     defined(USE_ILUVATAR) || defined(USE_MPS) || defined(USE_CAMBRICON)
       at::native::flagos::_copy_from(tmp, dst, false);
-#elif defined(FLAGOS_BOXING_BUILD)
-      DeviceBoxingGuard guard(tmp, dst);
-      at::native::copy_(const_cast<at::Tensor&>(dst), tmp, false);
 #else
       // CUDA platform without the boxing kernels: as above, scatter through the
       // flagos copy path instead of the absent native CUDA copy kernel.
@@ -892,7 +858,7 @@ at::Tensor _to_copy(
     device = c10::Device(device.type(), device_index);
   }
 
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD) && defined(FLAGOS_GEMS_DEVICE_COPY)
+#if defined(USE_DCU) && defined(FLAGOS_GEMS_DEVICE_COPY)
   if (self.is_privateuseone() && device == self.device() && dtype != self.scalar_type() &&
       !self.is_conj() && !self.is_neg() && !self.has_names() &&
       self.numel() > 0 && self.numel() <= INT32_MAX &&
@@ -1061,18 +1027,6 @@ at::Tensor _to_copy(
           self_contig.options()
               .dtype(dtype)
               .device(c10::Device(c10::kPrivateUse1, device_index)));
-#if defined(FLAGOS_BOXING_BUILD)
-      // CUDA platform: use DeviceBoxingGuard + CUDA TensorIterator copy kernel
-      // for dtype cast on-device, avoiding costly CPU round-trip. The native
-      // copy kernel has no UInt16/UInt32/UInt64 case, so those casts take the
-      // host round-trip instead.
-      if (cast_needs_cpu_roundtrip(self_contig.scalar_type(), dtype)) {
-        strided_copy_cast_via_cpu(self_contig, result);
-      } else {
-        DeviceBoxingGuard guard(self_contig, result);
-        at::native::copy_(result, self_contig, false);
-      }
-#else
       // CUDA platform without the boxing kernels. `DeviceBoxingGuard` only
       // rewrites a tensor's device metadata to CUDA, so the on-device cast it
       // enables is ATen's native TensorIterator strided copy -- and that is a
@@ -1104,7 +1058,6 @@ at::Tensor _to_copy(
         strided_copy_cast_via_cpu(self_contig, result);
 #endif
       }
-#endif
 #endif
     } else {
       result = at::empty(

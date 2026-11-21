@@ -33,7 +33,7 @@ build_source="$(mktemp -d "$RUNNER_TEMP/torch-fl-native-host-source.XXXXXX")"
 git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$build_source"
 cd "$build_source"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
-export FLAGOS_BUILD_NATIVE_HOST=1 FLAGOS_BUILD_BOXING=0
+export FLAGOS_BUILD_NATIVE_HOST=1
 export FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
 if [[ "$FLAGOS_ACCELERATOR" == metax ]]; then
   export FLAGOS_BUILD_VENDOR=1

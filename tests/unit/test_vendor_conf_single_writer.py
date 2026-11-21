@@ -136,7 +136,7 @@ def test_the_cuda_conf_is_not_a_generated_vendor_conf():
     """Keep the exemption honest: cuda is not in the generator's platform set."""
     built = g.build_all(CONF_DIR)
     assert "cuda" not in built
-    canonical = set(g.BOXING_PLATFORMS) | set(g.VENDORS)
+    canonical = set(g.CUDA_ABI_PLATFORMS) | set(g.VENDORS)
     experimental = {f"{vendor}_tileops" for vendor in ("ascend", "mthreads", "metax")}
     assert set(built) == canonical | (experimental & set(built))
 
@@ -145,18 +145,18 @@ def test_vendors_and_boxing_platforms_are_disjoint():
     """A platform in both sets silently shadows its native route with boxing.
 
     The union above stays true for a platform that is a member of both sets, so
-    it is exactly the check that misses a platform moved from BOXING_PLATFORMS
+    it is exactly the check that misses a platform moved from CUDA_ABI_PLATFORMS
     to VENDORS without the removal sticking: the native ``<vendor>`` route would
     be overridden by the ``cuda`` fallback and every other test would still pass.
     """
-    assert set(g.VENDORS).isdisjoint(set(g.BOXING_PLATFORMS))
+    assert set(g.VENDORS).isdisjoint(set(g.CUDA_ABI_PLATFORMS))
 
 
 def test_no_local_vendor_fallback_table_is_left_behind():
     """The policy sets that fed the deleted writers have no other reader.
 
     A conf's routing diagnosis belongs next to the routing -- the gap sets and
-    BOXING_GAP_NOTES in gen_vendor_confs.py -- not in a second table here that
+    CUDA_ABI_GAP_NOTES in gen_vendor_confs.py -- not in a second table here that
     only a second writer would consult.
     """
     leftover = _assigned_names(_tree(CODEGEN_OPS)) & LEGACY_FALLBACK_SETS

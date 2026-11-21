@@ -46,7 +46,7 @@ def routes(path):
 def test_native_routes_and_claims_are_generated_from_one_policy():
     generator = load("scripts/codegen/gen_vendor_confs.py", "metax_native_confs")
     registration = load(
-        "scripts/codegen/codegen_boxing_flaggems_register.py", "metax_native_claims"
+        "scripts/codegen/codegen_flaggems_register.py", "metax_native_claims"
     )
     conf_dir = ROOT / "torch_fl/configs"
     ordinary = (conf_dir / "backends_metax.conf").read_bytes()
@@ -87,7 +87,7 @@ def test_native_routes_and_claims_are_generated_from_one_policy():
 
 def test_native_claim_generation_rejects_an_unavailable_kernel():
     registration = load(
-        "scripts/codegen/codegen_boxing_flaggems_register.py", "metax_native_missing"
+        "scripts/codegen/codegen_flaggems_register.py", "metax_native_missing"
     )
     with pytest.raises(SystemExit, match="no FlagGems kernel"):
         registration.render_native_hosts("metax", registration.wrapper_map(), set())

@@ -142,15 +142,6 @@ class TestSoftmaxDispatch:
         expected = routed_backend("_softmax")
         assert f"[flagos dispatch] _softmax -> {expected}" in result.stderr
 
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda(self):
-        result = _run_softmax_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP__softmax": "cuda"}
-        )
-        assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] _softmax -> boxing" in result.stderr
-
 
 class TestSoftmaxAscendDispatch:
     """Verify Ascend backend correctness."""

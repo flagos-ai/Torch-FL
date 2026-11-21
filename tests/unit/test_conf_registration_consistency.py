@@ -242,43 +242,6 @@ def _registered_ops(inc_path: Path) -> set[str]:
     return set(re.findall(r'm\.impl\("([^"]+)"', inc_path.read_text()))
 
 
-@pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", sorted(BOXING_PLATFORMS))
-def test_a_boxing_claim_and_the_conf_route_agree_in_both_directions(platform):
-    """The boxed list is the conf's route set, not a superset or a subset.
-
-    register.cc's boxing arm claims exactly ``register_boxing_<platform>.inc``
-    (plus the matrix ops the soft-lowp prelude claims from source in the same
-    body, where that prelude's platform macro is defined).
-    A claim with no route is "routed to 'none' ... but the op is registered on
-    PrivateUse1", and a route with no claim -- an op the conf routes to
-    ``boxing`` that nothing registered -- is "backend not registered" the first
-    time a model calls it. Both directions are measured failures on DCU: mm
-    after the arm stopped claiming unlisted wrappers (run 40156011560), and
-    `empty_like` the other way round before the boxed list existed.
-    """
-    boxed = _registered_ops(GEN_DIR / f"register_boxing_{platform}.inc")
-    boxed |= _prelude_matrix_claims(platform)
-    routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")
-    assert boxed, f"{platform} claims no boxed op"
-    left_at_none = sorted(op for op in boxed if routes.get(op) == "none")
-    assert not left_at_none, (
-        f"{platform} claims ops its conf routes to none: {left_at_none[:10]}"
-    )
-    unlisted = sorted(op for op in boxed if op not in routes)
-    assert not unlisted, (
-        f"{platform} claims ops its conf does not list: {unlisted[:10]}"
-    )
-    routed_to_boxes = sorted(
-        op for op, value in routes.items() if value.split("#")[0].strip() == "boxing"
-    )
-    unclaimed = sorted(set(routed_to_boxes) - boxed)
-    assert not unclaimed, (
-        f"{platform} routes {len(unclaimed)} op(s) to boxing that its boxed list "
-        f"does not claim: {unclaimed[:10]}"
-    )
-
-
 def _platform_registered(platform: str) -> set[str]:
     """Union of ops registered by every ``.inc`` this platform compiles.
 
@@ -287,7 +250,7 @@ def _platform_registered(platform: str) -> set[str]:
     """
     ops: set[str] = set(EXTRA_NATIVE.get(platform, set()))
     fragments = PLATFORM_REGISTRATION[platform]
-    for kind in ("base", "vendor", "flaggems", "boxing"):
+    for kind in ("base", "vendor", "flaggems"):
         if kind in fragments:
             ops |= _registered_ops(ATEN_DIR / fragments[kind])
     return ops
@@ -493,12 +456,6 @@ def test_metax_tileops_experiment_registration_matches_its_conf():
         ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "ON"}, ["vendor", "flaggems"]),
         ("metax", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
         ("metax", {"FLAGOS_BUILD_TILEOPS": "ON"}, ["tileops"]),
-        (
-            "metax",
-            {"FLAGOS_BUILD_TILEOPS": "ON", "FLAGOS_BUILD_BOXING": "ON"},
-            ["boxing"],
-        ),
-        ("tsingmicro", {"FLAGOS_BUILD_BOXING": "ON"}, ["boxing"]),
     ],
 )
 def test_cmake_selects_registration_fragments(tmp_path, platform, overrides, expected):
@@ -539,19 +496,6 @@ def test_cmake_selects_registration_fragments(tmp_path, platform, overrides, exp
 # ---------------------------------------------------------------------------
 # Conf shape invariants
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.anyplatform
-@pytest.mark.parametrize("platform", sorted(BOXING_PLATFORMS))
-def test_boxing_platforms_have_no_none_entries(platform):
-    """The day-0 boxing variant boxes what it cannot accelerate, so ``none`` is
-    never the right answer there -- that is what makes it a day-0 file. The
-    default conf for the same platform is ``none``-based; see
-    test_gen_vendor_confs.test_default_confs_never_route_boxing.
-    """
-    routes = _parse_conf(CONF_DIR / f"backends_{platform}_boxing.conf")
-    none_ops = [op for op, v in routes.items() if v.split("#", 1)[0].strip() == "none"]
-    assert not none_ops, f"{platform} routes {none_ops[:5]} to none"
 
 
 @pytest.mark.anyplatform
@@ -698,10 +642,9 @@ def test_flaggems_conformance_counts_match_committed_confs(monkeypatch):
     ]
     measured = {}
     for label in caps.EXPECTED_FLAGGEMS_ROUTES:
-        base = label.removesuffix("_boxing")
+        base = label
         vendor = platforms.get(base, {}).get("vendor", base)
-        suffix = "_boxing" if label.endswith("_boxing") else ""
-        conf = CONF_DIR / f"backends_{vendor}{suffix}.conf"
+        conf = CONF_DIR / f"backends_{vendor}.conf"
         monkeypatch.setattr(caps, "conf_path", lambda conf=conf: conf)
         measured[label] = caps.flaggems_coverage_count()
         assert (
@@ -871,7 +814,7 @@ def test_conf_route_counts_are_stable():
         # native_batch_norm and where.self_out (the math-SDPA fallbacks) -> 65. The
         # survey's 12/12 STRICT result and the measurements behind the two
         # additions are recorded in docs/reference/operator-support.md.
-        "tsingmicro": {"flaggems": 65, "flagos_python": 2, "tsingmicro": 14},
+        "tsingmicro": {"flaggems": 63, "flagos_python": 2, "tsingmicro": 14, "none": 2},
     }
     for platform, exp in expected.items():
         routes = _parse_conf(CONF_DIR / f"backends_{platform}.conf")

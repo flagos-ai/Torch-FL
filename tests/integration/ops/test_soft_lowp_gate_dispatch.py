@@ -180,13 +180,13 @@ class TestSoftLowpMatrixNumerics:
         raw = torch.full((2, 2), 0x11, dtype=torch.uint8, device=DEVICE)
         a = raw.view(torch.float4_e2m1fn_x2)
         b = raw.view(torch.float4_e2m1fn_x2)
-        self = torch.zeros(2, 2, device=DEVICE, dtype=torch.bfloat16)
+        bias = torch.full((2, 2), 2.0, device=DEVICE, dtype=torch.bfloat16)
 
-        result = self.addmm_(a, b)
-        assert result is self
+        result = bias.addmm_(a, b, beta=3, alpha=2)
+        assert result is bias
         assert result.device.type == "flagos"
         torch.testing.assert_close(
-            result.cpu(), torch.ones((2, 2), dtype=torch.bfloat16), atol=0, rtol=0
+            result.cpu(), torch.full((2, 2), 8.0, dtype=torch.bfloat16), atol=0, rtol=0
         )
 
 

@@ -296,12 +296,7 @@ def test_dispatch_can_select_each_platform(platform):
         capture_output=True,
         check=True,
     )
-    # A boxing platform is one wheel built two ways, so naming it dispatches
-    # both of its lanes and never only one.
     scheduled = [platform]
-    config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
-    if config.get("boxing_lane") is True:
-        scheduled = [platform, f"{platform}-boxing"]
     assert json.loads(result.stdout.removeprefix("platforms=")) == scheduled
 
 

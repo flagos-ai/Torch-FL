@@ -87,34 +87,12 @@ wheel_artifact_name: wheel-ppu
 # .github/scripts/check_platform_environment.py. The vocabulary is documented on
 # that script; the values are this platform's.
 #
-# PPU runs both builds of the wheel, one job each:
-#
-#   vendor lane (this file's `platform:` name)  the default wheel: stock +cpu
-#       torch, FlagGems routes compiled, backends_thead.conf as it ships. No
-#       boxing kernels, and no lib_thead/ bundle -- that dir is how torch_fl
-#       recognises a PPU-core wheel, and this lane is not one.
-#
-#   boxing lane (`thead-boxing`)  FLAGOS_BUILD_BOXING=1: the generated CUDA
-#       boxing kernels plus PPU's own libtorch staged into lib_thead/ and
-#       selected at import (which is why torch.version.cuda reads 13.0), run
-#       against the day-0 conf backends_thead_boxing.conf that routes the ops
-#       this build registers without a FlagGems kernel to `boxing`.
-#
-# Only the boxing lane bundles PPU's libtorch into lib_thead/: it is the tree
-# the PPU build links into, and it is what makes the wheel identify itself as a
-# PPU wheel (torch.version.cuda then reads 13.0). The vendor lane is the stock
-# +cpu wheel a `pip install` gets, judged by environment_check below.
-#
-# `boxing_lane: true` is what schedules the second job
-# (.github/scripts/ci/generate_matrix.py reads it).
-boxing_lane: true
-
 environment_check:
   torch_version_prefix: "2.10.0+cpu"
   cuda_version: null
   torch_path_forbidden:
     - /opt/conda/
-  # The vendor lane ships no lib_thead/ bundle: that directory is how torch_fl
+  # The wheel uses CPU torch without the PPU libtorch bundle: that directory is how torch_fl
   # identifies a PPU-core wheel, so a bundled one would make this stock +cpu
   # wheel select the PPU libtorch and read cuda 13.0 (run 40168685639).
   forbid_package_files:
@@ -123,18 +101,5 @@ environment_check:
     - flaggems
   forbid_build_kernels:
     - boxing
-  flagos_devices:
-    more_than: 0
-
-boxing_environment_check:
-  torch_version_prefix: "2.10.0+cpu"
-  cuda_version: "13.0"
-  torch_path_forbidden:
-    - /opt/conda/
-  require_build_kernels:
-    - flaggems
-    - boxing
-  require_package_files:
-    - lib_thead/libtorch_cuda.so
   flagos_devices:
     more_than: 0

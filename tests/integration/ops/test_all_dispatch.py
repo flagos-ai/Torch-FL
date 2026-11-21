@@ -247,15 +247,6 @@ class TestAllDispatch:
         )
         assert "[flagos dispatch] all -> flagos_python" in result.stderr
 
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_all_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_all": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] all -> boxing" in result.stderr
-
 
 class TestAllAscendDispatch:
     """Verify Ascend backend correctness."""

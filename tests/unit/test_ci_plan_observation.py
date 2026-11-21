@@ -74,9 +74,6 @@ def test_every_planned_lane_matches_the_existing_loader_cli(tmp_path, profile):
         config = yaml.safe_load(
             (ROOT / f".github/configs/{lane['platform']}.yml").read_text()
         )
-        boxing = lane["lane"] == "boxing"
-        if boxing:
-            config["display_name"] += " (CUDA boxing)"
         config_file.write_text(json.dumps(config))
         # These are the exact CLI inputs supplied by load-platform-config.yml.
         command = [
@@ -92,15 +89,7 @@ def test_every_planned_lane_matches_the_existing_loader_cli(tmp_path, profile):
             str(config_file),
             "--config-dir",
             str(ROOT / ".github/configs"),
-            "--environment-check",
-            json.dumps(
-                config.get(
-                    "boxing_environment_check" if boxing else "environment_check"
-                )
-            ),
         ]
-        if boxing:
-            command.append("--boxing-lane")
         expected = json.loads(
             subprocess.check_output(command, text=True, stderr=subprocess.PIPE)
         )
@@ -128,7 +117,7 @@ def test_every_planned_lane_matches_the_existing_loader_cli(tmp_path, profile):
         ),
         ("pull_request", ["README.md"], ["platform:nvidia"], "", "labels"),
         ("pull_request", ["README.md"], ["platform:unknown"], "", "labels"),
-        ("workflow_dispatch", ["README.md"], [], "hygon-boxing", "dispatch"),
+        ("workflow_dispatch", ["README.md"], [], "hygon", "dispatch"),
         ("push", [], [], "", "full_event"),
         ("schedule", [], [], "", "full_event"),
     ],
@@ -224,7 +213,7 @@ def test_execution_plan_retains_upstream_label_precedence(changed):
     labeled = PLANNER.build_ci_plan(
         request(), CONTRACT, ROOT, changed, "pull_request", ["platform:nvidia"]
     )
-    assert labeled["expected_platforms"] == ["nvidia", "nvidia-boxing"]
+    assert labeled["expected_platforms"] == ["nvidia"]
     assert [lane["name"] for lane in labeled["execution_plan"]] == labeled[
         "expected_platforms"
     ]
@@ -278,7 +267,7 @@ def test_large_execution_plan_stays_out_of_the_dispatch_context():
 
 
 @pytest.mark.parametrize(
-    "labels,selected", [([], []), (["platform:nvidia"], ["nvidia", "nvidia-boxing"])]
+    "labels,selected", [([], []), (["platform:nvidia"], ["nvidia"])]
 )
 def test_real_plan_cli_records_identity_and_supplies_the_matrix(
     tmp_path, labels, selected
@@ -443,9 +432,7 @@ def test_ci_nightly_is_full_and_weekly_stays_reserved():
     )
     configs = ROOT / ".github/configs"
     known = MATRIX._load_platforms(configs)
-    assert len(plan["execution_plan"]) == len(known) + len(
-        PLANNER.boxing_platforms(configs, known)
-    )
+    assert len(plan["execution_plan"]) == len(known)
     with pytest.raises(ValueError, match="weekly is reserved"):
         PLANNER.build_ci_plan(request(profile="weekly"), CONTRACT, ROOT, [], "schedule")
     with pytest.raises(ValueError, match="nightly requires platforms=all"):
@@ -490,16 +477,13 @@ def test_all_snapshot_configuration_outputs_match_platform_data(
         config = yaml.safe_load(
             (ROOT / f".github/configs/{lane['platform']}.yml").read_text()
         )
-        boxing = lane["lane"] == "boxing"
         consumed = CONSUMER.consume_plan(
             plan, context, lane["name"], profile, plan["source_sha"]
         )
         outputs = consumed["configuration"]
         assert outputs == {
             "platform": lane["platform"],
-            "boxing_lane": "1" if boxing else "",
-            "display_name": config["display_name"]
-            + (" (CUDA boxing)" if boxing else ""),
+            "display_name": config["display_name"],
             "setup_script": config["setup_script"],
             "setup_platform": config["setup_platform"],
             "setup_stage": config.get("setup_stage", "integration"),
@@ -511,8 +495,7 @@ def test_all_snapshot_configuration_outputs_match_platform_data(
             "integration_timeout_minutes": str(
                 config.get("integration_timeout_minutes", config["timeout_minutes"])
             ),
-            "wheel_artifact_name": config["wheel_artifact_name"]
-            + ("-boxing" if boxing else ""),
+            "wheel_artifact_name": config["wheel_artifact_name"],
             "integration_build_tools": "\n".join(
                 config.get("integration_build_tools", [])
             ),

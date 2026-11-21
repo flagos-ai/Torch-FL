@@ -25,15 +25,12 @@ how much of the model runs on FlagGems. The number is a measurement, so moving i
 is a deliberate edit that also updates the support report.
 """
 
-from pathlib import Path
-
 import pytest
 
 from flaggems_caps import (
     EXPECTED_FLAGGEMS_ROUTES,
     EXPECTED_SDPA_ROUTE,
     FLAGGEMS_ROUTING_CALLS,
-    SEEDED_DRAWOPS,
     accel_label,
     conf_path,
     conf_route,
@@ -66,46 +63,12 @@ def test_flaggems_route_count_matches_the_measured_one():
 
 
 @pytest.mark.anyplatform
-def test_the_seeded_draw_ops_are_never_boxed():
-    """No day-0 variant sends the seeded-drawout ops: ``boxing`` or ``none``.
-
-    A ``boxing`` row for them is the one route that cannot honour a seed on a
-    CPU-torch wheel: the boxing kernel is ATen's ``native_dropout``, which draws
-    from a generator ``torch.manual_seed`` cannot write. A ``none`` row is no
-    kernel at all. This is the invariant behind ``SEEDED_DRAWOPS``: the count
-    above leaves those rows out, so this test is where they are pinned.
-    """
-    import torch_fl
-    from torch_fl._platform import platform_for
-
-    conf_dir = Path(torch_fl.__file__).parent / "configs"
-    unrouted = []
-    for path in sorted(conf_dir.glob("backends_*_boxing.conf")):
-        # The generated variants only: ``platform_for`` names the vendors that
-        # have one, and the rest of this directory's ``*_boxing`` files are none.
-        if not platform_for(path.stem[len("backends_") : -len("_boxing")]):
-            continue
-        routes = dict.fromkeys(SEEDED_DRAWOPS)
-        with open(path) as f:
-            for line in f:
-                name, sep, value = line.split("#")[0].partition("=")
-                if sep and name.strip() in routes:
-                    routes[name.strip()] = value.strip()
-        unrouted += [
-            (path.name, op, route)
-            for op, route in routes.items()
-            if route in ("boxing", "none")
-        ]
-    assert not unrouted, f"the seeded-drawout ops have no seedable route in {unrouted}"
-
-
-@pytest.mark.anyplatform
 def test_sdpa_route_matches_the_recorded_one():
     """The composite's route is text, and text is all that can be pinned here.
 
     ``scaled_dot_product_attention`` is served by one PrivateUse1 kernel under
     every conf -- the kernel reads the key itself to decide between the FlagGems
-    callable and the boxed CUDA composite -- so the dispatch log cannot say which
+    callable and the ATen composite, so the dispatch log cannot say which
     arm a call took. The conf's spelling is the statement, and the numerics of
     each arm are the property of the platform's own operator tests.
     """

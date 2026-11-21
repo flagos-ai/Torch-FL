@@ -62,8 +62,8 @@ consults, so a stale export cannot make a wheel describe itself wrongly.
 | `FLAGOS_ACCELERATOR` | Build | `cuda` | Hardware platform the wheel is built for: `cuda`, `ppu`, `metax`, `ascend`, `tsingmicro`, `dcu`, `gcu`, `musa`, or `bpu`. Read by `setup.py` alone — the wheel records it in `_build_config.py`, and that record, not a re-export, is what every run-time reader consults |
 | `FLAGOS_BUILD_VENDOR` | Build | `ON`, `OFF` on `metax` | Compile the accelerator vendor's native kernels (a no-op where the vendor ships none: `cuda`, `dcu`, `ppu`, `bpu`). TsingMicro builds its host-draw RNG kernels here and pins the switch `ON`: `register.cc` claims those symbols unconditionally. MetaX defaults `OFF` because its native path is retired — that platform's accelerated ops are its FlagGems routes, with the rest on `cpu_fallback` |
 | `FLAGOS_BUILD_FLAGGEMS` | Build | `ON`, `OFF` on `bpu` | Compile the FlagGems Python kernel wrappers (calls into Python, no C++ linking). Set `OFF` for a runtime-only build with no FlagGems routes (`bpu`) |
-| `FLAGOS_BUILD_NATIVE_HOST` | Build | `OFF` | Generate and compile FlagGems host source into the NVIDIA or experimental MetaX/Ascend CPU-Torch wheel. Requires published FlagGems/FlagTree wheels, Cython and the platform SDK at build time; boxing, FlagGems C++ and TileOPs must be disabled. The wheel records this choice as `NATIVE_HOSTS`; MetaX and Ascend model acceptance remain tracked in #832 and #833 |
-| `FLAGOS_BUILD_BOXING` | Build | `OFF` | Compile the generated CUDA boxing kernels, the CUDA-ABI vendor path. `OFF` on every platform by default: the default wheel is FlagGems-primary (routed ops go to FlagGems, the rest to `cpu_fallback`) and depends on no vendor torch package. Set `FLAGOS_BUILD_BOXING=1` (or `-DFLAGOS_BUILD_BOXING=ON`) to build a boxing wheel that reuses the vendor's CUDA-ABI kernels |
+| `FLAGOS_BUILD_NATIVE_HOST` | Build | `OFF` | Generate and compile FlagGems host source into the NVIDIA or experimental MetaX/Ascend CPU-Torch wheel. Requires published FlagGems/FlagTree wheels, Cython and the platform SDK at build time; FlagGems C++ and TileOPs must be disabled. The wheel records this choice as `NATIVE_HOSTS`; MetaX and Ascend model acceptance remain tracked in #832 and #833 |
+| `FLAGOS_BUILD_BOXING` | Build | `OFF` | Retired. Enabling this setting raises a build error. Use the platform's ordinary wheel |
 | `FLAGOS_BUILD_FLAGGEMS_CPP` | Build | `ON` on `cuda`, off elsewhere | Compile the FlagGems C++ wrapper, which links `liboperators.so`. Defaults `OFF` outside `cuda` because that library has to be built for the vendor's own toolkit and pointed at with `FLAGGEMS_DIR`; a build with one may turn this `ON` explicitly (MetaX's MACA build is the case). Pinned `OFF` for `dcu`, `musa` and `bpu`, where no such library exists at all; `tsingmicro` defaults `OFF` for the same reason and does not pin it |
 | `FLAGOS_BUILD_TILEOPS` | Build | `ON` on `cuda`, `OFF` elsewhere | Compile the TileOps kernel wrappers |
 | `FLAGOS_BUILD_JOBS` | Build | System CPU count | Parallel jobs for the CMake build. `MAX_JOBS` and `CMAKE_BUILD_PARALLEL_LEVEL` are honoured as lower-priority fallbacks |
@@ -81,7 +81,7 @@ last win.
 
 ### Operator routing
 
-Which backend implementation (CUDA boxing, vendor native, FlagGems C++, FlagGems
+Which backend implementation (vendor native, FlagGems C++, FlagGems
 Python, TileOps) each operator dispatches to. Routing is stated per op in a
 single generated `backends_<platform>.conf`, so a wheel's default routing follows
 from what was compiled in; the variables below override or widen that table.
@@ -148,13 +148,13 @@ None is needed on a stock CUDA box; each platform guide states which apply.
 | `FLAGOS_METAX_COMPAT` | Runtime | `0` (off) | Patch FlagGems `torch.cuda` device queries for MetaX compatibility |
 | `FLAGOS_DCU_HIP_VERSION` | Runtime | No default | Override HIP version detection for the DCU runtime |
 | `FLAGOS_DCU_SKIP_RUNTIME_CHECK` | Runtime | `0` (off) | Skip the DCU post-import checks (torch/DTK version alignment and CUDA-key kernel presence), for deliberately testing a non-matching wheel pair |
-| `FLAGOS_DCU_SDPA_FLASH` | Runtime | `1` (on) | On DCU, point DTK's SDPA selector at its CUTLASS flash adapter when the stack has one, instead of forcing the math decomposition. A stack without DTK's flash-attn library falls back to math on its own. Set `0` to force math everywhere. This is a capability switch, not a route switch: `scaled_dot_product_attention` stays a `cuda` route in `backends_hygon.conf`, and `FLAGOS_OP_scaled_dot_product_attention=flaggems` is the (measured-slower) FlagGems alternative |
+| `FLAGOS_DCU_SDPA_FLASH` | Runtime | `1` (on) | Allow the DTK compatibility layer to use its CUTLASS flash adapter for CUDA SDPA when available. Set `0` to use DTK's math path. FlagOS tensor routes are set by `backends_hygon.conf` |
 | `FLAGOS_DISABLE_APEX_COMPAT` | Runtime | `0` (off) | Disable the optional Apex multi-tensor compatibility layer; see the Apex note below |
 | `FLAGOS_DISABLE_QWENIMAGE_ROPE` | Runtime | `0` (off) | Leave `diffusers`' Qwen-Image rotary-embedding table alone. `torch_fl` registers the `flagos` device there at import on GCU and on Ascend, which is what keeps the rotation off the complex exponential `diffusers` would otherwise fall back to; set `1` to measure that difference. This is a capability switch, not a route switch: it changes which rotation `diffusers` calls, not which backend serves any operator — see the Qwen-Image note below |
 | `FLAGOS_DIST_FORCE_NCCL` | Test | `0` (off) | In the manual MetaX distributed tests, skip FlagCX and use NCCL |
 | `FLAGOS_DCU_SKIP_LEGACY_SMOKE` | Test | `0` (off) | In `.github/scripts/set_env_hygon.sh`, skip the legacy-mode smoke path (`FLAGOS_DCU_VENDOR_CORE=1`) after the decoupled gates have run |
 
-**Apex compatibility.** On CUDA-ABI boxing vendors, torch_fl patches Apex's
+**Apex compatibility.** On CUDA-ABI vendors, torch_fl patches Apex's
 common `MultiTensorApply` entry point when Apex is imported. The patch converts
 flagos tensors to zero-copy CUDA views for direct `amp_C` calls and converts CUDA
 results back to flagos views. It is optional and does not apply to native

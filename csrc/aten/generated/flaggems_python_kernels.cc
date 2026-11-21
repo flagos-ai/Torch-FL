@@ -447,7 +447,7 @@ static TypedSourceSlot PrivUnique2FnSource("aten::_unique2", "flag_gems._unique2
 
 static TypedSourceSlot PrivUnsafeViewFnSource("aten::_unsafe_view", "flag_gems._unsafe_view", "873830181b5714c67e350022f6af9c25ee23b38520076ef324e0058c891e2356", "{\"abi\": \"873830181b5714c67e350022f6af9c25ee23b38520076ef324e0058c891e2356\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"at::IntArrayRef\"}], \"host\": \"flag_gems._unsafe_view\", \"op\": \"aten::_unsafe_view\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor PrivUnsafeViewKernelPython(const at::Tensor & self, at::IntArrayRef size) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
   return at::native::flagos::unsafe_view(self, size);
 #endif
   auto result = PrivUnsafeViewFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems._unsafe_view", {self, size}); }, static_cast<const at::Tensor&>(self), static_cast<const at::IntArrayRef&>(size));
@@ -4192,7 +4192,7 @@ at::Tensor & SinhInplaceKernelPython(at::Tensor & self) {
 
 static TypedSourceSlot SliceTensorFnSource("aten::slice.Tensor", "flag_gems.slice", "b95c118341a68b6e0f60b4953ab5d4593f864f5b4a243dd4ce31b0c8d4d2bf40", "{\"abi\": \"b95c118341a68b6e0f60b4953ab5d4593f864f5b4a243dd4ce31b0c8d4d2bf40\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"::std::optional<int64_t>\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.slice\", \"op\": \"aten::slice.Tensor\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor SliceTensorKernelPython(const at::Tensor & self, int64_t dim, ::std::optional<int64_t> start, ::std::optional<int64_t> end, int64_t step) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
   return at::native::flagos::slice_tensor(self, dim, start, end, step);
 #endif
   auto result = SliceTensorFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.slice", {self, dim, start, end, step}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim), static_cast<const ::std::optional<int64_t>&>(start), static_cast<const ::std::optional<int64_t>&>(end), static_cast<const int64_t&>(step));
@@ -4675,7 +4675,7 @@ at::Tensor TraceKernelPython(const at::Tensor & self) {
 
 static TypedSourceSlot TransposeIntFnSource("aten::transpose.int", "flag_gems.transpose", "a691b511b3e6d9f9bc96631cd111e1473c3e822396c2a765a4fc013ee9c6d56d", "{\"abi\": \"a691b511b3e6d9f9bc96631cd111e1473c3e822396c2a765a4fc013ee9c6d56d\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.transpose\", \"op\": \"aten::transpose.int\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor TransposeIntKernelPython(const at::Tensor & self, int64_t dim0, int64_t dim1) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
   return at::native::flagos::transpose_int(self, dim0, dim1);
 #endif
   auto result = TransposeIntFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.transpose", {self, dim0, dim1}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim0), static_cast<const int64_t&>(dim1));
@@ -4766,7 +4766,7 @@ static TypedSourceSlot UniqueDimFnSource("aten::unique_dim", "flag_gems.unique_d
 
 static TypedSourceSlot UnsqueezeFnSource("aten::unsqueeze", "flag_gems.unsqueeze", "90ed4ac6933e2d84868d6938fb7180aa58dc4b8e8e8a14759e01722fe81e9ac2", "{\"abi\": \"90ed4ac6933e2d84868d6938fb7180aa58dc4b8e8e8a14759e01722fe81e9ac2\", \"arguments\": [{\"keyword\": null, \"type\": \"at::Tensor\"}, {\"keyword\": null, \"type\": \"int64_t\"}], \"host\": \"flag_gems.unsqueeze\", \"op\": \"aten::unsqueeze\", \"outputs\": 1, \"result_type\": \"at::Tensor\"}");
 at::Tensor UnsqueezeKernelPython(const at::Tensor & self, int64_t dim) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
   return at::native::flagos::unsqueeze(self, dim);
 #endif
   auto result = UnsqueezeFnSource.Call<at::Tensor>([&]() { return CallPythonOp_Generic("flag_gems.unsqueeze", {self, dim}); }, static_cast<const at::Tensor&>(self), static_cast<const int64_t&>(dim));

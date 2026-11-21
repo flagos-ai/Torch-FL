@@ -349,10 +349,7 @@ def _metax_path_from_env() -> str:
 def _setup_metax_build_env(env: dict) -> str:
     """PATH/LD_LIBRARY_PATH for the MetaX SDK. Returns MACA_PATH.
 
-    MetaX is a CUDA-boxing build: host g++ compiles the generated boxing kernels
-    against maca's cu-bridge headers, so the SDK's include/lib directories have
-    to be reachable. The mxcc/cucc device compiler belonged to the retired
-    native-kernel path, so its absence is no longer an error here.
+    The MetaX runtime uses the SDK's cu-bridge headers and libraries.
     """
     metax_path = _metax_path_from_env()
     cu_bridge = os.path.join(metax_path, "tools", "cu-bridge")
@@ -603,16 +600,14 @@ def _vendor_kernel_switches(accelerator: str) -> dict[str, bool]:
     """What one accelerator builds by default, before any explicit environment value.
 
     The middle of the three layers in _kernel_switches, and the only one that
-    differs per vendor. The values -- and the per-platform rationale (why MetaX
-    has no native kernels, why Ascend/GCU/MUSA turn boxing off, why BPU drops
-    FlagGems, ...) -- live in cmake/flagos_platforms.json, next to the CMake side
-    that consumes the same table.
+    differs per vendor. The defaults and their rationale live in
+    cmake/flagos_platforms.json, which CMake and setuptools both read.
     """
     return dict(_platform_entry(accelerator)["kernel_defaults"])
 
 
 def _kernel_switches(accelerator: str) -> dict[str, bool]:
-    """Resolve the five kernel-set switches for one accelerator.
+    """Resolve the kernel-set switches for one accelerator.
 
     The single place that decides what a build compiles in. Both the -D list
     handed to CMake and the KERNELS tuple written into the build record come
@@ -631,6 +626,11 @@ def _kernel_switches(accelerator: str) -> dict[str, bool]:
     # here for the same reason it does at run time, instead of the build
     # reading it as "on" and compiling a set the user never asked for.
     env = _env_module()
+    if env.flag("FLAGOS_BUILD_BOXING"):
+        raise ValueError(
+            "FLAGOS_BUILD_BOXING has been removed. "
+            "Use the platform's default FlagGems or vendor build."
+        )
     pinned = _pinned_kernel_switches(accelerator)
     for name in KERNEL_SWITCHES:
         requested = env.flag(name, resolved[name])
@@ -795,7 +795,7 @@ def build_deps(*, inplace=False):
 
     subprocess.check_call([cmake] + build_args, cwd=build_dir, env=build_env)
     _verify_built_native_libs()
-    _bundle_cuda_assets()
+    _bundle_nvidia_native_vendor()
     _write_build_config(inplace=inplace)
 
 
@@ -846,15 +846,7 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
 
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     compiled = [KERNEL_SET_NAME[name] for name in KERNEL_SWITCHES if kernels[name]]
-    # vendor_torch_libraries is the platform's policy; a `vendor_torch_gate` names
-    # the kernel switch the build has to compile for the wheel to actually source
-    # and ship a vendor libtorch. CUDA-ABI platforms gate on boxing: the generated
-    # boxing kernels are the only consumer of a vendor libtorch there, so a
-    # FlagGems-primary wheel (the default) ships none and must not be asked for
-    # vendor provenance at release time. DTK's bundled device libraries also
-    # provide runtime hooks and generators to its non-boxing CPU frontend.
     entry = _platform_entry(FLAGOS_ACCELERATOR)
-    gate = entry.get("vendor_torch_gate")
     hygon_device_bundle = entry["vendor"] == "hygon" and os.path.isfile(
         os.path.join(BASE_DIR, "torch_fl", _BUNDLE_LIBDIR, "libtorch_hip.so")
     )
@@ -870,7 +862,7 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
         ),
         vendor_torch_libraries=native_vendor is not None
         or hygon_device_bundle
-        or (entry["vendor_torch_libraries"] and (gate is None or kernels[gate])),
+        or entry["vendor_torch_libraries"],
         requirements=_install_requires(),
         torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
         sdk_version=os.environ.get("FLAGOS_SDK_VERSION"),
@@ -898,17 +890,10 @@ def _native_vendor_cohort():
     ):
         return None
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
-    if (
-        kernels["FLAGOS_BUILD_BOXING"]
-        or not kernels["FLAGOS_BUILD_VENDOR"]
-        or (
-            FLAGOS_ACCELERATOR == "cuda"
-            and _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
-        )
+    if not kernels["FLAGOS_BUILD_VENDOR"] or (
+        FLAGOS_ACCELERATOR == "cuda" and _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
     ):
-        raise RuntimeError(
-            "native vendor precision requires bundled non-boxing vendor libraries"
-        )
+        raise RuntimeError("native vendor precision requires bundled vendor libraries")
     source = os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_cohort.py")
     spec = importlib.util.spec_from_file_location("torch_fl_vendor_cohort", source)
     if spec is None or spec.loader is None:
@@ -926,60 +911,14 @@ def _native_vendor_cohort():
     return module, cohort
 
 
-def _bundle_cuda_assets() -> None:
-    """Copy the external CUDA .so assets into torch_fl/lib so the wheel is
-    self-contained.
-
-    torch_fl's CUDA backend reuses PyTorch's registered CUDA kernels via an
-    externally-supplied libtorch_cuda.so (CPU-only pip torch does not ship it).
-    Historically this was LD_PRELOAD-ed by scripts/vendor/with_nvidia_libtorch.sh; for a
-    single self-contained wheel we bundle the assets and preload them from
-    torch_fl/__init__.py before `import torch` (see that doc, constraint 1).
-    CUDA only.
-
-    Set FLAGOS_SKIP_CUDA_ASSETS=1 to skip (e.g. a slim build for a machine that
-    supplies libtorch_cuda.so out-of-band).
-    """
+def _bundle_nvidia_native_vendor() -> None:
+    """Stage the libraries for the optional NVIDIA native precision module."""
     if FLAGOS_ACCELERATOR != "cuda":
         return
     native_vendor = _native_vendor_cohort()
     if native_vendor is not None:
         module, cohort = native_vendor
         module.bundle(cohort, os.path.join(BASE_DIR, "torch_fl"))
-        return
-    # A FlagGems-primary CUDA wheel is built with FLAGOS_BUILD_BOXING=OFF (the
-    # default). It compiles no boxing kernels and has no vendor torch to feed, so
-    # the bundled libtorch_cuda.so and its nvidia-*-cu12 runtime wheels are not
-    # part of it. An explicit boxing opt-in restores them.
-    if not _kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_BOXING"]:
-        return
-    if os.environ.get("FLAGOS_SKIP_CUDA_ASSETS", "0") == "1":
-        return
-    assets_dir = os.environ.get(
-        "FLAGOS_CUDA_ASSETS_DIR",
-        os.path.join(BASE_DIR, ".libtorch_cuda_assets"),
-    )
-    if not os.path.isdir(assets_dir):
-        print(
-            f"[setup] warning: CUDA assets dir {assets_dir} not found; wheel "
-            "will require an externally-supplied libtorch_cuda.so at runtime."
-        )
-        return
-    dst_dir = os.path.join(BASE_DIR, "torch_fl", "lib")
-    os.makedirs(dst_dir, exist_ok=True)
-    import glob
-
-    copied = []
-    for src in sorted(glob.glob(os.path.join(assets_dir, "*.so*"))):
-        dst = os.path.join(dst_dir, os.path.basename(src))
-        # Skip if already present and identical size (avoid re-copying ~1GB).
-        if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
-            copied.append(os.path.basename(src))
-            continue
-        shutil.copy2(src, dst)
-        copied.append(os.path.basename(src))
-    if copied:
-        print(f"[setup] bundled CUDA assets into torch_fl/lib: {', '.join(copied)}")
 
 
 _NCCL_EXT_BUILD_PATH = os.path.join(
@@ -1129,13 +1068,12 @@ class BuildExtWithCmake(_build_ext):
         if not kernels["FLAGOS_BUILD_FLAGGEMS"] or any(
             kernels[key]
             for key in (
-                "FLAGOS_BUILD_BOXING",
                 "FLAGOS_BUILD_FLAGGEMS_CPP",
                 "FLAGOS_BUILD_TILEOPS",
             )
         ):
             raise RuntimeError(
-                "native hosts require FlagGems with boxing, FlagGems C++ and TileOPs disabled"
+                "native hosts require FlagGems with FlagGems C++ and TileOPs disabled"
             )
         spec = importlib.util.spec_from_file_location(
             "native_host_backend_build",
@@ -1513,29 +1451,6 @@ def _get_setup_kwargs():
     return kwargs
 
 
-# NVIDIA CUDA runtime libs that the bundled libtorch_cuda.so (cu12.x) links
-# against. Pinned to the cu12 major sonames it needs (libcudart.so.12,
-# libcublas.so.12, libcudnn.so.9, libnvshmem_host.so.3, ...). Lower bounds keep
-# pip free to resolve a compatible patch; the bundled .so was built against the
-# cu12.8 wheels present in the build env.
-_CUDA_RUNTIME_DEPS = [
-    "nvidia-cuda-runtime-cu12>=12.8",
-    "nvidia-cublas-cu12>=12.8",
-    "nvidia-cudnn-cu12>=9.0",
-    "nvidia-cuda-nvrtc-cu12>=12.8",
-    "nvidia-cufft-cu12>=11.0",
-    "nvidia-curand-cu12>=10.0",
-    "nvidia-cusolver-cu12>=11.0",
-    "nvidia-cusparse-cu12>=12.0",
-    "nvidia-cusparselt-cu12>=0.7",
-    "nvidia-nccl-cu12>=2.20",
-    "nvidia-nvtx-cu12>=12.8",
-    "nvidia-cuda-cupti-cu12>=12.8",
-    "nvidia-nvjitlink-cu12>=12.8",
-    "nvidia-nvshmem-cu12>=3.0",
-]
-
-
 # torch_fl is a thin build on three packages that live outside this repository:
 # FlagTree (the Triton build carrying the vendor backend), FlagGems (the operator
 # source) and FlagCX (the distributed backend). Omitting them is not a crash --
@@ -1678,34 +1593,6 @@ def _install_requires():
                 "revalidate the native vendor policy for the configured FlagGems pin"
             )
         return reqs + cohort["requirements"]
-    # For a CUDA wheel we bundle libtorch_cuda.so and preload it at import; it
-    # needs the NVIDIA runtime libs present, so make them hard deps. Ascend/MetaX
-    # builds do not (they supply their own runtime), so keep it CUDA-only.
-    #
-    # FLAGOS_SKIP_CUDA_ASSETS=1 means we do NOT bundle libtorch_cuda.so (the same
-    # switch _bundle_cuda_assets() honors). That is the PPU case: the active torch
-    # is already a CUDA-enabled build (CUDA 13, PPU_SDK/CUDA_SDK supplies the
-    # runtime), so the pinned nvidia-*-cu12 wheels are both mismatched and
-    # unnecessary. Skip them so `pip install` does not drag in cu12 packages.
-    skip_assets = os.environ.get("FLAGOS_SKIP_CUDA_ASSETS", "0") == "1"
-    # A FlagGems-primary CUDA wheel (FLAGOS_BUILD_BOXING=OFF, the default) bundles
-    # no libtorch_cuda.so -- _bundle_cuda_assets() skips for the same reason -- so
-    # it must not pull the nvidia-*-cu12 runtime wheels either. Boxing is the
-    # opt-in that needs them.
-    #
-    # CUDA is the only accelerator asked, and it has to be asked first: these
-    # runtime wheels are a CUDA-only requirement, and _kernel_switches() raises
-    # for a platform whose pin contradicts an inherited environment value (say
-    # FLAGOS_BUILD_BOXING=1 in a lane that builds boxing, while the table is
-    # walked and reaches iluvatar). That objection is about the build's -D list,
-    # which still goes through _kernel_switches(), not about what this wheel's
-    # requirements are on a platform that never ships the runtime wheels anyway.
-    if (
-        FLAGOS_ACCELERATOR == "cuda"
-        and not skip_assets
-        and _kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_BOXING"]
-    ):
-        reqs += _CUDA_RUNTIME_DEPS
     return reqs
 
 

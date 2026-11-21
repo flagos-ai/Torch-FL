@@ -34,11 +34,6 @@ on:
       setup_platform:
         required: true
         type: string
-      boxing_lane:
-        description: '"1" for the opt-in boxing build, empty for the default build'
-        required: false
-        type: string
-        default: ''
       image:
         required: true
         type: string
@@ -184,7 +179,6 @@ jobs:
       - name: Prepare platform environment
         env:
           CI_STAGE: build
-          BOXING_LANE: ${{ inputs.boxing_lane }}
           TORCH_FL_CPU_TORCH_WHEELHOUSE: ${{ steps.wheelhouse.outputs.path }}
         run: bash "${{ inputs.setup_script }}" --platform "${{ inputs.setup_platform }}"
 
@@ -214,8 +208,6 @@ jobs:
         run: python scripts/tools/torch-fl-preflight --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" --check-build-env
 
       - name: Verify wheel
-        env:
-          EXPECTED_BOXING_LANE: ${{ inputs.boxing_lane }}
         run: |
           set -euo pipefail
           python -m pip install --force-reinstall --no-deps dist/*.whl
@@ -242,8 +234,9 @@ jobs:
               f"Wheel manifest resolves outside the installed distribution: {manifest_path}"
           )
           manifest = json.loads(manifest_path.read_text())
-          assert ("boxing" in manifest["build"]["kernels"]) == (os.environ["EXPECTED_BOXING_LANE"] == "1"), (
-              "Wheel kernel sets do not match the requested boxing lane"
+          assert "boxing" not in manifest["build"]["kernels"], "Wheel contains a retired kernel set"
+          assert not any(path.endswith("_boxing.conf") for path in package_files), (
+              "Wheel contains a retired boxing configuration"
           )
           assert any("torch_fl" in path for path in package_files), (
               "torch_fl module not found in wheel"

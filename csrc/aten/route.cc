@@ -113,7 +113,6 @@ struct BackendInfo {
 
 // Indexed by Backend. A legacy log spelling is also an accepted conf key.
 constexpr BackendInfo kBackends[] = {
-    {Backend::kBoxing, "boxing", "boxing"},
     {Backend::kFlagGemsCpp, "flaggems_cpp", "flaggems_cpp", "flagos"},
     {Backend::kFlagGems, "flaggems", "flaggems", "flagos_python"},
     {Backend::kAscend, "ascend", "vendor"},
@@ -144,7 +143,6 @@ struct BackendAlias {
 };
 
 constexpr BackendAlias kAliases[] = {
-    {"cuda", Backend::kBoxing},
     {"thead", Backend::kNone},  // T-Head has no native kernel slot.
     {"bpu", Backend::kDrobotics},
     {"flaggems_python", Backend::kFlagGems},
@@ -396,8 +394,8 @@ std::unordered_map<std::string, BackendConfigEntry> LoadBackendConfig() {
   ParseConfigInto(path, table, alt);
   ApplyForcedBackend(table, alt);
 
-  // Per-op env var overrides: FLAGOS_OP_<op_name>=cuda|metax|flaggems|tileops
-  // e.g. FLAGOS_OP_mm=cuda  or  FLAGOS_OP_mm__out=cuda
+  // Per-op env var overrides, e.g. FLAGOS_OP_mm=flaggems or
+  // FLAGOS_OP_mm__out=flaggems.
   // Dots in op names are replaced with double underscores to avoid ambiguity
   // with ops that already contain underscores (e.g. mm_out vs mm.out).
   for (auto& [op, _] : table) {
@@ -434,6 +432,9 @@ const std::unordered_map<std::string, BackendConfigEntry>& BackendTable() {
 
 bool ParseBackendName(const std::string& raw, Backend* backend) {
   const auto name = LowerStr(raw);
+  TORCH_CHECK(name != "boxing" && name != "cuda",
+              "flagos: the '", raw, "' boxing route has been removed. "
+              "Use the platform's default backend configuration or select a registered backend.");
   for (const auto& info : kBackends) {
     if (name == info.name ||
         (info.legacy_log_name && name == info.legacy_log_name)) {

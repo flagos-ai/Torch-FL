@@ -79,17 +79,6 @@ class TestRsqrtCorrectness:
         ref = 1.0 / torch.sqrt(a.cpu())
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_rsqrt_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0").abs() + 1e-6
-        ref = torch.rsqrt(a_cuda)
-        a = a_cuda.to(DEVICE)
-        out = torch.rsqrt(a)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
 
 class TestRsqrtDispatch:
     """Verify dispatch routing for rsqrt op."""
@@ -106,14 +95,6 @@ class TestRsqrtDispatch:
             check=False,
         )
         assert "[flagos dispatch] rsqrt -> flagos_python" in result.stderr
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_rsqrt_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_rsqrt": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] rsqrt -> boxing" in result.stderr
 
 
 class TestRsqrtAscendDispatch:

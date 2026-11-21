@@ -29,7 +29,7 @@ signatures are regenerated separately with `codegen_native_vendor.py`.
 
 | Script | What it generates | Run |
 |---|---|---|
-| `codegen_ops.py` | `csrc/aten/generated/{ops.h,ops.cc,cuda_kernels.cc,flaggems_python_kernels.cc,register.inc}` for the CUDA/boxing path. Reads `torch_fl/configs/backends_nvidia.conf` and torchgen. | `python scripts/codegen/codegen_ops.py` |
+| `codegen_ops.py` | `csrc/aten/generated/{ops.h,ops.cc,flaggems_python_kernels.cc,register.inc}` for shared ATen wrappers and the NVIDIA config. Reads `torch_fl/configs/backends_nvidia.conf` and torchgen. | `python scripts/codegen/codegen_ops.py` |
 | `codegen_ascend.py` | Ascend aclnn backend sources under `csrc/aten/backends/ascend/`, and appends the covered ops to `backends_ascend.conf`. | `python scripts/codegen/codegen_ascend.py [--category NAME] [--no-conf]` |
 | `codegen_gcu.py` | Enflame GCU (topsaten) backend sources, and the matching conf append. | `python scripts/codegen/codegen_gcu.py [--category NAME] [--no-conf]` |
 | `codegen_mudnn.py` | Moore Threads MUSA (mudnn) backend sources, and the matching conf append. | `python scripts/codegen/codegen_mudnn.py [--category NAME] [--no-conf]` |
@@ -38,7 +38,7 @@ signatures are regenerated separately with `codegen_native_vendor.py`.
 | `codegen_mps.py` | The Apple Silicon (Metal / MPSGraph) native backend: `csrc/aten/backends/apple/generated/{mps_kernels.mm,mps_register.inc}`, Objective-C++. Grows one category at a time (`unary`, then `binary`, `binary_scalar` and `reduce` -- nine ops so far); `torch_fl/configs/backends_apple.conf` is derived from the emitted register file by `gen_vendor_confs.py`. | `python scripts/codegen/codegen_mps.py [--check]` |
 | `codegen_musa_flaggems.py` | The MUSA FlagGems registration list (`.inc`). | `python scripts/codegen/codegen_musa_flaggems.py [--check]` |
 | `codegen_gcu_flaggems.py` | The GCU FlagGems registration list (`.inc`). | `python scripts/codegen/codegen_gcu_flaggems.py [--check]` |
-| `codegen_boxing_flaggems_register.py` | `csrc/aten/generated/register_boxing_<platform>.inc` and `register_flaggems_<platform>.inc` for the CUDA-ABI platforms (cuda, metax, dcu, ppu, tsingmicro): the `m.impl()` lines for the ops each platform's conf routes somewhere other than `none` (boxing build), and for the ops it routes to a FlagGems backend (FlagGems-primary build). `register.cc` compiles one or the other instead of `generated/register.inc`; it never claims an op whose route is `none`. | `python scripts/codegen/codegen_boxing_flaggems_register.py [--check]` |
+| `codegen_flaggems_register.py` | Generates the FlagGems registration fragments for NVIDIA, MetaX, Hygon, T-Head and TsingMicro. It also generates TsingMicro's metadata-view fragment and the extra MetaX AOT claims. | `python scripts/codegen/codegen_flaggems_register.py [--check]` |
 | `codegen_autograd.py` | `csrc/aten/generated/variable_type.cc` — the `AutogradPrivateUse1` layer for ops a backend re-owns with a fused kernel. | `python scripts/codegen/codegen_autograd.py` |
 | `codegen_tileops.py` | `csrc/aten/generated/tileops_python_kernels.cc`, `torch_fl/tileops/generated/` (routes, shims), `tests/integration/ops/test_tileops_generated.py`, and the `TILEOPS_OPS` block in `backend_coverage.py`. | `python scripts/codegen/codegen_tileops.py [--check]` |
 | `gen_vendor_confs.py` | `torch_fl/configs/backends_<vendor>.conf`, one full-coverage conf per platform. | `python scripts/codegen/gen_vendor_confs.py [--check\|--stats]` |
@@ -108,11 +108,11 @@ require an empty diff before opening a PR that touches them.
 
 | Artifact | Generator | Staleness check |
 |---|---|---|
-| `csrc/aten/generated/{ops.h,ops.cc,cuda_kernels.cc,flaggems_python_kernels.cc,register.inc}` | `codegen_ops.py` | **manual** (needs torchgen) — `tests/integration/ops/test_flaggems_conf_consistency.py` and `tests/unit/test_conf_registration_consistency.py` assert the routing these files encode |
+| `csrc/aten/generated/{ops.h,ops.cc,flaggems_python_kernels.cc,register.inc}` | `codegen_ops.py` | **manual** (needs torchgen) — `tests/integration/ops/test_flaggems_conf_consistency.py` and `tests/unit/test_conf_registration_consistency.py` assert the routing these files encode |
 | `csrc/aten/generated/variable_type.cc` | `codegen_autograd.py` | **manual** (needs torchgen) |
 | `csrc/aten/generated/tileops_python_kernels.cc` | `codegen_tileops.py` | `codegen_tileops.py --check` — **manual** (needs torch + tileops) |
 | `csrc/aten/generated/name_map.json` | `extract_name_map.py` | **manual** |
-| `csrc/aten/generated/register_flaggems_{cuda,metax,dcu,ppu,tsingmicro}.inc` | `codegen_boxing_flaggems_register.py` | `codegen_boxing_flaggems_register.py --check` — **CI** |
+| `csrc/aten/generated/register_flaggems_{nvidia,metax,hygon,thead,tsingmicro}.inc` | `codegen_flaggems_register.py` | `codegen_flaggems_register.py --check` — **CI** |
 | `csrc/aten/backends/ascend/generated/*` | `codegen_ascend.py` | **manual** (needs Ascend ATen headers) |
 | `csrc/aten/backends/enflame/generated/{gcu_kernels.cc,gcu_register.inc}` | `codegen_gcu.py` | **manual** (needs GCU ATen headers) |
 | `csrc/aten/backends/enflame/generated/gcu_flaggems_register.inc` | `codegen_gcu_flaggems.py` | `codegen_gcu_flaggems.py --check` — **CI** |

@@ -162,23 +162,6 @@ class TestCatDispatch:
             out.cpu().float(), k_states.cpu().float(), rtol=0, atol=0
         )
 
-    @pytest.mark.cuda
-    def test_cat_matches_cuda_ref(self, cuda_ref):
-        """flagos cat result must match CUDA reference."""
-        if cuda_ref is None:
-            pytest.skip("CUDA not available for reference")
-        a_cuda, b_cuda, ref = cuda_ref
-        a = a_cuda.to(DEVICE)
-        b = b_cuda.to(DEVICE)
-        out = torch.cat([a, b], dim=0)
-        torch.testing.assert_close(
-            out.cpu(),
-            ref.cpu(),
-            rtol=1e-5,
-            atol=1e-5,
-            msg="cat result on flagos differs from CUDA reference",
-        )
-
     @pytest.mark.anyplatform
     def test_cat_half(self):
         torch.manual_seed(5)
@@ -521,17 +504,6 @@ class TestCatDispatchLog:
         result = _run_cat_subprocess({"FLAGOS_LOG": "dispatch"})
         assert f"[flagos dispatch] cat -> {expected}" in result.stderr, (
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
-        )
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        """FLAGOS_OP_cat=cuda overrides to cuda backend."""
-        result = _run_cat_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cat": "cuda"},
-        )
-        assert "[flagos dispatch] cat -> boxing" in result.stderr, (
-            f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.ascend

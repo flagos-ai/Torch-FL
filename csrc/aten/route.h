@@ -16,12 +16,6 @@ namespace at::native::flagos {
 // returned by GetBackendForOp. Dispatcher caches a complete immutable entry.
 // Keep it last so the real backends stay contiguous.
 enum class Backend {
-  // The CUDA-ABI boxing kernel: re-dispatch PrivateUse1 to CUDA into a vendor's
-  // own libtorch (DeviceBoxingGuard) instead of launching a kernel of our own.
-  // Named for what it does, not for the runtime it borrows -- MetaX, Hygon DCU
-  // and the T-Head PPU all route through this one slot. Conf key: boxing
-  // ("cuda" is the legacy spelling, still parsed).
-  kBoxing,
   kFlagGemsCpp,    // FlagGems C++ runtime (liboperators.so, conf key: flaggems_cpp)
   kFlagGems,       // FlagGems Python/Triton path (conf key: flaggems)
   // One value per vendor, spelled the way its conf key is (see AGENTS.md,
