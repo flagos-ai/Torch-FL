@@ -886,6 +886,24 @@ runtime dependencies; the build bundles the original numerical libraries and
 licenses. The compatibility manifest records the verified vendor Torch version.
 No SDK version is inferred from a wheel suffix.
 
+For MetaX, run the CI builder with the published vendor Torch cohort from the
+isolated MetaX build environment. Set `GITHUB_WORKSPACE` to the checkout,
+`RUNNER_TEMP` to an existing scratch directory, and select the verified SDK
+and CPU Torch environment as in the MetaX CI lane:
+
+```bash
+export FLAGOS_ACCELERATOR=metax
+export FLAGOS_VENDOR_TORCH_LIB=/path/to/published/vendor/torch/lib
+export FLAGOS_VENDOR_TORCH_VERSION=2.10.0+metax3.8.1.0
+bash .github/scripts/build_native_hosts_ci.sh --metax-precision
+```
+
+The command builds from the checkout's committed `HEAD`, runs wheel preflight
+before installation, and runs installed preflight and the native conformance
+and vendor precision suites outside the source tree. The evidence directory
+printed by the command contains the wheel, build manifests, preflight logs and
+JUnit results. The ordinary MetaX CI lane builds the SDK-only native wheel.
+
 The Hygon cohort uses the same generated entry mechanism with
 `codegen_native_vendor.py --vendor hygon`. It verifies the published DTK Torch
 distribution, vendor Git revision and HIP runtime separately from the CPU Torch

@@ -373,7 +373,7 @@ def install_gcu_device_probes(flagos) -> None:
     dynamo's trace, from inductor's autotune cache, or from a Triton probe, each
     of which the GCU lane has shown in turn.
 
-    `_alias_cuda_to_flagos` answers part of this, but only when it decides there
+    `compat.cuda.install_alias` answers part of this, but only when it decides there
     is no real CUDA, and on this lane it decides there is (a probe was flipped to
     True by something else before the decision), so it stands down. This installs
     the same answers unconditionally: the set a CUDA build's device module

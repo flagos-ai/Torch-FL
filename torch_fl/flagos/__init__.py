@@ -140,10 +140,10 @@ def _lazy_init():
     _C._init()
     _initialized = True
 
-    from .. import _cuda_alias_active
+    from ..compat.cuda import is_active
     from ..compat.flaggems.runtime import initialize
 
-    initialize(build_info().vendor, _cuda_alias_active)
+    initialize(build_info().vendor, is_active())
 
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from

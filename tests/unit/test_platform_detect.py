@@ -158,7 +158,7 @@ def test_ppu_sdk_env_wins_over_the_marker(isolated_torch_fl, tmp_path, monkeypat
         ("/x/backends_enflame.conf", "gcu"),
         ("/x/backends_hygon.conf", "dcu"),
         ("/x/backends_nvidia.conf", "cuda"),
-        ("/x/backends_metax_native_host.conf", "metax"),
+        ("/x/backends_metax.conf", "metax"),
     ],
 )
 def test_conf_fallback(isolated_torch_fl, tmp_path, monkeypatch, conf, expected):

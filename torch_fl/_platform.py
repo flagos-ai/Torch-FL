@@ -70,6 +70,7 @@ class BuildInfo(NamedTuple):
     kernels: frozenset[str] = frozenset()
     native_hosts: bool = False
     platform_recorded: bool = False
+    backend_config: str = ""
 
     @property
     def vendor(self) -> str:
@@ -132,6 +133,7 @@ def _read_build_info(package: Path | None) -> BuildInfo:
         ),
         native_hosts=bool(getattr(record, "NATIVE_HOSTS", False)),
         platform_recorded=bool(platform),
+        backend_config=str(getattr(record, "BACKEND_CONFIG", "")),
     )
 
 

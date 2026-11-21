@@ -50,10 +50,11 @@ def test_native_routes_and_claims_are_generated_from_one_policy():
     )
     conf_dir = ROOT / "torch_fl/configs"
     ordinary = (conf_dir / "backends_metax.conf").read_bytes()
-    built = generator.build_all(conf_dir)
-    native_text, native, _ = built["metax_native_host"]
-    assert native_text == (conf_dir / "backends_metax_native_host.conf").read_text()
-    base = built["metax"][1]
+    base = generator.parse_conf(conf_dir / "backends_metax.conf")
+    native = generator.native_host_routes("metax", base)
+    native_text = generator.render_native_host_config("metax", base)
+    assert "# flagos op backend config for metax -- AUTO-GENERATED." in native_text
+    assert "# Note:" not in native_text
     policy = generator.NATIVE_HOST_FLAGGEMS_OPS["metax"]
     assert native.keys() == base.keys()
     changed = {op for op in native if native[op] != base[op]}
@@ -92,22 +93,27 @@ def test_native_claim_generation_rejects_an_unavailable_kernel():
         registration.render_native_hosts("metax", registration.wrapper_map(), set())
 
 
-@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize(
+    "recorded_config", ["", "configs/backends_metax.conf", "lib/backends_metax.conf"]
+)
 @pytest.mark.parametrize("runtime_value", ["0", "1"])
-def test_build_record_selects_native_config_before_torch_import(
-    tmp_path, monkeypatch, native, runtime_value
+def test_build_record_selects_the_staged_config_before_torch_import(
+    tmp_path, monkeypatch, recorded_config, runtime_value
 ):
     platform = load("torch_fl/_platform.py", "metax_routing_platform")
+    native = bool(recorded_config)
     (tmp_path / "_build_config.py").write_text(
         f'PLATFORM = "metax"\nACCELERATOR = "metax"\nNATIVE_HOSTS = {native}\n'
+        + (f"BACKEND_CONFIG = {recorded_config!r}\n" if native else "")
     )
     monkeypatch.setattr(platform, "_torch_fl_package_dir", lambda: tmp_path)
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", runtime_value)
     monkeypatch.delenv("FLAGOS_BACKEND_CONFIG", raising=False)
-    directory = tmp_path / "configs"
-    directory.mkdir()
-    for name in ("backends_metax.conf", "backends_metax_native_host.conf"):
-        (directory / name).write_text("")
+    ordinary = tmp_path / "configs/backends_metax.conf"
+    expected = tmp_path / recorded_config if native else ordinary
+    for path in {ordinary, expected}:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("")
     namespace = functions(
         "torch_fl/__init__.py",
         ["_select_backend_config"],
@@ -119,11 +125,10 @@ def test_build_record_selects_native_config_before_torch_import(
         },
     )
     namespace["_select_backend_config"]()
-    name = "backends_metax_native_host.conf" if native else "backends_metax.conf"
-    assert namespace["_BACKEND_CONFIG_PATH"] == str(directory / name)
+    assert namespace["_BACKEND_CONFIG_PATH"] == str(expected)
     assert "FLAGOS_BACKEND_CONFIG" not in os.environ
     if native:
-        (directory / name).unlink()
+        expected.unlink()
         with pytest.raises(RuntimeError, match="missing its generated config"):
             namespace["_select_backend_config"]()
         override = tmp_path / "explicit.conf"

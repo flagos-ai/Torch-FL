@@ -25,6 +25,7 @@ import setuptools
 
 ROOT = Path(__file__).resolve().parents[2]
 INIT = ROOT / "torch_fl" / "__init__.py"
+LOADER = ROOT / "torch_fl" / "accelerator" / "_loader.py"
 
 
 @pytest.fixture
@@ -69,8 +70,8 @@ def _pyproject_entry_points(group: str) -> dict:
     return entries
 
 
-def _function(name):
-    tree = ast.parse(INIT.read_text(encoding="utf-8"))
+def _function(name, path=INIT):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     node = next(
         node
         for node in tree.body
@@ -78,7 +79,7 @@ def _function(name):
     )
     namespace = {}
     exec(
-        compile(ast.Module(body=[node], type_ignores=[]), str(INIT), "exec"), namespace
+        compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace
     )
     return namespace[name]
 
@@ -94,7 +95,7 @@ def test_native_metax_never_selects_a_vendor_torch_core(
         sys.modules, "torch_fl.accelerator.metax._metax_libtorch_link", linker
     )
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", build_override)
-    function = _function("_relink_vendor_libtorch")
+    function = _function("_relink_vendor_libtorch", LOADER)
     build = SimpleNamespace(platform="metax", native_hosts=native_hosts)
     function.__globals__["_platform"] = SimpleNamespace(build_info=lambda: build)
     function()
@@ -173,14 +174,23 @@ def test_vendor_core_and_cuda_assets_are_selected_before_torch_import():
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_phase_preload"
     )
-    calls = [
-        node.value.func.id
-        for node in preload.body
-        if isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-    ]
-    assert calls.index("_relink_vendor_libtorch") < calls.index("_preload_cuda_assets")
+    assert any(
+        ast.unparse(node.func) == "_loader.preload"
+        for node in ast.walk(preload)
+        if isinstance(node, ast.Call)
+    )
+    run = _function("preload", LOADER)
+    calls = []
+    order = (
+        "_relink_vendor_libtorch",
+        "_preload_cuda_assets",
+        "_disable_vendor_backend_autoload",
+    )
+    run.__globals__.update(
+        {name: lambda name=name: calls.append(name) for name in order}
+    )
+    run()
+    assert tuple(calls) == order
 
 
 @pytest.mark.parametrize("current", ["privateuseone", "flagos"])
@@ -208,7 +218,7 @@ def test_foreign_privateuse1_claim_fails_before_native_extension(current):
 
 @pytest.mark.parametrize("platform,expected", [("musa", ["0"]), ("cuda", [])])
 def test_only_musa_disables_vendor_entry_points_before_torch_import(platform, expected):
-    disable = _function("_disable_vendor_backend_autoload")
+    disable = _function("_disable_vendor_backend_autoload", LOADER)
     values = []
     disable.__globals__.update(
         _platform=SimpleNamespace(

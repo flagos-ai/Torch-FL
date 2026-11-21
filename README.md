@@ -226,10 +226,10 @@ Set `FLAGOS_BUILD_VENDOR=1` to include the measured BF16 matrix precision slots;
 MetaX native-host CI uses this selection.
 The adapter submits the original published MetaX FlagGems kernels directly through
 MACA, with boxing disabled. MetaX CI builds a separate opt-in wheel and retains
-its generated coverage, preflight and launch-conformance evidence. The native
-wheel selects generated `backends_metax_native_host.conf` from its build record
-and compiles its additional registrations; the ordinary wheel keeps its own
-measured routing. Native routes align the published hosts' device identity and
+its generated coverage, preflight and launch-conformance evidence. Both wheels
+pack `configs/backends_metax.conf`. The native-host build derives its routes and
+additional registrations from the ordinary platform table and measured policy.
+Native routes align the published hosts' device identity and
 use the existing contracted-axis padding for small-K bmm, including out variants.
 For FP32 outer products, original published pointwise kernels preserve the
 caller's TF32 rounding policy; the resolved adaptation is recorded in the wheel

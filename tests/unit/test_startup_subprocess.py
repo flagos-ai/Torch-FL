@@ -198,7 +198,9 @@ def test_import_order_and_startup_profile(profile, torch_first):
     _require_torch()
     _require_declared_entry_point()
     if torch_first and _accelerator_recorded_by_the_install() not in ("cuda", "mps"):
-        pytest.skip("Vendor libtorch overlays require torch_fl before torch")
+        build = _installed_platform_module()["build_info"]()
+        if build.platform != "metax" or not build.native_hosts:
+            pytest.skip("Vendor libtorch overlays require torch_fl before torch")
 
     imports = (
         "import torch\n"
