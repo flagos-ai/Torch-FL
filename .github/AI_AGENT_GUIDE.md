@@ -122,7 +122,7 @@ Before modifying any file:
    def new_op(...):
        # Uses the same pattern because I understand why:
        # - This pattern handles both contiguous and strided inputs
-       # - The boxing layer needs this specific signature
+       # - The ATen dispatcher expects this signature
        # - Reference: similar_op() in this same file
    ```
 

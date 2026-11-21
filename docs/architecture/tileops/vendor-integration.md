@@ -34,14 +34,11 @@ chosen platform:
 ```bash
 FLAGOS_ACCELERATOR=ascend FLAGOS_BUILD_TILEOPS=1 python setup.py bdist_wheel
 FLAGOS_ACCELERATOR=musa FLAGOS_BUILD_TILEOPS=1 python setup.py bdist_wheel
-FLAGOS_ACCELERATOR=metax FLAGOS_BUILD_TILEOPS=1 \
-  FLAGOS_BUILD_BOXING=0 python setup.py bdist_wheel
+FLAGOS_ACCELERATOR=metax FLAGOS_BUILD_TILEOPS=1 python setup.py bdist_wheel
 ```
 
-The MetaX build must keep boxing off. Its experiment configuration depends on
-`register_tileops_metax.inc`, which claims exactly the 60 TileOPs operators and
-leaves every other operator unclaimed for CPU fallback. A normal boxing build
-continues to use the full generated wrapper set.
+The MetaX experiment uses `register_tileops_metax.inc` to claim its 60 TileOPs
+operators. Other operators reach CPU fallback.
 
 Select the experiment at runtime after installing the matching provider:
 

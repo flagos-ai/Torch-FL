@@ -13,12 +13,8 @@
 // generated/ops.h (shared with the CUDA codegen); here we only fill the
 // Backend::kApple slot.
 //
-// Nothing below re-tags a tensor onto DispatchKey::MPS or CUDA: the tensors stay
-// on PrivateUse1 and the runtime's shared MTLBuffers are described to MPSGraph
-// directly (see mps_common.h). The CUDA-boxing path does not apply to this
-// platform -- FLAGOS_BUILD_BOXING is pinned off in cmake/flagos_platforms.json --
-// and the kMps slot is a plain one: Dispatcher::GetFn does not degrade it to a
-// CUDA kernel when it is empty, so an op named here always has a body behind it.
+// Tensors stay on PrivateUse1. MPSGraph reads the runtime's shared MTLBuffers
+// directly (see mps_common.h).
 //
 // Whatever routes here without a kernel falls through to the CPU fallback: the
 // conf only names this backend for ops in mps_register.inc.

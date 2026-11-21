@@ -14,11 +14,6 @@
 
 set(LIBRARY_NAME torch_fl)
 
-option(FLAGOS_BUILD_VENDOR "Build the FLAGOS_ACCELERATOR vendor's native kernels (no-op where the vendor ships none)" ON)
-option(FLAGOS_BUILD_FLAGGEMS "Build FlagGems Python kernel wrappers (calls via Python, no C++ linking)" ON)
-option(FLAGOS_BUILD_FLAGGEMS_CPP "Build FlagGems C++ kernel wrappers (requires liboperators.so)" ON)
-option(FLAGOS_BUILD_TILEOPS "Build TileOPs kernel wrappers (calls via Python, no C++ linking)" ON)
-
 # The main library owns ATen, profiling, and the common runtime. Each
 # accelerator runtime, the Python bindings, and the AOT hosts have their own
 # build entry points.
@@ -243,14 +238,6 @@ else()
       list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/${_vendor_dir}/.*")
     endif()
   endforeach()
-  # MUSA's toolkit may ship no buildable mudnn (CMakeLists.txt decides). The
-  # vendor trees go after the loop above, so this does not depend on which
-  # directory names the MUSA row lists.
-  if(_flagos_is_musa AND NOT FLAGOS_MUSA_VENDOR_SLOT)
-    list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/aten/backends/mthreads/.*")
-    add_compile_definitions(FLAGOS_MUSA_NO_VENDOR_SLOT=1)
-    message(STATUS "MUSA build without the vendor kernel slot (no mudnn C++ SDK)")
-  endif()
   message(STATUS "FLAGOS_BUILD_VENDOR=ON for accelerator: ${FLAGOS_ACCELERATOR} (vendor ${FLAGOS_PLATFORM_VENDOR})")
 endif()
 
@@ -463,25 +450,9 @@ if(FLAGOS_BUILD_TILEOPS)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_TILEOPS)
 endif()
 
-# The kernel sets this wheel actually contains, as one comma-separated list, so
-# a dispatch failure can say whether the backend is missing because this build
-# never compiled it rather than leaving the user to guess. Names match
-# setup.py::KERNEL_SET_NAME, which writes the same set into the generated
-# torch_fl/_build_config.py; the two must not diverge, so the -D and the record
-# are both derived from these very options.
-set(FLAGOS_BUILTIN_KERNELS "")
-if(FLAGOS_BUILD_VENDOR)
-  string(APPEND FLAGOS_BUILTIN_KERNELS "vendor,")
-endif()
-if(FLAGOS_BUILD_FLAGGEMS)
-  string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems,")
-endif()
-if(FLAGOS_BUILD_FLAGGEMS_CPP)
-  string(APPEND FLAGOS_BUILTIN_KERNELS "flaggems_cpp,")
-endif()
-if(FLAGOS_BUILD_TILEOPS)
-  string(APPEND FLAGOS_BUILTIN_KERNELS "tileops,")
-endif()
+# Dispatch diagnostics and wheel metadata use the same configured kernel sets.
+flagos_write_build_config("${PROJECT_BINARY_DIR}/build-config.json" _kernel_sets)
+list(JOIN _kernel_sets "," FLAGOS_BUILTIN_KERNELS)
 message(STATUS "torch_fl kernel sets: ${FLAGOS_BUILTIN_KERNELS}")
 target_compile_definitions(${LIBRARY_NAME} PRIVATE
     FLAGOS_BUILTIN_KERNELS="${FLAGOS_BUILTIN_KERNELS}"
@@ -618,7 +589,7 @@ elseif(_flagos_is_iluvatar)
   endif()
 elseif(_flagos_is_musa)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${_torch_fl_link_libs})
-  if(FLAGOS_BUILD_VENDOR AND FLAGOS_MUSA_VENDOR_SLOT)
+  if(FLAGOS_BUILD_VENDOR)
     target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_MUSA_KERNEL=1)
     # mudnn's headers and library both live in the MUSA toolkit, already on the
     # include path via cuda_runtime_compat. Nothing vendor-specific to stage: no

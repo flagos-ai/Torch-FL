@@ -108,13 +108,8 @@ VENDOR_TORCH_ROOT="${VENDOR_FIELDS[2]}"
 VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[3]}"
 VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
 
-# DCU is a CUDA-ABI platform: the DTK torch wheel is a hipified build whose HIP
-# kernels are registered under the CUDA dispatch key, so torch_fl reaches them
-# through that dispatch key -- with the generated boxing kernels on the boxing
-# lane (BOXING_LANE=1), and with the DTK-native routes backends_hygon.conf names
-# on the vendor lane. libtorch_hip.so is the DTK analogue of CUDA's
-# libtorch_cuda.so; the bundle script stages it (plus the core .so) into
-# torch_fl/lib_hygon for a self-contained wheel on both lanes.
+# The DTK torch package supplies libtorch_hip.so for the Hygon runtime bundle.
+# The ordinary wheel uses the operator routes in backends_hygon.conf.
 if [[ ! -f "$VENDOR_TORCH_LIB/libtorch_hip.so" ]]; then
   echo "::error::$VENDOR_TORCH_LIB has no libtorch_hip.so, not a DTK torch/lib" >&2
   exit 1

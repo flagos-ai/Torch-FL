@@ -61,11 +61,9 @@ git push upstream v2.10.0
    also recognizes older artifact directories named for an accelerator id when
    recovering an old run, and refuses duplicate copies of the same wheel.
 
-   Independent wheel builds forward the loader's boxing mode to the existing
-   environment hook. Wheel verification reinstalls the fresh artifact and checks
-   its recorded kernel sets against the requested mode. Release matrix entries
-   above continue to select default builds; opting into a boxing build does not
-   add a second publishing lane.
+   The release matrix builds the ordinary wheel for each publishing platform.
+   Wheel verification checks the recorded kernel sets and runs preflight before
+   installing the artifact.
 
    Uploading from the platform's own job, rather than collecting all seven wheels
    into one GitHub-hosted job, is a measured decision. On `v2.10.0rc1` the

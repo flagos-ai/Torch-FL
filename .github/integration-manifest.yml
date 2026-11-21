@@ -157,7 +157,7 @@ steps:
     platforms: [nvidia, metax, thead]
     command: >-
       python -m pytest tests/integration/ops/
-      -m "main_ops and not cuda and not flaggems and not flaggems_python and not flaggems_cpp"
+      -m "main_ops and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
   # The ordinary Hygon baseline has known gaps in complex dtype support
@@ -167,7 +167,7 @@ steps:
     platforms: [hygon]
     command: >-
       python -m pytest tests/integration/ops/
-      -m "(dcu or main_ops) and not cuda and not flaggems and not flaggems_python and not flaggems_cpp"
+      -m "(dcu or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp"
       -k "not test_zeros_keeps_complex_dtype
       and not test_abs_of_complex_is_real_and_correct
       and not test_ones_and_fill_keep_complex_dtype
@@ -189,12 +189,6 @@ steps:
       -m "(anyplatform or main_ops or gcu) and not flaggems and not flaggems_python and not flaggems_cpp"
       -v -s --tb=short
 
-  # Kunlunxin is a native-kernel vendor like musa/gcu/ascend:
-  # backends_kunlunxin.conf routes ops to the native `kunlunxin` key (the vendor
-  # xdnn op library) or leaves them at `none` (CPU fallback), with no `cuda`
-  # route, so the `-> boxing` dispatch assertions are skipped by the platform
-  # table in tests/integration/ops/conftest.py rather than run here.
-  #
   # test_flaggems_device_name.py is ignored because this image's flagtree XPU
   # stack cannot import flag_gems at all: its XPU TLE backend raises
   # NotImplementedError for `tle.device_mesh`, which pytest.importorskip does not
@@ -231,10 +225,10 @@ steps:
     command: >-
       python -m pytest tests/integration/ops/
       --ignore=tests/integration/ops/test_rng_dispatch.py
-      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp and not cuda and not ascend and not metax and not dcu and not gcu and not ppu"
+      -m "(anyplatform or main_ops) and not flaggems and not flaggems_python and not flaggems_cpp and not ascend and not metax and not dcu and not gcu and not ppu"
       -v -s --tb=short
 
-  # Iluvatar has native vendor and FlagGems routes, with CUDA boxing disabled.
+  # Iluvatar has native vendor and FlagGems routes.
   # Select portable/native tests through markers; the conftest platform gate
   # handles backend assertions. FlagGems has its own group below.
   - id: vendor_ops
@@ -667,7 +661,7 @@ steps:
     command: python -m pytest tests/integration/test_mps_runtime.py -v --tb=short
 
   # Build a separate opt-in artifact after the ordinary vendor wheel has been
-  # tested. Boxing is disabled; the following group runs the installed hosts
+  # tested. The following group runs the installed hosts
   # from the same wheel-only workspace as the other operator suites.
   - id: native_host_build
     name: Build native FlagGems hosts

@@ -146,7 +146,7 @@
 │ Supported Platforms                                               │
 ├───────────────────────────────────────────────────────────────────┤
 │ • CUDA    - Primary development platform (PyTorch 2.11)          │
-│ • MetaX   - Boxing mode (PyTorch 2.10, reuses CUDA kernels)      │
+│ • MetaX   - FlagGems on the MACA runtime                          │
 │ • Ascend  - ACL backend                                           │
 │ • PPU     - CUDA-compatible via PPU SDK                           │
 └───────────────────────────────────────────────────────────────────┘

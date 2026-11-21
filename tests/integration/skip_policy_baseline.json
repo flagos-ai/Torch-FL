@@ -284,9 +284,9 @@
       "pytest.skip": 1
     },
     "tests/integration/ops/test_rng_dispatch.py": {
-      "pytest.mark.skipif": 2,
+      "pytest.mark.skipif": 1,
       "pytest.mark.xfail": 2,
-      "pytest.skip": 7
+      "pytest.skip": 5
     },
     "tests/integration/ops/test_rsqrt_dispatch.py": {
       "pytest.skip": 1
@@ -308,7 +308,6 @@
       "pytest.skip": 1
     },
     "tests/integration/ops/test_sparse_csr_dispatch.py": {
-      "pytest.mark.skipif": 1,
       "pytest.mark.xfail": 1
     },
     "tests/integration/ops/test_sum_dispatch.py": {
@@ -325,9 +324,9 @@
   "kinds": {
     "pytest.importorskip": 3,
     "pytest.mark.skip": 1,
-    "pytest.mark.skipif": 58,
+    "pytest.mark.skipif": 56,
     "pytest.mark.xfail": 6,
-    "pytest.skip": 100
+    "pytest.skip": 98
   },
   "roots": [
     "tests/integration/flaggems/",

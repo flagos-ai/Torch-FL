@@ -30,7 +30,7 @@ Generates (into csrc/aten/generated/):
   - register.inc     wrapper functions + m.impl() lines for register.cc
 
 Authoritative signature source: torchgen's faithful C++ signature
-(exploded TensorOptions form, required for PrivateUse1 boxing dispatch).
+(exploded TensorOptions form, as expected by the ATen dispatcher).
 We never hand-roll a type table; torchgen produces the exact `at::` signature.
 
 Naming convention (schema-driven, PyTorch-aligned):

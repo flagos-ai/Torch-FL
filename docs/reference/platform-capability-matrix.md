@@ -14,17 +14,17 @@ when a platform gains or loses one.
 
 | lane (`FLAGOS_ACCELERATOR` id) | Kind | runtime dir | aten backend | Python compat | conf routes | CI |
 |---|---|---|---|---|---|---|
-| `nvidia` | native CUDA (FlagGems-primary; CUDA boxing opt-in) | `nvidia` | — (C++ / FlagGems / CUDA) | `nvidia` | 2034 | yes |
-| `thead` | CUDA-ABI (FlagGems-primary; PPU libtorch only in a boxing build) | `nvidia` (+ `lib_thead/` bundle) | — (FlagGems / boxing opt-in) | `thead` | 2042 | yes |
-| `metax` | CUDA-ABI (FlagGems-primary; native retired; boxing opt-in) | `metax` | — (FlagGems / boxing opt-in) | `metax` | 2042 | yes |
-| `hygon` | CUDA-ABI (FlagGems-primary; DTK torch only in a boxing build) | `nvidia` (+ `hygon` DTK-core shim) | — (FlagGems / boxing opt-in) | `hygon` | 2042 | yes |
+| `nvidia` | FlagGems-primary on CUDA | `nvidia` | FlagGems, optional native precision | `nvidia` | 2034 | yes |
+| `thead` | FlagGems-primary on the PPU runtime | `nvidia` | FlagGems | `thead` | 2042 | yes |
+| `metax` | FlagGems-primary on MACA | `metax` | FlagGems, optional AOT native hosts | `metax` | 2042 | yes |
+| `hygon` | FlagGems-primary on DTK | `nvidia` (+ DTK-core shim) | FlagGems, optional AOT native hosts | `hygon` | 2042 | yes |
 | `kunlunxin` | vendor-native (xdnn op library) | `kunlunxin` | `kunlunxin` | `kunlunxin` (FlagGems shim only) | 2042 | yes |
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2042 | yes |
 | `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2042 | yes |
 | `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2042 | yes |
-| `tsingmicro` | CUDA-ABI (FlagGems-primary; boxing opt-in) | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
+| `tsingmicro` | FlagGems-primary on the Kuiper TX runtime | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
 | `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2042 | no |
-| `iluvatar` | FlagGems-primary + native vendor kernels (no boxing) | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
+| `iluvatar` | FlagGems-primary + native vendor kernels | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
 | `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2042 | yes |
 | `cambricon` | vendor-native (cnrt runtime; FlagGems-primary, CNNL kernels pending) | `cambricon` | `cambricon` (FlagGems register only; CNNL kernels pending) | `cambricon` | 2042 | no |
 
@@ -32,12 +32,9 @@ Column notes:
 
 - **Kind** is the operator path the build selects (see
   `cmake/flagos_platforms.json` for the per-platform kernel-switch defaults).
-  The CUDA-ABI platforms (`cuda`, `ppu`, `metax`, `dcu`, `tsingmicro`) are
-  **FlagGems-primary by default**: `FLAGOS_BUILD_BOXING` is off, so the wheel
-  compiles no CUDA boxing kernels, bundles no vendor libtorch, and routes the
-  ops its conf names to FlagGems with everything else on `cpu_fallback`. Boxing
-  is the explicit opt-in (`FLAGOS_BUILD_BOXING=1` / `-DFLAGOS_BUILD_BOXING=ON`)
-  that restores the vendor-libtorch build.
+  The ordinary CUDA, T-Head, MetaX and Hygon wheels use the FlagGems routes in
+  their shipped configuration. Operators with no device route reach
+  `cpu_fallback`.
 - **runtime dir** is the `csrc/runtime/accelerator/<dir>` whose sources the
   device runtime is built from. `dcu` reuses `cuda` (DTK's CUDA compatibility
 toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
@@ -72,26 +69,16 @@ toolkit) and adds `dcu/` for its DTK-core ABI shim; `ppu` reuses `cuda` too.
 
 ## Shared kernel sets
 
-`FLAGOS_BUILD_*` kernel switches (see `cmake/flagos_platforms.json`) decide which
-sets a wheel compiles: `vendor` (the platform's native tree), `flaggems`
-(FlagGems Python path), `flaggems_cpp` (FlagGems C++ path), `boxing` (generated
-CUDA boxing kernels) and `tileops`. Which are on by default is a property of the
-platform, not a per-build choice. `boxing` is off on every platform by default —
-a CUDA-ABI wheel is FlagGems-primary and carries no vendor libtorch unless a
-build opts into boxing.
+The platform table (`cmake/flagos_platforms.json`) defines the default
+`vendor`, `flaggems`, `flaggems_cpp`, and `tileops` kernel sets. The
+wheel's `_build_config.py` and `compatibility.json` record the sets CMake
+actually selected after checking the SDK.
 
 ## Known gaps
 
-- **CUDA** is where the gap between the conf and the default wheel is widest.
-  `backends_nvidia.conf` routes 392 ops to `flaggems` and 1642 to `cuda`, and the
-  default wheel compiles the generated FlagGems register list only, so those
-  1642 ops are unregistered on PrivateUse1 and reach `cpu_fallback`. Of them,
-  258 are FlagGems-capable on at least one of `metax`/`dcu`/`ppu` (unchanged --
-  the same set -- when `tsingmicro` and `iluvatar` are counted) and are the
-  cheap re-wire candidates; the other 1384 have no FlagGems route on any
-  platform and need a native CUDA backend
-  (cuBLAS/cuDNN/ATen CUDA) or an opt-in boxing build. The CUDA lane builds and
-  tests the default wheel, so a case asserting a `-> boxing` route skips there.
+- **CUDA** routes operators through FlagGems according to
+  `backends_nvidia.conf`. An opt-in native precision module can serve the dtype
+  exceptions declared there. Unrouted operators use `cpu_fallback`.
 - **BPU** has no aten backend and an empty conf: its unit of execution is a whole
   compiled graph, so eager ops reach `cpu_fallback` and acceleration comes from
   the `torch.compile(backend="bpu")` path.
@@ -109,8 +96,7 @@ build opts into boxing.
   `cpu_fallback`. The operator layer is MPSGraph-first
   with a hand-written MSL fallback (see
   `docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md`). It is
-  native — no dispatch re-tag onto `DispatchKey::MPS`/`CUDA` and no CUDA boxing
-  kernels (`FLAGOS_BUILD_BOXING` is pinned off). It has a
+  native and operates on PrivateUse1 tensors. It has a
   `torch_fl/accelerator/apple/` directory holding only `mps_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to), so the Python
   compat column reads "stream/event only". Its CI job runs on the free
@@ -139,7 +125,7 @@ build opts into boxing.
   `lib/flagos_platform` marker (it uses the `lib_thead/` bundle).
 - **Kunlunxin** (Kunlun P800 XPU) is a native vendor backend: its
   `backends_kunlunxin.conf` routes ops to the `kunlunxin` key (the vendor xdnn
-  op library) and leaves the rest at `none`, with **no `cuda` boxing route**. Its
+  op library), FlagGems or `none`. Its
   `torch_fl/accelerator/kunlunxin/` module is FlagGems glue only — a device-name
   realignment and a `torch.cuda` shim, no operator kernels. Its FlagGems routes are
   the 256 ops two P800 screens left standing (of a 618-op ceiling), listed in
@@ -150,8 +136,7 @@ build opts into boxing.
   what kept 22 silently-wrong and 9 device-poisoning operators off the conf, and
   what rejected three more that a single-profile screen had passed.
 - **Iluvatar** (BI-V150 / Tianshu, corex 4.5.0) is FlagGems-primary with a
-  native, non-boxing vendor slot alongside it. Boxing with the CUDA kernels was
-  explicitly ruled out; instead the ops FlagGems does not cover route to
+  native vendor slot. Operators covered by the vendor slot run through
   `csrc/aten/backends/iluvatar/`, whose kernels call corex's CUDA-named C ABI
   (ixdnn/ixblas) directly. Everything FlagGems covers still routes to the
   FlagGems Python/Triton path through FlagTree's iluvatar backend, and the rest

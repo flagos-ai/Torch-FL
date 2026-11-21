@@ -263,13 +263,16 @@ outside a FlagTree environment.
 
 ## FlagGems on MetaX
 
-Every MetaX wheel compiles the FlagGems Python dispatch slot, and `backends_metax.conf` is FlagGems-first. `import torch_fl` therefore routes 586 of the conf's 2037 ops to the FlagGems Python path and 15 to the FlagGems C++ path on its own; everything else -- including the ops `triton-metax` cannot compile (`mm`/`bmm`/`mean.dim`/`sum.dim_IntList` and others, where FlagGems uses a SPLIT_K kwarg or a CUDA-context path `triton-metax` rejects) -- is `none` and reaches `cpu_fallback`.
+The ordinary wheel uses the FlagGems routes in `backends_metax.conf`.
+An operator with no device route reaches `cpu_fallback`. The opt-in AOT wheel
+stages its measured routes under the same config filename.
 
-The ten `flaggems_cpp` routes need a FlagGems built for MACA (the `cpp/` half, `-DFLAGGEMS_BACKEND=MACA`) linked into the wheel; without it the dispatcher sees an empty C++ slot and boxes them. `_softmax` and `embedding` are on the Python path rather than the C++ one until that C++ wiring lands — see *Native Backend Route Changes* in the operator-support reference.
+The `scaled_dot_product_attention` wrapper checks which inputs the FlagGems
+kernel supports. Other inputs use the ATen composite on flagos tensors, and
+the constituent operators follow their own routes.
 
-One of the 594 is not a leaf op: `scaled_dot_product_attention` is a composite, and its conf key is read by the private-use kernel itself rather than by the dispatcher, so the route is taken only for the shapes `FlagGemsEligible` in `csrc/aten/sdp_choice_stub.cc` admits — bf16, 4-D, head_dim 128, sequence length 1024 or more, and no mask, causal flag or `scale`. Every other shape falls through to the composite tail under the same conf key: on a boxing wheel that tail boxes onto the CUDA kernel, and on the default FlagGems-primary wheel it calls the composite on the flagos tensors so its leaves reach FlagGems or `cpu_fallback`. On a boxing wheel, `FLAGOS_OP_scaled_dot_product_attention=cuda` takes the boxing route for every shape; on the default wheel that key names the unregistered `cuda` backend, so leave it unset.
-
-There is no switch that turns this on: routing is a property of the build (`torch_fl/__init__.py:_select_backend_config`), not of an environment variable. The practical consequence is that FlagGems is a runtime **dependency** rather than an option — an op routed to a FlagGems backend whose callable is absent raises at dispatch instead of falling back to boxing.
+FlagGems is a runtime dependency for the operators routed to it. A missing
+FlagGems callable raises at dispatch.
 
 Two target-side dependencies, neither of them on PyPI:
 
@@ -431,13 +434,14 @@ is involved any more.
 
 ### Wheel Too Large for PyPI
 
-**Expected behavior.** The bundled forked libtorch causes the wheel to exceed PyPI's 100 MB limit (~1.1 GB). Distribute via a private package index or direct file transfer.
+Optional native precision builds can be larger when they include vendor
+libraries. Use the MetaX package index for published wheels.
 
 ### FlagGems: `ModuleNotFoundError: No module named 'flag_gems'`
 
-**Cause:** `backends_metax.conf` routes 594 ops to the FlagGems Python path by default — 593 leaf ops plus the `scaled_dot_product_attention` composite described in *FlagGems on MetaX* — and `csrc/aten/backends/flagos/python_op_caller.cc:GetFunc` resolves each kernel by `getattr` on `flag_gems` at dispatch time. Without the package those routes raise rather than fall back. On a boxing wheel the composite is the one route that can be turned off without the package: `FLAGOS_OP_scaled_dot_product_attention=cuda` returns it to the CUDA boxing kernel and leaves every other route alone.
-
-**Fix:** Install FlagGems and a MetaX FlagTree Triton as shown in *FlagGems on MetaX* above. When reusing a copy that is already on the machine, check that it resolves the names rather than that it reports a version: an editable source tree reports `flag_gems.__version__ == "0.0.0"`.
+The FlagGems Python dispatcher resolves the selected callable from the installed
+`flag_gems` package. Install the package and the MetaX Triton provider described
+in [FlagGems on MetaX](#flaggems-on-metax).
 
 ## Further Reading
 

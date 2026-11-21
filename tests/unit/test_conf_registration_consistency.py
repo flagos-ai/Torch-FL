@@ -452,8 +452,8 @@ def test_metax_tileops_experiment_registration_matches_its_conf():
     [
         ("apple", {}, ["base"]),
         ("enflame", {"FLAGOS_BUILD_VENDOR": "OFF"}, ["flaggems"]),
-        ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "OFF"}, ["flaggems"]),
-        ("mthreads", {"FLAGOS_MUSA_VENDOR_SLOT": "ON"}, ["vendor", "flaggems"]),
+        ("mthreads", {"FLAGOS_BUILD_VENDOR": "OFF"}, ["flaggems"]),
+        ("mthreads", {}, ["vendor", "flaggems"]),
         ("metax", {"FLAGOS_NATIVE_HOSTS": "ON"}, ["flaggems", "native_host"]),
         ("metax", {"FLAGOS_BUILD_TILEOPS": "ON"}, ["tileops"]),
     ],
@@ -468,9 +468,6 @@ def test_cmake_selects_registration_fragments(tmp_path, platform, overrides, exp
         "cmake_minimum_required(VERSION 3.19)\n"
         f'include("{REPO_ROOT}/cmake/FlagosPlatforms.cmake")\n'
         f'include("{REPO_ROOT}/cmake/FlagosRegistration.cmake")\n'
-        'if(FLAGOS_PLATFORM_ID STREQUAL "musa")\n'
-        "  set(_flagos_is_musa ON)\n"
-        "endif()\n"
         f'flagos_write_registration("{ATEN_DIR}" "{output}")\n'
     )
     switches = {"FLAGOS_BUILD_VENDOR": "ON", "FLAGOS_BUILD_FLAGGEMS": "ON", **overrides}

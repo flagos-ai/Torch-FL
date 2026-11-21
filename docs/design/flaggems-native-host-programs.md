@@ -199,7 +199,7 @@ original FlagGems route on a miss.
 
 Use an installed NVIDIA CPU-Torch wheel, the dependency versions above, a C++
 compiler and the matching NVIDIA toolkit. The tested build ran
-`python setup.py bdist_wheel` with `FLAGOS_BUILD_BOXING=0`,
+`python setup.py bdist_wheel` with
 `FLAGOS_BUILD_FLAGGEMS_CPP=0`, `FLAGOS_BUILD_TILEOPS=0`, and the verified
 `FLAGOS_SDK_VERSION=13.1`. Wheel preflight with `--check-build-env --sdk-version
 13.1` passed before installation. The existing platform table still labels
@@ -233,8 +233,7 @@ non-default streams, embedding flags, strided copies, overlapping destinations
 and fresh views with shared version counters. Admission unit tests require no
 PyTorch installation. The PR records exact lint, test and codegen-check output.
 The integration manifest runs both hardware test files in the default NVIDIA
-PR and nightly lanes, with a 53-pass minimum; the boxing lane does not select
-this compiler-specific group. Admission and lifecycle unit tests run in the
+PR and nightly jobs with a 53-pass minimum. Admission and lifecycle unit tests run in the
 shared CPU workflow without requiring PyTorch or an accelerator.
 
 ## Remaining work

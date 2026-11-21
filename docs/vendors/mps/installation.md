@@ -58,7 +58,6 @@ and are not per-build choices:
 | Switch | Value | Why |
 |---|---|---|
 | `FLAGOS_BUILD_VENDOR` | on | The native operator tree lives in `csrc/aten/backends/apple/` and links `-framework MetalPerformanceShadersGraph` for the MPSGraph kernels. |
-| `FLAGOS_BUILD_BOXING` | **off** | This is a native backend. It never re-tags a `flagos` tensor onto `DispatchKey::MPS` or `DispatchKey::CUDA` and never builds the CUDA boxing kernels. |
 | `FLAGOS_BUILD_FLAGGEMS` | **off** | No FlagGems/Triton line targets Metal. |
 | `FLAGOS_BUILD_FLAGGEMS_CPP` | **off** | No `liboperators.so` exists for the Metal stack. |
 | `FLAGOS_BUILD_TILEOPS` | **off** | No TileOps line for Metal. |

@@ -103,11 +103,6 @@ def test_manifest_builder_works_without_source_root_on_import_path(
         "json": json,
         "SOURCE_DIR": str(source_root),
         "BASE_DIR": str(tmp_path),
-        "FLAGOS_ACCELERATOR": "cuda",
-        "_kernel_switches": lambda _: {"VENDOR": True},
-        "KERNEL_SWITCHES": ("VENDOR",),
-        "KERNEL_SET_NAME": {"VENDOR": "vendor"},
-        "_BUNDLE_LIBDIR": "lib",
         "_platform_entry": lambda _: {
             "vendor": "nvidia",
             "vendor_torch_libraries": True,
@@ -135,7 +130,16 @@ def test_manifest_builder_works_without_source_root_on_import_path(
     )
     (tmp_path / "torch_fl").mkdir()
 
-    namespace["_write_compatibility_manifest"]("0.1.0")
+    namespace["_write_compatibility_manifest"](
+        "0.1.0",
+        {
+            "platform": "cuda",
+            "vendor": "nvidia",
+            "bundle_libdir": "lib",
+            "kernels": ["vendor"],
+            "native_hosts": False,
+        },
+    )
 
     manifest = json.loads((tmp_path / "torch_fl" / "compatibility.json").read_text())
     assert manifest["platform"] == "cuda"

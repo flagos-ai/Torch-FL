@@ -27,8 +27,8 @@ Operator tests (`tests/integration/ops/`) use markers to select backend-specific
 |--------|---------|-------------|
 | `main_ops` | Representative operator in the CI smoke subset | Applied to frequently-used ops (add, matmul, conv, etc.) for fast feedback |
 | `anyplatform` | Runs on any accelerator backend | Device-agnostic tests (operator registration, dispatch routing) |
-| `cuda` | Requires a CUDA boxing build (`FLAGOS_BUILD_BOXING=1`); the default FlagGems-primary wheel has no `cuda` route, so the CUDA lane skips these | Tests asserting `-> boxing` backend routing |
-| `metax` | Requires MetaX C++ (mxcc) backend | Tests asserting `-> metax` backend routing; skipped on MetaX (its lane builds the boxing wheel) |
+| `nvidia` | Requires the NVIDIA runtime | Tests for NVIDIA-specific behavior, such as native metadata views |
+| `native_source_host` | Requires a wheel built with precompiled FlagGems source hosts | Tests for source-host routing and launch behavior on supported platforms |
 | `ascend` | Requires Ascend ACL backend | Tests asserting `-> ascend` backend routing |
 | `musa` | Requires Moore Threads MUSA backend | Tests asserting `-> musa` backend routing |
 | `flaggems` | Asserts the FlagGems route from `backends_<platform>.conf` | Tests asserting `-> flagos_python` or vendor-fallback routing |
@@ -293,20 +293,22 @@ torch_fl uses code generation to create operator bindings and backend-specific k
 
 ### Regenerating Operator Bindings
 
-When PyTorch's operator schema changes or new operators are added, regenerate the CUDA boxing kernels:
+When PyTorch's operator schema changes or operators are added, regenerate the
+shared dispatcher declarations, definitions, and registration wrappers.
 
 ```bash
 python scripts/codegen/codegen_ops.py
 ```
 
-This reads `torch._C._dispatch_tls_local_include()` and `native_functions.yaml` to generate `csrc/aten/generated/RegisterFlagOS.cpp` and related files.
+The generator reads PyTorch's `native_functions.yaml` through torchgen and
+writes `ops.h`, `ops.cc`, and `register.inc` under `csrc/aten/generated/`.
 
 ### Platform-specific Codegen
 
 | Script | Purpose | When to Run |
 |--------|---------|-------------|
-| `scripts/codegen/codegen_ops.py` | CUDA boxing kernels (kCUDA dispatch) | After PyTorch version bump or schema changes |
-| `scripts/codegen/codegen_boxing_flaggems_register.py` | Per-platform FlagGems register lists (`register_flaggems_<platform>.inc`) compiled by a FlagGems-primary CUDA-ABI build | After a conf route change on cuda/metax/dcu/ppu/tsingmicro, or a FlagGems op-table change |
+| `scripts/codegen/codegen_ops.py` | Shared dispatcher and registration wrappers | After PyTorch version bump or schema changes |
+| `scripts/codegen/codegen_flaggems_register.py` | Per-vendor FlagGems register lists (`register_flaggems_<vendor>.inc`) | After a route or FlagGems op-table change for a supported platform |
 | `scripts/codegen/codegen_autograd.py` | Autograd backward operator wrappers | After adding autograd support for new operators |
 | `scripts/codegen/codegen_ascend.py` | Ascend ACL kernel wrappers | After updating CANN version or adding Ascend ops |
 | `scripts/codegen/codegen_gcu.py` | GCU topsaten kernel wrappers | After updating TopsRider SDK or adding GCU ops |
@@ -350,7 +352,7 @@ ruff check --fix .
 
 GitHub Actions CI runs a subset of tests based on pytest marks:
 
-- **Smoke tests**: `-m main_ops` (CUDA boxing kernels only)
+- **Smoke tests** use `-m main_ops` to select representative operators on the ordinary wheel.
 - **FlagGems tests**: `-m "flaggems and main_ops"` (no env gate; the conf decides the route)
 - **Platform tests**: Vendor-specific runners filter by platform marker (e.g., `-m "ascend and main_ops"`)
 - **Cross-backend contracts**: platform manifests under `.github/configs/` run the same `-m amp` and `-m profiler` commands rather than per-vendor test files. A manifest omits a contract only when the gap is recorded in the file (GCU currently omits the profiler contract: its CPU-only PyTorch/Kineto image supplies no PrivateUse1 resolver, so TOPSPTI activities never surface as device events).
@@ -369,16 +371,10 @@ There is no per-platform workflow to copy, and no YAML dependency is needed in
 accelerator images. See [execution plans](ci-controls.md#executable-plans) for
 identity checks, failed-job reruns and the remaining report-gate work.
 
-A platform that can build CUDA boxing runs **two lanes**: its vendor lane (`<platform>`) and
-its boxing lane (`<platform>-boxing`), scheduled together by `generate_matrix.py` from
-`boxing_lane: true` in its config. Naming the platform in a dispatch (or `/ci run <platform>`)
-selects both; there is no way to run one without the other. The two lanes compose the same
-manifest -- the same groups, in the same order -- and differ in exactly two places: the
-`vendor_ops` entry, which carries `boxing_variant: [<platform>]` and therefore runs only on the
-boxing build (the vendor build's selection cannot answer the boxing conf), and the environment
-check, where the boxing lane is held to `boxing_environment_check` instead of `environment_check`. The hook builds the boxing wheel when the job is the boxing lane (it reads
-`BOXING_LANE` from the loader) and publishes under `wheel-<platform>-boxing` so the two artifacts
-cannot overwrite each other.
+Each platform runs its ordinary wheel in one hardware job. The integration
+manifest selects the test groups applicable to that platform. On supported
+platforms the same job also builds and tests an opt-in native-host wheel.
+Both wheels run preflight before installation.
 
 There is no generic integration fallback. A selected platform without a config fails discovery
 instead of being silently omitted. `build-wheel.yml` -- the one parameterized wheel build, used by
