@@ -694,7 +694,7 @@ steps:
   - id: native_source_hosts_hygon
     name: Native Hygon FlagGems host conformance
     platforms: [hygon]
-    min_passed: 216
+    min_passed: 217
     command: >-
       python -m pytest tests/integration/ops/test_hygon_native_hosts.py
       tests/integration/ops/test_hygon_native_routes.py -v --tb=short

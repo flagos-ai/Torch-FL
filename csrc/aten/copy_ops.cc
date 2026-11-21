@@ -103,17 +103,33 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
       src.is_complex() || dst.is_complex() || src.numel() > INT32_MAX ||
       dst.numel() > INT32_MAX || src.numel() == 0 || dst.numel() == 0 ||
       src.is_alias_of(dst)) return false;
-  if (!GemsCopyType(src.scalar_type()) || !GemsCopyType(dst.scalar_type())) return false;
+  const auto src_type = src.scalar_type();
+  const auto dst_type = dst.scalar_type();
+#if defined(USE_DCU) && defined(FLAGOS_NATIVE_HOSTS)
+  const bool copy_double_bits = src_type == at::kDouble && dst_type == at::kDouble;
+#else
+  constexpr bool copy_double_bits = false;
+#endif
+  if (!copy_double_bits && (!GemsCopyType(src_type) || !GemsCopyType(dst_type))) {
+    return false;
+  }
   at::assert_no_internal_overlap(dst);
   struct Scope {
     bool& active;
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
+  if (copy_double_bits) {
+    // The HCU copy host can move FP64 storage through its INT64 kernel.
+    // Same-width views preserve sizes, strides, storage offsets, and all bits.
+    CopyInplaceSourceHost(
+        dst.view(at::kLong), src.view(at::kLong), /*non_blocking=*/false);
+    return true;
+  }
 #if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)
   // The published MACA compiler lowers Bool -> BF16 to uitofp with an i16
   // result. Two original GPU copies through FP32 preserve both Boolean values.
-  if (src.scalar_type() == at::kBool && dst.scalar_type() == at::kBFloat16) {
+  if (src_type == at::kBool && dst_type == at::kBFloat16) {
     auto promoted = at::empty(src.sizes(), src.options().dtype(at::kFloat));
     CopyInplaceSourceHost(promoted, src, /*non_blocking=*/false);
     CopyInplaceSourceHost(dst, promoted, /*non_blocking=*/false);

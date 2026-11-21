@@ -361,7 +361,7 @@ def test_native_host_programs_run_in_the_default_nvidia_lane(profile):
     [
         ("ascend", "native_source_hosts", 94),
         ("metax", "native_source_hosts_metax", 86),
-        ("hygon", "native_source_hosts_hygon", 216),
+        ("hygon", "native_source_hosts_hygon", 217),
     ],
 )
 def test_native_source_hosts_require_the_installed_nonboxing_cohort(

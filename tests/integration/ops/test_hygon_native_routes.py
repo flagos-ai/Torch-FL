@@ -100,6 +100,24 @@ def test_hcu_copy_cast_broadcast_and_stream_order(source_dtype, target_dtype):
     torch.testing.assert_close(target.cpu(), cpu.to(target_dtype).expand(2, 7, 3))
 
 
+def test_hcu_strided_float64_copy_preserves_bits():
+    bits = torch.tensor(
+        [[0x3FF0000000000001, -(1 << 63)], [0x7FF8000000000042, 1]],
+        dtype=torch.int64,
+    )
+    expected = torch.zeros(2, 3, dtype=torch.int64)
+    expected[:, 1:].copy_(bits.t())
+    stream = torch.Stream(device="flagos")
+    with stream:
+        source = bits.view(torch.float64).to("flagos")
+        storage = torch.zeros(2, 3, dtype=torch.float64).to("flagos")
+        storage[:, 1:].t().copy_(source)
+    stream.synchronize()
+    torch.testing.assert_close(
+        storage.cpu().view(torch.int64), expected, rtol=0, atol=0
+    )
+
+
 def test_hcu_precision_entries_are_installed_without_boxing():
     from torch_fl import _build_config
     from torch_fl.native_host import vendor
