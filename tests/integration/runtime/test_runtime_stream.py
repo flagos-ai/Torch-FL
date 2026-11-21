@@ -27,6 +27,8 @@ import pytest
 import torch
 
 import torch_fl
+from torch_fl import _C
+from torch_fl._platform import detect_platform
 
 DEVICE = "flagos:0"
 
@@ -51,6 +53,25 @@ def test_current_stream_exposes_the_protocol():
         assert callable(getattr(stream, name)), f"stream lacks {name}()"
     assert stream.query() in (True, False)
     stream.synchronize()
+
+
+@pytest.mark.anyplatform
+def test_hygon_owned_stream_is_distinct_and_tensor_bindable():
+    if detect_platform() != "dcu" or not hasattr(_C, "_get_native_current_raw_stream"):
+        pytest.skip("requires the Hygon native stream guard")
+    current = torch_fl.flagos.current_stream(DEVICE)
+    high_priority = torch_fl.flagos.Stream(DEVICE, priority=-1)
+    ordinary = torch_fl.flagos.Stream(DEVICE)
+    assert isinstance(high_priority, torch.Stream)
+    assert len({current.stream_id, high_priority.stream_id, ordinary.stream_id}) == 3
+    tensor = torch.arange(32).to(DEVICE)
+    tensor.record_stream(high_priority)
+    tensor.record_stream(ordinary)
+    with torch_fl.flagos.stream(high_priority):
+        assert (
+            torch_fl.flagos.current_stream(DEVICE).stream_id == high_priority.stream_id
+        )
+    assert torch_fl.flagos.current_stream(DEVICE).stream_id == current.stream_id
 
 
 @pytest.mark.anyplatform
