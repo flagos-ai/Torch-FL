@@ -348,7 +348,7 @@ steps:
   # already measures -- the multinomial case among them.
   - id: rng
     name: Run unified RNG tests
-    platforms: [ascend, nvidia, hygon, enflame, iluvatar, kunlunxin, metax]
+    platforms: [ascend, nvidia, hygon, enflame, iluvatar, kunlunxin, metax, tsingmicro]
     command: >-
       python -m pytest tests/integration/ops/test_rng_dispatch.py
       -m "main_ops and not flaggems" -v -s --tb=short
@@ -413,6 +413,7 @@ steps:
       - mthreads
       - nvidia
       - thead
+      - tsingmicro
     command: python -m pytest tests/integration/test_factory_ops.py -v -s --tb=short
 
   # Measured on the eight-device C550 host on 2026-09-15: 30 passed, 7 deselected.

@@ -1,0 +1,50 @@
+# Copyright 2026 FlagOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+display_name: TsingMicro
+setup_script: .github/scripts/set_env.sh
+setup_platform: tsingmicro
+
+# build-infra #1440 validated FlagOS runtime 2.3.0 on tsm-249 with these
+# device mappings. The setup hook isolates the Torch-FL cohort in its own venv.
+ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-tsingmicro-tsm260610@sha256:60d3b1891f71a2cb23a24a654e3e03c5d267600a3d55771c7255c3e7561a4b2a
+runner_labels:
+  - tsm-249
+
+paths_watch:
+  - torch_fl/accelerator/tsingmicro/
+  - torch_fl/configs/backends_tsingmicro.conf
+  - csrc/aten/backends/tsingmicro/
+  - csrc/aten/generated/register_flaggems_tsingmicro.inc
+  - csrc/runtime/accelerator/tsingmicro/
+  - csrc/runtime/allocator/backends/tsingmicro_memory.h
+  - csrc/profiler/tsingmicro_*
+  - .github/scripts/hooks/set_env_tsingmicro.sh
+  - .github/scripts/set_env_tsingmicro.sh
+
+container_volumes: []
+container_options: >-
+  --device=/dev/accel
+  --device=/dev/accel_drv_mgr
+  --shm-size=8g
+
+timeout_minutes: 60
+wheel_artifact_name: wheel-tsingmicro
+
+environment_check:
+  torch_version_prefix: "2.10.0+cpu"
+  cuda_version: null
+  require_build_kernels: [vendor, flaggems]
+  forbid_build_kernels: [flaggems_cpp, tileops]
+  forbid_package_files:
+    - lib/libtorch_cuda.so
+    - lib/libc10_cuda.so
+  flagos_devices:
+    at_least: 1
+  triton_backend: tsingmicro
+  flaggems_vendor: tsingmicro
+  require_torch_backends_hook: true
+  flagtree:
+    version_env: FLAGTREE_VERSION
+    version_default: 0.7.0+tsingmicro3.6
+    triton_prefix: "3.6."

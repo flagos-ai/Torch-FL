@@ -154,8 +154,8 @@ If you drafted text in another language during development, translate it before 
 ### Hardware Acceptance
 
 Every PR requires a passing `PR hardware parity` check on the final revision.
-Link the run and list the common cases that exercise the fix or feature on all
-ten lanes. See
+Link the run and list the common cases that exercise the fix or feature on every
+required lane. See
 [Cross-platform PR acceptance](AGENTS.md#cross-platform-pr-acceptance).
 
 ### Exclude

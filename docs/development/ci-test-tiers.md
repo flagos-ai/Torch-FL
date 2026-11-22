@@ -11,7 +11,7 @@ integration manifest.
 
 The daily nightly runs at 02:00 China Standard Time. A manually requested
 nightly requires `platforms=all`. Ordinary push events run the full matrix.
-PR acceptance requires the common suite to pass on all ten lanes for the
+PR acceptance requires the common suite to pass on every required lane for the
 same revision. Shared lint, source and codegen checks are also required.
 
 `profiles: [nightly]` on a manifest group keeps optional CUDA profiling out of

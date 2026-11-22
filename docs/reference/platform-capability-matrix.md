@@ -22,7 +22,7 @@ when a platform gains or loses one.
 | `ascend` | vendor-native (ACLNN) | `ascend` | `ascend` | `ascend` | 2042 | yes |
 | `enflame` | vendor-native (topsaten) | `enflame` | `enflame` | `enflame` | 2042 | yes |
 | `mthreads` | vendor-native (mudnn) | `mthreads` | `mthreads` | `mthreads` (stream/event only) | 2042 | yes |
-| `tsingmicro` | FlagGems-primary on the Kuiper TX runtime | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | no |
+| `tsingmicro` | FlagGems-primary on the Kuiper TX runtime | `tsingmicro` | `tsingmicro` (RNG kernels only; ops otherwise FlagGems) | `tsingmicro` (Qwen-Image-2.1 rope shim only) | 81 | yes |
 | `drobotics` | vendor-native (compiled single-op .hbm artifacts) + graph compile | `bpu` | `bpu` (generated elementwise kernels; needs `FLAGOS_BPU_OPLIB`) | `bpu` | 2042 | no |
 | `iluvatar` | FlagGems-primary + native vendor kernels | `iluvatar` | `iluvatar` (FlagGems register + ixdnn/ixblas native kernels) | — (no dir) | 2042 | yes |
 | `apple` | vendor-native (Metal / MPSGraph) | `apple` | `apple` (MPSGraph-first: 37 native routes) | `apple` (stream/event only) | 2042 | yes |
@@ -108,9 +108,11 @@ actually selected after checking the SDK.
   explicit `import torch_fl` is limited
   by [PyTorch issue #161129](https://github.com/pytorch/pytorch/issues/161129):
   autograd can choose a different stream from the MPS device.
-- **TsingMicro** has a sparse hand-written conf (81 routes) and no CI job; its
-  `torch_fl/accelerator/tsingmicro/` directory holds only the Qwen-Image-2.1
-  rotation shim, not a device compat layer.
+- **TsingMicro** has a sparse hand-written conf (81 routes). The
+  [hardware lane](../../.github/configs/tsingmicro.yml) builds the wheel with Kuiper,
+  CPU PyTorch, and the pinned TXDA FlagTree backend, then runs the shared
+  integration manifest. Its Python compat directory contains the
+  Qwen-Image-2.1 rotation shim.
 - **MUSA** has no Python compat module and no compile-only CI job. It does have a
   `torch_fl/accelerator/mthreads/` directory, but it holds only `musa_stream.py` (the
   stream/event wrappers `torch.flagos.Stream` dispatches to) — not a
@@ -154,7 +156,7 @@ actually selected after checking the SDK.
   `corex4.5.0`. The native kernel cohort is **not yet hardware-revalidated**: the
   ixdnn/ixblas path has a proven end-to-end conv2d result (bit-for-bit vs CPU on
   BI-V150) but the full cohort has not been re-measured.
-- **CI covers 10 of 13**: TsingMicro, BPU and Cambricon have no
+- **CI covers 11 of 13**: BPU and Cambricon have no
   `.github/configs/` entry. Cambricon's platform is complete and builds, but no
   runner carries its hardware yet, so the lane is retired and `pypi_lane` is
   empty — a release job reads its runner label and image from that config file,

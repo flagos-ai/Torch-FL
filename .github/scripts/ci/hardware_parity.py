@@ -18,6 +18,7 @@ REQUIRED_PLATFORMS = frozenset(
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     }
 )
 GROUP_ID = "common_regression"

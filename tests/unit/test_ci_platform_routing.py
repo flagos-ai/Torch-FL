@@ -412,7 +412,7 @@ def _parity_reports(plan, directory, *, defect=""):
     "defect, message",
     [
         ("", ""),
-        ("nine_lanes", "PR plan is missing required platforms: thead"),
+        ("missing_lane", "PR plan is missing required platforms: tsingmicro"),
         ("missing_group", "metax: expected the unfiltered common regression group"),
         ("filtered_group", "metax: expected the unfiltered common regression group"),
         ("missing_report", "missing platform report: metax"),
@@ -430,10 +430,10 @@ def test_pr_hardware_gate_requires_identical_passing_common_cases(
     tmp_path, defect, message
 ):
     plan = gate_plan()
-    if defect == "nine_lanes":
-        plan["expected_platforms"].remove("thead")
+    if defect == "missing_lane":
+        plan["expected_platforms"].remove("tsingmicro")
         plan["execution_plan"] = [
-            lane for lane in plan["execution_plan"] if lane["name"] != "thead"
+            lane for lane in plan["execution_plan"] if lane["name"] != "tsingmicro"
         ]
     if defect in {"missing_group", "filtered_group"}:
         metax = next(lane for lane in plan["execution_plan"] if lane["name"] == "metax")
@@ -444,7 +444,7 @@ def test_pr_hardware_gate_requires_identical_passing_common_cases(
             metax["groups"].remove(common)
         else:
             common["command"] += " -k test_case_0"
-    if defect in {"nine_lanes", "missing_group", "filtered_group"}:
+    if defect in {"missing_lane", "missing_group", "filtered_group"}:
         plan["plan_hash"] = PLANNER.plan_hash(plan)
     _parity_reports(plan, tmp_path, defect=defect)
     jobs = {

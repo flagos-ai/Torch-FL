@@ -7,8 +7,8 @@ TsingMicro Triton backend, with `cpu_fallback` for every op the routing file doe
 not name. The one native kernel set is the host-draw RNG family in
 `csrc/aten/backends/tsingmicro/rng.cc`.
 
-This platform is **Experimental**. It is measured on TX8110 hardware, but it has
-no CI job and no published wheel.
+This platform is **Experimental**. The TsingMicro CI lane builds and tests its
+wheel on TX8110 hardware.
 
 ## Prerequisites
 
@@ -18,10 +18,9 @@ no CI job and no published wheel.
   the CMake cache variable `KUIPER_ROOT` (`-DKUIPER_ROOT=/path/to/kuiper`).
 - **FlagGems**: `flag_gems==5.4.0` (the version the routing tables were generated
   against).
-- **Triton**: `triton>=3.5.1`. TsingMicro has no FlagTree build, so `setup.py`
-  declares a stock Triton requirement instead of pinning FlagTree. A vendor
-  Triton build that carries the `tsingmicro` backend is the validated case.
-- **Python**: 3.8 or later (validated with 3.10).
+- **FlagTree**: `flagtree==0.7.0+tsingmicro3.6` from the FlagOS wheel index.
+  It provides Triton 3.6 with the `tsingmicro` backend.
+- **Python**: 3.10 on x86-64 Linux, matching the published FlagTree wheel.
 - **Device access**: the TX8 runtime must see at least one device (`tsm_smi`
   lists them).
 - **Operating system**: Linux.
@@ -40,7 +39,9 @@ pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-FLAGOS_ACCELERATOR=tsingmicro pip install --no-build-isolation -v -e .
+FLAGOS_ACCELERATOR=tsingmicro pip install --no-build-isolation -v -e . \
+  --extra-index-url https://resource.flagos.net/repository/flagos-pypi-hosted/simple \
+  --extra-index-url https://resource.flagos.net/repository/flagos-pypi-tsingmicro/simple
 ```
 
 Build flags:
@@ -226,11 +227,8 @@ is otherwise indistinguishable from a workload that launched no kernels.
 
 ## Known limitations
 
-- **No CI and no published wheel.** Every result in this guide is on-hardware
-  measurement, not continuous validation.
-- **No FlagTree or FlagCX pin.** `setup.py` declares a plain `triton>=3.5.1` for
-  this platform, and FlagCX has no TsingMicro build in the version pins, so
-  distributed collectives are not validated.
+- **Local wheel distribution.** Build Torch-FL using the instructions above.
+- **Distributed collectives.** The TsingMicro CI cohort does not cover FlagCX.
 - **No complex64 on the device.** The Triton backend has no complex pointer
   type; keep complex tensors on the CPU. The Qwen-Image-2.1 rope is the known
   workaround.
@@ -238,6 +236,11 @@ is otherwise indistinguishable from a workload that launched no kernels.
   host. Use `FLAGOS_LOG=fallback` to list them.
 
 ## Testing
+
+For CI, dispatch the shared CI workflow with `platforms=tsingmicro`. The
+job uses the [FlagOS runtime validated on the tsm-249 runner](https://github.com/flagos-ai/build-infra/pull/1440).
+The lane builds the wheel, checks its compatibility manifest, and runs the
+common regression suite and TsingMicro's selected integration groups.
 
 ```bash
 pytest tests/unit/test_tsingmicro_qwenimage21_rope.py -v

@@ -52,6 +52,7 @@ PLATFORMS = [
     "metax",
     "mthreads",
     "thead",
+    "tsingmicro",
 ]
 RUNNER = SCRIPTS_DIR / "set_env.sh"
 HOOKS_DIR = SCRIPTS_DIR / "hooks"
@@ -384,28 +385,24 @@ def test_requires_python_is_the_platforms_pinned_interpreter():
                 declared,
             )
         else:
-            # No FlagTree, so no lane and no artifact either.
+            # Builds without a compiler pin keep the general Python floor.
             assert declared == ">=3.8", (platform, declared)
 
 
-def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
-    """The two travel together: both describe the one published artifact.
-
-    An SDK segment (``+cuda13.3``) names the FlagTree build the wheel links, so
-    it must come with that build's interpreter. A platform-id segment (``+mps``)
-    names the wheel's platform and nothing else -- MPS links no FlagTree -- so it
-    must not borrow a pin it does not have; ``Requires-Python`` then falls back
-    to the base builds' range.
-    """
+def test_interpreter_pin_matches_the_compiler_cohort():
+    """A pinned compiler needs its interpreter even for a CI-only wheel."""
     pins = _pins()
     for platform in _platforms_in_the_table():
+        vendor = _table_vendor(platform)
+        compiler = pins.get(f"FLAGTREE_VERSION_{vendor}") or pins.get(
+            f"TRITON_VERSION_{vendor}"
+        )
+        interpreter = pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
+        assert bool(interpreter) == bool(compiler), platform
+
         segment = _wheel_local(platform)
-        if segment == platform:
-            assert f"FLAGTREE_PYTHON_VERSION_{platform}" not in pins, platform
-        else:
-            assert bool(segment) == bool(
-                pins.get(f"FLAGTREE_PYTHON_VERSION_{platform}")
-            ), platform
+        if segment and segment != platform:
+            assert interpreter, platform
 
 
 def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():

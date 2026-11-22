@@ -344,7 +344,7 @@ eager operator path:
 routes its ops to FlagGems, and the `#else` branch of
 [`csrc/aten/register.cc`](../../csrc/aten/register.cc) claims them. There is no
 vendor-native operator library to fall back to — TsingMicro's compute path is FlagGems
-through a vendor Triton build (there is no FlagTree wheel for this platform), and a build
+through the TsingMicro FlagTree wheel, and a build
 that cannot reach FlagGems has nothing behind it. The exception is the host-draw RNG family
 in [`csrc/aten/backends/tsingmicro/rng.cc`](../../csrc/aten/backends/tsingmicro/rng.cc),
 which `register.cc` claims directly because TX8 has no random-number unit.
@@ -371,8 +371,8 @@ run was a smoke test, not the per-overload survey the 2026-Q3 split above came f
 that split remains the last per-operator correctness record. See the TsingMicro row in
 [`docs/reference/operator-support.md`](operator-support.md).
 
-This was measured on a TX8 host, not in CI. There is no CI manifest for this platform;
-installation and verification steps are in
+The measurements above came from a TX8 host. The shared CI manifest now includes
+TsingMicro. Installation and verification steps are in
 [the TsingMicro guide](../vendors/tsingmicro/installation.md).
 
 ## Reading the Matrix

@@ -53,6 +53,7 @@ PLATFORMS = [
     "mthreads",
     "nvidia",
     "thead",
+    "tsingmicro",
 ]
 
 
