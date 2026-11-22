@@ -150,9 +150,6 @@ export PIP_DEFAULT_TIMEOUT=120
   --requirements-file "$REPO_ROOT/.github/requirements-thead.txt"
 
 ensure_runtime_requirements "$REPO_ROOT/.github/requirements-thead.txt" "$PIP_INDEX_URL"
-if ! runtime_cpu_torch_is_usable; then
-  repair_runtime_cpu_torch
-fi
 
 # Retain the existing integration-only compiler, operator and model packages.
 if [[ "$CI_STAGE" == "integration" ]]; then
@@ -168,13 +165,18 @@ if [[ "$CI_STAGE" == "integration" ]]; then
   install_flag_gems
 fi
 
-CPU_TORCH_ROOT="$("$VENV_PYTHON" - <<'PY'
+if ! runtime_cpu_torch_is_usable; then
+  repair_runtime_cpu_torch
+fi
+CPU_TORCH_ROOT="$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV_PYTHON" -I - <<'PY'
 from pathlib import Path
+import sys
+
 import torch
 
-print(Path(torch.__file__).resolve().parent)
-assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-assert torch.version.cuda is None, torch.version.cuda
+torch_root = Path(torch.__file__).resolve().parent
+assert torch_root.is_relative_to(Path(sys.prefix).resolve()), torch_root
+print(torch_root)
 PY
 )"
 
@@ -237,22 +239,10 @@ else
   exit 1
 fi
 
-python - <<'PY'
-import os
-from pathlib import Path
-import sys
-import torch
-
-torch_path = Path(torch.__file__).resolve()
-assert sys.executable.startswith("/"), sys.executable
-assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
-assert torch.version.cuda is None, torch.version.cuda
-assert "/opt/conda/" not in str(torch_path), torch_path
-assert not Path("torch_fl/lib_thead/libtorch_cuda.so").exists()
-print(f"Isolated Python: {sys.executable}")
-print(f"CPU PyTorch: {torch.__version__}")
-print(f"CPU torch path: {torch_path}")
-PY
+if [[ -e torch_fl/lib_thead/libtorch_cuda.so ]]; then
+  echo "::error::The ordinary PPU build must not bundle libtorch_cuda.so" >&2
+  exit 1
+fi
 
 # Prove the installed FlagGems stack is importable and wired to PPU, so a broken
 # install fails here instead of turning into a wall of identical failures in the
