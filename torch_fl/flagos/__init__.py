@@ -277,16 +277,15 @@ def reset_peak_memory_stats(device=None):
 class Stream(torch.cuda.Stream):
     """Create a stream for the wheel's device runtime.
 
-    On native Hygon builds, the public constructor returns a ``torch.Stream``
-    backed by the PrivateUse1 guard. Check the result against ``torch.Stream``
-    when passing it to APIs such as ``Tensor.record_stream``.
+    On Hygon and MUSA, the public constructor returns a ``torch.Stream`` backed
+    by the PrivateUse1 guard for use with APIs such as ``Tensor.record_stream``.
     """
 
     def __new__(cls, device=None, priority=0, **kwargs):
         if (
             cls is Stream
             and not kwargs
-            and _platform() == "dcu"
+            and _platform() in {"dcu", "musa"}
             and hasattr(_C, "_get_native_current_raw_stream")
         ):
             # FSDP passes the object directly to Tensor.record_stream. The
@@ -458,15 +457,20 @@ class _HostTimedEvent:
 class Event(torch.cuda.Event):
     """Flagos event: a real CUDA event where there is a CUDA runtime.
 
-    Where there is not, this is the vendor's event (Enflame tops, Ascend ACL) or,
-    on MUSA and any accelerator without one, the host-clock
-    ``_HostTimedEvent``.
+    Other runtimes use the device's event when available and the host clock as
+    a fallback.
     """
 
     def __new__(
         cls, enable_timing=False, blocking=False, interprocess=False, external=False
     ):
         if not _has_cuda_runtime():
+            if (
+                _platform() == "musa"
+                and hasattr(_C, "_get_native_current_raw_stream")
+                and not (blocking or interprocess or external)
+            ):
+                return torch.Event(device="flagos", enable_timing=enable_timing)
             # One spelling of the host-clock fallback for the arms below, so they
             # differ only in which vendor class they try first.
             host_timed = dict(
@@ -514,11 +518,6 @@ class Event(torch.cuda.Event):
                 obj = object.__new__(cls)
                 obj._event = IluEvent(**host_timed)
                 return obj
-            # MUSA, whose vendor events live behind the shared C ABI: its timing
-            # flags are not musa_runtime's, so there is nothing here to wrap and
-            # the host clock is the clock that is left. Any other accelerator with
-            # no event class takes the same answer, rather than being sent to
-            # Ascend for one. See torch_fl/accelerator/mthreads/musa_stream.py.
             return _HostTimedEvent(**host_timed)
         if not hasattr(torch._C, "_cuda_getCurrentStream"):
             # CPU torch wheel over a real CUDA runtime: torch.cuda.Event is the

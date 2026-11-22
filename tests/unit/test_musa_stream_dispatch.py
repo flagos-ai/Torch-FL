@@ -92,20 +92,36 @@ def test_stream_builds_the_shared_musa_stream(vendor):
     assert not _ascend_was_imported()
 
 
-def test_fsdp_streams_are_one_queue(vendor):
-    """FSDP asks for four streams; all four must carry the same handle.
-
-    That is the point of the MUSA arm rather than a side effect: mudnn is bound
-    to ``GetDefaultMusaStream`` for the life of the process and Triton launches on
-    the same handle, so a second stream would only make the copies FSDP wanted to
-    overlap unordered against the ops they feed.
-    """
+def test_legacy_fsdp_streams_share_one_queue(vendor):
+    """The legacy binding lends the same queue to each FSDP stream."""
     vendor("musa")
 
     streams = [_build_stream(priority=-1) for _ in range(3)]
     streams.append(_build_stream())
 
     assert {stream.musa_stream for stream in streams} == {_HANDLE}
+    assert not _ascend_was_imported()
+
+
+def test_musa_with_a_stream_registry_uses_the_pytorch_guard(vendor, monkeypatch):
+    vendor("musa")
+    monkeypatch.setattr(
+        _streams._C,
+        "_get_native_current_raw_stream",
+        lambda index: _HANDLE,
+        raising=False,
+    )
+    sentinel = object()
+    calls = []
+
+    def create(index, priority):
+        calls.append((index, priority))
+        return sentinel
+
+    monkeypatch.setattr(_streams, "create_guard_stream", create)
+    assert flagos.Stream(device="flagos:1", priority=-1) is sentinel
+    assert calls == [(1, -1)]
+    assert _streams.get_raw_stream(1) == _HANDLE
     assert not _ascend_was_imported()
 
 

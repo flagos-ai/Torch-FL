@@ -181,15 +181,23 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
 
 
 @pytest.mark.parametrize(
-    "contract,sdk_variable,library,utility,compiler",
+    "contract,sdk_variable,library,utility,compiler,capabilities",
     [
-        ("thead", "PPU_SDK", "hggc", "hggc_utils", "ppu"),
-        ("iluvatar", "COREX_PATH", "cuda", "cuda_utils", "corex"),
+        ("thead", "PPU_SDK", "hggc", "hggc_utils", "ppu", 253),
+        ("iluvatar", "COREX_PATH", "cuda", "cuda_utils", "corex", 253),
+        ("mthreads", "MUSA_HOME", "musa", "musa_utils", "musa", 167),
     ],
     indirect=["contract"],
 )
 def test_extensions_use_the_published_sdk_driver(
-    monkeypatch, contract, tmp_path, sdk_variable, library, utility, compiler
+    monkeypatch,
+    contract,
+    tmp_path,
+    sdk_variable,
+    library,
+    utility,
+    compiler,
+    capabilities,
 ):
     adapter, root, record, compiled = contract
     monkeypatch.setenv(sdk_variable, "/published-sdk")
@@ -208,15 +216,44 @@ def test_extensions_use_the_published_sdk_driver(
     assert "/published-sdk/lib" in launcher.library_dirs
     assert not any("/unrelated-cuda" in path for path in launcher.library_dirs)
     assert record["compiler_backend"] == compiler
-    assert compiled["capabilities"] == 253
+    assert compiled["capabilities"] == capabilities
 
 
-@pytest.mark.parametrize("contract", ["nvidia", "thead", "iluvatar"], indirect=True)
+@pytest.mark.parametrize(
+    "contract", ["nvidia", "thead", "iluvatar", "mthreads"], indirect=True
+)
 def test_shared_launch_parameters_are_part_of_the_backend_contract(contract):
     adapter, root, record, compiled = contract
     (backend._ROOT / "csrc/launch_params.h").write_text("// changed launch layout\n")
     with pytest.raises(RuntimeError, match="ABI changed"):
         backend.validate_record(record, adapter, root, compiled)
+
+
+def test_musa_launcher_packs_the_published_target_and_descriptors():
+    musa = import_native_host("backends.mthreads")
+    signature = {"descriptor": "tensordesc<fp16[16,32]>", "length": "i32"}
+    source = SimpleNamespace(
+        fn=SimpleNamespace(arg_names=("length", "descriptor")), signature=signature
+    )
+    entry = {"block_size": (16, 32), "elem_size": 2}
+    metadata = SimpleNamespace(
+        target=SimpleNamespace(warp_size=128), tensordesc_meta=[entry]
+    )
+    driver = SimpleNamespace(
+        _parse_tensordesc_type={signature["descriptor"]: ("fp16", 2)}.get,
+        _musa_tme_dtype_enum={"fp16": 4}.__getitem__,
+        _MUSA_TME_NAN_FILL={"fp16": 0x7E00},
+    )
+    prepared, parameters = musa._prepare(source, metadata, driver)
+    assert list(prepared.signature.values()) == ["i32", signature["descriptor"]]
+    assert parameters.warp_size == 128
+    assert parameters.global_scratch_size == parameters.profile_scratch_size == 0
+    assert parameters.tensordesc_meta == (
+        {**entry, "elem_type": 4, "nan_fill": 0x7E00},
+    )
+    metadata.debug_launch_hidden_arg = True
+    with pytest.raises(RuntimeError, match="debugger arguments"):
+        musa._prepare(source, metadata, driver)
 
 
 @pytest.mark.parametrize("contract", ["metax"], indirect=True)

@@ -221,13 +221,9 @@ class BlockingCopyGuard {
     // still correct, just coarser. Only reached on the blocking-copy paths.
     ::DeviceSynchronize();
 #elif defined(USE_MUSA)
-    // No c10::cuda to ask here either, but the shared per-device stream is
-    // reachable directly. Every producer submits to it -- mudnn through
-    // EXEC_MUDNN_CMD, FlagGems and Triton through flagtree_shim -- so draining
-    // it is the barrier the CUDA arm gets from stream.synchronize(). The guard
-    // above is what makes GetDefaultMusaStream() resolve to *this tensor's*
-    // device; it keys off the current device, like the mudnn handle.
-    musaStreamSynchronize(at::native::flagos::musa::GetDefaultMusaStream());
+    // The guard selected the tensor's device. Drain its current producer queue
+    // before the blocking transfer.
+    musaStreamSynchronize(at::native::flagos::musa::GetCurrentMusaStream());
 #elif defined(USE_GCU)
     // Same shape as the MUSA arm, and added for the same reason: the tops
     // stream is shared by both producers -- topsaten submits to
@@ -256,7 +252,7 @@ class BlockingCopyGuard {
     // iluvatar owns its streams, so the queue every producer submits to is
     // reachable directly. The guard above selected *this tensor's* device
     // before this runs, so the current device is the one to ask about -- the
-    // same assumption the MUSA arm makes about GetDefaultMusaStream(). Waiting
+    // same assumption the MUSA arm makes about its current stream. Waiting
     // on that stream is what the CUDA arm gets from c10::cuda's current stream.
     // Only reached on the blocking-copy paths.
     int device = 0;

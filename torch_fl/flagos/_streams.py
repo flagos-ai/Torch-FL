@@ -185,6 +185,7 @@ class _GuardStream(torch.Stream):
         return self.stream_id
 
     cuda_stream = handle
+    musa_stream = handle
 
     def record_event(self, event=None):
         from . import Event

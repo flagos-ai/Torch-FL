@@ -31,6 +31,9 @@
 #if !defined(USE_CAMBRICON) && defined(FLAGOS_ACCEL_CAMBRICON)
 #define USE_CAMBRICON 1
 #endif
+#if !defined(USE_MUSA) && defined(FLAGOS_ACCEL_MUSA)
+#define USE_MUSA 1
+#endif
 
 #include <cstdint>
 
@@ -47,24 +50,17 @@
 #endif
 
 #if defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || \
-    defined(USE_CUDA) || defined(USE_MACA)
-#define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 1
+    defined(USE_CUDA) || defined(USE_MACA) || defined(USE_DCU) || defined(USE_MUSA)
+#define FLAGOS_GUARD_HAS_OWNED_STREAM 1
 #include <c10/core/DeviceGuard.h>
 #include "runtime/allocator/caching_device_allocator.h"
 #else
-#define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 0
+#define FLAGOS_GUARD_HAS_OWNED_STREAM 0
 #endif
 
-#if defined(USE_DCU)
-#define FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM 1
-#include <c10/core/DeviceGuard.h>
-#include "runtime/allocator/caching_device_allocator.h"
-#else
-#define FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM 0
+#ifdef USE_MUSA
+#include "runtime/accelerator/mthreads/musa_stream.h"
 #endif
-
-#define FLAGOS_GUARD_HAS_OWNED_STREAM \
-  (FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM || FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM)
 
 #if defined(USE_ILUVATAR) || defined(USE_CAMBRICON) || defined(USE_MPS) || FLAGOS_GUARD_HAS_OWNED_STREAM
 #define FLAGOS_GUARD_HAS_PLATFORM_STREAM 1
@@ -254,6 +250,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     return MakeKunlunxinStream(device, stream);
 #elif defined(USE_MPS)
     return getNewStream(d);
+#elif defined(USE_MUSA)
+    return getNewStream(d, isHighPriority ? -1 : 0);
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
     auto device = ResolvePlatformStreamDevice(d);
 #if FLAGOS_GUARD_HAS_OWNED_STREAM
@@ -326,6 +324,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     TORCH_CHECK(::FlagosMPSStreamFromPool(&stream) == Success,
                 "Metal stream creation failed");
     return MakePlatformDeviceStream(device, stream);
+#elif defined(USE_MUSA)
+    const auto device = ResolvePlatformStreamDevice(d);
+    const auto stream = at::native::flagos::musa::GetMusaStreamFromPool(device, priority);
+    TORCH_CHECK(stream, "MUSA stream creation failed");
+    return MakePlatformDeviceStream(device, reinterpret_cast<Stream_t>(stream));
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
     auto device = ResolvePlatformStreamDevice(d);
 #if FLAGOS_GUARD_HAS_OWNED_STREAM
