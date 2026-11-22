@@ -207,6 +207,14 @@ device-to-host copies, an XPU stream, synchronization, cache release, and
 Every check runs through the port's own native XPU device layer; `mm` reaches the
 vendor xdnn op library behind the native `kunlunxin` route.
 
+The hardware lane also builds with `FLAGOS_BUILD_NATIVE_HOST=1` using the same
+FlagTree wheel. This build packages the published XPU3 loader and compiles its
+host launcher ahead of time. CI preflights the wheel and installs it in a
+separate import directory before running the shared
+`test_compiled_stream_chain`. Eager, Inductor and compiled host operations use
+the current FlagOS stream. The native host launcher currently requires a launch
+without FlagTree's launch-time quantization.
+
 ### Superseded CUDA-boxing baseline
 
 An earlier revision of this guide recorded what a P800 OAM reported under the

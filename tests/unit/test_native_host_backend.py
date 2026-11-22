@@ -3,6 +3,7 @@
 
 """Backend contracts are inspectable without importing Torch or any SDK."""
 
+from functools import cache
 from pathlib import Path
 import shutil
 import subprocess
@@ -56,9 +57,7 @@ def test_backend_record_and_compiled_extension_agree(contract):
     }
 
 
-@pytest.mark.parametrize(
-    "vendor", ["unregistered", "kunlunxin", "gcu", "cuda", "../nvidia"]
-)
+@pytest.mark.parametrize("vendor", ["unregistered", "gcu", "cuda", "../nvidia"])
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
         backend.get_backend(vendor)
@@ -161,6 +160,15 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
         assert "/*py_libhip_search_path*/" not in utility
         assert "cuda" not in launcher.libraries
         assert adapter.config.capabilities == 187
+    elif vendor == "kunlunxin":
+        driver = root / "backends/xpu"
+        utility = Path(utilities.sources[0])
+        assert utility.suffix == ".cc"
+        assert utility.read_bytes() == (driver / "driver.c").read_bytes()
+        assert launcher.extra_objects == [str(driver / "xpu3/lib/liblaunch.a")]
+        assert {"launch_shared", "xpurt", "cudart"} <= set(launcher.libraries)
+        assert "xpurt" in utilities.libraries
+        assert adapter.config.capabilities == 129
     else:
         assert utilities.sources == [
             str(path)
@@ -248,6 +256,73 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
             assert getattr(driver, name) is getattr(utilities, name)
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
             driver.compile_module_from_src("unused")
+
+
+def test_xpubin_uses_the_prebuilt_utility_and_normalized_launch_layout(monkeypatch):
+    adapter = backend.get_backend("kunlunxin")
+    driver = SimpleNamespace(
+        XPUUtils=object,
+        XPULauncher=object,
+        get_xpu_spec=lambda arch, sdnn: (12, 8 if sdnn else 64),
+        ty_to_cpp=lambda kind: (
+            "void *"
+            if kind.startswith("*")
+            else {"i1": "int32_t", "i32": "int32_t", "i64": "int64_t", "bf16": "float"}[
+                kind
+            ]
+        ),
+    )
+
+    @cache
+    def utils():
+        return driver.XPUUtils()
+
+    class Driver:
+        def __init__(self):
+            self.utils = self.xpu_utils = utils()
+            self.launcher_cls = self.launcher_cls_xpu = driver.XPULauncher
+
+    driver.XPUDriver = Driver
+    driver._xpu_utils_singleton = utils
+    existing = Driver()
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.runtime",
+        SimpleNamespace(driver=SimpleNamespace(_active=existing)),
+    )
+    utility = object()
+    adapter.bind_driver(
+        driver, utility, lambda src, meta: (src, meta), lambda d: d + 10
+    )
+    source = SimpleNamespace(
+        fn=object(),
+        signature={
+            "value": "tensordesc<fp32[32,64]>",
+            "scale": "bf16",
+            "C": "constexpr",
+        },
+    )
+    metadata = SimpleNamespace(xpu_arch=3, tensor_args=(), ewtable="", is_sdnn=False)
+    for instance in (existing, Driver()):
+        assert instance.xpu_utils is instance.utils is utility
+        assert instance.launcher_cls_xpu is instance.launcher_cls
+        assert instance.get_current_stream(2) == 12
+        src, launch = instance.launcher_cls_xpu(source, metadata)
+        assert src.fn is source.fn
+        assert src.signature == {**source.signature, "scale": "fp32"}
+        assert launch.tensordesc_meta == [2]
+        assert launch._flagos_xpu_geometry == (12, 64)
+        assert launch._flagos_xpu_parameters == [
+            *((8, 0, False),) * 5,
+            (4, 0, True),
+            *((4, 0, False),) * 2,
+            *((8, 0, False),) * 2,
+            (4, 0, False),
+        ]
+    with pytest.raises(RuntimeError, match="launch-time quantization"):
+        existing.launcher_cls_xpu(
+            source, SimpleNamespace(**{**vars(metadata), "tensor_args": (0,)})
+        )
 
 
 def test_enflame_build_fingerprints_and_links_its_own_published_loader(
