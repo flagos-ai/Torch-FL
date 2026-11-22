@@ -86,6 +86,7 @@ _KNOWN_GAPS = {
         not in {
             "metax",
             "ascend",
+            "enflame",
             "hygon",
             "iluvatar",
             "kunlunxin",

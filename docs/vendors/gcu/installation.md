@@ -144,6 +144,10 @@ the same per-device seed/offset stream.
 
 ### One stream, two producers
 
+`torch.Stream` selects a TOPS queue through the PrivateUse1 device guard.
+Eager, Inductor, and AOT native hosts read the same current queue for each
+device and thread.
+
 `topsaten` and FlagGems submit to the **same** tops stream, so a run mixes two
 producers on one queue. `EXEC_TOPSATEN_CMD` submits to `GetCurrentTopsStream()`
 and Triton's enflame driver reads the handle back from
@@ -188,15 +192,20 @@ Installation, routing, and operator-specific failure modes are documented in
 
 ### CI scope
 
+The Enflame CI lane builds, preflights, and installs an AOT wheel in a separate
+import directory before running the common regression suite. The
+`test_compiled_stream_chain` case verifies eager, Inductor, and native-host
+submissions on the same non-default stream.
+
 [`.github/configs/enflame.yml`](../../../.github/configs/enflame.yml) runs an S60 runner against an isolated CPU-PyTorch wheel, selecting the same contract suites the other platforms run by marker rather than by a file allowlist: the operator suite twice — once on the `anyplatform`/`main_ops` cohort with the FlagGems markers excluded, once on the `flaggems and main_ops` cohort — plus the full `tests/integration/ops/test_rng_dispatch.py`, `tests/integration/test_factory_ops.py`, the shared `tests/integration/test_amp_contract.py`, the shared `tests/integration/test_math_bits_contract.py`, and `tests/integration/test_compile.py`. `.github/scripts/set_env_enflame.sh` provisions FlagTree and FlagGems into the isolated venv for both the build and integration stages, so the FlagGems cohort runs against the real Triton stack rather than being excluded. Profiler contract tests and Qwen3 smoke are not in the manifest yet; see the notes below and the comment block at the end of that file.
 
 ### Distributed support not validated
 
 Distributed collectives are not validated on GCU hardware. The `_VENDOR_PROFILES` routing table in `torch_fl/comm/process_group.py` lists GCU as FlagCX-only unless live evidence proves otherwise.
 
-### Profiler is runtime only; torch.compile not validated
+### Profiler is runtime only
 
-The TOPSPTI tracer collects activities on S60, but none surface as device events on the CPU-only PyTorch/Kineto build used here, which supplies no PrivateUse1 resolver. This is an environment limitation rather than a tracer defect, so `test_profiler_contract.py` stays out of CI until it is measured end to end. `torch.compile` has not been validated on GCU.
+The TOPSPTI tracer collects activities on S60, but none surface as device events on the CPU-only PyTorch/Kineto build used here, which supplies no PrivateUse1 resolver. This is an environment limitation rather than a tracer defect, so `test_profiler_contract.py` stays out of CI until it is measured end to end.
 
 ## Build without native kernels
 

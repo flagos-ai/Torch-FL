@@ -664,7 +664,7 @@ steps:
   # The other common cases still exercise the ordinary installed wheel.
   - id: native_host_build
     name: Build native FlagGems hosts
-    platforms: [metax, ascend, hygon, iluvatar, kunlunxin, mthreads, nvidia, thead]
+    platforms: [metax, ascend, enflame, hygon, iluvatar, kunlunxin, mthreads, nvidia, thead]
     command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh --test-install
 
   - id: common_regression
