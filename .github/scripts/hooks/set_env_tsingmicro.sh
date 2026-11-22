@@ -3,9 +3,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Sourced by set_env.sh inside the pinned FlagOS TsingMicro runtime image.
-if [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_NAME:-}" != tsm-249 ]]; then
-  printf '::error::Expected runner tsm-249, received %s\n' "${RUNNER_NAME:-unknown}" >&2
-  exit 1
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+  # Match each FlagTree worker's device assignment on the shared host.
+  case "${RUNNER_NAME:-}" in
+    tsingmicro3.6_runner) TXDA_VISIBLE_DEVICES=30 ;;
+    tsingmicro3.6_runner2) TXDA_VISIBLE_DEVICES=29 ;;
+    tsingmicro3.6_runner3) TXDA_VISIBLE_DEVICES=28 ;;
+    tsingmicro3.6_runner4) TXDA_VISIBLE_DEVICES=27 ;;
+    *)
+      printf '::error::No TsingMicro device assigned to runner %s\n' "${RUNNER_NAME:-unknown}" >&2
+      exit 1
+      ;;
+  esac
+  export TXDA_VISIBLE_DEVICES
+  export_ci_env TXDA_VISIBLE_DEVICES
+  printf 'TsingMicro runner %s uses device %s\n' "$RUNNER_NAME" "$TXDA_VISIBLE_DEVICES"
 fi
 
 export FLAGOS_ACCELERATOR=tsingmicro

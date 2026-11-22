@@ -9,8 +9,7 @@ setup_platform: tsingmicro
 # runner's Kuiper installation to match its kernel driver.
 ci_image: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-tsingmicro-tsm260610@sha256:60d3b1891f71a2cb23a24a654e3e03c5d267600a3d55771c7255c3e7561a4b2a
 runner_labels:
-  - self-hosted
-  - tsingmicro
+  - tsingmicro3.6
 
 paths_watch:
   - torch_fl/accelerator/tsingmicro/
@@ -24,12 +23,10 @@ paths_watch:
   - .github/scripts/set_env_tsingmicro.sh
 
 container_volumes: []
-# Limit this validation run to the card used by the requested cases.
 container_options: >-
   --mount=type=bind,source=/usr/local/kuiper,target=/usr/local/kuiper,readonly
   --device=/dev/accel
   --device=/dev/accel_drv_mgr
-  --env=TXDA_VISIBLE_DEVICES=0
   --shm-size=8g
 
 timeout_minutes: 60
