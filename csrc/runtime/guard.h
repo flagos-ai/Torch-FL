@@ -46,7 +46,8 @@
 #include "runtime/allocator/caching_device_allocator.h"
 #endif
 
-#if defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA)
+#if defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || \
+    defined(USE_CUDA) || defined(USE_MACA)
 #define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 1
 #include <c10/core/DeviceGuard.h>
 #include "runtime/allocator/caching_device_allocator.h"
