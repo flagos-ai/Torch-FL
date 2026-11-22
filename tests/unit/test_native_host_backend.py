@@ -180,10 +180,19 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
         ]
 
 
-@pytest.mark.parametrize("contract", ["thead"], indirect=True)
-def test_ppu_extensions_use_the_published_hggc_driver(monkeypatch, contract, tmp_path):
+@pytest.mark.parametrize(
+    "contract,sdk_variable,library,utility,compiler",
+    [
+        ("thead", "PPU_SDK", "hggc", "hggc_utils", "ppu"),
+        ("iluvatar", "COREX_PATH", "cuda", "cuda_utils", "corex"),
+    ],
+    indirect=["contract"],
+)
+def test_extensions_use_the_published_sdk_driver(
+    monkeypatch, contract, tmp_path, sdk_variable, library, utility, compiler
+):
     adapter, root, record, compiled = contract
-    monkeypatch.setenv("PPU_SDK", "/published-ppu")
+    monkeypatch.setenv(sdk_variable, "/published-sdk")
     monkeypatch.setenv("CUDA_HOME", "/unrelated-cuda")
     torch = SimpleNamespace(
         __file__="/cpu-torch/torch/__init__.py",
@@ -192,16 +201,17 @@ def test_ppu_extensions_use_the_published_hggc_driver(monkeypatch, contract, tmp
     launcher, utilities = backend.build_extensions(
         adapter, "test_hosts", NATIVE_SOURCE, torch, record, root, tmp_path
     )
-    assert "hggc" in launcher.libraries and "cuda" not in launcher.libraries
-    assert utilities.libraries == ["hggc"]
-    assert utilities.name == "test_hosts.hggc_utils"
-    assert "/published-ppu/include" in launcher.include_dirs
-    assert "/published-ppu/lib" in launcher.library_dirs
-    assert record["compiler_backend"] == "ppu"
+    assert launcher.libraries == [library, "torch_python", "torch_cpu", "c10"]
+    assert utilities.libraries == [library]
+    assert utilities.name == f"test_hosts.{utility}"
+    assert "/published-sdk/include" in launcher.include_dirs
+    assert "/published-sdk/lib" in launcher.library_dirs
+    assert not any("/unrelated-cuda" in path for path in launcher.library_dirs)
+    assert record["compiler_backend"] == compiler
     assert compiled["capabilities"] == 253
 
 
-@pytest.mark.parametrize("contract", ["nvidia", "thead"], indirect=True)
+@pytest.mark.parametrize("contract", ["nvidia", "thead", "iluvatar"], indirect=True)
 def test_shared_launch_parameters_are_part_of_the_backend_contract(contract):
     adapter, root, record, compiled = contract
     (backend._ROOT / "csrc/launch_params.h").write_text("// changed launch layout\n")
@@ -239,7 +249,7 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(
 
 
 @pytest.mark.parametrize(
-    "contract", ["nvidia", "metax", "hygon", "thead"], indirect=True
+    "contract", ["nvidia", "metax", "hygon", "thead", "iluvatar"], indirect=True
 )
 def test_reinstallation_updates_existing_and_future_driver_streams(
     monkeypatch, contract
@@ -263,6 +273,12 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
         "triton.runtime",
         SimpleNamespace(driver=SimpleNamespace(_active=active, _default=default)),
     )
+    context = SimpleNamespace(is_lite_mode=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.runtime._distributed",
+        SimpleNamespace(DistributedRtContext=lambda: context),
+    )
     exports = config.utility_exports
     modules = {f"triton.backends.{config.driver_directory}.driver": driver}
     for package in ("first", "second"):
@@ -280,16 +296,26 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
             return device + offset
 
         kernel = object()
-        driver_binding.install_driver(adapter, package, provider, kernel)
+
+        def factory(source, metadata, kernel=kernel):
+            return kernel
+
+        driver_binding.install_driver(adapter, package, provider, factory)
         utilities = modules[f"{package}.{config.utility_module}"]
         for instance in (active, default, Driver()):
             assert instance.utils is utilities
-            assert instance.launcher_cls is kernel
+            assert instance.launcher_cls(None, SimpleNamespace()) is kernel
             assert instance.get_current_stream(3) == offset + 3
         for name in exports:
             assert getattr(driver, name) is getattr(utilities, name)
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
             driver.compile_module_from_src("unused")
+    if config.vendor == "iluvatar":
+        with pytest.raises(RuntimeError, match="debugger arguments"):
+            active.launcher_cls(None, SimpleNamespace(debug_launch_hidden_arg=True))
+        context.is_lite_mode = True
+        with pytest.raises(RuntimeError, match="distributed arguments"):
+            active.launcher_cls(None, SimpleNamespace())
 
 
 def test_xpubin_uses_the_prebuilt_utility_and_normalized_launch_layout(monkeypatch):

@@ -65,4 +65,18 @@ inline size_t PackSoftwareDescriptor(const DescriptorValue& value, Slot* slots) 
   return count;
 }
 
+class SoftwareTensorDescriptor final : public Descriptor {
+ public:
+  explicit SoftwareTensorDescriptor(pybind11::handle metadata) {
+    if (!metadata.is_none())
+      throw std::invalid_argument("native host backend requires software tensor descriptors");
+  }
+
+  size_t Capacity() const override { return kSoftwareDescriptorSlots; }
+
+  size_t Pack(const DescriptorValue& value, Slot* slots) const override {
+    return PackSoftwareDescriptor(value, slots);
+  }
+};
+
 }  // namespace flagos::native_host::backend

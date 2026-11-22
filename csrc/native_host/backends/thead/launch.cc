@@ -59,20 +59,6 @@ class PpuKernel final : public WarpKernel {
   }
 };
 
-class PpuDescriptor final : public Descriptor {
- public:
-  explicit PpuDescriptor(py::handle metadata) {
-    if (!metadata.is_none())
-      throw std::invalid_argument("PPU native hosts require software tensor descriptors");
-  }
-
-  size_t Capacity() const override { return kSoftwareDescriptorSlots; }
-
-  size_t Pack(const DescriptorValue& value, Slot* slots) const override {
-    return PackSoftwareDescriptor(value, slots);
-  }
-};
-
 bool IsCapturing(uint64_t stream) {
   HGstreamCaptureStatus status;
   Check(hgStreamIsCapturing(reinterpret_cast<HGstream>(stream), &status));
@@ -88,7 +74,7 @@ const Api api{
       return std::make_unique<PpuKernel>(py::handle(metadata));
     },
     [](_object* metadata, _object*) -> std::shared_ptr<const Descriptor> {
-      return std::make_shared<PpuDescriptor>(py::handle(metadata));
+      return std::make_shared<SoftwareTensorDescriptor>(py::handle(metadata));
     },
     &IsCapturing};
 

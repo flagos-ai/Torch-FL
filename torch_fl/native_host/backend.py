@@ -35,7 +35,7 @@ COMPILED_FIELDS = (
 )
 # Admit a backend after it passes installed-wheel conformance on hardware.
 _ADAPTERS = frozenset(
-    {"ascend", "enflame", "hygon", "kunlunxin", "metax", "nvidia", "thead"}
+    {"ascend", "enflame", "hygon", "iluvatar", "kunlunxin", "metax", "nvidia", "thead"}
 )
 _ROOT = Path(__file__).resolve().parent
 _LAUNCHER_SOURCE = "launcher.cc"

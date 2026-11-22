@@ -367,6 +367,7 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
         "ascend",
         "enflame",
         "gcu",
+        "iluvatar",
         "kunlunxin",
         "thead",
     ],
@@ -401,7 +402,7 @@ def test_native_host_build_uses_staged_package(
             else None
         ),
     )
-    if vendor in {"metax", "ascend", "kunlunxin", "thead"}:
+    if vendor in {"metax", "ascend", "iluvatar", "kunlunxin", "thead"}:
         monkeypatch.setitem(
             globals_,
             "_setup_cuda_build_env",
@@ -667,7 +668,7 @@ def test_ordinary_wheel_clears_stale_native_host_stage(
     assert sorted(path.name for path in native.iterdir()) == ["load.py"]
 
 
-@pytest.mark.parametrize("vendor", ["iluvatar", "mthreads"])
+@pytest.mark.parametrize("vendor", ["mthreads", "tsingmicro"])
 def test_native_host_build_requires_a_validated_backend_adapter(
     monkeypatch, clean_kernel_env, vendor
 ):

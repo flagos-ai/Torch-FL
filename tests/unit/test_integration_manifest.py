@@ -82,7 +82,7 @@ _KNOWN_GAPS = {
     "native_host_build": tuple(
         p
         for p in _PLATFORMS
-        if p not in {"metax", "ascend", "hygon", "kunlunxin", "thead"}
+        if p not in {"metax", "ascend", "hygon", "iluvatar", "kunlunxin", "thead"}
     ),
     "native_source_hosts": tuple(p for p in _PLATFORMS if p != "ascend"),
     "native_source_hosts_metax": tuple(p for p in _PLATFORMS if p != "metax"),
