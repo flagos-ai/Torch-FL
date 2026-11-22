@@ -14,7 +14,7 @@ export GEMS_VENDOR=tsingmicro
 export FLAGOS_BUILD_JOBS="${FLAGOS_BUILD_JOBS:-8}"
 
 if [[ ! -f /usr/local/kuiper/include/tx_runtime.h || ! -f /usr/local/kuiper/lib/libhpgr.so ]]; then
-  echo "::error::The CI image must provide the Kuiper SDK at /usr/local/kuiper" >&2
+  echo "::error::The runner's Kuiper SDK must be mounted at /usr/local/kuiper" >&2
   exit 1
 fi
 if ! sdk_info="$(/usr/local/kuiper/bin/tsm_smi --version)"; then
