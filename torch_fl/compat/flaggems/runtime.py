@@ -472,7 +472,9 @@ def configure_vendor(accelerator: str, flagos) -> None:
 
         # Mock stream API - return flagos stream handle
         def _mock_get_current_stream(device_index=0):
-            return flagos.current_stream(device_index).cuda_stream
+            from torch_fl.flagos._streams import get_raw_stream
+
+            return get_raw_stream(device_index)
 
         _npu_c_shim._npu_getCurrentRawStreamNoWait = _mock_get_current_stream
         _npu_shim._C = _npu_c_shim

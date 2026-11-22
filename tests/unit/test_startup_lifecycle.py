@@ -33,10 +33,10 @@ HOOKS = (
 )
 INSTALLERS = (
     "_install_apex_compat",
-    "_patch_ddp_for_flagos",
-    "_patch_comm_for_flagos",
-    "_patch_dataparallel_for_flagos",
-    "_patch_data_parallel_for_flagos",
+    "install_ddp",
+    "install_comm",
+    "install_dataparallel",
+    "install_data_parallel",
     "_register_compile_backend",
     "_install_flex_attention_compat",
     "_register_bpu_compile_backend",
@@ -47,7 +47,7 @@ def _tree():
     return ast.parse(SOURCE.read_text(encoding="utf-8"))
 
 
-def _lifecycle(installers):
+def _lifecycle(installers, platform="cuda"):
     """Load only the public lifecycle functions with controllable hook stubs."""
     selected = [
         node
@@ -59,10 +59,19 @@ def _lifecycle(installers):
     namespace = dict(zip(INSTALLERS, installers))
     messages = []
     namespace.update(
+        parallel=SimpleNamespace(
+            **{
+                name: namespace[name]
+                for name in INSTALLERS
+                if name.startswith("install_")
+            }
+        ),
         _OPTIONAL_INTEGRATIONS=HOOKS,
         _optional_integration_state={},
         _env=SimpleNamespace(warn=messages.append),
-        _build_accelerator=lambda: "cuda",
+        _platform=SimpleNamespace(
+            build_info=lambda: SimpleNamespace(platform=platform)
+        ),
         messages=messages,
     )
     exec(
@@ -89,6 +98,15 @@ def test_explicit_activation_is_ordered_and_idempotent():
     assert len(calls) == 5
     assert lifecycle["optional_integration_status"]()["apex"] == "inactive"
     assert lifecycle["optional_integration_status"]()["compile"] == "active"
+
+
+def test_bpu_is_part_of_default_activation_for_the_bpu_platform():
+    calls = []
+    lifecycle = _lifecycle(
+        [lambda name=name: calls.append(name) for name in HOOKS], "bpu"
+    )
+    assert lifecycle["activate_optional_integrations"]()["bpu"] == "active"
+    assert calls == list(HOOKS)
 
 
 def test_optional_failure_does_not_install_dependent_or_block_unrelated_hooks():

@@ -13,13 +13,13 @@
       "pytest.skip": 2
     },
     "tests/integration/ops/test_abs_dispatch.py": {
-      "pytest.skip": 3
-    },
-    "tests/integration/ops/test_acos_dispatch.py": {
       "pytest.skip": 2
     },
+    "tests/integration/ops/test_acos_dispatch.py": {
+      "pytest.skip": 1
+    },
     "tests/integration/ops/test_add_dispatch.py": {
-      "pytest.skip": 4
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_ascend_device_context.py": {
       "pytest.mark.skipif": 1
@@ -34,31 +34,28 @@
       "pytest.skip": 1
     },
     "tests/integration/ops/test_bitwise_and_dispatch.py": {
-      "pytest.skip": 2
+      "pytest.skip": 1
     },
     "tests/integration/ops/test_bmm_dispatch.py": {
-      "pytest.skip": 5
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_cambricon_native_ops.py": {
       "pytest.mark.skipif": 1
     },
     "tests/integration/ops/test_cat_dispatch.py": {
-      "pytest.skip": 4
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_constant_pad_nd_dispatch.py": {
       "pytest.skip": 1
     },
     "tests/integration/ops/test_cos_dispatch.py": {
-      "pytest.skip": 3
+      "pytest.skip": 1
     },
     "tests/integration/ops/test_dcu_complex.py": {
       "pytest.skip": 2
     },
     "tests/integration/ops/test_dcu_flaggems_sdpa.py": {
       "pytest.skip": 4
-    },
-    "tests/integration/ops/test_div_scalar_dispatch.py": {
-      "pytest.skip": 1
     },
     "tests/integration/ops/test_dtype_cast_copy.py": {
       "pytest.mark.skipif": 1
@@ -73,7 +70,7 @@
       "pytest.skip": 1
     },
     "tests/integration/ops/test_embedding_dispatch.py": {
-      "pytest.skip": 4
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_flaggems_conf_consistency.py": {
       "pytest.skip": 1
@@ -100,7 +97,7 @@
       "pytest.skip": 1
     },
     "tests/integration/ops/test_mean_dispatch.py": {
-      "pytest.skip": 4
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_metax_complex_fill.py": {
       "pytest.skip": 2
@@ -110,7 +107,7 @@
       "pytest.skip": 4
     },
     "tests/integration/ops/test_mm_dispatch.py": {
-      "pytest.skip": 5
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_mps_activations.py": {
       "pytest.mark.skipif": 1
@@ -265,10 +262,7 @@
       "pytest.mark.skipif": 1
     },
     "tests/integration/ops/test_mul_dispatch.py": {
-      "pytest.skip": 5
-    },
-    "tests/integration/ops/test_mul_scalar_dispatch.py": {
-      "pytest.skip": 1
+      "pytest.skip": 3
     },
     "tests/integration/ops/test_musa_dispatch.py": {
       "pytest.importorskip": 1,
@@ -281,36 +275,30 @@
       "pytest.skip": 5
     },
     "tests/integration/ops/test_neg_dispatch.py": {
-      "pytest.skip": 2
-    },
-    "tests/integration/ops/test_new_ones_dispatch.py": {
       "pytest.skip": 1
     },
     "tests/integration/ops/test_nll_loss_dispatch.py": {
       "pytest.skip": 2
     },
     "tests/integration/ops/test_pow_dispatch.py": {
-      "pytest.skip": 2
+      "pytest.skip": 1
     },
     "tests/integration/ops/test_rng_dispatch.py": {
-      "pytest.mark.skipif": 2,
+      "pytest.mark.skipif": 1,
       "pytest.mark.xfail": 2,
-      "pytest.skip": 7
+      "pytest.skip": 5
     },
     "tests/integration/ops/test_rsqrt_dispatch.py": {
-      "pytest.skip": 2
-    },
-    "tests/integration/ops/test_scalar_tensor_dispatch.py": {
       "pytest.skip": 1
     },
     "tests/integration/ops/test_silu_backward_dispatch.py": {
       "pytest.skip": 1
     },
     "tests/integration/ops/test_silu_dispatch.py": {
-      "pytest.skip": 3
+      "pytest.skip": 2
     },
     "tests/integration/ops/test_sin_dispatch.py": {
-      "pytest.skip": 3
+      "pytest.skip": 1
     },
     "tests/integration/ops/test_slice_backward_dispatch.py": {
       "pytest.mark.xfail": 3,
@@ -320,26 +308,25 @@
       "pytest.skip": 1
     },
     "tests/integration/ops/test_sparse_csr_dispatch.py": {
-      "pytest.mark.skipif": 1,
       "pytest.mark.xfail": 1
     },
     "tests/integration/ops/test_sum_dispatch.py": {
-      "pytest.skip": 3
+      "pytest.skip": 2
     },
     "tests/integration/ops/test_tileops_generated.py": {
       "pytest.mark.skipif": 1,
       "pytest.skip": 1
     },
     "tests/integration/ops/test_where_dispatch.py": {
-      "pytest.skip": 3
+      "pytest.skip": 2
     }
   },
   "kinds": {
     "pytest.importorskip": 3,
     "pytest.mark.skip": 1,
-    "pytest.mark.skipif": 58,
+    "pytest.mark.skipif": 56,
     "pytest.mark.xfail": 6,
-    "pytest.skip": 127
+    "pytest.skip": 98
   },
   "roots": [
     "tests/integration/flaggems/",

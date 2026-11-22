@@ -37,11 +37,9 @@ import torch
 import torch_fl  # noqa: F401
 
 from backend_conf import (
-    override_is_logged,
     route_is_served,
     routed_backend,
     routed_backend_or_none,
-    _OVERRIDE_UNSERVED,
 )
 
 
@@ -91,19 +89,6 @@ class TestMulTensorCorrectness:
         out = torch.mul(a, b)
         ref = a.cpu() * b.cpu()
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
-
-    @pytest.mark.cuda
-    def test_mul_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        b_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = torch.mul(a_cuda, b_cuda)
-        a = a_cuda.to(DEVICE)
-        b = b_cuda.to(DEVICE)
-        out = torch.mul(a, b)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
 
 
 class TestMulPythonNumberOperand:
@@ -239,22 +224,6 @@ class TestMulTensorDispatch:
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("mul.Tensor")
         assert f"[flagos dispatch] mul.Tensor -> {expected}" in result.stderr
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        if not (
-            override_is_logged("mul.Tensor", "boxing")
-            or override_is_logged("mul.Tensor", "flaggems_python")
-        ):
-            pytest.skip(_OVERRIDE_UNSERVED)
-        # check=False: this asserts the route the override selects, not that
-        # the kernel runs -- an unserved route leaves the op unregistered when
-        # the conf hands it to cpu_fallback, so the call fails after the line.
-        result = _run_mul_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mul__Tensor": "cuda"}, check=False
-        )
-        assert "[flagos dispatch] mul.Tensor -> boxing" in result.stderr
 
 
 class TestMulTensorAscendDispatch:

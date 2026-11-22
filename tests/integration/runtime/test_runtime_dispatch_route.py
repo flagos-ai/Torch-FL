@@ -25,13 +25,7 @@ The probes use input dtypes outside the configured precision clauses. The
 operator suite separately covers matching dtypes and explicit overrides; the
 portable probe audit checks this base-route precondition against every conf.
 
-The only skip is build-driven: an op routed to a FlagGems backend or to the CUDA
-dispatch key is marked with the kernel set that route needs, so the package
-conftest can skip it on a wheel whose build record lacks that set -- the one
-build-driven skip allowed. The CUDA key is on that list because on this project's
-CPU-torch wheels it is served by the generated CUDA boxing kernels, not by torch
-itself: on the default FlagGems-primary wheel (boxing off) a ``= cuda`` route has
-no kernel behind it and the op reaches cpu_fallback, which emits no dispatch line.
+A case may require the compiled FlagGems kernel set.
 An op the conf routes to ``none`` is left to cpu_fallback, which writes no
 dispatch. The case skips as an unimplemented kernel, while the suite's summary
 records it in ``ops_none`` so the coverage gap stays visible. The conf must
@@ -58,10 +52,6 @@ def _parametrized_ops() -> list:
             marks.append(pytest.mark.flaggems_cpp)
         elif backend == "flagos_python":
             marks.append(pytest.mark.flaggems_python)
-        elif backend == "cuda":
-            # The CUDA dispatch key is served by the generated boxing kernels on
-            # every platform whose torch is CPU-only; see the module docstring.
-            marks.append(pytest.mark.boxing)
         params.append(pytest.param(op, marks=marks))
     return params
 
@@ -78,16 +68,6 @@ def test_dispatch_matches_conf_route(op: str):
     assert len(report) == 1
     entry = report[0]
     assert entry["error"] is None, entry["error"]
-    if entry["dispatched_backend"] is None and backend == "boxing":
-        # A `boxing` route reads to a flagos tensor as "served on this device
-        # by the vendor's own CUDA kernels through PrivateUse1", with no
-        # transport and no device-level dispatch to log -- the day-0 conf's
-        # whole premise. Only a CUDA/PPU build can see this: everywhere else
-        # the boxed list registers at least one kernel that logs.
-        pytest.skip(
-            f"{op} is served on-device through its boxing route, so there is "
-            "no dispatch line to read; the CPU reference above already ran"
-        )
     assert entry["dispatched_backend"] == backend, (
         f"{op} dispatched to {entry['dispatched_backend']!r}, conf says {backend!r}"
     )

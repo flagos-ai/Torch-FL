@@ -123,7 +123,6 @@ exit 2
         PIP_READY="1" if pip_ready else "0",
         PIP_BOOTSTRAPPED=str(tmp_path / "pip-bootstrapped"),
         PIP_CACHE_DIR=str(tmp_path / "runner-pip-cache"),
-        BOXING_LANE="1" if fail == "boxing" else "",
         FAIL_PHASE=fail,
         LD_LIBRARY_PATH="/host/driver",
         PIP_CONSTRAINT=str(ROOT / ".github/constraints.txt"),
@@ -149,7 +148,6 @@ pip_retry() {
   printf 'installed %s\n' "${@: -1}" >> "$CALL_LOG"
 }
 build_flagos_inplace() {
-  test "$FLAGOS_BUILD_BOXING" = 0
   test "$FLAGOS_BUILD_FLAGGEMS_CPP" = 0
   test "$FLAGOS_BUILD_VENDOR" = 1
   echo native-build >> "$CALL_LOG"
@@ -246,7 +244,7 @@ def test_venv_failure_uses_the_runtime_uv_without_apt(tmp_path):
 
 @pytest.mark.parametrize(
     "fail",
-    ["python", "boxing", "sdk", "cudart", "xdnn", "seed", "uv", "check", "backend"],
+    ["python", "sdk", "cudart", "xdnn", "seed", "uv", "check", "backend"],
 )
 def test_invalid_runtime_or_dependency_state_stops_before_build(tmp_path, fail):
     done, calls, *_ = run_hook(tmp_path, fail=fail)

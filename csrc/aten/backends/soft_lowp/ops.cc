@@ -17,6 +17,8 @@
 #include <ATen/ops/bmm.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/eq.h>
+#include <ATen/ops/floor_divide.h>
+#include <ATen/ops/full.h>
 #include <ATen/ops/mul.h>
 #include <ATen/ops/exp2.h>
 #include <ATen/ops/mm.h>
@@ -25,7 +27,9 @@
 #include <ATen/ops/where.h>
 #include <ATen/native/Resize.h>
 #include <c10/util/Exception.h>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "../../device_boxing.h"
@@ -100,6 +104,70 @@ at::Tensor DecodeFp4Nibbles(const at::Tensor& raw) {
   return at::stack({decoded_low, decoded_high}, -1);
 }
 
+#if defined(USE_DCU)
+at::Tensor DecodeFp8OnDevice(const at::Tensor& input) {
+  const auto format = GetFormatSpec(*FormatForDtype(input.scalar_type()));
+  const auto raw = input.view(c10::kByte);
+  // Use the routed Tensor overloads for arithmetic on PrivateUse1 storage.
+  auto constant = [&input](c10::Scalar value, c10::ScalarType dtype) {
+    return at::full({}, value, input.options().dtype(dtype));
+  };
+  if (format.id == FormatId::kFloat8E8M0FNU) {
+    // The byte is the float32 exponent. Zero encodes 2^-127, and 255 is NaN.
+    const auto exponent = raw.to(c10::kInt) * constant(1 << 23, c10::kInt);
+    const auto bits = at::where(
+        at::eq(raw, 0), constant(1 << 22, c10::kInt), exponent);
+    return at::where(
+               at::eq(raw, 255), constant(0x7fc00000, c10::kInt), bits)
+        .view(c10::kFloat)
+        .to(c10::kBFloat16);
+  }
+
+  const bool e5m2 = format.id == FormatId::kFloat8E5M2 ||
+      format.id == FormatId::kFloat8E5M2FNUZ;
+  const int mantissa_bits = e5m2 ? 2 : 3;
+  const int bias = (e5m2 ? 15 : 7) + format.fnuz;
+  const int field_base = 1 << mantissa_bits;
+  const auto magnitude = at::bitwise_and(raw, at::Scalar(0x7f));
+  const auto exponent = at::floor_divide(magnitude, constant(field_base, c10::kByte));
+  const auto mantissa = at::bitwise_and(magnitude, at::Scalar(field_base - 1));
+  const auto fraction = mantissa.to(c10::kFloat) * constant(1.0 / field_base, c10::kFloat);
+  const auto power = at::exp2(exponent.to(c10::kFloat) + constant(-bias, c10::kFloat));
+  const auto normal = (constant(1.0, c10::kFloat) + fraction) * power;
+  const auto subnormal = fraction * constant(std::ldexp(1.0, 1 - bias), c10::kFloat);
+  auto decoded = at::where(at::eq(exponent, 0), subnormal, normal);
+
+  const auto nan = constant(std::numeric_limits<float>::quiet_NaN(), c10::kFloat);
+  if (format.fnuz) {
+    decoded = at::where(at::eq(raw, 0x80), nan, decoded);
+  } else if (format.has_infinity) {
+    const auto inf = constant(std::numeric_limits<float>::infinity(), c10::kFloat);
+    const auto special = at::where(at::eq(mantissa, 0), inf, nan);
+    decoded = at::where(at::eq(exponent, 31), special, decoded);
+  } else {
+    decoded = at::where(at::eq(magnitude, 0x7f), nan, decoded);
+  }
+  const auto negative = at::ne(at::bitwise_and(raw, at::Scalar(0x80)), 0);
+  return at::where(negative, -decoded, decoded).to(c10::kBFloat16);
+}
+#endif
+
+at::Tensor CastMatrixToBfloat16(const at::Tensor& input) {
+#if defined(USE_DCU)
+  if (IsFp8(input.scalar_type())) {
+    return DecodeFp8OnDevice(input);
+  }
+  return input.to(c10::kBFloat16);
+#else
+  auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
+  if (IsFp8(input.scalar_type())) {
+    DeviceBoxingGuard guard(input, result);
+    return at::native::copy_(result, input, false);
+  }
+  return result.copy_(input);
+#endif
+}
+
 at::Tensor DecodeMatrix(const at::Tensor& input, bool packed_dim0) {
   if (input.scalar_type() == c10::kFloat4_e2m1fn_x2) {
     auto raw = input.view(c10::kByte);
@@ -116,27 +184,7 @@ at::Tensor DecodeMatrix(const at::Tensor& input, bool packed_dim0) {
     return unpacked.reshape(shape);
   }
 
-  // FP8 handled via boxing. This is the one boxing site outside the guards, so
-  // it binds the device itself: the boxed copy goes through c10's CUDA
-  // machinery, and the `at::empty` below relies on the runtime's current device
-  // to place the result. See BoxingDeviceScope.
-  BoxingDeviceScope device;
-  if (input.device().is_privateuseone()) {
-    device.bind(input.device().index());
-  }
-  auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
-  if (IsFp8(input.scalar_type())) {
-    at::Tensor boxed = input;
-    at::Tensor boxed_result = result;
-    SetTensorDevice(boxed, c10::DeviceType::CUDA);
-    SetTensorDevice(boxed_result, c10::DeviceType::CUDA);
-    auto decoded = at::native::copy_(boxed_result, boxed, false);
-    UnboxToFlagos(decoded);
-    UnboxToFlagos(boxed);
-    return decoded;
-  }
-
-  return result.copy_(input);
+  return CastMatrixToBfloat16(input);
 }
 
 at::Tensor DecodeBatchMatrix(const at::Tensor& input, bool packed_dim1) {
@@ -154,24 +202,7 @@ at::Tensor DecodeBatchMatrix(const at::Tensor& input, bool packed_dim1) {
     return unpacked.reshape(shape);
   }
 
-  // FP8 handled via boxing; see the note in DecodeMatrix.
-  BoxingDeviceScope device;
-  if (input.device().is_privateuseone()) {
-    device.bind(input.device().index());
-  }
-  auto result = at::empty(input.sizes(), input.options().dtype(c10::kBFloat16));
-  if (IsFp8(input.scalar_type())) {
-    at::Tensor boxed = input;
-    at::Tensor boxed_result = result;
-    SetTensorDevice(boxed, c10::DeviceType::CUDA);
-    SetTensorDevice(boxed_result, c10::DeviceType::CUDA);
-    auto decoded = at::native::copy_(boxed_result, boxed, false);
-    UnboxToFlagos(decoded);
-    UnboxToFlagos(boxed);
-    return decoded;
-  }
-
-  return result.copy_(input);
+  return CastMatrixToBfloat16(input);
 }
 
 bool HasLowpInput(const at::Tensor& tensor) {
@@ -331,28 +362,6 @@ enum class DecodedShape {
   kAddmmOut,        // Dispatcher<AddmmOutFn>(bias, lhs, rhs, beta, alpha, out)
 };
 
-// Where an ordinary pair reaching RunMatrix goes.
-//
-// The dispatch key is the call's own -- `mm.out` is served by the mm.out
-// dispatcher -- and the kernel is the conf's answer for that key. What makes
-// this a question is GetFn's degradation: a build without liboperators fills
-// the flaggems_cpp slot of mm/bmm with this file's own wrappers
-// (soft_lowp/dispatch.cc), and hygon's conf names `flaggems_cpp` for `bmm` and
-// `mm.out`. Handing the pair to that kernel landed on the wrapper that handed
-// it back, which is the recursion RunMatrix's own comment describes, so a key
-// that answers with the wrapper is not a route and the pair is computed here.
-enum class OrdinaryRoute {
-  kNone,          // no key names a kernel this file can call: compute it here
-  kFactory,       // the call's own key, mm/bmm answering a new tensor
-  kDtype,         // the call's own key, the .dtype form
-  kMmOut,         // the call's own key, mm.out
-  kBmmOut,        // the call's own key, bmm.out
-  kMmDtypeOut,    // the call's own key, mm.dtype_out
-  kBmmDtypeOut,   // the call's own key, bmm.dtype_out
-  kAddmm,         // the call's own key, the fused addmm
-  kAddmmOut,      // the call's own key, the fused addmm writing `out`
-};
-
 // The wrappers soft_lowp/dispatch.cc installs in this file's name, as
 // file-local forwarders: RegisterGemmKernels' flaggems_cpp slots for mm/bmm
 // (around OrdinaryMm/OrdinaryBmm) and its REGISTER_IMPL_TO_DISPATCHER entries
@@ -458,99 +467,6 @@ bool RoutesOrdinaryKey(const char* ordinary_key) {
   return std::strcmp(ordinary_key, "bmm") == 0
       ? Fitted(bmm_dispatcher, ordinary_key) != nullptr
       : Fitted(mm_dispatcher, ordinary_key) != nullptr;
-}
-
-// Two keys are tried, the call's own first, then the mm/bmm one.
-//
-// Every shape falls back to kFactory, including the ones that write `out`:
-// the pair is computed here and then stored into `out`, which covers the case
-// the conf leaves these keys `none`. Only a key the mm/bmm one cannot take
-// either -- `none` on both -- leaves the pair unrouted.
-OrdinaryRoute Pick(const bool own,
-                   const char* ordinary_key,
-                   const OrdinaryRoute own_route) {
-  if (own) {
-    return own_route;
-  }
-  return RoutesOrdinaryKey(ordinary_key) ? OrdinaryRoute::kFactory
-                                         : OrdinaryRoute::kNone;
-}
-
-// The conf kernel this file can hand a decoded pair to for `key`'s own
-// `.dtype` / `.out` schema, or nullptr.
-//
-// Only the boxing slot is trusted here. Every other slot of mm.dtype,
-// mm.dtype_out, mm.out and their bmm twins is written by this file:
-// soft_lowp/dispatch.cc registers Self*Kernel there, and a conf that names
-// `flaggems_cpp` resolves to exactly that wrapper -- Fitted's wrapper test
-// cannot tell it apart from a real one, because the wrapper lives in another
-// translation unit and the two files' signatures must stay swappable. Calling
-// it is the recursion this file exists to stop:
-//   Mm -> MmDtype -> RunMatrix("mm.dtype") -> MmDtypeKernel -> MmDtype -> ...
-// Measured on DCU (job 2ef55348's build, bw1100): an FP8 mm on a conf that
-// routes `mm.dtype` recursed until the stack ran out, SIGSEGV in LookupVariant.
-//
-// The plain mm/bmm keys are not in that position: their flaggems_cpp slots hold
-// OrdinaryMmKernel/OrdinaryBmmKernel, which Fitted knows by address, and every
-// other backend there is someone else's. So this override covers exactly the
-// schemas whose slots this file writes, and leaves kFactory alone.
-template <typename Fn>
-Fn OwnKernelFor(const Dispatcher<Fn>& route, const char* route_key) {
-  const Backend configured = route.ConfiguredBackend(route_key);
-  if (configured != Backend::kBoxing) {
-    return nullptr;
-  }
-  const Fn fn = route.KernelFor(configured);
-  return IsFallbackWrapper(reinterpret_cast<const void*>(fn)) ? nullptr : fn;
-}
-
-// Whether the call's own key names a kernel this file can call.
-template <typename Dispatcher>
-bool OwnRoute(const Dispatcher& route, const char* key) {
-  return OwnKernelFor(route, key) != nullptr;
-}
-
-OrdinaryRoute OrdinaryRouteFor(const char* key, DecodedShape shape) {
-  switch (shape) {
-    case DecodedShape::kDtype:
-      return std::strcmp(key, "bmm") == 0 ||
-              std::strcmp(key, "bmm.dtype") == 0
-          ? Pick(OwnRoute(bmm_dtype_dispatcher, key), "bmm",
-                 OrdinaryRoute::kDtype)
-          : Pick(OwnRoute(mm_dtype_dispatcher, key), "mm",
-                 OrdinaryRoute::kDtype);
-    case DecodedShape::kMmOut:
-      return Pick(OwnRoute(mm_out_dispatcher, key), "mm",
-                  OrdinaryRoute::kMmOut);
-    case DecodedShape::kBmmOut:
-      return Pick(OwnRoute(bmm_out_dispatcher, key), "bmm",
-                  OrdinaryRoute::kBmmOut);
-    case DecodedShape::kMmDtypeOut:
-      return Pick(OwnRoute(mm_dtype_out_dispatcher, key), "mm",
-                  OrdinaryRoute::kMmDtypeOut);
-    case DecodedShape::kBmmDtypeOut:
-      return Pick(OwnRoute(bmm_dtype_out_dispatcher, key),
-                  "bmm", OrdinaryRoute::kBmmDtypeOut);
-    case DecodedShape::kAddmm:
-      return Pick(OwnRoute(addmm_dispatcher, key), "mm",
-                  OrdinaryRoute::kAddmm);
-    case DecodedShape::kAddmmOut:
-      return Pick(OwnRoute(addmm_out_dispatcher, key), "mm",
-                  OrdinaryRoute::kAddmmOut);
-    case DecodedShape::kVoid:
-      return OrdinaryRoute::kNone;
-  }
-  return OrdinaryRoute::kNone;
-}
-
-// The kernels the conf names for the call's own key, on the .dtype schema.
-// nullptr where only this file's own wrapper holds the slot (see OwnKernelFor).
-BmmDtypeFn BmmDtypeKernelFor(const char* key) {
-  return OwnKernelFor(bmm_dtype_dispatcher, key);
-}
-
-MmDtypeFn MmDtypeKernelFor(const char* key) {
-  return OwnKernelFor(mm_dtype_dispatcher, key);
 }
 
 // The kernel the conf names for the mm/bmm key of a pair reaching RunMatrix,
@@ -913,10 +829,7 @@ at::Tensor& DispatchDecodedOut(
               " does not write the caller's tensor");
 }
 
-// The pair computed here, because no route will take it: a packed FP4 pair is
-// decoded nibble-wise and there is no FP4 dtype to hand a kernel. A bias keeps
-// its fused call through the boxing slot, where the bias and the scalars
-// already have a kernel.
+// Compute a decoded pair using the ordinary GEMM kernels.
 at::Tensor ComputeDecoded(
     const TensorPair& pair,
     c10::ScalarType output_dtype,
@@ -925,11 +838,13 @@ at::Tensor ComputeDecoded(
   const c10::OptionalDeviceGuard guard(pair.lhs.device());
   at::Tensor result;
   if (pair.bias.defined()) {
-    // Called through AddmmCall, not the dispatcher: see the note above it.
-    const AddmmFn kernel = static_cast<AddmmFn>(
-        addmm_dispatcher.KernelFor(Backend::kBoxing));
-    const AddmmCall call{addmm_dispatcher};
-    result = call.Call(kernel, pair.bias, pair.lhs, pair.rhs, beta, alpha);
+#if defined(FLAGOS_FLAGGEMS_PYTHON)
+    // The decoded BF16 inputs can use the existing fused addmm kernel.
+    result = addmm_dispatcher.DispatchBackend(
+        Backend::kFlagGems, pair.bias, pair.lhs, pair.rhs, beta, alpha);
+#else
+    TORCH_CHECK(false, "soft-lowp decoded addmm requires the FlagGems kernel");
+#endif
   } else if (pair.rank == 2) {
     result = at::mm(pair.lhs, pair.rhs);
   } else {
@@ -1023,71 +938,24 @@ at::Tensor RunMatrix(
   const char* const key = variant;
   const auto& entry = *LookupVariant(variant);
   if (IsOrdinaryMatrixPair(self, mat2)) {
-    // Some composite callers (notably linear_out) reach addmm with ordinary
-    // operands after their own boxing/decomposition; those keep the fused
-    // addmm kernel rather than the low-precision validation below. Where the
-    // pair goes is OrdinaryRoute's question: the conf's kernel for the call's
-    // own key where there is one this file can call as this form asks, the
-    // plain GEMM when only the mm/bmm key is served, and the pair computed
-    // here when neither is.
     const auto output_dtype = DefaultOutputDtype(self, out_dtype);
-    const auto route = OrdinaryRouteFor(key, entry.shape);
+    // Test the call's route before borrowing the plain matrix kernel. A
+    // fallback wrapper takes the local computation path to avoid recursion.
+    const char* plain_key = entry.batch ? "bmm" : "mm";
+    const bool routed = entry.shape != DecodedShape::kVoid &&
+        RoutesOrdinaryKey(plain_key) &&
+        AnswerKeyHasRoute(TensorFormKey(key));
     at::Tensor result;
-    switch (route) {
-      case OrdinaryRoute::kFactory: {
-        // Either this call's own mm/bmm key, or the plain mm/bmm the conf
-        // serves when only that key has a kernel -- and only when the key this
-        // call is really routed by has one (see AnswerKeyHasRoute: the plain
-        // key asked here is not the key a decoded pair was routed by). Never
-        // this file's own wrapper for the key: `mm` resolves to
-        // OrdinaryMmKernel -- the hand-back -- and calling it here is the
-        // recursion, not a route.
-        const bool routed = AnswerKeyHasRoute(TensorFormKey(key));
-        const auto wrapper = [](const void* fn) {
-          return fn == reinterpret_cast<const void*>(&OrdinaryMmKernel) ||
-              fn == reinterpret_cast<const void*>(&OrdinaryBmmKernel);
-        };
-        if (entry.batch) {
-          const BmmFn kernel = routed ? BmmKernelFor(key) : nullptr;
-          result = kernel != nullptr && !wrapper(reinterpret_cast<const void*>(kernel))
-              ? kernel(self, mat2)
-              : ComputeOrdinary(true, self, mat2);
-        } else {
-          const MmFn kernel = routed ? MmKernelFor(key) : nullptr;
-          result = kernel != nullptr && !wrapper(reinterpret_cast<const void*>(kernel))
-              ? kernel(self, mat2)
-              : ComputeOrdinary(false, self, mat2);
-        }
-        break;
-      }
-      case OrdinaryRoute::kDtype:
-        result = entry.batch
-            ? BmmDtypeCall{bmm_dtype_dispatcher}.Call(
-                  BmmDtypeKernelFor(key), self, mat2, out_dtype)
-            : MmDtypeCall{mm_dtype_dispatcher}.Call(
-                  MmDtypeKernelFor(key), self, mat2, out_dtype);
-        break;
-      case OrdinaryRoute::kAddmm: {
-        // Select runs DecodedKernel, which raises where the conf names no
-        // route -- so an addmm key Pick chose on the mm/bmm key's say needs
-        // its own route too, or the call raises instead of being computed.
-        const AddmmCall call{addmm_dispatcher};
-        result = call.Call(call.Select(key), bias, self, mat2, beta, alpha);
-        break;
-      }
-      case OrdinaryRoute::kMmOut:
-      case OrdinaryRoute::kBmmOut:
-      case OrdinaryRoute::kMmDtypeOut:
-      case OrdinaryRoute::kBmmDtypeOut:
-      case OrdinaryRoute::kAddmmOut:
-        // Asked for a new tensor on a key the conf routes as a form that
-        // writes `out`: the shape the call asked for is not one the route has
-        // a kernel for, so it is the plain GEMM this file computes.
-        result = ComputeOrdinary(entry.batch, self, mat2);
-        break;
-      case OrdinaryRoute::kNone:
-        result = ComputeOrdinary(entry.batch, self, mat2);
-        break;
+    if (entry.batch) {
+      const BmmFn kernel = routed ? BmmKernelFor(key) : nullptr;
+      result = kernel != nullptr && kernel != &OrdinaryBmmKernel
+          ? kernel(self, mat2)
+          : ComputeOrdinary(true, self, mat2);
+    } else {
+      const MmFn kernel = routed ? MmKernelFor(key) : nullptr;
+      result = kernel != nullptr && kernel != &OrdinaryMmKernel
+          ? kernel(self, mat2)
+          : ComputeOrdinary(false, self, mat2);
     }
     return output_dtype == result.scalar_type() ? result
                                                 : result.to(output_dtype);
@@ -1365,17 +1233,6 @@ at::Tensor& WrapperMdtypeOutAsMm(
   return out;
 }
 
-at::Tensor& WrapperMmOutAsBoxing(
-    const at::Tensor& self,
-    const at::Tensor& mat2,
-    at::Tensor& out) {
-  if (PairIsLowPrecision(self, mat2) && !IsDispatchSuppressed()) {
-    return MmOut(self, mat2, out);
-  }
-  out.copy_(at::mm(self, mat2));
-  return out;
-}
-
 at::Tensor& WrapperMoutAsMm(
     const at::Tensor& self,
     const at::Tensor& mat2,
@@ -1383,41 +1240,6 @@ at::Tensor& WrapperMoutAsMm(
   out.copy_(OrMmRoute(self, mat2,
       [&] { return Mm(self, mat2); }));
   return out;
-}
-
-at::Tensor WrapperMmDtypeAsBoxing(
-    const at::Tensor& self,
-    const at::Tensor& mat2,
-    c10::ScalarType out_dtype) {
-  if (!IsLowPrecision(self.scalar_type()) && !IsLowPrecision(mat2.scalar_type()) &&
-      !IsDispatchSuppressed()) {
-    return at::mm(self, mat2).to(out_dtype);
-  }
-  return MmDtype(self, mat2, out_dtype);
-}
-
-at::Tensor& WrapperMmDtypeOutAsBoxing(
-    const at::Tensor& self,
-    const at::Tensor& mat2,
-    c10::ScalarType out_dtype,
-    at::Tensor& out) {
-  if (!IsLowPrecision(self.scalar_type()) && !IsLowPrecision(mat2.scalar_type()) &&
-      !IsDispatchSuppressed()) {
-    out.copy_(at::mm(self, mat2).to(out_dtype));
-    return out;
-  }
-  return MmDtypeOut(self, mat2, out_dtype, out);
-}
-
-at::Tensor WrapperBmmAsBoxing(
-    const at::Tensor& self,
-    const at::Tensor& mat2,
-    c10::ScalarType out_dtype) {
-  if (!IsLowPrecision(self.scalar_type()) && !IsLowPrecision(mat2.scalar_type()) &&
-      !IsDispatchSuppressed()) {
-    return at::bmm(self, mat2).to(out_dtype);
-  }
-  return BmmDtype(self, mat2, out_dtype);
 }
 
 at::Tensor WrapperBdtypeAsBmm(
@@ -1435,17 +1257,6 @@ at::Tensor& WrapperBdtypeOutAsBmm(
     at::Tensor& out) {
   out.copy_(OrBmmRoute(self, mat2,
       [&] { return BmmDtype(self, mat2, out_dtype); }));
-  return out;
-}
-
-at::Tensor& WrapperBmmOutAsBoxing(
-    const at::Tensor& self,
-    const at::Tensor& mat2,
-    at::Tensor& out) {
-  if (PairIsLowPrecision(self, mat2) && !IsDispatchSuppressed()) {
-    return BmmOut(self, mat2, out);
-  }
-  out.copy_(at::bmm(self, mat2));
   return out;
 }
 

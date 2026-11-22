@@ -104,19 +104,6 @@ def test_platform_module_accepts_both_halves(platform_mod):
     assert platform_mod.platform_for("nope") == ""
 
 
-def test_setup_normalizes_the_same_way(platform_mod):
-    """setup.py's own copy of the vendor map, read by AST -- setup.py is a script."""
-    setup_src = (REPO_ROOT / "setup.py").read_text(encoding="utf-8")
-    body = re.search(r"_VENDOR_TO_PLATFORM = \{(.*?)\n\}", setup_src, re.S)
-    assert body, "setup.py no longer defines _VENDOR_TO_PLATFORM"
-    pairs = dict(re.findall(r'"([a-z0-9_-]+)":\s*"([a-z0-9_]+)"', body.group(1)))
-    assert pairs == {
-        vendor: key for key, vendor in platform_mod.PLATFORM_VENDOR.items()
-    }
-    # The Nexus spelling of D-Robotics is accepted as an alias.
-    assert 'value == "d-robotics"' in setup_src
-
-
 def test_no_chip_name_reaches_a_conf_or_an_accelerator_id():
     """The chip layer is source-only: an Ascend 310B is an `ascend` build."""
     platform_ids = set(_platforms()) | {row["vendor"] for row in _platforms().values()}

@@ -568,6 +568,14 @@ def patch_torch_cuda_for_metax():
     _orig_raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
 
     def _current_raw_stream(idx=0):
+        # The optional MetaX shim can be installed before _C is loaded.
+        native_stream = getattr(
+            getattr(getattr(torch, "flagos", None), "_C", None),
+            "_get_native_current_raw_stream",
+            None,
+        )
+        if native_stream is not None:
+            return native_stream(idx)
         if _orig_raw_stream is not None:
             try:
                 return _orig_raw_stream(idx)

@@ -25,7 +25,7 @@ namespace at::native::flagos {
 // (e.g. the boxing guards, which record impls to avoid refcount churn) don't
 // need to reconstruct an owning Tensor to unbox.
 inline void SetTensorImplDevice(c10::TensorImpl* impl, c10::DeviceType type) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
   TORCH_CHECK(type != c10::DeviceType::CUDA || !impl->device().is_privateuseone(),
               "Hygon non-boxing builds forbid converting FlagOS tensors to CUDA");
 #endif
@@ -69,7 +69,7 @@ inline void BoxToCuda(const at::Tensor& t) {
 }
 
 inline void UnboxToFlagos(const at::Tensor& t) {
-#if defined(USE_DCU) && !defined(FLAGOS_BOXING_BUILD)
+#if defined(USE_DCU)
   if (t.defined() && t.device().is_privateuseone() &&
       t.key_set().has(c10::DispatchKey::PrivateUse1)) {
     auto* impl = t.unsafeGetTensorImpl();

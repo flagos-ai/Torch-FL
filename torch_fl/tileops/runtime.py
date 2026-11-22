@@ -174,10 +174,7 @@ def _tileops_platform() -> str:
     """Hardware platform of the running torch_fl build."""
     from torch_fl import _platform
 
-    accelerator = _platform.build_accelerator()
-    if accelerator:
-        return _platform._ACCELERATOR_TO_PLATFORM.get(accelerator, accelerator)
-    return _platform.detect_platform()
+    return _platform.build_info().platform or _platform.detect_platform()
 
 
 def _provider_backend():

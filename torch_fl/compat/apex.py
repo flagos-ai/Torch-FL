@@ -62,16 +62,6 @@ def _is_disabled() -> bool:
     return _env.flag(_DISABLE_ENV)
 
 
-def _build_accelerator() -> str:
-    """Return the build accelerator via the shared detector.
-
-    torch_fl._platform.build_accelerator() reads the build record alone -- see it
-    for why the environment is not consulted. This used to keep a private copy;
-    it now delegates, so there is one read of the record.
-    """
-    return _platform.build_accelerator()
-
-
 def _active_vendor() -> str:
     """Resolve the vendor name used by the shared CUDA-alias capability table."""
     configured = os.environ.get("GEMS_VENDOR", "").strip().lower()
@@ -83,13 +73,7 @@ def _active_vendor() -> str:
     # GEMS_VENDOR is normally initialized by torch_fl.__init__ before this
     # module is installed. The fallback keeps direct use of this module
     # deterministic in tests and in applications that call the installer early.
-    accelerator = _build_accelerator()
-    return {
-        "dcu": "hygon",
-        "metax": "metax",
-        "cuda": "nvidia",
-        "": "nvidia",
-    }.get(accelerator, accelerator)
+    return _platform.build_info().vendor or "nvidia"
 
 
 def is_apex_compat_available() -> bool:

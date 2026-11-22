@@ -124,7 +124,30 @@ class TestSoftLowpMatrixDispatch:
 
 
 class TestSoftLowpMatrixNumerics:
-    """The composite FP4 decoder preserves the packed nibble values."""
+    """The software decoders preserve the input encodings."""
+
+    @pytest.mark.parametrize(
+        "dtype,bits",
+        [
+            (torch.float8_e4m3fn, [0x00, 0x01, 0x38, 0xB8, 0x7F]),
+            (torch.float8_e5m2, [0x01, 0x3C, 0xBC, 0x7C, 0xFC, 0x7D]),
+            (torch.float8_e4m3fnuz, [0x00, 0x01, 0x40, 0xC0, 0x80]),
+            (torch.float8_e5m2fnuz, [0x00, 0x01, 0x40, 0xC0, 0x80]),
+            (torch.float8_e8m0fnu, [0x7E, 0x7F, 0x80, 0xFE, 0xFF]),
+        ],
+    )
+    @pytest.mark.soft_lowp
+    def test_fp8_decode_mm(self, dtype, bits):
+        raw = torch.tensor(bits, dtype=torch.uint8).reshape(-1, 1)
+        lhs = raw.to(DEVICE).view(dtype)
+        rhs = torch.ones(1, 1, dtype=torch.bfloat16, device=DEVICE)
+
+        result = torch.mm(lhs, rhs)
+        assert result.device == lhs.device
+        assert lhs.dtype == dtype
+        torch.testing.assert_close(
+            result.cpu(), raw.view(dtype).bfloat16(), atol=0, rtol=0, equal_nan=True
+        )
 
     @pytest.mark.soft_lowp
     def test_fp4_nibble_decode_mm(self):
@@ -157,13 +180,13 @@ class TestSoftLowpMatrixNumerics:
         raw = torch.full((2, 2), 0x11, dtype=torch.uint8, device=DEVICE)
         a = raw.view(torch.float4_e2m1fn_x2)
         b = raw.view(torch.float4_e2m1fn_x2)
-        self = torch.zeros(2, 2, device=DEVICE, dtype=torch.bfloat16)
+        bias = torch.full((2, 2), 2.0, device=DEVICE, dtype=torch.bfloat16)
 
-        result = self.addmm_(a, b)
-        assert result is self
+        result = bias.addmm_(a, b, beta=3, alpha=2)
+        assert result is bias
         assert result.device.type == "flagos"
         torch.testing.assert_close(
-            result.cpu(), torch.ones((2, 2), dtype=torch.bfloat16), atol=0, rtol=0
+            result.cpu(), torch.full((2, 2), 8.0, dtype=torch.bfloat16), atol=0, rtol=0
         )
 
 

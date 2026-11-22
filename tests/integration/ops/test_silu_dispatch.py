@@ -81,17 +81,6 @@ class TestSiluCorrectness:
         ref = a.cpu() * torch.sigmoid(a.cpu())
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_silu_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = F.silu(a_cuda)
-        a = a_cuda.to(DEVICE)
-        out = F.silu(a)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
 
 class TestSiluDispatch:
     """Verify dispatch routing for silu op."""
@@ -126,15 +115,6 @@ class TestSiluDispatch:
         result = _run_silu_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert f"[flagos dispatch] silu -> {expected}" in result.stderr
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_silu_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_silu": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] silu -> boxing" in result.stderr
 
     @pytest.mark.ascend
     def test_dispatch_log_ascend(self):

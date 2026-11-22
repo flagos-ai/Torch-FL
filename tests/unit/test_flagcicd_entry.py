@@ -198,7 +198,7 @@ def test_runtime_changes_cannot_be_lowered_to_l0():
     )
     assert result["test_level"] == "L2"
     # A boxing platform names both of its lanes; the plan runs each.
-    assert result["expected_platforms"] == ["nvidia", "nvidia-boxing"]
+    assert result["expected_platforms"] == ["nvidia"]
 
 
 def test_documentation_has_no_hardware_but_explicit_l2_is_nonempty():
@@ -1183,6 +1183,7 @@ def test_real_execution_through_both_workflow_gates(tmp_path, entry, scenario):
         "PYTHONPATH": str(SCRIPTS / "pytest_reporting"),
         "PYTEST_PLUGINS": "flagcicd_report",
         "PYTEST_ADDOPTS": "",
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_RUN_ID": "42",
         "GITHUB_RUN_ATTEMPT": "1",
         "GH_TOKEN": "",

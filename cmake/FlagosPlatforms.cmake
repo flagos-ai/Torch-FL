@@ -18,7 +18,7 @@
 # after flagos_pin_build_switch() is defined. It publishes, in the including
 # scope (and therefore to every add_subdirectory below it):
 #
-#   FLAGOS_KERNEL_SWITCHES            the five FLAGOS_BUILD_* names, in order
+#   FLAGOS_KERNEL_SWITCHES            the FLAGOS_BUILD_* kernel options, in order
 #   FLAGOS_PLATFORM_LANGUAGES         project() language list
 #   FLAGOS_PLATFORM_VENDOR            the platform's vendor (apple, nvidia, ...)
 #   FLAGOS_ATEN_VENDOR_DIRS           accelerator keys owning an
@@ -43,6 +43,7 @@ if(NOT EXISTS "${_flagos_platforms_json}")
   message(FATAL_ERROR "flagos platform table not found: ${_flagos_platforms_json}")
 endif()
 file(READ "${_flagos_platforms_json}" _flagos_platforms)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_flagos_platforms_json}")
 
 # JSON array at <path>... -> a CMake list in <out>.
 function(flagos_json_list out json)
@@ -57,6 +58,35 @@ function(flagos_json_list out json)
     endforeach()
   endif()
   set(${out} "${_items}" PARENT_SCOPE)
+endfunction()
+
+# Write the effective settings after the SDK probes and return the kernel set
+# names for the runtime diagnostics.
+function(flagos_write_build_config output kernel_sets)
+  set(_compiled "")
+  foreach(_switch IN LISTS FLAGOS_KERNEL_SWITCHES)
+    if(${_switch})
+      string(JSON _kernel GET "${_flagos_platforms}" kernel_set_names "${_switch}")
+      list(APPEND _compiled "${_kernel}")
+    endif()
+  endforeach()
+  set(${kernel_sets} "${_compiled}" PARENT_SCOPE)
+  list(TRANSFORM _compiled PREPEND "\"")
+  list(TRANSFORM _compiled APPEND "\"")
+  list(JOIN _compiled ", " _kernels)
+  set(_native_hosts false)
+  if(FLAGOS_NATIVE_HOSTS)
+    set(_native_hosts true)
+  endif()
+  file(CONFIGURE OUTPUT "${output}" CONTENT [=[
+{
+  "platform": "@FLAGOS_PLATFORM_ID@",
+  "vendor": "@FLAGOS_PLATFORM_VENDOR@",
+  "bundle_libdir": "@FLAGOS_BUNDLE_LIBDIR@",
+  "kernels": [@_kernels@],
+  "native_hosts": @_native_hosts@
+}
+]=] @ONLY)
 endfunction()
 
 # Reject an unknown accelerator here, the way setup.py does, instead of falling
@@ -98,23 +128,8 @@ if(_flagos_accel_err)
     "${_flagos_known_str}.")
 endif()
 
-# The table row this build belongs to, and every other name for it that an
-# environment may carry. setup.py records them (torch_fl/_platform_alias.py) and
-# passes them here; this is their CMake-side twin, so a wheel built for a
-# platform enters that platform's arms whichever half of the name it was told.
-# `_flagos_is_<name>` below is what the target must match, and for the row whose
-# vendor is also its id that is the vendor's own name.
-#
-# FLAGOS_ACCELERATOR itself is read by the branches further down -- the MetaX
-# target name, the per-SDK messages -- so it keeps the name the build was given
-# and the row is resolved into FLAGOS_PLATFORM_ID beneath it.
+# The lookup above resolves both platform IDs and vendor names to a table row.
 set(FLAGOS_PLATFORM_ID "${FLAGOS_ACCELERATOR}")
-if(DEFINED FLAGOS_ACCELERATOR_ALIASES)
-  list(FIND FLAGOS_ACCELERATOR_ALIASES "${FLAGOS_ACCELERATOR}" _alias_index)
-  if(NOT _alias_index EQUAL -1)
-    list(GET FLAGOS_ACCELERATOR_ALIASES -1 FLAGOS_PLATFORM_ID)
-  endif()
-endif()
 
 # Every accelerator key that owns an aten/backends/<key>/ kernel tree, whatever
 # spelling this build was given, as one alternation: the vendor-kernel filter

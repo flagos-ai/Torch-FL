@@ -166,8 +166,6 @@ For an in-place source checkout, use `setup.py build_ext --inplace` instead of
   boxing.
 - **`FLAGOS_BUILD_VENDOR=ON`** (pinned): xdnn is the only operator library the
   XPU SDK provides.
-- **`FLAGOS_BUILD_BOXING=OFF`**: the conf routes nothing to the CUDA boxing
-  kernels.
 - **`FLAGOS_BUILD_FLAGGEMS_CPP=OFF`** (pinned): no FlagGems `liboperators.so`
   exists for the XPU SDK.
 

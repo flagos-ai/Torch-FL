@@ -28,7 +28,12 @@ at::Tensor Vendor(const at::Tensor&, const at::Tensor&) { return at::scalar_tens
 int main(int argc, char** argv) {
   try {
     SetBackendConfigPath(argv[1]);
-    if (std::string(argv[2]) == "scalar") {
+    const std::string mode(argv[2]);
+    if (mode == "name") {
+      std::cout << BackendLogName(GetBackendForOp("mm")) << '\n';
+      return 0;
+    }
+    if (mode == "scalar") {
       int wrong = 0;
       for (auto dtype : {at::kFloat, at::kDouble, at::kHalf, at::kBFloat16}) {
         for (double value : {-0.0, 0.1, std::numeric_limits<double>::infinity(),
@@ -53,7 +58,7 @@ int main(int argc, char** argv) {
       std::cout << wrong << ' ' << rejected << '\n';
       return 0;
     }
-    if (std::string(argv[2]) == "wrapped") {
+    if (mode == "wrapped") {
       auto scalar = at::scalar_tensor(0.5);
       auto regular = at::scalar_tensor(0.5);
       auto complex = at::scalar_tensor(c10::complex<double>(0.5, 1.0),
@@ -70,7 +75,6 @@ int main(int argc, char** argv) {
     }
     Dispatcher<Fn> op("mm");
     op.RegisterKernel(Backend::kFlagGems, &Gems);
-    const std::string mode(argv[2]);
     if (mode == "host") {
       auto value = at::ones({2, 2}, at::TensorOptions().dtype(at::kDouble));
       TORCH_CHECK(CpuFallbackAllowed());
@@ -93,6 +97,13 @@ int main(int argc, char** argv) {
     if (mode == "native" || mode == "threads") op.RegisterKernel(Backend::kNvidia, &Vendor);
     if (mode == "hygon") op.RegisterKernel(Backend::kHygon, &Vendor);
     auto bf = at::empty({1}, at::TensorOptions().dtype(at::kBFloat16));
+    if (mode == "decoded") {
+      op.RegisterKernel(Backend::kFlagGemsCpp, &Vendor);
+      op.RegisterKernel(Backend::kHygon, &Vendor);
+      op.RegisterKernel(Backend::kNvidia, &Vendor);
+      std::cout << op.DecodedKernel("mm")(bf, bf).item<int>() << '\n';
+      return 0;
+    }
     if (mode == "late") {
       std::cout << op(bf, bf).item<int>() << ' ';
       op.RegisterKernel(Backend::kNvidia, &Vendor);
@@ -148,12 +159,14 @@ def executable(tmp_path_factory):
         "-pthread",
         f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
         f'-DFLAGOS_SOURCE_ROOT="{ROOT}"',
+        '-DFLAGOS_BUILTIN_KERNELS="flaggems,vendor"',
         "-I" + str(ROOT / "csrc"),
         "-I" + str(ROOT / "csrc/include"),
         "-I" + str(torch_root / "include"),
         "-I" + str(torch_root / "include/torch/csrc/api/include"),
         str(source),
         str(ROOT / "csrc/aten/common.cc"),
+        str(ROOT / "csrc/aten/route.cc"),
         "-L" + str(torch_root / "lib"),
         "-Wl,-rpath," + str(torch_root / "lib"),
         "-ltorch_cpu",
@@ -239,6 +252,121 @@ def test_plain_override_replaces_an_included_dtype_rule(executable, tmp_path):
     result = run(executable, tmp_path, "include included.conf\nmm = flaggems")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "11 11 11 11 11"
+
+
+@pytest.mark.parametrize(
+    "key,log_name",
+    [
+        ("FLAGOS", "flagos"),
+        ("flaggems_python", "flagos_python"),
+        ("FLAGOS_PYTHON", "flagos_python"),
+        ("musa", "musa"),
+        ("gcu", "gcu"),
+        ("mps", "mps"),
+        ("bpu", "drobotics"),
+        ("thead", "none"),
+        ("nvidia", "nvidia"),
+        ("hygon", "hygon"),
+    ],
+)
+def test_legacy_conf_names_resolve_to_the_expected_backend(
+    executable, tmp_path, key, log_name
+):
+    result = run(executable, tmp_path, f"mm = {key}", mode="name")
+    assert result.returncode == 0, result.stderr
+    assert "unknown backend" not in result.stderr
+    assert result.stdout.strip() == log_name
+
+
+@pytest.mark.parametrize("key", ["boxing", "CuDa"])
+@pytest.mark.parametrize("source", ["base", "dtype", "override", "decoded"])
+def test_retired_boxing_route_requires_migration(executable, tmp_path, key, source):
+    config = "mm = flaggems"
+    mode = "name"
+    environment = {}
+    if source == "base":
+        config = f"mm = {key}"
+    elif source == "dtype":
+        config += f"; Float:{key}"
+    elif source == "override":
+        environment["FLAGOS_OP_mm"] = key
+    else:
+        config = "mm = metax"
+        mode = "decoded"
+        environment["FLAGOS_SOFT_LOWP_STAY_ON_ROUTE"] = key
+    result = run(executable, tmp_path, config, mode=mode, **environment)
+    assert result.returncode != 0
+    assert "boxing route has been removed" in result.stderr
+
+
+def test_path_from_binding_takes_priority_over_the_env(executable, tmp_path):
+    env_conf = tmp_path / "env.conf"
+    env_conf.write_text("mm = none\n")
+    result = run(
+        executable,
+        tmp_path,
+        "mm = flaggems_cpp",
+        mode="name",
+        FLAGOS_BACKEND_CONFIG=str(env_conf),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "flagos"
+
+
+@pytest.mark.parametrize(
+    "key,log_name",
+    [
+        ("flagos", "flagos"),
+        ("hygon", "hygon"),
+        ("nvidia", "nvidia"),
+    ],
+)
+def test_decoded_route_pins_only_supported_kernel_slots(
+    executable, tmp_path, key, log_name
+):
+    result = run(
+        executable,
+        tmp_path,
+        "mm = metax",
+        mode="decoded",
+        FLAGOS_SOFT_LOWP_STAY_ON_ROUTE=key,
+        FLAGOS_LOG="dispatch",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "22"
+    assert f"[flagos dispatch] mm -> {log_name}" in result.stderr
+
+
+def test_decoded_route_rejects_a_valid_conf_key_for_an_ineligible_slot(
+    executable, tmp_path
+):
+    result = run(
+        executable,
+        tmp_path,
+        "mm = metax",
+        mode="decoded",
+        FLAGOS_SOFT_LOWP_STAY_ON_ROUTE="mps",
+    )
+    assert result.returncode != 0
+    assert 'FLAGOS_SOFT_LOWP_STAY_ON_ROUTE="mps" names no live slot' in result.stderr
+
+
+def test_uncompiled_kernel_set_is_named_in_dispatch_error(executable, tmp_path):
+    result = run(executable, tmp_path, "mm = tileops")
+    assert result.returncode != 0
+    assert "the 'tileops' kernel set was not compiled into this wheel" in result.stderr
+
+
+def test_forced_vendor_route_reports_a_missing_kernel(executable, tmp_path):
+    result = run(
+        executable,
+        tmp_path,
+        "mm = flaggems # nvidia",
+        mode="none",
+        FLAGOS_FORCE_BACKEND="vendor",
+    )
+    assert result.returncode != 0
+    assert "FLAGOS_FORCE_BACKEND=vendor but no vendor kernel" in result.stderr
 
 
 def test_host_matmul_uses_the_shared_strict_fallback_policy(executable, tmp_path):

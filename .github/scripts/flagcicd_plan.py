@@ -28,9 +28,9 @@ from ci.generate_matrix import (
     _changed_files,
     _platforms_from_dispatch,
     _platforms_from_files,
-    boxing_platforms,
     select_platforms,
 )
+from ci.hardware_parity import validate_pr_plan
 from platform_config import compile_platform, load_platform_data, plan_hash
 from compose_integration_manifest import validate_profile
 
@@ -89,13 +89,12 @@ def build_plan(request, contract, source, changed):
     validate_profile(profile)
     if profile == "nightly" and selection.strip() != "all":
         raise ValueError("nightly requires platforms=all")
-    boxing = boxing_platforms(configs, known, platform_configs)
     reasons = [{"kind": "dispatch", "requested": selection}]
-    selected = _platforms_from_dispatch(selection, known, boxing)
+    selected = _platforms_from_dispatch(selection, known)
     if profile == "pr" and selection.strip() == "all" and changed is not None:
         reasons = []
         selected = _platforms_from_files(
-            changed, known, configs, boxing, reasons, platform_configs
+            changed, known, configs, reasons, platform_configs
         )
     elif changed is None and profile == "pr" and selection.strip() == "all":
         reasons = [{"kind": "diff_unavailable"}]
@@ -111,7 +110,7 @@ def build_plan(request, contract, source, changed):
         raise ValueError(f"test level {level} is not supported")
     # An explicit hardware request must not become an empty, passing matrix.
     if level == "L2" and not selected:
-        selected = _platforms_from_dispatch("all", known, boxing)
+        selected = _platforms_from_dispatch("all", known)
         reasons.append({"kind": "l2_requires_hardware"})
     plan = {
         "schema_version": "flagcicd.plan/v1",
@@ -132,7 +131,7 @@ def build_plan(request, contract, source, changed):
         + ([] if level == "L0" else ["agnostic", "codegen"]),
         "selection_reasons": reasons,
     }
-    return complete_plan(plan, contract, source, platform_configs, raw_configs, boxing)
+    return complete_plan(plan, contract, source, platform_configs, raw_configs)
 
 
 def build_ci_plan(
@@ -144,31 +143,28 @@ def build_ci_plan(
     if profile == "nightly" and dispatch not in ("", "all"):
         raise ValueError("nightly requires platforms=all")
     platform_configs, raw_configs = load_platform_data(source)
-    selected, reasons = select_platforms(
-        event_name,
-        source / ".github/configs",
-        changed,
-        labels,
-        dispatch,
-        platform_configs=platform_configs,
-    )
-    boxing = boxing_platforms(
-        source / ".github/configs", list(platform_configs), platform_configs
-    )
+    if event_name == "pull_request":
+        selected = sorted(platform_configs)
+        reasons = [{"kind": "pr_full_matrix"}]
+    else:
+        selected, reasons = select_platforms(
+            event_name,
+            source / ".github/configs",
+            changed,
+            labels,
+            dispatch,
+            platform_configs=platform_configs,
+        )
     _inferred, risk, matched, diff_status = infer_level(changed, contract)
-    # Ordinary CI always runs all required shared checks, including documentation
-    # PRs. An empty hardware matrix is valid here, even when risk inference
-    # would raise an explicit external request to L2.
-    level = "L2" if selected else "L1"
-    return complete_plan(
+    plan = complete_plan(
         {
             "schema_version": "flagcicd.plan/v1",
             **request,
             "profile": profile,
             "entry": "ci",
             "event_name": event_name,
-            "test_level": level,
-            "scope": contract["levels"][level]["scope"],
+            "test_level": "L2",
+            "scope": contract["levels"]["L2"]["scope"],
             "risk_level": risk,
             "risk_rule_version": contract["risk_rules"]["version"],
             "diff_status": diff_status,
@@ -191,11 +187,13 @@ def build_ci_plan(
         source,
         platform_configs,
         raw_configs,
-        boxing,
     )
+    if event_name == "pull_request":
+        validate_pr_plan(plan)
+    return plan
 
 
-def complete_plan(plan, contract, source, platform_configs, raw_configs, boxing):
+def complete_plan(plan, contract, source, platform_configs, raw_configs):
     """Validate configuration and snapshot final executable lanes once."""
     manifest_bytes = (source / ".github/integration-manifest.yml").read_bytes()
     manifest = yaml.safe_load(manifest_bytes)
@@ -203,7 +201,7 @@ def complete_plan(plan, contract, source, platform_configs, raw_configs, boxing)
     execution = []
     for lane in plan["validated_platforms"]:
         compiled = compile_platform(
-            source, lane, plan["profile"], manifest, platform_configs, boxing
+            source, lane, plan["profile"], manifest, platform_configs
         )
         platform = compiled["platform"]
         fingerprint.update(lane.encode())

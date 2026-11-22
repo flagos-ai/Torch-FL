@@ -135,10 +135,8 @@ not directly comparable to each other; each table states which wheel it used.
   **vendor kernel through flagos boxing** (9.5–12.7 µs) is what the same device
   costs when the vendor kernel is reached through the plugin's boxing route.
 
-Caveat for anyone re-measuring: at HEAD the *default* NVIDIA conf routes
-549 FlagGems / 1485 none / **0 boxing**, so a default HEAD wheel has no vendor
-route to compare against. The vendor arm requires a boxing wheel plus
-`FLAGOS_BACKEND_CONFIG=.../backends_nvidia_boxing.conf`.
+The boxed measurements used the former operator route. To measure the vendor
+baseline on the current tree, run the same operators on CUDA tensors.
 
 ## 2. Baseline on H100
 
@@ -1499,7 +1497,7 @@ slow or broken path. Order matters.
 | 8 | `csrc/aten/dispatcher.h` `NameOf` | log name | `tests/unit/test_route_log_name_tables.py` and the integration `_LOG_NAME` table must map it, or `[flagos dispatch] <op> -> <name>` assertions break |
 | 9 | `csrc/aten/dispatcher.h` `VendorSlot`, `RouteAcceptsDecoded`, `DecodedFallbackFn`, local `ParseBackendName` | decide explicitly whether the key is safe on the soft-lowp decode path | decode path enumerates slot kinds |
 | 10 | `csrc/aten/register.cc` + per-platform claim lists | claim `m.impl` in both directions | claiming an op the conf routes `none`, or not claiming one the conf routes, is the failure documented at `register.cc:790-840` |
-| 11 | `scripts/codegen/codegen_boxing_flaggems_register.py` | regenerate `register_flaggems_<vendor>.inc` | **silent**: an op routed to the new key but absent from the claim list is never claimed on PrivateUse1 → `cpu_fallback` (the PPU bug recorded in the same comment) |
+| 11 | `scripts/codegen/codegen_flaggems_register.py` | regenerate `register_flaggems_<vendor>.inc` | An operator absent from the claim list reaches `cpu_fallback` |
 | 12 | `scripts/codegen/gen_vendor_confs.py` | emit the key | `tests/unit/test_vendor_conf_single_writer.py` requires it to be the only conf writer; `tests/unit/test_conf_matches_codegen_routes.py` pins conf == generator route sets |
 | 13 | `AGENTS.md` ("Default confs never route boxing" — allowed keys) | amend the allowed-key list in the same PR | documented policy, **review-enforced only**; a new key otherwise violates the stated rule |
 

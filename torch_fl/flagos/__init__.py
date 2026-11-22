@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import sys
 import time
 import types
@@ -20,48 +19,18 @@ import types
 import torch
 
 from .. import _C  # type: ignore[misc]
+from .._platform import build_info, detect_platform
 from ..compat import triton as _triton_compat
 
+from . import _streams
 from . import meta  # noqa: F401
 
 
 _initialized = False
 
-# The platform cannot change while the process runs, so it is resolved once. The
-# stream helpers below consult it on every call, and a call happens once per
-# FlagGems kernel launch -- 483 a step on the Qwen-Image transformer -- while
-# detect_platform() stats the wheel on each call, which made this 0.34 s of every
-# step before it was cached.
-_platform_name: str | None = None
-
 
 def _platform() -> str:
-    """The accelerator this wheel was built for, as torch_fl itself names it.
-
-    Delegates to ``torch_fl._platform.detect_platform()`` -- the one detector
-    ``_select_backend_config()`` and the integration trees read too -- so the
-    stream helpers below cannot disagree with the conf this wheel routes its ops
-    through.
-
-    Reading ``lib/flagos_platform`` alone, as this used to, is wrong for every
-    CUDA-ABI boxing platform: ``cmake/flagos_platforms.json`` leaves
-    ``writes_platform_marker`` false for cuda, ppu, metax, kunlunxin and dcu,
-    because their conf follows from the build record rather than from a file the
-    build writes. On a DCU wheel the marker read therefore returned ``""`` -- an
-    accelerator no arm below knows -- while ``_select_backend_config()`` had
-    already resolved that same wheel to ``backends_hygon.conf``. That empty token
-    is what reached ``Stream.__init__``'s final arm and raised.
-
-    detect_platform() consults the marker too, but after the build record: the
-    marker names a native-kernel platform, and those are exactly the ones with a
-    stream class of their own.
-    """
-    global _platform_name
-    if _platform_name is None:
-        from .._platform import detect_platform
-
-        _platform_name = detect_platform()
-    return _platform_name
+    return detect_platform()
 
 
 def _has_cuda_runtime() -> bool:
@@ -160,23 +129,21 @@ def is_initialized():
 
 
 def _lazy_init():
-    from .. import _build_accelerator
-
     global _initialized
     if is_initialized():
         from ..compat.flaggems.autotune import refresh_tune_space
 
         # A lane whose first device touch happened after `import flag_gems`
         # reaches the tune-space repair only here; see the function.
-        refresh_tune_space(_build_accelerator())
+        refresh_tune_space(build_info().vendor)
         return
     _C._init()
     _initialized = True
 
-    from .. import _cuda_alias_active
+    from ..compat.cuda import is_active
     from ..compat.flaggems.runtime import initialize
 
-    initialize(_build_accelerator(), _cuda_alias_active)
+    initialize(build_info().vendor, is_active())
 
     # Advanced indexing on this device takes the C++ dispatcher and needs no
     # Python patch here. `index.Tensor` is registered on PrivateUse1 from
@@ -308,16 +275,23 @@ def reset_peak_memory_stats(device=None):
 
 
 class Stream(torch.cuda.Stream):
-    """Flagos stream: a real CUDA stream where there is a CUDA runtime.
+    """Create a stream for the wheel's device runtime.
 
-    Where there is not, ``__new__`` falls back to ``object.__new__(cls)`` and
-    ``__init__`` builds one of the ``torch_fl.accelerator`` vendor streams --
-    Enflame tops, MUSA, or Ascend ACL -- or, on any accelerator that has no
-    stream class of its own, the same handle-only stand-in ``current_stream()``
-    returns -- and delegates every method below to it.
+    On native Hygon builds, the public constructor returns a ``torch.Stream``
+    backed by the PrivateUse1 guard. Check the result against ``torch.Stream``
+    when passing it to APIs such as ``Tensor.record_stream``.
     """
 
     def __new__(cls, device=None, priority=0, **kwargs):
+        if (
+            cls is Stream
+            and not kwargs
+            and _platform() == "dcu"
+            and hasattr(_C, "_get_native_current_raw_stream")
+        ):
+            # FSDP passes the object directly to Tensor.record_stream. The
+            # CUDA-derived facade cannot supply a PrivateUse1 c10 stream.
+            return _streams.create_guard_stream(_device_index(device), priority)
         if device is None:
             device = current_device()
         try:
@@ -329,79 +303,15 @@ class Stream(torch.cuda.Stream):
             raise
 
     def __init__(self, device=None, priority=0, **kwargs):
-        # On a vendor backend with no CUDA runtime, __new__ returns
-        # object.__new__(cls) and we need a full native implementation. Import the
-        # vendor module late to avoid touching it on CUDA runs.
-        if not _has_cuda_runtime():
-            vendor = _platform()
-            if vendor == "gcu":
-                from torch_fl.accelerator.enflame.tops_stream import TopsStream
+        native = _streams.create_stream(device, priority)
+        if native is not None:
+            self._stream = native
 
-                self._stream = TopsStream(device, priority)
-            elif vendor == "musa":
-                from torch_fl.accelerator.mthreads.musa_stream import MusaStream
-
-                self._stream = MusaStream(device, priority)
-            elif vendor == "ascend":
-                from torch_fl.accelerator.ascend.acl_stream import AclStream
-
-                self._stream = AclStream(device, priority)
-            elif vendor == "mps":
-                # Apple Silicon (M-series). Metal has real command queues, so
-                # this is an owning stream rather than the handle-0 stand-in the
-                # unnamed arms below get -- see torch_fl/accelerator/apple/.
-                from torch_fl.accelerator.apple.mps_stream import MpsStream
-
-                self._stream = MpsStream(device, priority)
-            elif vendor == "iluvatar":
-                # Corex is CUDA-shaped, so this really creates a stream like
-                # MPS rather than borrowing the one shared queue MUSA has.
-                from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
-
-                self._stream = IluStream(device, priority)
-            else:
-                # The accelerators with a stream class of their own are named
-                # above; everything else denotes its one queue with handle 0.
-                # That is the TX runtime, whose only stream *is* the default one
-                # -- FSDP builds four streams at startup and nothing owns a
-                # handle, so this is a borrowed view of that single queue -- the
-                # CUDA-ABI boxing platforms (cuda, metax, ppu, dcu), whose
-                # kernels are submitted through the C++ runtime to the same
-                # default stream the boxing shim hands out, and the de-boxed
-                # native kunlunxin backend, whose single queue is likewise
-                # denoted by handle 0.
-                # The CUDA-ABI platforms reach this arm with a real CUDA runtime
-                # absent from torch: their device library is dlopen'd by the
-                # compat layer rather than being the runtime ``torch.cuda.Stream``
-                # was built for, so ``_has_cuda_runtime()`` is false for them
-                # here. Kunlunxin has no CUDA runtime at all -- its native XPU
-                # backend deliberately routes around the CUDA-shaped surface the
-                # SDK ships -- so it is false for kunlunxin too.
-                #
-                # The stand-in is deliberately the one ``current_stream()``
-                # returns (see _real_current_stream), which is what lets a
-                # stream built here stand in for the current one -- FSDP and the
-                # cross-stream-ordering contract both assume that.
-                #
-                # This arm used to be a bare ``else`` that meant Ascend, so any
-                # accelerator named neither "gcu" nor a CUDA runtime took it.
-                # MUSA did: constructing a stream imported
-                # torch_fl.accelerator.ascend.acl_stream -- whose first statement
-                # is ctypes.CDLL("libascendcl.so") -- on a host with no Ascend
-                # toolkit. The named arms keep that from coming back, and the
-                # manual allowlist that replaced them is gone: an accelerator
-                # with no stream class of its own is a property of the runtime
-                # (one queue, handle 0), not a name to keep adding to a list.
-                self._stream = _DefaultStreamHandle(_device_index(device))
-            # Set device attribute for __repr__ compatibility with torch.cuda.Stream
-            self.device = self._stream.device
-        elif not hasattr(torch._C, "_cuda_getCurrentStream"):
-            # CUDA runtime present, but torch.cuda.Stream is the wheel's dummy base
-            # class rather than a real stream. Delegate to the same shim
-            # torch.cuda.current_stream hands out.
-            self._stream = _cuda_stream_shim(device)
-            self.device = self._stream.device
-        # else: real torch.cuda.Stream path -- __new__ constructed it, do nothing.
+    @property
+    def device(self):
+        if hasattr(self, "_stream"):
+            return self._stream.device
+        return super().device
 
     def __repr__(self):
         if hasattr(self, "_stream"):
@@ -485,179 +395,8 @@ class Stream(torch.cuda.Stream):
         return super().device_type
 
 
-class _DefaultStreamHandle:
-    """Minimal stream stand-in for backends with no CUDA runtime.
-
-    Vendor Triton launchers (and FlagGems through them) want an object exposing
-    a raw stream handle, under whichever name their vendor uses -- ``cuda_stream``
-    for CUDA-derived backends, ``gcu_stream`` for Enflame's triton_gcu. On
-    Enflame GCU, Ascend and MUSA the kernels go to the vendor's default stream,
-    which every one of them denotes with handle 0. The synchronization those
-    backends need already happens in their own op paths, so
-    ``synchronize``/``wait_stream`` have nothing to do here.
-    """
-
-    __slots__ = (
-        "cuda_stream",
-        "gcu_stream",
-        "musa_stream",
-        "mlu_stream",
-        "txda_stream",
-        "device_index",
-    )
-
-    def __init__(self, device_index: int = 0):
-        self.cuda_stream = 0
-        self.gcu_stream = 0
-        get_musa_stream = getattr(_C, "_get_musa_current_raw_stream", None)
-        self.musa_stream = get_musa_stream(device_index) if get_musa_stream else 0
-        # Cambricon's Triton driver reads `.mlu_stream`. A cnrt queue is a real
-        # per-device handle rather than a fixed 0, so it is asked for when the
-        # runtime layer that owns it is compiled in.
-        get_mlu_stream = getattr(_C, "_get_cambricon_current_raw_stream", None)
-        self.mlu_stream = get_mlu_stream(device_index) if get_mlu_stream else 0
-        # TsingMicro's triton launcher (triton.backends.tsingmicro.driver) reads
-        # `.txda_stream`; the TX runtime only has the default stream, handle 0.
-        self.txda_stream = 0
-        self.device_index = device_index
-
-    def __int__(self) -> int:
-        return 0
-
-    @property
-    def device(self) -> torch.device:
-        """The device whose queue this handle denotes.
-
-        ``Stream.__init__`` assigns ``self._stream.device`` to itself, so a stream
-        built on a backend with no CUDA runtime still has to name a device; the
-        handle's own is the flagos one, not the CUDA one ``torch.cuda.Stream``
-        would have defaulted to.
-        """
-        return torch.device("flagos", self.device_index)
-
-    @property
-    def handle(self) -> int:
-        """The raw handle, under the name ``Stream``'s properties read."""
-        return self.cuda_stream
-
-    @property
-    def stream_id(self) -> int:
-        """The handle, under the name ``torch.cuda.Stream`` uses for one.
-
-        These backends keep no stream registry to look an id up in, so the id is
-        the handle itself -- the only queue the device has.
-        """
-        return self.cuda_stream
-
-    @property
-    def device_type(self) -> int:
-        """``at::DeviceType::CUDA``, matching what the shim reports.
-
-        ``Stream.device_type`` and ``stream()``'s CUDA path both read this off
-        whatever they wrap, so a stand-in without it turns a wrapper that was
-        otherwise complete into an AttributeError. It is the CUDA device type
-        even on a vendor backend because that is the ABI the boxing kernels and
-        ``_cuda_setStream`` speak; on a backend that reaches neither, nothing
-        reads it.
-        """
-        return 1
-
-    def synchronize(self):
-        pass
-
-    def wait_stream(self, other):
-        pass
-
-    def query(self) -> bool:
-        return True
-
-    def wait_event(self, event):
-        return None
-
-    def record_event(self, event=None):
-        """Return an event over the work submitted so far.
-
-        ``MusaStream`` is the native counterpart of this handle and carries the
-        same method; FSDP asks whichever object ``current_stream()`` returned for
-        an event it can later wait on, so the stand-in has to answer too. The
-        event is what ``flagos.Event`` already is on these backends -- the
-        vendor's own event where one exists, else the host-clock
-        ``_HostTimedEvent`` -- and recording it on this handle is the whole
-        contract, since every stream on the device *is* this one queue.
-        """
-        from torch_fl.flagos import Event
-
-        if event is None:
-            event = Event()
-        native = getattr(event, "_event", event)
-        native.record(self)
-        return event
-
-
 def _real_current_stream(device=None):
-    """Resolve the actual current CUDA stream as a real ``torch.cuda.Stream``.
-
-    Under MetaX boxing, ``torch.cuda.current_stream`` is monkey-patched to a
-    lightweight shim (only ``.cuda_stream``, for triton/FlagGems launch), which
-    is NOT a real Stream and makes ``torch.cuda.Event.record()`` fail with
-    "invalid StreamId". We instead read the true stream tuple straight from the
-    C++ runtime (``_cuda_getCurrentStream``) and rebuild a real Stream from it,
-    so events record/wait on the same physical (default) stream the boxing
-    kernels submit to.
-
-    On a vendor backend with no CUDA runtime at all (Enflame GCU, Ascend, MUSA)
-    ``_cuda_getCurrentStream`` does not exist and ``torch.cuda`` cannot even be
-    lazily initialized ("Torch not compiled with CUDA enabled"). There is no CUDA
-    stream to describe, so return a stand-in carrying the vendor's default stream
-    handle: callers such as FlagGems' Triton launcher only read ``.cuda_stream``
-    off the result, and those backends submit to their default stream.
-
-    A CUDA runtime with no ``_cuda_getCurrentStream`` is the CPU torch wheel case
-    instead; there the stream to describe is whatever ``torch.cuda.current_stream``
-    reports, which is the shim ``_StreamShim``.
-    """
-    idx = current_device() if device is None else int(device)
-    if hasattr(_C, "_get_musa_current_raw_stream"):
-        return _DefaultStreamHandle(idx)
-    if not _has_cuda_runtime():
-        if _platform() == "gcu":
-            from torch_fl.accelerator.enflame.tops_stream import current_tops_stream
-
-            return current_tops_stream(idx)
-        if _platform() == "ascend":
-            from torch_fl.accelerator.ascend.acl_stream import current_acl_stream
-
-            try:
-                return current_acl_stream(idx)
-            except RuntimeError:
-                return _DefaultStreamHandle(idx)
-        if _platform() == "mps":
-            from torch_fl.accelerator.apple.mps_stream import current_mps_stream
-
-            return current_mps_stream(idx)
-        if _platform() == "iluvatar":
-            # A real stream from the platform's own registry, not a stand-in:
-            # corex has per-device queues and the registry tracks which one is
-            # current, so every caller below can wait, record and synchronize on
-            # it. It is the same handle the eager kernels submit to.
-            from torch_fl.accelerator.iluvatar.ilu_stream import current_ilu_stream
-
-            return current_ilu_stream(idx)
-        # MUSA answers from the C++ runtime at the top of this function and never
-        # arrives here; an accelerator with no stream class of its own has no
-        # current stream to describe and gets this same handle-only stand-in,
-        # rather than being sent to Ascend for one. That is the TX runtime and the
-        # CUDA-ABI boxing platforms -- dcu arrives here because its device library
-        # is dlopen'd by the DCU compat layer, not built into the torch it runs
-        # against, so ``_has_cuda_runtime()`` reads false for it even though a
-        # DTK runtime is very much there. Same object ``Stream()`` wraps.
-        return _DefaultStreamHandle(idx)
-    if not hasattr(torch._C, "_cuda_getCurrentStream"):
-        return _cuda_stream_shim(idx)
-    stream_id, device_index, device_type = torch._C._cuda_getCurrentStream(idx)
-    return torch.cuda.Stream(
-        stream_id=stream_id, device_index=device_index, device_type=device_type
-    )
+    return _streams.current_stream(device)
 
 
 class _HostTimedEvent:
@@ -808,17 +547,13 @@ class Event(torch.cuda.Event):
         if hasattr(self, "_event"):
             native = getattr(stream, "_stream", stream)
             return self._event.record(native)
-        if stream is None:
-            stream = _real_current_stream()
-        return super().record(stream)
+        return super().record(_streams.cuda_event_stream(stream))
 
     def wait(self, stream=None):
         if hasattr(self, "_event"):
             native = getattr(stream, "_stream", stream)
             return self._event.wait(native)
-        if stream is None:
-            stream = _real_current_stream()
-        return super().wait(stream)
+        return super().wait(_streams.cuda_event_stream(stream))
 
     def synchronize(self):
         if hasattr(self, "_event"):
@@ -838,96 +573,13 @@ class Event(torch.cuda.Event):
 
 
 def current_stream(device=None):
-    """Return the currently selected stream for the given device.
-
-    Returns a real ``torch.cuda.Stream`` (bypassing the boxing shim on
-    ``torch.cuda.current_stream``) so it is usable for event record/wait and
-    stream ordering, not just triton launch.
-    """
+    """Return a snapshot of the selected stream for the given device."""
     return _real_current_stream(device)
 
 
-@contextlib.contextmanager
 def stream(s):
-    """Context-manager that selects a given stream.
-
-    Reimplemented instead of delegating to ``torch.cuda.stream`` because the
-    latter saves/restores via ``torch.cuda.current_stream``, which boxing
-    replaces with a non-Stream shim (no ``.device``) -> AttributeError. We
-    save/restore the real stream through ``_cuda_setStream`` directly.
-    """
-    if s is None:
-        yield
-        return
-
-    # On native runtimes with no CUDA, switch the thread-local stream registry.
-    if not hasattr(torch._C, "_cuda_setStream"):
-        native = getattr(s, "_stream", s)
-        vendor = _platform()
-        if vendor == "gcu":
-            from torch_fl.accelerator.enflame.tops_stream import TopsStream
-
-            native_type = TopsStream
-        elif vendor == "ascend":
-            from torch_fl.accelerator.ascend.acl_stream import AclStream
-
-            native_type = AclStream
-        elif vendor == "mps":
-            # Apple Silicon: Metal command queues and a thread-local current
-            # stream, so this really switches rather than running the body in
-            # place -- see torch_fl/accelerator/apple/mps_stream.py.
-            from torch_fl.accelerator.apple.mps_stream import MpsStream
-
-            native_type = MpsStream
-        elif vendor == "iluvatar":
-            # Corex has real per-device streams and the runtime tracks which one
-            # is current (SetCurrentStreamForDevice), so this really switches.
-            from torch_fl.accelerator.iluvatar.ilu_stream import IluStream
-
-            native_type = IluStream
-        else:
-            # MUSA, the de-boxed native Kunlunxin backend, and any accelerator
-            # with no stream class of its own -- the TX runtime and the CUDA-ABI
-            # boxing platforms (cuda, metax, ppu, dcu, the last of which arrives
-            # here because its runtime is dlopen'd rather than built into torch):
-            # every stream on the device *is* the shared one, so there is nothing
-            # to switch to and nothing to restore. Running the body is the whole
-            # contract, and it keeps this call from reaching for Ascend.
-            # Kunlunxin is native (its flagos tensor is not a cuda alias): its
-            # per-device current stream is switched by the C++ StreamGuard in
-            # csrc/runtime/guard.h (SetCurrentStreamForDevice), not from Python,
-            # and the Python stream object here is a handle-only stand-in with no
-            # ``set_current`` to call. The restore below is also why MUSA cannot
-            # be routed through the arms above: the stream
-            # ``_real_current_stream`` returns there is a handle-only stand-in
-            # with no ``set_current`` to restore with.
-            native_type = None
-        if native_type is not None and isinstance(native, native_type):
-            previous = _real_current_stream(native.device_index)
-            native.set_current()
-            try:
-                yield
-            finally:
-                previous.set_current()
-            return
-        yield
-        return
-
-    # CUDA path: real stream switching via _cuda_setStream
-    prev = _real_current_stream(s.device.index)
-    torch._C._cuda_setStream(
-        stream_id=s.stream_id,
-        device_index=s.device_index,
-        device_type=s.device_type,
-    )
-    try:
-        yield
-    finally:
-        torch._C._cuda_setStream(
-            stream_id=prev.stream_id,
-            device_index=prev.device_index,
-            device_type=prev.device_type,
-        )
+    """Select a stream for the region and restore the previous stream on exit."""
+    return _streams.stream_scope(s)
 
 
 def get_amp_supported_dtype():

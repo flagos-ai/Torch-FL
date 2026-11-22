@@ -16,6 +16,7 @@
 
 import importlib.util
 import json
+from collections import Counter
 import os
 import shlex
 import subprocess
@@ -38,6 +39,8 @@ PLATFORMS = sorted(
 sys.path.insert(0, str(ROOT / ".github/scripts"))
 try:
     import flagcicd_plan as PLANNER
+    from ci.hardware_parity import GROUP_ID, TEST_PATH
+    from run_integration_tests import requires_pytest
 
     spec = importlib.util.spec_from_file_location(
         "routing_ci_gate", ROOT / ".github/scripts/flagcicd_report.py"
@@ -296,12 +299,7 @@ def test_dispatch_can_select_each_platform(platform):
         capture_output=True,
         check=True,
     )
-    # A boxing platform is one wheel built two ways, so naming it dispatches
-    # both of its lanes and never only one.
     scheduled = [platform]
-    config = yaml.safe_load((CONFIGS / f"{platform}.yml").read_text())
-    if config.get("boxing_lane") is True:
-        scheduled = [platform, f"{platform}-boxing"]
     assert json.loads(result.stdout.removeprefix("platforms=")) == scheduled
 
 
@@ -311,14 +309,153 @@ def test_required_gate_checks_platform_result(tmp_path, selected, result):
     gate = _workflow("ci.yml")["jobs"]["ci-complete"]
     results = {name: {"result": "success"} for name in gate["needs"]}
     results["platform-pipeline"]["result"] = result
-    report = REPORTER.aggregate(gate_plan(selected), results, tmp_path, 1)
-    assert (report["status"] == "passed") == (
-        not selected and result in ("success", "skipped")
+    plan = gate_plan(selected)
+    report = REPORTER.aggregate(
+        plan, results, tmp_path, 1, pr_sha=None if selected else plan["source_sha"]
     )
-    if selected and result == "success":
+    assert report["status"] != "passed"
+    if result == "success":
         assert any("missing platform report" in e for e in report["errors"])
-    elif result not in ("success", "skipped") or (selected and result == "skipped"):
+    else:
         assert any("platform-pipeline:" in e for e in report["errors"])
+
+
+def _parity_reports(plan, directory, *, defect=""):
+    """Write reports shaped like the outputs of all planned hardware jobs."""
+    context = {key: plan[key] for key in REPORTER.IDENTITY}
+    for lane in plan["execution_plan"]:
+        platform = lane["name"]
+        lane_defect = defect if platform == "metax" else ""
+        if lane_defect == "missing_report":
+            continue
+        groups, sessions = [], []
+        for group in lane["groups"]:
+            requires_report = requires_pytest(group["command"])
+            groups.append(
+                {
+                    **group,
+                    "requires_pytest": requires_report,
+                    "returncode": 0,
+                    "status": "passed",
+                }
+            )
+            if not requires_report:
+                continue
+            group_id = group["group_id"]
+            size = max(2, group.get("min_passed", 0))
+            cases = [f"{TEST_PATH}/test_device.py::test_case_{i}" for i in range(size)]
+            outcomes = ["passed"] * size
+            collectors = []
+            if group_id == GROUP_ID:
+                if lane_defect == "inventory":
+                    cases[-1] = f"{TEST_PATH}/test_device.py::test_platform_only"
+                elif lane_defect in {"skipped", "xfailed", "xpassed"}:
+                    outcomes[-1] = lane_defect
+                elif lane_defect == "collection_skip":
+                    collectors = [f"{TEST_PATH}/test_skipped.py"]
+            counts = dict(Counter(outcomes), total=size, collected=size)
+            if group_id == GROUP_ID and lane_defect == "deselected":
+                counts["deselected"] = 1
+            sessions.append(
+                {
+                    "report": group_id + ".json",
+                    "group_id": group_id,
+                    "group": group["name"],
+                    "context": context,
+                    "platform": platform,
+                    "run_attempt": 1,
+                    "selected_nodeids": cases,
+                    "observed_nodeids": cases,
+                    "exitcode": 0,
+                    "summary": counts,
+                    "collection_failures": collectors,
+                    "tests_details": [
+                        {"nodeid": case, "outcome": status}
+                        for case, status in zip(cases, outcomes)
+                    ],
+                }
+            )
+        execution = {
+            "groups": groups,
+            "expected": [group["name"] for group in groups],
+            "context": context,
+            "platform": platform,
+            "run_attempt": 1,
+            "environment": lane["environment"],
+        }
+        totals = Counter()
+        for session in sessions:
+            totals.update(session["summary"])
+        report = {
+            **REPORTER.identity(plan),
+            "schema_version": REPORTER.SCHEMA,
+            "report_type": "platform",
+            "platform": {"name": platform},
+            "run_attempt": 1,
+            "configuration_result": "success",
+            "execution_result": "success",
+            "execution_attempt": "1",
+            "status": "passed",
+            "stages": dict.fromkeys(REPORTER.REQUIRED_STAGES, "success"),
+            "evidence": {"execution": execution, "sessions": sessions},
+            "groups": REPORTER.summarize_groups(execution, sessions),
+            "metrics": {"tests": dict(totals)},
+        }
+        if lane_defect == "commit":
+            report["source_sha"] = "d" * 40
+        (directory / f"flagcicd-platform-{platform}-1.json").write_text(
+            json.dumps(report)
+        )
+
+
+@pytest.mark.parametrize(
+    "defect, message",
+    [
+        ("", ""),
+        ("nine_lanes", "PR plan is missing required platforms: thead"),
+        ("missing_group", "metax: expected the unfiltered common regression group"),
+        ("filtered_group", "metax: expected the unfiltered common regression group"),
+        ("missing_report", "missing platform report: metax"),
+        ("commit", "report identity does not match the plan"),
+        ("inventory", "common regression inventory differs from apple"),
+        ("skipped", "test_case_1 (skipped)"),
+        ("xfailed", "test_case_1 (xfailed)"),
+        ("xpassed", "test_case_1 (xpassed)"),
+        ("collection_skip", "test_skipped.py"),
+        ("deselected", "all common regression cases must be collected and pass"),
+        ("old_plan", "the PR plan belongs to another source revision"),
+    ],
+)
+def test_pr_hardware_gate_requires_identical_passing_common_cases(
+    tmp_path, defect, message
+):
+    plan = gate_plan()
+    if defect == "nine_lanes":
+        plan["expected_platforms"].remove("thead")
+        plan["execution_plan"] = [
+            lane for lane in plan["execution_plan"] if lane["name"] != "thead"
+        ]
+    if defect in {"missing_group", "filtered_group"}:
+        metax = next(lane for lane in plan["execution_plan"] if lane["name"] == "metax")
+        common = next(
+            group for group in metax["groups"] if group["group_id"] == GROUP_ID
+        )
+        if defect == "missing_group":
+            metax["groups"].remove(common)
+        else:
+            common["command"] += " -k test_case_0"
+    if defect in {"nine_lanes", "missing_group", "filtered_group"}:
+        plan["plan_hash"] = PLANNER.plan_hash(plan)
+    _parity_reports(plan, tmp_path, defect=defect)
+    jobs = {
+        name: {"result": "success"}
+        for name in [*plan["expected_shared_checks"], "platform-pipeline"]
+    }
+    source = "e" * 40 if defect == "old_plan" else plan["source_sha"]
+    report = REPORTER.aggregate(plan, jobs, tmp_path, 1, "ci", pr_sha=source)
+    assert (report["status"] == "passed") == (not defect)
+    if message:
+        assert any(message in error for error in report["errors"]), report["errors"]
 
 
 @pytest.mark.parametrize(

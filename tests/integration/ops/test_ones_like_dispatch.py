@@ -79,18 +79,6 @@ class TestOnesLikeCorrectness:
         assert torch.all(out.cpu() == 1.0)
 
 
-class TestOnesLikeDispatch:
-    """Verify dispatch routing."""
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_ones_like": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] ones_like -> boxing" in result.stderr
-
-
 class TestOnesLikeAscendDispatch:
     """Verify Ascend backend correctness."""
 

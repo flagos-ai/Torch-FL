@@ -158,7 +158,7 @@ def test_ppu_sdk_env_wins_over_the_marker(isolated_torch_fl, tmp_path, monkeypat
         ("/x/backends_enflame.conf", "gcu"),
         ("/x/backends_hygon.conf", "dcu"),
         ("/x/backends_nvidia.conf", "cuda"),
-        ("/x/backends_metax_native_host.conf", "metax"),
+        ("/x/backends_metax.conf", "metax"),
     ],
 )
 def test_conf_fallback(isolated_torch_fl, tmp_path, monkeypatch, conf, expected):
@@ -174,5 +174,60 @@ def test_default_when_nothing_identifies_the_build(isolated_torch_fl, tmp_path):
     _install_wheel(tmp_path)
     try:
         assert platform.detect_platform() == "cuda"
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_explicit_platform_wins_over_legacy_signals(
+    isolated_torch_fl, tmp_path, monkeypatch
+):
+    _install_wheel(tmp_path, accelerator="cuda", marker="ascend", lib_thead=True)
+    record = tmp_path / "torch_fl" / "_build_config.py"
+    record.write_text(
+        'PLATFORM = "cuda"\nACCELERATOR = "cuda"\nKERNELS = ("FlagGems",)\n'
+    )
+    monkeypatch.setenv("PPU_SDK", "/opt/ppu")
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "mthreads")
+    monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", "/x/backends_hygon.conf")
+    try:
+        build = platform.build_info()
+        assert build is platform.build_info()
+        assert (build.platform, build.vendor, build.kernels) == (
+            "cuda",
+            "nvidia",
+            frozenset({"flaggems"}),
+        )
+        assert platform.detect_platform() == "cuda"
+        assert "torch_fl" not in sys.modules
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_legacy_alias_record_remains_readable(isolated_torch_fl, tmp_path):
+    _install_wheel(tmp_path, accelerator="cuda")
+    (tmp_path / "torch_fl" / "_platform_alias.py").write_text('ACCELERATOR = "ppu"\n')
+    try:
+        build = platform.build_info()
+        assert (build.accelerator, build.platform, build.vendor) == (
+            "cuda",
+            "ppu",
+            "thead",
+        )
+        assert platform.detect_platform() == "ppu"
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_legacy_conf_probe_leaves_the_package_unloaded(
+    isolated_torch_fl, tmp_path, monkeypatch
+):
+    _install_wheel(tmp_path)
+    (tmp_path / "torch_fl" / "__init__.py").write_text(
+        'raise AssertionError("bootstrap ran")\n'
+    )
+    monkeypatch.setenv("FLAGOS_BACKEND_CONFIG", "/x/backends_enflame.conf")
+    try:
+        assert platform.detect_platform() == "gcu"
+        assert "torch_fl" not in sys.modules
     finally:
         sys.path.remove(str(tmp_path))

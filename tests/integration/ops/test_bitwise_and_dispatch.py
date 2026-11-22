@@ -106,16 +106,6 @@ class TestBitwiseAndDispatch:
         )
         assert "[flagos dispatch] bitwise_and.Tensor -> flagos_python" in result.stderr
 
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bitwise_and__Tensor": "cuda"}
-        )
-        if result.returncode != 0 and "backend not registered" in result.stderr:
-            pytest.skip("cuda backend not available in this build")
-        assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] bitwise_and.Tensor -> boxing" in result.stderr
-
     @pytest.mark.metax
     def test_dispatch_log_metax(self):
         result = _run_subprocess(

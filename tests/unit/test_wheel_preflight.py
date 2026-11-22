@@ -103,11 +103,6 @@ def test_manifest_builder_works_without_source_root_on_import_path(
         "json": json,
         "SOURCE_DIR": str(source_root),
         "BASE_DIR": str(tmp_path),
-        "FLAGOS_ACCELERATOR": "cuda",
-        "_kernel_switches": lambda _: {"VENDOR": True},
-        "KERNEL_SWITCHES": ("VENDOR",),
-        "KERNEL_SET_NAME": {"VENDOR": "vendor"},
-        "_BUNDLE_LIBDIR": "lib",
         "_platform_entry": lambda _: {
             "vendor": "nvidia",
             "vendor_torch_libraries": True,
@@ -135,7 +130,16 @@ def test_manifest_builder_works_without_source_root_on_import_path(
     )
     (tmp_path / "torch_fl").mkdir()
 
-    namespace["_write_compatibility_manifest"]("0.1.0")
+    namespace["_write_compatibility_manifest"](
+        "0.1.0",
+        {
+            "platform": "cuda",
+            "vendor": "nvidia",
+            "bundle_libdir": "lib",
+            "kernels": ["vendor"],
+            "native_hosts": False,
+        },
+    )
 
     manifest = json.loads((tmp_path / "torch_fl" / "compatibility.json").read_text())
     assert manifest["platform"] == "cuda"
@@ -268,11 +272,21 @@ def test_the_vendor_equivalence_follows_the_platform_table(manifest):
         assert f"Wheel platform is {row}; requested {name}" in errors, name
 
 
-def test_without_the_table_the_comparison_stays_exact(monkeypatch):
-    """Installed beside a wheel there is no table; do not guess an equivalence."""
-    monkeypatch.setattr(
-        preflight, "PLATFORM_TABLE", Path("/nonexistent/flagos_platforms.json")
-    )
+def test_installed_preflight_reads_the_packaged_table(monkeypatch, tmp_path):
+    monkeypatch.setattr(preflight, "PLATFORM_TABLE", tmp_path / "missing.json")
+    table = SOURCE_ROOT / "cmake" / "flagos_platforms.json"
+    distribution = types.SimpleNamespace(locate_file=lambda _: table)
+    monkeypatch.setattr(preflight.metadata, "distribution", lambda _: distribution)
+    assert preflight._same_platform("apple", "mps")
+    assert preflight._same_platform("hygon", "dcu")
+    assert not preflight._same_platform("nvidia", "ppu")
+
+
+def test_without_the_table_the_comparison_stays_exact(monkeypatch, tmp_path):
+    """Older wheel installs may lack the platform table."""
+    monkeypatch.setattr(preflight, "PLATFORM_TABLE", tmp_path / "missing.json")
+    distribution = types.SimpleNamespace(locate_file=lambda name: tmp_path / name)
+    monkeypatch.setattr(preflight.metadata, "distribution", lambda _: distribution)
     assert preflight.platform_vendor("apple") is None
     assert preflight._same_platform("apple", "mps") is False
     assert preflight._same_platform("mps", "mps") is True

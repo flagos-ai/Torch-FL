@@ -303,7 +303,7 @@ void WrapperRecordStream(at::Tensor& self, at::Stream s) {
   // Convert at::Stream to flagos Stream_t.
   // The stream id encodes the underlying device stream pointer.
   Stream_t stream = reinterpret_cast<Stream_t>(s.id());
-#if !defined(FLAGOS_BOXING_BUILD) && (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_DCU))
+#if (defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_DCU))
   c10::OptionalDeviceGuard device_guard(s.device());
 #endif
   alloc->record_stream(self.storage().data_ptr(), stream);
@@ -691,481 +691,143 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("matmul_backward", WrapperMatmulBackward);
 #endif
 
-  // ============================================================
-  // Generated m.impl registrations for the generated operators
-  // ============================================================
-  // GCU registers only its topsaten coverage set. Claiming an op on PrivateUse1
-  // without a kernel behind it turns into the dispatcher's "backend not
-  // registered" error, whereas leaving it unregistered reaches the cpu_fallback
-  // below. FlagGems Python kernels are compiled alongside GCU, but only wrappers
-  // in this coverage set may select their kFlagGems dispatcher slot.
-  //
-  // MUSA is the same story: musa_register.inc lists exactly the ops with a mudnn
-  // kernel behind them, and no CUDA boxing kernels are compiled in
-  // (musa_runtime, not cudart), so uncovered ops must fall through rather than
-  // be claimed. The two convolution `*_overrideable` ops are the exception that
-  // proves the rule -- ATen's default for them raises instead of being boxable,
-  // so they get real kernels in backends/mthreads/mudnn_conv.cc.
-  //
-  // Ascend joined them: it used to fall through to the full register.inc below,
-  // claiming every generated op while owning aclnn kernels for a few hundred.
-  // That made `none` in backends_ascend.conf unreachable as a fallback -- the op
-  // was registered, so the call reached the dispatcher and raised on the empty
-  // slot instead of boxing to CPU. ascend_register.inc lists exactly the aclnn
-  // coverage set, generated and handwritten.
-  #if defined(USE_GCU)
-    #if defined(FLAGOS_GCU_KERNEL)
-    #include "backends/enflame/generated/gcu_register.inc"
-    #endif
-    // Registered whenever the FlagGems Python path is compiled in, not only
-    // under FLAGOS_GCU_KERNEL: backends_enflame.conf routes ops to FlagGems by
-    // default, so these kFlagGems dispatcher slots must exist or those routes
-    // raise "backend not registered". Same contract as the MUSA include below.
-    #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/enflame/generated/gcu_flaggems_register.inc"
-    #endif
-  #elif defined(USE_KUNLUNXIN)
-    // Kunlunxin owns its ops natively: it registers the xdnn_pytorch coverage
-    // set into the kKunlunxin slot rather than claiming every generated op.
-    // Claiming an op on PrivateUse1 with no kernel behind it raises "backend
-    // not registered" instead of boxing to CPU, so the list has to be exactly
-    // the set of ops backends/kunlunxin/generated/kunlunxin_kernels.cc
-    // implements -- which is also what gen_vendor_confs.py routes to
-    // "kunlunxin"; everything else in the conf says "none" and reaches
-    // cpu_fallback.
-    #if defined(FLAGOS_KUNLUNXIN_KERNEL)
-    #include "backends/kunlunxin/generated/kunlunxin_register.inc"
-    #endif
-    // Registered whenever the FlagGems Python path is compiled in, not only
-    // under FLAGOS_KUNLUNXIN_KERNEL. The file is empty today -- no route in
-    // backends_kunlunxin.conf names `flaggems`, because the P800 FlagGems survey
-    // has not run -- but the arm has to exist before the first measured op
-    // lands, for the reason every other FlagGems-primary native vendor states at
-    // its own include: without it a `flaggems` route reaches the dispatcher with
-    // an empty kFlagGems slot and raises "backend not registered" instead of
-    // running a kernel. Same contract as MUSA, GCU, Iluvatar and Cambricon, and
-    // the file is generated from the same value the conf generator reads
-    // (KUNLUNXIN_FLAGGEMS_MEASURED), so the two cannot drift.
-    #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/kunlunxin/generated/kunlunxin_flaggems_register.inc"
-    #endif
-    // The vendor SDK exposes no conv operator, so the *_overrideable ops cannot
-    // be generated (see the wrapper block above) -- they are the one pair of
-    // ops claimed here without an xdnn kernel, and they take the CPU route.
-    m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
-    m.impl("convolution_backward_overrideable",
-        FlagosWrapperConvolutionBackwardOverrideable);
-  #elif defined(USE_ASCEND)
-    #include "backends/ascend/generated/ascend_register.inc"
-  #elif defined(USE_MUSA)
-    #if defined(FLAGOS_MUSA_KERNEL)
-    #include "backends/mthreads/generated/musa_register.inc"
-    #endif
-    // Registered unconditionally when FlagGems is compiled in: backends_mthreads.conf
-    // routes ops to FlagGems by default, so these kFlagGems dispatcher slots must
-    // exist or those routes raise "backend not registered". Gating them on an
-    // opt-in env var was correct only while the default conf was mudnn-only.
-    #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/mthreads/generated/musa_flaggems_register.inc"
-    #endif
-  #elif defined(USE_ILUVATAR)
-    // Iluvatar is FlagGems-primary, with a vendor-native slot alongside it: the
-    // corex ixdnn/ixblas libraries (the CUDA-named C API) back the ops the conf
-    // routes to "iluvatar", and FlagGems stays the default for everything else.
-    // The native set is claimed only under FLAGOS_ILUVATAR_KERNEL so a
-    // FlagGems-only build still compiles; the two .inc files are disjoint, as
-    // both are included into the same PrivateUse1 TORCH_LIBRARY_IMPL body and a
-    // duplicate m.impl for one op is a compile error.
-    //
-    // This arm must exist even when it claimed nothing else -- without it
-    // iluvatar would fall to the generic #else below, which includes the full
-    // generated register.inc and claims every generated op, making `none` in
-    // backends_iluvatar.conf a "backend not registered" raise instead of a
-    // cpu_fallback. That is the same defect the Ascend comment above records.
-    #if defined(FLAGOS_ILUVATAR_KERNEL)
-    #include "backends/iluvatar/generated/iluvatar_register.inc"
-    #endif
-    // Registered whenever the FlagGems Python path is compiled in, not only
-    // under FLAGOS_ILUVATAR_KERNEL: backends_iluvatar.conf routes ops to
-    // FlagGems by default, so these kFlagGems dispatcher slots must exist or
-    // those routes raise "backend not registered". Same contract as MUSA.
-    #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/iluvatar/generated/iluvatar_flaggems_register.inc"
-    #endif
-    // No convolution backward exists on this platform and the boxed fallback
-    // cannot reach one (see the shared wrapper above), so every conv backward
-    // takes the CPU crossing. Unconditional: the wrapper needs no vendor or
-    // FlagGems kernel. Only the backward -- the forward keeps its FlagGems /
-    // ixdnn routes.
-    m.impl("convolution_backward_overrideable",
-        FlagosWrapperConvolutionBackwardOverrideable);
-    // See FlagosWrapperPrivConj above. Unconditional like the conv pair
-    // above: the metadata kernel needs neither a vendor nor a FlagGems slot, and both
-    // op names carry no CPU fallback to reach instead.
-    m.impl("_conj", FlagosWrapperPrivConj);
-    m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
-    m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
-    // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
-    // wrong for add (complex128) and raises for div (complex64) here, so these
-    // run ATen's kernels instead.
-    m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
-    m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
-    m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
-    // The landing for the runtime dtype escape `add.Tensor`/`add.Scalar` rely
-    // on after moving to the FlagGems route; see FlagosPrivAddTensor above and
-    // the USE_ILUVATAR arm of FlagGemsRejectsDtype. The dispatcher names have to
-    // be brought in unqualified: REGISTER_IMPL_TO_DISPATCHER pastes them into
-    // the registrar's identifier, which a qualified-id cannot be.
-    using at::native::flagos::AddScalarFn;
-    using at::native::flagos::AddTensorFn;
-    using at::native::flagos::add_scalar_dispatcher;
-    using at::native::flagos::add_tensor_dispatcher;
-    REGISTER_IMPL_TO_DISPATCHER(
-        AddTensorFn,
-        add_tensor_dispatcher,
-        at::native::flagos::Backend::kIluvatar,
-        FlagosPrivAddTensor);
-    REGISTER_IMPL_TO_DISPATCHER(
-        AddScalarFn,
-        add_scalar_dispatcher,
-        at::native::flagos::Backend::kIluvatar,
-        FlagosPrivAddScalar);
-  #elif defined(USE_CAMBRICON)
-    // Cambricon MLU is FlagGems-primary with a short CNNL vendor half. An op in
-    // neither register file stays unregistered, which is what lets a `none`
-    // route in backends_cambricon.conf reach cpu_fallback rather than raising
-    // "backend not registered" -- the same contract the Iluvatar and BPU arms
-    // document above.
-    //
-    // The two halves are gated independently because they are turned on by
-    // different build switches: the CNNL half comes with
-    // FLAGOS_CAMBRICON_KERNEL (the vendor kernel build), the FlagGems half with
-    // FLAGOS_FLAGGEMS_PYTHON. A build with only one of them must still start,
-    // and the conf generator reads both .inc files to decide what to route, so
-    // a route always lands on a slot that exists in that build.
-    #if defined(FLAGOS_CAMBRICON_KERNEL)
-    #include "backends/cambricon/generated/cambricon_register.inc"
-    #endif
-    #if defined(FLAGOS_FLAGGEMS_PYTHON)
-    #include "backends/cambricon/generated/cambricon_flaggems_register.inc"
-    #endif
-  #elif defined(USE_BPU)
-    // The BPU's unit of execution is a whole compiled artifact (a .hbm from
-    // hbdk4), not an individual operator, so a kernel here submits an artifact
-    // from the operator library named by FLAGOS_BPU_OPLIB rather than calling
-    // into a driver. Without that variable every kernel takes its CPU
-    // round-trip, which is the behaviour this branch had before any kernel
-    // existed; whole-graph acceleration still comes from the torch.compile
-    // backend in torch_fl/backends/bpu/.
-    //
-    // The list is generated (scripts/codegen/codegen_bpu.py) and contains
-    // exactly the ops with a kernel behind them: claiming an op on PrivateUse1
-    // without one raises "backend not registered" instead of falling back.
-    #include "backends/bpu/generated/bpu_register.inc"
-    //
-    // The *_overrideable ops need their own wrapper, since the generic fallback
-    // cannot serve them (see the wrapper block above).
-    m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
-    m.impl("convolution_backward_overrideable",
-        FlagosWrapperConvolutionBackwardOverrideable);
-  #elif defined(USE_MPS)
-    // Apple Metal. Per the design doc
-    // (docs/superpowers/specs/2026-10-14-apple-mps-native-backend-design.md,
-    // section 6) the backend is MPSGraph-first: kernels live under
-    // csrc/aten/backends/apple/, and each op is claimed only once its kernel
-    // exists. Claiming an op without a kernel behind it raises "backend not
-    // registered" instead of falling back, so this include is exactly the
-    // coverage set the operator layer implements -- currently the `unary`
-    // category (stage 1). Every other op stays unregistered and reaches
-    // cpu_fallback.
-    //
-    // This is a native backend: it does NOT re-tag onto DispatchKey::MPS or
-    // CUDA and does not build the CUDA boxing kernels (FLAGOS_BUILD_BOXING is
-    // pinned off in cmake/flagos_platforms.json).
-    #include "backends/apple/generated/mps_register.inc"
-  #else
-  // CUDA-ABI boxing platforms: cuda, metax, dcu, ppu and tsingmicro all share
-  // this arm. With FLAGOS_BUILD_BOXING=ON the wheel carries the generated CUDA
-  // boxing kernels (generated/cuda_kernels.cc), so every generated op may be
-  // claimed here and a `cuda` route lands on a real kernel.
-  //
-  // Boxing is off by default for all five now (cmake/flagos_platforms.json).
-  // Those wheels link no CUDA kernels and no vendor torch, so claiming a
-  // `cuda`-routed op would raise "backend not registered" instead of reaching
-  // the cpu_fallback arm below. Register only the ops the platform's conf routes
-  // to a FlagGems backend, from the generated per-platform list; every other op
-  // stays unregistered and falls through to cpu_fallback. Boxing remains an
-  // explicit opt-in (-DFLAGOS_BUILD_BOXING=ON / FLAGOS_BUILD_BOXING=1).
-  #if defined(FLAGOS_TILEOPS_METAX_NO_BOXING)
-  // A TileOPs-only MetaX experiment must not claim the full wrapper set: the
-  // conf deliberately leaves every non-TileOPs op at `none`, which reaches
-  // cpu_fallback only while those ops stay unregistered on PrivateUse1.
-  #include "generated/register_tileops_metax.inc"
-  #elif defined(FLAGOS_BOXING_BUILD)
-  // One list, and it is the conf's: generated/register_boxing_<platform>.inc
-  // names exactly the ops backends_<platform>.conf routes and this wheel has a
-  // kernel for. Nothing else is claimed here, because registration and routing
-  // have to agree in BOTH directions:
-  //
-  //   * Nothing may be claimed for an op the conf routes to `none`: the claim
-  //     puzzles the dispatcher into "routed to 'none' ... but the op is
-  //     registered on PrivateUse1" instead of letting cpu_fallback take it --
-  //     measured on DCU (cloning a flagos tensor failed on `empty_like`).
-  //   * Nothing the conf routes may be left unclaimed either, and generated
-  //     wrappers are not a route: on metax `torch.mm` reached cpu_fallback's
-  //     `addmm_impl_cpu_` instead of the FP8/FP4 wrapper's soft_lowp prelude
-  //     (run 40137411252, the whole low-precision group) because the wrapper
-  //     was defined and never registered. That is what the boxed list is for:
-  //     it holds the matrix ops the default conf routes to `boxing`.
-  //
-  // The full generated list used to be included here as a second claim, and it
-  // cannot be. A generated wrapper calls the *whole-op* dispatcher
-  // (`mm_dispatcher`), so a claim on it is not a claim on one route: on a
-  // platform whose conf leaves mm on `none` it turns every dtype of mm into
-  // "routed to 'none' ... but the op is registered" (DCU, run 40156011560, the
-  // DCU import gate), and on PPU the same claim made mm/bmm/mul.Tensor answer
-  // with their boxed wrapper while the runtime contract required no dispatch
-  // (run 40153064301). Both platforms now leave those ops unclaimed, which is
-  // what their conf asks for.
-  //
-  // "Which conf" is the second half of that bullet, and it is where the list
-  // above goes wrong. The generator reads the platform's DEFAULT conf
-  // (`backends_<platform>.conf`), but a boxing wheel runs the day-0 variant
-  // (`backends_<platform>_boxing.conf`), and the two disagree on exactly one
-  // direction: every op the default conf routes `none` is `boxing` in the
-  // variant. Those are the ops a boxing wheel COULD serve and the list leaves
-  // out, not ops that lack a kernel -- so an op routed `boxing` ends up with no
-  // m.impl at all and the call silently takes ATen's CompositeExplicitAutograd
-  // arm instead of a routed kernel. Measured on PPU: `torch.bmm` on the boxing
-  // conf emitted no `[flagos dispatch]` line, because `backends_thead.conf` says
-  // `bmm = none`, the list held it back, and nothing else claimed it (run
-  // 40245371944, test_float_bmm_logs_the_conf_route).
-  //
-  // The wrappers for the left-out ops are already compiled -- `register.inc`
-  // defines all of them at file scope above -- so the missing half is the
-  // registration. Claiming it is what a boxing wheel did before the per-platform
-  // list existed, and it is safe here for the one reason it was not safe before:
-  // the conf a boxing wheel runs routes these ops `boxing`, so the claim follows
-  // the route instead of inventing one. A wrapper is not a competing
-  // implementation either -- `WrapperBmm` enters `bmm_dispatcher`, which on the
-  // `boxing` route is the same `BmmKernelCuda` a direct registration would have
-  // called, so the claim reaches the same computation rather than shadowing it.
-  //
-  // The per-platform list and the full generated registration are mutually
-  // exclusive, and it used to be `register.inc` alone before the list existed.
-  // Both cannot be included: every entry of every per-platform list is already
-  // an entry of `register.inc` (592 of 2034 on PPU, 453 of 2034 on DCU), and a
-  // duplicate `m.impl` in one TORCH_LIBRARY_IMPL body is a compile error, not a
-  // harmless override. `FLAGOS_GEN_IMPLS` turns `register.inc` into its m.impl()
-  // block only -- the wrappers are defined once at file scope above.
-  //
-  // Which claim a platform gets is decided by ONE measurement: does
-  // `register.inc` claim any op its day-0 boxing conf routes `none`? An extra
-  // claim is fine only where the answer is zero, because a claim on a `none`
-  // route is the dispatcher's "routed to 'none' ... but the op is registered"
-  // raise rather than cpu_fallback. The same count against the DEFAULT conf is
-  // large for every platform and says nothing -- those ops are `boxing` in the
-  // conf the boxing wheel actually runs, which is the whole bug this arm fixes.
-  //
-  //   nvidia       0 of 2035 boxing routes shadow a `none` -- `register.inc`
-  //                is exactly the CUDA conf, so it is the whole claim.
-  //   metax        0. Also has a FLAGOS_SOFT_LOWP prelude in every matrix
-  //   hygon        0. wrapper, so `mm`/`bmm`/`addmm` must be REGISTERED or the
-  //   thead        0. FP8/FP4 path is unreachable (run 40137411252), and
-  //                `bmm` cannot be left to the list (run 40245371944). On DCU
-  //                that prelude is reached on the boxing route, which these
-  //                ops carry here; the DEFAULT DCU conf still spells them
-  //                `none`, and claiming them there instead breaks every
-  //                mm/bmm call (measured, PR #655).
-  //   tsingmicro   no: it routes 81 ops and `register.inc` claims 1953 more it
-  //                does not list. Keeps the conf-derived list alone.
-  #if defined(FLAGOS_ACCEL_TSINGMICRO)
-  #include "generated/register_boxing_tsingmicro.inc"
-  #else
-  #define FLAGOS_GEN_IMPLS
-  #include "generated/register.inc"
-  #undef FLAGOS_GEN_IMPLS
-  #endif
-  #elif defined(FLAGOS_FLAGGEMS_PYTHON)
-  #if defined(FLAGOS_ACCEL_CUDA)
-  #include "generated/register_flaggems_nvidia.inc"
-  #elif defined(FLAGOS_ACCEL_METAX)
-  #include "generated/register_flaggems_metax.inc"
-  #if defined(FLAGOS_NATIVE_HOSTS)
-  #include "generated/register_flaggems_metax_native_host.inc"
-  #endif
-  #elif defined(FLAGOS_ACCEL_DCU)
-  #include "generated/register_flaggems_hygon.inc"
-  #elif defined(FLAGOS_ACCEL_PPU)
-  #include "generated/register_flaggems_thead.inc"
-  #elif defined(FLAGOS_ACCEL_TSINGMICRO)
-  #include "generated/register_flaggems_tsingmicro.inc"
-  #endif
-  // The software low-precision matrix path is not an op the conf has to route.
-  //
-  // Its wrappers make the call themselves whenever an operand is FP8/FP4 (the
-  // `#if defined(FLAGOS_SOFT_LOWP)` prelude every matrix wrapper opens with),
-  // and only hand an ordinary pair to this op's conf route. But a wrapper is
-  // not a route: on a FlagGems-primary build an op the conf leaves on `none`
-  // -- mm, bmm and their variants on DCU -- lands on ATen's
-  // CompositeExplicitAutograd arm instead, which is `at::mm(decoded...)` and
-  // never sees the prelude. So an FP8 mm on DCU answered through the conf (or
-  // raised from the route's own slot) while `_scaled_mm` had to stay
-  // fail-closed beside it: the same wheel gating one fingerprint and not the
-  // other (measured on bw1100, job a91aa314's build).
-  //
-  // Claiming them follows the rule this arm already states -- the claim follows
-  // the route -- because these ops' route IS this path for a low-precision
-  // operand, whatever the conf says about the ordinary dtypes the route is
-  // named for. An ordinary pair still follows the conf inside the wrapper.
-  //
-  // Two consequences for the ordinary pair, and both are on DCU:
-  //   * an op the conf leaves on `none` is still the conf's to answer: the
-  //     wrapper sees no FP8/FP4 operand and hands the pair to its route, which
-  //     the dispatcher now asks for by key first. `none` and "not in the conf"
-  //     are refusals, and the pair is computed on the device (a plain GEMM),
-  //     which `none` (cpu_fallback) never served on this device either. It is
-  //     NOT answered with the other operand form's kernel: `bmm` on a conf that
-  //     routes `mm` would otherwise reach the `mm` row, because the factory
-  //     arm's lookup takes the plain key's slot whatever the pair was refused
-  //     for (see AnswerKeyHasRoute in soft_lowp/ops.cc). An ordinary pair that
-  //     reaches the wrapper directly is not this case -- nothing refused it;
-  //   * an op the conf routes to a FlagGems kernel now reaches this wrapper
-  //     before that kernel, which is the trade #655's revert chose to avoid --
-  //     and the reason the ops that list already claims are held back below.
-  //
-  // Only where the prelude exists, so only where FLAGOS_SOFT_LOWP does
-  // (metax, dcu): without it the claim would route every dtype through a
-  // wrapper that does not know the low-precision path.
-  //
-  // What is claimed is the matrix ops the conf leaves on `none`, or routes to
-  // a slot nothing fills -- the ops no route serves for a low-precision
-  // operand. The generated FlagGems list is included in this same body and a
-  // duplicate m.impl is a compile error, so an op whose conf route is FlagGems
-  // (metax `bmm`/`bmm.out`; both platforms' `addmm*`) is not claimed here: its
-  // wrapper still runs, because the generated list names the same
-  // `Wrapper*` symbol, whose prelude answers an FP8/FP4 operand first.
-  #if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
-  // The plain pair is claimed where the conf does not route it to a list that
-  // serves it -- and only there, because a claim on a `none` route raises for
-  // every ordinary call. DCU routes both to a FlagGems key its list reaches no
-  // dispatcher for, so both are its. Metax is not: its conf leaves `mm`
-  // `none`, so claiming it turns every `torch.mm` into "routed to 'none' ...
-  // but the op is registered on PrivateUse1" (run 40629858404, nine cases).
-  // Metax's `bmm` is on `flaggems_cpp`, which its list does claim.
-  #if !defined(FLAGOS_ACCEL_METAX)
+  // The selected generated fragments claim the operators with a route in
+  // this build. Unclaimed operators can reach the boxed CPU fallback.
+#define FLAGOS_GEN_IMPLS
+#include "register_ops.inc"
+#undef FLAGOS_GEN_IMPLS
+
+#if defined(USE_KUNLUNXIN) || defined(USE_BPU)
+  // ATen's default convolution override kernels raise. Neither backend
+  // supplies an implementation, so both directions need the CPU crossing.
+  m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
+  m.impl("convolution_backward_overrideable",
+      FlagosWrapperConvolutionBackwardOverrideable);
+#elif defined(USE_ILUVATAR)
+  // No convolution backward exists on this platform and the boxed fallback
+  // cannot reach one (see the shared wrapper above), so every conv backward
+  // takes the CPU crossing. Unconditional: the wrapper needs no vendor or
+  // FlagGems kernel. Only the backward -- the forward keeps its FlagGems /
+  // ixdnn routes.
+  m.impl("convolution_backward_overrideable",
+      FlagosWrapperConvolutionBackwardOverrideable);
+  // See FlagosWrapperPrivConj above. Unconditional like the conv pair
+  // above: the metadata kernel needs neither a vendor nor a FlagGems slot, and both
+  // op names carry no CPU fallback to reach instead.
+  m.impl("_conj", FlagosWrapperPrivConj);
+  m.impl("_conj_copy.out", FlagosWrapperPrivConjCopyOut);
+  m.impl("view_as_real", FlagosWrapperPrivViewAsReal);
+  // See FlagosWrapperPrivAddTensorInplace above: FlagGems' complex kernel is
+  // wrong for add (complex128) and raises for div (complex64) here, so these
+  // run ATen's kernels instead.
+  m.impl("add_.Tensor", FlagosWrapperPrivAddTensorInplace);
+  m.impl("add_.Scalar", FlagosWrapperPrivAddScalarInplace);
+  m.impl("div_.Tensor", FlagosWrapperPrivDivInplace);
+  // The landing for the runtime dtype escape `add.Tensor`/`add.Scalar` rely
+  // on after moving to the FlagGems route; see FlagosPrivAddTensor above and
+  // the USE_ILUVATAR arm of FlagGemsRejectsDtype. The dispatcher names have to
+  // be brought in unqualified: REGISTER_IMPL_TO_DISPATCHER pastes them into
+  // the registrar's identifier, which a qualified-id cannot be.
+  using at::native::flagos::AddScalarFn;
+  using at::native::flagos::AddTensorFn;
+  using at::native::flagos::add_scalar_dispatcher;
+  using at::native::flagos::add_tensor_dispatcher;
+  REGISTER_IMPL_TO_DISPATCHER(
+      AddTensorFn,
+      add_tensor_dispatcher,
+      at::native::flagos::Backend::kIluvatar,
+      FlagosPrivAddTensor);
+  REGISTER_IMPL_TO_DISPATCHER(
+      AddScalarFn,
+      add_scalar_dispatcher,
+      at::native::flagos::Backend::kIluvatar,
+      FlagosPrivAddScalar);
+#endif
+
+#if defined(FLAGOS_FLAGGEMS_PYTHON) && \
+    !defined(FLAGOS_REGISTER_TILEOPS)
+#if defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_DCU)
+  // Keep the low-precision prelude reachable for the forms the generated
+  // FlagGems list leaves unclaimed. Hygon needs the plain mm and bmm
+  // wrappers. MetaX leaves mm unclaimed for ordinary dtypes and already has
+  // bmm in its generated list. The software-scaled forms use their own
+  // wrappers on both platforms.
+#if !defined(FLAGOS_ACCEL_METAX)
   m.impl("mm", WrapperMm);
   m.impl("bmm", WrapperBmm);
-  #endif
-  // The other matrix forms are not claimed here: their generated list claims
-  // them (see SOFT_LOWP_PAIR_CLAIMS in the boxing/FlagGems list generator),
-  // because which wrapper a form takes depends on its conf route, which the
-  // list already reads. The generated list is included above this block, so a
-  // second m.impl for one of them here is a duplicate.
+#endif
   m.impl("_scaled_mm", WrapperPrivScaledMm);
   m.impl("_scaled_mm.out", WrapperPrivScaledMmOut);
   m.impl("_scaled_mm_v2", WrapperPrivScaledMmV2);
   m.impl("_scaled_grouped_mm", WrapperPrivScaledGroupedMm);
   m.impl("_scaled_grouped_mm_v2", WrapperPrivScaledGroupedMmV2);
-  #endif
-  // The *_overrideable conv ops are the exception the generic cpu_fallback
-  // cannot serve (see the wrapper comment above): ATen's only other kernel for
-  // them raises, and a fallback re-dispatches the *same* op, so it lands back on
-  // that raise. The condition differs per platform because what the generated
-  // list above claims differs:
-  //
-  //   * TsingMicro: FlagGems-primary with no vendor op library, so the list is
-  //     its whole claim -- and it names no conv, because the conf it derives
-  //     from routes none.
-  //   * cuda, dcu: their conf routes conv to `cuda`, and this arm only runs with
-  //     boxing off (the FLAGOS_BOXING_BUILD arm above claims everything
-  //     already), so that route resolves to nothing. The conf-derived list names
-  //     no conv for either, so both ops need the crossing.
-  //   * metax, ppu: the conf routes conv to FlagGems and the list does claim
-  //     convolution_overrideable, so only the backward needs it. Claiming the
-  //     forward too would duplicate the m.impl the list already emitted into
-  //     this same body, which is a compile error.
-  //
-  // Same exception BPU and Kunlunxin make, and the same shared wrapper serves
-  // all of them.
-  #if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_CUDA) || \
-      defined(FLAGOS_ACCEL_DCU)
+#endif
+
+  // These FlagGems-primary builds have no forward or backward kernel for
+  // convolution_overrideable. MetaX and PPU already claim the forward in
+  // their generated list, so they only need the backward CPU crossing.
+#if defined(FLAGOS_ACCEL_TSINGMICRO) || defined(FLAGOS_ACCEL_CUDA) || \
+    defined(FLAGOS_ACCEL_DCU)
   m.impl("convolution_overrideable", FlagosWrapperConvolutionOverrideable);
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
-  #elif defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_PPU)
-  // metax/ppu already claim the forward through the generated list above.
+#elif defined(FLAGOS_ACCEL_METAX) || defined(FLAGOS_ACCEL_PPU)
   m.impl("convolution_backward_overrideable",
       FlagosWrapperConvolutionBackwardOverrideable);
-  #endif
-  // RNG: the same exception as the convolution wrappers above. TsingMicro has
-  // no random-number unit and its conf names no RNG op, so these reached the
-  // generic cpu_fallback -- which redispatchs randn.generator on the CPU and
-  // trips at::native's CPU-generator assertion against a flagos generator
-  // ("Expected a 'cpu' device type for generator but found 'flagos'"). The
-  // kernels live in backends/tsingmicro/rng.cc (host draw, device copy) and
-  // consume c10::flagos::ReserveSeed, so torch.flagos.manual_seed and the
-  // get/set_rng_state entry points own the stream these draw from.
-  //
-  // Claimed directly rather than through the conf, because the codegen that
-  // builds register_flaggems_tsingmicro.inc only emits ops its conf routes to a
-  // FlagGems backend, and a `tsingmicro` route is not one -- it would drop these
-  // silently. The REGISTER_IMPL_TO_DISPATCHER slots in rng.cc are filled for
-  // symmetry with the sibling vendors and for a future conf route; the claims
-  // below are what actually keep these ops off the fallback.
-  #if defined(USE_TSINGMICRO) && !defined(FLAGOS_BOXING_BUILD)
-    m.impl("rand", at::native::flagos::RandKernelTsingMicro);
-    m.impl("rand.generator", at::native::flagos::RandGeneratorKernelTsingMicro);
-    m.impl("rand.out", at::native::flagos::RandOutKernelTsingMicro);
-    m.impl("rand.names_out", at::native::flagos::RandNamesOutKernelTsingMicro);
-    m.impl("rand_like", at::native::flagos::RandLikeKernelTsingMicro);
-    m.impl("rand_like.generator", at::native::flagos::RandLikeGeneratorKernelTsingMicro);
-    m.impl("rand_like.out", at::native::flagos::RandLikeOutKernelTsingMicro);
-    m.impl("uniform_", at::native::flagos::UniformInplaceKernelTsingMicro);
-    m.impl("normal_", at::native::flagos::NormalInplaceKernelTsingMicro);
-    m.impl("normal.float_float", at::native::flagos::NormalFloatFloatKernelTsingMicro);
-    m.impl("normal.Tensor_float", at::native::flagos::NormalTensorFloatKernelTsingMicro);
-    m.impl("normal.Tensor_Tensor", at::native::flagos::NormalTensorTensorKernelTsingMicro);
-    m.impl("randint", at::native::flagos::RandintKernelTsingMicro);
-    m.impl("randint.low", at::native::flagos::RandintLowKernelTsingMicro);
-    m.impl("randint.out", at::native::flagos::RandintOutKernelTsingMicro);
-    m.impl("randint.low_out", at::native::flagos::RandintLowOutKernelTsingMicro);
-    m.impl("randint_like", at::native::flagos::RandintLikeKernelTsingMicro);
-    m.impl("randint_like.low_dtype", at::native::flagos::RandintLikeLowDtypeKernelTsingMicro);
-    m.impl("randint_like.out", at::native::flagos::RandintLikeOutKernelTsingMicro);
-    m.impl("randint_like.low_dtype_out", at::native::flagos::RandintLikeLowDtypeOutKernelTsingMicro);
-    m.impl("randperm", at::native::flagos::RandpermKernelTsingMicro);
-    m.impl("randperm.out", at::native::flagos::RandpermOutKernelTsingMicro);
-    m.impl("randn_like", at::native::flagos::RandnLikeKernelTsingMicro);
-    m.impl("randn_like.out", at::native::flagos::RandnLikeOutKernelTsingMicro);
-    m.impl("randn.names_out", at::native::flagos::RandnNamesOutKernelTsingMicro);
-    m.impl("random_.from", at::native::flagos::RandomInplaceFromKernelTsingMicro);
-    m.impl("native_dropout", at::native::flagos::NativeDropoutKernelTsingMicro);
-    m.impl("native_dropout_backward", at::native::flagos::NativeDropoutBackwardKernelTsingMicro);
-    m.impl("bernoulli_.Tensor", at::native::flagos::BernoulliInplaceTensorKernelTsingMicro);
-    m.impl("binomial", at::native::flagos::BinomialKernelTsingMicro);
-    m.impl("_standard_gamma", at::native::flagos::PrivStandardGammaKernelTsingMicro);
-    m.impl("_sample_dirichlet", at::native::flagos::PrivSampleDirichletKernelTsingMicro);
-    m.impl("randn", at::native::flagos::RandnKernelTsingMicro);
-    m.impl("randn.generator", at::native::flagos::RandnGeneratorKernelTsingMicro);
-    m.impl("randn_like.generator", at::native::flagos::RandnLikeGeneratorKernelTsingMicro);
-    m.impl("randn_like.generator_out", at::native::flagos::RandnLikeGeneratorOutKernelTsingMicro);
-    m.impl("randint.generator", at::native::flagos::RandintGeneratorKernelTsingMicro);
-    m.impl("randint.low_generator", at::native::flagos::RandintLowGeneratorKernelTsingMicro);
-    m.impl("randperm.generator", at::native::flagos::RandpermGeneratorKernelTsingMicro);
-    m.impl("random_", at::native::flagos::RandomInplaceKernelTsingMicro);
-    m.impl("random_.to", at::native::flagos::RandomInplaceToKernelTsingMicro);
-    m.impl("bernoulli", at::native::flagos::BernoulliKernelTsingMicro);
-    m.impl("bernoulli_.float", at::native::flagos::BernoulliInplaceFloatKernelTsingMicro);
-    m.impl("exponential", at::native::flagos::ExponentialKernelTsingMicro);
-    m.impl("exponential_", at::native::flagos::ExponentialInplaceKernelTsingMicro);
-    m.impl("multinomial", at::native::flagos::MultinomialKernelTsingMicro);
-    m.impl("poisson", at::native::flagos::PoissonKernelTsingMicro);
-  #endif
-  // FLAGOS_BUILD_FLAGGEMS=OFF leaves the block empty: no accelerated route is
-  // compiled in, so every op is meant to reach cpu_fallback.
-  #endif
-  #endif
+#endif
+
+#if defined(USE_TSINGMICRO)
+  // Host draws consume the FlagOS generator. The generic CPU fallback would
+  // pass that generator to an ATen kernel that expects a CPU generator.
+  m.impl("rand", at::native::flagos::RandKernelTsingMicro);
+  m.impl("rand.generator", at::native::flagos::RandGeneratorKernelTsingMicro);
+  m.impl("rand.out", at::native::flagos::RandOutKernelTsingMicro);
+  m.impl("rand.names_out", at::native::flagos::RandNamesOutKernelTsingMicro);
+  m.impl("rand_like", at::native::flagos::RandLikeKernelTsingMicro);
+  m.impl("rand_like.generator", at::native::flagos::RandLikeGeneratorKernelTsingMicro);
+  m.impl("rand_like.out", at::native::flagos::RandLikeOutKernelTsingMicro);
+  m.impl("uniform_", at::native::flagos::UniformInplaceKernelTsingMicro);
+  m.impl("normal_", at::native::flagos::NormalInplaceKernelTsingMicro);
+  m.impl("normal.float_float", at::native::flagos::NormalFloatFloatKernelTsingMicro);
+  m.impl("normal.Tensor_float", at::native::flagos::NormalTensorFloatKernelTsingMicro);
+  m.impl("normal.Tensor_Tensor", at::native::flagos::NormalTensorTensorKernelTsingMicro);
+  m.impl("randint", at::native::flagos::RandintKernelTsingMicro);
+  m.impl("randint.low", at::native::flagos::RandintLowKernelTsingMicro);
+  m.impl("randint.out", at::native::flagos::RandintOutKernelTsingMicro);
+  m.impl("randint.low_out", at::native::flagos::RandintLowOutKernelTsingMicro);
+  m.impl("randint_like", at::native::flagos::RandintLikeKernelTsingMicro);
+  m.impl("randint_like.low_dtype", at::native::flagos::RandintLikeLowDtypeKernelTsingMicro);
+  m.impl("randint_like.out", at::native::flagos::RandintLikeOutKernelTsingMicro);
+  m.impl("randint_like.low_dtype_out", at::native::flagos::RandintLikeLowDtypeOutKernelTsingMicro);
+  m.impl("randperm", at::native::flagos::RandpermKernelTsingMicro);
+  m.impl("randperm.out", at::native::flagos::RandpermOutKernelTsingMicro);
+  m.impl("randn_like", at::native::flagos::RandnLikeKernelTsingMicro);
+  m.impl("randn_like.out", at::native::flagos::RandnLikeOutKernelTsingMicro);
+  m.impl("randn.names_out", at::native::flagos::RandnNamesOutKernelTsingMicro);
+  m.impl("random_.from", at::native::flagos::RandomInplaceFromKernelTsingMicro);
+  m.impl("native_dropout", at::native::flagos::NativeDropoutKernelTsingMicro);
+  m.impl("native_dropout_backward", at::native::flagos::NativeDropoutBackwardKernelTsingMicro);
+  m.impl("bernoulli_.Tensor", at::native::flagos::BernoulliInplaceTensorKernelTsingMicro);
+  m.impl("binomial", at::native::flagos::BinomialKernelTsingMicro);
+  m.impl("_standard_gamma", at::native::flagos::PrivStandardGammaKernelTsingMicro);
+  m.impl("_sample_dirichlet", at::native::flagos::PrivSampleDirichletKernelTsingMicro);
+  m.impl("randn", at::native::flagos::RandnKernelTsingMicro);
+  m.impl("randn.generator", at::native::flagos::RandnGeneratorKernelTsingMicro);
+  m.impl("randn_like.generator", at::native::flagos::RandnLikeGeneratorKernelTsingMicro);
+  m.impl("randn_like.generator_out", at::native::flagos::RandnLikeGeneratorOutKernelTsingMicro);
+  m.impl("randint.generator", at::native::flagos::RandintGeneratorKernelTsingMicro);
+  m.impl("randint.low_generator", at::native::flagos::RandintLowGeneratorKernelTsingMicro);
+  m.impl("randperm.generator", at::native::flagos::RandpermGeneratorKernelTsingMicro);
+  m.impl("random_", at::native::flagos::RandomInplaceKernelTsingMicro);
+  m.impl("random_.to", at::native::flagos::RandomInplaceToKernelTsingMicro);
+  m.impl("bernoulli", at::native::flagos::BernoulliKernelTsingMicro);
+  m.impl("bernoulli_.float", at::native::flagos::BernoulliInplaceFloatKernelTsingMicro);
+  m.impl("exponential", at::native::flagos::ExponentialKernelTsingMicro);
+  m.impl("exponential_", at::native::flagos::ExponentialInplaceKernelTsingMicro);
+  m.impl("multinomial", at::native::flagos::MultinomialKernelTsingMicro);
+  m.impl("poisson", at::native::flagos::PoissonKernelTsingMicro);
+#endif
+#endif
 }
 
 // Register fallback for all unimplemented operators

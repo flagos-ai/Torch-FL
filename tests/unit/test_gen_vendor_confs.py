@@ -141,26 +141,6 @@ def test_route_annotates_vendor_kernels_that_lose_to_flaggems():
     assert g.route("mm", "mthreads", set(), both, both, both) == "flaggems  # mthreads"
 
 
-def test_route_boxing_never_emits_none():
-    """Boxing reuses CUDA wholesale, so every op has an impl."""
-    for op in ("a", "b", "c"):
-        assert g.route_boxing(op, {"a"}, {"b"}, set()) != "none"
-    assert g.route_boxing("c", {"a"}, {"b"}, set()) == g.BOXING_FALLBACK
-
-
-def test_route_boxing_gap_beats_flaggems_coverage():
-    """A measured triton gap outranks FlagGems coverage for that platform."""
-    assert g.route_boxing("x", {"x"}, set(), {"x"}) == g.BOXING_FALLBACK
-    assert g.route_boxing("y", set(), {"y"}, {"y"}) == g.BOXING_FALLBACK
-
-
-def test_route_boxing_gap_also_beats_tileops():
-    """Same reason: the gap set is measured on hardware, so it wins over any
-    derived candidate -- and tileops is not a way around a broken op."""
-    assert g.route_boxing("z", set(), set(), {"z"}, {"z"}) == g.BOXING_FALLBACK
-    assert g.route_boxing("z", set(), set(), set(), {"z"}) == "tileops"
-
-
 # ---------------------------------------------------------------------------
 # Recovery helpers: both spellings, so the round trip is lossless
 # ---------------------------------------------------------------------------
@@ -340,24 +320,24 @@ def test_ascend_matmul_is_native_though_absent_from_its_inc():
     assert routes["matmul"] == "ascend"
 
 
-def test_boxing_triton_gaps_only_counts_ops_flaggems_covers(tmp_path):
+def test_cuda_abi_triton_gaps_only_counts_ops_flaggems_covers(tmp_path):
     (tmp_path / "b.conf").write_text(
         "real_gap = cuda\n"  # FlagGems covers it, pinned to cuda anyway
         "never_covered = cuda\n"  # just uncovered, not a gap
         "routed = flaggems\n"
     )
-    gaps = g.boxing_triton_gaps(tmp_path, "b.conf", {"real_gap"}, set())
+    gaps = g.cuda_abi_triton_gaps(tmp_path, "b.conf", {"real_gap"}, set())
     assert gaps == {"real_gap"}
 
 
-def test_boxing_cpp_ops_recovers_measured_subset(tmp_path):
+def test_cuda_abi_cpp_ops_recovers_measured_subset(tmp_path):
     """Returns METAX_CPP_MEASURED ∩ fg_cpp for backends_metax.conf; empty for all others."""
     # Superset fg_cpp — only measured ops should survive the intersection.
     fg_cpp = g.METAX_CPP_MEASURED | {"extra_op_not_measured"}
-    result = g.boxing_cpp_ops(tmp_path, "backends_metax.conf", fg_cpp)
+    result = g.cuda_abi_cpp_ops(tmp_path, "backends_metax.conf", fg_cpp)
     assert result == g.METAX_CPP_MEASURED
     # Any other filename returns empty regardless of fg_cpp contents.
-    assert g.boxing_cpp_ops(tmp_path, "backends_other.conf", fg_cpp) == set()
+    assert g.cuda_abi_cpp_ops(tmp_path, "backends_other.conf", fg_cpp) == set()
 
 
 def test_native_measured_python_ops_is_not_gated_on_the_platform_set(monkeypatch):
@@ -556,7 +536,7 @@ def test_every_vendor_conf_covers_the_whole_op_list(vendor):
             assert key in allowed, f"{vendor}: {op} routed to unexpected {key!r}"
 
 
-@pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(g.CUDA_ABI_PLATFORMS))
 def test_default_confs_never_route_boxing(platform):
     """The default conf states the platform's real accelerator coverage.
 
@@ -579,7 +559,7 @@ def test_default_confs_never_route_boxing(platform):
                 value.split(";", 1)[1].strip() == configured_dtype_routes(platform)[op]
             )
             assert keys[1:] == [platform]
-        assert not {g.BOXING_FALLBACK, "cuda", "nvidia"}.intersection(keys), op
+        assert not {"boxing", "cuda", "nvidia"}.intersection(keys), op
 
 
 def test_every_platform_covers_the_same_op_set():
@@ -691,7 +671,7 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     dispatcher and raise on an empty slot instead of falling back. They must not
     be generated as native-kernel vendors: both are covered by their boxing
     confs. tsingmicro no longer falls through -- register.cc gives it
-    generated/register_boxing_tsingmicro.inc, the list derived from its own conf
+    generated/register_flaggems_tsingmicro.inc, the list derived from its own conf
     -- but it stays hand-written for a different reason: the conf is the source
     of that claim, so generating it full-coverage would claim every generated op
     and put the `none` raise back.
@@ -721,11 +701,15 @@ def test_only_registration_subset_platforms_get_a_generated_vendor_conf():
     assert "metax" not in g.VENDORS
     assert "tsingmicro" not in g.VENDORS
     # backends_metax.conf is now AUTO-GENERATED (boxing conf), so skip that check
-    text = (CONF_DIR / "backends_tsingmicro.conf").read_text()
+    conf = CONF_DIR / "backends_tsingmicro.conf"
+    text = conf.read_text()
     assert "AUTO-GENERATED" not in text, (
         "backends_tsingmicro.conf must stay hand-written"
     )
-    assert " = none" not in text, "tsingmicro registers every op; none would raise"
+    assert {op for op, route in g.parse_conf(conf).items() if route == "none"} == {
+        "embedding_dense_backward",
+        "index.Tensor",
+    }
 
 
 def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
@@ -733,7 +717,7 @@ def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
 
     The op is a composite whose fused-backend selection runs inside it, so it is
     outside the FlagGems coverage ceiling no coverage scan can see, and
-    ``boxing_measured_python_ops`` is the only thing that can route it at all.
+    ``cuda_abi_measured_python_ops`` is the only thing that can route it at all.
     That makes it exactly the kind of route that leaks: widening the function to
     hand back one set for every platform would route MetaX's measurement on DCU
     and DCU's on MetaX, and routing it on a third platform would claim a kernel
@@ -747,15 +731,15 @@ def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
     assert g.METAX_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
     assert g.DCU_COMPOSITE_FLAGGEMS == {"scaled_dot_product_attention"}
     assert g.COMPOSITE_NATIVE == {"iluvatar": {"scaled_dot_product_attention"}}
-    assert g.boxing_measured_python_ops("backends_metax.conf") == (
+    assert g.cuda_abi_measured_python_ops("backends_metax.conf") == (
         g.METAX_FLAGGEMS_MEASURED | g.METAX_COMPOSITE_FLAGGEMS
     )
-    assert g.boxing_measured_python_ops("backends_hygon.conf") == (
+    assert g.cuda_abi_measured_python_ops("backends_hygon.conf") == (
         g.DCU_COMPOSITE_FLAGGEMS | g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
     )
     # Named the other way round on purpose: a platform that never measured the
     # op gets nothing, and backends_metax.conf's set must not arrive here.
-    assert g.boxing_measured_python_ops("backends_mthreads.conf") == set()
+    assert g.cuda_abi_measured_python_ops("backends_mthreads.conf") == set()
 
     built = g.build_all(CONF_DIR)
     for platform, (_, routes, _) in built.items():
@@ -771,7 +755,7 @@ def test_sdpa_composite_is_measured_on_exactly_the_platforms_that_took_it():
             )
 
 
-def test_metax_routes_mm_to_flaggems_only_in_the_default_conf():
+def test_metax_routes_mm_to_flaggems():
     """The two metax confs deliberately disagree about `mm`.
 
     Default conf: `flaggems`. The soft-lowp matrix claim needs the key
@@ -781,33 +765,20 @@ def test_metax_routes_mm_to_flaggems_only_in_the_default_conf():
     instead. METAX_FLAGGEMS_MEASURED is the lever; see its note for the C550
     measurements that retired the gap entry's stated SPLIT_K reason.
 
-    Day-0 variant: `boxing`, unchanged. That file's premise is that FlagGems is
-    not what a day-0 model is trusted to, and the lane passes all 30 soft_lowp
-    cases with `mm = boxing` already. BOXING_VARIANT_KEEP_GAPPED is what holds
-    it, and holding it in `gaps` specifically matters: `mm` is in the shared
-    FlagGems C++ set, which route_boxing() ranks above both the Python slot and
-    the boxing fallback, so merely dropping it from the measured set would land
-    it on `flaggems_cpp` rather than back on `boxing`.
-
-    `mm.out` is a real gap on both: FlagGems ships no out= matmul on this build.
+    `mm.out` stays at `none`; FlagGems ships no out= matmul on this build.
     """
     routes = g.build_all(CONF_DIR)["metax"][1]
     assert routes["mm"].split("#", 1)[0].strip() == "flaggems"
     assert routes["mm.out"].split("#", 1)[0].strip() == "none"
-
-    variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["metax"][1]
-    assert variant["mm"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
-    assert variant["mm.out"].split("#", 1)[0].strip() == g.BOXING_FALLBACK
 
     # The route comes from the measured set, not from the C++ slot: `mm` was
     # never verified servable through MetaX's FlagGems C++ path, and a
     # flaggems_cpp route raises on the fp32 operands aten::bmm must serve.
     assert "mm" not in g.METAX_CPP_MEASURED
     assert "mm" in g.METAX_FLAGGEMS_MEASURED
-    assert "mm" in g.BOXING_VARIANT_KEEP_GAPPED["metax"]
-    # Still a gap entry, which is what the variant reads.
-    assert "mm" in g.BOXING_TRITON_GAPS["metax"]
-    assert "mm.out" in g.BOXING_TRITON_GAPS["metax"]
+    # The measurement overrides the historical gap entry.
+    assert "mm" in g.CUDA_ABI_TRITON_GAPS["metax"]
+    assert "mm.out" in g.CUDA_ABI_TRITON_GAPS["metax"]
 
 
 def test_iluvatar_570_gaps_leave_the_flaggems_path():
@@ -944,7 +915,7 @@ def test_iluvatar_570_gaps_leave_the_flaggems_path():
         assert route(op) == "none", op
 
 
-@pytest.mark.parametrize("platform", sorted(g.BOXING_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(g.CUDA_ABI_PLATFORMS))
 def test_default_confs_route_only_measured_flaggems(platform):
     """The accelerated part of a default conf is FlagGems coverage intersected
     with the platform's measured routes -- nothing else is claimable here."""
@@ -953,204 +924,13 @@ def test_default_confs_route_only_measured_flaggems(platform):
         op for op, v in routes.items() if v.split("#", 1)[0].strip() != "none"
     }
     fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
-    measured = g.boxing_measured_python_ops(f"backends_{platform}.conf")
+    measured = g.cuda_abi_measured_python_ops(f"backends_{platform}.conf")
     if platform == "hygon":
         measured |= g.HYGON_HOST_FLAGGEMS_MEASURED
     stray = sorted(accelerated - (fg | measured))
     assert not stray, f"{platform} accelerates {stray[:5]} with no FlagGems route"
 
 
-@pytest.mark.parametrize("platform", sorted(g.BOXING_VARIANT_PLATFORMS))
-def test_boxing_variant_has_no_none_entries(platform):
-    """The day-0 variant boxes what it cannot accelerate, so `none` never appears
-    there -- that is exactly what makes it a day-0 file."""
-    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
-    none_ops = [op for op, v in routes.items() if v.split("#", 1)[0].strip() == "none"]
-    assert not none_ops, f"{platform} variant routes {none_ops[:5]} to none"
-
-
 # ---------------------------------------------------------------------------
 # Day-0 boxing-only variants (BOXING_VARIANT_PLATFORMS)
 # ---------------------------------------------------------------------------
-
-
-def test_boxing_variant_platforms_are_the_cuda_compatible_ones():
-    """NVIDIA, MetaX, DCU and PPU. The set is the platforms a boxing wheel exists
-    for -- an extra row here ships a conf nothing can serve."""
-    assert set(g.BOXING_VARIANT_PLATFORMS) == {"nvidia", "metax", "hygon", "thead"}
-
-
-def test_boxing_variants_are_routed_and_committed():
-    """Every variant is regenerable from the tree and up to date on disk."""
-    built = g.build_all(CONF_DIR)
-    variants = g.build_boxing_variants(CONF_DIR, built)
-    assert set(variants) == set(g.BOXING_VARIANT_PLATFORMS)
-    for platform, (text, _, _) in variants.items():
-        path = CONF_DIR / f"backends_{platform}_boxing.conf"
-        assert path.exists(), f"{path.name} is missing"
-        assert path.read_text() == text, (
-            f"{path.name} is stale; run scripts/codegen/gen_vendor_confs.py"
-        )
-
-
-@pytest.mark.parametrize("platform", sorted(g.BOXING_VARIANT_PLATFORMS))
-def test_boxing_variant_routes_only_flaggems_and_boxing(platform):
-    """The premise of the file: a day-0 model is not trusted to anything but the
-    vendor's own kernel, with FlagGems where this platform has measured it."""
-    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
-    keys = {v.split("#", 1)[0].strip() for v in routes.values()}
-    assert keys <= {"flaggems", "flaggems_cpp", "boxing"}, keys
-    assert "boxing" in keys
-
-
-def test_boxing_variant_leaves_unmeasured_ops_on_boxing():
-    """The whole-coverage platforms have no measured FlagGems route beyond the
-    shared ceiling, so their variants keep everything FlagGems does not cover on
-    the boxing kernel rather than claiming coverage they never ran.
-
-    ``BOXING_VARIANT_FLAGGEMS_OPS`` is the one exception, and it is not a
-    coverage claim: the boxing kernel for those ops is ATen's own
-    ``native_dropout``, whose draw ``torch.manual_seed`` cannot reach on a
-    CPU-torch wheel, so routing them to boxing makes the mask irreproducible.
-    See the table for the measurement.
-    """
-    cuda_routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["nvidia"][1]
-    assert set(cuda_routes.values()) == {"boxing", "flaggems"}
-    assert {op for op, value in cuda_routes.items() if value == "flaggems"} == set(
-        g.BOXING_VARIANT_FLAGGEMS_OPS
-    )
-
-
-def test_boxing_variants_route_the_seeded_rng_ops_to_flaggems():
-    """Every variant, not just nvidia's: which generator ``manual_seed``
-    reaches is a property of the kernel library the route runs, so a variant
-    that boxes these ops has the same irreproducible draw."""
-    variants = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))
-    for platform in g.BOXING_VARIANT_PLATFORMS:
-        routes = variants[platform][1]
-        for op in g.BOXING_VARIANT_FLAGGEMS_OPS:
-            assert routes[op] == "flaggems", f"{platform}: {op} is {routes[op]}"
-
-
-def test_boxing_variant_routes_only_ops_flaggems_registers():
-    """A conf row is a claim that a kernel exists behind it, so every
-    ``flaggems`` row of a variant must be an op FlagGems registers here.
-
-    The seeded-RNG override used to name the ``.out`` overloads too, which
-    FlagGems registers on no platform: the row said ``flaggems`` while the call
-    had no kernel to reach, and the shared test that counts the conf's
-    ``flaggems`` rows against the measured number caught it (thead-boxing, run
-    40268688923). The generators' own names carry no ``.out`` spelling.
-    """
-    variants = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))
-    for platform in g.BOXING_VARIANT_PLATFORMS:
-        routes = variants[platform][1]
-        registered = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
-        # route_boxing() holds these back whatever the coverage set says, so a
-        # variant never claims them either.
-        held = g.flaggems_holds()
-        claimed = {
-            op
-            for op, value in routes.items()
-            if value.startswith("flaggems") and op not in held
-        }
-        # Plain mm/bmm are claimed by the soft-lowp prelude's own m.impl in
-        # register.cc, not by the generated list (see SOFT_LOWP_CLAIMED_OPS),
-        # and scaled_dot_product_attention is a whole-op override in
-        # csrc/aten/sdp_choice_stub.cc rather than a FlagGems kernel. Neither
-        # is a FlagGems row of this check's kind.
-        claimed -= g.SOFT_LOWP_CLAIMED_OPS.get(platform, set()) | {
-            "scaled_dot_product_attention"
-        }
-        assert not claimed - registered, (
-            f"{platform}: routed to flaggems but not registered: "
-            f"{sorted(claimed - registered)}"
-        )
-
-
-def test_boxing_variant_uses_only_the_flaggems_ceiling_every_platform_measured():
-    """A variant may route to FlagGems only what no platform is missing.
-
-    ``FLAGGEMS_PYTHON_OPS`` has ``mul.Tensor`` and ``FLAGGEMS_PYTHON_OPS_FROZEN``
-    does not: the difference is what only CUDA has measured. A variant built
-    straight from the union hands every chip a route nobody ran there, and the
-    day-0 files exist for the platforms whose day-0 model cannot afford that.
-    Pinning both sides keeps the subtraction honest -- a widened ceiling that
-    is not first frozen reaches the variants, and this fails.
-    """
-    assert set(g.FLAGGEMS_PYTHON_OPS) - set(g.FLAGGEMS_PYTHON_OPS_FROZEN) == {
-        "mul.Tensor"
-    }
-    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))
-    for platform in g.BOXING_VARIANT_PLATFORMS:
-        # Read the "flaggems" matrices: metax's variant carries the mm family on
-        # `flaggems_cpp`, and the union a variant is built from is the whole
-        # Python coverage set, C++ ops included.
-        over = sorted(
-            {
-                op
-                for op, value in routes[platform][1].items()
-                if value == "flaggems" and op in g.FLAGGEMS_PYTHON_OPS
-            }
-            - g.FLAGGEMS_PYTHON_OPS_FROZEN
-        )
-        assert not over, (
-            f"{platform}: {over} is outside the frozen ceiling; a variant may "
-            "route only what every platform has measured"
-        )
-
-
-def test_boxing_variant_does_not_apply_measured_composite_routes():
-    """DCU's measured scaled_dot_product_attention route belongs to the default
-    conf; the variant's premise is that FlagGems is not what it trusts.
-
-    The mm/bmm route is the one exception, and it is not a measurement: the DCU
-    build compiles the soft-lowp matrix prelude, so every dtype of those two
-    ops goes through one PrivateUse1 entry and none of them can be left to
-    cpu_fallback. Boxing the key would send an ordinary pair and an FP8/FP4
-    pair down two different paths under one name.
-
-    That exception is why the two halves are asserted separately below. #672
-    added the mm/bmm override by taking the whole of
-    boxing_measured_python_ops(), which also carries the composite, and this
-    assertion was relaxed to `flaggems` to match rather than the override being
-    narrowed -- so the composite rode into the day-0 conf and the boxing lane
-    reported it as test_sdpa_route_matches_the_recorded_one. The override now
-    reads SOFT_LOWP_FLAGGEMS_MEASURED, which is the set its own note defends.
-    """
-    assert "scaled_dot_product_attention" in g.DCU_COMPOSITE_FLAGGEMS
-    routes = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))["hygon"][1]
-    assert routes["scaled_dot_product_attention"] == "boxing"
-    assert set(g.BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS) == {"hygon"}
-    for op in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]:
-        assert routes[op] == "flaggems", op
-    # The composite is not in that set, which is what keeps the two apart.
-    assert "scaled_dot_product_attention" not in g.SOFT_LOWP_FLAGGEMS_MEASURED["hygon"]
-
-
-@pytest.mark.parametrize("platform", ["metax", "hygon", "thead"])
-def test_boxing_variant_keeps_the_platforms_triton_gaps(platform):
-    """A gap is an op FlagGems covers that this backend cannot compile. The
-    variant must not send it to flaggems just because boxing is the fallback.
-
-    The gap set comes from the generator (BOXING_TRITON_GAPS or the conf diff),
-    not from the default conf: in the default conf a gap is spelled `none`, so
-    the reference is what boxing_triton_gaps() returns for the platform.
-    """
-    variant = g.build_boxing_variants(CONF_DIR, g.build_all(CONF_DIR))[platform][1]
-    fg = g.flaggems_python_ops_for(platform) | g.flaggems_cpp_ops(CONF_DIR)
-    gaps = g.boxing_triton_gaps(
-        CONF_DIR,
-        f"backends_{platform}.conf",
-        g.flaggems_python_ops_for(platform),
-        g.flaggems_cpp_ops(CONF_DIR),
-    )
-    assert gaps, f"{platform} has no measured gaps to preserve"
-    # A key the variant routes to flaggems for the claim reason (DCU's mm/bmm)
-    # is not held on boxing: that route is what the prelude's decoded pair
-    # follows, and boxing it puts an ordinary pair on a kernel an FP8 pair
-    # never reaches.
-    kept = g.SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
-    for op in gaps - kept:
-        if op in fg:
-            assert variant[op] == "boxing", op

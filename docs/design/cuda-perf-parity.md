@@ -1,5 +1,8 @@
 # Aligning the FlagGems-primary CUDA build with torch-cuda
 
+These measurements and route counts describe a checkout before the retirement
+of the CUDA boxing route.
+
 ## Problem
 
 On the OCR-RM Qwen3.5-VL 2B value head (12 samples, bf16, sdpa), steady median

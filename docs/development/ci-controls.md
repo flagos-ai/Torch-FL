@@ -90,21 +90,10 @@ package overlay. The launched workers require the FlagCX backend and exercise
 two-device collectives. The experiment reports admission and runtime outcomes
 separately from the baseline result.
 
-Pending resolution of [Torch-FL #878](https://github.com/flagos-ai/Torch-FL/issues/878),
-the final gate also allows functional tests on `nvidia-boxing` using
-vendor Torch `2.10.0+cu130` when both dependency checkers report the same
-missing CUDA 12 packages from the known wheel declaration. The snapshot lists
-the deferred packages and retains both failing checker results
-(`valid=false`, `ready_for_tests=true`). Other errors remain blocking.
-The exception applies only to integration CI. Wheel metadata and release
-checks are unchanged.
-
 The interpreter, compiler backend and SDK follow each chosen runtime, while CPU
-Torch and published package pins retain their existing lane contracts. PPU retains
-its two existing lanes: default uses CPU Torch without a vendor bundle; boxing
-bundles vendor libtorch after the existing native build. No additional native
-build, source-built Torch or hardware test-selection exclusions are introduced
-by this migration. Hygon [retains its compatible development image](../vendors/dcu/installation.md#ci-image-and-isolated-environment)
+Torch and published package pins retain their existing contracts. PPU uses CPU
+Torch and the PPU SDK without a vendor core bundle. The migration adds no
+native build, source-built Torch or hardware test exclusions. Hygon [retains its compatible development image](../vendors/dcu/installation.md#ci-image-and-isolated-environment)
 after the DTK 26.10 / vendor Torch 2.13 trial failed the symbol ABI guard.
 It keeps the shared venv, package policy and cache mechanisms, restores matching
 Torch base versions and enables both the normal runtime checks and the separate
@@ -117,12 +106,9 @@ final environment gate. `.github/requirements-nvidia.txt` retains the existing
 requirements within the shared policy. Other Python tools use the shared
 ranges, including SQLAlchemy `>=2.0.55,<2.0.58` instead of the former CUDA-only
 `2.0.48` pin. Reuse never copies the image's CUDA Torch into the CPU test venv.
-The existing boxing-only device-library staging and optional vendor-Torch
-bootstrap remain separate from that venv. The bootstrap venv uses the same
-creation and protected-path checks through function-local venv variables.
-The default lane does not bootstrap
-GPU Torch. Native FlagGems selection, the FlagTune workaround, image-provided
-CUDA tools and hardware test selections are retained. FlagCX remains deferred.
+The hook can reuse compatible image-provided native FlagGems and CUDA
+libraries. It keeps the FlagTune workaround and uses the CUDA tools from the
+image. FlagCX remains deferred.
 
 ### Organization of environment checks
 
@@ -131,10 +117,10 @@ validation and computation tests are separate stages. Hooks own SDK discovery,
 build inputs and vendor-library staging. The final dependency gate owns package
 ranges and the wheel contract. The first integration group runs
 `check_platform_environment.py` for every platform; its expectations come from
-the platform's `environment_check` or `boxing_environment_check` mapping.
+the platform's `environment_check` mapping.
 Computation and runtime-contract suites retain their existing groups and coverage.
 
-All nine platforms using shared preparation enable `venv_isolation` in both applicable lanes.
+All nine platforms using shared preparation enable `venv_isolation`.
 It verifies the active venv, disabled system-site inheritance, package locations
 and absence of runtime Python search paths. Optional native checks are driven by
 configuration: exact Torch metadata/module versions, C++ ABI, loaded Torch
@@ -144,19 +130,19 @@ YAML, not embedded Python or shell commands.
 
 | Platform | Preparation/build checks retained | Hardware checks and functional owner |
 | --- | --- | --- |
-| CUDA | Existing Python selection, glibc/Triton checks, native FlagGems selection and boxing-only CUDA assets | Common lane-specific environment group; existing default and boxing suites |
+| CUDA | Existing Python selection, glibc/Triton checks and native FlagGems selection | Common environment group and CUDA integration suites |
 | Ascend | CANN/driver assets and isolated Python | Common environment group; existing operator suites |
 | Iluvatar | CoreX assets/header syntax probe; shared isolation assertions | Common group audits CPU core mappings, ELF dependencies and CoreX target; the existing `iluvatar_runtime` group retains both add computations |
 | Enflame | TOPS assets and isolated Python | Common environment group; existing native and FlagGems suites |
 | Kunlunxin | XPU/XDNN assets and XPU compiler origin | Common environment group; existing native and FlagGems suites |
 | MUSA | MUSA/mudnn assets and isolated compiler | Common environment group; the existing MUSA runtime-contract test retains driver binding and compile-target validation |
-| PPU | SDK and boxing-only vendor bundle | Common lane-specific environment group; existing computation suites |
+| PPU | SDK and CPU Torch preparation | Common environment group and PPU integration suites |
 | MetaX | Vendor bundle and non-mutating Torch facade checks | Common lane-specific environment group; existing computation suites |
 | Hygon | DTK/driver assets, bundle ABI and dispatch checks | Common lane-specific environment group; existing trial and hardware gates |
 
 Loaded-core policies must describe the actual lane. Iluvatar expects the
-official CPU core; PPU/MetaX vendor-core combinations and Hygon's decoupled
-trial must not inherit that policy. This reorganization moves Iluvatar's
+official CPU core; the MetaX vendor-core combination and Hygon's decoupled
+runtime must not inherit that policy. This reorganization moves Iluvatar's
 existing native assertions into the common checker; it does not invent
 unverified loaded-library allowlists for other vendors.
 
@@ -179,9 +165,9 @@ imports and still retains the diagnostic JSON.
 
 ### Device access for the runtime-migration lanes
 
-The eight migrated platforms use all devices made available to their runner;
-CI does not impose a fixed card selection or device-count upper bound. Both
-vendor and boxing environment policies require at least two visible FlagOS
+The container-based platforms use all devices made available to their runner;
+CI does not impose a fixed card selection or device-count upper bound. The
+runtime-migration environment policies require at least two visible FlagOS
 devices so existing cross-device tests cannot silently lose their second card.
 Where a lane also checks the CUDA-compatible interface, it uses the same minimum.
 This is a functional prerequisite, not a device allocator or a claim that every
@@ -238,42 +224,22 @@ package isolation, native builds, wheel validation and test execution still run.
 
 | Event | Hardware selection |
 | --- | --- |
-| PR with `platform:all` | Every configured platform |
-| PR with one or more `platform:<name>` labels | The union of the labeled platforms |
-| PR with an unknown routing label | Every platform, conservatively |
-| PR without routing labels | Platforms affected by the changed files |
-| Documentation-only PR without routing labels | No hardware jobs; shared checks still run |
-| Push or daily schedule | Every platform |
+| Pull request, including documentation-only changes | Every configured platform |
+| Push or daily schedule | Every configured platform |
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
-Routing labels take precedence over changed-file filtering, following upstream
-policy. For example, a shared workflow change with `platform:nvidia` selects
-NVIDIA and its boxing lane. Without routing labels, shared code or unavailable
-diffs select every platform. The plan records the diff audit fields and the
-label's `label_priority` selection policy. The gate validates every lane in
-that selected matrix; it does not imply a full-platform run.
-Adding or removing labels reruns PR CI. Supported platform names are `apple`,
+The automatic pull request plan requires the ten hardware lanes `apple`,
 `ascend`, `enflame`, `hygon`, `iluvatar`, `kunlunxin`, `metax`, `mthreads`,
-`nvidia` and `thead`.
+`nvidia` and `thead`. It retains the changed files for audit. The workflow
+starts on PR creation, updates, reopening and marking a draft ready for review.
 
-Each `.github/configs/<platform>.yml` declares `paths_watch`: exact file names,
-directory prefixes ending in `/`, or shell-style globs. Its own configuration
-and dedicated workflow automatically belong to that lane. Shared code or an
-unrecognized code path selects all lanes; a recognized vendor change must not
-hide an unrelated shared change in the same PR. Missing or invalid watch
-metadata also selects all lanes. A failed Git comparison selects all lanes.
+FlagCICD Entry uses `paths_watch` in the platform configs for diff-based
+diagnostic selection. Selection there retains both paths when a file moves.
+Shared or unknown paths and unavailable diffs select the full matrix.
 
 `seed_runtime.py` is shared provisioning infrastructure. Its changes follow the
-same conservative full-matrix policy as `set_env.sh` and `set_env_common.sh`;
-do not list it as a vendor-owned watch path. Explicit routing labels retain
-their existing precedence over file filtering.
-
-Selection compares the immutable PR base and head commits and includes both
-paths when files move between platforms. Watch lists include shared consumers:
-CUDA runtime sources affect CUDA, DCU and PPU, while the CUDA allocator header
-also affects MetaX. Keep these relationships aligned with
-`cmake/flagos_platforms.json` and the runtime build configuration when adding or
-changing a platform.
+same full-matrix policy as `set_env.sh` and `set_env_common.sh`; do not list it as
+a vendor-owned watch path.
 
 ## Functional profiles
 
@@ -284,18 +250,25 @@ nightly requests require `platforms=all`. `weekly` is reserved and rejected
 before hardware dispatch. Both CI and FlagCICD Entry expose these profile names.
 See [Functional CI profiles](ci-test-tiers.md) for execution and evidence rules.
 
-## One required check
+## Required pull request check
 
-The top-level job named **CI complete** runs after the shared checks and every
-hardware pipeline. Shared checks and every selected platform must succeed.
-Unselected platforms may skip. A selected platform that unexpectedly skips,
-fails or is cancelled blocks the gate, as does missing or invalid discovery
-output. A documentation-only PR can pass after its shared checks succeed.
+**PR hardware parity** succeeds after the shared checks, all required hardware
+lanes and all common regression cases pass on the same PR merge revision.
+Each lane builds its ordinary wheel, runs preflight and tests the installed
+wheel. The aggregate check validates the plan and compares the collected
+common pytest node IDs and outcomes across lanes. A missing lane, stale report,
+different inventory, incomplete execution, skipped case or expected failure
+blocks acceptance.
 
-A repository administrator can make **CI complete** the required status check
-in the branch protection rule or ruleset. Adding the job does not change that
-repository setting automatically. Do not substitute individual platform job
-names for this aggregate check.
+Every fix and feature must work on all ten platforms. Keep the shared cases
+in `tests/integration/common/`. Each case exercises the same behavior with
+the same inputs, reference and assertions. Add a case when the existing suite
+does not cover the change. The [repository acceptance rules](../../AGENTS.md#cross-platform-pr-acceptance)
+describe the contract.
+
+Protect `main` with the required GitHub Actions check **PR hardware parity**
+and an up-to-date merge revision. Push, nightly and diagnostic runs report
+**CI complete**.
 
 ## `/ci` comments
 
@@ -324,14 +297,13 @@ heads cannot dispatch. Separate concurrency groups keep a requested PR run from
 cancelling main, nightly CI or another PR's requested run.
 
 Requested runs provide diagnostics for the PR head. Their check run belongs to
-the dispatch ref; they do not replace the ordinary PR's required **CI complete**
-check or publish a synthetic passing check on the PR commit.
+the dispatch ref. The PR's required check comes from its automatic full-matrix run.
 
 ## Bounded network retry
 
 `flaky-retry.yml` listens for completed, failed runs of `ci.yml`. It checks the
 actual run and all failed root jobs using the GitHub API. It excludes the
-dependent **CI complete** summary from root-cause classification.
+dependent summary checks from root-cause classification.
 
 A platform outcome job succeeds when it successfully describes an upstream
 hardware failure; that failure remains in the report and blocks the shared gate.
@@ -411,11 +383,10 @@ configuration jobs use sibling `control/` and `source/` directories; a path or
 symlink submitted inside the source tree cannot redirect the trusted checkout.
 Configuration outputs remain relative to the hardware job's source checkout.
 
-One planning call reads each platform file once. Routing, boxing selection,
-compilation and configuration fingerprinting reuse that call's parsed data and
-original bytes, without a process-global cache. Each lane receives its own copy
-so default and boxing expectations cannot mutate one another. Runner labels must
-be nonempty strings, including after whitespace is stripped.
+One planning call reads each platform file once. Routing, manifest composition
+and configuration fingerprinting share the parsed data and the original bytes.
+Each platform has one lane and its own environment expectations. Runner labels
+must be nonempty after whitespace is stripped.
 
 A failed-job rerun may reuse the original producer's artifact in the same run;
 the consumer still checks its exact context and hash, and rejects a future
@@ -453,7 +424,7 @@ counts. The CPU platform reporter supplies the independently generated planned
 group list to that same validator. A self-consistent execution inventory cannot
 hide a group omitted from the plan's required execution.
 
-`flagcicd_report.py` now handles both `CI complete` and `FlagCICD complete`.
+`flagcicd_report.py` handles the PR, ordinary CI and FlagCICD summary checks.
 Each gate downloads the exact full plan and platform outcomes, validates the
 artifact against its compact context/current run/trusted control commit, then
 checks the plan's `expected_shared_checks` and expected lanes. Report identities
@@ -516,10 +487,8 @@ A standalone codegen dispatch has this narrower scope; use full CI for both.
 
 Explicit test files and generator checks must not be listed in both CPU
 workflows. The routing contract tests check unique ownership and preserve the
-required dependencies. This policy does not remove device or installed-wheel
-checks: identical filenames on default/boxing or different vendor environments
-can represent different validation. Reducing those checks requires evidence of
-equivalent environments and behavior, not a filename-based exclusion list.
+required dependencies. Device and installed-wheel checks still run in the
+platform pipelines.
 
 Platform-agnostic CI runs regression tests for selection, routing, required gate
 results, checkout resolution, comment dispatch, network classification and retry

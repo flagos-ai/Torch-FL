@@ -26,11 +26,10 @@ from github_api import GitHub, GitHubError
 from generate_matrix import (
     _load_platforms,
     _platforms_from_dispatch,
-    boxing_platforms,
 )
 
 
-def parse_command(body, platforms, boxing=()):
+def parse_command(body, platforms):
     first_line = body.splitlines()[0].strip() if body.splitlines() else ""
     words = first_line.split()
     if not words or words[0] != "/ci":
@@ -39,7 +38,7 @@ def parse_command(body, platforms, boxing=()):
         raise ValueError("Use /ci run [all | platform ...].")
     requested = ",".join(words[2:])
     try:
-        selected = _platforms_from_dispatch(requested, platforms, boxing)
+        selected = _platforms_from_dispatch(requested, platforms)
     except ValueError as exc:
         raise ValueError(
             "Invalid platform selection. Use /ci run all or /ci run <platform ...>. "
@@ -50,7 +49,7 @@ def parse_command(body, platforms, boxing=()):
     return selected
 
 
-def handle(event, platforms, github, boxing=()):
+def handle(event, platforms, github):
     issue = event.get("issue", {})
     comment = event.get("comment", {})
     if not issue.get("pull_request"):
@@ -68,7 +67,7 @@ def handle(event, platforms, github, boxing=()):
     if not isinstance(number, int) or number <= 0:
         raise ValueError("PR number must be a positive integer.")
     try:
-        selected = parse_command(body, platforms, boxing)
+        selected = parse_command(body, platforms)
     except ValueError as exc:
         github.repo_api(
             f"issues/{number}/comments", method="POST", payload={"body": str(exc)}
@@ -167,7 +166,6 @@ def main():
                 event,
                 platforms,
                 github,
-                boxing_platforms(Path(args.configs_dir), platforms),
             )
         )
     except (GitHubError, ValueError) as exc:

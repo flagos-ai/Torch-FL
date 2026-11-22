@@ -407,85 +407,6 @@ def defer_missing_flagcx(checks, manifest):
     return deferred
 
 
-def defer_missing_cuda_boxing_dependencies(checks, manifest):
-    """Allow functional CI to run with the known CUDA metadata mismatch (#878)."""
-    build = manifest.get("build", {})
-    if (
-        os.environ.get("REPORT_PLATFORM") != "nvidia-boxing"
-        or os.environ.get("TORCH_FL_VENDOR_TORCH_VERSION") != "2.10.0+cu130"
-        or manifest.get("platform") != "cuda"
-        or "boxing" not in build.get("kernels", [])
-        or build.get("vendor_torch_libraries") is not True
-    ):
-        return []
-
-    # This allowlist is limited to the diagnostics observed in CI #2819.
-    cuda12_packages = {
-        "nvidia-cublas-cu12",
-        "nvidia-cuda-cupti-cu12",
-        "nvidia-cuda-nvrtc-cu12",
-        "nvidia-cuda-runtime-cu12",
-        "nvidia-cudnn-cu12",
-        "nvidia-cufft-cu12",
-        "nvidia-curand-cu12",
-        "nvidia-cusolver-cu12",
-        "nvidia-cusparse-cu12",
-        "nvidia-cusparselt-cu12",
-        "nvidia-nccl-cu12",
-        "nvidia-nvjitlink-cu12",
-        "nvidia-nvshmem-cu12",
-        "nvidia-nvtx-cu12",
-    }
-    Requirement = requirement_type()
-    requirements = {}
-    for raw in manifest.get("requirements", []):
-        requirement = Requirement(raw)
-        name = requirement.name.lower()
-        if name in cuda12_packages and requirement.marker is None:
-            requirements[name] = raw
-
-    records = {record["name"]: record for record in checks}
-    pip_check = records.get("pip-check", {})
-    preflight = records.get("installed-wheel", {})
-    if any(
-        record.get("exit_code") != 1 or record.get("truncated") or record.get("error")
-        for record in (pip_check, preflight)
-    ):
-        return []
-    if pip_check.get("stderr", "").strip() or preflight.get("stdout", "").strip():
-        return []
-
-    version = manifest["wheel_version"].lower()
-    pip_messages = {
-        f"torch-fl {version} requires {name}, which is not installed.": name
-        for name in requirements
-    }
-    preflight_messages = {
-        f"ERROR: Required {raw}; installed missing": name
-        for name, raw in requirements.items()
-    }
-    pip_lines = pip_check.get("stdout", "").strip().lower().splitlines()
-    preflight_lines = [
-        line
-        for line in preflight.get("stderr", "").strip().splitlines()
-        if not line.startswith("WARNING:")
-    ]
-    if (
-        not pip_lines
-        or not preflight_lines
-        or any(line not in pip_messages for line in pip_lines)
-        or any(line not in preflight_messages for line in preflight_lines)
-    ):
-        return []
-    missing = {pip_messages[line] for line in pip_lines}
-    if missing != {preflight_messages[line] for line in preflight_lines}:
-        return []
-
-    for record in (pip_check, preflight):
-        record["deferred_dependency"] = "nvidia-*-cu12"
-    return sorted(missing)
-
-
 def finalize_environment(wheel, output, requirements_file=None):
     """Validate the installed test environment and retain evidence on failure."""
     wheel = wheel.resolve()
@@ -616,18 +537,6 @@ def finalize_environment(wheel, output, requirements_file=None):
             )
             print(
                 "::warning::FlagCX is deferred across CI; release dependencies are not complete and FlagCX collective communication is not validated."
-            )
-        missing_cuda12 = defer_missing_cuda_boxing_dependencies(checks, manifest)
-        if missing_cuda12:
-            deferred.append(
-                {
-                    "name": "nvidia-*-cu12",
-                    "packages": missing_cuda12,
-                    "reason": "Torch-FL #878: CUDA boxing uses cu130 device libraries while its wheel declares CUDA 12 dependencies. Only functional tests are allowed.",
-                }
-            )
-            print(
-                "::warning::Torch-FL #878: CUDA boxing has missing CUDA 12 wheel dependencies. Running functional tests with the cu130 cohort; wheel dependency validation remains failed."
             )
         if deferred:
             report["deferred_dependencies"] = deferred

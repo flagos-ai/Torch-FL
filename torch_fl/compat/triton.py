@@ -29,7 +29,7 @@ def stand_down_foreign_drivers(cuda_alias_active: bool) -> None:
     wheel also carries an ``nvidia`` backend whose ``is_active()`` is
     ``torch.cuda.is_available() and torch.version.hip is None``
     (triton/backends/nvidia/driver.py). On Ascend that expression is True only
-    because of ``torch_fl._alias_cuda_to_flagos``, which repoints
+    because of ``compat.cuda.install_alias``, which repoints
     ``torch.cuda.is_available`` at the flagos device count so that ecosystem
     code hardcoding ``"cuda"`` finds the accelerator that is actually present.
     Triton reads the same attribute as its hardware probe, concludes a CUDA

@@ -4,17 +4,24 @@
 
 | Platform | Build selector | Execution path | Installation guide |
 |---|---|---|---|
-| NVIDIA CUDA | `FLAGOS_ACCELERATOR=cuda` (default) | FlagGems-primary; CUDA boxing over an external `libtorch_cuda.so` is opt-in | [CUDA Installation](../vendors/cuda/installation.md) |
-| MetaX | `FLAGOS_ACCELERATOR=metax` | FlagGems-primary; CUDA boxing via `cu-bridge` against the vendor libtorch is opt-in | [MetaX Installation](../vendors/metax/installation.md) |
+| NVIDIA CUDA | `FLAGOS_ACCELERATOR=cuda` (default) | FlagGems and measured native dtype routes | [CUDA Installation](../vendors/cuda/installation.md) |
+| MetaX | `FLAGOS_ACCELERATOR=metax` | FlagGems, with optional AOT native hosts | [MetaX Installation](../vendors/metax/installation.md) |
 | Ascend | `FLAGOS_ACCELERATOR=ascend` | Native ACLNN operator backend, FlagGems via FlagTree (Triton 3.5) | [Ascend Installation](../vendors/ascend/installation.md) |
-| PPU | `FLAGOS_ACCELERATOR=ppu` | FlagGems-primary; the CUDA-boxing path against the PPU's CUDA-13-compatible SDK (bundling its own libtorch into `lib_thead/`) is opt-in | [PPU Installation](../vendors/ppu/installation.md) |
-| Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | FlagGems-primary; CUDA boxing over the hipified DTK torch build (HIP kernels under the CUDA dispatch key) is opt-in | [DCU Installation](../vendors/dcu/installation.md) |
+| PPU | `FLAGOS_ACCELERATOR=ppu` | FlagGems through the T-Head PPU runtime | [PPU Installation](../vendors/ppu/installation.md) |
+| Hygon DCU | `FLAGOS_ACCELERATOR=dcu` | FlagGems and optional HCU native hosts, using the DTK runtime | [DCU Installation](../vendors/dcu/installation.md) |
 | Kunlunxin (Kunlun P800) | `FLAGOS_ACCELERATOR=kunlunxin` | Native XPU backend over the vendor xdnn operator library | [Kunlunxin Installation](../vendors/kunlunxin/installation.md) |
 | Enflame GCU | `FLAGOS_ACCELERATOR=gcu` | Native `libtopsaten.so` operator backend, with CPU fallback for unrouted/int64 ops | [GCU Installation](../vendors/gcu/installation.md) |
 | Moore Threads MUSA | `FLAGOS_ACCELERATOR=musa` | FlagGems-first Triton kernels, native `mudnn` backend as fallback, with CPU fallback for unrouted ops | [MUSA Installation](../vendors/musa/installation.md) |
 | D-Robotics BPU | `FLAGOS_ACCELERATOR=bpu` | No eager kernel sets are built; eager ops run on CPU | [BPU Installation](../vendors/bpu/installation.md) |
 | Apple Silicon (M-series) | `FLAGOS_ACCELERATOR=mps` | Runtime floor only: native Metal device memory, streams and events; no aten op is claimed yet, so eager ops run on CPU | [MPS Installation](../vendors/mps/installation.md) |
 | TsingMicro | `FLAGOS_ACCELERATOR=tsingmicro` | FlagGems-primary over the Kuiper TX runtime; host-draw RNG kernels; no vendor-native operator library | [TsingMicro Installation](../vendors/tsingmicro/installation.md) |
+
+### Upgrading from a boxing wheel
+
+Switch to the ordinary wheel for your platform. Remove `FLAGOS_BUILD_BOXING` and
+any `FLAGOS_BACKEND_CONFIG` path to a former `*_boxing.conf` file. For custom
+operator routes, replace the old `boxing` and `cuda` route values with a supported
+backend or `none`. Use `FLAGOS_ACCELERATOR=cuda` to select NVIDIA at build time.
 
 ## Common Requirements
 

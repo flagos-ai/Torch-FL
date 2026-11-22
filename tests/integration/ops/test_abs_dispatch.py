@@ -109,17 +109,6 @@ class TestAbsCorrectness:
         ref = torch.abs(a.cpu())
         torch.testing.assert_close(out.cpu(), ref)
 
-    @pytest.mark.cuda
-    def test_abs_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = torch.abs(a_cuda)
-        a = a_cuda.to(DEVICE)
-        out = torch.abs(a)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-5, atol=1e-5)
-
 
 class TestAbsDispatch:
     """Verify dispatch routing for abs op."""
@@ -157,15 +146,3 @@ class TestAbsDispatch:
         result = _run_abs_subprocess({"FLAGOS_LOG": "dispatch"})
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         assert f"[flagos dispatch] abs -> {expected}" in result.stderr
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_abs_subprocess(
-            {
-                "FLAGOS_LOG": "dispatch",
-                "FLAGOS_OP_abs": "cuda",
-            },
-            check=False,
-        )
-        assert "[flagos dispatch] abs -> boxing" in result.stderr

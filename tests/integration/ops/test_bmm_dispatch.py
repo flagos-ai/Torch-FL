@@ -17,7 +17,7 @@ bmm dispatch tests
 
 Verifies that torch.bmm and torch.bmm.out:
   - produce correct results on flagos device
-  - C++ wrapper routes to flaggems (default) or cuda (via env override)
+  - routing follows the loaded config and supported overrides
   - dispatch log confirms the actual backend used
 
 Usage:
@@ -96,15 +96,15 @@ def _run_bmm_subprocess(
         )
     if use_out:
         code = setup + (
-            f"a = torch.randn(2,4,4,device='flagos:0', {operands}); "
-            f"b = torch.randn(2,4,4,device='flagos:0', {operands}); "
-            "out = torch.empty(2,4,4,device='flagos:0'); "
+            f"a = torch.randn(2,16,16,device='flagos:0', {operands}); "
+            f"b = torch.randn(2,16,16,device='flagos:0', {operands}); "
+            "out = torch.empty(2,16,16,device='flagos:0'); "
             "torch.bmm(a, b, out=out)"
         )
     else:
         code = setup + (
-            f"a = torch.randn(2,4,4,device='flagos:0', {operands}); "
-            f"b = torch.randn(2,4,4,device='flagos:0', {operands}); "
+            f"a = torch.randn(2,16,16,device='flagos:0', {operands}); "
+            f"b = torch.randn(2,16,16,device='flagos:0', {operands}); "
             "torch.bmm(a, b)"
         )
     result = subprocess.run(
@@ -146,23 +146,6 @@ class TestBmmDispatch:
         ret = torch.bmm(a, b, out=out)
         assert ret.data_ptr() == out.data_ptr()
         assert out.shape == (4, 64, 32)
-
-    @pytest.mark.cuda
-    def test_bmm_matches_cuda_ref(self, cuda_ref):
-        """flagos bmm result must match CUDA reference."""
-        if cuda_ref is None:
-            pytest.skip("CUDA not available for reference")
-        a_cuda, b_cuda, ref = cuda_ref
-        a = a_cuda.to(DEVICE)
-        b = b_cuda.to(DEVICE)
-        out = torch.bmm(a, b)
-        torch.testing.assert_close(
-            out.cpu(),
-            ref.cpu(),
-            rtol=1e-3,
-            atol=1e-3,
-            msg="bmm result on flagos differs from CUDA reference",
-        )
 
     @pytest.mark.anyplatform
     def test_bmm_half(self):
@@ -297,25 +280,6 @@ class TestBmmDispatchLog:
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        """FLAGOS_OP_bmm=cuda overrides to cuda backend."""
-        if not (
-            override_is_logged("bmm", "boxing")
-            or override_is_logged("bmm", "flaggems_python")
-        ):
-            pytest.skip(_OVERRIDE_UNSERVED)
-        result = _run_bmm_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm": "cuda"}, check=False
-        )
-        # check=False: this asserts the route the override selects, not that
-        # the kernel runs -- an unserved route leaves the op unregistered when
-        # the conf hands it to cpu_fallback, so the call fails after the line.
-        assert "[flagos dispatch] bmm -> boxing" in result.stderr, (
-            f"Expected cuda dispatch log, got:\n{result.stderr}"
-        )
-
     @pytest.mark.flaggems
     def test_dispatch_log_bmm_out_flaggems_runtime(self):
         """With the FlagGems runtime path available, bmm.out keeps its conf route.
@@ -334,17 +298,6 @@ class TestBmmDispatchLog:
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
-    @pytest.mark.cuda
-    def test_dispatch_log_bmm_out_cuda_override(self):
-        """FLAGOS_OP_bmm__out=cuda overrides bmm.out to cuda."""
-        result = _run_bmm_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_bmm__out": "cuda"},
-            use_out=True,
-        )
-        assert "[flagos dispatch] bmm.out -> boxing" in result.stderr, (
-            f"Expected cuda dispatch log, got:\n{result.stderr}"
-        )
-
     @pytest.mark.ascend
     def test_dispatch_log_ascend_override(self):
         """FLAGOS_OP_bmm=ascend overrides to ascend backend."""
@@ -356,56 +309,20 @@ class TestBmmDispatchLog:
         )
 
 
-# The backends a platform with the software low-precision path (FLAGOS_SOFT_LOWP:
-# MetaX, DCU) can serve for an ordinary-dtype bmm.
-#
-# The conf names whatever its generator measured, and those platform confs are
-# written for the FlagGems runtime: MetaX names a FlagGems route the generated
-# kernels hold, so it degrades at dispatch (``Backend::kFlagGemsCpp`` falls back
-# to boxing, then FlagGems) to ``flagos``. Accepting the fall-through rather than
-# one spelling keeps the case honest on both wheel shapes -- a vendor build has
-# no boxing kernels at all, and a boxing build, on some platforms, resolves the
-# same conf there.
-_SOFT_LOWP_ROUTES = {
-    "flagos": {"flagos"},
-    "boxing": {"boxing", "flagos"},
-}
-
-
-def _expected_bmm_route() -> tuple:
-    expected = routed_backend("bmm")
-    return tuple(sorted(_SOFT_LOWP_ROUTES.get(expected, {expected})))
-
-
 class TestFloatBmmKeepsItsRoute:
-    """An ordinary-dtype bmm stays on an accelerated route.
-
-    The software low-precision path runs on FLAGOS_SOFT_LOWP platforms (MetaX,
-    DCU), and the generated wrapper's dtype prelude cannot tell whether the
-    build compiles it -- so on those platforms every bmm wrapper call enters the
-    software implementation, and it has to compute the ordinary dtypes (its
-    decode is a no-op) rather than fail or take the process down: a boxing kernel
-    refuses them ("soft-lowp matrix kernel requires a low-precision input", MetaX
-    CI run 40189509687), the addmm spellings died with fp64 (run 447e9a6), and
-    re-routing the call by name from inside the path segfaulted (run 40195692591).
-
-    The dispatch log names what actually ran, so it separates a routed call from
-    a fallback that still computed the right answer.
-    """
+    """Check the configured dispatch or fallback for ordinary dtype pairs."""
 
     @pytest.mark.main_ops
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_float_bmm_logs_the_conf_route(self, dtype):
-        expected = _expected_bmm_route()
-        result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch"}, dtype=dtype)
-        logged = [
-            route
-            for route in expected
-            if f"[flagos dispatch] bmm -> {route}" in result.stderr
-        ]
-        assert logged, (
-            f"Expected one of {expected} for a {dtype} bmm, got:\n{result.stderr}"
+        route = routed_backend_or_none("bmm")
+        result = _run_bmm_subprocess({"FLAGOS_LOG": "dispatch,fallback"}, dtype=dtype)
+        expected = (
+            "[flagos cpu_fallback] aten::bmm"
+            if route is None
+            else f"[flagos dispatch] bmm -> {route}"
         )
+        assert expected in result.stderr, result.stderr
 
 
 class TestBmmAscendDispatch:

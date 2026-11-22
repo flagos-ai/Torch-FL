@@ -19,7 +19,7 @@ add_library(${LIBRARY_NAME} SHARED
     module.cc
 )
 
-if(_flagos_is_cuda AND NOT FLAGOS_BUILD_BOXING)
+if(_flagos_is_cuda)
   # Runtime target defines do not propagate to these Python bindings. Expose
   # the native registry to the CPU-Torch CUDA shim on this build only.
   target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_NATIVE_NVIDIA_STREAM=1)

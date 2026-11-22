@@ -1,36 +1,30 @@
 # Functional CI profiles
 
-This CI verifies the installed Torch-FL wheel on the configured accelerators.
-It reuses the existing diff router, platform configs and integration manifest.
+This CI verifies installed Torch-FL wheels using the platform configs and
+integration manifest.
 
 | Profile | Hardware selection | Tests |
 | --- | --- | --- |
-| PR | Changed-file routing; labels may add platforms | Existing applicable functional groups |
+| PR | Every configured platform, including the ten required lanes | A common regression suite plus each platform's applicable groups |
 | Nightly | Every configured platform, regardless of the diff | All existing applicable groups plus CUDA transfer regressions |
 | Weekly | Reserved | Rejected before hardware dispatch until a workload is defined |
 
 The daily nightly runs at 02:00 China Standard Time. A manually requested
-nightly requires `platforms=all`. Ordinary push events keep the existing full
-platform matrix. Shared lint, source and codegen checks still run for PRs.
-Only the hardware matrix is narrowed by the diff router.
+nightly requires `platforms=all`. Ordinary push events run the full matrix.
+PR acceptance requires the common suite to pass on all ten lanes for the
+same revision. Shared lint, source and codegen checks are also required.
 
 `profiles: [nightly]` on a manifest group keeps optional CUDA profiling out of
 ordinary PR checks. Groups without that field run in both profiles. The CUDA
 FlagGems route regression runs on the NVIDIA vendor lane and requires five
 passing cases, including the measured route and correctness cases; its optional
 FlagGems device-name probe may skip on versions without that constant.
-The nine dtype-cast, strided-copy and gather performance cases
-run on the NVIDIA boxing lane, which supplies native CUDA copy kernels even
-though the installed PyTorch is CPU-only. All nine must pass; missing native
-copy support is a configuration failure, not a successful skipped group.
-The default vendor wheel intentionally takes the host path for these copies;
-its portable correctness checks do not establish transfer-free casts. The
-non-boxing, CUDA-linked PyTorch copy path remains outside the scheduled coverage.
-Both transfer suites use `PrivateUse1` activity, count the `gpu_memcpy` category
-independently of display names, and require a known host-transfer positive
-control. An empty device trace cannot establish zero transfers. Runtime platform
-guards retain build-table ids such as `cuda`; CI config names use vendor names
-such as `nvidia`. Source-only contracts run in the agnostic/codegen checks.
+The ordinary NVIDIA wheel runs portable copy correctness checks. Transfer-free
+dtype casts and strided copies are outside the scheduled coverage. The FlagGems
+route regression counts `gpu_memcpy` activities independently of display names
+and requires a known host-transfer positive control. Runtime platform guards
+use build-table IDs such as `cuda`. CI configs use vendor names such as
+`nvidia`. Source-only contracts run in the agnostic and codegen checks.
 
 The Hygon per-file unit runner reads those workflows' explicit, unfiltered
 pytest file lists with `--exclude-shared-cpu`, so CPU-owned checks are not
@@ -75,13 +69,7 @@ preflight failures and an unexpectedly installed FlagCX still fail the gate.
 A snapshot with a deferred dependency records `valid=false` while allowing the
 remaining functional tests to run through `ready_for_tests=true`. CUDA retains
 its existing dependency checks and disables FlagTree's optional distributed
-loader; no FlagCX import or communication check is scheduled. The temporary
-[CUDA boxing exception](ci-controls.md#final-test-environment-validation) for
-#878 allows functional tests with the known CUDA 12 dependency mismatch and
-retains the failed checks in the snapshot.
+loader; no FlagCX import or communication check is scheduled.
 
-Release publication continues through the existing wheel-build and publishing
-workflows, with platform names and boxing-mode propagation kept consistent with
-CI. Candidate receipts, performance baselines, endurance and model release
-acceptance are outside this PR. No whole-repository test-file registry or
-cross-repository schema/adapter framework is required to add a functional test.
+The wheel-build and publishing workflows use the same platform names as
+functional CI.

@@ -14,19 +14,10 @@
 
 """A/B `scaled_dot_product_attention` on DCU across the routes it can take.
 
-PR #347 gave the op a FlagGems route on MetaX, where the boxing path had no
-reachable fused kernel. DCU is the other CUDA-boxing platform where the same
-whole-op override (`csrc/aten/sdp_choice_stub.cc`) is compiled in, so the
-question of whether to follow MetaX is a conf line. This is the measurement
-behind the answer, which is no: `backends_hygon.conf` keeps the `cuda` route and
-the vendor CUTLASS flash adapter is 2.5x faster than FlagGems at both shapes.
+The two arms use FlagOS tensors and call
+`torch.ops.aten.scaled_dot_product_attention`:
 
-Three arms, all through the same `torch.ops.aten.scaled_dot_product_attention`:
-
-    math      FLAGOS_OP_scaled_dot_product_attention=cuda + FLAGOS_DCU_SDPA_FLASH=0
-              (DTK's own math decomposition)
-    cuda      shipped conf (DTK's selector, which the shim points at its
-              CUTLASS flash adapter)
+    math      FLAGOS_OP_scaled_dot_product_attention=none (ATen composite)
     flaggems  FLAGOS_OP_scaled_dot_product_attention=flaggems
 
 One process per arm. The route is latched when the vendor conf is loaded, i.e.
@@ -71,17 +62,13 @@ SHAPES = {
     "joint-4114": (1, 24, 4114, 128),
     "joint-12576": (1, 24, 12576, 128),
 }
-ROUTES = ("math", "cuda", "flaggems")
+ROUTES = ("math", "flaggems")
 
 
 def _route_env(route):
-    """The two env vars each arm differs by; `math` is `cuda` with flash off."""
-    env = {
-        "FLAGOS_OP_scaled_dot_product_attention": "cuda" if route == "math" else route
+    return {
+        "FLAGOS_OP_scaled_dot_product_attention": "none" if route == "math" else route
     }
-    if route == "math":
-        env["FLAGOS_DCU_SDPA_FLASH"] = "0"
-    return env
 
 
 def _median(fn, sync, iters, warmup=2):

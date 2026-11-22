@@ -138,23 +138,6 @@ class TestMmDispatch:
         assert ret.data_ptr() == out.data_ptr()
         assert out.shape == (64, 32)
 
-    @pytest.mark.cuda
-    def test_mm_matches_cuda_ref(self, cuda_ref):
-        """flagos mm result must match CUDA reference."""
-        if cuda_ref is None:
-            pytest.skip("CUDA not available for reference")
-        a_cuda, b_cuda, ref = cuda_ref
-        a = a_cuda.to(DEVICE)
-        b = b_cuda.to(DEVICE)
-        out = torch.mm(a, b)
-        torch.testing.assert_close(
-            out.cpu(),
-            ref.cpu(),
-            rtol=1e-3,
-            atol=1e-3,
-            msg="mm result on flagos differs from CUDA reference",
-        )
-
     @pytest.mark.anyplatform
     def test_mm_non_contiguous(self):
         torch.manual_seed(2)
@@ -225,25 +208,6 @@ class TestMmDispatchLog:
             f"Expected {expected} dispatch log, got:\n{result.stderr}"
         )
 
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        """FLAGOS_OP_mm=cuda overrides to cuda backend."""
-        if not (
-            override_is_logged("mm", "boxing")
-            or override_is_logged("mm", "flaggems_python")
-        ):
-            pytest.skip(_OVERRIDE_UNSERVED)
-        result = _run_mm_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm": "cuda"}, check=False
-        )
-        # check=False: this asserts the route the override selects, not that
-        # the kernel runs -- an unserved route leaves the op unregistered when
-        # the conf hands it to cpu_fallback, so the call fails after the line.
-        assert "[flagos dispatch] mm -> boxing" in result.stderr, (
-            f"Expected cuda dispatch log, got:\n{result.stderr}"
-        )
-
     @pytest.mark.ascend
     def test_dispatch_log_ascend_override(self):
         """FLAGOS_OP_mm=ascend overrides to ascend backend."""
@@ -274,17 +238,6 @@ class TestMmDispatchLog:
         )
         assert f"[flagos dispatch] mm.out -> {expected}" in result.stderr, (
             f"Expected mm.out -> {expected} dispatch log, got:\n{result.stderr}"
-        )
-
-    @pytest.mark.cuda
-    def test_dispatch_log_mm_out_cuda_override(self):
-        """FLAGOS_OP_mm__out=cuda overrides mm.out to cuda."""
-        result = _run_mm_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_mm__out": "cuda"},
-            use_out=True,
-        )
-        assert "[flagos dispatch] mm.out -> boxing" in result.stderr, (
-            f"Expected cuda dispatch log, got:\n{result.stderr}"
         )
 
     @pytest.mark.ascend

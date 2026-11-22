@@ -36,24 +36,7 @@ import torch
 import torch.fx
 import torch.cuda
 
-from torch_fl import _env
-
-
-def _platform_of_record() -> str:
-    """The platform id a build record's accelerator names.
-
-    ``_build_config.ACCELERATOR`` carries the *vendor* spelling of a platform
-    (setup.py writes it), while the branches in this file name the platform id
-    CMake, the confs and the CI lanes use: "mthreads" for what they call "musa",
-    "enflame" for "gcu", "hygon" for "dcu". Resolving once here keeps those
-    branches in one vocabulary. A name the table does not know -- a test stub, a
-    record older than the table -- is returned as it is, so they answer for it
-    as they did before.
-    """
-    from torch_fl._build_config import ACCELERATOR as recorded
-    from torch_fl._platform import platform_for
-
-    return platform_for(recorded) or recorded
+from torch_fl import _env, _platform
 
 
 def _patch_native_triton_autotune() -> None:
@@ -65,7 +48,7 @@ def _patch_native_triton_autotune() -> None:
     configuration for each kernel. Selecting the first compiled configuration
     keeps execution native; it does not claim autotuning performance parity.
     """
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
     from torch_fl.compile.device_interface import is_native_accelerator
 
     if not is_native_accelerator():
@@ -118,11 +101,9 @@ def _patch_native_cuda_probe() -> None:
     initialization ("Torch not compiled with CUDA enabled"). The compiler still
     receives a ``flagos`` device and never executes a CUDA kernel.
 
-    What it replaces is kept as ``torch.cuda._flagos_original_is_available``,
-    which is torch_fl's only way to ask what torch itself answers once this has
-    run. `torch_fl._real_cuda_is_available` reads it, and the ``cuda`` device
-    alias installs only when torch reports no CUDA device -- which is what the
-    saved copy answers, and what the redirected probe no longer does.
+    Save the binding in ``torch.cuda._flagos_original_is_available`` for
+    diagnostics. The CUDA alias captures the runtime probe earlier, immediately
+    after vendor preparation.
     """
     from torch_fl.compile.device_interface import is_native_accelerator
 
@@ -135,15 +116,8 @@ def _patch_native_cuda_probe() -> None:
 
     original = torch.cuda.is_available
     torch.cuda.is_available = torch.flagos.is_available
-    # Read back by torch_fl._real_cuda_is_available, which has to tell this
-    # redirect from a real CUDA runtime; the alias's guard depends on it.
-    #
-    # An already-stashed copy wins: torch_fl's own earlier redirect (the
-    # ``torch.cuda.is_available = lambda: flagos.device_count() > 0`` in
-    # ``_alias_cuda_to_flagos``'s phase) has usually run by the time this does,
-    # and storing *that* keeps a torch_fl lambda rather than torch's answer --
-    # which is the one value the copy exists to preserve, and reading it back as
-    # "there is real CUDA" would mislabel every native accelerator.
+    # Preserve the first binding for diagnostics. It may already be the alias
+    # installed by compat.cuda.
     torch.cuda._flagos_original_is_available = getattr(
         torch.cuda, "_flagos_original_is_available", original
     )
@@ -160,7 +134,7 @@ def _bind_musa_flagtree_runtime() -> None:
     and one stream. This must run before any Triton driver instance exists, hence
     module load time.
     """
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
 
     if platform != "musa":
         return
@@ -202,7 +176,7 @@ def _patch_native_cache_system_key() -> None:
     import hashlib
     import json
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
 
     @staticmethod
     @functools.cache
@@ -361,7 +335,7 @@ def pin_compile_threads() -> bool:
     if os.environ.get(_COMPILE_THREADS_ENV) is not None:
         return False
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
     from torch_fl.compile.device_interface import _torch_has_cuda_kernels
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
@@ -457,7 +431,7 @@ def _resolve_config_patches(
         # turn it back off; the kernels still compile and run, just untuned.
         patches["coordinate_descent_tuning"] = False
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
 
     # 2D tiling is what makes Inductor emit a transposed load (`in_ptr0 + (y0 +
     # 128*x1)` against an x-major store), and Triton lowers that pair to
@@ -506,7 +480,7 @@ def _patch_vendor_flagtree_compile_workers(config_patches: Dict[str, Any]) -> No
     if os.environ.get("TORCHINDUCTOR_COMPILE_THREADS") is not None:
         return
 
-    platform = _platform_of_record()
+    platform = _platform.build_info().platform
     from torch_fl.compile.flagtree_shim import flagtree_backend
 
     if platform == "gcu":

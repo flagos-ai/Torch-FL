@@ -98,17 +98,6 @@ class TestSumDimCorrectness:
         assert out.shape == ref.shape
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_sum_dim_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(3)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = torch.sum(a_cuda, dim=1)
-        a = a_cuda.to(DEVICE)
-        out = torch.sum(a, dim=1)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.anyplatform
     def test_sum_dim_dtype(self, dtype):
@@ -184,15 +173,6 @@ class TestSumDimDispatch:
         assert result.returncode == 0, f"Failed:\n{result.stderr}"
         expected = routed_backend("sum.dim_IntList")
         assert f"[flagos dispatch] sum.dim_IntList -> {expected}" in result.stderr
-
-    @pytest.mark.cuda
-    @pytest.mark.main_ops
-    def test_dispatch_log_cuda_override(self):
-        result = _run_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_sum__dim_IntList": "cuda"}
-        )
-        assert result.returncode == 0
-        assert "[flagos dispatch] sum.dim_IntList -> boxing" in result.stderr
 
 
 class TestSumDimAscendDispatch:

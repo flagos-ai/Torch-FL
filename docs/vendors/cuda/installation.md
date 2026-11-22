@@ -2,22 +2,20 @@
 
 ## Overview
 
-The CUDA backend is **FlagGems-primary by default**: the operations its conf routes go to the FlagGems/Triton path and the rest reach `cpu_fallback`, with no vendor torch package required. An opt-in **boxing** build (`FLAGOS_BUILD_BOXING=1`) instead reuses PyTorch's optimized CUDA kernels through compatibility-key boxing — CPU-only PyTorch via pip plus a version-matched external `libtorch_cuda.so` that carries the full CUDA operator set.
+The NVIDIA wheel uses FlagGems and the CUDA runtime. Operators outside the configured routes reach CPU fallback.
 
-CI has separate default and boxing lanes on A100 runners. The default wheel
-is FlagGems-primary, with no boxing kernels or bundled `libtorch_cuda.so`;
-the boxing lane validates the explicit boxing configuration.
+CI builds and tests the ordinary FlagGems-primary wheel on A100 runners.
 
 ## CI environment preparation
 
-Both lanes retain `harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev`.
-They use the [shared CI preparation](../../development/ci-controls.md#runtime-environment-preparation)
+The lane retains `harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev`.
+It uses the [shared CI preparation](../../development/ci-controls.md#runtime-environment-preparation)
 for fresh isolated venvs, compatible Python-package reuse, missing-package
 installation, download-cache recovery and final environment reports.
 `.github/requirements-nvidia.txt` retains CUDA's existing build-frontend
 restrictions; other small components follow the common version ranges.
-Python 3.12, CPU Torch 2.10, FlagTree and FlagGems pins, CUDA device-library
-staging, native FlagGems selection and hardware test groups are retained.
+Python 3.12, CPU Torch 2.10, FlagTree and FlagGems pins, image-provided
+CUDA libraries, native FlagGems selection and hardware test groups are retained.
 No runtime-image migration or source-built Torch is introduced. FlagCX
 installation and collective validation remain deferred.
 
@@ -54,20 +52,12 @@ This build:
 - Compiles **no** CUDA boxing kernels and does **not** bundle `libtorch_cuda.so`; operations the conf does not route to FlagGems reach `cpu_fallback`
 - Depends on no `nvidia-*-cu12` runtime wheels
 
-### From Source (Boxing Build, Opt-in)
+### Migrating from a boxing wheel
 
-Set `FLAGOS_BUILD_BOXING=1` to build the CUDA boxing path, where each routed operation runs on the vendor's CUDA-ABI kernels:
-
-```bash
-FLAGOS_ACCELERATOR=cuda \
-  FLAGOS_BUILD_BOXING=1 \
-  pip install --no-build-isolation -vvv -e .
-```
-
-This build:
-- Generates CUDA boxing kernels from PyTorch's ATen schema (`csrc/aten/generated/cuda_kernels.cc`)
-- Bundles `libtorch_cuda.so` and related CUDA dispatcher libraries into `torch_fl/lib/`
-- Pins matching `nvidia-*-cu12` runtime dependencies for the bundled CUDA assets
+Use the ordinary NVIDIA wheel and its shipped `backends_nvidia.conf`. Remove
+`FLAGOS_BUILD_BOXING` and replace any `boxing` or `cuda` route values in custom
+configs and per-operator overrides. The `cuda` accelerator identifier is still
+accepted by `FLAGOS_ACCELERATOR`.
 
 ### With FlagGems C++ Dispatch (Optional)
 

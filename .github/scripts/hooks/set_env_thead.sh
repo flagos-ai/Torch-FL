@@ -14,23 +14,8 @@
 
 # PPU (T-Head Jianwu ZW810E) environment bootstrap for CI.
 #
-# PPU is a CUDA-ABI boxing backend with its own FLAGOS_ACCELERATOR value: the toolchain
-# is CUDA (PPU torch is a local USE_CUDA=1 build whose libtorch_cpu.so provides
-# ~2092 undefined symbols of libtorch_fl.so), but the vendor is PPU, so the
-# build bundles its libtorch into lib_thead/. The stock CPU wheel's core libs must
-# be selected from the PPU build at import time. This script:
-#   1. Validates PPU_SDK and the vendor torch assets.
-#   2. Builds an isolated venv with stock CPU torch 2.10.0 (link target).
-#   3. Reuses matching wheels by RECORD; installs missing published wheels.
-#   4. Exports FLAGOS_ACCELERATOR=ppu + PPU_SDK + the two CUDA-assets kill switches.
-#   5. Preserves the existing native build; only boxing bundles vendor libtorch.
-#
-# Nothing here reads a host bind mount, so the environment is fully reproducible
-# from the image plus this script's indexes.
-#
-# Core selection itself is automatic at `import torch_fl` time, gated on
-# lib_thead/libtorch_cuda.so existing; the FLAGOS_ACCELERATOR value is what selects
-# backends_thead.conf. No mode env var is involved.
+# Build against the official CPU torch core and use the PPU SDK runtime.
+# The isolated venv supplies the published T-Head FlagTree and FlagGems wheels.
 
 # SDK startup has already run in the image. Child shells must not restore its
 # vendor Python/compiler paths after CI activates the isolated environment.
@@ -53,7 +38,7 @@ CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 # That policy is unchanged; the default it points at is now mirror.nju.edu.cn,
 # because mirror.sjtu.edu.cn redirected into the one host this comment set out
 # to avoid, which is how a filelock 403 failed 6 of 14 consecutive runs across
-# the thead and thead-boxing lanes. The fallback in install_cpu_torch still
+# the T-Head lane. The fallback in install_cpu_torch still
 # returns to this pin when the mirror does not serve the wheel, and the mirror
 # stays enabled, because it is also what keeps the 146-190 MB CPU-torch wheel
 # from taking 17-21 minutes.
@@ -216,26 +201,7 @@ fi
 export FLAGOS_SKIP_CUDA_ASSETS=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 
-# PPU runs both builds of the wheel, and BOXING_LANE says which one this job is.
-#
-# The boxing lane selects the day-0 conf, the one whose second route is the
-# boxing kernel that wheel carries: backends_thead.conf leaves the 1445 ops this
-# build registers without a FlagGems kernel on `none`, which on a boxing wheel
-# is a raise rather than a cpu_fallback. Exported here, before the build,
-# because it also travels to the integration runner through GITHUB_ENV and is
-# what the tests' `routed_backend()` reads. The vendor lane selects nothing: the
-# build record names the platform and the runtime picks backends_thead.conf.
-if [[ "${BOXING_LANE:-}" == "1" ]]; then
-  export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_thead_boxing.conf}"
-  if [[ ! -f "$FLAGOS_BACKEND_CONFIG" ]]; then
-    echo "::error::the PPU boxing lane needs the day-0 conf $FLAGOS_BACKEND_CONFIG"
-    exit 1
-  fi
-fi
-
-suffix=""
-if [[ "${BOXING_LANE:-}" == 1 ]]; then suffix=-boxing; fi
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}${suffix}}"
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}}"
 if ! "$VENDOR_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
   echo "::error::PPU FlagTree requires Python 3.12" >&2
   exit 1
@@ -300,35 +266,11 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=ppu
-# The boxing wheel: it stages the PPU torch wheel's libtorch into lib_thead/ and
-# the lane measures it against the day-0 conf that exists for exactly this
-# wheel (backends_thead_boxing.conf, selected below).
-#
-# This lane built the FlagGems-primary wheel for a while, and that wheel cannot
-# run the gen_vendor_confs.py confs at all: `torch_fl` selects `backends_thead.conf`
-# whenever the build record names the platform, and that conf names `flaggems`
-# for 592 ops while a build without FLAGOS_BUILD_FLAGGEMS=1 registers no FlagGems
-# wrapper -- measured on the PPU runner as `add.Tensor: routed to 'none' ... but
-# the op is registered on PrivateUse1`. The default wheel's wheel-local build
-# directory read *its own* conf, which is why it looked fine there; the
-# installed-tree measurement is what failed.
-#
-# `boxing` is the route a boxing wheel serves without FlagGems, and the conf for
-# it is the day-0 variant AGENTS.md describes: FlagGems where this build has it,
-# boxing everywhere else. That is the combination the boxing lane measures; the
-# vendor lane leaves FLAGOS_BUILD_BOXING unset and builds the default wheel the
-# sentence above describes.
-if [[ "${BOXING_LANE:-}" == "1" ]]; then
-  export FLAGOS_BUILD_BOXING=1
-fi
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
 export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
 export FLAGOS_VENDOR_TORCH_VERSION=""
-if [[ "${BOXING_LANE:-}" == 1 ]]; then
-  export FLAGOS_VENDOR_TORCH_VERSION="$VENDOR_TORCH_VERSION"
-fi
 export FLAGOS_SDK_VERSION="${PPU_VERSION:-}"
 FLAGOS_SDK_VERSION="${FLAGOS_SDK_VERSION#v}"
 if [[ "$FLAGOS_SDK_VERSION" != 2.1.0 ]]; then
@@ -363,24 +305,9 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$PPU_SDK/lib:$PPU_SDK/lib64${VENDOR_NVI
 
 cd "$REPO_ROOT"
 if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
-  # Prebuild so package_data sees libtorch_fl.so and the bundled PPU assets
+  # Prebuild so package_data sees libtorch_fl.so
   # before the common workflow invokes python -m build.
   build_flagos_inplace
-fi
-
-# Bundle PPU core+CUDA+MKL .so into torch_fl/lib_thead/ and rewrite the plugin
-# RPATH. setup.py does not auto-invoke this; mirrors the metax pattern. The
-# bundle is idempotent and must run after build_ext so libtorch_fl.so exists.
-#
-# Boxing lane only. `torch_fl` recognises a PPU wheel by `lib_thead/libtorch_cuda.so`
-# (torch_fl/__init__.py:_is_ppu_build), and the presence of that dir is what makes
-# import select the PPU core and reconcile `torch.version.cuda`. The vendor lane
-# is the default FlagGems-primary wheel, which ships neither (setup.py honours
-# the PPU row's `vendor_torch_gate: FLAGOS_BUILD_BOXING`); bundling here made
-# that lane a PPU-core wheel and its environment check read cuda "13.0" on a
-# wheel advertised as stock +cpu torch (run 40168685639).
-if [[ "${BOXING_LANE:-}" == "1" ]]; then
-  bash scripts/vendor/bundle_thead_libtorch.sh
 fi
 
 if command -v ppu-smi >/dev/null 2>&1; then
@@ -403,21 +330,16 @@ assert sys.executable.startswith("/"), sys.executable
 assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
-if os.environ.get("FLAGOS_BUILD_BOXING") == "1":
-    assert Path("torch_fl/lib_thead/libtorch_cuda.so").is_file()
+assert not Path("torch_fl/lib_thead/libtorch_cuda.so").exists()
 print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
-print(f"PPU bundle: {Path('torch_fl/lib_thead').resolve()}")
 PY
 
 # Prove the installed FlagGems stack is importable and wired to PPU, so a broken
 # install fails here instead of turning into a wall of identical failures in the
-# FlagGems runtime step. flag_gems queries torch.cuda at import time, so torch_fl
-# must be imported first: that is what swaps the stock CPU core libs for the PPU
-# build bundled above. The check therefore has to run after
-# bundle_thead_libtorch.sh, and only in the integration stage, which is where
-# flagtree and flag_gems are installed.
+# FlagGems runtime step. Import torch_fl first to initialize the PPU runtime,
+# then check the published wheels provisioned for integration tests.
 #
 # The three assertions are the ones that actually went wrong while bringing this
 # up: the installed `triton` must be FlagTree's (its registry exposes the `ppu`
@@ -452,23 +374,12 @@ after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
          for path in lib.iterdir() if path.is_file()}
 assert after == before, "PPU import changed the installed torch/lib"
 
-# Which build this lane made, and the routing half of the same contract. A
-# boxing wheel registers every op on PrivateUse1, and a `none` route there
-# raises instead of falling back, so its conf has to agree with the
-# registration for the ops a model actually calls -- the day-0 conf is the one
-# that does, where the default one leaves 1445 of them on `none` (measured on
-# the PPU runner). The vendor lane selects the default conf and stages nothing.
 import torch_fl._env as _env
 
 kernels = _env.build_kernels()
 conf = torch_fl.backend_config_path()
-if os.environ.get("BOXING_LANE") == "1":
-    assert "boxing" in kernels, kernels
-    assert Path("torch_fl/lib_thead/libtorch_cuda.so").is_file(), "no PPU bundle"
-    assert conf.endswith("backends_thead_boxing.conf"), conf
-else:
-    assert "boxing" not in kernels, kernels
-    assert conf.endswith("backends_thead.conf"), conf
+assert "boxing" not in kernels, kernels
+assert conf.endswith("backends_thead.conf"), conf
 assert "flaggems" in kernels, kernels
 print(f"triton (FlagTree): {triton.__version__} -> {triton.__file__}")
 print(f"triton backends: {sorted(triton.backends.backends)}")
@@ -482,10 +393,6 @@ if [[ -n "${GITHUB_PATH:-}" ]]; then
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
 
-  # The boxing lane assigns these; the vendor lane leaves them unset, and
-  # export_ci_env reads every name under `set -u`. Assign the empty default here
-  # so both lanes persist an explicit value.
-  : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
-  export_ci_env PATH VIRTUAL_ENV BASH_ENV TORCH_DEVICE_BACKEND_AUTOLOAD FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV BASH_ENV TORCH_DEVICE_BACKEND_AUTOLOAD FLAGOS_SDK_VERSION FLAGOS_VENDOR_TORCH_VERSION PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BACKEND_CONFIG CUDA_HOME CUDA_PATH PPU_SDK FLAGOS_VENDOR_TORCH_LIB FLAGOS_SKIP_CUDA_ASSETS FLAGOS_DISABLE_CUDA_ASSETS FLAGOS_BUILD_FLAGGEMS_CPP CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

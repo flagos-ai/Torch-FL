@@ -20,23 +20,13 @@ Construction and ``torch._C._dispatch_keys`` already worked for
 through to the ``CompositeExplicitAutograd`` defaults and raised the *layout*
 error (``crow_indices expected sparse row compressed tensor layout``) while
 ``empty.memory_format`` had no default at all.  csrc/aten/sparse_csr_ops.cc
-registers the structure surface, the layout conversions and the matrix
-multiply for that key.
+registers the structure surface and layout entry points for that key.
 
 Only that surface is asserted here.  The compressed sparse *value* kernels
 (``_sparse_csr_sum``/``_sparse_csr_prod``, the sparse arithmetic family,
 ``torch.sparse.mm(..., reduce="sum")``) stay outside the change's scope and
 are deliberately not asserted, so this file reads as a statement of what is
 supported rather than of what is not.
-
-Two groups need the CUDA-compatible libtorch and are compiled only where the
-guard in csrc/aten/sparse_csr_ops.cc admits it: the CSC<->CSR and CSR->BSC
-conversions, which need a ``PrivateUse1`` slot on ATen's ``flatten_indices``
-stub, and the sparse matrix multiply, which computes its product in cuSPARSE.
-They are skipped where the plugin was built without it, the same way the ops
-themselves are.  The rest -- accessors, allocation, buffer movement,
-densification, and the dense->BSR conversion -- reaches no vendor library and
-is asserted everywhere.
 
 Every flagos result is compared against the same construction on CPU.
 """
@@ -48,25 +38,6 @@ import torch_fl  # noqa: F401
 from backend_conf import routed_backend_or_none
 
 DEVICE = "flagos:0"
-
-# The guarded registrations need two things the default wheel does not have:
-# an accelerator whose libtorch carries the cuSPARSE symbols and the
-# DispatchStub CUDA slot, and the boxing build switch.  The `#if !defined(
-# USE_ASCEND) && ... && defined(FLAGOS_BOXING_BUILD)` guard in
-# csrc/aten/sparse_csr_ops.cc is the source of truth; this only keeps the test
-# in step with it.
-#
-# The switch half is read from the build record rather than inferred from the
-# accelerator name, because the two stopped being interchangeable when boxing
-# became an opt-in (#520): a FlagGems-primary cuda wheel compiles this block no
-# more than the MUSA one does, and naming a platform list here would have
-# claimed otherwise.
-HAS_CUDA_BOXING = "boxing" in torch_fl._env.build_kernels()
-
-requires_cuda_boxing = pytest.mark.skipif(
-    not HAS_CUDA_BOXING,
-    reason="csrc/aten/sparse_csr_ops.cc compiles this for CUDA-boxing only",
-)
 
 # Densifying a compressed tensor lays its stored values into a zero-filled
 # dense tensor with `index_add_`, and every generated conf routes `index_add_`
@@ -116,20 +87,6 @@ ROW = [0, 1]
 VALUES = [1.0, 1.0]
 IDENTITY = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
 
-# A 3x3 with one entry per row, off the diagonal.  The identity's index
-# tensors are already sorted in both orientations, so a conversion that
-# dropped the sort order would still pass against it; this one's are not.
-PERM_CROW = [0, 1, 2, 3]
-PERM_COL = [1, 2, 0]
-PERM_VALUES = [1.0, 2.0, 3.0]
-
-# A 4x4 with six non-zeros, two of them sharing a row, so the block form has
-# a block to fill and rows to skip.  `to_sparse_bsr`/`to_sparse_bsc` need the
-# sparse size to be divisible by the block size.
-BLOCK_CROW = [0, 2, 3, 4, 6]
-BLOCK_COL = [1, 3, 0, 2, 1, 3]
-BLOCK_VALUES = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-
 
 def _csr(device=DEVICE, dtype=torch.float32):
     return torch.sparse_csr_tensor(
@@ -140,18 +97,6 @@ def _csr(device=DEVICE, dtype=torch.float32):
 def _csc(device=DEVICE, dtype=torch.float32):
     return torch.sparse_csc_tensor(
         CCOL, ROW, VALUES, (2, 2), dtype=dtype, device=device
-    )
-
-
-def _perm_csr(device=DEVICE):
-    return torch.sparse_csr_tensor(
-        PERM_CROW, PERM_COL, PERM_VALUES, (3, 3), device=device
-    )
-
-
-def _block_csr(device=DEVICE):
-    return torch.sparse_csr_tensor(
-        BLOCK_CROW, BLOCK_COL, BLOCK_VALUES, (4, 4), device=device
     )
 
 
@@ -168,11 +113,7 @@ def _dense(x):
 class TestConstruction:
     @pytest.mark.anyplatform
     def test_issue_293_reproducer(self):
-        """The accessor and allocation checks from the report must not raise.
-
-        The report's two remaining checks -- CSC->CSR and SpMM -- are the ones
-        that needed the CUDA-compatible libtorch and are covered below.
-        """
+        """The accessor and allocation checks from the report must work."""
         csr = _csr()
         csc = _csc()
         assert (csc.layout, csr.layout) == (torch.sparse_csc, torch.sparse_csr)
@@ -290,70 +231,6 @@ class TestStructureQueries:
 
 class TestLayoutConversion:
     @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_csc_to_sparse_csr_matches_cpu(self):
-        """The report's fourth check. It hashes the rebuilt indices through
-        ATen's flatten_indices stub, which has no PrivateUse1 kernel."""
-        gpu, cpu = _csc().to_sparse_csr(), _csc("cpu").to_sparse_csr()
-        assert gpu.layout == torch.sparse_csr
-        assert gpu.device == _csc().device
-        torch.testing.assert_close(gpu.crow_indices().cpu(), cpu.crow_indices())
-        torch.testing.assert_close(gpu.col_indices().cpu(), cpu.col_indices())
-        torch.testing.assert_close(gpu.values().cpu(), cpu.values())
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_csr_to_sparse_csc_matches_cpu(self):
-        gpu, cpu = _csr().to_sparse_csc(), _csr("cpu").to_sparse_csc()
-        assert gpu.layout == torch.sparse_csc
-        torch.testing.assert_close(gpu.ccol_indices().cpu(), cpu.ccol_indices())
-        torch.testing.assert_close(gpu.row_indices().cpu(), cpu.row_indices())
-        torch.testing.assert_close(gpu.values().cpu(), cpu.values())
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_roundtrip_returns_the_original_structure(self):
-        """A flip that lost the sort order would pass a dense comparison and
-        still break every consumer that reads the index tensors."""
-        csr = _csr()
-        back = csr.to_sparse_csc().to_sparse_csr()
-        torch.testing.assert_close(back.crow_indices().cpu(), csr.crow_indices().cpu())
-        torch.testing.assert_close(back.col_indices().cpu(), csr.col_indices().cpu())
-        torch.testing.assert_close(back.values().cpu(), csr.values().cpu())
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_csr_to_sparse_csc_off_diagonal(self):
-        """The identity above is already sorted in both orientations, so the
-        conversions would still pass a hash that dropped the order.  This
-        pattern, which shares a row between two entries, does not."""
-        gpu, cpu = _block_csr(), _block_csr("cpu")
-        flipped = gpu.to_sparse_csc()
-        expected = cpu.to_sparse_csc()
-        assert flipped.device == gpu.device
-        torch.testing.assert_close(
-            flipped.ccol_indices().cpu(), expected.ccol_indices()
-        )
-        torch.testing.assert_close(flipped.row_indices().cpu(), expected.row_indices())
-        torch.testing.assert_close(_dense(flipped).cpu(), _dense(cpu))
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_csr_to_sparse_bsc_matches_cpu(self):
-        """CSR->BSC is the block conversion this tree can run: ATen sends it
-        through `to_sparse_csc` first, i.e. through the flipped-layout helper
-        and the stub.  CSR->BSR reaches a different kernel and is not asserted
-        here -- it faults inside the torch wheel with no plugin loaded at all,
-        on the host as well as on flagos; see TestBlockLayouts."""
-        gpu, cpu = _block_csr(), _block_csr("cpu")
-        converted = gpu.to_sparse_bsc((2, 2))
-        assert converted.layout == torch.sparse_bsc
-        assert converted.device == gpu.device
-        torch.testing.assert_close(
-            _dense(converted).cpu(), _dense(cpu.to_sparse_bsc((2, 2)))
-        )
-
-    @pytest.mark.anyplatform
     def test_to_dense_matches_cpu(self):
         """Densification goes through `_convert_indices_from_csr_to_coo` and
         `index_add_` on the dense operand, so it needs no vendor sparsity."""
@@ -399,52 +276,6 @@ class TestBlockLayouts:
         assert gpu.layout == torch.sparse_bsr
         assert str(gpu.device) == DEVICE
         torch.testing.assert_close(_dense(gpu).cpu(), _dense(cpu))
-
-
-class TestMatmul:
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_spmm_matches_cpu(self):
-        """The report's fifth check: `torch.sparse.mm` bottoms out in
-        `addmm.out`, which computes the product with cuSPARSE."""
-        ones = torch.ones(2, 1)
-        gpu = torch.sparse.mm(_csr(), ones.to(DEVICE))
-        cpu = torch.sparse.mm(_csr("cpu"), ones)
-        assert gpu.device == _csr().device
-        torch.testing.assert_close(gpu.cpu(), cpu)
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_spmm_off_diagonal(self):
-        """A permutation's product is not symmetric, so this one would catch
-        a product computed from the transpose."""
-        dense = torch.arange(1.0, 10.0).reshape(3, 3)
-        gpu = torch.sparse.mm(_perm_csr(), dense.to(DEVICE))
-        cpu = torch.sparse.mm(_perm_csr("cpu"), dense)
-        assert gpu.device == _perm_csr().device
-        torch.testing.assert_close(gpu.cpu(), cpu)
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_addmm_with_dense_self(self):
-        """The dense operand is the one boxed by storage; the sparse operand
-        is boxed on its own impl.  Both have to read as CUDA for the kernel's
-        `_check_is_cuda`."""
-        dense = torch.ones(3, 3)
-        gpu = torch.addmm(dense.to(DEVICE), _perm_csr(), dense.to(DEVICE))
-        cpu = torch.addmm(dense, _perm_csr("cpu"), dense)
-        assert gpu.device == _perm_csr().device
-        torch.testing.assert_close(gpu.cpu(), cpu)
-
-    @pytest.mark.anyplatform
-    @requires_cuda_boxing
-    def test_mm_out_writes_through_the_out_tensor(self):
-        """The `.out` form must fill the tensor it was handed rather than
-        return a fresh one -- that is the registration under test."""
-        out = torch.empty(2, 1, device=DEVICE)
-        torch.ops.aten.mm.out(_csr(), torch.ones(2, 1, device=DEVICE), out=out)
-        assert out.device == _csr().device
-        torch.testing.assert_close(out.cpu(), torch.tensor([[1.0], [1.0]]))
 
 
 class TestBufferMovement:

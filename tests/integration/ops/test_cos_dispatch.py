@@ -77,17 +77,6 @@ class TestCosCorrectness:
         ref = torch.cos(a.cpu())
         torch.testing.assert_close(out.cpu(), ref, rtol=1e-4, atol=1e-4)
 
-    @pytest.mark.cuda
-    def test_cos_matches_cuda(self):
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        torch.manual_seed(2)
-        a_cuda = torch.randn(64, 64, device="cuda:0")
-        ref = torch.cos(a_cuda)
-        a = a_cuda.to(DEVICE)
-        out = torch.cos(a)
-        torch.testing.assert_close(out.cpu(), ref.cpu(), rtol=1e-4, atol=1e-4)
-
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.anyplatform
     def test_cos_dtypes(self, dtype):
@@ -112,16 +101,6 @@ class TestCosDispatch:
             check=False,
         )
         assert "[flagos dispatch] cos -> flagos_python" in result.stderr
-
-    @pytest.mark.cuda
-    def test_dispatch_log_cuda_override(self):
-        result = _run_cos_subprocess(
-            {"FLAGOS_LOG": "dispatch", "FLAGOS_OP_cos": "cuda"}
-        )
-        if result.returncode != 0 and "backend not registered" in result.stderr:
-            pytest.skip("cuda backend not available in this build")
-        assert result.returncode == 0, f"Failed:\n{result.stderr}"
-        assert "[flagos dispatch] cos -> boxing" in result.stderr
 
     @pytest.mark.metax
     def test_dispatch_log_metax(self):

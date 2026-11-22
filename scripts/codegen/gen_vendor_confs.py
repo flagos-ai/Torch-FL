@@ -61,12 +61,10 @@ Usage:
     python3 scripts/codegen/gen_vendor_confs.py --check     # exit 1 if any is stale
     python3 scripts/codegen/gen_vendor_confs.py --stats     # print a coverage table
 
-The one exception to "one conf per platform" is the day-0 boxing-only variant
-(backends_<platform>_boxing.conf) that NVIDIA, MetaX, DCU and PPU also get; see
-BOXING_VARIANT_PLATFORMS for what it is and when it goes away.
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -90,10 +88,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # touching PPU, and PPU overriding a value in a file it also enumerates from is
 # the round trip this script avoids everywhere else.
 #
-# generated/register.inc is the artifact the CUDA line and the PPU line both
-# compile (the `#else` branch of csrc/aten/register.cc), which is the same reason
-# the vendor kernel sets below are read from the generated C++ rather than from a
-# conf.
+# generated/register.inc is the full list of generated registrations. Vendor
+# kernel sets are read from the platform's selected fragments of that surface.
 GENERATED_REGISTER_INC = REPO_ROOT / "csrc/aten/generated/register.inc"
 
 # Where the backend coverage sets come from. These used to be three shared conf
@@ -110,114 +106,19 @@ from backend_coverage import (  # noqa: E402
     TILEOPS_OPS,
 )
 
-# Vendors that get a full-coverage conf.
-#
-# Only a platform whose PrivateUse1 registration is a *subset* of the op list
-# belongs here, because that is what makes `none` honest. Claiming an op on
-# PrivateUse1 with no kernel behind it does not fall back -- the call reaches the
-# dispatcher and raises on the empty slot -- whereas leaving it unregistered lets
-# it box to cpu_fallback. So `none` means cpu_fallback only where registration
-# skips the op, and these three platforms are the ones that skip:
-#
-#   platform  registration branch in csrc/aten/register.cc   m.impl count
-#   musa      musa_register.inc + musa_flaggems_register.inc  517
-#   gcu       gcu_register.inc + gcu_flaggems_register.inc     401
-#   ascend    ascend_register.inc                              372
-#
-# metax and dcu fall through to the `#else` branch and register the full
-# generated list (~2034), so a `none` entry there would be a guaranteed raise
-# rather than a fallback; both are handled as CUDA-boxing platforms below (see
-# BOXING_PLATFORMS). tsingmicro no longer falls through -- register.cc gives it
-# register_boxing_tsingmicro.inc, the 81 ops derived from its own conf -- but
-# backends_tsingmicro.conf stays hand-written, because that conf is the source of
-# the claim and generating it full-coverage would restore the raise.
-#
-#   vendor -> (conf naming its native kernels, other .inc files it registers)
-#
-# The sets are read from the generated C++ rather than from the conf this script
-# rewrites, so there is no round trip to survive: registration and routing are
-# derived from the same artifact the compiler sees.
-VENDORS = {
-    "mthreads": (
-        "backends/mthreads/generated/musa_register.inc",
-        ("backends/mthreads/generated/musa_flaggems_register.inc",),
-    ),
-    "enflame": (
-        "backends/enflame/generated/gcu_register.inc",
-        ("backends/enflame/generated/gcu_flaggems_register.inc",),
-    ),
-    "ascend": ("backends/ascend/generated/ascend_register.inc", ()),
-    # Kunlunxin is a native backend with a second registration file for the
-    # FlagGems Python path. Unlike the other native vendors that file is not
-    # generated from the shared FlagGems ceiling: kunlunxin is absent from
-    # FLAGGEMS_PYTHON_PLATFORMS, so only an op a P800 survey has vouched for may
-    # appear in it (KUNLUNXIN_FLAGGEMS_MEASURED, read by
-    # codegen_kunlunxin_flaggems.py). It is empty today, which is why
-    # backends_kunlunxin.conf routes nothing to `flaggems` and why this entry
-    # changes no route -- the file exists so the follow-up that measures an op
-    # has one value to edit instead of a registration path to invent.
-    #
-    # The blocker the earlier version of this comment recorded -- the SDK's torch
-    # shim naming the FlagGems runtime device something other than torch_fl's
-    # "flagos", so every guarded kernel falls through -- is a real defect and is
-    # still unremediated for this vendor: patch_flaggems_device_name's
-    # _ALIGNED_VENDORS (torch_fl/accelerator/nvidia/_cuda_compat.py) lists nvidia
-    # and hygon only. Naming the device right is a prerequisite of the first
-    # measured op, not of this file.
-    "kunlunxin": (
-        "backends/kunlunxin/generated/kunlunxin_register.inc",
-        ("backends/kunlunxin/generated/kunlunxin_flaggems_register.inc",),
-    ),
-    # Apple Silicon (Metal). Like kunlunxin this is a native backend with a
-    # single registration .inc and no FlagGems file to fold in: no Metal
-    # FlagTree/Triton line exists, so backends_apple.conf routes the ops
-    # backends/apple/generated/mps_register.inc claims to the `mps` kernel and
-    # everything else to `none` (cpu_fallback). After stage 2 that is the
-    # `unary`, `binary`, `binary_scalar` and `reduce` categories; see
-    # scripts/codegen/codegen_mps.py.
-    "apple": ("backends/apple/generated/mps_register.inc", ()),
-    # D-Robotics RDK BPU. Like apple this is native with a single registration
-    # .inc and no FlagGems file: the BPU has no FlagTree/Triton line, so
-    # backends_drobotics.conf routes the ops
-    # backends/bpu/generated/bpu_register.inc claims to the `drobotics` kernel
-    # and everything else to `none` (cpu_fallback).
-    #
-    # Those kernels submit single-operator .hbm artifacts from the library named
-    # by FLAGOS_BPU_OPLIB. Without that variable each kernel takes its own CPU
-    # round-trip, so the route is correct but unaccelerated -- which is the
-    # state the conf cannot express, since it is a routing table and not a
-    # capability probe.
-    "drobotics": ("backends/bpu/generated/bpu_register.inc", ()),
-    # Iluvatar is still FlagGems-primary, but it now has a native (non-boxing)
-    # .inc for the first cohort of corex ixdnn/ixblas kernels, so the native slot
-    # is no longer empty. backends_iluvatar.conf routes an op to `flaggems` where
-    # FlagGems covers it, to `iluvatar` where only the vendor kernel does, and to
-    # `none` otherwise (cpu_fallback). The two .inc files are included into the
-    # same PrivateUse1 TORCH_LIBRARY_IMPL body, so they must be disjoint -- the
-    # generator (scripts/codegen/codegen_iluvatar.py) intersects its claims
-    # against the FlagGems .inc for exactly that reason.
-    "iluvatar": (
-        "backends/iluvatar/generated/iluvatar_register.inc",
-        ("backends/iluvatar/generated/iluvatar_flaggems_register.inc",),
-    ),
-    # Cambricon MLU is FlagGems-primary with no native half yet: the CNNL
-    # kernels under aten/backends/cambricon/ do not exist, so the native slot is
-    # the empty string -- the explicit "no native kernels" declaration, not a
-    # file that should exist. Every op FlagGems does not cover therefore routes
-    # to `none` (cpu_fallback) rather than to a vendor kernel. The FlagGems .inc
-    # comes from codegen_cambricon_flaggems.py; when a cnnl_register.inc lands,
-    # name it in this slot and that generator subtracts its ops automatically,
-    # keeping the two disjoint inside the one PrivateUse1 TORCH_LIBRARY_IMPL
-    # body.
-    # Cambricon is FlagGems-primary with a small CNNL vendor half. The native
-    # slot names the CNNL register file, emitted by codegen_cambricon.py; the
-    # extra slot is the FlagGems ceiling. An op in neither stays `none` and
-    # reaches cpu_fallback, which is where most of this backend sits today.
-    "cambricon": (
-        "backends/cambricon/generated/cambricon_register.inc",
-        ("backends/cambricon/generated/cambricon_flaggems_register.inc",),
-    ),
-}
+# Native coverage comes from the same generated fragments CMake selects.
+# Additional FlagGems claims can extend that surface without adding vendor kernels.
+_platforms = json.loads(
+    (REPO_ROOT / "cmake/flagos_platforms.json").read_text(encoding="utf-8")
+)["accelerators"]
+VENDORS = {}
+for _row in _platforms.values():
+    _registration = _row["registration"]
+    _native = _registration.get("base") or _registration.get("vendor")
+    # TsingMicro maintains its own sparse routing config.
+    if _native and _row["vendor"] != "tsingmicro":
+        _flaggems = _registration.get("flaggems")
+        VENDORS[_row["vendor"]] = (_native, (_flaggems,) if _flaggems else ())
 
 # Ops a vendor registers straight from register.cc instead of its .inc, so they
 # are invisible to the .inc scan. Ascend claims aten::matmul (and the
@@ -337,29 +238,10 @@ ESCAPE_NATIVE = {
     }
 }
 
-# CUDA-ABI platforms (cuda, metax, dcu, ppu) use the same five-key shape as a
-# native vendor, but they have no vendor kernel library of their own: their
-# `<vendor>` slot is empty, and every op FlagGems does not cover reaches
-# `none` (cpu_fallback). A default conf on this tree never routes `boxing` --
-# see AGENTS.md ("Day-0 boxing confs"). The CUDA-ABI kernel is reachable only
-# through the day-0 variants below, which are opt-in.
-#
-# The gap set is per-platform, not a FlagGems defect: the kernel works elsewhere,
-# but this platform's triton backend cannot run it, so the op is held off the
-# FlagGems route. In a default conf that means `none`; in a day-0 variant it
-# means `boxing`. MetaX's and DCU's are still recovered by diffing those
-# platform's confs -- an op FlagGems covers whose conf line reads `boxing` is a
-# gap that platform measured, so the set is read back from the artifact instead
-# of restated, and the per-op diagnosis is in BOXING_GAP_NOTES below. That round
-# trip only holds while this script is the confs' sole writer: codegen_ops.py
-# wrote backends_metax.conf and backends_hygon.conf as well until #459, from
-# fallback sets that had drifted away from the confs, so a documented full
-# regeneration silently reverted the pins the diff had recovered. PPU's is a
-# literal (BOXING_TRITON_GAPS) because the diff cannot tell a gap from a policy
-# exception on a flaggems-first platform.
-#
-#   platform -> conf naming that platform's triton gaps
-BOXING_PLATFORMS = {
+# These CUDA-ABI platforms share the measured FlagGems route generator.
+# Uncovered operators use CPU fallback. NVIDIA's config is generated by
+# codegen_ops.py.
+CUDA_ABI_PLATFORMS = {
     "metax": "backends_metax.conf",
     "hygon": "backends_hygon.conf",
     # PPU's triton gap set is the mm/bmm family. PPU's triton build rejects the
@@ -375,99 +257,10 @@ BOXING_PLATFORMS = {
     "thead": "backends_thead.conf",
 }
 
-# Platforms that get a second, boxing-only conf: backends_<platform>_boxing.conf.
-#
-# NVIDIA, MetaX, Hygon DCU and the PPU (T-Head) are CUDA-compatible, so a boxing
-# build can serve every op by re-dispatching PrivateUse1 -> CUDA into the
-# vendor's own libtorch, with no FlagGems kernel behind anything. That wheel is
-# the day-0 path for a new model: a model whose ops FlagGems does not cover yet
-# runs on the vendor's real kernels instead of degrading to cpu_fallback, and it
-# needs no per-op work. The default conf for each of these platforms stays
-# FlagGems-primary, which is what a default wheel is built for.
-#
-# The variant routes ONLY `flaggems` (and `flaggems_cpp` on a platform that
-# actually compiles that slot) with `boxing` behind everything else. The
-# platform's measured triton gaps are applied as usual, so an op FlagGems
-# covers but this platform's triton backend cannot run still goes to boxing
-# rather than to a kernel that would raise. The measured composite routes
-# (scaled_dot_product_attention on DCU) are NOT applied: they are FlagGems
-# routes on evidence, and this file's premise is that FlagGems is not what a
-# day-0 model is trusted to at all.
-#
-# NVIDIA has no row above because its generated conf is backends_nvidia.conf,
-# written by codegen_ops.py; the `_boxing` variant is the one file here this
-# script owns for it.
-#
-# This is a temporary artifact. Once a platform's vendor kernels + FlagGems
-# routes cover what day-0 models need, its `_boxing` conf goes away and the
-# table row with it. See AGENTS.md ("Day-0 boxing confs") before extending the
-# table -- do not add a platform because boxing is convenient for it.
-BOXING_VARIANT_PLATFORMS = {
-    # key -> (base conf, is the base in BOXING_PLATFORMS?)
-    "nvidia": ("backends_nvidia.conf", False),
-    "metax": ("backends_metax.conf", True),
-    "hygon": ("backends_hygon.conf", True),
-    "thead": ("backends_thead.conf", True),
-}
-# The CUDA-boxing route, spelled "boxing" rather than "cuda": the two name
-# different things (borrow ATen's CUDA kernel from a flagos tensor through
-# DeviceBoxingGuard vs run it on a real NVIDIA device), and only the first is
-# what a boxing platform means.
-BOXING_FALLBACK = "boxing"
-
-# The boxing variants list no FlagGems coverage, because
-# build_boxing_variants() passes `py_here` empty for them: their premise is that
-# FlagGems is not what a day-0 model is trusted to. These two are the exception,
-# and for a reason that is measured rather than a preference: boxing them to the
-# CUDA kernel does not reproduce the draw.
-#
-# The boxing kernel is `at::native_dropout` through DeviceBoxingGuard
-# (generated/cuda_kernels.cc), so it reads ATen's own
-# `getDefaultCUDAGenerator()` -- and on a CPU-torch wheel `torch.manual_seed`
-# cannot reach that generator (there is no `torch._C._cuda_manualSeed`
-# binding). The FlagGems kernel reads the shared flagos generator instead, which
-# is the seed source `torch.manual_seed` does write. Measured on the NVIDIA
-# boxing lane: two `F.dropout(ones, 0.5)` calls at the same seed drew different
-# masks -- test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible,
-# failing on main (run 40255168276) and on the PR that followed it.
-BOXING_VARIANT_FLAGGEMS_OPS = frozenset({"native_dropout", "native_dropout_backward"})
-# The day-0 variant of a platform whose default conf routes mm/bmm to FlagGems
-# (DCU). The variant is FlagGems + boxing and applies no measured
-# composite routes, but mm/bmm keep the FlagGems route here for a build-graph
-# reason rather than a measured one: the DCU build compiles the soft-lowp
-# matrix prelude, so every dtype of mm/bmm has one PrivateUse1 entry and cannot
-# be left to cpu_fallback behind it. Boxing the key would send an ordinary pair
-# to the CUDA kernel and an FP8/FP4 pair to the prelude's in-wrapper
-# computation -- two routes under one key, the divergence the default conf's
-# claim already covers.
-BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS = frozenset({"hygon"})
-BOXING_VARIANT_FLAGGEMS_ROUTE_NOTE = (
-    "mm/bmm route to flaggems, as in the default conf, rather than to boxing:",
-    "the DCU build compiles the soft-lowp matrix prelude, and a claim on these",
-    "ops carries every dtype through it. Boxing the key would put an ordinary",
-    "pair on the CUDA kernel and an FP8/FP4 pair on the prelude at once.",
-    "FlagGems issue #6227 measured mm hanging on this backend; the route is",
-    "kept because the alternative is the same gap the default conf closes, and",
-    "tracked there.",
-)
-
-BOXING_VARIANT_FLAGGEMS_NOTE = (
-    "native_dropout and native_dropout_backward are routed to flaggems rather",
-    "than boxing: the boxing kernel is ATen's native_dropout, so it draws from",
-    "getDefaultCUDAGenerator(), which torch.manual_seed cannot write on a",
-    "CPU-torch wheel. Measured: two dropout calls at the same seed drew",
-    "different masks",
-    "(test_rng_dispatch.py::TestRngDropout::test_dropout_reproducible, run",
-    "40255168276). Which generator a seed reaches is a property of the kernel",
-    "library and not of the platform, so every variant gets this. The .out",
-    "overloads stay on boxing: FlagGems registers no kernel for them on any",
-    "platform, and a conf row is a claim that one exists.",
-)
-
 # Generated conf notes for platform-specific FlagGems fallbacks. Keep these in
 # the generator so regeneration preserves the measured diagnosis and upstream
 # issue reference instead of erasing a hand-edited comment.
-BOXING_GAP_NOTES = {
+CUDA_ABI_GAP_NOTES = {
     "hygon": (
         "mm/bmm route to flaggems although FlagGems issue #6227 measured them",
         "hanging until the 50-minute CI timeout on the DCU HCU backend. The DCU",
@@ -665,7 +458,7 @@ BOXING_GAP_NOTES = {
         "docs/reference/operator-support.md, and the routing itself is now",
         "asserted for every platform by tests/integration/flaggems/.",
         "This set is not restated here: gen_vendor_confs.py reads it back from",
-        "backends_metax.conf on every run (see BOXING_PLATFORMS), so a pin is",
+        "backends_metax.conf on every run (see CUDA_ABI_PLATFORMS), so a pin is",
         "recorded by the route it takes in this file, and the gap does not",
         "drift away from the conf the way it did while codegen_ops.py wrote a",
         "second copy from a stale literal (issue #459).",
@@ -685,13 +478,13 @@ BOXING_GAP_NOTES = {
         "FlagGems materializes instead of setting the Conjugate bit; _unsafe_view,",
         "whose FlagGems reshape can silently return a copy; and slice.Tensor,",
         "whose FlagGems route rejects complex dtypes. See",
-        "BOXING_TRITON_GAPS, which carries each op's failure, and",
+        "CUDA_ABI_TRITON_GAPS, which carries each op's failure, and",
         "docs/reference/operator-support.md for the full survey.",
     ),
 }
 
 # Boxing platforms whose triton gap set is stated here instead of recovered by
-# diffing the generated conf (see boxing_triton_gaps). Those two are the same
+# diffing the generated conf (see cuda_abi_triton_gaps). Those two are the same
 # thing only while the platform is vendor-first: the diff infers "this op is a
 # gap" from "this op is spelled `cuda` even though FlagGems covers it", which
 # stops being readable the moment a platform routes FlagGems first by policy --
@@ -717,7 +510,7 @@ BOXING_GAP_NOTES = {
 # on flaggems and their failures are recorded as pre-existing in
 # docs/reference/operator-support.md. Each entry below carries the failure the
 # survey measured, in the same profile the route is reached with.
-BOXING_TRITON_GAPS = {
+CUDA_ABI_TRITON_GAPS = {
     "thead": {
         # -- mm/bmm family, FlagGems issue #6225 (see above) --
         "bmm",
@@ -859,7 +652,7 @@ BOXING_TRITON_GAPS = {
     },
     # -- MetaX: the set the pre-day-0 conf measured as `cuda` for an op FlagGems
     # covers (Xnack/ATU faults, SPLIT_K, the profiler pins and the device-name
-    # guards -- per-op diagnosis in BOXING_GAP_NOTES["metax"]). A literal for the
+    # guards -- per-op diagnosis in CUDA_ABI_GAP_NOTES["metax"]). A literal for the
     # same reason PPU's and DCU's are: a default conf spells these `none`, so the
     # conf diff below could not recover them any more.
     "metax": {
@@ -889,7 +682,7 @@ BOXING_TRITON_GAPS = {
         # route it produces is still the one the day-0 variant wants, and
         # route_boxing() reads this set to decide that. METAX_FLAGGEMS_MEASURED
         # is what lifts `mm` to `flaggems` in the *default* conf, where the
-        # soft-lowp claim needs it registered; boxing_measured_python_ops()
+        # soft-lowp claim needs it registered; cuda_abi_measured_python_ops()
         # subtracts that set here, so the variant keeps `boxing`. See the note
         # on METAX_FLAGGEMS_MEASURED for the measurement and for why the two
         # files deliberately differ on this op.
@@ -1179,7 +972,7 @@ FLAGGEMS_PYTHON_PLATFORMS = {
 
 # Ops a native-kernel vendor must keep on its own kernel because that platform's
 # triton backend cannot compile the FlagGems kernel. The boxing platforms express
-# this by pinning the op to `cuda` and recovering it with boxing_triton_gaps();
+# this by pinning the op to `cuda` and recovering it with cuda_abi_triton_gaps();
 # a native vendor's conf spells the fallback as the vendor name, which is also
 # what an op with no FlagGems coverage looks like, so the two cases cannot be
 # told apart by reading the file back. Stated here instead.
@@ -2716,7 +2509,7 @@ TILEOPS_EXPERIMENT_PLATFORMS = ("ascend", "mthreads")
 # its shipped wheel actually produce. Fifteen of the 18 in the shared C++ set;
 # `mm` is one deliberate omission and the two `*_softmax`-adjacent drops another,
 # both explained below. Recorded here because the conf that used to hold this
-# measurement no longer exists separately; see boxing_cpp_ops().
+# measurement no longer exists separately; see cuda_abi_cpp_ops().
 # test_metax_conf_keeps_mm_boxed pins the `mm` exception.
 #
 # The `mm` omission: gems' `mm` passes a SPLIT_K kwarg triton-metax rejects, so
@@ -2729,8 +2522,8 @@ TILEOPS_EXPERIMENT_PLATFORMS = ("ascend", "mthreads")
 # also sit in MetaX's boxing gap set, which route_boxing() checks first, so the
 # conf keeps `bmm`, `bmm.out`, `sort`, `sort.stable` and `sum.dim_IntList` on the
 # boxing kernel and only 10 of the 15 reach flaggems_cpp. That set is read back
-# from backends_metax.conf (see BOXING_PLATFORMS) and its per-op reasons are in
-# BOXING_GAP_NOTES["metax"]. `sort`'s pin is its profiler interaction, not its
+# from backends_metax.conf (see CUDA_ABI_PLATFORMS) and its per-op reasons are in
+# CUDA_ABI_GAP_NOTES["metax"]. `sort`'s pin is its profiler interaction, not its
 # values -- it computes the host answer on the C++ route.
 #
 # The two drops: `_softmax` and `embedding` were measured servable through the
@@ -2809,12 +2602,12 @@ METAX_CPP_MEASURED = {
 # `(self, indices, output_size, stride, padding)`, so the generated call passes
 # the output size as the kernel size and returns a (1,2,6,6,6) tensor where the
 # boxing route returns (1,2,4,4,4). `cudnn_batch_norm_backward` was not
-# re-measured. See boxing_measured_python_ops().
+# re-measured. See cuda_abi_measured_python_ops().
 #
 # `mm` joins for a different reason than the seven above, and only in the
 # default conf. It is not held by the shared coverage ceiling; it is in
-# BOXING_TRITON_GAPS["metax"], and this set is what lifts it back out (route()
-# takes the gap set outside the coverage sets, and boxing_measured_python_ops()
+# CUDA_ABI_TRITON_GAPS["metax"], and this set is what lifts it back out (route()
+# takes the gap set outside the coverage sets, and cuda_abi_measured_python_ops()
 # is subtracted from the gaps). Three measurements put it here, all on a MetaX
 # C550 with torch 2.10.0+metax3.8.1.0, flag_gems 5.4.0 and a cold
 # FLAGGEMS_CACHE_DIR:
@@ -2922,26 +2715,9 @@ DCU_COMPOSITE_FLAGGEMS = {"scaled_dot_product_attention"}
 # above -- so `route()` reads it as unregistered and returns `none`; the set is
 # applied after `route()` for that reason. It is keyed by platform so the
 # measurement cannot leak onto a platform that never took it, which is the same
-# guard `boxing_measured_python_ops` provides for the FlagGems composites.
+# guard `cuda_abi_measured_python_ops` provides for the FlagGems composites.
 COMPOSITE_NATIVE = {"iluvatar": {"scaled_dot_product_attention"}}
 
-
-# Ops a platform routes to FlagGems in its default conf but must keep on the
-# boxing kernel in its day-0 variant, named per platform.
-#
-# These are measurements that are true and still deliberately not applied to the
-# day-0 file, which is the same judgement BOXING_VARIANT_PLATFORMS already makes
-# for the measured composites: a day-0 conf exists to bring a model up on the
-# vendor's real CUDA-ABI kernels, so an op only belongs on FlagGems there when
-# the variant has no boxing kernel for it.
-#
-# MetaX's `mm` is the one entry. It reaches `flaggems` in the default conf
-# because the soft-lowp matrix claim needs the key registered and a default conf
-# may not route boxing, while `metax-boxing` passes all 30 soft_lowp cases with
-# `mm = boxing` (run 40984981771, job 123834506145) and has nothing to gain.
-BOXING_VARIANT_KEEP_GAPPED = {
-    "metax": {"mm"},
-}
 
 # FlagGems Python routes on the platforms that compile the soft-lowp matrix
 # prelude, measured on their own hardware.
@@ -2977,10 +2753,10 @@ SOFT_LOWP_CLAIMED_OPS = {
 }
 
 # FlagGems Python routes a native-kernel vendor measured on top of the shared
-# coverage ceiling. The native twin of boxing_measured_python_ops(): same rule
+# coverage ceiling. The native twin of cuda_abi_measured_python_ops(): same rule
 # -- a cohort claim only the platform holding the matching FlagGems build can
 # discharge -- for a platform whose routes are read from VENDORS rather than
-# BOXING_PLATFORMS.
+# CUDA_ABI_PLATFORMS.
 #
 # Kunlunxin is empty because its 640-op FlagGems cohort has not been surveyed on
 # the P800 yet. The stack to run it exists and is what the lane installs:
@@ -3470,7 +3246,7 @@ def flaggems_python_ops_for(platform: str) -> set:
     cuda reads the measured package contents. The rest read the frozen
     pre-2026-10-22 set, which keeps an unrelated cuda fix from re-routing six
     vendors: routing an op onto the Python path needs the differential survey for
-    *that* platform (see ``boxing_triton_gaps`` and ``BOXING_TRITON_GAPS`` for the
+    *that* platform (see ``cuda_abi_triton_gaps`` and ``CUDA_ABI_TRITON_GAPS`` for the
     shape that evidence takes).
 
     A platform graduates by having the survey run on it and its result landed. A
@@ -3571,12 +3347,12 @@ def _platform_from_conf(filename: str) -> str:
     return ""
 
 
-def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -> set:
+def cuda_abi_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -> set:
     """Ops a boxing platform must keep on CUDA even though FlagGems covers them.
 
     Two sources, in this order:
 
-    * BOXING_TRITON_GAPS -- platforms whose gap set is a measurement that cannot
+    * CUDA_ABI_TRITON_GAPS -- platforms whose gap set is a measurement that cannot
       be recovered from the conf. PPU is one: it is flaggems-first by policy, so
       the ops it keeps on `cuda` are exceptions to that policy rather than the
       residue of one, and reading them back out of the file would re-derive an
@@ -3586,7 +3362,7 @@ def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -
     * Diffing the platform's existing conf against the shared FlagGems sources
       (MetaX): an op that FlagGems covers but this conf routes to `cuda`/
       `boxing` is a deliberate per-platform triton gap (MetaX Xnack/ATU faults,
-      diagnosed per op in BOXING_GAP_NOTES). This branch reads the file it later
+      diagnosed per op in CUDA_ABI_GAP_NOTES). This branch reads the file it later
       rewrites, so it only works while a gap keeps its boxing spelling there --
       which is why the *default* conf, where a gap is spelled `none`, must not
       rely on it: build_all() calls this with its own gaps before the rewrite,
@@ -3597,11 +3373,11 @@ def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -
       `cuda` routes are a boxing-era residue, not measured gaps. See the comment
       at that branch.
     """
-    measured = BOXING_TRITON_GAPS.get(_platform_from_conf(filename))
+    measured = CUDA_ABI_TRITON_GAPS.get(_platform_from_conf(filename))
     if measured is not None:
         return measured & (fg_py | fg_cpp)
     if _platform_from_conf(filename) == "nvidia":
-        # The cuda conf is not in BOXING_TRITON_GAPS and must not fall through to
+        # The cuda conf is not in CUDA_ABI_TRITON_GAPS and must not fall through to
         # the diff below.
         #
         # The diff reads the file this function is generating, so on a platform
@@ -3619,7 +3395,7 @@ def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -
         # value head that was 49.3% of the forward spent in cudaMemcpy.
         #
         # An empty set is the honest statement: cuda has no measured triton gap.
-        # If one is found, it belongs in BOXING_TRITON_GAPS with its diagnosis,
+        # If one is found, it belongs in CUDA_ABI_TRITON_GAPS with its diagnosis,
         # the same way PPU's mm/bmm family is recorded -- explicit, measured, and
         # not inferred from whatever the last regeneration happened to write.
         return set()
@@ -3634,7 +3410,7 @@ def boxing_triton_gaps(conf_dir: Path, filename: str, fg_py: set, fg_cpp: set) -
     }
 
 
-def boxing_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
+def cuda_abi_cpp_ops(conf_dir: Path, filename: str, fg_cpp: set) -> set:
     """Which FlagGems C++ ops a boxing platform actually routes to that path.
 
     Per-platform measured, not shared: MetaX verified 17 of the 18 ops on-device
@@ -3667,7 +3443,7 @@ HYGON_HOST_FLAGGEMS_MEASURED = {
 }
 
 
-def boxing_measured_python_ops(filename: str) -> set:
+def cuda_abi_measured_python_ops(filename: str) -> set:
     """Extra FlagGems Python ops a boxing platform routes on measured evidence.
 
     These ops are outside the shared coverage ceiling (``FLAGGEMS_PYTHON_OPS``)
@@ -3695,13 +3471,13 @@ def boxing_measured_python_ops(filename: str) -> set:
 def native_measured_python_ops(vendor: str) -> set:
     """FlagGems Python ops a native-kernel vendor routes on measured evidence.
 
-    The native twin of ``boxing_measured_python_ops``, and the reason it exists
+    The native twin of ``cuda_abi_measured_python_ops``, and the reason it exists
     as a function rather than an expression inside ``build_all``: the two halves
     of that row are easy to get wrong in opposite directions.
 
     The op must be inside the vendor's own FlagGems ceiling -- an op dropped from
     ``FLAGGEMS_PYTHON_OPS`` cannot linger on a measured route, the same guard
-    ``boxing_cpp_ops`` applies. It must NOT additionally be gated on
+    ``cuda_abi_cpp_ops`` applies. It must NOT additionally be gated on
     ``FLAGGEMS_PYTHON_PLATFORMS``: that set says "this vendor's whole cohort has
     been measured", and this one says "these ops have". Intersecting against the
     platform-gated coverage set instead made the row a silent no-op for the one
@@ -3754,8 +3530,8 @@ def enflame_native_host_conf(built: dict) -> str:
     return header + render("enflame", "enflame", routes)
 
 
-def boxing_to_none_notes(notes) -> tuple:
-    """The BOXING_GAP_NOTES lines as a default conf needs them.
+def format_gap_notes(notes) -> tuple:
+    """The CUDA_ABI_GAP_NOTES lines as a default conf needs them.
 
     The notes are written for the day-0 file, where a measured hold reads
     "pinned to cuda" / "pinned to boxing" because the CUDA kernel is what holds
@@ -3794,45 +3570,6 @@ def flaggems_holds() -> set:
     the routing consequence, and a test keeps the two equal.
     """
     return set(FLAGGEMS_HOLDS)
-
-
-def route_boxing(op: str, fg_cpp: set, fg_py: set, gaps: set, tileops: set = ()) -> str:
-    """Pick the backend key for one op on a CUDA-boxing platform.
-
-    Same priority as a native vendor, with `cuda` in the `<vendor>` slot. Boxing
-    reuses the CUDA kernels wholesale, so every op has an impl and `none` never
-    appears -- the difference from a native-kernel vendor is coverage, not shape.
-
-    A triton gap outranks every accelerated key, `tileops` included: the gap is a
-    measured statement that this platform's triton backend cannot run the kernel,
-    and the TileOps shims are Triton-generated too.
-    """
-    if op in gaps:
-        return BOXING_FALLBACK
-    # A FlagGems hold outranks the coverage sets. codegen_ops.py's runtime-broken
-    # and recursive-fallback groups name ops whose gems kernel is itself the
-    # defect -- index_select's Triton launch is not stream-ordered against the
-    # flagos stream (issue #120, KV-cache NaN in HF beam search), and the others
-    # fail their own listed ways. Covering them says a kernel exists, not that it
-    # is safe to route to, and only codegen_ops.py carries that distinction.
-    #
-    # Without this term, widening FLAGGEMS_PYTHON_OPS routes those ops to
-    # FlagGems on every platform regenerated afterwards. That is not hypothetical:
-    # it is what happened when the ceiling grew from 640 to 1098 entries, and why
-    # the generated confs for ascend, gcu, musa and ppu had index_select,
-    # _cdist_backward, nanmedian and smooth_l1_loss pointed at the Python path.
-    # A per-platform measurement that clears one of them belongs in
-    # boxing_measured_python_ops (METAX_FLAGGEMS_MEASURED), which is added to
-    # fg_py by the caller, not deleted from the shared holds.
-    if op in flaggems_holds():
-        return BOXING_FALLBACK
-    if op in fg_cpp:
-        return "flaggems_cpp"
-    if op in fg_py:
-        return "flaggems"
-    if op in tileops:
-        return "tileops"
-    return BOXING_FALLBACK
 
 
 def route(
@@ -3926,36 +3663,19 @@ def route_metax_tileops(
     return "none"
 
 
-def _variant_routes_flaggems_override(routes: dict) -> bool:
-    """Whether a boxing variant carries the RNG override this file records."""
-    return any(routes.get(op) == "flaggems" for op in BOXING_VARIANT_FLAGGEMS_OPS)
-
-
 def render(
     platform: str,
     vendor: str,
     routes: dict,
-    boxing: bool = False,
     escape: set = frozenset(),
-    variant: bool = False,
     cuda_abi: bool = False,
     tileops_only: bool = False,
+    include_gap_notes: bool = True,
 ) -> str:
     """Build the conf text for one platform.
 
-    `cuda_abi` marks a default conf for a CUDA-ABI platform (cuda, metax, dcu,
-    ppu): it has no vendor kernel library and no boxing route, so the legend
-    says what `none` means here, and the notes describe each measured hold as
-    the cpu_fallback it is in this file rather than as the boxing pin it is in
-    the day-0 variant.
-
-    `variant` marks a day-0 boxing conf (BOXING_VARIANT_PLATFORMS): the header
-    says what the file is for and that it is temporary, so a reader who found it
-    through FLAGOS_BACKEND_CONFIG is not left guessing. Only the header changes;
-    the body is the same five-key table.
-
-    `platform` names the conf (backends_<platform>.conf); `vendor` is the key in
-    the third slot -- a native kernel name, or "cuda" for a boxing platform.
+    `cuda_abi` selects the measured fallback notes for a CUDA-ABI platform.
+    `platform` names the config and `vendor` names its native kernel slot.
     `escape` is ESCAPE_NATIVE[vendor]: ops with a vendor kernel but no `m.impl`
     of their own, which route() cannot see. They are backfilled with the vendor
     annotation here, so the line still says a kernel exists behind the winning
@@ -3975,23 +3695,11 @@ def render(
     total = len(routes)
     covered = total - counts.get("none", 0)
 
-    if boxing:
-        vendor_desc = "CUDA boxing kernel (this platform is CUDA-compatible)"
-    else:
-        vendor_desc = "vendor-native kernel"
-
-    # A FlagGems-primary platform with no vendor kernel library (iluvatar) has
-    # no native `.inc`, so no op routes to the vendor slot. Its conf must not
-    # advertise a backend nothing selects -- the legend and the routing-priority
-    # line are the only places the vendor name appears, and both would otherwise
-    # describe a route that does not exist. Every other vendor (and every boxing
-    # platform) has at least one native route, so this only changes that conf.
-    has_vendor_slot = boxing or counts.get(vendor, 0) > 0
+    has_vendor_slot = counts.get(vendor, 0) > 0
 
     lines = [LICENSE.rstrip("\n"), ""]
-    banner = " (day-0 boxing only)" if variant else ""
     lines += [
-        f"# flagos op backend config for {platform}{banner} -- AUTO-GENERATED.",
+        f"# flagos op backend config for {platform} -- AUTO-GENERATED.",
         "# Regenerated by scripts/codegen/gen_vendor_confs.py -- do not edit manually.",
         "#",
         "# Full-coverage config: every op torch_fl can route is listed exactly",
@@ -3999,22 +3707,6 @@ def render(
         "# file alone.",
         "#",
     ]
-    if variant:
-        lines += [
-            f"# This is the DAY-0 BOXING-ONLY variant of backends_{platform}.conf:",
-            "# every op FlagGems does not cover here runs on the vendor's CUDA-ABI",
-            "# kernel instead of degrading to cpu_fallback. It exists so a new",
-            "# model can be brought up on day 0 without waiting for a FlagGems or",
-            "# vendor-native kernel per op, and it is TEMPORARY -- it is deleted",
-            "# once this platform's own operator routes cover day-0 models. Do not",
-            "# use it as the default conf and do not add a platform to it because",
-            "# boxing would be convenient there; see AGENTS.md.",
-            "#",
-            "# Select it with",
-            f"#   FLAGOS_BACKEND_CONFIG=<install>/torch_fl/configs/backends_{platform}_boxing.conf",
-            "# and point the install at a boxing wheel (FLAGOS_BUILD_BOXING=1).",
-            "#",
-        ]
     lines += [
         "# Values:",
     ]
@@ -4027,12 +3719,7 @@ def render(
             "#   tileops       TileOPs Triton shims (needs FLAGOS_BUILD_TILEOPS=ON + SM90)",
         ]
     if has_vendor_slot and vendor != "none":
-        lines.append(f"#   {vendor:<13} {vendor_desc}")
-    if cuda_abi and not variant:
-        lines += [
-            "#   boxing        only in the opt-in backends_"
-            f"{platform}_boxing.conf (day-0)",
-        ]
+        lines.append(f"#   {vendor:<13} vendor-native kernel")
     if tileops_only:
         lines.append(
             "#   none          no TileOPs or vendor impl -> reaches cpu_fallback"
@@ -4046,14 +3733,6 @@ def render(
             "#",
             f"# Routing priority: {priority}",
             "# Experimental TileOPs config: FlagGems is deliberately excluded.",
-            "#",
-        ]
-    elif boxing:
-        lines += [
-            "#",
-            f"# Routing priority: flaggems_cpp > flaggems > tileops > {vendor}.",
-            "# Boxing reuses the CUDA kernels for every op, so nothing routes to",
-            "# 'none' here.",
             "#",
         ]
     else:
@@ -4070,15 +3749,9 @@ def render(
         f"# Coverage: {covered}/{total} ops accelerated "
         f"({100.0 * covered / total:.1f}%)",
     ]
-    notes = BOXING_GAP_NOTES.get(platform)
-    if notes and cuda_abi and not variant:
-        notes = boxing_to_none_notes(notes)
-    if variant and _variant_routes_flaggems_override(routes):
-        notes = (list(notes) if notes else []) + list(BOXING_VARIANT_FLAGGEMS_NOTE)
-    if variant and platform in BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS:
-        notes = (list(notes) if notes else []) + list(
-            BOXING_VARIANT_FLAGGEMS_ROUTE_NOTE
-        )
+    notes = CUDA_ABI_GAP_NOTES.get(platform) if include_gap_notes else None
+    if notes and cuda_abi:
+        notes = format_gap_notes(notes)
     if notes:
         lines += ["#"] + [f"# Note: {line}" for line in notes]
     counts_order = dict.fromkeys(
@@ -4110,7 +3783,7 @@ def build_all(conf_dir: Path) -> dict:
     Covers both native-kernel vendors and the CUDA-ABI platforms: same keys,
     same priority, differing only in what sits in the vendor slot -- a vendor
     kernel for the former, nothing for the latter (whose uncovered ops are
-    `none`). No default conf routes boxing; see BOXING_PLATFORMS.
+    `none`). No default conf routes boxing; see CUDA_ABI_PLATFORMS.
     """
     all_ops = registered_impls(GENERATED_REGISTER_INC)
     if not all_ops:
@@ -4119,20 +3792,8 @@ def build_all(conf_dir: Path) -> dict:
             "run scripts/codegen/codegen_ops.py first"
         )
 
-    # A missing .inc is a silent disaster. registered_impls() returns the empty
-    # set for a path that does not exist, so that vendor's whole coverage set
-    # reads as empty, every one of its ops routes to `none`, and --check reports
-    # success -- while the C++ build fails on the very same #include register.cc
-    # emits. Fail loudly here instead: the VENDORS table names files that
-    # register.cc actually includes, so a name with no file behind it is always
-    # a bug, never a platform that happens to cover nothing. (A platform that
-    # genuinely covers nothing belongs in BOXING_PLATFORMS or has no row at all.)
-    #
-    # The one documented exception is a FlagGems-primary vendor: iluvatar has no
-    # vendor kernel library, so its native slot is the empty string -- an explicit
-    # "no native kernels" declaration, not a file that should exist. Only the
-    # extra (FlagGems) paths are real includes for such a vendor, and they are
-    # checked like any other.
+    # Validate the declared fragments before deriving coverage. A missing file
+    # would otherwise look like an empty registration set.
     for _vendor, (_native_inc, _extra_incs) in VENDORS.items():
         for _inc in (_native_inc, *_extra_incs):
             if not _inc:
@@ -4140,10 +3801,8 @@ def build_all(conf_dir: Path) -> dict:
             if not (CSRC_DIR / _inc).exists():
                 raise SystemExit(
                     f"error: {_vendor}: {_inc} does not exist. Its coverage set "
-                    "would read as empty and every op would route to `none`, "
-                    "silently -- while register.cc fails to compile on the same "
-                    "include. Generate it (see scripts/codegen/) or remove the "
-                    "entry from VENDORS."
+                    "would read as empty. Generate the fragment or correct the "
+                    "registration entry in cmake/flagos_platforms.json."
                 )
 
     # No shared fg_py here: each platform's ceiling is resolved per platform
@@ -4261,19 +3920,19 @@ def build_all(conf_dir: Path) -> dict:
                 vendor,
             )
 
-    for platform, sparse_conf in BOXING_PLATFORMS.items():
+    for platform, sparse_conf in CUDA_ABI_PLATFORMS.items():
         fg_py_here = flaggems_python_ops_for(platform)
         # The platform's measured triton gaps: ops FlagGems covers that this
         # backend cannot compile. In a default conf they are `none`; in the day-0
-        # variant they are `boxing`. They come from BOXING_TRITON_GAPS or, for a
+        # variant they are `boxing`. They come from CUDA_ABI_TRITON_GAPS or, for a
         # platform that has none there, from the diff of its own conf.
-        gaps = boxing_triton_gaps(conf_dir, sparse_conf, fg_py_here, fg_cpp)
+        gaps = cuda_abi_triton_gaps(conf_dir, sparse_conf, fg_py_here, fg_cpp)
         # A measured FlagGems route outranks the gap this file's own boxing
         # entries would otherwise recover: the op is held on boxing today
         # because the shared coverage set does not hold it, not because this
         # platform measured a triton gap. It has to come off `gaps` as well as
         # onto `py_here` -- route() takes the gap set outside the coverage sets.
-        measured = boxing_measured_python_ops(sparse_conf)
+        measured = cuda_abi_measured_python_ops(sparse_conf)
         if platform == "hygon":
             measured |= HYGON_HOST_FLAGGEMS_MEASURED
         gaps -= measured
@@ -4288,7 +3947,7 @@ def build_all(conf_dir: Path) -> dict:
         # Only the C++-runtime conf routes to flaggems_cpp; elsewhere the slot is
         # unused and every C++ op is reached through the Python path instead.
         cpp_here = (
-            boxing_cpp_ops(conf_dir, sparse_conf, fg_cpp)
+            cuda_abi_cpp_ops(conf_dir, sparse_conf, fg_cpp)
             if platform in FLAGGEMS_CPP_PLATFORMS
             else set()
         )
@@ -4296,7 +3955,7 @@ def build_all(conf_dir: Path) -> dict:
         # No vendor kernel set: a CUDA-ABI platform on this tree has no native
         # operator library, so the vendor slot is empty and everything FlagGems
         # does not cover falls to `none` (cpu_fallback). Boxing is deliberately
-        # absent from a default conf; see BOXING_PLATFORMS.
+        # absent from a default conf; see CUDA_ABI_PLATFORMS.
         routes = {
             op: route(
                 op, platform, cpp_here, py_here - gaps, set(), all_ops, tileops_here
@@ -4335,49 +3994,6 @@ def build_all(conf_dir: Path) -> dict:
                 "none",
             )
 
-    for platform, operators in NATIVE_HOST_FLAGGEMS_OPS.items():
-        python_ops = flaggems_python_ops_for(platform)
-        routes = {
-            op: ("flaggems" if op in python_ops else "none")
-            if value == "flaggems_cpp"
-            else value
-            for op, value in out[platform][1].items()
-        }
-        # Composite measurements from the ordinary wheel do not establish
-        # native-host lowering. Qwen's eager attention uses its explicit ops.
-        if platform == "metax":
-            routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
-        missing = operators - routes.keys()
-        if missing:
-            raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
-        routes.update({op: "flaggems" for op in operators})
-        name = f"{platform}_native_host"
-        text = render(name, "", routes)
-        if platform == "metax":
-            from native_host_policy import (
-                NATIVE_SDK_PRECISION,
-                precision_policy,
-                render_config_routes,
-            )
-
-            policy = {
-                "operators": [
-                    *NATIVE_SDK_PRECISION[platform]["operators"],
-                    *precision_policy(platform)["operators"],
-                ]
-            }
-            text = render_config_routes(text, platform, policy=policy)
-        text = text.replace(
-            "# Full-coverage config:",
-            "# Experimental CPU-Torch native-host wheel only (FLAGOS_BUILD_NATIVE_HOST=1).\n"
-            "# Selected by the wheel build record; numerical CPU fallback is rejected.\n"
-            "# These routes require the compiled original hosts and device-name alignment.\n"
-            "# Full-model accuracy and performance remain separate acceptance gates.\n#\n"
-            "# Full-coverage config:",
-            1,
-        )
-        out[name] = (text, routes, "")
-
     # The contract from AGENTS.md ("Day-0 boxing confs"), enforced rather than
     # documented: no default conf may route an op to the boxing kernel. It would
     # claim coverage the platform's own vendor / FlagGems routes do not have,
@@ -4396,10 +4012,59 @@ def build_all(conf_dir: Path) -> dict:
     # the one this guard exists for. The check belongs to the contract, not to
     # the writer.
     for path in sorted(CONF_DIR.glob("backends_*.conf")):
-        if path.name.endswith("_boxing.conf") or path.name in checked:
+        if path.name in checked:
             continue
         _reject_boxing_routes(path.name, _read_conf_routes(path))
     return out
+
+
+def native_host_routes(platform: str, base: dict) -> dict:
+    """Derive native-host routes from the ordinary platform's generated table."""
+    python_ops = flaggems_python_ops_for(platform)
+    routes = {
+        op: ("flaggems" if op in python_ops else "none")
+        if value == "flaggems_cpp"
+        else value
+        for op, value in base.items()
+    }
+    # MetaX's ordinary composite measurement does not establish native-host
+    # lowering. Qwen's eager attention uses its explicit ops.
+    if platform == "metax":
+        routes.update({op: "none" for op in METAX_COMPOSITE_FLAGGEMS})
+    operators = NATIVE_HOST_FLAGGEMS_OPS[platform]
+    missing = operators - routes.keys()
+    if missing:
+        raise SystemExit(f"native host routes have no wrapper: {sorted(missing)}")
+    routes.update({op: "flaggems" for op in operators})
+    return routes
+
+
+def render_native_host_config(platform: str, base: dict) -> str:
+    """Render the configuration staged as backends_<platform>.conf in a wheel."""
+    routes = native_host_routes(platform, base)
+    _reject_boxing_routes(f"backends_{platform}.conf", routes)
+    text = render(platform, "", routes, include_gap_notes=False)
+    if platform == "metax":
+        from native_host_policy import (
+            NATIVE_SDK_PRECISION,
+            precision_policy,
+            render_config_routes,
+        )
+
+        policy = {
+            "operators": [
+                *NATIVE_SDK_PRECISION[platform]["operators"],
+                *precision_policy(platform)["operators"],
+            ]
+        }
+        text = render_config_routes(text, platform, policy=policy)
+    return text.replace(
+        "# Full-coverage config:",
+        "# Experimental CPU-Torch native-host build (FLAGOS_BUILD_NATIVE_HOST=1).\n"
+        "# These routes require the compiled hosts and reject numerical CPU fallback.\n#\n"
+        "# Full-coverage config:",
+        1,
+    )
 
 
 def _read_conf_routes(path: Path) -> dict:
@@ -4413,21 +4078,13 @@ def _read_conf_routes(path: Path) -> dict:
 
 
 def _reject_boxing_routes(name: str, routes: dict) -> None:
-    """Refuse a default conf that names the boxing kernel for any op.
-
-    Both spellings that reach ``Backend::kBoxing`` in ``csrc/aten/common.cc``:
-    ``boxing`` and the legacy ``cuda``. The native ``nvidia`` slot is distinct.
-    Conditional dtype clauses must obey the same prohibition as the base route.
-    """
+    """Reject the retired route keys ``boxing`` and ``cuda`` in every clause."""
     from native_host_policy import route_backends
 
     boxed = sorted(
         op
         for op, v in routes.items()
-        if any(
-            backend.lower() in (BOXING_FALLBACK, "cuda")
-            for backend in route_backends(v)
-        )
+        if any(backend.lower() in ("boxing", "cuda") for backend in route_backends(v))
     )
     if boxed:
         raise SystemExit(
@@ -4435,128 +4092,8 @@ def _reject_boxing_routes(name: str, routes: dict) -> None:
             f"to boxing (e.g. {', '.join(boxed[:5])}). A default conf may "
             "only use flaggems/flaggems_cpp/tileops/<vendor>/none; an op "
             "FlagGems does not cover and no vendor kernel implements is "
-            "`none` (cpu_fallback). Boxing belongs in the day-0 "
-            "backends_<platform>_boxing.conf only."
+            "`none` (cpu_fallback)."
         )
-
-
-def build_boxing_variants(conf_dir: Path, built: dict) -> dict:
-    """Compute the day-0 boxing-only confs: {platform: (text, routes, key)}.
-
-    See BOXING_VARIANT_PLATFORMS for what these are for. Each one is built from
-    the same inputs as its platform's default conf, so the two cannot disagree
-    about which FlagGems build the platform runs or which ops it registers --
-    the only decision this function makes is the second one the default conf
-    already made, run again with boxing as the fallback.
-    """
-    fg_cpp = flaggems_cpp_ops(conf_dir)
-    out = {}
-    for platform, (sparse_conf, is_boxing) in BOXING_VARIANT_PLATFORMS.items():
-        if platform == "nvidia":
-            # codegen_ops.py owns backends_nvidia.conf and writes it with the
-            # whole routed table; read its keys so the op universe is the one
-            # that file lists, and widen with any vendor-only op the other confs
-            # needed (EXTRA_ROUTED, Ascend's fused matmul) so every platform's
-            # table stays over the same op set.
-            ops = set(parse_conf(conf_dir / sparse_conf))
-            if not ops:
-                raise SystemExit(
-                    f"error: {sparse_conf} is empty or missing; the boxing "
-                    "variants for nvidia/metax/hygon/thead take their op list from it."
-                    "Run scripts/codegen/codegen_ops.py first."
-                )
-            ops |= EXTRA_ROUTED
-        else:
-            ops = set(next(iter(built.values()))[1]) if built else set()
-
-        py_here = (
-            flaggems_python_ops_for(platform)
-            if platform in FLAGGEMS_PYTHON_PLATFORMS
-            else set()
-        )
-        if is_boxing:
-            # The day-0 variant is allowed what EVERY platform has measured, not
-            # what the platform's own ceiling has. Those differ in one
-            # direction: nvidia's ceiling is the whole FlagGems package while
-            # the others read the frozen copy, so a variant built from the
-            # per-platform ceiling would make the cuda variant the one file that
-            # routes what only CUDA has run -- the opposite of what a day-0 file
-            # is for. Applying the shared set here only narrows nvidia's variant;
-            # every other platform already IS this set.
-            py_here &= set(FLAGGEMS_PYTHON_OPS_FROZEN)
-        # The platform's measured triton gaps stay gaps: boxing is the fallback
-        # here, so an op FlagGems covers but this backend cannot compile belongs
-        # on boxing -- route_boxing() checks the gap set before the coverage set.
-        gaps = set()
-        if is_boxing:
-            gaps = boxing_triton_gaps(conf_dir, sparse_conf, py_here, fg_cpp)
-            # The measured routes are deliberately NOT applied; see
-            # BOXING_VARIANT_PLATFORMS. Drop the gap entries that only exist
-            # because the default conf routes them to flaggems, though -- with
-            # the measured route gone they are not gaps, they are boxing.
-            #
-            # Minus the ops this variant must keep boxed anyway. MetaX's `mm` is
-            # in METAX_FLAGGEMS_MEASURED for the *default* conf only (the
-            # soft-lowp claim needs it registered there, and a default conf may
-            # not route boxing); the day-0 file's premise is that FlagGems is
-            # not what a day-0 model is trusted to, and this lane passes all 30
-            # soft_lowp cases with `mm = boxing` today. Dropping it from `gaps`
-            # here would not even leave it on `boxing`: `mm` is in the shared
-            # FlagGems C++ set, and route_boxing() ranks that slot above both
-            # the Python slot and the fallback, so it would land on
-            # `flaggems_cpp` -- a route that raises "soft-lowp matrix kernel
-            # requires a low-precision input" on the fp32 operands aten::bmm
-            # must serve. Keep it a gap.
-            gaps -= boxing_measured_python_ops(
-                sparse_conf
-            ) - BOXING_VARIANT_KEEP_GAPPED.get(platform, set())
-        cpp_here = fg_cpp if platform in FLAGGEMS_CPP_PLATFORMS else set()
-        routes = {op: route_boxing(op, cpp_here, py_here, gaps) for op in sorted(ops)}
-        if platform == "nvidia":
-            routes = {
-                op: (BOXING_FALLBACK if value == "cuda" else value)
-                for op, value in routes.items()
-            }
-        # The seeded-RNG override is a property of the kernel, not the platform,
-        # so it is applied last and unconditionally: PPU's conf names these ops
-        # `boxing` in its default conf too, and moving them to `flaggems` is the
-        # only difference the variant is allowed to make there. A boxing kernel
-        # reads ATen's own generator, which a CPU-torch wheel cannot seed; a
-        # FlagGems route reads the shared flagos one, which torch.manual_seed
-        # does write.
-        routes.update({op: "flaggems" for op in BOXING_VARIANT_FLAGGEMS_OPS})
-        # The platform's own FlagGems-routed keys, kept for the claim reason in
-        # BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS rather than for the RNG one
-        # above: a claim on these ops carries every dtype through the soft-lowp
-        # prelude, so boxing the key would serve one key by two paths.
-        #
-        # Read from SOFT_LOWP_FLAGGEMS_MEASURED and not from
-        # boxing_measured_python_ops(): that function also returns the
-        # platform's composite measurements (DCU_COMPOSITE_FLAGGEMS, i.e.
-        # `scaled_dot_product_attention`), which the branch above deliberately
-        # removes from this variant. Taking the whole set here put SDPA back on
-        # `flaggems` in the day-0 conf, against the premise that a day-0 model
-        # is not trusted to FlagGems -- the boxing lane caught it as
-        # `test_sdpa_route_matches_the_recorded_one` ("routes
-        # scaled_dot_product_attention to 'flaggems'; dcu_boxing was recorded at
-        # 'boxing'"). The claim reason above is specific to the soft-lowp matrix
-        # ops, so the override is too. `if op in routes` still holds the rule
-        # that the variant cannot route a key the default conf does not.
-        if platform in BOXING_VARIANT_FLAGGEMS_ROUTE_PLATFORMS:
-            measured = SOFT_LOWP_FLAGGEMS_MEASURED.get(platform, set())
-            routes.update({op: "flaggems" for op in measured if op in routes})
-        out[platform] = (
-            render(
-                platform,
-                BOXING_FALLBACK,
-                routes,
-                boxing=True,
-                variant=True,
-            ),
-            routes,
-            BOXING_FALLBACK,
-        )
-    return out
 
 
 def print_stats(built: dict) -> None:
@@ -4596,29 +4133,11 @@ def print_stats(built: dict) -> None:
 
 # Upper bound on the generate/read-back passes in main(). Reaching it means a
 # conf this run rewrites keeps changing the next run's inputs; see main().
-_MAX_GENERATION_PASSES = 4
-
-
-def _write_files(built: dict, variants: dict, check: bool) -> list:
-    """Write (or, with `check`, only list) every stale conf. Returns the names.
-
-    The variants come after the platform confs because the cuda one reads
-    backends_nvidia.conf, which codegen_ops.py writes -- this script never writes
-    that file, only the op list it lists from.
-    """
-    # Keyed by file name, not by platform: cuda/metax/dcu/ppu appear in BOTH
-    # dicts, and a platform-keyed dict let the variant overwrite the default
-    # conf's entry -- so the default files were never written and --check
-    # silently passed on a stale one.
+def _write_files(built: dict, check: bool) -> list:
+    """Write the generated configs or report stale files."""
     files = {
         f"backends_{platform}.conf": text for platform, (text, _, _) in built.items()
     }
-    files.update(
-        {
-            f"backends_{platform}_boxing.conf": text
-            for platform, (text, _, _) in variants.items()
-        }
-    )
     stale = []
     for name, text in sorted(files.items()):
         path = CONF_DIR / name
@@ -4662,45 +4181,12 @@ def main() -> int:
             path.write_text(text)
         return 0
 
-    # build_boxing_variants() reads each platform's triton gap set back from the
-    # conf file, and this run is about to rewrite those files, so one pass can
-    # see a stale file and emit a variant against it -- with the day-0 rules on
-    # the default confs (no boxing route there) the dcu variant came out one op
-    # different whenever the default confs had just changed. Iterate to a fixed
-    # point instead: the files are small, the pass is cheap, and the second pass
-    # is a no-op in the steady state. The bound is a guard against a cycle, not
-    # an expected path.
     built = build_all(CONF_DIR)
-    variants = build_boxing_variants(CONF_DIR, built)
-    if not args.check:
-        # --check never writes, so there is no fixed point for it to reach; it
-        # reports the one-pass answer, and a rewrite run (which does iterate) is
-        # what brings the files in line. From a consistent tree that is one pass,
-        # which is the state a CI checkout is always in.
-        for _ in range(_MAX_GENERATION_PASSES):
-            if not _write_files(built, variants, check=False):
-                break
-            # The default confs this pass just wrote are what the next pass
-            # reads back for its gap diff, so rebuild both from the tree.
-            built = build_all(CONF_DIR)
-            variants = build_boxing_variants(CONF_DIR, built)
-        else:
-            raise SystemExit(
-                "error: vendor conf generation did not converge in "
-                f"{_MAX_GENERATION_PASSES} passes -- a gap set read back from a "
-                "conf that this run rewrites is toggling. Check "
-                "boxing_triton_gaps() and the conf it reads for the platform "
-                "that keeps changing."
-            )
-
     if args.stats:
         print_stats(built)
-        if variants:
-            print("\nday-0 boxing-only variants:")
-            print_stats(variants)
         return 0
 
-    stale = _write_files(built, variants, check=True)
+    stale = _write_files(built, check=args.check)
     if args.check:
         if stale:
             print(

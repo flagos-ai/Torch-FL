@@ -20,7 +20,7 @@ output = compiled_model(input)
 **Key benefits**:
 - Automatic kernel fusion (no manual optimization needed), cutting per-op dispatch overhead
 - Graph stays on flagos: no cuda round trip, no copy at the graph boundary
-- Compatible with existing flagos dispatch (FlagGems Python/C++, CUDA boxing)
+- Compatible with existing flagos dispatch (FlagGems Python and C++ or vendor kernels)
 - Optional FlagTree compilation for multi-backend kernel generation (drop-in: it
   replaces `triton` at install time, so no code change is needed)
 
@@ -375,13 +375,19 @@ inductor generates Triton kernels that operate on flagos tensors directly.
    - The two names are not the same string everywhere. On Ascend the driver
      reports `GPUTarget(backend="npu", ...)` and `AscendBackend.supports_target`
      accepts only `"npu"`, but the package key is `"ascend"`
-   - `is_cuda_like=False` (Ascend only) routes hardware queries, raw streams and
-     generated device snippets away from `torch.cuda`, which does not exist there
+   - `is_cuda_like` selects the source for hardware properties. Stream lookup
+     uses the flagos device runtime on every build.
 
 3. **Device interface** (`torch_fl/compile/device_interface.py`)
    - `DeviceInterface` subclass: device state always from `torch.flagos`;
      hardware properties from `torch.cuda` on CUDA-like builds (the same physical
      GPU), from `torch.flagos` plus the ACL runtime on Ascend
+   - Eager stream views, the Inductor device interface, and generated Python
+     wrappers resolve the current queue through `torch_fl/flagos/_streams.py`.
+     On builds with a native stream registry, the raw binding reads the
+     registered PrivateUse1 guard, backed by the same device library as the
+     native host launcher. `torch.Stream(device="flagos")` requests a separate
+     queue on these builds.
    - Adds `"flagos"` to inductor's `GPU_TYPES` so `is_gpu()` is True and the
      Triton codegen path is taken instead of C++/CPU
    - Reports the hardware's backend name at the Triton boundary
@@ -395,15 +401,15 @@ inductor generates Triton kernels that operate on flagos tensors directly.
 4. **Codegen registration** (`torch_fl/compile/inductor_codegen.py`)
    - CUDA-like builds: device op overrides inheriting the CUDA ones, and the
      stock CUDA/Triton scheduling + wrapper pipeline
-   - Ascend: overrides that emit the ACL raw stream and `torch.flagos` device
-     calls, plain `TritonScheduling`, and *no* C++ wrapper — `CppWrapperGpu`
+   - Ascend: the shared Python stream/device snippets and plain
+     `TritonScheduling`. `CppWrapperGpu`
      emits CUDA-runtime C++, so the slot is left unregistered rather than
      pointing at something that cannot build. The C++ members raise
      `NotImplementedError` instead of emitting a translation unit CANN rejects
 
 4. **Dispatch integration**
    - Ops inductor does not fuse fall back to eager flagos dispatch
-     (FlagGems Python/C++ or CUDA boxing) with no changes needed
+     (FlagGems Python and C++ or vendor kernels) with no changes needed
 
 5. **GCU 64-bit guard** (`torch_fl/compile/triton_64bit_guard.py`)
    - GCU300 cannot compile a kernel that needs a 64-bit value, and one of the

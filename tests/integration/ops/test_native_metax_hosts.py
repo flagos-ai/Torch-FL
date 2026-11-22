@@ -233,3 +233,39 @@ def test_metax_native_launch_uses_tensor_device_and_current_stream():
         assert torch.ops.flagos.native_source_typed_hits("aten::cos") == hits + 3
     finally:
         torch_fl.flagos.set_device(initial)
+
+
+def test_metax_eager_and_native_host_share_a_side_stream():
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+    from torch_fl.compile.inductor_codegen import FlagOSDeviceOpOverrides
+
+    namespace = {}
+    exec(
+        FlagOSDeviceOpOverrides().import_get_raw_stream_as("get_raw_stream"), namespace
+    )
+    get_raw_stream = namespace["get_raw_stream"]
+
+    device = torch.device("flagos:0")
+    cpu = torch.linspace(-1.0, 1.0, 2048)
+    value = cpu.to(device)
+    side = torch.Stream(device=device)
+    default = get_raw_stream(device)
+    assert side.stream_id != default
+
+    model = torch_fl.native_host.compile(lambda x: torch.cos(x), dynamic=False)
+    hits = torch.ops.flagos.native_source_typed_hits("aten::cos")
+    with torch_fl.flagos.stream(side) as selected, torch.no_grad():
+        assert selected is None
+        assert torch_fl.flagos.current_stream(device).cuda_stream == side.stream_id
+        assert FlagOSDeviceInterface.get_raw_stream(0) == side.stream_id
+        assert get_raw_stream(0) == _launcher().current_stream(0) == side.stream_id
+        assert torch._C._cuda_getCurrentRawStream(0) == side.stream_id
+
+        eager = value + 0.25
+        actual = model(eager)
+
+    assert get_raw_stream(device) == default
+    assert model._flagos_host_backend.graphs[0]["execution_sha256"]
+    assert torch.ops.flagos.native_source_typed_hits("aten::cos") == hits + 1
+    side.synchronize()
+    torch.testing.assert_close(actual.cpu(), torch.cos(cpu + 0.25))

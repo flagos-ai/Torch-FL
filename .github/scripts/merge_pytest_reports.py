@@ -259,6 +259,11 @@ def read_pytest_session(marker, session):
             )
     session["exitcode"] = report["exitcode"]
     session["summary"] = report["summary"]
+    session["collection_failures"] = [
+        collector["nodeid"]
+        for collector in report.get("collectors", [])
+        if collector["outcome"] != "passed"
+    ]
     return report
 
 

@@ -30,7 +30,6 @@ namespace at::native::flagos {
 //   // cpp:
 //   ADD_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, "mm")
 //   REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kFlagGemsCpp, my_flaggems_cpp_mm)
-//   REGISTER_IMPL_TO_DISPATCHER(MmFn, mm_dispatcher, Backend::kBoxing,   my_cuda_mm)
 //
 //   // call (uses op_name "mm" for config lookup):
 //   mm_dispatcher(self, mat2, out);
@@ -156,7 +155,6 @@ class Dispatcher {
 
   void RegisterKernel(Backend device, FnPtr fn) {
     switch (device) {
-      case Backend::kBoxing:          cuda_fn_ = fn;              break;
       case Backend::kFlagGemsCpp:   flaggems_cpp_fn_ = fn;     break;
       case Backend::kFlagGems:      flaggems_fn_ = fn;         break;
       case Backend::kAscend:        ascend_fn_ = fn;           break;
@@ -233,8 +231,7 @@ class Dispatcher {
   // FLAGOS_SOFT_LOWP build's floating-point GEMMs as well as the FP8/FP4 ones
   // (the generated .inc cannot tell whether this build compiles the software
   // path), and the software path has to send the ordinary ones to whatever the
-  // conf names -- the vendor slot, boxing -- rather than to one hard-coded
-  // slot.
+  // conf names.
   //
   // A decoded FP8 pair asks first (RouteAcceptsDecoded) and then goes through
   // DecodedKernel: the two names can disagree, and the route a decoded pair
@@ -288,10 +285,7 @@ class Dispatcher {
   // flaggems for a key whose C++ slot is empty -- Medusa GPU, no liboperators --
   // lands on this file's own fallback wrappers, which answers with the pair
   // again. That degradation is the wrong answer here, so the fall-through is
-  // opt-in by naming a slot: FLAGOS_SOFT_LOWP_STAY_ON_ROUTE=boxing (or
-  // flaggems_cpp) hands a pair the named route cannot run to that slot instead
-  // of raising. A slot is not a conf key -- no conf names `boxing` -- so the
-  // flag is read here, where the difference is known.
+  // opt-in by naming a registered slot for the decoded pair.
   //
   // The kernel is returned rather than called here: the call belongs at the
   // call site, made on the kernel's own type (soft_lowp/ops.cc).
@@ -308,8 +302,7 @@ class Dispatcher {
       if (stay.empty()) {
         throw std::runtime_error(DecodedRefusalFor(route_key, backend));
       }
-      backend = ParseBackendName(stay);
-      fn = DecodedFallbackFn(backend);
+      fn = DecodedFallbackFn(stay, backend);
       if (!fn) throw std::runtime_error(DecodedRefusalFor(route_key, backend));
     }
     LogDispatch(route_key, backend);
@@ -341,34 +334,6 @@ class Dispatcher {
   }
 
  private:
-  // FLAGOS_FORCE_BACKEND asks for one backend family across the whole routing
-  // table, so a miss for the family it named is a hard error rather than a
-  // silent fall-through. Only `flaggems` and `vendor` get here: `tileops` is a
-  // repin of ops the conf already annotates `# tileops`, so a miss there means
-  // the op was never a TileOPs candidate and nothing was asked of it.
-  void ThrowIfForcedBackendMissing(const std::string& op_name,
-                                   Backend backend) const {
-    const std::string& forced = ForcedBackendMode();
-    if (forced.empty()) return;
-
-    if (forced == "flaggems" &&
-        (backend == Backend::kFlagGemsCpp || backend == Backend::kFlagGems)) {
-      throw std::runtime_error(
-          op_name +
-          ": FLAGOS_FORCE_BACKEND=flaggems but no FlagGems implementation is "
-          "compiled into this wheel (rebuild with FLAGOS_BUILD_FLAGGEMS_CPP=1 "
-          "or FLAGOS_BUILD_FLAGGEMS=1)");
-    }
-    if (forced == "vendor" && backend != Backend::kFlagGemsCpp &&
-        backend != Backend::kFlagGems && backend != Backend::kNone &&
-        backend != Backend::kTileOps) {
-      throw std::runtime_error(
-          op_name +
-          ": FLAGOS_FORCE_BACKEND=vendor but no vendor kernel is registered "
-          "for this op");
-    }
-  }
-
   // GetFn, plus the dtype escape from the FlagGems route.
   //
   // Existing platform capability guards predate configured dtype clauses.
@@ -385,18 +350,8 @@ class Dispatcher {
   // Only the Python route is guarded: the C++ one (kFlagGemsCpp) exists only
   // on the vendors that measured it, so its conf entries are already a per-op
   // decision made from a measurement.
-  // The build's own native kernel slot, with the backend name that selects it.
-  // Exactly one is ever populated: a build registers its native kernels into
-  // its own slot (kAscend on Ascend, kMthreads on MUSA, ...) and, on the
-  // CUDA-compatible platforms, boxing kernels into kBoxing -- which this does
-  // not offer. The boxing kernels are not this build's own (a CPU-torch shim or
-  // another vendor's runtime can host them), and the conf's own degradation
-  // path already reads a FlagGems route with no FlagGems kernel as
-  // `cuda_fn_ ? cuda_fn_ : flaggems_fn_`. Offering the slot when both exist
-  // made FlagGems a second runtime route: NVIDIA's conf leaves index_select off
-  // FlagGems for a broken kernel, and a FlagGems route could still land on the
-  // boxing kernel. Ordered most-specific-first so a build that somehow
-  // populated two still prefers the vendor's own kernels.
+  // The build's native kernel slot used when FlagGems cannot accept an input.
+  // Measured dtype exceptions are selected through the configured dtype routes.
   std::pair<FnPtr, Backend> VendorSlot() const {
     if (ascend_fn_)      return {ascend_fn_,      Backend::kAscend};
     if (mthreads_fn_)    return {mthreads_fn_,    Backend::kMthreads};
@@ -437,38 +392,12 @@ class Dispatcher {
 
   FnPtr GetFn(Backend device) const {
     switch (device) {
-      // The boxing kernel set is the opt-in (FLAGOS_BUILD_BOXING=ON); the
-      // default CUDA wheel is FlagGems-primary and compiles none of it. A
-      // platform ships ONE conf, so -- exactly as for the three sets below --
-      // the same file has to stay correct for both builds. Degrade to the
-      // FlagGems Python path rather than hard-failing on the empty slot: an op
-      // whose boxing kernel is absent is otherwise reachable only through the
-      // registration FlagGems installs itself, and returning nullptr there
-      // turns "this build does not box" into a dispatch error for ops that ran
-      // before the route moved. Same shape as the kFlagGems arm below.
-      case Backend::kBoxing:
-        return cuda_fn_ ? cuda_fn_ : flaggems_fn_;
-      // FlagGems C++ runtime is only compiled in for a FLAGOS_BUILD_FLAGGEMS_CPP=ON
-      // build (flaggems_cpp_kernels.cc, behind FLAGOS_FLAGGEMS_CPP), which needs
-      // liboperators.so built for the vendor. A platform ships ONE conf, so the
-      // conf cannot know whether that opt-in build is the one running: MetaX's
-      // conf routes ops here because a MACA-built FlagGems is worth using when
-      // present, and the same file has to stay correct when it is absent.
-      // Degrade to the boxing kernel rather than hard-failing on the empty slot.
-      // Boxing is preferred over the Python FlagGems path because these ops
-      // reach the C++ set precisely where the platform's triton backend is the
-      // weak link (metax rejects the SPLIT_K kwarg gems' bmm passes), so the
-      // Python path is not a safe substitute. Mirrors the kTileOps case below.
+      // Use the corresponding FlagGems kernel when the requested wrapper
+      // is unavailable in this build.
       case Backend::kFlagGemsCpp:
-        if (flaggems_cpp_fn_) return flaggems_cpp_fn_;
-        return cuda_fn_ ? cuda_fn_ : flaggems_fn_;
-      // FlagGems Python path is only compiled in for a FLAGOS_BUILD_FLAGGEMS=ON build
-      // (flaggems_python_kernels.cc, behind FLAGOS_FLAGGEMS_PYTHON). When uncompiled,
-      // degrade to the boxing kernel rather than raising "backend not registered".
-      // This keeps one conf correct for both builds (Python FlagGems ON/OFF).
+        return flaggems_cpp_fn_ ? flaggems_cpp_fn_ : flaggems_fn_;
       case Backend::kFlagGems:
-        if (flaggems_fn_) return flaggems_fn_;
-        return cuda_fn_ ? cuda_fn_ : flaggems_cpp_fn_;
+        return flaggems_fn_ ? flaggems_fn_ : flaggems_cpp_fn_;
       case Backend::kAscend:        return ascend_fn_;
       case Backend::kMthreads:      return mthreads_fn_;
       case Backend::kMetax:         return metax_fn_.load(std::memory_order_acquire);
@@ -487,7 +416,7 @@ class Dispatcher {
       // so fall back instead of hard-failing on an empty slot.
       case Backend::kTileOps:
         if (tileops_fn_) return tileops_fn_;
-        return cuda_fn_ ? cuda_fn_ : flaggems_cpp_fn_;
+        return flaggems_cpp_fn_;
       // "none" means the platform has no accelerated impl for this op. Codegen
       // is expected to skip m.impl() for it so the call reaches cpu_fallback
       // and never arrives here. Landing here means the registration and the
@@ -501,66 +430,21 @@ class Dispatcher {
     return nullptr;
   }
 
-  // Distinguishes "conf says none but the op was registered anyway" from a
-  // genuinely missing kernel. The first is a codegen/conf mismatch and the
-  // operator-support docs are the place to fix it; the second is a build gap.
-  //
-  // Every message keeps the phrase "backend not registered": it is what callers
-  // and tests match on to tell "this wheel cannot do that" from "the op is
-  // broken". The build set, when the wheel records one, is appended as the
-  // reason rather than replacing it.
-  static std::string DispatchFailureMessage(Backend backend) {
-    if (backend == Backend::kNone) {
-      return ": routed to 'none' (no accelerated impl on this platform) but the "
-             "op is registered on PrivateUse1 -- regenerate the vendor conf so "
-             "registration and routing agree";
-    }
-    std::string message = ": backend not registered";
-#if defined(FLAGOS_BUILTIN_KERNELS)
-    // The compile definition setup.py derives from the same kernel switches as
-    // the build record, so the wheel can name the missing set instead of
-    // leaving the user to guess whether it is a build gap or a broken install.
-    const char* kernel_set = KernelSetOf(backend);
-    if (kernel_set != nullptr &&
-        !flagos_env::ListedIn(FLAGOS_BUILTIN_KERNELS, kernel_set)) {
-      message += std::string(" (the '") + kernel_set +
-                 "' kernel set was not compiled into this wheel)";
-    }
-#endif
-    return message;
-  }
-
-  // That slot's kernel, or nullptr when the build has none.
-  FnPtr DecodedFallbackFn(Backend backend) const {
-    switch (backend) {
-      case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
-      case Backend::kBoxing:      return cuda_fn_;
-      case Backend::kNvidia:      return nvidia_fn_.load(std::memory_order_acquire);
-      case Backend::kHygon:       return hygon_fn_.load(std::memory_order_acquire);
-      default:                    return nullptr;
-    }
-  }
-
-  // The slots a decoded pair may be asked for by
-  // FLAGOS_SOFT_LOWP_STAY_ON_ROUTE, spelled the way a conf spells them. Only
-  // the two that can answer a decoded pair: a C++ FlagGems kernel (real, and
-  // does not run Python), or boxing.
-  static Backend ParseBackendName(const std::string& raw) {
-    if (flagos_env::EnvIs(raw.c_str(), "hygon")) return Backend::kHygon;
-    if (flagos_env::EnvIs(raw.c_str(), "nvidia")) return Backend::kNvidia;
-    const char* boxing[] = {"boxing", "cuda"};
-    for (const char* name : boxing) {
-      if (flagos_env::EnvIs(raw.c_str(), name)) return Backend::kBoxing;
-    }
-    const char* gemm[] = {"flaggems_cpp", "flagos"};
-    for (const char* name : gemm) {
-      if (flagos_env::EnvIs(raw.c_str(), name)) return Backend::kFlagGemsCpp;
+  // Decoded pairs only accept raw kernels from these slots.
+  FnPtr DecodedFallbackFn(const std::string& name, Backend& backend) const {
+    if (ParseBackendName(name, &backend)) {
+      switch (backend) {
+        case Backend::kFlagGemsCpp: return flaggems_cpp_fn_;
+        case Backend::kNvidia: return nvidia_fn_.load(std::memory_order_acquire);
+        case Backend::kHygon: return hygon_fn_.load(std::memory_order_acquire);
+        default: break;
+      }
     }
     TORCH_CHECK(false,
                 "FLAGOS_SOFT_LOWP_STAY_ON_ROUTE=\"",
-                raw,
-                "\" names no live slot for a decoded pair; use boxing or "
-                "flaggems_cpp");
+                name,
+                "\" names no live slot for a decoded pair; use "
+                "flaggems_cpp, nvidia or hygon");
   }
 
   // Why a decoded pair will not be handed to a route: the conf's answer for
@@ -594,79 +478,17 @@ class Dispatcher {
            "registered for";
   }
 
-  // Which kernel set provides a backend, named the way setup.py::KERNEL_SET_NAME
-  // and the KERNELS tuple in torch_fl/_build_config.py name it. nullptr for a
-  // backend that no kernel set owns.
-  static const char* KernelSetOf(Backend backend) {
-    switch (backend) {
-      case Backend::kBoxing:        return "boxing";
-      case Backend::kFlagGemsCpp: return "flaggems_cpp";
-      case Backend::kFlagGems:    return "flaggems";
-      case Backend::kTileOps:     return "tileops";
-      // Every remaining backend is the accelerator's own native kernel library
-      // (ACLNN, mudnn, topsaten, ...), which the single FLAGOS_BUILD_VENDOR switch
-      // compiles. There is one such library per build, never two.
-      case Backend::kAscend:
-      case Backend::kMthreads:
-      case Backend::kMetax:
-      case Backend::kTsingMicro:
-      case Backend::kEnflame:     return "vendor";
-      case Backend::kKunlunxin:   return "vendor";
-      case Backend::kIluvatar:    return "vendor";
-      case Backend::kCambricon:   return "vendor";
-      case Backend::kApple:       return "vendor";
-      case Backend::kDrobotics:   return "vendor";
-      case Backend::kNvidia:     return "vendor";
-      case Backend::kHygon:      return "vendor";
-      case Backend::kNone:
-      case Backend::kUncached:    return nullptr;
-    }
-    return nullptr;
-  }
-
-  // The names the dispatch log prints. Several are what the SDK-era conf spelled
-  // the same kernel (`musa`, `gcu`, `mps`, `flagos`, `flagos_python`) and are kept
-  // for the tests and logs that read them. tests/unit/test_ops_conf_log_names.py
-  // holds this list against the shipped confs: a conf key the log cannot print
-  // has no dispatch line to assert against.
   static void LogDispatch(const std::string& op_name, Backend backend) {
     static const bool enabled = LogEnabled("dispatch");
     if (!enabled) return;
     fprintf(stderr, "[flagos dispatch] %s -> %s\n", op_name.c_str(),
-            NameOf(backend));
-  }
-
-  // The name the dispatch log prints for `backend`.
-  static const char* NameOf(Backend backend) {
-    const char* name;
-    switch (backend) {
-      case Backend::kBoxing:        name = "boxing"; break;
-      case Backend::kFlagGemsCpp:   name = "flagos"; break;  // keep old name for test compat
-      case Backend::kFlagGems:      name = "flagos_python"; break;  // keep old name for test compat
-      case Backend::kAscend:        name = "ascend"; break;
-      case Backend::kMthreads:      name = "musa"; break;
-      case Backend::kMetax:         name = "metax"; break;
-      case Backend::kTsingMicro:    name = "tsingmicro"; break;
-      case Backend::kEnflame:       name = "gcu"; break;
-      case Backend::kKunlunxin:     name = "kunlunxin"; break;
-      case Backend::kIluvatar:      name = "iluvatar"; break;
-      case Backend::kCambricon:     name = "cambricon"; break;
-      case Backend::kTileOps:       name = "tileops"; break;
-      case Backend::kApple:         name = "mps"; break;
-      case Backend::kDrobotics:     name = "drobotics"; break;
-      case Backend::kNvidia:        name = "nvidia"; break;
-      case Backend::kHygon:         name = "hygon"; break;
-      case Backend::kNone:          name = "none"; break;
-      default:                      name = "unknown"; break;
-    }
-    return name;
+            BackendLogName(backend));
   }
 
   const char* op_name_ = nullptr;
   // Per-op backend cache for the hot operator() path (see comment there).
   // Publish the immutable entry as one pointer, including its dtype clauses.
   mutable std::atomic<const BackendConfigEntry*> cached_config_{nullptr};
-  FnPtr cuda_fn_           = nullptr;
   FnPtr flaggems_cpp_fn_   = nullptr;
   FnPtr flaggems_fn_       = nullptr;
   std::atomic<FnPtr> nvidia_fn_{nullptr};

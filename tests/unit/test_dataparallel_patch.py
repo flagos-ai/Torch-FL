@@ -43,6 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INIT = REPO_ROOT / "torch_fl" / "__init__.py"
+PARALLEL = REPO_ROOT / "torch_fl" / "compat" / "parallel.py"
 COMM_CC = REPO_ROOT / "csrc" / "bindings" / "dataparallel.cc"
 
 _DEVICE_TYPES = "_FLAGOS_DEVICE_TYPES"
@@ -87,17 +88,15 @@ class _Module:
         return iter(self._buffers)
 
 
-def _tree():
-    return ast.parse(INIT.read_text(encoding="utf-8"))
+def _tree(path=PARALLEL):
+    return ast.parse(path.read_text(encoding="utf-8"))
 
 
 def _function(tree, name):
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(
-        f"{name} is not defined at module level in torch_fl/__init__.py"
-    )
+    raise AssertionError(f"{name} is not defined at module level")
 
 
 def _helpers():
@@ -118,7 +117,8 @@ def _helpers():
     assert len(wanted) == len(_HELPERS) + 1, [ast.dump(n)[:40] for n in wanted]
     namespace = {}
     exec(
-        compile(ast.Module(body=wanted, type_ignores=[]), str(INIT), "exec"), namespace
+        compile(ast.Module(body=wanted, type_ignores=[]), str(PARALLEL), "exec"),
+        namespace,
     )
     return namespace
 
@@ -148,7 +148,7 @@ def test_module_device_type_reads_parameters_and_buffers():
 
 
 def test_optional_activation_installs_the_dataparallel_patches():
-    activation = _function(_tree(), "activate_optional_integrations")
+    activation = _function(_tree(INIT), "activate_optional_integrations")
     installers = next(
         node
         for node in ast.walk(activation)
@@ -162,9 +162,9 @@ def test_optional_activation_installs_the_dataparallel_patches():
         key.value: ast.unparse(value)
         for key, value in zip(installers.value.keys, installers.value.values)
     }
-    assert mapped["parallel_comm"] == "_patch_comm_for_flagos"
-    assert mapped["dataparallel"] == "_patch_dataparallel_for_flagos"
-    assert mapped["data_parallel"] == "_patch_data_parallel_for_flagos"
+    assert mapped["parallel_comm"] == "parallel.install_comm"
+    assert mapped["dataparallel"] == "parallel.install_dataparallel"
+    assert mapped["data_parallel"] == "parallel.install_data_parallel"
 
     prerequisites = next(
         node
@@ -181,7 +181,7 @@ def test_optional_activation_installs_the_dataparallel_patches():
 
 
 def test_comm_patch_hands_the_primitives_to_the_extension():
-    patch = _function(_tree(), "_patch_comm_for_flagos")
+    patch = _function(_tree(), "install_comm")
     calls = _called_names(patch)
     # The implementations live in the extension -- because they have to read and
     # write flagos tensors with C++ tensor ops, and because rebinding
@@ -203,7 +203,7 @@ def test_comm_patch_hands_the_primitives_to_the_extension():
 
 
 def test_comm_patch_scatter_restores_the_scope_it_sets():
-    scatter = _nested(_tree(), "_patch_dataparallel_for_flagos", "_patched_scatter")
+    scatter = _nested(_tree(), "install_dataparallel", "_patched_scatter")
     calls = [
         node
         for node in ast.walk(scatter)
@@ -277,7 +277,7 @@ def _called_names(function):
 
 
 def test_dataparallel_init_keeps_the_stock_path_for_non_flagos_modules():
-    init = _nested(_tree(), "_patch_dataparallel_for_flagos", "_patched_init")
+    init = _nested(_tree(), "install_dataparallel", "_patched_init")
     calls = _called_names(init)
     # The fallback: a module whose tensors are not on a flagos device must be
     # handed to the original __init__ untouched. (Commented in the source too --

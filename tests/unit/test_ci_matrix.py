@@ -30,17 +30,11 @@ SPEC = importlib.util.spec_from_file_location("ci_matrix", SCRIPT)
 MATRIX = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MATRIX)
 PLATFORMS = MATRIX._load_platforms(CONFIGS)
-# The platforms whose config opts into a second, CUDA-boxing lane. A platform
-# named in a selection always brings both of its lanes: they are two builds of
-# one wheel, and letting one run without the other is how they drift apart.
-BOXING = MATRIX.boxing_platforms(CONFIGS, PLATFORMS)
-LANES = MATRIX._schedule(PLATFORMS, BOXING)
+LANES = PLATFORMS
 
 
 def lanes(*platforms):
-    """The scheduled lanes a set of platform names stands for."""
-    selected = set(platforms)
-    return [lane for lane in LANES if MATRIX._platform_of(lane, BOXING) in selected]
+    return [platform for platform in PLATFORMS if platform in platforms]
 
 
 def _run(event="pull_request", files="", labels="", dispatch=""):
@@ -241,17 +235,16 @@ def test_routing_labels_take_precedence_over_changed_files(files):
         ("", LANES),
         ("all", LANES),
         ("mthreads,ascend,mthreads", lanes("ascend", "mthreads")),
-        # A platform name dispatches both of its lanes; a lane name alone is
-        # accepted only alongside its platform.
         ("hygon", lanes("hygon")),
-        ("nvidia-boxing", lanes("nvidia")),
     ],
 )
 def test_manual_selection(requested, expected):
     assert _run(event="workflow_dispatch", dispatch=requested)[1] == expected
 
 
-@pytest.mark.parametrize("requested", ["unknown", "all,ascend", "ascend,unknown"])
+@pytest.mark.parametrize(
+    "requested", ["unknown", "all,ascend", "ascend,unknown", "nvidia-boxing"]
+)
 def test_invalid_manual_selection_fails(requested):
     result, selected = _run(event="workflow_dispatch", dispatch=requested)
     assert result.returncode == 2
@@ -260,9 +253,7 @@ def test_invalid_manual_selection_fails(requested):
 
 def test_missing_watch_metadata_falls_back_to_all(tmp_path):
     (tmp_path / "cuda.yml").write_text("display_name: CUDA\n")
-    assert MATRIX._platforms_from_files(["op.cc"], ["nvidia"], tmp_path, []) == [
-        "nvidia"
-    ]
+    assert MATRIX._platforms_from_files(["op.cc"], ["nvidia"], tmp_path) == ["nvidia"]
     assert MATRIX._platforms_from_files(None, PLATFORMS, CONFIGS) == LANES
 
 

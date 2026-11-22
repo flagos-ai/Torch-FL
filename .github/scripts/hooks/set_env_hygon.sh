@@ -121,13 +121,8 @@ VENDOR_TORCH_ROOT="${VENDOR_FIELDS[2]}"
 VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[3]}"
 VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
 
-# DCU is a CUDA-ABI platform: the DTK torch wheel is a hipified build whose HIP
-# kernels are registered under the CUDA dispatch key, so torch_fl reaches them
-# through that dispatch key -- with the generated boxing kernels on the boxing
-# lane (BOXING_LANE=1), and with the DTK-native routes backends_hygon.conf names
-# on the vendor lane. libtorch_hip.so is the DTK analogue of CUDA's
-# libtorch_cuda.so; the bundle script stages it (plus the core .so) into
-# torch_fl/lib_hygon for a self-contained wheel on both lanes.
+# The DTK torch package supplies libtorch_hip.so for the Hygon runtime bundle.
+# The ordinary wheel uses the operator routes in backends_hygon.conf.
 if [[ ! -f "$VENDOR_TORCH_LIB/libtorch_hip.so" ]]; then
   echo "::error::$VENDOR_TORCH_LIB has no libtorch_hip.so, not a DTK torch/lib" >&2
   exit 1
@@ -189,9 +184,7 @@ echo "CPU torch target: $CPU_TORCH_VERSION+cpu"
 # Isolated venv with the matching CPU-only torch wheel. Unlike CUDA, DCU does
 # not stage libtorch_cuda.so into .libtorch_cuda_assets; the DTK forked libtorch
 # .so are bundled into torch_fl/lib_hygon by bundle_hygon_libtorch.sh below.
-suffix=""
-if [[ "${BOXING_LANE:-}" == 1 ]]; then suffix=-boxing; fi
-VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-hygon-${CI_STAGE}${suffix}}"
+VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-hygon-${CI_STAGE}}"
 create_runtime_venv "$VENDOR_PYTHON"
 "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
   --target-python "$VENV_PYTHON" \
@@ -286,22 +279,6 @@ export PATH="$VENV_ROOT/bin:$PATH"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=""
 export FLAGOS_ACCELERATOR=dcu
-# Both lanes stage the hipified DTK libtorch into the bundle and assert
-# libtorch_hip.so/libc10_hip.so: that is the platform's vendor path, not the
-# boxing kernels. What BOXING_LANE adds is the generated CUDA boxing kernel set
-# (off by default for every accelerator, cmake/flagos_platforms.json), which is
-# the explicit opt-in a user makes with FLAGOS_BUILD_BOXING=1.
-if [[ "${BOXING_LANE:-}" == "1" ]]; then
-  export FLAGOS_BUILD_BOXING=1
-  # The day-0 conf a boxing wheel needs (AGENTS.md, "Day-0 boxing confs"):
-  # FlagGems where this build has it, boxing for everything else, instead of
-  # the default conf's DTK-native routes.
-  export FLAGOS_BACKEND_CONFIG="${FLAGOS_BACKEND_CONFIG:-$REPO_ROOT/torch_fl/configs/backends_hygon_boxing.conf}"
-  if [[ ! -f "$FLAGOS_BACKEND_CONFIG" ]]; then
-    echo "::error::the DCU boxing lane needs the day-0 conf $FLAGOS_BACKEND_CONFIG"
-    exit 1
-  fi
-fi
 # FlagGems on DCU goes through the Python (Triton) path, not the C++ wrapped
 # one: the flagtree hcu backend lands the kernels on the HIP runtime, which is
 # exactly the CUDA-compatible path a kernel library needs here. Mirrors the
@@ -363,10 +340,8 @@ fi
 FLAGOS_VENDOR_TORCH_LIB="$FLAGOS_VENDOR_TORCH_LIB" \
   PYTHON="$VENV_PYTHON" bash scripts/vendor/bundle_hygon_libtorch.sh
 
-# Kernel sets are a build input (setup.py records them in
-# torch_fl/_build_config.py), so a lane that silently got the other one would run
-# the other lane's tests. Asserted here, before the import gate below.
-python - "$([[ "${BOXING_LANE:-}" == "1" ]] && echo boxing || echo vendor)" <<'PY'
+# Check the build record before importing the extension.
+python - <<'PY'
 import importlib.machinery
 import importlib.util
 import sys
@@ -380,10 +355,7 @@ _config = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_config)
 kernels = tuple(_config.KERNELS)
 assert "flaggems" in kernels, kernels
-if sys.argv[1] == "boxing":
-    assert "boxing" in kernels, kernels
-else:
-    assert "boxing" not in kernels, kernels
+assert "boxing" not in kernels, kernels
 print(f"Kernel sets: {kernels}")
 PY
 
@@ -600,10 +572,6 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     export_ci_env FLAGOS_SDK_VERSION
   fi
 
-  # The boxing lane assigns these; the vendor lane leaves them unset, and
-  # export_ci_env reads every name under `set -u`. Assign the empty default here
-  # so both lanes persist an explicit value.
-  : "${FLAGOS_BUILD_BOXING:=}"
   : "${FLAGOS_BACKEND_CONFIG:=}"
-  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BUILD_BOXING FLAGOS_BACKEND_CONFIG ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
+  export_ci_env PATH VIRTUAL_ENV PYTHONNOUSERSITE PYTHONPATH FLAGOS_ACCELERATOR FLAGOS_BACKEND_CONFIG ROCM_PATH FLAGOS_VENDOR_TORCH_LIB FLAGGEMS_DIR FLAGOS_BUILD_FLAGGEMS_CPP FLAGOS_BUILD_FLAGGEMS TORCH_DEVICE_BACKEND_AUTOLOAD CMAKE_PREFIX_PATH LIBRARY_PATH LD_LIBRARY_PATH
 fi

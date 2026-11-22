@@ -87,19 +87,6 @@ def test_the_runner_sources_the_library():
     assert SOURCE_LINE in RUNNER.read_text(encoding="utf-8")
 
 
-def test_the_cuda_script_still_selects_its_interpreter_per_call():
-    """CUDA drives several interpreters, so it must set PIP_RETRY_PYTHON.
-
-    The shared pip_retry defaults to $VENV_PYTHON; CUDA's bootstrap/vendor steps
-    need a different one, so every call has to name it or the wrong interpreter
-    is used silently.
-    """
-    text = (HOOKS_DIR / "set_env_nvidia.sh").read_text(encoding="utf-8")
-    calls = re.findall(r"pip_retry ", text)
-    prefixed = re.findall(r'PIP_RETRY_PYTHON="\$[A-Za-z_]+" pip_retry ', text)
-    assert calls and len(calls) == len(prefixed), (len(calls), len(prefixed))
-
-
 def test_the_library_defines_every_shared_phase():
     text = LIB.read_text(encoding="utf-8")
     for fn in SHARED_PHASES:

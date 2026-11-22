@@ -33,6 +33,16 @@ UNKNOWN_VERSION_MARKERS = {"unknown", "latest", "none", "n/a"}
 PLATFORM_TABLE = Path(__file__).resolve().parents[2] / "cmake" / "flagos_platforms.json"
 
 
+def _platform_table_path():
+    if PLATFORM_TABLE.is_file():
+        return PLATFORM_TABLE
+    try:
+        dist = metadata.distribution("torch-fl")
+    except metadata.PackageNotFoundError:
+        return PLATFORM_TABLE
+    return Path(dist.locate_file("torch_fl/_platforms.json"))
+
+
 def platform_vendor(name):
     """The vendor sharing ``name``'s platform row, or ``None``.
 
@@ -41,12 +51,11 @@ def platform_vendor(name):
     which is what a CI lane exports. A wheel records the id, so comparing the
     strings alone rejects the vendor spelling of the platform it was built for.
 
-    The table is read only when the repository is at hand. A preflight installed
-    beside a wheel has no table, and then the comparison stays exact -- failing
-    closed rather than guessing that two names mean the same thing.
+    Read the repository table or the copy staged into the installed wheel.
+    For an older installation without a table, callers compare names exactly.
     """
     try:
-        table = json.loads(PLATFORM_TABLE.read_text(encoding="utf-8"))
+        table = json.loads(_platform_table_path().read_text(encoding="utf-8"))
         accelerators = table["accelerators"]
     except (OSError, ValueError, KeyError):
         return None

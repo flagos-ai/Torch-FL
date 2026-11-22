@@ -25,6 +25,7 @@ import subprocess
 import sys
 import sysconfig
 from distutils.command.clean import clean
+from pathlib import Path
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as _build_ext
@@ -35,95 +36,49 @@ from setuptools.command.editable_wheel import editable_wheel as _editable_wheel
 IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
-#: Vendor layer -> build-table platform id, mirroring ``vendor`` in
-#: cmake/flagos_platforms.json (a test keeps the two equal). A build may name
-#: either half: the vendor (nvidia, hygon, mthreads, enflame, thead, drobotics,
-#: apple) or the platform id that keys the table (cuda, dcu, musa, gcu, ppu,
-#: bpu, mps). The vendor is the public name -- it is also the
-#: flagos-pypi-<lane> a wheel publishes to -- while the platform id stays the
-#: table/cmake/CI key, so a wheel built as either lands on the same row.
-_VENDOR_TO_PLATFORM = {
-    "ascend": "ascend",
-    "apple": "mps",
-    "drobotics": "bpu",
-    "enflame": "gcu",
-    "hygon": "dcu",
-    "iluvatar": "iluvatar",
-    "kunlunxin": "kunlunxin",
-    "metax": "metax",
-    "mthreads": "musa",
-    "nvidia": "cuda",
-    "thead": "ppu",
-    "tsingmicro": "tsingmicro",
-    "cambricon": "cambricon",
-}
-
-
-def _normalize_accelerator(raw: str) -> str:
-    """Build-table platform id for a FLAGOS_ACCELERATOR value.
-
-    Identity for a platform id (the historical spelling every CI lane and doc
-    uses), a mapping for a vendor name, "" for anything unknown (the caller
-    reports it against the table's own list). A vendor name prints one line
-    saying which row it resolved to, so a log of the build names both halves.
-    """
-    value = raw.strip().lower()
-    if value in _VENDOR_TO_PLATFORM:
-        platform = _VENDOR_TO_PLATFORM[value]
-        if platform != value:
-            print(
-                f"[setup] FLAGOS_ACCELERATOR={value} is the vendor name; "
-                f"building the '{platform}' platform ({value})"
-            )
-        return platform
-    # The vendor is also accepted as the value the build switches resolve for:
-    # an accelerator whose vendor is not a table key (apple for mps, drobotics
-    # for bpu) arrives at _platform_entry() as that vendor, and the row it needs
-    # is keyed by the platform id `_VENDOR_TO_PLATFORM` maps it back to.
-
-    # The Nexus lane spells D-Robotics with a hyphen; identifiers cannot.
-    if value == "d-robotics":
-        # The Nexus lane spelling; identifiers and the table drop the hyphen.
-        return "bpu"
-    return value
-
-
-FLAGOS_ACCELERATOR = _normalize_accelerator(
-    os.environ.get("FLAGOS_ACCELERATOR", "cuda")
-)
-
-#: Build-table platform id -> vendor, for the build record. A wheel records the
-#: vendor, because that is the name every runtime reader compares against (the
-#: accelerator selects a conf, drives the packaging policy and picks the vendor
-#: hooks); the platform id stays the table/cmake/CI key so the switch lists, the
-#: pins and the lane files keep resolving.
-_PLATFORM_TO_VENDOR = {
-    platform: vendor for vendor, platform in _VENDOR_TO_PLATFORM.items()
-}
-
-# Where the sources live. Distinct from BASE_DIR, which is repointed at a
-# scratch tree when the generated files are redirected somewhere else -- the
-# files this build reads back (torch_fl/_env.py, cmake/flagos_platforms.json) do
-# not move with them.
+# Generated build files can be redirected to a staging tree.
 SOURCE_DIR = os.path.dirname(os.path.realpath(__file__))
-
 BASE_DIR = SOURCE_DIR
 
 _PLATFORM_TABLE = None
 
 
 def _platform_table() -> dict:
-    """cmake/flagos_platforms.json: the platform/build matrix shared with CMake.
-
-    CMakeLists.txt reads the same file, so the kernel switches, the
-    bundled-libtorch dir, the platform list and the pins have one definition.
-    """
+    """Read the platform and kernel matrix shared with CMake."""
     global _PLATFORM_TABLE
     if _PLATFORM_TABLE is None:
         path = os.path.join(SOURCE_DIR, "cmake", "flagos_platforms.json")
         with open(path, encoding="utf-8") as handle:
             _PLATFORM_TABLE = json.load(handle)
     return _PLATFORM_TABLE
+
+
+_PLATFORM_TO_VENDOR = {
+    platform: row["vendor"]
+    for platform, row in _platform_table()["accelerators"].items()
+}
+_VENDOR_TO_PLATFORM = {
+    vendor: platform for platform, vendor in _PLATFORM_TO_VENDOR.items()
+}
+
+
+def _normalize_accelerator(raw: str) -> str:
+    """Resolve a build input to the platform row used by CMake."""
+    value = raw.strip().lower()
+    if value == "d-robotics":
+        value = "drobotics"
+    platform = _VENDOR_TO_PLATFORM.get(value, value)
+    if platform != value:
+        print(
+            f"[setup] FLAGOS_ACCELERATOR={value} is the vendor name; "
+            f"building the '{platform}' platform ({value})"
+        )
+    return platform
+
+
+FLAGOS_ACCELERATOR = _normalize_accelerator(
+    os.environ.get("FLAGOS_ACCELERATOR", "cuda")
+)
 
 
 def _platform_entry(accelerator: str) -> dict:
@@ -135,25 +90,17 @@ def _platform_entry(accelerator: str) -> dict:
     """
     table = _platform_table()
     rows = table["accelerators"]
-    try:
-        return rows[accelerator]
-    except KeyError:
-        pass
-    for row in rows.values():
-        if row.get("vendor") == accelerator:
-            return row
+    platform = _VENDOR_TO_PLATFORM.get(accelerator, accelerator)
+    if platform in rows:
+        return rows[platform]
     known = ", ".join(sorted(set(rows) | {r["vendor"] for r in rows.values()}))
     raise ValueError(
         f"Unknown FLAGOS_ACCELERATOR '{accelerator}'. Expected one of: {known}"
     ) from None
 
 
-# The kernel sets a build can compile in, and their build-record names, from the
-# shared table. Each name is simultaneously an environment variable, a CMake
-# option() and one entry of the generated build_config.KERNELS, so no
-# env-name -> -D-name -> record-name translation exists to fall out of sync.
+# The environment variables and CMake options for requesting kernel sets.
 KERNEL_SWITCHES = tuple(_platform_table()["kernel_switches"])
-KERNEL_SET_NAME = dict(_platform_table()["kernel_set_names"])
 
 # Directory inside the wheel holding a bundled forked libtorch, for the backends
 # that ship one (see scripts/vendor/bundle_*_libtorch.sh). "lib" means "no separate
@@ -398,10 +345,7 @@ def _metax_path_from_env() -> str:
 def _setup_metax_build_env(env: dict) -> str:
     """PATH/LD_LIBRARY_PATH for the MetaX SDK. Returns MACA_PATH.
 
-    MetaX is a CUDA-boxing build: host g++ compiles the generated boxing kernels
-    against maca's cu-bridge headers, so the SDK's include/lib directories have
-    to be reachable. The mxcc/cucc device compiler belonged to the retired
-    native-kernel path, so its absence is no longer an error here.
+    The MetaX runtime uses the SDK's cu-bridge headers and libraries.
     """
     metax_path = _metax_path_from_env()
     cu_bridge = os.path.join(metax_path, "tools", "cu-bridge")
@@ -652,25 +596,18 @@ def _vendor_kernel_switches(accelerator: str) -> dict[str, bool]:
     """What one accelerator builds by default, before any explicit environment value.
 
     The middle of the three layers in _kernel_switches, and the only one that
-    differs per vendor. The values -- and the per-platform rationale (why MetaX
-    has no native kernels, why Ascend/GCU/MUSA turn boxing off, why BPU drops
-    FlagGems, ...) -- live in cmake/flagos_platforms.json, next to the CMake side
-    that consumes the same table.
+    differs per vendor. The defaults and their rationale live in
+    cmake/flagos_platforms.json, which CMake and setuptools both read.
     """
     return dict(_platform_entry(accelerator)["kernel_defaults"])
 
 
 def _kernel_switches(accelerator: str) -> dict[str, bool]:
-    """Resolve the five kernel-set switches for one accelerator.
-
-    The single place that decides what a build compiles in. Both the -D list
-    handed to CMake and the KERNELS tuple written into the build record come
-    from here, so the wheel cannot be described as something it is not.
+    """Resolve the requested kernel-set switches before CMake configures.
 
     Order: the CMake option() default, then what this accelerator builds by
-    default, then an explicit environment value, then a pin. An explicit value
-    that contradicts a pin raises rather than being dropped, because CMake would
-    ignore it and the resulting record would be wrong.
+    default, then an explicit environment value, then a pin. An explicit
+    request that contradicts a platform pin raises.
     """
     resolved = dict.fromkeys(KERNEL_SWITCHES, True)
     resolved.update(_vendor_kernel_switches(accelerator))
@@ -680,6 +617,11 @@ def _kernel_switches(accelerator: str) -> dict[str, bool]:
     # here for the same reason it does at run time, instead of the build
     # reading it as "on" and compiling a set the user never asked for.
     env = _env_module()
+    if env.flag("FLAGOS_BUILD_BOXING"):
+        raise ValueError(
+            "FLAGOS_BUILD_BOXING has been removed. "
+            "Use the platform's default FlagGems or vendor build."
+        )
     pinned = _pinned_kernel_switches(accelerator)
     for name in KERNEL_SWITCHES:
         requested = env.flag(name, resolved[name])
@@ -721,7 +663,7 @@ def _torch_cxx11_abi() -> str:
     return "1" if torch._C._GLIBCXX_USE_CXX11_ABI else "0"
 
 
-def build_deps():
+def build_deps(*, inplace=False):
     build_dir = os.path.join(BASE_DIR, "build")
     os.makedirs(build_dir, exist_ok=True)
     # The MetaX cu-bridge shim, built at import and loaded RTLD_GLOBAL, has to be
@@ -757,21 +699,8 @@ def build_deps():
         cmake_args.append("-DFLAGOS_TORCH_CXX11_ABI=" + torch_cxx11_abi)
 
     cmake_args.append(f"-DFLAGOS_ACCELERATOR={FLAGOS_ACCELERATOR}")
-    aliases = _platform_aliases(FLAGOS_ACCELERATOR)
-    if aliases:
-        # The names, then the one CMake enters. A list (-D a;b), not a JSON
-        # array: it needs no quoting after `=`, and cmake/FlagosPlatforms.cmake
-        # reads the last item as the target for any of the others.
-        cmake_args.append(
-            "-DFLAGOS_ACCELERATOR_ALIASES=" + ";".join(aliases + [FLAGOS_ACCELERATOR])
-        )
-
-    # What gets compiled in, resolved in one place so the wheel can describe
-    # itself accurately. _kernel_switches() is also what _write_build_config()
-    # reads, so the -D list and the KERNELS record cannot disagree.
-    #
-    # The per-vendor rationale (why MetaX has no native kernels, why Ascend
-    # turns boxing off, ...) lives in cmake/flagos_platforms.json.
+    # Pass the requested switches. CMake checks SDK availability and records
+    # the effective kernel sets for packaging.
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
     for switch in KERNEL_SWITCHES:
         cmake_args.append(f"-D{switch}={'ON' if kernels[switch] else 'OFF'}")
@@ -853,123 +782,43 @@ def build_deps():
 
     subprocess.check_call([cmake] + build_args, cwd=build_dir, env=build_env)
     _verify_built_native_libs()
-    _bundle_cuda_assets()
-    _write_build_config()
-    _write_environment_platform_alias()
+    _bundle_nvidia_native_vendor()
+    with open(os.path.join(build_dir, "build-config.json"), encoding="utf-8") as f:
+        build_config = json.load(f)
+    _write_build_config(build_config, inplace=inplace)
+    return build_config
 
 
-def _write_build_config() -> None:
-    """Record what this wheel was built for.
+def _metax_config_path(inplace: bool) -> Path:
+    # Leave the checked-in default intact for an in-place build.
+    return Path("lib" if inplace else "configs") / "backends_metax.conf"
 
-    torch_fl._select_backend_config() runs at import time, before `import torch`,
-    so it cannot sniff torch.version.hip to tell a DCU build apart. Recording the
-    accelerator as ACCELERATOR here lets it pick backends_hygon.conf without the
-    user having to keep FLAGOS_ACCELERATOR set at run time.
 
-    The two attribute names are the record's own vocabulary, not the switches':
-    ACCELERATOR holds a platform value and KERNELS holds kernel-set values, while
-    the build inputs a user sets are FLAGOS_ACCELERATOR and the five
-    FLAGOS_BUILD_* flags.
-
-    KERNELS records the compiled kernel sets, because the accelerator alone does
-    not describe a wheel: two MetaX wheels built with different kernel-set flags
-    share a FLAGOS_ACCELERATOR and are not the same wheel. Run-time code that
-    used to infer the kernel set from an environment variable reads this
-    instead, so there is nothing left to keep in sync by hand.
-
-    Both values come from _kernel_switches(), the same function whose output
-    becomes the -D list handed to CMake, so this file cannot describe a build
-    other than the one that produced it.
-    """
-    kernels = _kernel_switches(FLAGOS_ACCELERATOR)
-    compiled = tuple(sorted(KERNEL_SET_NAME[s] for s in KERNEL_SWITCHES if kernels[s]))
+def _write_build_config(build_config: dict, *, inplace=False) -> None:
+    """Write the platform identity and kernel sets selected by CMake."""
+    platform = build_config["platform"]
+    vendor = build_config["vendor"]
+    compiled = sorted(build_config["kernels"])
     body = ", ".join(f'"{name}"' for name in compiled)
     if len(compiled) == 1:
         body += ","
+    native_hosts = build_config["native_hosts"]
     path = os.path.join(BASE_DIR, "torch_fl", "_build_config.py")
     content = (
         "# AUTO-GENERATED by setup.py at build time. Do not edit.\n"
-        f'ACCELERATOR = "{_PLATFORM_TO_VENDOR.get(FLAGOS_ACCELERATOR, FLAGOS_ACCELERATOR)}"\n'
+        f'PLATFORM = "{platform}"\n'
+        f'ACCELERATOR = "{vendor}"\n'
         f"KERNELS = ({body})\n"
-        f"NATIVE_HOSTS = {_env_module().flag('FLAGOS_BUILD_NATIVE_HOST')}\n"
+        f"NATIVE_HOSTS = {native_hosts}\n"
         f"NATIVE_VENDOR = {_native_vendor_cohort() is not None}\n"
     )
+    if native_hosts and platform == "metax":
+        content += f"BACKEND_CONFIG = {_metax_config_path(inplace).as_posix()!r}\n"
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
 
-def _platform_aliases(accelerator: str) -> list[str]:
-    """Every other name for `accelerator`'s platform: its vendor, when it differs.
-
-    CMake's per-platform enters are one spelling per platform -- `_flagos_is_<id>`
-    for most, `_flagos_is_metax` for the row whose vendor is also its id -- so a
-    build told the vendor of a row whose id differs (`mthreads`, `hygon`,
-    `apple`, `nvidia`) was left on the default arms, and a build told the row
-    that shares `metax`'s vendor stayed there rather than entering the CUDA
-    arms its toolkit answers. Both sides resolve any name in this list to its
-    last item, which is the row. Takes its argument rather than reading the
-    build's: a later read of setup.py must answer for this build only.
-    """
-    target = _alias_target(accelerator)
-    return [] if target is None else [accelerator, target]
-
-
-def _alias_target(platform: str) -> str | None:
-    """The row `platform` resolves to, when that is not itself.
-
-    The vendor, when it differs from the id; for a row that is its own vendor
-    (`metax`) the id of the platform it shares a vendor with, because its
-    toolkit answers that platform's arms. No other row shares a vendor, so the
-    answer is a fact of the table rather than a lookup here.
-    """
-    vendor = _PLATFORM_TO_VENDOR.get(platform)
-    if vendor is None:
-        return None
-    if vendor != platform:
-        return vendor
-    return _SHARED_VENDOR.get(platform)
-
-
-#: A row whose vendor is also its id, and the row it shares that vendor with.
-_SHARED_VENDOR = {"metax": "cuda"}
-
-
-def _write_environment_platform_alias() -> None:
-    """Let this build enter the other spelling of its platform.
-
-    A build is told either its platform id or its vendor (`FLAGOS_ACCELERATOR`
-    accepts both), but the environment of a later process may carry the one
-    this build was not told. CMake enters exactly one spelling
-    (`_flagos_is_<id>`), so the other fell through to the default arms -- a
-    MetaX build told `nvidia` compiled the NVIDIA runtime sources and then
-    asked for Ascend's headers. The vendor of the value the environment
-    carried is an alias even where the table keys the platform by it (`metax`
-    is both), because CMake's per-platform enters for that name are `metax`'s
-    and the arms the platform needs are keyed on the id.
-
-    CMake writes the platform marker before any of this (it runs first); this
-    file carries the same facts to torch_fl, which reads it in preference to the
-    marker so a `metax` marker still resolves to `metax`.
-    """
-    path = os.path.join(BASE_DIR, "torch_fl", "_platform_alias.py")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    content = (
-        "# AUTO-GENERATED by setup.py at build time. Do not edit.\n"
-        '"""The table row this wheel was built for, and the other names for it."""\n'
-        "\n"
-        f"ACCELERATOR = {FLAGOS_ACCELERATOR!r}\n"
-        f"ALIASES = {_platform_aliases(FLAGOS_ACCELERATOR)!r}\n"
-        "\n"
-        "\n"
-        "def platform_from(name):\n"
-        '    """``name`` as the table id this wheel was built for."""\n'
-        "    return ACCELERATOR if name in ALIASES else name\n"
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-
-def _write_compatibility_manifest(wheel_version: str) -> None:
+def _write_compatibility_manifest(wheel_version: str, build_config: dict) -> None:
     """Write artifact facts after the native build, before wheel staging."""
     import torch
 
@@ -984,33 +833,25 @@ def _write_compatibility_manifest(wheel_version: str) -> None:
     preflight = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(preflight)
 
-    kernels = _kernel_switches(FLAGOS_ACCELERATOR)
-    compiled = [KERNEL_SET_NAME[name] for name in KERNEL_SWITCHES if kernels[name]]
-    # vendor_torch_libraries is the platform's policy; a `vendor_torch_gate` names
-    # the kernel switch the build has to compile for the wheel to actually source
-    # and ship a vendor libtorch. CUDA-ABI platforms gate on boxing: the generated
-    # boxing kernels are the only consumer of a vendor libtorch there, so a
-    # FlagGems-primary wheel (the default) ships none and must not be asked for
-    # vendor provenance at release time. DTK's bundled device libraries also
-    # provide runtime hooks and generators to its non-boxing CPU frontend.
-    entry = _platform_entry(FLAGOS_ACCELERATOR)
-    gate = entry.get("vendor_torch_gate")
-    hygon_device_bundle = entry["vendor"] == "hygon" and os.path.isfile(
-        os.path.join(BASE_DIR, "torch_fl", _BUNDLE_LIBDIR, "libtorch_hip.so")
+    platform = build_config["platform"]
+    bundle_libdir = build_config["bundle_libdir"]
+    entry = _platform_entry(platform)
+    hygon_device_bundle = build_config["vendor"] == "hygon" and os.path.isfile(
+        os.path.join(BASE_DIR, "torch_fl", bundle_libdir, "libtorch_hip.so")
     )
     native_vendor = _native_vendor_cohort()
     manifest = preflight.make_manifest(
-        platform=FLAGOS_ACCELERATOR,
+        platform=platform,
         wheel_version=wheel_version,
-        kernels=compiled,
+        kernels=build_config["kernels"],
         bundle_libdir=(
             "native_host/_generated/metax_vendor"
-            if native_vendor is not None and FLAGOS_ACCELERATOR == "metax"
-            else _BUNDLE_LIBDIR
+            if native_vendor is not None and platform == "metax"
+            else bundle_libdir
         ),
         vendor_torch_libraries=native_vendor is not None
         or hygon_device_bundle
-        or (entry["vendor_torch_libraries"] and (gate is None or kernels[gate])),
+        or entry["vendor_torch_libraries"],
         requirements=_install_requires(),
         torch_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI),
         sdk_version=os.environ.get("FLAGOS_SDK_VERSION"),
@@ -1038,17 +879,10 @@ def _native_vendor_cohort():
     ):
         return None
     kernels = _kernel_switches(FLAGOS_ACCELERATOR)
-    if (
-        kernels["FLAGOS_BUILD_BOXING"]
-        or not kernels["FLAGOS_BUILD_VENDOR"]
-        or (
-            FLAGOS_ACCELERATOR == "cuda"
-            and _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
-        )
+    if not kernels["FLAGOS_BUILD_VENDOR"] or (
+        FLAGOS_ACCELERATOR == "cuda" and _env_module().flag("FLAGOS_SKIP_CUDA_ASSETS")
     ):
-        raise RuntimeError(
-            "native vendor precision requires bundled non-boxing vendor libraries"
-        )
+        raise RuntimeError("native vendor precision requires bundled vendor libraries")
     source = os.path.join(SOURCE_DIR, "torch_fl/native_host/vendor_cohort.py")
     spec = importlib.util.spec_from_file_location("torch_fl_vendor_cohort", source)
     if spec is None or spec.loader is None:
@@ -1066,60 +900,14 @@ def _native_vendor_cohort():
     return module, cohort
 
 
-def _bundle_cuda_assets() -> None:
-    """Copy the external CUDA .so assets into torch_fl/lib so the wheel is
-    self-contained.
-
-    torch_fl's CUDA backend reuses PyTorch's registered CUDA kernels via an
-    externally-supplied libtorch_cuda.so (CPU-only pip torch does not ship it).
-    Historically this was LD_PRELOAD-ed by scripts/vendor/with_nvidia_libtorch.sh; for a
-    single self-contained wheel we bundle the assets and preload them from
-    torch_fl/__init__.py before `import torch` (see that doc, constraint 1).
-    CUDA only.
-
-    Set FLAGOS_SKIP_CUDA_ASSETS=1 to skip (e.g. a slim build for a machine that
-    supplies libtorch_cuda.so out-of-band).
-    """
+def _bundle_nvidia_native_vendor() -> None:
+    """Stage the libraries for the optional NVIDIA native precision module."""
     if FLAGOS_ACCELERATOR != "cuda":
         return
     native_vendor = _native_vendor_cohort()
     if native_vendor is not None:
         module, cohort = native_vendor
         module.bundle(cohort, os.path.join(BASE_DIR, "torch_fl"))
-        return
-    # A FlagGems-primary CUDA wheel is built with FLAGOS_BUILD_BOXING=OFF (the
-    # default). It compiles no boxing kernels and has no vendor torch to feed, so
-    # the bundled libtorch_cuda.so and its nvidia-*-cu12 runtime wheels are not
-    # part of it. An explicit boxing opt-in restores them.
-    if not _kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_BOXING"]:
-        return
-    if os.environ.get("FLAGOS_SKIP_CUDA_ASSETS", "0") == "1":
-        return
-    assets_dir = os.environ.get(
-        "FLAGOS_CUDA_ASSETS_DIR",
-        os.path.join(BASE_DIR, ".libtorch_cuda_assets"),
-    )
-    if not os.path.isdir(assets_dir):
-        print(
-            f"[setup] warning: CUDA assets dir {assets_dir} not found; wheel "
-            "will require an externally-supplied libtorch_cuda.so at runtime."
-        )
-        return
-    dst_dir = os.path.join(BASE_DIR, "torch_fl", "lib")
-    os.makedirs(dst_dir, exist_ok=True)
-    import glob
-
-    copied = []
-    for src in sorted(glob.glob(os.path.join(assets_dir, "*.so*"))):
-        dst = os.path.join(dst_dir, os.path.basename(src))
-        # Skip if already present and identical size (avoid re-copying ~1GB).
-        if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
-            copied.append(os.path.basename(src))
-            continue
-        shutil.copy2(src, dst)
-        copied.append(os.path.basename(src))
-    if copied:
-        print(f"[setup] bundled CUDA assets into torch_fl/lib: {', '.join(copied)}")
 
 
 _NCCL_EXT_BUILD_PATH = os.path.join(
@@ -1226,9 +1014,38 @@ def _verify_built_native_libs() -> None:
 class BuildExtWithCmake(_build_ext):
     """Run cmake before setuptools builds torch_fl._C."""
 
+    def _stage_metax_config(self, destination, *, native):
+        package = Path(destination) / "torch_fl"
+        target = package / _metax_config_path(self.inplace)
+        source = Path(SOURCE_DIR) / "torch_fl" / _metax_config_path(False)
+
+        if not self.inplace:
+            # An existing build tree may still carry the old variant filename.
+            (target.parent / "backends_metax_native_host.conf").unlink(missing_ok=True)
+        if not native:
+            if self.inplace:
+                target.unlink(missing_ok=True)
+            elif target.is_file():
+                # build_py may keep newer data from an earlier native build.
+                shutil.copyfile(source, target)
+            return
+
+        spec = importlib.util.spec_from_file_location(
+            "vendor_confs_build",
+            Path(SOURCE_DIR) / "scripts/codegen/gen_vendor_confs.py",
+        )
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        text = generator.render_native_host_config(
+            "metax", generator.parse_conf(source)
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
     def _build_native_hosts(self):
         destination = os.path.abspath(BASE_DIR if self.inplace else self.build_lib)
         if not _env_module().flag("FLAGOS_BUILD_NATIVE_HOST"):
+            self._stage_metax_config(destination, native=False)
             if not self.inplace:
                 # build_lib can be reused when switching back to an ordinary wheel.
                 for name in ("csrc", "_generated"):
@@ -1240,13 +1057,12 @@ class BuildExtWithCmake(_build_ext):
         if not kernels["FLAGOS_BUILD_FLAGGEMS"] or any(
             kernels[key]
             for key in (
-                "FLAGOS_BUILD_BOXING",
                 "FLAGOS_BUILD_FLAGGEMS_CPP",
                 "FLAGOS_BUILD_TILEOPS",
             )
         ):
             raise RuntimeError(
-                "native hosts require FlagGems with boxing, FlagGems C++ and TileOPs disabled"
+                "native hosts require FlagGems with FlagGems C++ and TileOPs disabled"
             )
         spec = importlib.util.spec_from_file_location(
             "native_host_backend_build",
@@ -1263,6 +1079,7 @@ class BuildExtWithCmake(_build_ext):
                 "MetaX native hosts require a clean staging tree without bundled "
                 "vendor libtorch; build from a clean source tree"
             )
+        self._stage_metax_config(destination, native=vendor == "metax")
         env = os.environ.copy()
         if vendor == "nvidia":
             _setup_cuda_build_env(env)
@@ -1345,15 +1162,14 @@ class BuildExtWithCmake(_build_ext):
             return
 
     def run(self):
-        build_deps()
-        _write_compatibility_manifest(self.distribution.get_version())
+        build_config = build_deps(inplace=self.inplace)
+        _write_compatibility_manifest(self.distribution.get_version(), build_config)
         self._prepare_nccl_extension()
         # ``build`` runs build_py before build_ext, but CMake installs package
         # data into torch_fl/ during build_ext. Setuptools caches build_py's file
         # list, so copy late-generated files explicitly into wheel staging.
         relative_paths = [
             "_build_config.py",
-            "_platform_alias.py",
             "compatibility.json",
             "lib/flagos_platform",
             "include/flagos.h",
@@ -1380,6 +1196,14 @@ class BuildExtWithCmake(_build_ext):
                 destination = os.path.join(self.build_lib, "torch_fl", relative_path)
                 self.mkpath(os.path.dirname(destination))
                 self.copy_file(source, destination)
+        wheel_package = Path(self.build_lib) / "torch_fl"
+        self.mkpath(str(wheel_package))
+        self.copy_file(
+            os.path.join(SOURCE_DIR, "cmake", "flagos_platforms.json"),
+            str(wheel_package / "_platforms.json"),
+        )
+        # build_py can stage a record left by an earlier in-place build.
+        (wheel_package / "_platform_alias.py").unlink(missing_ok=True)
         super().run()
         self._build_native_hosts()
 
@@ -1616,29 +1440,6 @@ def _get_setup_kwargs():
     return kwargs
 
 
-# NVIDIA CUDA runtime libs that the bundled libtorch_cuda.so (cu12.x) links
-# against. Pinned to the cu12 major sonames it needs (libcudart.so.12,
-# libcublas.so.12, libcudnn.so.9, libnvshmem_host.so.3, ...). Lower bounds keep
-# pip free to resolve a compatible patch; the bundled .so was built against the
-# cu12.8 wheels present in the build env.
-_CUDA_RUNTIME_DEPS = [
-    "nvidia-cuda-runtime-cu12>=12.8",
-    "nvidia-cublas-cu12>=12.8",
-    "nvidia-cudnn-cu12>=9.0",
-    "nvidia-cuda-nvrtc-cu12>=12.8",
-    "nvidia-cufft-cu12>=11.0",
-    "nvidia-curand-cu12>=10.0",
-    "nvidia-cusolver-cu12>=11.0",
-    "nvidia-cusparse-cu12>=12.0",
-    "nvidia-cusparselt-cu12>=0.7",
-    "nvidia-nccl-cu12>=2.20",
-    "nvidia-nvtx-cu12>=12.8",
-    "nvidia-cuda-cupti-cu12>=12.8",
-    "nvidia-nvjitlink-cu12>=12.8",
-    "nvidia-nvshmem-cu12>=3.0",
-]
-
-
 # torch_fl is a thin build on three packages that live outside this repository:
 # FlagTree (the Triton build carrying the vendor backend), FlagGems (the operator
 # source) and FlagCX (the distributed backend). Omitting them is not a crash --
@@ -1781,34 +1582,6 @@ def _install_requires():
                 "revalidate the native vendor policy for the configured FlagGems pin"
             )
         return reqs + cohort["requirements"]
-    # For a CUDA wheel we bundle libtorch_cuda.so and preload it at import; it
-    # needs the NVIDIA runtime libs present, so make them hard deps. Ascend/MetaX
-    # builds do not (they supply their own runtime), so keep it CUDA-only.
-    #
-    # FLAGOS_SKIP_CUDA_ASSETS=1 means we do NOT bundle libtorch_cuda.so (the same
-    # switch _bundle_cuda_assets() honors). That is the PPU case: the active torch
-    # is already a CUDA-enabled build (CUDA 13, PPU_SDK/CUDA_SDK supplies the
-    # runtime), so the pinned nvidia-*-cu12 wheels are both mismatched and
-    # unnecessary. Skip them so `pip install` does not drag in cu12 packages.
-    skip_assets = os.environ.get("FLAGOS_SKIP_CUDA_ASSETS", "0") == "1"
-    # A FlagGems-primary CUDA wheel (FLAGOS_BUILD_BOXING=OFF, the default) bundles
-    # no libtorch_cuda.so -- _bundle_cuda_assets() skips for the same reason -- so
-    # it must not pull the nvidia-*-cu12 runtime wheels either. Boxing is the
-    # opt-in that needs them.
-    #
-    # CUDA is the only accelerator asked, and it has to be asked first: these
-    # runtime wheels are a CUDA-only requirement, and _kernel_switches() raises
-    # for a platform whose pin contradicts an inherited environment value (say
-    # FLAGOS_BUILD_BOXING=1 in a lane that builds boxing, while the table is
-    # walked and reaches iluvatar). That objection is about the build's -D list,
-    # which still goes through _kernel_switches(), not about what this wheel's
-    # requirements are on a platform that never ships the runtime wheels anyway.
-    if (
-        FLAGOS_ACCELERATOR == "cuda"
-        and not skip_assets
-        and _kernel_switches(FLAGOS_ACCELERATOR)["FLAGOS_BUILD_BOXING"]
-    ):
-        reqs += _CUDA_RUNTIME_DEPS
     return reqs
 
 

@@ -97,7 +97,6 @@ Operations on `flagos` tensors are routed to different kernel implementations de
 
 - **Portable compiler kernels**: FlagGems Triton kernels that work across platforms (when enabled)
 - **Native vendor kernels**: Platform-specific optimized implementations (e.g., ACLNN for Ascend, mudnn for MUSA)
-- **Compatibility boxing**: Generated wrapper kernels that delegate to an external vendor backend (e.g., CUDA boxing)
 - **CPU fallback**: Operations without a device kernel fall back to CPU (documented per-platform; not all platforms use this)
 
 The routing is transparent to your code. No changes are needed when switching between platforms or kernel sources.

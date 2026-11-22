@@ -232,7 +232,7 @@ def install_mlu_driver_device_strings() -> None:
     PrivateUse1 name; this build claims that name as ``flagos`` instead (torch
     allows exactly one), and a ``str`` device argument is resolved in C++ before
     any Python alias sees it -- which is why the device-alias entry in
-    ``torch_fl._VENDOR_DEVICE_ALIASES`` helps for direct ``torch.empty`` calls
+    The aliases in ``torch_fl.compat.cuda`` handle direct ``torch.empty`` calls
     but not once the call is made from inside FlagGems' dispatcher.
 
     Rebinding the two methods is the whole fix: the device object they should

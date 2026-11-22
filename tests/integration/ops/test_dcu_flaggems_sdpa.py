@@ -79,29 +79,12 @@ import torch_fl
 
 DEVICE = "flagos:0"
 
-# `dcu` alone made this file unreachable. It asserts the route
-# `backends_hygon.conf` states (`scaled_dot_product_attention = flaggems`), and
-# `_require_dcu_flaggems` below skips the module unless the loaded conf IS that
-# file -- so the run that can execute it is the DCU **vendor** lane. But the only
-# manifest step whose selection `dcu` satisfies is `vendor_ops`, which carries
-# `boxing_variant: [hygon]` and therefore composes into the **boxing** lane
-# (.github/integration-manifest.yml); the vendor lane's operator step selects
-# `flaggems and main_ops`, which a `dcu`-only file does not match. Both halves
-# measured with compose_integration_manifest.py: the vendor lane's 16 steps
-# contain no `(dcu or main_ops)`, the boxing lane's 17 do. The result was nine
-# cases that never ran anywhere -- on a platform that ships the route.
-#
-# `flaggems` and `main_ops` are what the vendor lane's operator step selects, and
-# they describe what this file is: a FlagGems-route assertion over a main
-# operator. `dcu` stays so the boxing lane still collects the module and skips it
-# on the conf check, which is the honest outcome there -- that lane loads
-# backends_hygon_boxing.conf, where the route this file asserts is not stated.
 pytestmark = [pytest.mark.dcu, pytest.mark.flaggems, pytest.mark.main_ops]
 
 # The FlagGems SDPA route is the one conf entry the dispatcher does not select
 # for itself. `csrc/aten/sdp_choice_stub.cc` registers one PrivateUse1 kernel for
 # the composite under every conf, and that kernel reads `GetBackendForOp` to
-# decide between the FlagGems callable and the boxing kernel -- so neither the
+# decide between FlagGems and the ATen composite -- so neither the
 # conf text nor the dispatch log says which arm a call took (both arms are served
 # by the same key; there is no route to print, the kernel *is* the route).
 #
@@ -424,7 +407,7 @@ def sdpa_shipped():
 def sdpa_switched_off():
     """The same cases with the documented runtime switch set."""
     _require_dcu_flaggems()
-    result = _run_sdpa_cases({"FLAGOS_OP_scaled_dot_product_attention": "cuda"})
+    result = _run_sdpa_cases({"FLAGOS_OP_scaled_dot_product_attention": "none"})
     assert result.returncode == 0, f"sdpa probe failed\n{result.stderr}"
     return _sdpa_report(result)
 
@@ -548,8 +531,8 @@ class TestDcuFlaggemsSdpaRoute:
             "the converted additive is not reaching the kernel"
         )
 
-    def test_off_switch_returns_every_call_to_the_boxing_route(self, sdpa_switched_off):
-        """``FLAGOS_OP_scaled_dot_product_attention=cuda`` is the whole switch.
+    def test_off_switch_uses_the_aten_composite(self, sdpa_switched_off):
+        """``FLAGOS_OP_scaled_dot_product_attention=none`` is the whole switch.
 
         The same conf is in use in both arms -- only this variable differs -- so
         this is also the check that the eligible cases' route came from the conf

@@ -36,7 +36,7 @@ The installed torch wheel is never written to, including on interrupted startup.
 
 The CUDA backend is the one exception and does not use this module: the official
 ``+cpu`` wheel's core libs *are* the upstream ones, so only the extra CUDA libs
-are missing and a ctypes preload (``torch_fl.__init__._preload_cuda_assets``)
+are missing and a ctypes preload (``torch_fl.accelerator._loader``)
 suffices.
 
 Callers must invoke this from ``torch_fl/__init__.py`` BEFORE ``import torch``

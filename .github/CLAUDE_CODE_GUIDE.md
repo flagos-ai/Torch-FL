@@ -300,15 +300,14 @@ Create one commit per platform for easy review.
 Claude Code has session memory. Use it:
 
 ```
-User: "Remember: in this repo, CUDA boxing kernels are in
-csrc/aten/generated/cuda_kernels.cc and are auto-generated.
-Never edit that file directly - edit the template instead."
+User: "Remember: change the ATen wrapper generators when updating generated
+sources under csrc/aten/generated."
 
 Claude: [Saves to memory]
 
 # Later in session:
-User: "Fix the CUDA relu kernel"
-Claude: [Remembers to edit template, not generated file]
+User: "Update the generated FlagGems kernel wrapper"
+Claude: [Changes the generator and refreshes its output]
 ```
 
 ## Debugging Claude Code Issues

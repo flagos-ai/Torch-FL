@@ -6,6 +6,7 @@
 import copy
 import hashlib
 import importlib.util
+import runpy
 import json
 from pathlib import Path
 import sys
@@ -78,8 +79,12 @@ def test_sdk_binary_identity_allows_installation_at_another_path(sdk, tmp_path):
 
 
 def test_sdk_precision_is_explicit_and_native_only():
-    native = (ROOT / "torch_fl/configs/backends_metax_native_host.conf").read_text()
-    ordinary = (ROOT / "torch_fl/configs/backends_metax.conf").read_text()
+    generator = runpy.run_path(str(ROOT / "scripts/codegen/gen_vendor_confs.py"))
+    config = ROOT / "torch_fl/configs/backends_metax.conf"
+    native = generator["render_native_host_config"](
+        "metax", generator["parse_conf"](config)
+    )
+    ordinary = config.read_text()
     for operation in ("mm", "bmm"):
         assert f"{operation} = flaggems; BFloat16:metax\n" in native
         assert f"{operation} = flaggems; BFloat16:metax\n" not in ordinary

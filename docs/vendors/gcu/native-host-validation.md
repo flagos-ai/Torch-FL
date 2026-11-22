@@ -201,7 +201,7 @@ Build with the verified published dependency cohort and CPU Torch:
 ```bash
 export FLAGOS_ACCELERATOR=enflame FLAGOS_BUILD_NATIVE_HOST=1
 export FLAGOS_BUILD_FLAGGEMS=1 FLAGOS_BUILD_VENDOR=1
-export FLAGOS_BUILD_BOXING=0 FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
+export FLAGOS_BUILD_FLAGGEMS_CPP=0 FLAGOS_BUILD_TILEOPS=0
 export FLAGOS_DISABLE_CUDA_ASSETS=1 TOPS_HOME=/opt/tops
 export TOPSATEN_LIB=/usr/lib/libtopsaten.so FLAGOS_SDK_VERSION=1.7.2.2402
 export CPATH=/opt/tops/include/gcu:/opt/tops/include

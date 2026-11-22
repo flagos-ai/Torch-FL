@@ -155,7 +155,7 @@ def test_contiguous_gather_arms_box_only_when_libtorch_cuda_is_linked():
     the same CUDA DispatchStub. ``clone(memory_format=contiguous_format)``
     reaches the clone arm directly and ``_to_copy`` reaches the contiguous arm
     for every non-contiguous source, so the predicate has to include the
-    libtorch_cuda probe next to the boxing build.
+    libtorch_cuda probe.
     """
     src = _read(CONTIGUOUS_OPS)
     define = src.find("#define FLAGOS_CONTIGUOUS_CUDA_BOXING 1")
@@ -165,10 +165,6 @@ def test_contiguous_gather_arms_box_only_when_libtorch_cuda_is_linked():
         "FLAGOS_CONTIGUOUS_CUDA_BOXING no longer asks whether this wheel's torch "
         "ships libtorch_cuda, so it boxes into an empty CUDA DispatchStub"
     )
-    assert "FLAGOS_BOXING_BUILD" in predicate, (
-        "the predicate dropped the boxing build, which does link libtorch_cuda"
-    )
-
     arms = re.findall(r"#if FLAGOS_CONTIGUOUS_CUDA_BOXING(.*?)#endif", src, re.S)
     assert len(arms) == 2, (
         "expected the contiguous() and clone() strided-gather arms to branch on "

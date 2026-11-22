@@ -46,50 +46,6 @@ KERNEL_SWITCHES = (
 )
 
 
-def _gnu_ld_linker() -> str | None:
-    """``gcc``, made to link with GNU ``ld`` -- what the MetaX shim is built with."""
-    import os
-    import shutil
-    import tempfile
-
-    gcc = shutil.which("gcc")
-    if gcc is None or not sys.platform.startswith("linux"):
-        return None
-    ld = shutil.which("ld")
-    if ld is not None:
-        with open(ld, "rb") as handle:
-            if b"GNU ld" in handle.read(4096):
-                return gcc
-    homebrew_ld = "/opt/homebrew/opt/binutils/bin/ld"
-    if os.path.exists(homebrew_ld):
-        return gcc
-    # A bare `ld` resolved by gcc is not necessarily the one `which` found.
-    with tempfile.TemporaryDirectory() as scratch:
-        probe = os.path.join(scratch, "probe.c")
-        with open(probe, "w", encoding="utf-8") as handle:
-            handle.write("int _shim(int x) { return x; }\n")
-        script = os.path.join(scratch, "probe.map")
-        with open(script, "w", encoding="utf-8") as handle:
-            handle.write("SHIM_1 { global: _shim; local: *; };\n")
-        try:
-            subprocess.run(
-                [
-                    gcc,
-                    "-shared",
-                    "-fPIC",
-                    "-o",
-                    os.path.join(scratch, "libprobe.so"),
-                    probe,
-                    f"-Wl,--version-script={script}",
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            return None
-    return gcc
-
-
 def _load_setup(monkeypatch):
     kwargs = {}
     monkeypatch.setattr(setuptools, "setup", lambda **values: kwargs.update(values))
@@ -183,7 +139,9 @@ def test_iluvatar_manifest_records_official_cpu_runtime(
         "version",
         lambda name: "2.10.0+cpu" if name == "torch" else None,
     )
-    namespace["_write_compatibility_manifest"]("2.10.0+corex4.5.0")
+    namespace["_write_compatibility_manifest"](
+        "2.10.0+corex4.5.0", _build_config("iluvatar", "flaggems", "vendor")
+    )
     manifest = json.loads((root / "torch_fl/compatibility.json").read_text())
     assert manifest["build"]["distributions"]["torch"] == "2.10.0+cpu"
     assert manifest["build"]["torch_cxx11_abi"] is True
@@ -205,30 +163,56 @@ def clean_kernel_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_build_ext_stages_generated_build_config(
-    monkeypatch, tmp_path, clean_kernel_env
+@pytest.mark.parametrize(
+    "mudnn_header", [False, True], ids=["missing-mudnn", "full-sdk"]
+)
+def test_build_ext_stages_effective_musa_build_config(
+    monkeypatch, tmp_path, clean_kernel_env, mudnn_header
 ):
-    # The wheel version is resolved from the environment when setup.py is read,
-    # before anything patches the module global, so the ambient platform has to
-    # be the one under test or the manifest's wheel_version describes another
-    # platform's build. That was invisible while only one platform had a local
-    # version segment.
+    if shutil.which("cmake") is None:
+        pytest.skip("CMake is unavailable")
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "mthreads")
+    monkeypatch.setenv("FLAGOS_BUILD_VENDOR", "1")
     _, setup_kwargs = _load_setup(monkeypatch)
     assert "scripts" not in setup_kwargs
     source_root = tmp_path / "source"
     package_root = source_root / "torch_fl"
     package_root.mkdir(parents=True)
+    sdk = tmp_path / "musa"
+    (sdk / "lib").mkdir(parents=True)
+    (sdk / "lib/libmudnn.so").touch()
+    (sdk / "lib/libmurand.so").touch()
+    (sdk / "include/mudnncxx").mkdir(parents=True)
+    (sdk / "include/murand.h").touch()
+    if mudnn_header:
+        (sdk / "include/mudnncxx/mudnn.h").touch()
+    # Configure with the production SDK probe, registration selector, and
+    # metadata writer. A language-free project exercises setuptools staging
+    # on hosts without the MUSA compiler or device libraries.
+    (source_root / "csrc").mkdir()
+    (source_root / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.19)\n"
+        "project(musa_fixture LANGUAGES NONE)\n"
+        f'include("{ROOT}/cmake/FlagosPlatforms.cmake")\n'
+        f'set(MUSA_HOME "{sdk}")\n'
+        'set(CMAKE_FIND_LIBRARY_PREFIXES "lib")\n'
+        'set(CMAKE_FIND_LIBRARY_SUFFIXES ".so")\n'
+        f'include("{ROOT}/cmake/MusaKernels.cmake")\n'
+        "add_subdirectory(csrc)\n"
+    )
+    (source_root / "csrc/CMakeLists.txt").write_text(
+        f'include("{ROOT}/cmake/FlagosRegistration.cmake")\n'
+        f'flagos_write_registration("{ROOT}/csrc/aten" '
+        '"${PROJECT_BINARY_DIR}/register_ops.inc")\n'
+        'flagos_write_build_config("${PROJECT_BINARY_DIR}/build-config.json" kernels)\n'
+        'install(CODE [[message(STATUS "Fixture build configured")]])\n'
+    )
 
     command_type = setup_kwargs["cmdclass"]["build_ext"]
     setup_globals = command_type.run.__globals__
     monkeypatch.setitem(setup_globals, "BASE_DIR", str(source_root))
-    monkeypatch.setitem(setup_globals, "FLAGOS_ACCELERATOR", "mthreads")
-    monkeypatch.setitem(
-        setup_globals,
-        "build_deps",
-        lambda: setup_globals["_write_build_config"](),
-    )
+    monkeypatch.setitem(setup_globals, "get_pytorch_dir", lambda: str(tmp_path))
+    monkeypatch.setitem(setup_globals, "_verify_built_native_libs", lambda: None)
     monkeypatch.setitem(
         sys.modules,
         "torch",
@@ -244,44 +228,46 @@ def test_build_ext_stages_generated_build_config(
     command = command_type(Distribution(setup_kwargs))
     command.ensure_finalized()
     command.build_lib = str(tmp_path / "wheel")
+    package = tmp_path / "wheel" / "torch_fl"
+    package.mkdir(parents=True)
+    (package / "_platform_alias.py").write_text('ACCELERATOR = "cuda"\n')
     command.run()
 
-    staged = tmp_path / "wheel" / "torch_fl" / "_build_config.py"
-    assert staged.read_text(encoding="utf-8") == (
-        "# AUTO-GENERATED by setup.py at build time. Do not edit.\n"
-        'ACCELERATOR = "mthreads"\n'
-        'KERNELS = ("flaggems", "vendor")\n'
-        "NATIVE_HOSTS = False\n"
-        "NATIVE_VENDOR = False\n"
+    staged = package / "_build_config.py"
+    record = runpy.run_path(str(staged))
+    expected = ("flaggems", "vendor") if mudnn_header else ("flaggems",)
+    assert record["PLATFORM"] == "musa"
+    assert record["ACCELERATOR"] == "mthreads"
+    assert record["KERNELS"] == expected
+    assert record["NATIVE_HOSTS"] is False
+    assert record["NATIVE_VENDOR"] is False
+    registrations = _platform_table()["accelerators"]["musa"]["registration"]
+    configured = (source_root / "build/register_ops.inc").read_text()
+    assert registrations["flaggems"] in configured
+    assert (registrations["vendor"] in configured) == mudnn_header
+    platform_table = ROOT / "cmake" / "flagos_platforms.json"
+    assert (
+        staged.with_name("_platforms.json").read_bytes() == platform_table.read_bytes()
     )
+    assert not staged.with_name("_platform_alias.py").exists()
     compatibility = json.loads(
         (tmp_path / "wheel" / "torch_fl" / "compatibility.json").read_text()
     )
-    assert compatibility["platform"] == "mthreads"
+    assert compatibility["platform"] == "musa"
     # The local segment is the platform's `wheel_local` from
     # cmake/flagos_platforms.json -- the SDK the wheel was built against.
     assert compatibility["wheel_version"] == "2.10.0+musa5.2.0"
-    assert compatibility["build"]["kernels"] == ["flaggems", "vendor"]
+    assert compatibility["build"]["kernels"] == list(expected)
     assert compatibility["build"]["vendor_torch_libraries"] is False
     assert compatibility["build"]["distributions"]["torch"] == "2.10.0+cpu"
     assert compatibility["build"]["sdk_version"] is None
     assert compatibility["build"]["vendor_torch_version"] is None
 
 
-@pytest.mark.parametrize("boxing, expected", [(None, False), ("1", True)])
-def test_cuda_manifest_vendor_torch_policy_follows_boxing(
-    monkeypatch, tmp_path, clean_kernel_env, boxing, expected
+def test_cuda_manifest_records_no_vendor_torch_in_an_ordinary_build(
+    monkeypatch, tmp_path, clean_kernel_env
 ):
-    """A FlagGems-primary CUDA wheel declares no vendor libtorch; boxing opts in.
-
-    ``torch-fl-preflight --release`` demands FLAGOS_VENDOR_TORCH_VERSION only
-    when the manifest says the wheel ships a vendor libtorch, so the manifest
-    has to record the build's actual policy: a default (boxing-off) wheel ships
-    none, and only the explicit boxing opt-in carries the vendor libraries.
-    """
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
-    if boxing is not None:
-        monkeypatch.setenv("FLAGOS_BUILD_BOXING", boxing)
     namespace, _ = _load_setup(monkeypatch)
     root = tmp_path / "src"
     (root / "torch_fl").mkdir(parents=True)
@@ -302,10 +288,12 @@ def test_cuda_manifest_vendor_torch_policy_follows_boxing(
         lambda name: "2.10.0+cuda13.3" if name == "torch" else None,
     )
 
-    namespace["_write_compatibility_manifest"]("2.10.0+cuda13.3")
+    namespace["_write_compatibility_manifest"](
+        "2.10.0+cuda13.3", _build_config("cuda", "flaggems", "vendor")
+    )
 
     manifest = json.loads((root / "torch_fl" / "compatibility.json").read_text())
-    assert manifest["build"]["vendor_torch_libraries"] is expected
+    assert manifest["build"]["vendor_torch_libraries"] is False
 
 
 @pytest.mark.parametrize("bundled", [False, True])
@@ -313,7 +301,6 @@ def test_hygon_manifest_records_device_libraries_without_boxing(
     monkeypatch, tmp_path, clean_kernel_env, bundled
 ):
     monkeypatch.setenv("FLAGOS_ACCELERATOR", "hygon")
-    monkeypatch.setenv("FLAGOS_BUILD_BOXING", "0")
     monkeypatch.setenv("FLAGOS_VENDOR_TORCH_VERSION", "2.10.0+das.opt1.dtk2604")
     namespace, _ = _load_setup(monkeypatch)
     package = tmp_path / "torch_fl"
@@ -335,7 +322,9 @@ def test_hygon_manifest_records_device_libraries_without_boxing(
         "version",
         lambda name: "2.10.0+cpu" if name == "torch" else None,
     )
-    namespace["_write_compatibility_manifest"]("2.10.0+dtk2604")
+    namespace["_write_compatibility_manifest"](
+        "2.10.0+dtk2604", _build_config("dcu", "flaggems", "vendor")
+    )
     manifest = json.loads((package / "compatibility.json").read_text())
     assert "boxing" not in manifest["build"]["kernels"]
     assert manifest["build"]["vendor_torch_libraries"] is bundled
@@ -352,14 +341,13 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
     globals_ = namespace["_write_build_config"].__globals__
     monkeypatch.setitem(globals_, "BASE_DIR", str(root))
     monkeypatch.setitem(globals_, "FLAGOS_ACCELERATOR", "nvidia")
-    namespace["_write_build_config"]()
+    namespace["_write_build_config"](
+        _build_config("cuda", "vendor", "flaggems_cpp", "flaggems", "tileops")
+    )
 
     generated = {}
     exec((root / "torch_fl" / "_build_config.py").read_text("utf-8"), generated)
     assert generated["ACCELERATOR"] == "nvidia"
-    # CUDA builds every set except the CUDA boxing kernels: boxing is off by
-    # default (a FlagGems-primary wheel), and only an explicit opt-in adds
-    # "boxing" back.
     assert generated["KERNELS"] == (
         "flaggems",
         "flaggems_cpp",
@@ -522,7 +510,6 @@ def test_native_host_ci_build_excludes_the_default_build(
         "    assert not (root / 'build').exists(), 'inherited build cache'\n"
         "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
         "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
-        "    assert os.environ['FLAGOS_BUILD_BOXING'] == '0'\n"
         "    if os.environ['FLAGOS_ACCELERATOR'] == 'metax':\n"
         "        assert 'FLAGOS_VENDOR_TORCH_LIB' not in os.environ, 'inherited optional vendor cohort'\n"
         "        assert os.environ['FLAGOS_BUILD_VENDOR'] == '1'\n"
@@ -604,8 +591,55 @@ def test_native_host_build_rejects_boxing(monkeypatch, clean_kernel_env):
     _, kwargs = _load_setup(monkeypatch)
     command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
     command.ensure_finalized()
-    with pytest.raises(RuntimeError, match="boxing"):
+    with pytest.raises(ValueError, match="FLAGOS_BUILD_BOXING has been removed"):
         command._build_native_hosts()
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+def test_metax_stages_one_config_and_restores_the_default(
+    monkeypatch, tmp_path, clean_kernel_env, inplace
+):
+    monkeypatch.setenv("FLAGOS_ACCELERATOR", "nvidia")
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
+    namespace, kwargs = _load_setup(monkeypatch)
+    write_record = namespace["_write_build_config"]
+    monkeypatch.setitem(write_record.__globals__, "FLAGOS_ACCELERATOR", "metax")
+    monkeypatch.setitem(write_record.__globals__, "BASE_DIR", str(tmp_path))
+    monkeypatch.setitem(write_record.__globals__, "_native_vendor_cohort", lambda: None)
+    command = kwargs["cmdclass"]["build_ext"](Distribution(kwargs))
+    command.ensure_finalized()
+    command.inplace = inplace
+
+    package = tmp_path / "torch_fl"
+    default = package / "configs/backends_metax.conf"
+    source = ROOT / "torch_fl/configs/backends_metax.conf"
+    ordinary = source.read_bytes()
+    default.parent.mkdir(parents=True)
+    default.write_bytes(ordinary)
+    legacy = default.with_name("backends_metax_native_host.conf")
+    if not inplace:
+        legacy.touch()
+
+    write_record(
+        _build_config("metax", "flaggems", "vendor", native_hosts=True),
+        inplace=inplace,
+    )
+    command._stage_metax_config(tmp_path, native=True)
+    record = runpy.run_path(str(package / "_build_config.py"))
+    expected = "lib/backends_metax.conf" if inplace else "configs/backends_metax.conf"
+    assert record["BACKEND_CONFIG"] == expected
+    staged = package / expected
+    assert "bmm = flaggems; BFloat16:metax\n" in staged.read_text()
+    assert source.read_bytes() == ordinary
+    assert not legacy.exists()
+
+    monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "0")
+    write_record(_build_config("metax", "flaggems"), inplace=inplace)
+    command._stage_metax_config(tmp_path, native=False)
+    assert "BACKEND_CONFIG" not in runpy.run_path(str(package / "_build_config.py"))
+    assert default.read_bytes() == ordinary
+    if inplace:
+        assert not staged.exists()
 
 
 def test_ordinary_wheel_clears_stale_native_host_stage(
@@ -684,8 +718,9 @@ def test_native_vendor_records_the_verified_cohort(
         lambda name: "2.10.0+cpu" if name == "torch" else None,
     )
     (tmp_path / "torch_fl").mkdir()
-    namespace["_write_build_config"]()
-    namespace["_write_compatibility_manifest"]("2.10.0+cuda13.3")
+    build_config = _build_config("cuda", "flaggems", "vendor", native_hosts=True)
+    namespace["_write_build_config"](build_config)
+    namespace["_write_compatibility_manifest"]("2.10.0+cuda13.3", build_config)
     manifest = json.loads((tmp_path / "torch_fl/compatibility.json").read_text())
     assert (
         "NATIVE_VENDOR = True" in (tmp_path / "torch_fl/_build_config.py").read_text()
@@ -706,7 +741,6 @@ def test_native_vendor_records_the_verified_cohort(
 @pytest.mark.parametrize(
     "flag,value",
     [
-        ("FLAGOS_BUILD_BOXING", "1"),
         ("FLAGOS_BUILD_VENDOR", "0"),
         ("FLAGOS_SKIP_CUDA_ASSETS", "1"),
     ],
@@ -719,7 +753,7 @@ def test_native_vendor_refuses_incompatible_build(
     monkeypatch.setenv("FLAGOS_BUILD_NATIVE_HOST", "1")
     monkeypatch.setenv("FLAGOS_VENDOR_TORCH_LIB", str(tmp_path / "torch/lib"))
     monkeypatch.setenv(flag, value)
-    with pytest.raises(RuntimeError, match="bundled non-boxing vendor libraries"):
+    with pytest.raises(RuntimeError, match="bundled vendor libraries"):
         namespace["_native_vendor_cohort"]()
 
 
@@ -769,64 +803,40 @@ def test_default_kernel_set_per_accelerator(
 ):
     namespace, _ = _load_setup(monkeypatch)
     resolved = _switches(namespace, accelerator)
-    names = namespace["KERNEL_SET_NAME"]
+    names = _platform_table()["kernel_set_names"]
     assert {names[switch] for switch, on in resolved.items() if on} == expected
 
 
-@pytest.mark.parametrize(
-    "told, platform, aliases",
-    [
-        # The wheels named for a vendor whose row is keyed by another id have to
-        # recognise the vendor spelling; a row whose vendor is also its id
-        # (`metax`) names the row it shares that vendor with, whose arms MetaX's
-        # toolkit answers. The row comes last, which is the entry CMake resolves
-        # any of the names to. `metax` is read on Linux only: loading setup.py
-        # for it builds the libcudart shim, and macOS's ld has no
-        # `--version-script`. The GNU-ld gate asks for the linker the shim
-        # actually needs, not for Linux: a darwin host with GNU binutils named
-        # alongside Homebrew's ld can run it, and would otherwise skip.
-        pytest.param(
-            "metax",
-            "metax",
-            ["metax", "cuda"],
-            marks=pytest.mark.skipif(
-                _gnu_ld_linker() is None,
-                reason="metax setup.py builds its shim with GNU ld",
-            ),
-        ),
-        ("mthreads", "musa", ["musa", "mthreads"]),
-        ("apple", "mps", ["mps", "apple"]),
-        ("hygon", "dcu", ["dcu", "hygon"]),
-        ("nvidia", "cuda", ["cuda", "nvidia"]),
-    ],
-)
-def test_each_build_records_every_spelling_of_its_platform(
-    monkeypatch, tmp_path, clean_kernel_env, told, platform, aliases
+def test_build_record_carries_both_platform_names(
+    monkeypatch, tmp_path, clean_kernel_env
 ):
-    """A wheel recognises the accelerator name its environment may carry.
-
-    The build is told either half of the name, and a vendor-named build has to
-    accept that name or it falls to the default platform's arms.
-    """
-    monkeypatch.setenv("FLAGOS_ACCELERATOR", told)
     namespace, _ = _load_setup(monkeypatch)
-    monkeypatch.setitem(
-        namespace["_write_environment_platform_alias"].__globals__,
-        "BASE_DIR",
-        str(tmp_path),
+    emit = namespace["_write_build_config"]
+    normalize = namespace["_normalize_accelerator"]
+    package = tmp_path / "torch_fl"
+    package.mkdir()
+    monkeypatch.setitem(emit.__globals__, "BASE_DIR", str(tmp_path))
+
+    table = json.loads(
+        (ROOT / "cmake" / "flagos_platforms.json").read_text(encoding="utf-8")
     )
-    namespace["_write_environment_platform_alias"]()
-    record = {}
-    text = (tmp_path / "torch_fl" / "_platform_alias.py").read_text()
-    exec(text, record)
-    assert record["ACCELERATOR"] == platform
-    assert record["ALIASES"] == aliases
+    for expected, row in table["accelerators"].items():
+        vendor = row["vendor"]
+        for name in (expected, vendor):
+            platform = normalize(name)
+            assert platform == expected
+            monkeypatch.setitem(emit.__globals__, "FLAGOS_ACCELERATOR", platform)
+            emit(_build_config(platform))
+            record = runpy.run_path(str(package / "_build_config.py"))
+            assert record["PLATFORM"] == expected
+            assert record["ACCELERATOR"] == vendor
+    assert normalize("D-Robotics") == "bpu"
 
 
 def test_explicit_kernel_switch_overrides_the_vendor_default(
     monkeypatch, clean_kernel_env
 ):
-    """MetaX builds FlagGems into the boxing wheel by default, but not always."""
+    """MetaX enables FlagGems by default and honors an explicit opt-out."""
     namespace, _ = _load_setup(monkeypatch)
     monkeypatch.setenv("FLAGOS_BUILD_FLAGGEMS", "0")
     assert namespace["_kernel_switches"]("metax")["FLAGOS_BUILD_FLAGGEMS"] is False
@@ -863,37 +873,13 @@ def test_metax_can_opt_into_the_tileops_experiment(monkeypatch, clean_kernel_env
     monkeypatch.setenv("FLAGOS_BUILD_TILEOPS", "1")
     resolved = namespace["_kernel_switches"]("metax")
     assert resolved["FLAGOS_BUILD_TILEOPS"] is True
-    assert resolved["FLAGOS_BUILD_BOXING"] is False
-
-
-def test_cmake_kernel_set_names_match_the_build_record(monkeypatch):
-    """csrc/CMakeLists.txt builds FLAGOS_BUILTIN_KERNELS from the same five set names.
-
-    The names are spelled in CMake and in KERNEL_SET_NAME; the definition is what
-    lets a dispatch failure say "this kernel set was not compiled into this
-    wheel", so a rename on one side only would produce a wrong explanation.
-    """
-    namespace, _ = _load_setup(monkeypatch)
-    cmake = (ROOT / "csrc" / "CMakeLists.txt").read_text(encoding="utf-8")
-    block = cmake.split("set(FLAGOS_BUILTIN_KERNELS", 1)[1].split("message(STATUS", 1)[
-        0
-    ]
-    pairs = re.findall(
-        r"if\((\w+)\)\s*\n\s*string\(APPEND FLAGOS_BUILTIN_KERNELS \"([^,\"]+),\"\)",
-        block,
-    )
-    assert dict(pairs) == namespace["KERNEL_SET_NAME"]
+    assert "FLAGOS_BUILD_BOXING" not in resolved
 
 
 def test_impossible_kernel_switch_raises_instead_of_being_ignored(
     monkeypatch, clean_kernel_env
 ):
-    """A MUSA build always links the vendor (mudnn) kernels, so asking for off is an error.
-
-    Silently emitting the -D would be worse than failing: CMakeLists.txt forces
-    the value anyway, and the build record would then claim a kernel set the
-    wheel does not have.
-    """
+    """MUSA requests vendor kernels before checking SDK availability."""
     namespace, _ = _load_setup(monkeypatch)
     monkeypatch.setenv("FLAGOS_BUILD_VENDOR", "0")
     with pytest.raises(ValueError, match="FLAGOS_BUILD_VENDOR"):
@@ -910,6 +896,17 @@ def _platform_table() -> dict:
     return json.loads((ROOT / "cmake" / "flagos_platforms.json").read_text())
 
 
+def _build_config(platform, *kernels, native_hosts=False):
+    row = _platform_table()["accelerators"][platform]
+    return {
+        "platform": platform,
+        "vendor": row["vendor"],
+        "bundle_libdir": row["bundle_libdir"],
+        "kernels": list(kernels),
+        "native_hosts": native_hosts,
+    }
+
+
 def test_platform_table_is_internally_consistent():
     """Every accelerator row is complete, and each pin agrees with its default.
 
@@ -919,7 +916,7 @@ def test_platform_table_is_internally_consistent():
     """
     table = _platform_table()
     switches = table["kernel_switches"]
-    assert len(switches) == 5 and len(set(switches)) == 5
+    assert len(switches) == 4 and len(set(switches)) == 4
     assert set(table["kernel_set_names"]) == set(switches)
 
     required = (
@@ -964,17 +961,16 @@ def test_platform_table_is_internally_consistent():
 
 
 def test_cmake_declares_every_kernel_switch():
-    """Root and csrc CMakeLists option() cover exactly the table's switches.
-
-    A switch in the table but not declared with option() -- or the reverse -- is
-    exactly the drift this fixed: FLAGOS_BUILD_TILEOPS was missing from the root
-    explicit-request loop, so a contradictory -D was not rejected there.
-    """
+    """The root declares the switches and csrc uses the resolved values."""
     switches = set(_platform_table()["kernel_switches"])
-    for relative in ("CMakeLists.txt", "csrc/CMakeLists.txt"):
-        text = (ROOT / relative).read_text(encoding="utf-8")
-        declared = set(re.findall(r"^option\((FLAGOS_BUILD_\w+)", text, re.M))
-        assert declared == switches, (relative, declared ^ switches)
+    pattern = r"^option\((FLAGOS_BUILD_\w+)"
+    root_options = re.findall(
+        pattern, (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"), re.M
+    )
+    assert set(root_options) == switches
+    assert not re.search(
+        pattern, (ROOT / "csrc/CMakeLists.txt").read_text(encoding="utf-8"), re.M
+    )
 
 
 def test_setup_resolves_the_table_defaults(monkeypatch, clean_kernel_env):

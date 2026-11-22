@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / ".github/scripts/hooks/set_env_iluvatar.sh"
 
 
-def run_hook(tmp_path, *, prepared=True, fail="", boxing=False, cached_occupancy=False):
+def run_hook(tmp_path, *, prepared=True, fail="", cached_occupancy=False):
     """Run the real hook with local package/build boundaries and a fake SDK."""
     import shlex
 
@@ -100,7 +100,6 @@ def run_hook(tmp_path, *, prepared=True, fail="", boxing=False, cached_occupancy
         CI_PYTHON=str(ci_python),
         IMAGE_TORCH=image_torch,
         PREPARED_STATUS="0" if prepared else "1",
-        BOXING_LANE="1" if boxing else "",
         PIP_CONSTRAINT=str(ROOT / ".github/constraints.txt"),
         FAIL_PHASE=fail,
         FLAGOS_VENDOR_TORCH_LIB=f"{image_torch}/lib",
@@ -128,7 +127,6 @@ install_flag_gems() { :; }
 build_flagos_inplace() {
   test -z "$FLAGOS_VENDOR_TORCH_LIB"
   test -z "$FLAGOS_VENDOR_TORCH_VERSION"
-  test "$FLAGOS_BUILD_BOXING" = 0
   echo CPU-core-build >> "$CALL_LOG"
 }
 source "$REPO_ROOT/.github/scripts/hooks/set_env_iluvatar.sh"
@@ -152,7 +150,6 @@ def test_hook_reuses_packages_and_persists_cpu_isolation(tmp_path):
     rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
     assert rows["FLAGOS_VENDOR_TORCH_LIB"] == ""
     assert rows["FLAGOS_VENDOR_TORCH_VERSION"] == ""
-    assert rows["FLAGOS_BUILD_BOXING"] == "0"
     assert rows["BASH_ENV"] == "/dev/null"
     assert rows["PYTHONPATH"] == ""
     for name in ("CPATH", "LIBRARY_PATH", "LD_LIBRARY_PATH", "CMAKE_PREFIX_PATH"):
@@ -245,14 +242,6 @@ def test_new_image_keeps_the_previous_optional_compile_path(tmp_path, cached_occ
     )
     assert unseeded.returncode != 0
     assert "Image migration enabled occupancy" in unseeded.stderr
-
-
-def test_iluvatar_cannot_silently_build_a_boxing_lane(tmp_path):
-    done, calls, *_ = run_hook(tmp_path, boxing=True)
-    assert done.returncode != 0
-    assert "has no boxing lane" in done.stderr
-    assert not any(row.startswith("seed ") for row in calls)
-    assert "CPU-core-build" not in calls
 
 
 @pytest.mark.parametrize("phase", ["cpu", "pip"])

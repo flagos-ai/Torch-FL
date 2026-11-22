@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import subprocess
 import sys
 
@@ -18,103 +17,19 @@ ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / ".github/scripts/hooks/set_env_thead.sh"
 
 
-@pytest.mark.parametrize("attention", [False, True], ids=["legacy", "ppu-2.1"])
-def test_boxing_bundle_loads_after_vendor_python_is_removed(tmp_path, attention):
-    compiler, patchelf = shutil.which("cc"), shutil.which("patchelf")
-    if not compiler or not patchelf:
-        pytest.skip("ELF bundle regression requires a C compiler and patchelf")
-    repo = tmp_path / "repo"
-    scripts = repo / "scripts/vendor"
-    scripts.mkdir(parents=True)
-    for name in ("bundle_thead_libtorch.sh", "bundle_common.sh"):
-        shutil.copy2(ROOT / "scripts/vendor" / name, scripts / name)
-    source = tmp_path / "vendor/torch/lib"
-    source.mkdir(parents=True)
-    source.parent.joinpath("version.py").write_text('__version__ = "2.10.0"\n')
-    stub = tmp_path / "stub.c"
-    stub.write_text("int attention_value(void) { return 42; }\n")
-    library = source / "libxformers_ppu.so"
-    subprocess.run(
-        [compiler, "-shared", "-fPIC", str(stub), "-o", str(library)], check=True
-    )
-    original = library.read_bytes()
-    for name in (
-        "libc10.so",
-        "libtorch_cpu.so",
-        "libtorch.so",
-        "libtorch_global_deps.so",
-        "libtorch_python.so",
-    ):
-        shutil.copy2(library, source / name)
-    stub.write_text(
-        "extern int attention_value(void); int probe(void) { return attention_value(); }\n"
-        if attention
-        else "int probe(void) { return 42; }\n"
-    )
-    subprocess.run(
-        [
-            compiler,
-            "-shared",
-            "-fPIC",
-            str(stub),
-            *([f"-L{source}", "-lxformers_ppu"] if attention else []),
-            "-o",
-            str(source / "libtorch_cuda.so"),
-        ],
-        check=True,
-    )
-    if not attention:
-        library.unlink()
-    env = dict(
-        os.environ,
-        FLAGOS_VENDOR_TORCH_LIB=str(source),
-        FLAGOS_PPU_MKL_DIR=str(tmp_path / "mkl"),
-        PPU_SDK=str(tmp_path / "sdk"),
-        LD_LIBRARY_PATH="",
-        LD_PRELOAD="",
-    )
-    for _ in range(2):
-        subprocess.run(
-            ["bash", str(scripts / "bundle_thead_libtorch.sh")],
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    bundle = repo / "torch_fl/lib_thead"
-    if attention:
-        assert library.read_bytes() == original
-    shutil.rmtree(source.parent)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); assert lib.probe()==42",
-            str(bundle / "libtorch_cuda.so"),
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-
 def run_hook(
     tmp_path,
     *,
-    boxing=False,
     stage="integration",
     prepared=True,
     fail="",
     target="ci",
-    lane_value=None,
+    use_default_path=False,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".github").symlink_to(ROOT / ".github", target_is_directory=True)
     (repo / "torch_fl/configs").mkdir(parents=True)
-    (repo / "torch_fl/configs/backends_thead_boxing.conf").touch()
     sdk = tmp_path / "sdk"
     (sdk / "CUDA_SDK/lib64").mkdir(parents=True)
     (sdk / "CUDA_SDK/lib64/libcudart.so").touch()
@@ -231,7 +146,6 @@ fi
         TORCH_FL_VENV_ROOT=str(tmp_path / target),
         PPU_SDK=str(sdk),
         PPU_VERSION="v2.1.0",
-        BOXING_LANE=lane_value if lane_value is not None else ("1" if boxing else ""),
         GITHUB_ENV=str(env_file),
         GITHUB_PATH=str(path_file),
         CALL_LOG=str(calls),
@@ -252,7 +166,6 @@ fi
             )
         ),
         LD_LIBRARY_PATH=f"{vendor_root}/lib:/host/driver",
-        FLAGOS_BUILD_BOXING="",
         FLAGOS_BACKEND_CONFIG="",
     )
     script = r"""
@@ -272,10 +185,9 @@ build_flagos_inplace() {
   test "$FLAGOS_BUILD_FLAGGEMS_CPP" = 0
   echo native-build >> "$CALL_LOG"
 }
-bash() { test "$1" = scripts/vendor/bundle_thead_libtorch.sh; echo bundle >> "$CALL_LOG"; }
 source "$1"
 """
-    if lane_value is not None:
+    if use_default_path:
         env.pop("TORCH_FL_VENV_ROOT")
         env["RUNNER_TEMP"] = str(tmp_path)
     done = subprocess.run(
@@ -287,12 +199,10 @@ source "$1"
     return done, calls.read_text().splitlines(), env, env_file, path_file
 
 
-@pytest.mark.parametrize("boxing", [False, True])
-def test_runtime_reuse_preserves_lane_and_next_shell_isolation(tmp_path, boxing):
-    done, calls, env, env_file, path_file = run_hook(tmp_path, boxing=boxing)
+def test_runtime_reuse_preserves_next_shell_isolation(tmp_path):
+    done, calls, env, env_file, path_file = run_hook(tmp_path)
     assert done.returncode == 0, done.stderr
     assert calls.count("native-build") == 1
-    assert ("bundle" in calls) == boxing
     assert "cpu-torch" not in calls and "flagtree" not in calls
     assert not any(row.startswith("pip ") for row in calls)
     assert any("--requirements-file" in row for row in calls)
@@ -302,9 +212,6 @@ def test_runtime_reuse_preserves_lane_and_next_shell_isolation(tmp_path, boxing)
     assert rows["PYTHONPATH"] == ""
     assert rows["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert rows["FLAGOS_SDK_VERSION"] == "2.1.0"
-    assert rows["FLAGOS_VENDOR_TORCH_VERSION"] == (
-        "2.10.0+v0.1.0.ppu2.1.1" if boxing else ""
-    )
     assert "/host/driver" in rows["LD_LIBRARY_PATH"]
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", "python"],
@@ -335,8 +242,8 @@ def test_build_stage_preserves_existing_compile_count_without_model_packages(tmp
     assert not any("transformers" in row for row in calls)
 
 
-def test_zero_boxing_value_uses_the_default_lane_venv(tmp_path):
-    done, _, _, env_file, _ = run_hook(tmp_path, stage="build", lane_value="0")
+def test_uses_the_default_lane_venv(tmp_path):
+    done, _, _, env_file, _ = run_hook(tmp_path, stage="build", use_default_path=True)
     assert done.returncode == 0, done.stderr
     rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
     assert rows["VIRTUAL_ENV"] == str(tmp_path / "torch-fl-ppu-build")
@@ -419,16 +326,14 @@ def test_compiler_reuse_validates_version_origin_and_ppu_backend(tmp_path, state
     assert (done.returncode == 0) == (state == "local"), done.stderr
 
 
-def test_pinned_runtime_retains_device_access_and_both_lane_contracts():
+def test_pinned_runtime_retains_device_access_and_environment_contract():
     config = yaml.safe_load((ROOT / ".github/configs/thead.yml").read_text())
     assert (
         config["ci_image"]
         == "harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0@sha256:7837256c2dab931c762f86713a37d3fbecc902792392d67731c982ecda632cef"
     )
     assert config["runner_labels"] == ["flagcicd-810e"]
-    assert config["boxing_lane"] is True
     assert "--privileged" not in config["container_options"]
     assert "--ipc=host" not in config["container_options"]
     assert "--device=/dev/alixpu_ppu15" in config["container_options"]
     assert config["environment_check"]["cuda_version"] is None
-    assert config["boxing_environment_check"]["cuda_version"] == "13.0"

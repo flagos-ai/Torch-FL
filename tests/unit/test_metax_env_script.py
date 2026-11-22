@@ -169,23 +169,17 @@ def test_compiler_reuse_keeps_the_current_post2_cohort(
     assert (result.returncode == 0) == accepted, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("boxing", ["", "1"])
-def test_both_lanes_keep_the_image_inherited_runtime_flags(tmp_path, boxing):
-    conf = tmp_path / "torch_fl/configs/backends_metax_boxing.conf"
-    conf.parent.mkdir(parents=True)
-    conf.touch()
+def test_keeps_the_image_inherited_runtime_flags():
     start = SCRIPT.index("export FLAGOS_BUILD_VENDOR=OFF")
     end = SCRIPT.index("\nexport LD_LIBRARY_PATH=", start)
     result = run_shell(
         SCRIPT[start:end]
-        + '\nprintf "%s|%s|%s|%s|%s\\n" "$FLAGOS_BUILD_VENDOR" '
-        + '"${FLAGOS_BUILD_BOXING:-}" "$FLAGOS_METAX_CUDART_SHIM" '
+        + '\nprintf "%s|%s|%s|%s\\n" "$FLAGOS_BUILD_VENDOR" '
+        + '"$FLAGOS_METAX_CUDART_SHIM" '
         + '"$FLAGOS_DISABLE_CUDA_ASSETS" "$FLAGOS_BUILD_FLAGGEMS"',
-        BOXING_LANE=boxing,
-        REPO_ROOT=str(tmp_path),
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == f"OFF|{boxing}|1|1|1"
+    assert result.stdout.strip() == "OFF|1|1|1"
 
 
 @pytest.mark.parametrize("stage", ["build", "integration"])

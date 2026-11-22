@@ -14,7 +14,7 @@
 
 """The `cuda` alias must install on a build whose CUDA probe torch_fl rewrote.
 
-`_alias_cuda_to_flagos` returns early when a real CUDA device is present, because
+`cuda.install_alias` returns early when a real CUDA device is present, because
 on the CUDA and boxing backends `cuda` already names genuine hardware. The
 question it has to answer is therefore "does *torch* report a CUDA device", and
 that is not what `torch.cuda.is_available()` answers once torch_fl is imported:
@@ -53,17 +53,18 @@ import pytest
 import torch
 
 torch_fl = pytest.importorskip("torch_fl")
+cuda = pytest.importorskip("torch_fl.compat.cuda")
 
 
 def test_the_guard_asks_the_helper_not_the_probe_it_wrote():
     """Structural: the guard must not read the attribute it is deciding about."""
-    function = ast.parse(inspect.getsource(torch_fl._alias_cuda_to_flagos)).body[0]
+    function = ast.parse(inspect.getsource(cuda.install_alias)).body[0]
     guard_tests = [
         ast.unparse(statement.test)
         for statement in function.body
         if isinstance(statement, ast.If)
     ]
-    assert "_real_cuda_is_available()" in guard_tests, guard_tests
+    assert "has_real_cuda()" in guard_tests, guard_tests
     assert "torch.cuda.is_available()" not in guard_tests, guard_tests
 
 
@@ -79,13 +80,13 @@ def test_the_helper_answers_from_the_captured_probe(monkeypatch):
     monkeypatch.setattr(
         torch.cuda, "_flagos_original_is_available", lambda: True, raising=False
     )
-    monkeypatch.setattr(torch_fl, "_TORCH_CUDA_PROBE", lambda: False)
-    assert torch_fl._real_cuda_is_available() is False
+    monkeypatch.setattr(cuda, "_cuda_probe", lambda: False)
+    assert cuda.has_real_cuda() is False
 
     # ... and the other way, so this is not passing by accident of one value.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(torch_fl, "_TORCH_CUDA_PROBE", lambda: True)
-    assert torch_fl._real_cuda_is_available() is True
+    monkeypatch.setattr(cuda, "_cuda_probe", lambda: True)
+    assert cuda.has_real_cuda() is True
 
 
 def test_the_probe_is_captured_after_vendor_compat_and_before_the_alias():
@@ -99,14 +100,17 @@ def test_the_probe_is_captured_after_vendor_compat_and_before_the_alias():
     Captured after the alias, it sees torch_fl's own lambda, which is True on
     every build with a flagos device.
     """
-    claim = inspect.getsource(torch_fl._phase_claim)
     ecosystem = inspect.getsource(torch_fl._phase_ecosystem)
-    assert "_TORCH_CUDA_PROBE =" not in claim, (
-        "captured before the vendor compat layers"
+    assert ecosystem.index("device.prepare_cuda(") < ecosystem.index(
+        "cuda.install_alias("
     )
-    assert ecosystem.index("_TORCH_CUDA_PROBE =") < ecosystem.index(
-        "_alias_cuda_to_flagos()"
-    ), "captured after the alias replaced the attribute"
+    install = inspect.getsource(cuda.install_alias)
+    assert install.index("_cuda_probe = torch.cuda.is_available") < install.index(
+        "if has_real_cuda()"
+    )
+    assert install.index("if has_real_cuda()") < install.index(
+        "torch.cuda.is_available ="
+    )
 
 
 def test_vendor_device_aliases_cover_every_native_vendor():
@@ -121,20 +125,20 @@ def test_vendor_device_aliases_cover_every_native_vendor():
     """
     # Keyed by what the build record holds, which is the vendor; the platform
     # ids (musa, ...) are what setup.py normalises into these keys.
-    assert torch_fl._VENDOR_DEVICE_ALIASES["mthreads"] == ("cuda", "musa")
-    assert torch_fl._VENDOR_DEVICE_ALIASES["tsingmicro"] == ("cuda", "txda")
+    assert cuda._VENDOR_DEVICE_ALIASES["mthreads"] == ("cuda", "musa")
+    assert cuda._VENDOR_DEVICE_ALIASES["tsingmicro"] == ("cuda", "txda")
     # Cambricon is the one row without "cuda": MLU has no CUDA runtime, and a
     # flagos tensor there is cnrt memory, so reinterpreting a device string as
     # CUDA would be a correctness break rather than a convenience. Its row exists
     # for Triton's mlu driver, which builds autotune scratch as
     # torch.empty(..., device='mlu') -- the name torch_mlu would have registered.
-    assert torch_fl._VENDOR_DEVICE_ALIASES["cambricon"] == ("mlu",)
+    assert cuda._VENDOR_DEVICE_ALIASES["cambricon"] == ("mlu",)
     # Every accelerator with a vendor-private device name is listed; the rest
     # (nvidia/ascend/...) only ever see "cuda" or a name torch already knows.
     # A row that does not start with "cuda" is a platform with no CUDA runtime
     # at all, and must be named here rather than appear by accident.
     no_cuda_runtime = {"cambricon"}
-    for accelerator, aliases in torch_fl._VENDOR_DEVICE_ALIASES.items():
+    for accelerator, aliases in cuda._VENDOR_DEVICE_ALIASES.items():
         if accelerator in no_cuda_runtime:
             assert "cuda" not in aliases, accelerator
             continue
@@ -148,6 +152,7 @@ _CHILD = textwrap.dedent(
 
     import torch
     import torch_fl
+    from torch_fl.compat import cuda
 
     def device_type(dev):
         try:
@@ -167,8 +172,9 @@ _CHILD = textwrap.dedent(
         # Whether this build rewrote torch's CUDA probe at all.
         "redirected": hasattr(torch.cuda, "_flagos_original_is_available"),
         "cuda_is_available": bool(torch.cuda.is_available()),
-        "real_cuda": torch_fl._real_cuda_is_available(),
-        "alias_active": torch_fl._cuda_alias_active,
+        "real_cuda": cuda.has_real_cuda(),
+        "alias_active": cuda.is_active(),
+        "legacy_alias_active": torch_fl._cuda_alias_active,
         "device_is_wrapped": torch.device is not torch._C.device,
         "synchronize_is_flagos": torch.cuda.synchronize is torch.flagos.synchronize,
         "current_device_is_flagos": (
@@ -214,7 +220,9 @@ def _child_state(alias_env: str) -> dict:
         timeout=600,
     )
     assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+    state = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert state["legacy_alias_active"] == state["alias_active"]
+    return state
 
 
 @pytest.mark.parametrize("alias_env", ["1", ""])
@@ -262,7 +270,7 @@ def test_the_vendor_device_name_is_aliased_on_a_native_vendor_build(alias_env):
     nothing to check and passes trivially.
     """
     state = _child_state(alias_env)
-    aliases = torch_fl._VENDOR_DEVICE_ALIASES.get(torch_fl._build_accelerator(), ())
+    aliases = cuda._VENDOR_DEVICE_ALIASES.get(torch_fl._build_accelerator(), ())
     no_cuda_runtime = bool(aliases) and "cuda" not in aliases
     if not state["alias_active"] and not no_cuda_runtime:
         # Genuine CUDA, or the alias is opted out: nothing is remapped, so the

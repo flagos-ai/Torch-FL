@@ -29,7 +29,6 @@ on:
       platform:
         description: >-
           Config basename under .github/configs (without .yml), optionally
-          suffixed with "-boxing" for that platform's CUDA-boxing lane
         required: true
         type: string
       checkout_repository:
@@ -54,11 +53,8 @@ on:
         default: ''
     outputs:
       platform:
-        description: Config basename the lane reads (without any -boxing suffix)
+        description: Config basename the lane reads
         value: ${{ jobs.configuration.outputs.platform }}
-      boxing_lane:
-        description: '"1" when the lane builds the CUDA-boxing wheel, else ""'
-        value: ${{ jobs.configuration.outputs.boxing_lane }}
       display_name:
         description: Human-readable platform name, used in job and step names
         value: ${{ jobs.configuration.outputs.display_name }}
@@ -115,7 +111,6 @@ jobs:
         shell: bash
     outputs:
       platform: ${{ steps.config.outputs.platform }}
-      boxing_lane: ${{ steps.config.outputs.boxing_lane }}
       display_name: ${{ steps.config.outputs.display_name }}
       setup_script: ${{ steps.config.outputs.setup_script }}
       setup_platform: ${{ steps.config.outputs.setup_platform }}

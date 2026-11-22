@@ -90,8 +90,8 @@ def retry(event, github):
     if any(job.get("conclusion") == "cancelled" for job in jobs):
         return "No retry: at least one job was cancelled."
     failed = [job for job in jobs if job.get("conclusion") in {"failure", "timed_out"}]
-    # CI complete is a dependent summary, not an independent root cause.
-    roots = [job for job in failed if job.get("name") != "CI complete"]
+    summaries = {"CI complete", "PR hardware parity"}
+    roots = [job for job in failed if job.get("name") not in summaries]
     if not roots:
         return "No retry: no failed root job is available for classification."
     for job in roots:

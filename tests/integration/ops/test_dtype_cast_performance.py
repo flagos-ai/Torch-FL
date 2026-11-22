@@ -15,9 +15,7 @@
 """CUDA casts, strided copies and gathers must avoid host transfers.
 
 This is a performance contract, separate from cross-platform cast correctness.
-The profiler owns the device through an exclusive CUDA-only nightly manifest group.
-Other CUDA-ABI vendors need their own measurements before joining this contract.
-The nightly boxing lane supplies native CUDA copy kernels with CPU-only PyTorch.
+Run on NVIDIA with a torch-fl build linked against CUDA PyTorch.
 """
 
 from pathlib import Path
@@ -45,15 +43,10 @@ def _device():
 
 @pytest.fixture(scope="module")
 def native_cuda_copy():
-    """The scheduled lane must supply native copies, not the CPU fallback."""
-    from torch_fl import _env
-
+    """The test requires native CUDA copies."""
     torch_lib = Path(torch.__file__).resolve().parent / "lib"
-    assert (
-        "boxing" in _env.build_kernels() or (torch_lib / "libtorch_cuda.so").is_file()
-    ), (
-        "Transfer-free casts require a boxing wheel or CUDA-linked PyTorch; "
-        "the default CPU-only vendor lane does not cover this path"
+    assert (torch_lib / "libtorch_cuda.so").is_file(), (
+        "Transfer-free casts require CUDA-linked PyTorch"
     )
 
 

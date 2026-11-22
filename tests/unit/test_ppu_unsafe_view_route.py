@@ -31,14 +31,14 @@ _GENERATOR = _REPO / "scripts/codegen/gen_vendor_confs.py"
 _CONFIG = _REPO / "torch_fl/configs/backends_thead.conf"
 
 
-def test_ppu_contract_failures_are_regenerable_boxing_exceptions():
+def test_ppu_contract_failures_are_regenerable_flaggems_exceptions():
     tree = ast.parse(_GENERATOR.read_text())
     gaps = None
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
         if not any(
-            isinstance(target, ast.Name) and target.id == "BOXING_TRITON_GAPS"
+            isinstance(target, ast.Name) and target.id == "CUDA_ABI_TRITON_GAPS"
             for target in node.targets
         ):
             continue
@@ -54,8 +54,5 @@ def test_ppu_contract_failures_are_regenerable_boxing_exceptions():
         if line and "=" in line:
             op, backend = (part.strip() for part in line.split("=", 1))
             routes[op] = backend
-    # thead is a boxing platform: these two are held off FlagGems by the gap
-    # set above, and a default conf spells a held op `none` (cpu_fallback), not
-    # `boxing` -- the day-0 variant is the file that routes them to the boxer.
     assert routes["_unsafe_view"] == "none"
     assert routes["slice.Tensor"] == "none"

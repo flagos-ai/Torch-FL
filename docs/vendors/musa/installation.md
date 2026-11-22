@@ -88,7 +88,10 @@ Build flags:
 - `FLAGOS_ACCELERATOR=musa`: selects the MUSA build path and enables `FLAGOS_BUILD_VENDOR=ON`
 - `FLAGOS_BUILD_VENDOR=ON`: compiles generated `mudnn` operator kernels (automatic when `FLAGOS_ACCELERATOR=musa`)
 - `FLAGOS_BUILD_FLAGGEMS=ON`: compiles the optional Python dispatcher callers into the same wheel; runtime routing comes from `backends_mthreads.conf`
-- `FLAGOS_BUILD_BOXING=OFF`: forced (the MUSA toolkit exports no CUDA symbols)
+- CMake requires both `libmudnn.so` and `include/mudnncxx/mudnn.h` to compile
+  the vendor kernels. If either is missing, CMake warns and records the
+  build without the vendor kernel set. Set `FLAGOS_MUSA_REQUIRE_VENDOR=ON`
+  in CMake to require the complete SDK.
 - `FLAGOS_BUILD_FLAGGEMS_CPP=OFF`: automatically disabled because the FlagGems C++ runtime is not built for MUSA
 - `--no-build-isolation`: **required** (without it, pip resolves its own torch into a build overlay, and the extension links against that instead of your installed torch, causing `import torch_fl` to fail with `undefined symbol: c10::ValueError`)
 

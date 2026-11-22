@@ -6,7 +6,6 @@
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 import pytest
 import yaml
@@ -16,104 +15,10 @@ HOOK = ROOT / ".github/scripts/hooks/set_env_nvidia.sh"
 SCRIPT = HOOK.read_text()
 
 
-def test_vendor_bootstrap_keeps_the_main_venv_variables(tmp_path):
-    source = tmp_path / "source-python"
-    source.write_text('#!/bin/sh\nif [ "$1" = -c ]; then echo 3.12; fi\n')
-    source.chmod(0o755)
-    target = tmp_path / "vendor"
-    start = SCRIPT.index("bootstrap_vendor_python()")
-    end = SCRIPT.index("\n# Reads the accelerator torch", start)
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            "set -euo pipefail\n"
-            'create_runtime_venv() { mkdir -p "$VENV_ROOT/bin"; cp "$TORCH_FL_VENDOR_PYTHON" "$VENV_ROOT/bin/python"; VENV_PYTHON="$VENV_ROOT/bin/python"; }\n'
-            'pip_retry() { printf "install-python=%s\\n" "$PIP_RETRY_PYTHON"; }\n'
-            + SCRIPT[start:end]
-            + '\nbootstrap_vendor_python\nprintf "main=%s,%s vendor=%s\\n" "$VENV_ROOT" "$VENV_PYTHON" "$VENDOR_PYTHON"',
-        ],
-        env={
-            **os.environ,
-            "TORCH_FL_VENDOR_PYTHON": str(source),
-            "TORCH_FL_VENDOR_VENV": str(target),
-            "VENV_ROOT": "/main-venv",
-            "VENV_PYTHON": "/main-venv/bin/python",
-            "FLAGTREE_PYTHON_VERSION": "3.12",
-            "CPU_TORCH_VERSION": "2.10.0",
-            "VENDOR_TORCH_INDEX_URL": "https://example.invalid",
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    assert f"install-python={target}/bin/python" in result.stdout
-    assert (
-        f"main=/main-venv,/main-venv/bin/python vendor={target}/bin/python"
-        in result.stdout
-    )
-
-
-@pytest.mark.parametrize(
-    "protected", ["checkout", "source", "same-venv", "vendor-child", "vendor-parent"]
-)
-def test_vendor_bootstrap_rejects_protected_paths_before_clearing(tmp_path, protected):
-    repo, prefix = tmp_path / "repo", tmp_path / "runtime"
-    vendor = tmp_path / "vendor"
-    for directory in (repo, prefix, vendor):
-        directory.mkdir()
-        (directory / "keep").write_text("owned fixture")
-    targets = {"checkout": repo, "source": prefix}
-    test_paths = {
-        "same-venv": vendor,
-        "vendor-child": vendor.parent,
-        "vendor-parent": vendor / "nested",
-    }
-    python = tmp_path / "source-python"
-    python.write_text(
-        '#!/bin/bash\nif [[ "$1" == -c ]]; then echo 3.12; exit 0; fi\n'
-        'if [[ "$1" == -I && "$2" == - ]]; then\n'
-        'exec "$REAL_PYTHON" -I -c \'import os,sys; sys.prefix=os.environ["SOURCE_PREFIX"]; sys.base_prefix=sys.prefix; exec(sys.stdin.read())\' "${@:3}"\n'
-        "fi\nexit 7\n"
-    )
-    python.chmod(0o755)
-    start = SCRIPT.index("bootstrap_vendor_python()")
-    end = SCRIPT.index("\n# Reads the accelerator torch", start)
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'set -euo pipefail\nsource "$COMMON"\n'
-            + SCRIPT[start:end]
-            + "\nbootstrap_vendor_python",
-        ],
-        env={
-            **os.environ,
-            "COMMON": str(ROOT / ".github/scripts/lib/set_env_common.sh"),
-            "REPO_ROOT": str(repo),
-            "SOURCE_PREFIX": str(prefix),
-            "REAL_PYTHON": sys.executable,
-            "TORCH_FL_VENDOR_PYTHON": str(python),
-            "TORCH_FL_VENDOR_VENV": str(targets.get(protected, vendor)),
-            "VENV_ROOT": str(test_paths.get(protected, tmp_path / "test-venv")),
-            "FLAGTREE_PYTHON_VERSION": "3.12",
-            "CPU_TORCH_VERSION": "2.10.0",
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode != 0
-    assert "CI venv must" in result.stderr
-    assert all((directory / "keep").exists() for directory in (repo, prefix, vendor))
-
-
-@pytest.mark.parametrize("boxing", [False, True])
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("stage", ["build", "integration"])
 def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
-    tmp_path, boxing, prepared, stage
+    tmp_path, prepared, stage
 ):
     source = tmp_path / "image-python"
     source.write_text(
@@ -129,12 +34,7 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
         'printf "%s/torch\\n" "$VENV_ROOT"\n'
     )
     source.chmod(0o755)
-    start = SCRIPT.index("# The isolated environment runs on the Python version")
-    paths = SCRIPT[
-        SCRIPT.index('suffix=""') : SCRIPT.index(
-            'VENDOR_PYTHON="$(find_image_vendor_python)"'
-        )
-    ]
+    start = SCRIPT.index("# Sets TEST_PYTHON")
     end = SCRIPT.index("export FLAGOS_ACCELERATOR=cuda", start)
     log = tmp_path / "calls"
     done = subprocess.run(
@@ -159,7 +59,6 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
             'install_cpu_torch() { echo "cpu-torch $CPU_TORCH_VERSION" >> "$CALL_LOG"; touch "$VENV_ROOT/cpu-installed"; }\n'
             'install_flagtree() { echo flagtree >> "$CALL_LOG"; }\n'
             'install_flag_gems() { echo flaggems >> "$CALL_LOG"; }\n'
-            + paths
             + SCRIPT[start:end]
             + '\nprintf "CACHE=%s VENV=%s\\n" "$PIP_RETRY_NO_CACHE" "$VENV_ROOT"',
         ],
@@ -169,9 +68,8 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
             "RUNNER_TEMP": str(tmp_path),
             "CALL_LOG": str(log),
             "SOURCE_PYTHON": str(source),
-            "VENDOR_PYTHON": str(source) if boxing else "",
+            "VENDOR_PYTHON": "",
             "VENDOR_TORCH_ROOT": "",
-            "BOXING_LANE": "1" if boxing else "0",
             "CI_STAGE": stage,
             "CPU_TORCH_VERSION": "2.10.0",
             "FLAGTREE_PYTHON_VERSION": "3.12",
@@ -208,17 +106,15 @@ def test_shared_provisioning_reuses_packages_and_preserves_cache_policy(
     assert ("flagtree" in calls) is not prepared
     uninstall = "-m pip uninstall -y flagtree triton triton_kernels"
     assert (uninstall in calls) is not prepared
-    suffix = "-boxing" if boxing else ""
-    assert f"CACHE=1 VENV={tmp_path}/torch-fl-cuda-{stage}{suffix}" in done.stdout
+    assert f"CACHE=1 VENV={tmp_path}/torch-fl-cuda-{stage}" in done.stdout
 
 
-def test_cuda_keeps_its_image_and_enables_both_isolation_checks():
+def test_cuda_keeps_its_image_and_enables_isolation_check():
     config = yaml.safe_load((ROOT / ".github/configs/nvidia.yml").read_text())
     assert (
         config["ci_image"] == "harbor.baai.ac.cn/flagos-dev/torch-fl:20261021-cuda-dev"
     )
-    for name in ("environment_check", "boxing_environment_check"):
-        assert config[name]["venv_isolation"] is True
+    assert config["environment_check"]["venv_isolation"] is True
 
 
 def test_cuda_exports_isolation_and_does_not_reset_the_selected_cache():

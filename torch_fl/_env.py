@@ -25,8 +25,7 @@ pair is ``FLAGOS_FORCE_BACKEND`` now, one enum, so the disagreement is not
 expressible rather than merely fixed.
 
 Importing this module has no side effects beyond the one-shot scan described
-under `check_environment`. It imports nothing from ``torch_fl`` and nothing from
-``torch``, so it loads standalone — ``tests/unit/test_env_registry.py`` pulls it
+under `check_environment`. It loads without ``torch_fl`` or ``torch``, so it works standalone — ``tests/unit/test_env_registry.py`` pulls it
 in by path without a torch install.
 
 The C++ mirror is ``csrc/include/flagos_env.h``; the two must stay in step.
@@ -34,12 +33,10 @@ The C++ mirror is ``csrc/include/flagos_env.h``; the two must stay in step.
 
 from __future__ import annotations
 
-import functools
-import importlib.machinery
-import importlib.util
 import os
+import runpy
 import sys
-from typing import Any
+from pathlib import Path
 
 __all__ = [
     "FOREIGN",
@@ -232,49 +229,24 @@ def set_foreign(name: str, value: str) -> bool:
 # The build record
 # ---------------------------------------------------------------------------
 #
-# setup.py writes torch_fl/_build_config.py next to this file at build time, and
-# it is the authoritative answer to "what is this wheel?". The environment
-# describes what a user is asking for; the record describes what was compiled.
-# Run-time code that would otherwise infer the build from an environment
-# variable reads these instead, so there is nothing for a stale export to
-# contradict.
-#
-# Loaded by path rather than by import: torch_fl/__init__.py is still executing
-# when these are read, and a package import here would recurse into it.
+def _build_info():
+    if __package__ == "torch_fl":
+        from ._platform import build_info
 
-
-@functools.lru_cache(maxsize=1)
-def _build_record() -> dict[str, Any]:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build_config.py")
-    try:
-        loader = importlib.machinery.SourceFileLoader("torch_fl._build_config", path)
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        module = importlib.util.module_from_spec(spec)
-        loader.exec_module(module)
-    except (OSError, ImportError, SyntaxError):
-        # A source checkout with no build yet. Callers treat "" / () as
-        # "unknown", never as a platform.
-        return {"accelerator": "", "kernels": ()}
-    return {
-        "accelerator": str(getattr(module, "ACCELERATOR", "")).strip().lower(),
-        "kernels": tuple(
-            str(k).strip().lower() for k in getattr(module, "KERNELS", ())
-        ),
-    }
+        return build_info()
+    package = Path(__file__).resolve().parent
+    read = runpy.run_path(str(package / "_platform.py"))["build_info"]
+    return read(package)
 
 
 def build_accelerator() -> str:
-    """The accelerator this wheel was built for, lowercased ("" if unknown)."""
-    return str(_build_record()["accelerator"])
+    """Return the accelerator recorded by the build."""
+    return _build_info().accelerator
 
 
 def build_kernels() -> frozenset[str]:
-    """The kernel sets compiled into this wheel, lowercased.
-
-    Names are the ones setup.py::KERNEL_SET_NAME declares: "vendor", "flaggems",
-    "boxing", "flaggems_cpp", "tileops". Empty for an unbuilt source checkout.
-    """
-    return frozenset(_build_record()["kernels"])
+    """Return the kernel sets compiled into this wheel."""
+    return _build_info().kernels
 
 
 # ---------------------------------------------------------------------------
@@ -334,17 +306,13 @@ VARIABLES: dict[str, tuple[str, str, str]] = {
         "OFF",
         "Generate and compile FlagGems host source into the NVIDIA CPU-Torch "
         "wheel. Experimental; requires FlagGems, Cython and the CUDA toolkit at "
-        "build time. Boxing, FlagGems C++ and TileOPs must be disabled",
+        "build time. FlagGems C++ and TileOPs must be disabled",
     ),
     "FLAGOS_BUILD_BOXING": (
         SCOPE_BUILD,
         "OFF",
-        "Compile the generated CUDA boxing kernels, the CUDA-ABI vendor path. "
-        "Off on every platform by default: the default wheel is FlagGems-primary "
-        "(routed ops go to FlagGems, the rest to cpu_fallback) and depends on no "
-        "vendor torch package. Set FLAGOS_BUILD_BOXING=1 (or "
-        "-DFLAGOS_BUILD_BOXING=ON) to build a boxing wheel that reuses the "
-        "vendor's CUDA-ABI kernels",
+        "Retired. Enabling this setting raises a build error. Install or build "
+        "the platform's default FlagGems and vendor wheel",
     ),
     "FLAGOS_BUILD_FLAGGEMS_CPP": (
         SCOPE_BUILD,

@@ -14,7 +14,9 @@
 # limitations under the License.
 
 """
-CI platform matrix generator with changed-file filtering and label routing.
+Standalone diagnostic matrix generator with changed-file and label routing.
+
+Ordinary pull request CI uses the full matrix in flagcicd_plan.py.
 
 For schedule / push: returns all configured platforms.
 For workflow_dispatch: uses ``--dispatch-platforms`` (``all`` by default).
@@ -35,13 +37,8 @@ Usage (called from a GitHub Actions step):
         --dispatch-platforms "ascend" \\
         >> "$GITHUB_OUTPUT"
 
-A boxing platform (.github/configs/<p>.yml with ``boxing_lane: true``) is
-scheduled twice: the bare platform name runs the vendor build, and the
-``<p>-boxing`` lane runs the CUDA-boxing build of the same platform. The two
-are selected together -- there is no way to ask for one and not the other.
-
 Output written to GITHUB_OUTPUT:
-    platforms=["ascend","cuda","dcu","dcu-boxing","hygon","hygon-boxing"]
+    platforms=["ascend","hygon","nvidia","thead"]
 """
 
 from __future__ import annotations
@@ -82,41 +79,6 @@ def _platform_config(
     return cfg if isinstance(cfg, dict) else {}
 
 
-def boxing_platforms(
-    configs_dir: pathlib.Path, platforms: list[str], platform_configs=None
-) -> list[str]:
-    """The platforms whose config opts into a second, CUDA-boxing lane.
-
-    Read from ``boxing_lane: true`` in the platform's own config rather than
-    from a list here: the flag is a statement about that platform's build, and
-    it sits beside the ``environment_check`` that holds the lane to it.
-    """
-    return [
-        platform
-        for platform in platforms
-        if _platform_config(configs_dir, platform, platform_configs).get("boxing_lane")
-        is True
-    ]
-
-
-def _schedule(platforms: list[str], boxing: list[str]) -> list[str]:
-    """Each boxing platform followed by its ``<p>-boxing`` lane."""
-    lanes = []
-    for platform in platforms:
-        lanes.append(platform)
-        if platform in boxing:
-            lanes.append(f"{platform}-boxing")
-    return lanes
-
-
-def _platform_of(lane: str, boxing: list[str]) -> str:
-    """The platform a lane name stands for (``dcu-boxing`` -> ``dcu``)."""
-    for platform in boxing:
-        if lane == f"{platform}-boxing":
-            return platform
-    return lane
-
-
 def _changed_files(
     base_ref: str, base_sha: str = "", head_sha: str = "HEAD"
 ) -> list[str] | None:
@@ -150,23 +112,6 @@ def _matches(path: str, pattern: str) -> bool:
 
 
 def _platforms_from_files(
-    changed: list[str] | None,
-    all_platforms: list[str],
-    configs_dir: pathlib.Path,
-    boxing: list[str] | None = None,
-    reasons: list[dict] | None = None,
-    platform_configs=None,
-) -> list[str]:
-    """The lanes a pull request's changed files select."""
-    platforms = _platforms_from_files_bare(
-        changed, all_platforms, configs_dir, reasons, platform_configs
-    )
-    if boxing is None:
-        boxing = boxing_platforms(configs_dir, all_platforms, platform_configs)
-    return _schedule(platforms, boxing)
-
-
-def _platforms_from_files_bare(
     changed: list[str] | None,
     all_platforms: list[str],
     configs_dir: pathlib.Path,
@@ -259,34 +204,17 @@ def _platforms_from_labels(
     return [platform for platform in all_platforms if platform in set(routing)]
 
 
-def _platforms_from_dispatch(
-    requested: str,
-    all_platforms: list[str],
-    boxing: list[str] | None = None,
-) -> list[str]:
-    """Validate and return the lanes requested by workflow_dispatch.
-
-    A platform name selects its lanes whole: naming ``dcu`` dispatches the DCU
-    vendor build and ``dcu-boxing`` together, which is what a person asking for
-    DCU means and keeps the two from ratcheting apart. Naming the lane itself
-    (``dcu-boxing``) is accepted too, and also brings its platform's other
-    build: there is no way to ask for one lane and not the other.
-    """
-    if boxing is None:
-        boxing = []
-    lanes = _schedule(all_platforms, boxing)
+def _platforms_from_dispatch(requested: str, all_platforms: list[str]) -> list[str]:
+    """Validate and return the platforms requested by workflow_dispatch."""
     values = [value.strip() for value in requested.split(",") if value.strip()]
     if not values or values == ["all"]:
-        return lanes
-    platforms = {_platform_of(value, boxing) for value in values}
-    if "all" in platforms or any(value not in all_platforms for value in platforms):
+        return all_platforms
+    platforms = set(values)
+    if "all" in platforms or platforms.difference(all_platforms):
         unknown = sorted(platforms - set(all_platforms) - {"all"})
         detail = f": {', '.join(unknown)}" if unknown else ""
         raise ValueError(f"invalid workflow_dispatch platform selection{detail}")
-    # Every lane of a named platform is dispatched, the boxing lane included:
-    # the two are one wheel built two ways, so asking for the platform is
-    # asking for both.
-    return [lane for lane in lanes if _platform_of(lane, boxing) in platforms]
+    return [platform for platform in all_platforms if platform in platforms]
 
 
 def select_platforms(
@@ -306,30 +234,28 @@ def select_platforms(
     )
     if not known:
         raise ValueError(f"No platform configs found in {configs_dir}")
-    boxing = boxing_platforms(configs_dir, known, platform_configs)
     reasons = []
     if event_name == "workflow_dispatch":
-        selected = _platforms_from_dispatch(dispatch_platforms, known, boxing)
+        selected = _platforms_from_dispatch(dispatch_platforms, known)
         reasons.append({"kind": "dispatch", "requested": dispatch_platforms or "all"})
     elif event_name != "pull_request":
-        selected = _schedule(known, boxing)
+        selected = known
         reasons.append({"kind": "full_event", "event_name": event_name})
     else:
         label_platforms = _platforms_from_labels(labels, known)
         if label_platforms is None:
             selected = _platforms_from_files(
-                changed, known, configs_dir, boxing, reasons, platform_configs
+                changed, known, configs_dir, reasons, platform_configs
             )
         else:
-            label_lanes = _schedule(label_platforms, boxing)
-            selected = label_lanes
+            selected = label_platforms
             routing = sorted(label for label in labels if label.startswith("platform:"))
             reasons.append(
                 {
                     "kind": "labels",
                     "labels": routing,
                     "policy": "label_priority",
-                    "requested_lanes": label_lanes,
+                    "requested_lanes": label_platforms,
                 }
             )
             if any(

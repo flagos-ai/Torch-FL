@@ -26,6 +26,7 @@ import pytest
 import torch_fl
 import torch
 
+from torch_fl import _platform
 from torch_fl._build_config import ACCELERATOR
 
 
@@ -194,15 +195,23 @@ def test_compile_with_max_autotune(device):
     torch_fl._build_accelerator() != "metax",
     reason="MetaX compatibility event regression",
 )
-def test_metax_inductor_event_uses_real_stream(device):
+@pytest.mark.parametrize("explicit_stream", [False, True], ids=["implicit", "explicit"])
+def test_metax_inductor_event_uses_real_stream(device, explicit_stream):
     """Inductor timing events must not record on the raw-stream-only shim."""
     assert torch.cuda.Event is torch.flagos.Event
 
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    output = torch.ones(4096, device=device) + 1
-    end.record()
+    if hasattr(torch_fl._C, "_get_native_current_raw_stream"):
+        side = torch.Stream(device=device)
+    else:
+        side = torch.cuda.Stream()
+    with torch.flagos.stream(side):
+        stream = side if explicit_stream else None
+        start.record(stream)
+        output = torch.ones(4096, device=device) + 1
+        end.record(stream)
+    torch.flagos.current_stream().wait_event(end)
     end.synchronize()
 
     assert_on_flagos(output)
@@ -228,7 +237,9 @@ def test_metax_stream_shim_supports_event_ordering(device):
     current = torch.cuda.current_stream()
 
     # The launcher contract the shim exists for in the first place.
-    assert current.cuda_stream == 0
+    from torch_fl.flagos._streams import get_raw_stream
+
+    assert current.cuda_stream == get_raw_stream()
     assert current.device == torch.device("cuda", torch_fl.flagos.current_device())
 
     # The exact call from the traceback.
@@ -253,25 +264,83 @@ def test_metax_stream_shim_supports_event_ordering(device):
 
 @metax_only
 def test_metax_stream_context_selects_capture_stream(device):
-    """``get_raw_stream`` must follow the current stream, not always report 0.
+    """Launch stream queries follow the selected stream and restore the default."""
+    index = torch_fl.flagos.current_device()
+    default_raw = torch._C._cuda_getCurrentRawStream(index)
+    if hasattr(torch_fl._C, "_get_native_current_raw_stream"):
+        side = torch.Stream(device=device)
+        scope = torch_fl.flagos.stream(side)
+        expected = side.stream_id
+        assert expected != default_raw
+    else:
+        side = torch.cuda.Stream()
+        scope = torch.cuda.stream(side)
+        expected = side.cuda_stream
 
-    Generated Inductor code launches every kernel on ``get_raw_stream(idx)``, and
-    ``torch.cuda.graph()`` makes its capture stream current before capturing. A
-    hardcoded 0 would send those launches to the default stream, silently leaving
-    them out of the captured graph rather than failing.
-    """
-    default_raw = torch._C._cuda_getCurrentRawStream(torch_fl.flagos.current_device())
-    assert default_raw == 0
-
-    side = torch.cuda.Stream()
-    with torch.cuda.stream(side):
-        assert torch.cuda.current_stream().cuda_stream == side.cuda_stream
-        assert torch._C._cuda_getCurrentRawStream(side.device_index) == side.cuda_stream
+    with scope:
+        assert torch.cuda.current_stream().cuda_stream == expected
+        assert torch._C._cuda_getCurrentRawStream(side.device_index) == expected
         output = torch.ones(1024, device=device) + 1
 
-    # The context manager has to put the default stream back.
-    assert torch._C._cuda_getCurrentRawStream(torch_fl.flagos.current_device()) == 0
+    assert torch._C._cuda_getCurrentRawStream(index) == default_raw
     assert_on_flagos(output)
+
+
+@metax_only
+def test_metax_inductor_launches_on_the_selected_native_stream(device, monkeypatch):
+    """A fused Inductor kernel consumes eager work on a non-default stream."""
+    from torch._inductor.utils import run_and_get_code
+
+    from torch_fl import _build_config
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+    from torch_fl.flagos import _streams
+
+    if getattr(_build_config, "NATIVE_HOSTS", False):
+        pytest.skip("Requires the standard MetaX wheel")
+
+    cpu = torch.linspace(-1.0, 1.0, 2048)
+    value = cpu.to(device)
+    side = torch.Stream(device=device)
+    get_raw_stream = _streams.get_raw_stream
+    default = get_raw_stream(device)
+    assert side.stream_id != default
+
+    def fused(x):
+        return x.square() * 1.25 + 0.5
+
+    launches = []
+
+    def record_stream(index):
+        handle = get_raw_stream(index)
+        launches.append(handle)
+        return handle
+
+    # Exercise one launch configuration and capture the generated wrapper.
+    compiled = torch.compile(
+        fused,
+        backend="flagos",
+        fullgraph=True,
+        options={
+            "triton.autotune_pointwise": False,
+            "max_autotune": False,
+            "max_autotune_pointwise": False,
+            "fx_graph_cache": False,
+        },
+    )
+    with torch_fl.flagos.stream(side), torch.no_grad():
+        assert torch_fl.flagos.current_stream(device).cuda_stream == side.stream_id
+        assert FlagOSDeviceInterface.get_raw_stream(side.device_index) == side.stream_id
+        eager = value + 0.25
+        with monkeypatch.context() as patch:
+            patch.setattr(_streams, "get_raw_stream", record_stream)
+            result, code = run_and_get_code(compiled, eager)
+        actual = torch.cos(result)
+
+    assert get_raw_stream(device) == default
+    assert launches and set(launches) == {side.stream_id}
+    assert any("get_raw_stream(" in source for source in code)
+    side.synchronize()
+    torch.testing.assert_close(actual.cpu(), torch.cos(fused(cpu + 0.25)))
 
 
 def test_inductor_benchmark_accepts_triton_backend_name():
@@ -820,11 +889,17 @@ def test_torch_backends_entry_point_init_is_idempotent():
     assert torch.flagos.is_available()
 
 
+def _set_compile_platform(monkeypatch, platform):
+    build = _platform.BuildInfo(platform=platform)
+    monkeypatch.setattr(_platform, "build_info", lambda: build)
+
+
 def test_ppu_flagtree_defaults_to_serial_compile(monkeypatch):
     """PPU FlagTree must avoid CUDA initialization in forked compile workers."""
     from torch_fl.compile import inductor_backend
 
     monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
+    _set_compile_platform(monkeypatch, "ppu")
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "ppu"
     )
@@ -839,6 +914,7 @@ def test_ppu_flagtree_preserves_explicit_compile_threads(monkeypatch):
     """An explicit per-compile or environment setting remains authoritative."""
     from torch_fl.compile import inductor_backend
 
+    _set_compile_platform(monkeypatch, "ppu")
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "ppu"
     )
@@ -865,7 +941,7 @@ def test_non_ppu_flagtree_keeps_default_compile_threads(monkeypatch):
     # backend, so pin it: on a GCU build the vendor driver serializes regardless
     # of the FlagTree backend name, which is a different rule than the one under
     # test here.
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "cuda")
+    _set_compile_platform(monkeypatch, "cuda")
 
     patches = {}
     inductor_backend._patch_ppu_flagtree_compile_workers(patches)
@@ -881,7 +957,7 @@ def test_musa_flagtree_defaults_to_serial_compile(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "mthreads"
     )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
+    _set_compile_platform(monkeypatch, "musa")
 
     patches = {}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -896,7 +972,7 @@ def test_musa_flagtree_preserves_explicit_compile_threads(monkeypatch):
     monkeypatch.setattr(
         "torch_fl.compile.flagtree_shim.flagtree_backend", lambda: "mthreads"
     )
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "mthreads")
+    _set_compile_platform(monkeypatch, "musa")
 
     patches = {"compile_threads": 4}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -1297,7 +1373,6 @@ def test_gcu_guard_leaves_32bit_kernels_alone(device):
     torch.testing.assert_close(compiled, fn(x, y), rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.gcu
 def test_gcu_defaults_to_serial_compile(monkeypatch):
     """A tops pointer only resolves against the current device, so no forking.
 
@@ -1307,7 +1382,7 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
     from torch_fl.compile import inductor_backend
 
     monkeypatch.delenv("TORCHINDUCTOR_COMPILE_THREADS", raising=False)
-    monkeypatch.setattr("torch_fl._build_config.ACCELERATOR", "enflame")
+    _set_compile_platform(monkeypatch, "gcu")
 
     patches = {}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
@@ -1317,8 +1392,6 @@ def test_gcu_defaults_to_serial_compile(monkeypatch):
     patches = {"compile_threads": 4}
     inductor_backend._patch_vendor_flagtree_compile_workers(patches)
     assert patches["compile_threads"] == 4
-
-    _skip_unless_gcu(needs_triton=False)
 
 
 # The generic FlagTree test above also covers the MThreads runtime when the

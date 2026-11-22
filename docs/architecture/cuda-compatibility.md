@@ -16,17 +16,21 @@ not enough to make them agree with the logical `flagos` device.
 
 What exists today is an **input alias**, not a compatibility contract:
 
-- `torch_fl.__init__._alias_cuda_to_flagos` conditionally remaps `cuda` device
+- `torch_fl.compat.cuda.install_alias` conditionally remaps `cuda` device
   arguments through a `TorchFunctionMode`, wraps the `torch.device` constructor, and
   redirects `Tensor.cuda()` / `Module.cuda()`. The remap is table-driven by
   `_VENDOR_DEVICE_ALIASES`: `cuda` on every row, plus the vendor's *own* device
   name where torch_fl does not register it — `musa` (torch_musa) and `txda`
   (FlagTree's TsingMicro Triton driver, which resolves its active device that way
   while `flag_gems` is being imported).
-- It stands down when the original PyTorch probe reports real CUDA, and can be
-  disabled with `FLAGOS_ALIAS_CUDA=0`; `torch_fl._cuda_alias_active` reports whether
-  it is on.
+- It stands down when the captured PyTorch probe reports real CUDA. Set
+  `FLAGOS_ALIAS_CUDA=0` to disable it. `torch_fl._cuda_alias_active` reports
+  whether it is active.
 - Per-vendor `torch.cuda` facades (CUDA-ABI vendors) supply a `torch.cuda` surface.
+
+Torch-FL has retired the day-0 CUDA boxing operator route. CUDA device strings,
+Torch compatibility facades and the internal `DeviceBoxingGuard` continue to
+serve interoperability.
 
 The output of an alias is still a logical `flagos`/PrivateUse1 tensor. Frameworks
 that branch on the accelerator class, `device.type == "cuda"`, CUDA-only AMP
@@ -140,7 +144,7 @@ Per platform class, a subprocess conformance test that validates the **actual**
 behavior, not API labels:
 
 1. Placement: `torch.ones(..., device="cuda")`, `model.cuda()` land on the backend.
-2. Dispatch: the overload reaches the intended route (boxing / native / FlagGems),
+2. Dispatch: the overload reaches the intended native or FlagGems route,
    traced via `FLAGOS_LOG=dispatch`.
 3. AMP: autocast + scaler produce the expected dtype and finite/overflow behavior.
 4. Streams: multi-stream ordering is real (not a no-op `wait_stream`).
