@@ -676,7 +676,7 @@ steps:
     platforms: [ascend]
     min_passed: 94
     command: >-
-      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install"
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_ascend_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
 
@@ -685,7 +685,7 @@ steps:
     platforms: [metax]
     min_passed: 86
     command: >-
-      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install"
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_metax_hosts.py
       tests/integration/ops/test_native_metax_qwen_routes.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
@@ -695,7 +695,7 @@ steps:
     platforms: [hygon]
     min_passed: 217
     command: >-
-      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install"
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_hygon_native_hosts.py
       tests/integration/ops/test_hygon_native_routes.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
