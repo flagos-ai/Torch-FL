@@ -349,9 +349,9 @@ jobs:
           prefer_direct_route "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" "FlagCX experiment"
           python .github/scripts/run_flagcx_experiment.py \
             --index-url "$FLAGOS_WHEEL_ROOT_DEFAULT/flagos-pypi-ascend/simple" \
-            --wheel "$FLAGCX_WHEEL_ascend" \
-            --version "$FLAGCX_VERSION_ascend" \
-            --sha256 "$FLAGCX_WHEEL_SHA256_ascend" \
+            --wheel "$FLAGCX_EXPERIMENT_WHEEL_ascend" \
+            --version "$FLAGCX_EXPERIMENT_VERSION_ascend" \
+            --sha256 "$FLAGCX_EXPERIMENT_WHEEL_SHA256_ascend" \
             --torch-fl-wheel dist/*.whl \
             --workdir "$INTEGRATION_WORKDIR" \
             --output "$FLAGCICD_REPORT_DIR/flagcx-experiment"

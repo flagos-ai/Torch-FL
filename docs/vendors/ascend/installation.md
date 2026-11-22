@@ -31,7 +31,8 @@ summary retain passed, failed or blocked results; baseline success does not impl
 FlagCX support. `blocked` is an environment-policy decision: import and communication
 have not been attempted, and runtime compatibility remains untested. The pinned
 `0.14.0+cann9.0.0.910c` wheel currently requires `libtorch_npu.so` and is blocked
-under this policy. Expanding admission requires a suitable published build or an
+under this policy. The Torch-FL release wheel declares
+`flagcx==0.14.0+cann9.0.0`. Expanding admission requires a suitable published build or an
 explicitly reviewed integration contract; CI does not supply replacement vendor
 libraries. Torch-FL's own Python `torch_npu` shim is allowed; real vendor modules
 and a loaded `libtorch_npu.so` are excluded from the collective probe.

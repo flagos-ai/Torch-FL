@@ -319,5 +319,12 @@ def test_prefetch_and_experiment_keep_distinct_acceptance_scopes():
         for line in (ROOT / ".github/version-pins.env").read_text().splitlines()
         if line and not line.startswith("#") and "=" in line
     )
-    _, version, _, _ = parse_wheel_filename(pins["FLAGCX_WHEEL_ascend"])
-    assert version == Version(pins["FLAGCX_VERSION_ascend"])
+    _, version, _, _ = parse_wheel_filename(pins["FLAGCX_EXPERIMENT_WHEEL_ascend"])
+    assert version == Version(pins["FLAGCX_EXPERIMENT_VERSION_ascend"])
+    assert pins["FLAGCX_VERSION_ascend"] == "0.14.0+cann9.0.0"
+    for option, pin in (
+        ("--wheel", "FLAGCX_EXPERIMENT_WHEEL_ascend"),
+        ("--version", "FLAGCX_EXPERIMENT_VERSION_ascend"),
+        ("--sha256", "FLAGCX_EXPERIMENT_WHEEL_SHA256_ascend"),
+    ):
+        assert f'{option} "${pin}"' in experiment["run"]
