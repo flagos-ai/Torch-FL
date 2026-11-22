@@ -238,9 +238,7 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
             return device + offset
 
         kernel = object()
-        driver_binding.install_driver(
-            adapter, package, SimpleNamespace(current_stream=provider), kernel
-        )
+        driver_binding.install_driver(adapter, package, provider, kernel)
         utilities = modules[f"{package}.{config.utility_module}"]
         for instance in (active, default, Driver()):
             assert instance.utils is utilities
@@ -341,7 +339,7 @@ def test_enflame_installer_preserves_current_stream_after_reinstallation(monkeyp
     driver_binding.install_driver(
         adapter,
         "hosts",
-        SimpleNamespace(current_stream=lambda device: device + 100),
+        lambda device: device + 100,
         object(),
     )
     first = Driver()
@@ -350,7 +348,7 @@ def test_enflame_installer_preserves_current_stream_after_reinstallation(monkeyp
     driver_binding.install_driver(
         adapter,
         "hosts",
-        SimpleNamespace(current_stream=lambda device: device + 200),
+        lambda device: device + 200,
         object(),
     )
     assert Driver().get_current_stream(3) == active.get_current_stream(3) == 203

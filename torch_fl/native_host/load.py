@@ -136,6 +136,7 @@ def _validate_launcher(record, package, path, launcher):
 
 def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
     global _audit_installed, _launcher_module
+    from torch_fl.flagos._streams import get_raw_stream
     from torch_fl.native_host.backends.driver import install_driver
 
     package_module = importlib.import_module(package)
@@ -145,7 +146,7 @@ def install_launcher(package="fg_aot", *, enforce_native_compilation=True):
     backend = _validate_launcher(
         manifest.get("backend"), package, path, _launcher_module
     )
-    install_driver(backend, package, _launcher_module, kernel_launcher)
+    install_driver(backend, package, get_raw_stream, kernel_launcher)
     if enforce_native_compilation and not _audit_installed:
         sys.addaudithook(audit_native_compilers)
         _audit_installed = True

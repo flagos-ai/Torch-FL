@@ -319,9 +319,14 @@ def cuda_event_stream(stream):
 
 
 def get_raw_stream(device=None) -> int:
+    """Return the current device-library stream for a compiled launch."""
     from . import _device_index
 
-    return _runtime().raw(_device_index(device))
+    index = _device_index(device)
+    getter = getattr(_C, "_get_current_raw_stream", None)
+    if getter is not None:
+        return getter(index)
+    return _runtime().raw(index)
 
 
 def set_stream(stream):

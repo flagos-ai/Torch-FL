@@ -62,10 +62,10 @@ def bind_driver(
     bind_instances(active_drivers(), utilities, create_launcher, current_stream)
 
 
-def install_driver(adapter: BackendInterface, package, launcher, create_launcher):
+def install_driver(adapter: BackendInterface, package, current_stream, create_launcher):
     config = adapter.config
     module = importlib.import_module(
         f"triton.backends.{config.driver_directory}.{config.driver_entry}"
     )
     utilities = importlib.import_module(f"{package}.{config.utility_module}")
-    adapter.bind_driver(module, utilities, create_launcher, launcher.current_stream)
+    adapter.bind_driver(module, utilities, create_launcher, current_stream)

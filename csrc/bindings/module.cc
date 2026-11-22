@@ -322,6 +322,14 @@ static PyObject* _getNativeDefaultRawStream(PyObject*, PyObject* arg) {
   return _getOwnedRawStream(arg, true);
 }
 
+static PyObject* _getCurrentRawStream(PyObject*, PyObject* arg) {
+  HANDLE_TH_ERRORS
+  TORCH_CHECK(THPUtils_checkLong(arg), "current stream expects a device index");
+  return PyLong_FromUnsignedLongLong(
+      c10::flagos::CurrentStreamHandle(THPUtils_unpackLong(arg)));
+  END_HANDLE_TH_ERRORS
+}
+
 static PyObject* _getMusaCurrentRawStream(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
 #ifdef USE_MUSA
@@ -846,6 +854,14 @@ extern "C" FLAGOS_EXPORT PyObject* initFlagosModule(void) {
   static struct PyModuleDef flagos_C_module = {
       PyModuleDef_HEAD_INIT, "torch_fl._C", nullptr, -1, methods};
   PyObject* mod = PyModule_Create(&flagos_C_module);
+  static PyMethodDef guardedStreamMethods[] = {
+      {"_get_current_raw_stream", _getCurrentRawStream, METH_O, nullptr},
+      {nullptr, nullptr, 0, nullptr}};
+  if (mod && c10::flagos::HasGuardedStreams() &&
+      PyModule_AddFunctions(mod, guardedStreamMethods) < 0) {
+    Py_DECREF(mod);
+    return nullptr;
+  }
   static PyMethodDef nativeStreamMethods[] = {
       {"_get_native_current_raw_stream", _getNativeCurrentRawStream, METH_O, nullptr},
       {"_get_native_default_raw_stream", _getNativeDefaultRawStream, METH_O, nullptr},

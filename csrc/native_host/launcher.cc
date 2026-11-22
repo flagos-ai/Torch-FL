@@ -9,6 +9,7 @@
 #include <c10/core/DefaultDtype.h>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
+#include <c10/util/ScopeExit.h>
 #include <c10/util/SmallVector.h>
 #include <dlfcn.h>
 #include <pybind11/pybind11.h>
@@ -55,6 +56,22 @@ struct EnqueueCounter {
   std::atomic<uint64_t> count{0};
 };
 std::mutex enqueue_counter_mutex;
+thread_local std::vector<uint64_t>* enqueue_trace = nullptr;
+
+py::tuple CaptureEnqueues(const py::function& run) {
+  std::vector<uint64_t> streams;
+  auto* previous = enqueue_trace;
+  const auto restore = c10::make_scope_exit([previous] { enqueue_trace = previous; });
+  enqueue_trace = &streams;
+  auto result = run();
+  return py::make_tuple(result, streams);
+}
+
+void RecordEnqueue(EnqueueCounter& counter, uint64_t stream) {
+  counter.count.fetch_add(1, std::memory_order_relaxed);
+  if (enqueue_trace) enqueue_trace->push_back(stream);
+}
+
 std::vector<std::shared_ptr<EnqueueCounter>>& EnqueueCounters() {
   static auto* counters = new std::vector<std::shared_ptr<EnqueueCounter>>();
   return *counters;
@@ -402,7 +419,7 @@ class Launcher {
     if (grid) {
       kernel_->Enqueue({{x, y, z}, stream, function, pointers.data(), global_ptr,
                         global_bytes, true});
-      enqueue_counter_->count.fetch_add(1, std::memory_order_relaxed);
+      RecordEnqueue(*enqueue_counter_, stream);
     }
     if (!leave.is_none()) leave(launch_metadata);
   }
@@ -524,8 +541,9 @@ class Launcher {
       dims[i] = grid[i];
     }
     if (!CheckedProduct(CheckedProduct(dims[0], dims[1]), dims[2])) return;
-    kernel_->Enqueue({dims, Stream(device), function, pointers});
-    enqueue_counter_->count.fetch_add(1, std::memory_order_relaxed);
+    const auto stream = Stream(device);
+    kernel_->Enqueue({dims, stream, function, pointers});
+    RecordEnqueue(*enqueue_counter_, stream);
   }
 
   template <class Slots>
@@ -2670,6 +2688,7 @@ PYBIND11_MODULE(_launcher, module) {
   });
   module.def("current_stream", &Stream);
   module.def("enqueue_stats", &EnqueueStats);
+  module.def("capture_enqueues", &CaptureEnqueues);
   module.def("is_capturing", [](int device) {
     return IsCapturing(Stream(device));
   });

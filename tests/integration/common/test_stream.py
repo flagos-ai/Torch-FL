@@ -23,6 +23,11 @@ synchronize, equal the same computation on the default stream, and an event's
 elapsed time must be non-negative. Both are hardware-agnostic invariants.
 """
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -96,3 +101,107 @@ def test_event_wait_orders_work_across_streams():
     torch_fl.flagos.current_stream().wait_event(event)
     torch_fl.flagos.synchronize()
     torch.testing.assert_close(out.cpu(), reference, rtol=1e-3, atol=1e-3)
+
+
+def _assert_compiled_stream_chain():
+    from torch._inductor import metrics
+
+    from torch_fl.compile.device_interface import FlagOSDeviceInterface
+    from torch_fl.flagos._streams import get_raw_stream
+    from torch_fl.native_host.load import _launcher_module
+
+    assert torch_fl._build_config.NATIVE_HOSTS
+    device = torch.device(DEVICE)
+    reference = torch.linspace(-1.0, 1.0, 2048, dtype=torch.float32)
+    value = reference.to(device)
+    side = torch.Stream(device=device)
+    default = torch.accelerator.current_stream(device)
+    default_handle = get_raw_stream(device)
+    assert side != default
+
+    def fused(x):
+        return x.square() * 1.25 + 0.5
+
+    compiled = torch.compile(
+        fused,
+        backend="flagos",
+        fullgraph=True,
+        options={
+            "triton.autotune_pointwise": False,
+            "max_autotune": False,
+            "max_autotune_pointwise": False,
+            "fx_graph_cache": False,
+        },
+    )
+    model = torch_fl.native_host.compile(lambda x: torch.cos(x), dynamic=False)
+    typed_hits = torch.ops.flagos.native_source_typed_hits
+    capture = _launcher_module.capture_enqueues
+
+    with side, torch.no_grad():
+        handle = get_raw_stream(device)
+        assert torch.accelerator.current_stream(device) == side
+        assert handle != default_handle
+        assert FlagOSDeviceInterface.get_raw_stream(device.index) == handle
+        assert _launcher_module.current_stream(device.index) == handle
+
+        # Compile and specialize before measuring the asynchronous chain.
+        generated = metrics.generated_kernel_count
+        model(compiled(value))
+        assert metrics.generated_kernel_count > generated
+        side.synchronize()
+
+        hits = typed_hits("aten::cos")
+        eager, eager_streams = capture(lambda: torch.cos(value))
+        assert typed_hits("aten::cos") == hits + 1
+        result, compiled_streams = capture(lambda: compiled(eager))
+        assert typed_hits("aten::cos") == hits + 1
+        actual, host_streams = capture(lambda: model(result))
+        assert typed_hits("aten::cos") == hits + 2
+
+    for streams in (eager_streams, compiled_streams, host_streams):
+        assert set(streams) == {handle}
+    assert torch.accelerator.current_stream(device) == default
+    assert get_raw_stream(device) == default_handle
+    assert model._flagos_host_backend.graphs[0]["execution_sha256"]
+    for output in (eager, result, actual):
+        assert output.device == device
+        assert output.dtype == reference.dtype
+        assert output.shape == reference.shape
+    side.synchronize()
+    torch.testing.assert_close(actual.cpu(), torch.cos(fused(torch.cos(reference))))
+
+
+@pytest.mark.anyplatform
+def test_compiled_stream_chain():
+    if getattr(torch_fl._build_config, "NATIVE_HOSTS", False):
+        _assert_compiled_stream_chain()
+        return
+
+    # Keep the ordinary wheel in this pytest session. The AOT build group
+    # installs its wheel before the common suite in a separate import root.
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    assert runner_temp, "the stream chain requires an installed AOT wheel"
+    install = Path(runner_temp).resolve() / "torch-fl-native-host-install"
+    assert (install / "torch_fl").is_dir(), "the AOT wheel was not installed"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys\n"
+            "from pathlib import Path\n"
+            "import torch_fl\n"
+            "assert Path(torch_fl.__file__).resolve().is_relative_to(sys.argv[1])\n"
+            "runpy.run_path(sys.argv[2])['_assert_compiled_stream_chain']()\n",
+            str(install),
+            str(Path(__file__).resolve()),
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(install),
+            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=240,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
