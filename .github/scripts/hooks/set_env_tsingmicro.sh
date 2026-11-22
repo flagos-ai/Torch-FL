@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Sourced by set_env.sh inside the pinned FlagOS TsingMicro runtime image.
+if [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_NAME:-}" != tsm-249 ]]; then
+  printf '::error::Expected runner tsm-249, received %s\n' "${RUNNER_NAME:-unknown}" >&2
+  exit 1
+fi
+
 export FLAGOS_ACCELERATOR=tsingmicro
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export GEMS_VENDOR=tsingmicro
