@@ -80,6 +80,7 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    "tsingmicro_common_and_fp32": tuple(p for p in _PLATFORMS if p != "tsingmicro"),
     "native_host_build": tuple(
         p for p in _PLATFORMS if p not in {"metax", "ascend", "hygon"}
     ),
