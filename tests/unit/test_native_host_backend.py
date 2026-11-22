@@ -143,6 +143,9 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     ]
     assert str(NATIVE_SOURCE) in launcher.include_dirs
     assert str(NATIVE_SOURCE / "backend_api.h") in launcher.depends
+    for header in adapter.config.shared_headers:
+        assert str(NATIVE_SOURCE / header) in launcher.depends
+        assert f"csrc/{header}" in record["native_sources"]
     assert launcher.extra_compile_args == [
         "-O3",
         "-std=c++17",
@@ -177,6 +180,35 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
         ]
 
 
+@pytest.mark.parametrize("contract", ["thead"], indirect=True)
+def test_ppu_extensions_use_the_published_hggc_driver(monkeypatch, contract, tmp_path):
+    adapter, root, record, compiled = contract
+    monkeypatch.setenv("PPU_SDK", "/published-ppu")
+    monkeypatch.setenv("CUDA_HOME", "/unrelated-cuda")
+    torch = SimpleNamespace(
+        __file__="/cpu-torch/torch/__init__.py",
+        _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+    )
+    launcher, utilities = backend.build_extensions(
+        adapter, "test_hosts", NATIVE_SOURCE, torch, record, root, tmp_path
+    )
+    assert "hggc" in launcher.libraries and "cuda" not in launcher.libraries
+    assert utilities.libraries == ["hggc"]
+    assert utilities.name == "test_hosts.hggc_utils"
+    assert "/published-ppu/include" in launcher.include_dirs
+    assert "/published-ppu/lib" in launcher.library_dirs
+    assert record["compiler_backend"] == "ppu"
+    assert compiled["capabilities"] == 253
+
+
+@pytest.mark.parametrize("contract", ["nvidia", "thead"], indirect=True)
+def test_shared_launch_parameters_are_part_of_the_backend_contract(contract):
+    adapter, root, record, compiled = contract
+    (backend._ROOT / "csrc/launch_params.h").write_text("// changed launch layout\n")
+    with pytest.raises(RuntimeError, match="ABI changed"):
+        backend.validate_record(record, adapter, root, compiled)
+
+
 @pytest.mark.parametrize("contract", ["metax"], indirect=True)
 def test_metax_metadata_packing_is_part_of_the_backend_contract(contract):
     adapter, root, record, compiled = contract
@@ -206,7 +238,9 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(
     assert adapter.config.capabilities == 141
 
 
-@pytest.mark.parametrize("contract", ["nvidia", "metax", "hygon"], indirect=True)
+@pytest.mark.parametrize(
+    "contract", ["nvidia", "metax", "hygon", "thead"], indirect=True
+)
 def test_reinstallation_updates_existing_and_future_driver_streams(
     monkeypatch, contract
 ):

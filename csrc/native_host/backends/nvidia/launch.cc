@@ -3,7 +3,7 @@
 
 // Backend mechanics only. Device code remains the published FlagGems kernels;
 // module loading remains the published FlagTree driver's prebuilt utilities.
-#include "backend_api.h"
+#include "launch_params.h"
 
 #include <cuda.h>
 #include <pybind11/pybind11.h>
@@ -24,36 +24,13 @@ void Check(CUresult status) {
   }
 }
 
-unsigned GridSize(uint64_t value) {
-  if (value > std::numeric_limits<unsigned>::max())
-    throw std::overflow_error("Triton grid dimension overflow");
-  return static_cast<unsigned>(value);
-}
-
-class NvidiaKernel final : public Kernel {
+class NvidiaKernel final : public WarpKernel {
  public:
-  explicit NvidiaKernel(py::handle metadata) {
-    warps_ = py::cast<unsigned>(metadata.attr("num_warps"));
-    ctas_ = py::cast<unsigned>(py::getattr(metadata, "num_ctas", py::int_(1)));
-    shared_ = py::cast<unsigned>(metadata.attr("shared"));
+  explicit NvidiaKernel(py::handle metadata) : WarpKernel(metadata) {
     cluster_ = py::cast<std::array<unsigned, 3>>(
         py::getattr(metadata, "cluster_dims", py::make_tuple(1, 1, 1)));
-    cooperative_ =
-        py::cast<bool>(py::getattr(metadata, "launch_cooperative_grid", py::bool_(false)));
-    pdl_ = py::cast<bool>(py::getattr(metadata, "launch_pdl", py::bool_(false)));
-    global = {py::cast<uint64_t>(metadata.attr("global_scratch_size")),
-              py::cast<uint64_t>(metadata.attr("global_scratch_align"))};
-    profile = {py::cast<uint64_t>(metadata.attr("profile_scratch_size")),
-               py::cast<uint64_t>(metadata.attr("profile_scratch_align"))};
-    scratch_multiplier = ctas_;
-    scratch_slots = 2;
-    if (!warps_ || !ctas_ || !cluster_[0] || !cluster_[1] || !cluster_[2])
+    if (!cluster_[0] || !cluster_[1] || !cluster_[2])
       throw std::invalid_argument("invalid NVIDIA launch geometry");
-  }
-
-  void PackScratch(uint64_t global_pointer, uint64_t profile_pointer, Slot* slots) const override {
-    slots[0].Set(global_pointer);
-    slots[1].Set(profile_pointer);
   }
 
   void Enqueue(const Launch& launch) const override {
@@ -102,9 +79,7 @@ class NvidiaKernel final : public Kernel {
   }
 
  private:
-  unsigned warps_, ctas_, shared_;
   std::array<unsigned, 3> cluster_;
-  bool cooperative_, pdl_;
 };
 
 class NvidiaDescriptor final : public Descriptor {
@@ -121,48 +96,44 @@ class NvidiaDescriptor final : public Descriptor {
       throw std::invalid_argument("invalid NVIDIA descriptor block rank");
   }
 
-  size_t Capacity() const override { return hardware_ ? 1 + 2 * block_.size() : 22; }
+  size_t Capacity() const override {
+    return hardware_ ? 1 + 2 * block_.size() : kSoftwareDescriptorSlots;
+  }
 
   size_t Pack(const DescriptorValue& value, Slot* slots) const override {
+    if (!hardware_) return PackSoftwareDescriptor(value, slots);
     const size_t rank = value.rank;
     if (!rank || rank > 5 || value.strides[rank - 1] != 1)
       throw std::invalid_argument("invalid Triton tensor descriptor dimensions");
     uint64_t shape[5]{};
     for (size_t i = 0; i < rank; ++i) shape[i] = value.shape[i];
     size_t count = 0;
-    if (!hardware_) {
-      slots[count++].Set(value.pointer);
-      for (size_t i = 0; i < rank; ++i) slots[count++].Set(shape[i]);
-      for (size_t i = 0; i < rank; ++i) slots[count++].Set(value.strides[i]);
-      slots[count++].Set(static_cast<uint8_t>(value.nan_padding));
-    } else {
-      if (block_.size() != rank) throw std::invalid_argument("TMA descriptor block rank mismatch");
-      if (fp4_padded_) shape[rank - 1] = CheckedProduct(shape[rank - 1], 2);
-      uint64_t reversed_shape[5]{}, reversed_stride[5]{};
-      uint32_t reversed_block[5]{}, element_stride[5]{1, 1, 1, 1, 1};
-      for (size_t i = 0; i < rank; ++i) {
-        reversed_shape[rank - i - 1] = shape[i];
-        reversed_block[rank - i - 1] = block_[i];
-        if (i + 1 < rank)
-          reversed_stride[rank - i - 2] = CheckedProduct(value.strides[i], element_size_);
-      }
-      int element_type = element_type_;
-      if (element_type == 8)
-        element_type = 10;
-      else if (element_type == 9)
-        element_type = 8;
-      else if (element_type == 10)
-        element_type = 9;
-      static_assert(sizeof(CUtensorMap) <= kSlotBytes && alignof(CUtensorMap) <= kSlotAlignment);
-      Check(cuTensorMapEncodeTiled(
-          reinterpret_cast<CUtensorMap*>(slots[count++].bytes.data()),
-          static_cast<CUtensorMapDataType>(element_type), rank,
-          reinterpret_cast<void*>(value.pointer), reversed_shape, reversed_stride,
-          reversed_block, element_stride, CU_TENSOR_MAP_INTERLEAVE_NONE,
-          static_cast<CUtensorMapSwizzle>(swizzle_), CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-          value.nan_padding ? CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA
-                            : CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+    if (block_.size() != rank) throw std::invalid_argument("TMA descriptor block rank mismatch");
+    if (fp4_padded_) shape[rank - 1] = CheckedProduct(shape[rank - 1], 2);
+    uint64_t reversed_shape[5]{}, reversed_stride[5]{};
+    uint32_t reversed_block[5]{}, element_stride[5]{1, 1, 1, 1, 1};
+    for (size_t i = 0; i < rank; ++i) {
+      reversed_shape[rank - i - 1] = shape[i];
+      reversed_block[rank - i - 1] = block_[i];
+      if (i + 1 < rank)
+        reversed_stride[rank - i - 2] = CheckedProduct(value.strides[i], element_size_);
     }
+    int element_type = element_type_;
+    if (element_type == 8)
+      element_type = 10;
+    else if (element_type == 9)
+      element_type = 8;
+    else if (element_type == 10)
+      element_type = 9;
+    static_assert(sizeof(CUtensorMap) <= kSlotBytes && alignof(CUtensorMap) <= kSlotAlignment);
+    Check(cuTensorMapEncodeTiled(
+        reinterpret_cast<CUtensorMap*>(slots[count++].bytes.data()),
+        static_cast<CUtensorMapDataType>(element_type), rank,
+        reinterpret_cast<void*>(value.pointer), reversed_shape, reversed_stride,
+        reversed_block, element_stride, CU_TENSOR_MAP_INTERLEAVE_NONE,
+        static_cast<CUtensorMapSwizzle>(swizzle_), CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+        value.nan_padding ? CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA
+                          : CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
     for (size_t i = 0; i < rank; ++i) {
       if (shape[i] > INT32_MAX)
         throw std::overflow_error("descriptor dimension exceeds kernel ABI");

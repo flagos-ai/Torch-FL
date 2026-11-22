@@ -359,7 +359,17 @@ def test_build_config_is_executable_python(monkeypatch, tmp_path, clean_kernel_e
 
 @pytest.mark.parametrize(
     "vendor",
-    ["nvidia", "hygon", "dcu", "metax", "ascend", "enflame", "gcu", "kunlunxin"],
+    [
+        "nvidia",
+        "hygon",
+        "dcu",
+        "metax",
+        "ascend",
+        "enflame",
+        "gcu",
+        "kunlunxin",
+        "thead",
+    ],
 )
 def test_native_host_build_uses_staged_package(
     monkeypatch, tmp_path, clean_kernel_env, vendor
@@ -391,7 +401,7 @@ def test_native_host_build_uses_staged_package(
             else None
         ),
     )
-    if vendor in {"metax", "ascend", "kunlunxin"}:
+    if vendor in {"metax", "ascend", "kunlunxin", "thead"}:
         monkeypatch.setitem(
             globals_,
             "_setup_cuda_build_env",
