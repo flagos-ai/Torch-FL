@@ -24,10 +24,12 @@ paths_watch:
   - .github/scripts/set_env_tsingmicro.sh
 
 container_volumes: []
+# Limit this validation run to the card used by the requested cases.
 container_options: >-
   --mount=type=bind,source=/usr/local/kuiper,target=/usr/local/kuiper,readonly
   --device=/dev/accel
   --device=/dev/accel_drv_mgr
+  --env=TXDA_VISIBLE_DEVICES=0
   --shm-size=8g
 
 timeout_minutes: 60
