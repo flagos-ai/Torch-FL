@@ -50,6 +50,10 @@ if [[ "$CI_STAGE" == integration ]]; then
   install_with_pypi_fallback pytest 'transformers>=4.51,<5' safetensors sentencepiece tiktoken protobuf
 fi
 
+if [[ "$CI_STAGE" == "build" ]]; then
+  build_flagos_inplace
+fi
+
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$VENV_ROOT/bin" >> "$GITHUB_PATH"
 fi
