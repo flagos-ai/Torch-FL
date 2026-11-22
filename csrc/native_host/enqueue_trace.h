@@ -26,6 +26,11 @@ class EnqueueTrace {
   const Events& events() const { return events_; }
 
  private:
+  // An AOT extension and the operator library can submit into the same
+  // scoped trace. Keep the thread-local symbol visible to the Linux loader.
+#if defined(__linux__)
+  __attribute__((visibility("default")))
+#endif
   inline static thread_local EnqueueTrace* current_ = nullptr;
   EnqueueTrace* previous_;
   Events events_;

@@ -15,44 +15,76 @@
 #include <flagos.h>
 #include <tops_runtime_api.h>
 #include "interop.h"
+#include "tops_stream.h"
 
+#include <array>
 #include <mutex>
 #include <unordered_map>
 
 namespace {
 
+struct DeviceStreams {
+  topsStream_t default_stream = nullptr;
+  std::array<topsStream_t, 32> pool{};
+  size_t next = 0;
+};
+
 std::mutex stream_mutex;
-std::unordered_map<int, topsStream_t> default_streams;
+std::unordered_map<int, DeviceStreams> device_streams;
 thread_local std::unordered_map<int, topsStream_t> current_streams;
+
+class ScopedDevice {
+ public:
+  explicit ScopedDevice(int device) : device_(device) {
+    valid_ = topsGetDevice(&previous_) == topsSuccess &&
+        (previous_ == device || topsSetDevice(device) == topsSuccess);
+  }
+
+  ~ScopedDevice() {
+    if (valid_ && previous_ != device_) topsSetDevice(previous_);
+  }
+
+  explicit operator bool() const { return valid_; }
+
+ private:
+  int previous_ = 0;
+  int device_;
+  bool valid_;
+};
 
 topsStream_t get_default_stream(int device) {
   std::lock_guard<std::mutex> lock(stream_mutex);
-  auto it = default_streams.find(device);
-  if (it != default_streams.end()) {
-    return it->second;
-  }
+  auto& stream = device_streams[device].default_stream;
+  if (stream) return stream;
 
-  int previous_device = 0;
-  if (topsGetDevice(&previous_device) != topsSuccess) {
-    return nullptr;
-  }
-  if (previous_device != device && topsSetDevice(device) != topsSuccess) {
-    return nullptr;
-  }
-
-  topsStream_t stream = nullptr;
-  if (topsStreamCreate(&stream) != topsSuccess) {
-    stream = nullptr;
-  }
-  default_streams.emplace(device, stream);
-
-  if (previous_device != device) {
-    topsSetDevice(previous_device);
-  }
+  ScopedDevice guard(device);
+  topsStream_t created = nullptr;
+  if (!guard || topsStreamCreate(&created) != topsSuccess) return nullptr;
+  stream = created;
   return stream;
 }
 
 } // namespace
+
+namespace at::native::flagos::gcu {
+
+topsStream_t GetTopsStreamFromPool(int device) {
+  ScopedDevice guard(device);
+  if (!guard) return nullptr;
+
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  auto& streams = device_streams[device];
+  auto& queue = streams.pool[streams.next];
+  if (!queue) {
+    topsStream_t created = nullptr;
+    if (topsStreamCreate(&created) != topsSuccess) return nullptr;
+    queue = created;
+  }
+  streams.next = (streams.next + 1) % streams.pool.size();
+  return queue;
+}
+
+} // namespace at::native::flagos::gcu
 
 Stream_t GetDefaultStreamForDevice(int device) {
   return reinterpret_cast<Stream_t>(get_default_stream(device));

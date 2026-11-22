@@ -11,6 +11,8 @@
 
 namespace at::native::flagos::gcu {
 
+__attribute__((visibility("default"))) topsStream_t GetTopsStreamFromPool(int device);
+
 inline topsStream_t GetDefaultTopsStream() {
   int device = 0;
   if (topsGetDevice(&device) != topsSuccess) {
