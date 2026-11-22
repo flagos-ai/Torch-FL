@@ -40,6 +40,12 @@
 #include "runtime/allocator/caching_device_allocator.h"
 #endif
 
+#ifdef USE_MPS
+#include <c10/core/DeviceGuard.h>
+#include "runtime/accelerator/apple/mps.h"
+#include "runtime/allocator/caching_device_allocator.h"
+#endif
+
 #if defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA)
 #define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 1
 #include <c10/core/DeviceGuard.h>
@@ -59,7 +65,7 @@
 #define FLAGOS_GUARD_HAS_OWNED_STREAM \
   (FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM || FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM)
 
-#if defined(USE_ILUVATAR) || defined(USE_CAMBRICON) || FLAGOS_GUARD_HAS_OWNED_STREAM
+#if defined(USE_ILUVATAR) || defined(USE_CAMBRICON) || defined(USE_MPS) || FLAGOS_GUARD_HAS_OWNED_STREAM
 #define FLAGOS_GUARD_HAS_PLATFORM_STREAM 1
 #else
 #define FLAGOS_GUARD_HAS_PLATFORM_STREAM 0
@@ -245,6 +251,8 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreate(&stream);
     return MakeKunlunxinStream(device, stream);
+#elif defined(USE_MPS)
+    return getNewStream(d);
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
     auto device = ResolvePlatformStreamDevice(d);
 #if FLAGOS_GUARD_HAS_OWNED_STREAM
@@ -310,6 +318,13 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreateWithPriority(&stream, 0, priority);
     return MakeKunlunxinStream(device, stream);
+#elif defined(USE_MPS)
+    const auto device = ResolvePlatformStreamDevice(d);
+    TORCH_CHECK(device == 0, "Invalid Metal stream device index: ", device);
+    Stream_t stream = nullptr;
+    TORCH_CHECK(::FlagosMPSStreamFromPool(&stream) == Success,
+                "Metal stream creation failed");
+    return MakePlatformDeviceStream(device, stream);
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
     auto device = ResolvePlatformStreamDevice(d);
 #if FLAGOS_GUARD_HAS_OWNED_STREAM
@@ -424,7 +439,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       GetCachingAllocator()->record_stream(
           data_ptr, reinterpret_cast<Stream_t>(AscendStreamHandle(stream)));
     }
-#elif FLAGOS_GUARD_HAS_OWNED_STREAM
+#elif FLAGOS_GUARD_HAS_OWNED_STREAM || defined(USE_MPS)
     if (CachingDeviceAllocator::is_enabled()) {
       c10::OptionalDeviceGuard device_guard;
       if (getDevice() != stream.device()) device_guard.reset_device(stream.device());

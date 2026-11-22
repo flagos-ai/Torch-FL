@@ -1677,6 +1677,9 @@ FINISH = {
 # otherwise misread a torch-contiguous buffer whose innermost dimension is not
 # already that wide: a (4, 5) float32 tensor has 20-byte rows, which MPSNDArray
 # reads as 32. See the row-pitch note in mps_common.h.
+# These unary wrappers can use a dense kernel from PyTorch's bundled library.
+METAL_UNARY = {"cos"}
+
 T_UNARY = """\
 at::Tensor {kernel}(const at::Tensor& self) {{
   if (!mps::{supports}(self.scalar_type())) {{
@@ -1686,7 +1689,7 @@ at::Tensor {kernel}(const at::Tensor& self) {{
   at::Tensor out = at::empty(self_c.sizes(), self_c.options());
   if (out.numel() == 0) {{
     return out;
-  }}
+  }}{metal_unary}
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("{op}"{key_parts}),
       {{self_c}},
@@ -6691,6 +6694,7 @@ FILE_HEADER = """\
 #include <string_view>
 #include <vector>
 #include "../mps_common.h"
+#include "../metal.h"
 #include "runtime/accelerator/apple/mps_runtime.h"
 
 namespace at::native::flagos {
@@ -6771,6 +6775,11 @@ def render():
                 at_op=AT_OP[op],
                 supports=SUPPORTS[category],
                 call=CALLS[op],
+                metal_unary=(
+                    f'\n  if (mps::RunMetalUnary(out, self_c, "{op}")) return out;'
+                    if op in METAL_UNARY
+                    else ""
+                ),
                 rank=RANK.get(op, 0),
                 body=(
                     PREDICATE_BODIES.get(op)

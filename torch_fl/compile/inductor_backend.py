@@ -556,6 +556,52 @@ def _patch_cuda_compile_workers(config_patches: Dict[str, Any]) -> None:
         config_patches["compile_threads"] = 1
 
 
+def _prepare_triton(config_patches: Dict[str, Any]) -> None:
+    if _env.flag("FLAGOS_USE_FLAGTREE"):
+        from torch_fl.compile.flagtree_shim import require_flagtree
+        from torch_fl.compile.platform_profile import platform_profile
+
+        require_flagtree()
+        if platform_profile().vendor == "ascend":
+            from torch_fl.compile.flagtree_ascend_policy import install_policy
+
+            install_policy()
+
+    _bind_musa_flagtree_runtime()
+    _patch_vendor_flagtree_compile_workers(config_patches)
+    _patch_ascend_compile_workers(config_patches)
+    _patch_cuda_compile_workers(config_patches)
+
+
+def _install_triton_lowerings() -> None:
+    from torch_fl.compile.triton_64bit_guard import patch_triton_64bit_guard
+    from torch_fl.compile.triton_byte_loads import patch_triton_byte_load_workarounds
+    from torch_fl.compile.triton_libdevice import patch_triton_libdevice_module_map
+    from torch_fl.compile.triton_resource_limits import (
+        patch_triton_resource_limit_errors,
+    )
+
+    patch_triton_libdevice_module_map()
+    patch_triton_resource_limit_errors()
+    patch_triton_byte_load_workarounds()
+    patch_triton_64bit_guard()
+
+
+def register_inductor_device() -> None:
+    from torch_fl.compile.device_interface import register_flagos_device_interface
+    from torch_fl.compile.inductor_codegen import (
+        publish_codegen_on_device_module,
+        register_flagos_codegen,
+    )
+    from torch_fl.compile.platform_profile import platform_profile
+
+    register_flagos_device_interface()
+    publish_codegen_on_device_module()
+    register_flagos_codegen()
+    if platform_profile().compiler == "triton":
+        _install_triton_lowerings()
+
+
 def flagos_compile_backend(
     gm: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor],
@@ -567,7 +613,7 @@ def flagos_compile_backend(
     torch.compile backend for flagos device.
 
     Registers flagos as an inductor GPU device, then delegates the graph to
-    inductor unchanged. Generated Triton kernels run on flagos tensors directly.
+    inductor unchanged. Generated kernels run on flagos tensors directly.
 
     `mode` / `options` arrive as kwargs from dynamo's `_TorchCompileWrapper`
     (torch/__init__.py) whenever torch.compile is called with them on a named
@@ -594,57 +640,18 @@ def flagos_compile_backend(
         ) from e
 
     config_patches = _resolve_config_patches(mode, options, dynamic)
+    from torch_fl.compile.platform_profile import platform_profile
 
-    # FlagTree substitutes itself for triton at install time, so if it is
-    # installed inductor already compiles with it and there is nothing to switch
-    # on here. This only asserts that, so the flag cannot silently no-op.
-    if _env.flag("FLAGOS_USE_FLAGTREE"):
-        from torch_fl.compile.flagtree_shim import require_flagtree
-
-        require_flagtree()
-
-        # FlagTree's Ascend backend otherwise dispatches its host runtime
-        # through torch_npu, which would claim PrivateUse1 and lock torch_fl out
-        # of flagos. Swap in a policy backed by torch_fl's own runtime instead.
-        from torch_fl.compile.platform_profile import platform_profile
-
-        if platform_profile().vendor == "ascend":
-            from torch_fl.compile.flagtree_ascend_policy import install_policy
-
-            install_policy()
-
-    # Idempotent: module load already tried this, but a process that imported
-    # the backend before FlagTree was importable gets its second chance here.
-    _bind_musa_flagtree_runtime()
-    _patch_vendor_flagtree_compile_workers(config_patches)
-    _patch_ascend_compile_workers(config_patches)
-    _patch_cuda_compile_workers(config_patches)
+    uses_triton = platform_profile().compiler == "triton"
+    if uses_triton:
+        _prepare_triton(config_patches)
+    elif config_patches.get("cpp_wrapper"):
+        raise RuntimeError("FlagOS Metal requires Inductor's Python wrapper")
 
     # Make inductor treat flagos as a GPU device. Order matters: is_gpu() must
     # answer True and the device interface must be resolvable before the
     # codegen backend registration reads them.
-    from torch_fl.compile.device_interface import register_flagos_device_interface
-    from torch_fl.compile.inductor_codegen import (
-        publish_codegen_on_device_module,
-        register_flagos_codegen,
-    )
-    from torch_fl.compile.triton_64bit_guard import patch_triton_64bit_guard
-    from torch_fl.compile.triton_byte_loads import patch_triton_byte_load_workarounds
-    from torch_fl.compile.triton_libdevice import patch_triton_libdevice_module_map
-    from torch_fl.compile.triton_resource_limits import (
-        patch_triton_resource_limit_errors,
-    )
-
-    register_flagos_device_interface()
-    publish_codegen_on_device_module()
-    register_flagos_codegen()
-    patch_triton_libdevice_module_map()
-    patch_triton_resource_limit_errors()
-    patch_triton_byte_load_workarounds()
-
-    # A GCU300 64-bit kernel aborts the process inside the vendor pass manager,
-    # which no Python handler can catch, so it has to be refused beforehand.
-    patch_triton_64bit_guard()
+    register_inductor_device()
 
     # Hand the graph to inductor untouched -- it is on flagos and stays there.
     try:

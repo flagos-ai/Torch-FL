@@ -1209,7 +1209,7 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
     from torch_fl.compile import inductor_codegen as ic
 
     overrides = ic._device_op_overrides()
-    assert isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides)
+    assert isinstance(overrides, ic.FlagOSPythonDeviceOpOverrides)
 
     snippets = [
         overrides.set_device(0),
@@ -1236,6 +1236,7 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
         "kunlunxin",
         "tsingmicro",
         "cambricon",
+        "apple",
     ],
 )
 def test_generated_wrappers_import_the_shared_stream_getter(vendor, monkeypatch):
@@ -1244,8 +1245,8 @@ def test_generated_wrappers_import_the_shared_stream_getter(vendor, monkeypatch)
 
     _set_accelerator(monkeypatch, vendor)
     overrides = ic._device_op_overrides()
-    assert isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides) == (
-        vendor == "ascend"
+    assert isinstance(overrides, ic.FlagOSPythonDeviceOpOverrides) == (
+        vendor in {"ascend", "apple"}
     )
 
     namespace = {}

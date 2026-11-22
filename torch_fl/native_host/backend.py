@@ -37,7 +37,7 @@ COMPILED_FIELDS = (
 _ADAPTERS = frozenset({"ascend", "enflame", "hygon", "metax", "nvidia"})
 _ROOT = Path(__file__).resolve().parent
 _LAUNCHER_SOURCE = "launcher.cc"
-_LAUNCHER_HEADERS = ("backend_api.h", "host_abi.h")
+_LAUNCHER_HEADERS = ("backend_api.h", "enqueue_trace.h", "host_abi.h")
 
 
 @dataclass(frozen=True)

@@ -78,14 +78,15 @@ class FlagOSDeviceOpOverrides(_FlagOSDeviceQueries, CUDADeviceOpOverrides):
     """Use the CUDA driver and C++ wrapper snippets for CUDA-shaped runtimes."""
 
 
-class FlagOSAscendDeviceOpOverrides(_FlagOSDeviceQueries, DeviceOpOverrides):
-    """Device snippets for Ascend's Python wrapper."""
+class FlagOSPythonDeviceOpOverrides(_FlagOSDeviceQueries, DeviceOpOverrides):
+    """Device snippets for backends with a Python wrapper."""
 
 
 def _device_op_overrides() -> DeviceOpOverrides:
     """Select the C++ wrapper capabilities for the build."""
-    if platform_profile().vendor == "ascend":
-        return FlagOSAscendDeviceOpOverrides()
+    profile = platform_profile()
+    if profile.vendor == "ascend" or profile.compiler == "metal":
+        return FlagOSPythonDeviceOpOverrides()
     return FlagOSDeviceOpOverrides()
 
 
@@ -160,6 +161,10 @@ def register_flagos_codegen() -> None:
         register_backend_for_device(
             DEVICE_TYPE, scheduling, wrapper, cpp_wrapper, fx_wrapper
         )
+    if platform_profile().compiler == "metal":
+        from torch_fl.compile.metal import install_scheduler
+
+        install_scheduler()
 
 
 def _codegen_classes() -> tuple:
@@ -175,7 +180,13 @@ def _codegen_classes() -> tuple:
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.codegen.wrapper_fxir import WrapperFxCodegen
 
-    if not platform_profile().is_cuda_like:
+    profile = platform_profile()
+    if profile.compiler == "metal":
+        from torch_fl.compile.metal import MetalScheduling
+
+        return MetalScheduling, PythonWrapperCodegen, None, WrapperFxCodegen
+
+    if not profile.is_cuda_like:
         from torch._inductor.codegen.triton import TritonScheduling
 
         return TritonScheduling, PythonWrapperCodegen, None, WrapperFxCodegen

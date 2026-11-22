@@ -64,6 +64,10 @@
 
 #include "dataparallel.h"
 
+#ifdef FLAGOS_METAL_BINDINGS
+int InitMetalBindings(PyObject* mod);
+#endif
+
 namespace {
 
 // Forward declarations
@@ -871,5 +875,11 @@ extern "C" FLAGOS_EXPORT PyObject* initFlagosModule(void) {
     Py_DECREF(mod);
     return nullptr;
   }
+#ifdef FLAGOS_METAL_BINDINGS
+  if (mod && InitMetalBindings(mod) < 0) {
+    Py_DECREF(mod);
+    return nullptr;
+  }
+#endif
   return mod;
 }

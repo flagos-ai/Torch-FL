@@ -108,9 +108,9 @@ def _assert_compiled_stream_chain():
 
     from torch_fl.compile.device_interface import FlagOSDeviceInterface
     from torch_fl.flagos._streams import get_raw_stream
-    from torch_fl.native_host.load import _launcher_module
 
-    assert torch_fl._build_config.NATIVE_HOSTS
+    runtime = torch_fl.native_host._model_runtime()
+    assert runtime is not None
     device = torch.device(DEVICE)
     reference = torch.linspace(-1.0, 1.0, 2048, dtype=torch.float32)
     value = reference.to(device)
@@ -134,15 +134,14 @@ def _assert_compiled_stream_chain():
         },
     )
     model = torch_fl.native_host.compile(lambda x: torch.cos(x), dynamic=False)
-    typed_hits = torch.ops.flagos.native_source_typed_hits
-    capture = _launcher_module.capture_enqueues
+    capture = runtime.capture_enqueues
 
     with side, torch.no_grad():
         handle = get_raw_stream(device)
         assert torch.accelerator.current_stream(device) == side
         assert handle != default_handle
         assert FlagOSDeviceInterface.get_raw_stream(device.index) == handle
-        assert _launcher_module.current_stream(device.index) == handle
+        assert runtime.current_stream(device.index) == handle
 
         # Compile and specialize before measuring the asynchronous chain.
         generated = metrics.generated_kernel_count
@@ -150,16 +149,13 @@ def _assert_compiled_stream_chain():
         assert metrics.generated_kernel_count > generated
         side.synchronize()
 
-        hits = typed_hits("aten::cos")
         eager, eager_streams = capture(lambda: torch.cos(value))
-        assert typed_hits("aten::cos") == hits + 1
         result, compiled_streams = capture(lambda: compiled(eager))
-        assert typed_hits("aten::cos") == hits + 1
         actual, host_streams = capture(lambda: model(result))
-        assert typed_hits("aten::cos") == hits + 2
 
-    for streams in (eager_streams, compiled_streams, host_streams):
-        assert set(streams) == {handle}
+    assert set(eager_streams) == {(handle, True)}
+    assert set(compiled_streams) == {(handle, False)}
+    assert set(host_streams) == {(handle, True)}
     assert torch.accelerator.current_stream(device) == default
     assert get_raw_stream(device) == default_handle
     assert model._flagos_host_backend.graphs[0]["execution_sha256"]
@@ -173,7 +169,7 @@ def _assert_compiled_stream_chain():
 
 @pytest.mark.anyplatform
 def test_compiled_stream_chain():
-    if getattr(torch_fl._build_config, "NATIVE_HOSTS", False):
+    if torch_fl.native_host._model_runtime() is not None:
         _assert_compiled_stream_chain()
         return
 

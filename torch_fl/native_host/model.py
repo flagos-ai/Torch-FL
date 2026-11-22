@@ -1,7 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Execute model graphs through ATen and the precompiled FlagGems hosts."""
+"""Execute model graphs through ATen and the wheel's precompiled operators."""
 
 import functools
 import hashlib
@@ -24,7 +24,7 @@ def _devices(value):
 def _check_graph(graph):
     for node in graph.nodes():
         if "Fusion" in node.kind() or "TensorExpr" in node.kind():
-            raise RuntimeError("FlagGems model hosts do not permit numerical fusion")
+            raise RuntimeError("Compiled model hosts do not permit numerical fusion")
         for block in node.blocks():
             _check_graph(block)
 
@@ -74,7 +74,7 @@ class ModelHostBackend:
         def execute(*args):
             nonlocal audited
             if torch.is_grad_enabled():
-                raise RuntimeError("FlagGems model hosts require torch.no_grad()")
+                raise RuntimeError("Compiled model hosts require torch.no_grad()")
             with torch.jit.optimized_execution(True):
                 result = module(*args)
             if not audited:
@@ -90,17 +90,17 @@ class ModelHostBackend:
 
 
 def compile_model(model, *, dynamic=True, fullgraph=True):
-    """Compile inference host control flow while retaining FlagGems numerical ops.
+    """Compile inference host control flow while retaining the ATen operator routes.
 
     For an nn.Module, replace its forward method and return the same module so
     higher-level methods, including generation loops, use the compiled forward.
     Calls require torch.no_grad(). Numerical JIT fusers are disabled for this
-    explicit FlagGems execution mode; graph guards retain dynamic-shape checks.
+    explicit host execution mode. Graph guards retain dynamic-shape checks.
     """
     import torch
     from torch_fl import native_host
 
-    if native_host._hosts is None or not hasattr(native_host._hosts, "typed"):
+    if native_host._model_runtime() is None:
         raise RuntimeError("model hosts require a wheel with precompiled typed hosts")
     for name in (
         "_jit_set_texpr_fuser_enabled",
@@ -119,7 +119,7 @@ def compile_model(model, *, dynamic=True, fullgraph=True):
     @functools.wraps(function)
     def forward(*args, **kwargs):
         if torch.is_grad_enabled():
-            raise RuntimeError("FlagGems model hosts require torch.no_grad()")
+            raise RuntimeError("Compiled model hosts require torch.no_grad()")
         with torch._dynamo.config.patch(specialize_float=True):
             return compiled(*args, **kwargs)
 

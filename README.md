@@ -345,6 +345,11 @@ and `benchmarks/host_compiler/qwen_eager.py` for full-model validation and its
 limitations. The feature does not enable boxing or replace uncovered operations
 with Inductor-generated kernels.
 
+On Apple, `torch.compile(model, backend="flagos")` uses Inductor's Metal
+codegen and submits to the current FlagOS stream. `torch_fl.native_host.compile`
+uses the Apple wheel's compiled operator hosts for inference. See the
+[Metal integration](docs/architecture/torch-compile-integration.md#apple-metal).
+
 ## Documentation
 
 ### Getting Started
