@@ -201,13 +201,18 @@ fi
 
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ascend-${CI_STAGE}}"
 create_runtime_venv "$VENDOR_PYTHON"
+seed_options=()
+if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
+  seed_options+=(--skip-package torch --skip-package flagtree --skip-package flag-gems)
+fi
 "$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
   --target-python "$VENV_PYTHON" \
   --torch-version "$CPU_TORCH_VERSION" \
   --flagtree-version "${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}" \
   --flaggems-version "${TORCH_FL_FLAGGEMS_VERSION:-$FLAGGEMS_VERSION_DEFAULT}" \
-  --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt"
-# A delivered cohort must pass its checksum gate even when seeding succeeded.
+  --requirements-file "$REPO_ROOT/.github/requirements-ascend.txt" \
+  "${seed_options[@]}"
+# Install the delivered CPU Torch after verifying its checksum.
 if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
   install_cpu_torch
 elif "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
@@ -233,23 +238,7 @@ export PATH="$VENV_ROOT/bin:$PATH"
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_ascend}"
 if [[ -n "${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" ]]; then
   install_flagtree
-elif "$VENV_PYTHON" - "$FLAGTREE_VERSION" <<'PY'
-from importlib import metadata, util
-from pathlib import Path
-import sys
-
-try:
-    dist = metadata.distribution("flagtree")
-    spec = util.find_spec("triton")
-    root = Path(dist.locate_file("triton")).resolve()
-    assert dist.version == sys.argv[1]
-    assert spec is not None and spec.origin
-    assert Path(spec.origin).resolve().parent == root
-    assert (root / "backends/ascend").is_dir()
-except (metadata.PackageNotFoundError, AssertionError):
-    raise SystemExit(1)
-PY
-then
+elif runtime_flagtree_is_usable ascend; then
   echo "Using runtime-seeded FlagTree $FLAGTREE_VERSION"
 else
   # Remove a conflicting Triton before installing the pinned compiler.

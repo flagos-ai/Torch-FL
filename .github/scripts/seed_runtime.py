@@ -239,6 +239,8 @@ def seed(
     flagtree_version,
     flaggems_version,
     requirements_file=None,
+    *,
+    skip_packages=(),
 ):
     target = json.loads(
         subprocess.check_output(
@@ -272,7 +274,7 @@ def seed(
         name = re.sub(r"[-_.]+", "-", distribution.metadata.get("Name", "")).lower()
         # Collective communication is deferred across CI, including packages
         # available in the runtime or accidentally added to a tool list.
-        if name == "flagcx":
+        if name == "flagcx" or name in skip_packages:
             continue
         if (name not in expected and name not in tools) or name in reused:
             continue
@@ -590,6 +592,13 @@ def main():
     parser.add_argument("--flagtree-version", required=True)
     parser.add_argument("--flaggems-version", required=True)
     parser.add_argument("--requirements-file", type=Path)
+    parser.add_argument(
+        "--skip-package",
+        choices=("torch", "flagtree", "flag-gems"),
+        action="append",
+        default=[],
+        help="Install this package from a delivered wheel instead of copying it",
+    )
     args = parser.parse_args()
     seed(
         args.target_python,
@@ -597,6 +606,7 @@ def main():
         args.flagtree_version,
         args.flaggems_version,
         args.requirements_file,
+        skip_packages=args.skip_package,
     )
 
 

@@ -427,6 +427,44 @@ def test_seed_requires_matching_versions_and_python(
     assert target.exists() == reused
 
 
+@pytest.mark.parametrize(
+    "name,version,reused",
+    [
+        ("torch", "2.10.0+cpu", False),
+        ("flagtree", "0.7.0+ascend3.5", False),
+        ("flag-gems", "5.4.0", False),
+        ("numpy", "1.26.4", True),
+        ("packaging", "25.0", True),
+    ],
+)
+def test_seed_leaves_delivered_packages_for_the_wheelhouse(
+    tmp_path, monkeypatch, name, version, reused
+):
+    dist = runtime_distribution(tmp_path / "runtime", name=name, version=version)
+    target = tmp_path / "ci/site-packages"
+    binary = tmp_path / "ci/bin"
+    binary.mkdir(parents=True)
+    monkeypatch.setattr(SEED.metadata, "distributions", lambda **kwargs: [dist])
+    monkeypatch.setattr(
+        SEED.subprocess,
+        "check_output",
+        lambda *args, **kwargs: json.dumps(
+            {"site": str(target), "version": list(sys.version_info[:2])}
+        ),
+    )
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("packaging>=23\n")
+    SEED.seed(
+        binary / "python",
+        "2.10.0",
+        "0.7.0+ascend3.5",
+        "5.4.0",
+        requirements_file=requirements,
+        skip_packages=("torch", "flagtree", "flag-gems"),
+    )
+    assert target.exists() == reused
+
+
 @pytest.mark.parametrize("listed_as_tool", [False, True])
 def test_runtime_communication_package_is_never_copied(
     tmp_path, monkeypatch, listed_as_tool

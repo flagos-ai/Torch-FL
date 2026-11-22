@@ -17,6 +17,9 @@ CI requirements. Copies are limited to each distribution's recorded files;
 neither the runtime's site-packages directory nor its real `torch_npu` is exposed
 to the CI interpreter. Pip fills missing dependencies without upgrading already
 satisfied packages. The setup log reports reused wheels and local copy time.
+When the workflow delivers the CPU PyTorch, FlagTree and FlagGems wheels, the
+hook installs those three from the wheelhouse after checksum verification.
+Matching NumPy and Python tools can still be copied from the image.
 
 Baseline CI defers FlagCX. Ascend alone also runs a separate, non-required FlagCX
 admission check after the regular integration tests. This check verifies the

@@ -191,11 +191,12 @@ def test_delivered_ascend_cohort_takes_precedence_over_runtime_seed(
     tmp_path, delivered, install_status
 ):
     script = HOOK[HOOK.index("\nVENV_ROOT=") + 1 :]
-    script = script.split("# Install the published Python wheel;", 1)[0]
+    script = script.split("# Matching runtime tools", 1)[0]
     python = tmp_path / "python"
-    python.write_text("#!/bin/sh\nexit 0\n")
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$PYTHON_LOG"\n')
     python.chmod(0o755)
     calls = tmp_path / "calls"
+    python_calls = tmp_path / "python-calls"
     result = subprocess.run(
         [
             "bash",
@@ -203,7 +204,9 @@ def test_delivered_ascend_cohort_takes_precedence_over_runtime_seed(
             "set -euo pipefail\n"
             'create_runtime_venv() { VENV_PYTHON="$VENDOR_PYTHON"; }\n'
             'install_cpu_torch() { echo torch >> "$CALL_LOG"; return "$INSTALL_STATUS"; }\n'
-            'install_flagtree() { echo flagtree >> "$CALL_LOG"; }\n' + script,
+            'install_flagtree() { echo flagtree >> "$CALL_LOG"; }\n'
+            'runtime_flagtree_is_usable() { test "$1" = ascend; }\n'
+            'install_flag_gems() { echo flag-gems >> "$CALL_LOG"; }\n' + script,
         ],
         env={
             "PATH": "/usr/bin:/bin",
@@ -214,8 +217,10 @@ def test_delivered_ascend_cohort_takes_precedence_over_runtime_seed(
             "CPU_TORCH_VERSION": "2.10.0",
             "FLAGTREE_VERSION_ascend": "0.7.0+ascend3.5",
             "FLAGGEMS_VERSION_DEFAULT": "5.4.0",
+            "FLAGOS_WHEEL_ROOT_DEFAULT": "https://example.invalid",
             "TORCH_FL_CPU_TORCH_WHEELHOUSE": str(tmp_path) if delivered else "",
             "CALL_LOG": str(calls),
+            "PYTHON_LOG": str(python_calls),
             "INSTALL_STATUS": str(install_status),
         },
         capture_output=True,
@@ -223,7 +228,12 @@ def test_delivered_ascend_cohort_takes_precedence_over_runtime_seed(
         timeout=15,
     )
     assert result.returncode == install_status, result.stderr
-    expected = ["torch", "flagtree"] if delivered else []
+    expected = ["torch", "flagtree", "flag-gems"] if delivered else ["flag-gems"]
     if install_status:
         expected = ["torch"]
-    assert (calls.read_text().splitlines() if calls.exists() else []) == expected
+    assert calls.read_text().splitlines() == expected
+    argv = shlex.split(python_calls.read_text().splitlines()[0])
+    skipped = [
+        argv[index + 1] for index, value in enumerate(argv) if value == "--skip-package"
+    ]
+    assert skipped == (["torch", "flagtree", "flag-gems"] if delivered else [])
