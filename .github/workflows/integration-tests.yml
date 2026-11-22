@@ -262,6 +262,8 @@ jobs:
           printf 'FLAGCICD_REPORT_DIR=%s\n' "$REPORT_DIR" >> "$GITHUB_ENV"
 
       - name: Record hardware identity
+        timeout-minutes: 2
+        continue-on-error: true
         run: >-
           python .github/scripts/record_hardware_identity.py
           --platform "${{ inputs.platform }}"
