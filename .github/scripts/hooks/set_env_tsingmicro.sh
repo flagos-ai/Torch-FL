@@ -17,10 +17,24 @@ if [[ ! -f /usr/local/kuiper/include/tx_runtime.h || ! -f /usr/local/kuiper/lib/
   echo "::error::The runner's Kuiper SDK must be mounted at /usr/local/kuiper" >&2
   exit 1
 fi
-if ! sdk_info="$(/usr/local/kuiper/bin/tsm_smi --version)"; then
-  printf '::error::Kuiper SDK could not initialize the runner driver\n%s\n' "$sdk_info" >&2
-  exit 1
-fi
+
+# The SMI version query also reads firmware details. Check the same runtime
+# call as Torch-FL before using the SMI output to record the SDK version.
+BOOTSTRAP_PYTHON="python$FLAGTREE_PYTHON_VERSION_tsingmicro"
+"$BOOTSTRAP_PYTHON" - <<'PY'
+from ctypes import CDLL, POINTER, byref, c_int, c_uint32
+
+get_device_count = CDLL("/usr/local/kuiper/lib/libhpgr.so").txGetDeviceCount
+get_device_count.argtypes = (POINTER(c_uint32),)
+get_device_count.restype = c_int
+count = c_uint32()
+status = get_device_count(byref(count))
+if status != 0 or count.value == 0:
+    raise SystemExit(f"Kuiper txGetDeviceCount returned {status} with {count.value} devices")
+print(f"Kuiper devices: {count.value}")
+PY
+
+sdk_info="$(/usr/local/kuiper/bin/tsm_smi -i 0 --version 2>&1 || true)"
 FLAGOS_SDK_VERSION="$(awk -F '|' '/[|][[:space:]]*Runtime Version[[:space:]]*[|]/ {
   gsub(/[[:space:]]/, "", $3)
   if ($3 ~ /^[0-9]+([.][0-9]+)*$/) print $3
@@ -33,7 +47,7 @@ export FLAGOS_SDK_VERSION
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="$LLVM_SYSPATH/python_packages/mlir_core"
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-tsingmicro-${CI_STAGE}}"
-"python$FLAGTREE_PYTHON_VERSION_tsingmicro" -m venv --clear "$VENV_ROOT"
+"$BOOTSTRAP_PYTHON" -m venv --clear "$VENV_ROOT"
 VENV_PYTHON="$VENV_ROOT/bin/python"
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
