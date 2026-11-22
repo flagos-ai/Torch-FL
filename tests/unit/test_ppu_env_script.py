@@ -1,9 +1,8 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercise both PPU lanes without a device, network, or vendor Python import."""
+"""Exercise PPU environment preparation without a device or network."""
 
-import json
 import os
 from pathlib import Path
 import shlex
@@ -25,6 +24,8 @@ def run_hook(
     fail="",
     target="ci",
     use_default_path=False,
+    image_torch=False,
+    wrong_default_python=False,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -35,19 +36,8 @@ def run_hook(
     (sdk / "CUDA_SDK/lib64/libcudart.so").touch()
     image = tmp_path / "image"
     vendor_root = image / "site-packages/torch"
-    (vendor_root / "lib").mkdir(parents=True)
-    for name in (
-        "libc10",
-        "libtorch_cpu",
-        "libtorch",
-        "libtorch_global_deps",
-        "libtorch_python",
-        "libc10_cuda",
-        "libtorch_cuda",
-    ):
-        (vendor_root / f"lib/{name}.so").touch()
     image_bin = image / "bin"
-    image_bin.mkdir()
+    image_bin.mkdir(parents=True)
     ci_python = tmp_path / "ci-python"
     ci_python.write_text(r"""#!/bin/bash
 printf 'python %s\n' "$*" >> "$CALL_LOG"
@@ -79,7 +69,7 @@ fi
 if [[ $# == 0 ]]; then printf 'ci-python\n'; fi
 """)
     ci_python.chmod(0o755)
-    vendor = image_bin / "python"
+    vendor = image_bin / "python3.12"
     vendor.write_text(r"""#!/bin/bash
 set -e
 printf 'vendor %s\n' "$*" >> "$CALL_LOG"
@@ -90,12 +80,12 @@ fi
 if [[ "$*" == *seed_runtime.py* ]]; then
   [[ "$FAIL_PHASE" != seed ]]; exit $?
 fi
-if [[ "$1 $2" == '-I -c' ]]; then exit 0; fi
+if [[ "$1 $2" == '-I -c' ]]; then
+  [[ "$3" != *'import torch'* && "$FAIL_PHASE" != python ]]; exit $?
+fi
 input="$(cat)"
-if [[ "$input" == *'print(json.dumps'* ]]; then
-  printf '%s\n' "$VENDOR_INFO_JSON"
-elif [[ "$input" == *'info = json.loads'* ]]; then
-  printf '%s' "$input" | "$REAL_PYTHON" -
+if [[ "$input" == *'metadata.distribution("torch")'* ]]; then
+  if [[ -n "$IMAGE_TORCH_ROOT" ]]; then printf '%s\n' "$IMAGE_TORCH_ROOT"; fi
 elif [[ "$input" == *'target, repo ='* ]]; then
   printf '%s' "$input" | "$REAL_PYTHON" -I -c 'import os,sys; sys.prefix=os.environ["IMAGE_PREFIX"]; sys.base_prefix=sys.prefix; sys.version_info=(3,12,0); sys.argv=["-",*sys.argv[1:]]; exec(sys.stdin.read())' "$3" "$4"
 else
@@ -103,6 +93,12 @@ else
 fi
 """)
     vendor.chmod(0o755)
+    default_python = image_bin / "python"
+    if wrong_default_python:
+        default_python.write_text("#!/bin/sh\nexit 1\n")
+        default_python.chmod(0o755)
+    else:
+        default_python.symlink_to(vendor.name)
     uv = image_bin / "uv"
     uv.write_text(
         '#!/bin/bash\nprintf "uv %s\\n" "$*" >> "$CALL_LOG"\n'
@@ -131,8 +127,6 @@ fi
     )
     if fail == "sdk":
         (sdk / "CUDA_SDK/lib64/libcudart.so").unlink()
-    if fail == "vendor-lib":
-        (vendor_root / "lib/libtorch_cuda.so").unlink()
     env = dict(
         os.environ,
         PATH=f"{image_bin}:/usr/bin:/bin",
@@ -155,17 +149,17 @@ fi
         PREPARED_FILE=str(prepared_file),
         CPU_INSTALLED=str(tmp_path / "cpu-installed"),
         FAIL_PHASE=fail,
-        VENDOR_INFO_JSON=json.dumps(
-            dict(
-                version="2.10.0+v0.1.0.ppu2.1.1",
-                base_version="2.10.0",
-                cuda="13.0",
-                root=str(vendor_root),
-                site=str(vendor_root.parent),
-                python="3.12.3",
-            )
+        IMAGE_TORCH_ROOT=str(vendor_root) if image_torch else "",
+        LD_LIBRARY_PATH=(
+            f"{vendor_root}/lib:/host/driver" if image_torch else "/host/driver"
         ),
-        LD_LIBRARY_PATH=f"{vendor_root}/lib:/host/driver",
+        CPATH=f"{vendor_root}/include:/host/include"
+        if image_torch
+        else "/host/include",
+        LIBRARY_PATH=f"{vendor_root}/lib" if image_torch else "",
+        CMAKE_PREFIX_PATH=f"{vendor_root}/share/cmake" if image_torch else "",
+        FLAGOS_VENDOR_TORCH_LIB=str(vendor_root / "lib") if image_torch else "",
+        FLAGOS_VENDOR_TORCH_VERSION="2.13.0" if image_torch else "",
         FLAGOS_BACKEND_CONFIG="",
     )
     script = r"""
@@ -189,6 +183,7 @@ source "$1"
 """
     if use_default_path:
         env.pop("TORCH_FL_VENV_ROOT")
+        env.pop("TORCH_FL_VENDOR_PYTHON")
         env["RUNNER_TEMP"] = str(tmp_path)
     done = subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", script, "test", str(hook)],
@@ -199,8 +194,11 @@ source "$1"
     return done, calls.read_text().splitlines(), env, env_file, path_file
 
 
-def test_runtime_reuse_preserves_next_shell_isolation(tmp_path):
-    done, calls, env, env_file, path_file = run_hook(tmp_path)
+@pytest.mark.parametrize(
+    "image_torch", [False, True], ids=["no-image-torch", "image-torch"]
+)
+def test_runtime_reuse_preserves_next_shell_isolation(tmp_path, image_torch):
+    done, calls, env, env_file, path_file = run_hook(tmp_path, image_torch=image_torch)
     assert done.returncode == 0, done.stderr
     assert calls.count("native-build") == 1
     assert "cpu-torch" not in calls and "flagtree" not in calls
@@ -212,7 +210,12 @@ def test_runtime_reuse_preserves_next_shell_isolation(tmp_path):
     assert rows["PYTHONPATH"] == ""
     assert rows["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert rows["FLAGOS_SDK_VERSION"] == "2.1.0"
+    assert rows["FLAGOS_VENDOR_TORCH_LIB"] == rows["FLAGOS_VENDOR_TORCH_VERSION"] == ""
     assert "/host/driver" in rows["LD_LIBRARY_PATH"]
+    assert "/host/include" in rows["CPATH"]
+    if image_torch:
+        for name in ("CMAKE_PREFIX_PATH", "CPATH", "LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            assert env["IMAGE_TORCH_ROOT"] not in rows[name]
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", "python"],
         env={**env, **rows, "PATH": path_file.read_text().strip() + ":" + rows["PATH"]},
@@ -243,7 +246,9 @@ def test_build_stage_preserves_existing_compile_count_without_model_packages(tmp
 
 
 def test_uses_the_default_lane_venv(tmp_path):
-    done, _, _, env_file, _ = run_hook(tmp_path, stage="build", use_default_path=True)
+    done, _, _, env_file, _ = run_hook(
+        tmp_path, stage="build", use_default_path=True, wrong_default_python=True
+    )
     assert done.returncode == 0, done.stderr
     rows = dict(row.split("=", 1) for row in env_file.read_text().splitlines())
     assert rows["VIRTUAL_ENV"] == str(tmp_path / "torch-fl-ppu-build")
@@ -253,7 +258,7 @@ def test_uses_the_default_lane_venv(tmp_path):
     "fail",
     [
         "sdk",
-        "vendor-lib",
+        "python",
         "device",
         "seed",
         "isolation",

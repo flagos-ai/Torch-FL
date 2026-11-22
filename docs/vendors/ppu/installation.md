@@ -2,7 +2,10 @@
 
 ## Overview
 
-PPU presents itself as a **CUDA-compatible** device: it rides the CUDA toolchain (`PPU_SDK/CUDA_SDK` is a complete CUDA 13 toolkit) but has its own `FLAGOS_ACCELERATOR=ppu` value like every other vendor. The PPU `torch` wheel is a full CUDA-enabled build (`torch.version.cuda == '13.0'`, `torch.cuda.is_available() == True`).
+PPU uses the CUDA-compatible toolchain in `PPU_SDK/CUDA_SDK` and selects
+`FLAGOS_ACCELERATOR=ppu`. The default Torch-FL build uses official CPU Torch and
+exposes the PPU through `torch.flagos`. The separate vendor Torch wheel is a
+CUDA-enabled build with `torch.version.cuda == '13.0'`.
 
 The T-Head wheel uses FlagGems on the PPU SDK runtime.
 `backends_thead.conf` records the accelerated operators and CPU fallbacks.
@@ -36,13 +39,16 @@ sentencepiece, tiktoken and protobuf. SQLAlchemy uses the shared migrated-CI
 range `>=2.0.55,<2.0.58`; compatible image packages are retained.
 
 The CI lane uses published `torch==2.10.0+cpu` and compiles the ordinary
-FlagGems wheel without a vendor Torch bundle. It records the actual SDK
+FlagGems wheel without a vendor Torch bundle. The image provides Python,
+system build tools and the PPU SDK; a vendor Torch package is not required.
+CI records the actual SDK
 `2.1.0` separately from the wheel label selected by the shared release table.
 
 `BASH_ENV=/dev/null`, empty `PYTHONPATH`, disabled user sites and disabled vendor
-backend autoload persist into later Actions steps. The job uses the shared PPU pip download cache and its ownership/write-probe
-fallback with a fresh venv. Existing runner labels, explicit device mounts and shared-memory
-options are retained. No privileged mode or host IPC/network options are added.
+backend autoload persist into later Actions steps. The job uses the shared PPU
+pip download cache and its ownership/write-probe fallback with a fresh venv.
+Existing runner labels, explicit device mounts and shared-memory options are
+retained. No privileged mode or host IPC/network options are added.
 
 The official runtime lists host driver `2.0.0`, while the previous CI device tool
 reported `1.3.2-d7f5a2`. Compatibility must be established by the new-image
@@ -55,8 +61,8 @@ are not acceptance evidence for this new runtime.
 
 - PPU hardware with driver installed
 - PPU SDK installed at `/usr/local/PPU_SDK` (or `$PPU_SDK`)
-- PPU torch wheel (locally built or vendor-provided, CUDA-enabled)
-- Python 3.8 or later matching the PPU torch build
+- Official PyTorch `2.10.0+cpu`
+- Python 3.12 for the published PPU FlagTree wheel
 - `cmake >= 3.18`, `ninja`
 
 ## Installation
@@ -67,9 +73,7 @@ are not acceptance evidence for this new runtime.
 git clone https://github.com/flagos-ai/PyTorch-Plugin-FL.git
 cd PyTorch-Plugin-FL
 
-# CUDA_HOME points at the PPU CUDA_SDK; FLAGOS_SKIP_CUDA_ASSETS=1 skips
-# bundling an external libtorch_cuda.so AND skips pinned nvidia-*-cu12 deps
-# (PPU supplies CUDA 13 via PPU_SDK/CUDA_SDK).
+# CUDA_HOME points at the PPU SDK's CUDA-compatible toolkit.
 FLAGOS_ACCELERATOR=ppu \
   CUDA_HOME=/usr/local/PPU_SDK/CUDA_SDK \
   FLAGOS_SKIP_CUDA_ASSETS=1 \
@@ -100,7 +104,8 @@ print(f'Sample result: {y.cpu()[0, 0].item():.4f}')
 "
 ```
 
-Expected output shows `torch.cuda available: True`, `torch.version.cuda: 13.0`, and a floating-point result.
+For the default wheel, `torch.version.cuda` is `None`. The FlagOS device count
+should be nonzero and the matmul should return a floating-point result.
 
 ### `torch.compile` with FlagTree
 
@@ -154,7 +159,7 @@ scaler.step(optimizer)
 scaler.update()
 ```
 
-Run the PPU-only AMP contract after installing the PPU torch wheel and loading
+Run the PPU-only AMP contract after installing the default Torch-FL wheel and loading
 the driver. `FLAGOS_ACCELERATOR=ppu` (with `PPU_SDK` present) is what the contract's
 platform check reads, so the test cannot be mistaken
 for validation on an ordinary NVIDIA CUDA build:
@@ -284,11 +289,11 @@ FLAGOS_DISABLE_CUDA_ASSETS=1 \
 
 ## Troubleshooting
 
-### `torch.cuda.is_available()` Returns False
+### `torch.flagos.device_count()` Returns Zero
 
-**Cause:** PPU torch wheel is not correctly installed, or the PPU driver is not loaded.
-
-**Fix:** Verify PPU torch with `python -c "import torch; print(torch.version.cuda)"` — expect `13.0`. Check PPU driver status with vendor-provided diagnostic tools.
+Check the PPU driver, SDK and device visibility with `ppu-smi`. With the
+default wheel, `torch.version.cuda` is `None`; use `torch.flagos` to check the
+PPU device.
 
 ### `FLAGOS_DISABLE_CUDA_ASSETS=1` Not Set
 

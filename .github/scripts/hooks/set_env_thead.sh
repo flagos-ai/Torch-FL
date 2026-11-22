@@ -84,106 +84,38 @@ if [[ -z "$PPU_SDK" ]]; then
   exit 1
 fi
 
-select_vendor_python() {
-  local candidate="${TORCH_FL_VENDOR_PYTHON:-}"
-  if [[ -n "$candidate" && "$candidate" != */* ]]; then
-    candidate="$(command -v "$candidate" 2>/dev/null || true)"
-  fi
-  if [[ -z "$candidate" ]]; then
-    candidate="$(command -v python 2>/dev/null || true)"
-  fi
-  if [[ -z "$candidate" || ! -x "$candidate" ]]; then
-    echo "::error::Unable to find the vendor Python interpreter" >&2
-    exit 1
-  fi
-  if ! "$candidate" -I -c "import torch" >/dev/null 2>&1; then
-    echo "::error::Vendor Python cannot import torch: $candidate" >&2
-    exit 1
-  fi
-  printf '%s' "$candidate"
+# Use the image interpreter for venv creation and package reuse. It need not
+# have Torch: the new venv reuses or installs the official CPU wheel.
+select_runtime_python() {
+  local candidate
+  for candidate in "${TORCH_FL_VENDOR_PYTHON:-}" python python3.12; do
+    [[ -n "$candidate" ]] || continue
+    if [[ "$candidate" != */* ]]; then
+      candidate="$(command -v "$candidate" 2>/dev/null || true)"
+    fi
+    if [[ -x "$candidate" ]] && "$candidate" -I -c \
+        'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "::error::PPU FlagTree requires a Python 3.12 interpreter" >&2
+  return 1
 }
 
-VENDOR_PYTHON="$(select_vendor_python)"
-VENDOR_INFO="$("$VENDOR_PYTHON" -I - <<'PY'
-import json
+RUNTIME_PYTHON="$(select_runtime_python)"
+# If the image has Torch, identify its prefix only to remove inherited paths.
+# Reading distribution metadata does not load the package or its native libs.
+VENDOR_TORCH_ROOT="$("$RUNTIME_PYTHON" -I - <<'PYCODE'
+from importlib import metadata
 from pathlib import Path
-import site
-import sys
 
-import torch
-
-print(json.dumps({
-    "version": torch.__version__,
-    "base_version": torch.__version__.split("+", 1)[0],
-    "cuda": torch.version.cuda,
-    "root": str(Path(torch.__file__).resolve().parent),
-    "site": site.getsitepackages()[0],
-    "python": sys.version.split()[0],
-}, sort_keys=True))
-PY
+try:
+    print(Path(metadata.distribution("torch").locate_file("torch")).resolve())
+except metadata.PackageNotFoundError:
+    pass
+PYCODE
 )"
-
-readarray -t VENDOR_FIELDS < <(
-  VENDOR_INFO="$VENDOR_INFO" "$VENDOR_PYTHON" - <<'PY'
-import json
-import os
-
-info = json.loads(os.environ["VENDOR_INFO"])
-for key in ("version", "base_version", "cuda", "root", "site", "python"):
-    print(info.get(key) or "")
-PY
-)
-VENDOR_TORCH_VERSION="${VENDOR_FIELDS[0]}"
-VENDOR_TORCH_BASE_VERSION="${VENDOR_FIELDS[1]}"
-VENDOR_CUDA_VERSION="${VENDOR_FIELDS[2]}"
-VENDOR_TORCH_ROOT="${VENDOR_FIELDS[3]}"
-VENDOR_SITE="${VENDOR_FIELDS[4]}"
-VENDOR_PYTHON_VERSION="${VENDOR_FIELDS[5]}"
-VENDOR_TORCH_LIB="$VENDOR_TORCH_ROOT/lib"
-
-VENDOR_NVIDIA_LIBS=""
-for nvidia_lib in "$VENDOR_SITE"/nvidia/*/lib; do
-  [[ -d "$nvidia_lib" ]] || continue
-  VENDOR_NVIDIA_LIBS="${VENDOR_NVIDIA_LIBS:+$VENDOR_NVIDIA_LIBS:}$nvidia_lib"
-done
-
-if [[ "$VENDOR_TORCH_BASE_VERSION" != "$CPU_TORCH_VERSION" ]]; then
-  echo "::error::Vendor torch is $VENDOR_TORCH_VERSION; expected $CPU_TORCH_VERSION"
-  exit 1
-fi
-if [[ "$VENDOR_CUDA_VERSION" != "13.0" ]]; then
-  echo "::error::Vendor torch CUDA runtime is $VENDOR_CUDA_VERSION; expected 13.0"
-  exit 1
-fi
-
-echo "Vendor Python: $VENDOR_PYTHON ($VENDOR_PYTHON_VERSION)"
-echo "Vendor PyTorch: $VENDOR_TORCH_VERSION"
-echo "Vendor torch root: $VENDOR_TORCH_ROOT"
-
-# PPU build_ext runs with FLAGOS_BUILD_FLAGGEMS_CPP=OFF (setup.py cuda-branch default), so
-# the C++ FlagGems dispatch (which needs liboperators.so + FlagGemsConfig.cmake)
-# is never linked and find_package(FlagGems) is skipped. FLAGOS_BUILD_FLAGGEMS=ON
-# compiles the Python-path kernels without importing flag_gems at build time, so
-# the cuda-style FlagGems C++ asset discovery is omitted here. The runtime
-# flag_gems import for the FlagGems test step comes from the venv install further
-# down, not from the container filesystem.
-
-# PPU core libs are a local USE_CUDA=1 build, not an upstream wheel. They carry
-# the undefined symbols libtorch_fl.so needs, so they must be bundled and later
-# selected via a private torch facade at import time.
-for path in \
-  "$VENDOR_TORCH_LIB/libc10.so" \
-  "$VENDOR_TORCH_LIB/libtorch_cpu.so" \
-  "$VENDOR_TORCH_LIB/libtorch.so" \
-  "$VENDOR_TORCH_LIB/libtorch_global_deps.so" \
-  "$VENDOR_TORCH_LIB/libtorch_python.so" \
-  "$VENDOR_TORCH_LIB/libc10_cuda.so" \
-  "$VENDOR_TORCH_LIB/libtorch_cuda.so"; do
-  if [[ ! -e "$path" ]]; then
-    echo "::error::Required PPU torch asset is missing: $path"
-    exit 1
-  fi
-done
 
 # Device nodes: three classes on the runner -- /dev/alixpu (base),
 # /dev/alixpu_ctl (control), /dev/alixpu_ppu0-15 (compute). The CI container
@@ -194,19 +126,12 @@ if [[ ! -c /dev/alixpu_ppu0 ]]; then
   exit 1
 fi
 
-# PPU torch ships its own libtorch_cuda.so, so neither the build-time copy into
-# torch_fl/lib nor the runtime preload should run. Both kill switches are needed:
-#   FLAGOS_SKIP_CUDA_ASSETS  -> setup.py skips the libtorch_cuda.so copy + cu12 deps
-#   FLAGOS_DISABLE_CUDA_ASSETS -> torch_fl skips the runtime ctypes preload
+# The ordinary PPU build uses the SDK's CUDA-compatible runtime.
 export FLAGOS_SKIP_CUDA_ASSETS=1
 export FLAGOS_DISABLE_CUDA_ASSETS=1
 
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-ppu-${CI_STAGE}}"
-if ! "$VENDOR_PYTHON" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'; then
-  echo "::error::PPU FlagTree requires Python 3.12" >&2
-  exit 1
-fi
-create_runtime_venv "$VENDOR_PYTHON"
+create_runtime_venv "$RUNTIME_PYTHON"
 # The pod's proxied egress to files.pythonhosted.org has been observed at
 # ~90 kB/s, well below what pip's 15s default read timeout tolerates for a
 # single wheel (e.g. the ~30 MB cmake wheel stalled mid-download and tripped
@@ -217,7 +142,7 @@ export PIP_DEFAULT_TIMEOUT=120
 
 # Selectively copy RECORD-owned wheels. Never expose /flagos or /opt/flagtree
 # on the target import path, and never copy vendor Torch or editable finders.
-"$VENDOR_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+"$RUNTIME_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
   --target-python "$VENV_PYTHON" \
   --torch-version "${CPU_TORCH_VERSION%+cpu}" \
   --flagtree-version "$FLAGTREE_VERSION" \
@@ -225,17 +150,9 @@ export PIP_DEFAULT_TIMEOUT=120
   --requirements-file "$REPO_ROOT/.github/requirements-thead.txt"
 
 ensure_runtime_requirements "$REPO_ROOT/.github/requirements-thead.txt" "$PIP_INDEX_URL"
-if ! "$VENV_PYTHON" - "$CPU_TORCH_VERSION" <<'PYCODE'
-import sys
-import torch
-
-assert torch.__version__ == sys.argv[1].removesuffix("+cpu") + "+cpu"
-assert torch.version.cuda is None
-PYCODE
-then
+if ! runtime_cpu_torch_is_usable; then
   repair_runtime_cpu_torch
 fi
-
 
 # Retain the existing integration-only compiler, operator and model packages.
 if [[ "$CI_STAGE" == "integration" ]]; then
@@ -269,7 +186,7 @@ export FLAGOS_ACCELERATOR=ppu
 export CUDA_HOME="$PPU_SDK/CUDA_SDK"
 export CUDA_PATH="$CUDA_HOME"
 export PPU_SDK="$PPU_SDK"
-export FLAGOS_VENDOR_TORCH_LIB="$VENDOR_TORCH_LIB"
+export FLAGOS_VENDOR_TORCH_LIB=""
 export FLAGOS_VENDOR_TORCH_VERSION=""
 export FLAGOS_SDK_VERSION="${PPU_VERSION:-}"
 FLAGOS_SDK_VERSION="${FLAGOS_SDK_VERSION#v}"
@@ -296,9 +213,10 @@ CLEAN_CMAKE_PREFIX_PATH="$(strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
 CLEAN_LIBRARY_PATH="$(strip_vendor_paths "${LIBRARY_PATH:-}")"
 CLEAN_LD_LIBRARY_PATH="$(strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
 export CMAKE_PREFIX_PATH="$CPU_TORCH_ROOT/share/cmake${CLEAN_CMAKE_PREFIX_PATH:+:$CLEAN_CMAKE_PREFIX_PATH}"
-export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"
+CLEAN_CPATH="$(strip_vendor_paths "${CPATH:-}")"
+export CPATH="$CUDA_HOME/include${CLEAN_CPATH:+:$CLEAN_CPATH}"
 export LIBRARY_PATH="$CUDA_HOME/lib64:$PPU_SDK/lib:$PPU_SDK/lib64${CLEAN_LIBRARY_PATH:+:$CLEAN_LIBRARY_PATH}"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$PPU_SDK/lib:$PPU_SDK/lib64${VENDOR_NVIDIA_LIBS:+:$VENDOR_NVIDIA_LIBS}:$CPU_TORCH_ROOT/lib${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$PPU_SDK/lib:$PPU_SDK/lib64:$CPU_TORCH_ROOT/lib${CLEAN_LD_LIBRARY_PATH:+:$CLEAN_LD_LIBRARY_PATH}"
 
 "$VENV_PYTHON" -m pip check
 "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --report-environment
@@ -357,7 +275,7 @@ import sys
 lib = Path(importlib.util.find_spec("torch").submodule_search_locations[0]) / "lib"
 before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
           for path in lib.iterdir() if path.is_file()}
-import torch_fl  # noqa: F401  (selects the bundled PPU libtorch core)
+import torch_fl  # noqa: F401  -- register the PPU backend before FlagGems
 import flag_gems
 import triton
 import triton.backends

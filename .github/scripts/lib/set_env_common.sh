@@ -332,16 +332,17 @@ install_flag_gems() {
 # venv does not inherit the image's vendor torch.
 strip_vendor_paths() {
   local value="${1:-}"
+  local vendor_root="${VENDOR_TORCH_ROOT:-}"
   local entry
   local -a entries=()
   local -a kept=()
   IFS=: read -ra entries <<< "$value"
   for entry in "${entries[@]}"; do
     [[ -z "$entry" ]] && continue
-    case "$entry" in
-      "$VENDOR_TORCH_ROOT"|"$VENDOR_TORCH_ROOT"/*) ;;
-      *) kept+=("$entry") ;;
-    esac
+    if [[ -n "$vendor_root" && ( "$entry" == "$vendor_root" || "$entry" == "$vendor_root/"* ) ]]; then
+      continue
+    fi
+    kept+=("$entry")
   done
   local joined=""
   for entry in "${kept[@]}"; do
