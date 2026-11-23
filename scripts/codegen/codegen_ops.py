@@ -1303,6 +1303,13 @@ def gen_flaggems_python_kernel(
       tuple_return    -> GenericTuple(...); unbox each; return make_tuple(...)
       out_variant     -> Generic/GenericTuple over NON-out args; out_i.copy_(res_i)
     """
+    if op in FLAGGEMS_REDUCTION_ADAPTERS:
+        gems_func = (
+            "torch_fl.compat.flaggems.reductions." + FLAGGEMS_REDUCTION_ADAPTERS[op]
+        )
+        # These calls use the FlagGems device runtime and supply their own
+        # indexed-reduction semantics. They bind no published source host.
+        typed = False
     kn = function_name or python_kernel_name(fn_type)
     s = func.func
     aten_args = list(s.arguments.flat_all)
@@ -1325,6 +1332,31 @@ def gen_flaggems_python_kernel(
         return expression
 
     def finish(body, prelude=""):
+        if op == "argmin":
+            prelude += (
+                '  TORCH_CHECK(!self.is_complex(), "argmin(): does not support complex input");\n'
+                '  TORCH_CHECK(self.scalar_type() != at::kBool, "argmin(): does not support bool input");\n'
+                "  if (dim.has_value()) {\n"
+                '    at::native::zero_numel_check_dims(self, at::maybe_wrap_dim(*dim, self.dim()), "argmin()");\n'
+                "  } else {\n"
+                '    TORCH_CHECK_INDEX(self.numel() != 0, "argmin(): Expected reduction dim to be specified for input.numel() == 0.");\n'
+                "  }\n"
+            )
+        elif op in FLAGGEMS_REDUCTION_ADAPTERS:
+            prelude += (
+                f'  TORCH_CHECK(!self.is_complex(), "{op.split(".")[0]}(): does not support complex input");\n'
+                "  at::native::zero_numel_check_dims(self, at::maybe_wrap_dim(dim, self.dim()), "
+                f'"{op.split(".")[0]}()");\n'
+            )
+        if op in FLAGGEMS_REDUCTION_ADAPTERS:
+            # Keep the standard fallback for types the device compiler cannot
+            # serve. The shared regression enables strict device execution.
+            schema = FLAGGEMS_REDUCTION_ADAPTERS[op]
+            prelude += (
+                f'  if (FlagGemsRejectsOpDtype("{op}", self.scalar_type())) {{\n'
+                f"    return at::native::call_fallback_fn<&cpu_fallback, at::_ops::{schema}>::call(self, dim, keepdim);\n"
+                "  }\n"
+            )
         if op in FLAGGEMS_HCU_METADATA_ADAPTERS:
             target = FLAGGEMS_HCU_METADATA_ADAPTERS[op]
             prelude += (
@@ -1668,6 +1700,12 @@ FLAGGEMS_HCU_METADATA_ADAPTERS = {
     "unsqueeze": "unsqueeze",
     "slice.Tensor": "slice_tensor",
 }
+FLAGGEMS_REDUCTION_ADAPTERS = {
+    "argmin": "argmin",
+    "max.dim": "max_dim",
+    "min.dim": "min_dim",
+}
+
 _OUT_ADAPTER_MARKER = "// BEGIN GENERATED FLAGGEMS OUT ADAPTERS"
 
 
@@ -1751,12 +1789,22 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
         refreshed = refreshed.replace(
             '#include "ops.h"', '#include "ops.h"\n' + metadata_include, 1
         )
+    for header in (
+        "#include <ATen/native/CPUFallback.h>",
+        "#include <ATen/native/ReduceOpsUtils.h>",
+        '#include "../fallback.h"',
+    ):
+        if header not in refreshed:
+            refreshed = refreshed.replace(include, include + "\n" + header, 1)
     for op, category, keywords in (
         ("add.Tensor", "functional_pure", {"alpha"}),
         ("mean.dim", "functional_pure", {"dtype"}),
         ("cat", "tensorlist_dim", set()),
         ("pow.Tensor_Scalar", "functional_pure", set()),
         *((op, "functional_pure", set()) for op in FLAGGEMS_HCU_METADATA_ADAPTERS),
+        ("argmin", "functional_pure", set()),
+        ("max.dim", "tuple_return", set()),
+        ("min.dim", "tuple_return", set()),
     ):
         func = funcs[op]
         with local.parametrize(
@@ -1781,15 +1829,16 @@ def update_flaggems_out_adapters(path, funcs, *, check=False):
                 "transpose.int": "transpose",
                 "unsqueeze": "unsqueeze",
                 "slice.Tensor": "slice",
+                **FLAGGEMS_REDUCTION_ADAPTERS,
             }[op]
         )
         kernel = gen_flaggems_python_kernel(
             op, fn_type, result, args, host, category, func, kwargs, typed=True
         )
-        pattern = rf"static TypedSourceSlot {fn_type}Source\([^\n]+\);\n{re.escape(result)} {fn_type[:-2]}KernelPython\([^\n]*\) \{{.*?\n\}}"
+        pattern = rf"(?:static TypedSourceSlot {fn_type}Source\([^\n]+\);\n)?{re.escape(result)} {fn_type[:-2]}KernelPython\([^\n]*\) \{{.*?\n\}}"
         refreshed, count = re.subn(pattern, lambda match: kernel, refreshed, flags=re.S)
         if count != 1:
-            raise ValueError(f"cannot uniquely refresh measured HCU source route: {op}")
+            raise ValueError(f"cannot uniquely refresh the FlagGems adapter for {op}")
     expected = (
         refreshed.split(_OUT_ADAPTER_MARKER, 1)[0].rstrip()
         + "\n\n"

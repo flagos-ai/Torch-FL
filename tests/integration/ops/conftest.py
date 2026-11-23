@@ -68,9 +68,6 @@ _platform = _load_platform()
 # ops/test_mps_*.py) keep a module-level `pytest.mark.mps` and mark the cases
 # that are portable contract checks `anyplatform`, so a lane that selects the
 # shared cohort collects them and relies on this gate to skip them off Metal.
-# Without the entry the shared selection ran test_mps_argmin_arpextreme.py on
-# MUSA hardware and its 13 NaN-placement cases failed: mudnn's reductions do not
-# name a NaN the way the host reference does, and no Metal kernel is involved.
 _PLATFORM_SKIP_MARKERS: dict[str, tuple[str, ...]] = {
     "metax": ("ascend", "musa", "dcu", "mps"),
     "ascend": ("metax", "musa", "dcu", "mps"),

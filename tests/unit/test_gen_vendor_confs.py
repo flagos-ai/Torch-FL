@@ -456,13 +456,17 @@ def test_shipped_confs_are_up_to_date():
     assert not stale, f"stale: {stale}; run scripts/codegen/gen_vendor_confs.py"
 
 
-def test_enflame_native_host_experiment_preserves_every_unmeasured_route():
+def test_enflame_native_host_experiment_preserves_every_unmeasured_route(
+    tmp_path, monkeypatch
+):
     built = g.build_all(CONF_DIR)
-    text = g.enflame_native_host_conf(built)
-    path = REPO_ROOT / "benchmarks/host_compiler/configs/enflame_native_host.conf"
-    assert path.read_text() == text
+    path = tmp_path / "experiment.conf"
+    monkeypatch.setattr(
+        "sys.argv", [str(SCRIPT), "--enflame-native-host-conf", str(path)]
+    )
+    assert g.main() == 0
     routes = {}
-    for line in text.splitlines():
+    for line in path.read_text().splitlines():
         op, sep, value = line.split("#", 1)[0].partition("=")
         if sep:
             routes[op.strip()] = value.strip()

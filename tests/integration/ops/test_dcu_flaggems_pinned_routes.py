@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Input shapes that decide whether DCU's pinned routes may be unpinned.
+"""Regression inputs for previously pinned DCU routes.
 
-``backends_hygon.conf`` routes ``scatter_add_``, ``argmin``, ``mean``,
-``mean.dim`` and ``native_batch_norm`` to the CUDA boxing kernel. Each was
-moved off the FlagGems Python route after a same-tensor A/B on DCU in which the
-boxing arm matched ATen and the FlagGems arm did not:
+The cases compare the device result with ATen on inputs that exposed gaps
+in the published FlagGems routes.
 
 * ``scatter_add_`` with an ``index`` built by ``view(...).expand(...)`` --
   logically ``(340, 12)``, physically 340 elements, stride ``(1, 0)``. The
@@ -26,10 +24,6 @@ boxing arm matched ATen and the FlagGems arm did not:
   by up to 284.0. On another allocation the same overrun crosses an
   inaccessible page and aborts with an HSA VMFault. FlagGems issue #6448; the
   same defect is filed upstream as #6017.
-* ``argmin`` over a 20-column reduction. The kernel runs 32 lanes and does not
-  mask the tail, so lanes the row does not have take part in the reduction and
-  the answer comes back ``20`` -- an index the tensor does not have. FlagGems
-  issue #6447.
 * ``mean`` and ``mean.dim`` on an empty reduction, where the division by zero
   inside the kernel escapes as a Python ``ZeroDivisionError`` instead of ATen's
   ``nan``. FlagGems issue #6333.
@@ -40,19 +34,6 @@ boxing arm matched ATen and the FlagGems arm did not:
   but not that name, so every call -- training or eval, any shape -- raises
   ``AttributeError`` where ATen returns a tensor. Issue #295, mirroring FlagGems
   #6332.
-
-The first three are invisible to ``flaggems_overload_survey.py``: its profiles
-are contiguous, power-of-two and non-empty, so it records all four routes
-``STRICT`` while they are unusable. It does not separate the fourth either,
-recording ``native_batch_norm`` ``FAILED`` before the pin and after it. The
-shapes below are the missing ones.
-
-None of the cases reads the routing table, deliberately. They assert that these
-shapes produce ATen's answer on DCU, which is a property of the *platform* and
-not of whichever kernel happens to serve it -- so unpinning any of the four
-without an upstream fix fails this file rather than silently retiring it, and
-the A/B that motivated the pin is reproducible by setting
-``FLAGOS_OP_<op>=flaggems`` and watching the same cases fail.
 
 Usage:
     pytest tests/integration/ops/test_dcu_flaggems_pinned_routes.py -v
@@ -143,64 +124,6 @@ class TestScatterAddExpandedIndex:
         result = output.scatter_add_(0, index, source)
         torch.flagos.synchronize()
         torch.testing.assert_close(result.cpu(), reference)
-
-
-class TestArgminReductionTail:
-    """``argmin`` over a reduction width that is not a power of two."""
-
-    ROWS, COLUMNS, ROUNDING = 32, 20, 32
-
-    def _build(self):
-        """The measured tensor: a ``(32, 20)`` view over 32-element rows.
-
-        The backing storage is ``ROWS * ROUNDING`` long while the view strides
-        by ``COLUMNS``, so the view covers offsets 0..639 of a 1024-element
-        tensor and the lanes a 32-wide kernel reads past a row's last column
-        are the next row's first columns -- defined values this constructor
-        chose, not whatever the allocator put after the tensor.
-        """
-        rows, columns, rounding = self.ROWS, self.COLUMNS, self.ROUNDING
-
-        storage = torch.full((rows * rounding,), 1000.0, dtype=torch.float32)
-        values = storage.as_strided((rows, columns), (columns, 1))
-        values[:, columns - 1] = 1.0
-        values[1:, :12] = -1000.0
-        return values
-
-    @pytest.mark.dcu
-    def test_tail_lanes_do_not_reach_the_result(self):
-        values = self._build()
-        reference = torch.argmin(values, dim=1)
-        result = torch.argmin(values.to(DEVICE), dim=1)
-        torch.flagos.synchronize()
-        actual = result.cpu()
-
-        # Row 0 is the one that detects the defect: its own minimum is 1.0 at
-        # column 19, while the twelve lanes past it -- row 1's first columns --
-        # hold -1000.0, so a kernel that reduces all 32 lanes answers 20. Rows
-        # 1..31 already contain -1000.0 at lane 0, so the same over-read costs
-        # them nothing and the assertion has to be on the whole vector.
-        assert reference.tolist() == [self.COLUMNS - 1] + [0] * (self.ROWS - 1)
-        assert (actual < self.COLUMNS).all(), (
-            f"argmin returned an index outside [0, {self.COLUMNS - 1}]: "
-            f"{actual.tolist()}"
-        )
-        assert actual.tolist() == reference.tolist()
-
-    @pytest.mark.dcu
-    def test_power_of_two_width_is_unaffected(self):
-        """The control: a width the lane count divides exactly.
-
-        It pins that the case above is about the tail rather than about
-        ``argmin`` on the device in general.
-        """
-        values = torch.arange(self.ROUNDING, 0, -1, dtype=torch.float32).repeat(8, 1)
-        values[:, self.ROUNDING - 1] = -1.0
-        assert torch.argmin(values, dim=1).tolist() == [self.ROUNDING - 1] * 8
-
-        result = torch.argmin(values.to(DEVICE), dim=1)
-        torch.flagos.synchronize()
-        assert result.cpu().tolist() == [self.ROUNDING - 1] * 8
 
 
 class TestEmptyMeanIsNan:

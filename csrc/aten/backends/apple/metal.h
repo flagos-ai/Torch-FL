@@ -19,7 +19,8 @@
 
 namespace at::native::flagos::mps {
 
-using MetalArg = std::variant<at::Tensor, int64_t>;
+// Inline metadata is copied by the encoder before run returns.
+using MetalArg = std::variant<at::Tensor, int64_t, c10::IntArrayRef>;
 using MetalGrid = std::array<uint64_t, 3>;
 
 class FLAGOS_EXPORT MetalKernel {
