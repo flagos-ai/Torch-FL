@@ -2515,7 +2515,8 @@ at::Tensor {kernel}(
       {{self_c}},
       out,
       ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-{index_body}        return index;
+{index_body}        return index == nil ? nil
+                            : [graph castTensor:index toType:MPSDataTypeInt64 name:nil];
       }});
   return ran ? out : fallback();
 }}
@@ -2561,11 +2562,14 @@ T_ARG_EXTREME_PAIR = """\
       {{self_c}},
       {{values, indices}},
       ^std::vector<MPSGraphTensor*>(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-{index_body}        MPSGraphTensor* value = [graph gatherAlongAxis:(NSInteger)axis
+{index_body}        if (index == nil) {{
+          return {{}};
+        }}
+        MPSGraphTensor* value = [graph gatherAlongAxis:(NSInteger)axis
                                           withUpdatesTensor:args[0]
                                               indicesTensor:index
                                                        name:nil];
-        return {{value, index}};
+        return {{value, [graph castTensor:index toType:MPSDataTypeInt64 name:nil]}};
       }});
   return ran ? std::make_tuple(values, indices) : fallback();
 }}

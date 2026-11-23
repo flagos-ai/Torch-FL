@@ -1254,7 +1254,8 @@ at::Tensor ArgmaxKernelMps(
                         truePredicateTensor:first_nan
                        falsePredicateTensor:first_extreme
                                        name:nil];
-        return index;
+        return index == nil ? nil
+                            : [graph castTensor:index toType:MPSDataTypeInt64 name:nil];
       });
   return ran ? out : fallback();
 }
@@ -1341,7 +1342,8 @@ at::Tensor ArgminKernelMps(
                         truePredicateTensor:first_nan
                        falsePredicateTensor:first_extreme
                                        name:nil];
-        return index;
+        return index == nil ? nil
+                            : [graph castTensor:index toType:MPSDataTypeInt64 name:nil];
       });
   return ran ? out : fallback();
 }
@@ -1423,11 +1425,14 @@ REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kApple, Argmin
                         truePredicateTensor:first_nan
                        falsePredicateTensor:first_extreme
                                        name:nil];
+        if (index == nil) {
+          return {};
+        }
         MPSGraphTensor* value = [graph gatherAlongAxis:(NSInteger)axis
                                           withUpdatesTensor:args[0]
                                               indicesTensor:index
                                                        name:nil];
-        return {value, index};
+        return {value, [graph castTensor:index toType:MPSDataTypeInt64 name:nil]};
       });
   return ran ? std::make_tuple(values, indices) : fallback();
 }
@@ -1509,11 +1514,14 @@ REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kApple, MaxDi
                         truePredicateTensor:first_nan
                        falsePredicateTensor:first_extreme
                                        name:nil];
+        if (index == nil) {
+          return {};
+        }
         MPSGraphTensor* value = [graph gatherAlongAxis:(NSInteger)axis
                                           withUpdatesTensor:args[0]
                                               indicesTensor:index
                                                        name:nil];
-        return {value, index};
+        return {value, [graph castTensor:index toType:MPSDataTypeInt64 name:nil]};
       });
   return ran ? std::make_tuple(values, indices) : fallback();
 }
