@@ -147,7 +147,6 @@ FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
     ),
     "dcu": (
         "scatter_add_",
-        "argmin",
         "mean",
         # Hygon native-host policy restored the FlagGems base for mean.dim.
         # TestEmptyMeanIsNan covers the empty-reduction contract on ordinary wheels.
@@ -182,14 +181,14 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # 221 - 8 + 2: _conj, abs, fill_.Scalar, multinomial, neg,
     # pow.Tensor_Scalar, uniform_ and where.self use the native Ascend paths;
     # eye and eye.m now have FlagGems routes. Counted from the shipped conf.
-    "ascend": 215,
+    "ascend": 217,
     # 454: #672 routed DCU's `mm` and `bmm` to FlagGems (the soft-lowp matrix
     # claim carries every dtype through the prelude, so the key cannot box), and
     # left this count at the pre-reroute 452. The hygon lane reported the two it
     # had gained as `assert 454 == 452`.
-    "dcu": 462,
+    "dcu": 463,
     # Isolated full-model precision checks restore SiLU to FlagGems.
-    "gcu": 250,
+    "gcu": 253,
     # The iluvatar lane's landing: the conf routes 583 ops to FlagGems, thirteen
     # to the native slot (eight ixdnn/ixblas kernels -- `_convolution`, `addmm`,
     # `baddbmm`, `baddbmm_`, `bmm`, `convolution`, `mm`, `native_batch_norm` --
@@ -218,10 +217,10 @@ EXPECTED_FLAGGEMS_ROUTES: dict[str, int] = {
     # (the survey's seven plus 13x7, 3x5x7 and 64x3) compared at atol=rtol=1e-4,
     # which is the tolerance these tests assert with. The number is a
     # measurement, not the cohort size -- see KUNLUNXIN_FLAGGEMS_MEASURED.
-    "kunlunxin": 256,
+    "kunlunxin": 258,
     # 585 since `mm` joined: the default conf routes it to FlagGems so the
     # soft-lowp matrix claim has a registered key to follow.
-    "metax": 585,
+    "metax": 586,
     # 0: the apple conf routes no operator to FlagGems -- its native MPSGraph
     # kernels serve what it accelerates and the rest reaches cpu_fallback.
     "apple": 0,

@@ -20,7 +20,7 @@
 //
 // Do not hand-edit. Regenerate after changing that set:
 //   python3 scripts/codegen/codegen_kunlunxin_flaggems.py
-// Total: 256 ops registered here, 22 further FlagGems ops already claimed by kunlunxin_register.inc.
+// Total: 258 ops registered here, 22 further FlagGems ops already claimed by kunlunxin_register.inc.
 
   m.impl("_linalg_eigvals", WrapperPrivLinalgEigvals);
   m.impl("_prelu_kernel", WrapperPrivPreluKernel);
@@ -46,6 +46,7 @@
   m.impl("arange", WrapperArange);
   m.impl("arange.start", WrapperArangeStart);
   m.impl("arange.start_step", WrapperArangeStartStep);
+  m.impl("argmin", WrapperArgmin);
   m.impl("asinh", WrapperAsinh);
   m.impl("asinh.out", WrapperAsinhOut);
   m.impl("asinh_", WrapperAsinhInplace);
@@ -188,6 +189,7 @@
   m.impl("max.dim", WrapperMaxDim);
   m.impl("mean", WrapperMean);
   m.impl("min", WrapperMin);
+  m.impl("min.dim", WrapperMinDim);
   m.impl("mish", WrapperMish);
   m.impl("mish_", WrapperMishInplace);
   m.impl("mse_loss", WrapperMseLoss);

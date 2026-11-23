@@ -276,7 +276,8 @@
     "ascend": {
       "vendor": "ascend",
       "registration": {
-        "base": "backends/ascend/generated/ascend_register.inc"
+        "base": "backends/ascend/generated/ascend_register.inc",
+        "flaggems": "backends/ascend/generated/flaggems_register.inc"
       },
       "_comment": [
         "Huawei CANN: ACLNN serves the native operator routes and FlagGems",

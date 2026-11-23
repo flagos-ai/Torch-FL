@@ -125,6 +125,9 @@ struct PythonOpCache {
     if (dot == std::string::npos) {
       // Bare name: resolve from the flag_gems.ops module (legacy typed callers).
       func = OpsModule().attr(name);
+    } else if (qual.rfind("torch_fl.", 0) == 0) {
+      auto mod = py::module_::import(qual.substr(0, dot).c_str());
+      func = mod.attr(qual.substr(dot + 1).c_str());
     } else {
       // Dotted qualname "module.submodule.func". codegen freezes the *generic*
       // package path here -- _normalize_flaggems_qualname maps every discovery
