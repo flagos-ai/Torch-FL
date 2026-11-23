@@ -62,13 +62,15 @@ void Submit(id<MTLComputePipelineState> pipeline, c10::ArrayRef<MetalArg> args,
   }
 
   @autoreleasepool {
-    std::vector<std::variant<BufferView, int64_t>> bindings;
+    std::vector<std::variant<BufferView, int64_t, c10::IntArrayRef>> bindings;
     bindings.reserve(args.size());
     for (const auto& arg : args) {
       if (const auto* tensor = std::get_if<at::Tensor>(&arg)) {
         bindings.emplace_back(ResolveBuffer(*tensor));
+      } else if (const auto* value = std::get_if<int64_t>(&arg)) {
+        bindings.emplace_back(*value);
       } else {
-        bindings.emplace_back(std::get<int64_t>(arg));
+        bindings.emplace_back(std::get<c10::IntArrayRef>(arg));
       }
     }
     const auto group = GroupSize(pipeline, grid, group_size);
@@ -84,9 +86,13 @@ void Submit(id<MTLComputePipelineState> pipeline, c10::ArrayRef<MetalArg> args,
       const auto& binding = bindings[index];
       if (const auto* view = std::get_if<BufferView>(&binding)) {
         [encoder setBuffer:view->buffer offset:view->offset atIndex:index];
+      } else if (const auto* value = std::get_if<int64_t>(&binding)) {
+        [encoder setBytes:value length:sizeof(*value) atIndex:index];
       } else {
-        const auto& value = std::get<int64_t>(binding);
-        [encoder setBytes:&value length:sizeof(value) atIndex:index];
+        const auto values = std::get<c10::IntArrayRef>(binding);
+        [encoder setBytes:values.data()
+                   length:values.size() * sizeof(int64_t)
+                  atIndex:index];
       }
     }
     [encoder dispatchThreads:Size(grid) threadsPerThreadgroup:Size(group)];

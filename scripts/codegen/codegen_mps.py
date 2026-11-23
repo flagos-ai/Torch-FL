@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, BAAI. All rights reserved.
 #
-# Generate the Apple Metal (MPSGraph) operator layer.
+# Generate the Apple Metal operator layer.
 #
 # The Apple backend is deliberately small and grows one op at a time: an op is
 # claimed on PrivateUse1 only once a kernel exists for it, and the conf only
@@ -66,11 +66,6 @@ REGISTER_INC = REPO / "csrc/aten/generated/register.inc"
 # their kernels exist -- serving one means writing into a tensor the caller
 # owns, which this layer does not do.
 #
-# `max.dim` and `min.dim` are absent on purpose. aten defines both as a
-# (values, indices) pair, and the index half has no MPSGraph selector that comes
-# with a documented tie-break: `reductionArgMaximumWithTensor:axis:` exists, but
-# which of two equal maxima it names is not specified, and the reference has an
-# answer. They keep the CPU fallback until that can be measured on a device.
 # ---------------------------------------------------------------------------
 OPS = {
     "abs": "unary",
@@ -97,10 +92,10 @@ OPS = {
     # The graph uses MPSGraph's row and column coordinates. See T_TRIU.
     "triu": "triu",
     "tril": "tril",
-    "argmax": "argmax",
-    "argmin": "argmax",
-    "max.dim": "argmax_pair",
-    "min.dim": "argmax_pair",
+    "argmax": "indexed_reduce",
+    "argmin": "indexed_reduce",
+    "max.dim": "indexed_reduce_pair",
+    "min.dim": "indexed_reduce_pair",
     # Qwen3.5's GatedDeltaNet solves a batched triangular system. MPSGraph has
     # no triangular-solve selector on the hosted SDK, so the body builds a
     # forward or back substitution: the result is updated one row or column at
@@ -967,9 +962,8 @@ SUPPORTS = {
     "all_dims": "MpsSupportsAllDtype",
     "triu": "MpsSupportsTriuDtype",
     "tril": "MpsSupportsTriuDtype",
-    "argmax": "MpsSupportsArgmaxDtype",
-    "argmin": "MpsSupportsArgmaxDtype",
-    "argmax_pair": "MpsSupportsArgmaxDtype",
+    "indexed_reduce": "",
+    "indexed_reduce_pair": "",
     "SOLVE_TRIANGULAR": "MpsSupportsTriangularSolveDtype",
     "index": "",
     "cumsum": "MpsSupportsCumsumDtype",
@@ -2428,51 +2422,134 @@ REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
 """
 
 
-# Compare the ordered values to the extremum, then reduce their coordinates.
-# NaN coordinates are reduced separately so an earlier infinity cannot beat a
-# NaN. The index and the value both come from the selected input element.
-def _arg_extreme_index_body(reduction: str, identity: str) -> str:
-    return """        MPSGraphTensor* positions =
-            [graph coordinateAlongAxis:axis
-                            withShape:mps::MpsShapeOf(self_c.sizes())
-                                  name:nil];
-        MPSGraphTensor* nan = [graph isNaNWithTensor:args[0] name:nil];
-        MPSGraphTensor* no_match =
-            mps::MpsConstant(graph, self_c.size(axis), at::ScalarType::Int);
-        MPSGraphTensor* identity = nil;
-        if (positions == nil || nan == nil || no_match == nil ||
-            !mps::IDENTITY(graph, self_c.scalar_type(), &identity)) {{
-          return nil;
-        }}
-        MPSGraphTensor* ordered =
-            [graph selectWithPredicateTensor:nan
-                        truePredicateTensor:identity
-                       falsePredicateTensor:args[0]
-                                       name:nil];
-        MPSGraphTensor* extreme = [graph REDUCTIONordered axis:axis name:nil];
-        MPSGraphTensor* equal =
-            [graph equalWithPrimaryTensor:args[0] secondaryTensor:extreme name:nil];
-        MPSGraphTensor* first_extreme = [graph reductionMinimumWithTensor:
-            [graph selectWithPredicateTensor:equal
-                        truePredicateTensor:positions
-                       falsePredicateTensor:no_match
-                                       name:nil] axis:axis name:nil];
-        MPSGraphTensor* first_nan = [graph reductionMinimumWithTensor:
-            [graph selectWithPredicateTensor:nan
-                        truePredicateTensor:positions
-                       falsePredicateTensor:no_match
-                                       name:nil] axis:axis name:nil];
-        MPSGraphTensor* has_nan =
-            [graph lessThanWithPrimaryTensor:first_nan secondaryTensor:no_match name:nil];
-        MPSGraphTensor* index =
-            [graph selectWithPredicateTensor:has_nan
-                        truePredicateTensor:first_nan
-                       falsePredicateTensor:first_extreme
-                                       name:nil];
-""".replace("REDUCTION", reduction).replace("IDENTITY", identity)
+# A direct Metal kernel also works on devices that cannot encode MPSGraph.
+# One threadgroup reduces each output element using the input's actual strides.
+INDEXED_REDUCTION = """\
+namespace {
 
+void RunIndexedReduction(
+    const at::Tensor& self,
+    std::optional<int64_t> axis,
+    bool largest,
+    const at::Tensor& indices,
+    const at::Tensor& values = {}) {
+  static const mps::MetalKernel kernel(R"metal(
+#include <metal_stdlib>
+using namespace metal;
 
-T_ARG_EXTREME = """\
+struct Candidate {
+  uint key;
+  long index;
+};
+
+uint reduction_key(uint bits, bool largest) {
+  const uint magnitude = bits & 0x7fffffffu;
+  if (magnitude > 0x7f800000u) {
+    return 0xffffffffu;
+  }
+  // Order the original IEEE bits and treat both signs of zero as equal.
+  const uint ordered = magnitude == 0 ? 0x80000000u
+      : ((bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u));
+  return largest ? ordered : ~ordered;
+}
+
+bool precedes(Candidate candidate, Candidate best) {
+  return candidate.key > best.key ||
+      (candidate.key == best.key && candidate.index < best.index);
+}
+
+long strided_offset(long index, constant long* axes, long rank) {
+  long offset = 0;
+  for (long dim = 0; dim < rank; ++dim) {
+    const long size = axes[2 * dim];
+    offset += (index % size) * axes[2 * dim + 1];
+    index /= size;
+  }
+  return offset;
+}
+
+long input_offset(
+    long index, long base, long stride, constant long* axes, long rank) {
+  return stride < 0 ? strided_offset(index, axes, rank) : base + index * stride;
+}
+
+kernel void generated_kernel(
+    device const uint* input [[buffer(0)]],
+    device long* indices [[buffer(1)]],
+    device uint* values [[buffer(2)]],
+    constant long* layout [[buffer(3)]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 grid [[threadgroups_per_grid]],
+    uint3 group_size [[threads_per_threadgroup]]) {
+  const long row = long(group.z) * grid.y + group.y;
+  const long width = layout[1];
+  const long stride = layout[2];
+  const bool largest = layout[3] != 0;
+  const long rank = layout[5];
+  constant long* axes = layout + 6;
+  if (row >= layout[0]) {
+    return;
+  }
+  const long base = stride < 0 ? 0 : strided_offset(row, axes, rank);
+  Candidate best{0, width};
+  for (long index = lane; index < width; index += group_size.x) {
+    const uint bits = input[input_offset(index, base, stride, axes, rank)];
+    const Candidate candidate{reduction_key(bits, largest), index};
+    if (precedes(candidate, best)) {
+      best = candidate;
+    }
+  }
+  threadgroup Candidate partial[128];
+  partial[lane] = best;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint hop = group_size.x / 2; hop > 0; hop /= 2) {
+    if (lane < hop && precedes(partial[lane + hop], partial[lane])) {
+      partial[lane] = partial[lane + hop];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (lane == 0) {
+    const long winner = partial[0].index;
+    indices[row] = winner;
+    if (layout[4]) {
+      values[row] = input[input_offset(winner, base, stride, axes, rank)];
+    }
+  }
+}
+)metal");
+
+  const auto rows = static_cast<uint64_t>(indices.numel());
+  const int64_t width = axis ? self.size(*axis) : self.numel();
+  const bool flatten_strides = !axis && !self.is_contiguous();
+  const int64_t stride = axis ? self.stride(*axis) : (flatten_strides ? -1 : 1);
+  // Layout fields precede (size, stride) pairs in logical innermost-first order.
+  // Dropping singleton axes bounds the inline metadata even for high ranks.
+  c10::SmallVector<int64_t, 16> layout{
+      indices.numel(), width, stride, largest, values.defined(), 0};
+  if (axis || flatten_strides) {
+    for (int64_t dim = self.dim() - 1; dim >= 0; --dim) {
+      if (axis == dim || self.size(dim) == 1) {
+        continue;
+      }
+      layout.push_back(self.size(dim));
+      layout.push_back(self.stride(dim));
+      ++layout[5];
+    }
+  }
+  const std::array<mps::MetalArg, 4> args{
+      self, indices, values.defined() ? values : indices, c10::IntArrayRef(layout)};
+  const uint64_t group_width = width >= 128 ? 128 : 32;
+  const uint64_t grid_y = std::min<uint64_t>(rows, 65536);
+  kernel.run(args, {group_width, grid_y, (rows - 1) / grid_y + 1},
+             mps::MetalGrid{group_width, 1, 1});
+}
+
+} // namespace
+
+"""
+
+T_INDEXED_REDUCE = """\
 at::Tensor {kernel}(
     const at::Tensor& self,
     std::optional<int64_t> dim,
@@ -2480,9 +2557,9 @@ at::Tensor {kernel}(
   TORCH_CHECK(!self.is_complex(), "{at_op}(): does not support complex input");
   TORCH_CHECK(self.scalar_type() != at::kBool, "{at_op}(): does not support bool input");
   const int64_t rank = self.dim();
-  const int64_t axis = dim.has_value() ? at::maybe_wrap_dim(*dim, rank) : 0;
-  if (dim.has_value()) {{
-    at::native::zero_numel_check_dims(self, axis, "{at_op}()");
+  if (dim) {{
+    dim = at::maybe_wrap_dim(*dim, rank);
+    at::native::zero_numel_check_dims(self, *dim, "{at_op}()");
   }} else {{
     TORCH_CHECK_INDEX(self.numel() != 0,
         "{at_op}(): Expected reduction dim to be specified for input.numel() == 0.");
@@ -2491,40 +2568,29 @@ at::Tensor {kernel}(
     return at::zeros({{}}, self.options().dtype(at::kLong));
   }}
   auto out_shape = self.sizes().vec();
-  if (!dim.has_value()) {{
+  if (!dim) {{
     out_shape.assign(keepdim ? rank : 0, 1);
   }} else if (keepdim) {{
-    out_shape[axis] = 1;
+    out_shape[*dim] = 1;
   }} else {{
-    out_shape.erase(out_shape.begin() + axis);
+    out_shape.erase(out_shape.begin() + *dim);
   }}
   const auto out = at::empty(out_shape, self.options().dtype(at::kLong));
   if (out.numel() == 0) {{
     return out;
   }}
-  const auto fallback = [&]() {{
-    TORCH_CHECK(CpuFallbackAllowed(), "{op}: unsupported Metal graph or dtype");
+  if (self.scalar_type() != at::kFloat) {{
+    TORCH_CHECK(CpuFallbackAllowed(), "{op}: unsupported Metal reduction dtype");
     return at::{at_op}(self.cpu(), dim, keepdim).to(self.device());
-  }};
-  if (!mps::{supports}(self.scalar_type())) {{
-    return fallback();
   }}
-  const auto self_c = dim.has_value() ? self.contiguous() : self.contiguous().view({{-1}});
-  const bool ran = mps::MpsRunGraph(
-      mps::MpsGraphKey("{op}", axis, keepdim),
-      {{self_c}},
-      out,
-      ^MPSGraphTensor*(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-{index_body}        return index == nil ? nil
-                            : [graph castTensor:index toType:MPSDataTypeInt64 name:nil];
-      }});
-  return ran ? out : fallback();
+  RunIndexedReduction(self, dim, {largest}, out);
+  return out;
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
-""".replace("{index_body}", _arg_extreme_index_body("{reduction}", "{extreme}"))
+"""
 
-T_ARG_EXTREME_PAIR = """\
+T_INDEXED_REDUCE_PAIR = """\
 ::std::tuple<at::Tensor, at::Tensor> {kernel}(
     const at::Tensor& self,
     int64_t dim,
@@ -2547,50 +2613,17 @@ T_ARG_EXTREME_PAIR = """\
   if (values.numel() == 0) {{
     return {{values, indices}};
   }}
-  const auto fallback = [&]() {{
-    TORCH_CHECK(CpuFallbackAllowed(), "{op}: unsupported Metal graph or dtype");
+  if (self.scalar_type() != at::kFloat) {{
+    TORCH_CHECK(CpuFallbackAllowed(), "{op}: unsupported Metal reduction dtype");
     auto host = at::{at_op}(self.cpu(), dim, keepdim);
-    return ::std::make_tuple(std::get<0>(host).to(self.device()),
-                             std::get<1>(host).to(self.device()));
-  }};
-  if (!mps::{supports}(self.scalar_type())) {{
-    return fallback();
+    return {{std::get<0>(host).to(self.device()), std::get<1>(host).to(self.device())}};
   }}
-  const auto self_c = self.contiguous();
-  const bool ran = mps::MpsRunGraphMulti(
-      mps::MpsGraphKey("{op}", axis, keepdim),
-      {{self_c}},
-      {{values, indices}},
-      ^std::vector<MPSGraphTensor*>(MPSGraph* graph, NSArray<MPSGraphTensor*>* args) {{
-{index_body}        if (index == nil) {{
-          return {{}};
-        }}
-        MPSGraphTensor* value = [graph gatherAlongAxis:(NSInteger)axis
-                                          withUpdatesTensor:args[0]
-                                              indicesTensor:index
-                                                       name:nil];
-        return {{value, [graph castTensor:index toType:MPSDataTypeInt64 name:nil]}};
-      }});
-  return ran ? std::make_tuple(values, indices) : fallback();
+  RunIndexedReduction(self, axis, {largest}, indices, values);
+  return {{values, indices}};
 }}
 
 REGISTER_IMPL_TO_DISPATCHER({fn}, {disp}, Backend::kApple, {kernel})
-""".replace(
-    "{index_body}",
-    _arg_extreme_index_body("{reduction}", "{extreme}").replace(
-        "return nil;", "return {{}};"
-    ),
-)
-
-T_ARGMAX = T_ARG_EXTREME
-T_ARGMIN = T_ARG_EXTREME
-
-ARG_EXTREME = {
-    "argmax": ("reductionMaximumWithTensor:", "MpsNegativeInfinity"),
-    "argmin": ("reductionMinimumWithTensor:", "MpsPositiveInfinity"),
-    "max.dim": ("reductionMaximumWithTensor:", "MpsNegativeInfinity"),
-    "min.dim": ("reductionMinimumWithTensor:", "MpsPositiveInfinity"),
-}
+"""
 
 
 # aten's triangular solve computes X for AX = B (left=true) or XA = B
@@ -6474,9 +6507,8 @@ CATEGORIES = {
     "all_dims": T_ALL_DIMS,
     "triu": T_TRIU,
     "tril": T_TRIL,
-    "argmax": T_ARGMAX,
-    "argmin": T_ARGMIN,
-    "argmax_pair": T_ARG_EXTREME_PAIR,
+    "indexed_reduce": T_INDEXED_REDUCE,
+    "indexed_reduce_pair": T_INDEXED_REDUCE_PAIR,
     "SOLVE_TRIANGULAR": T_SOLVE_TRIANGULAR,
     "index": T_INDEX,
     "cumsum": T_CUMSUM,
@@ -6544,7 +6576,7 @@ FILE_HEADER = """\
 //
 // @generated by scripts/codegen/codegen_mps.py -- DO NOT EDIT.
 //
-// MPSGraph kernels for the Apple Metal backend. Each kernel gates on dtype and
+// Generated kernels for the Apple Metal backend. A graph kernel gates on dtype and
 // hands one graph to mps::MpsRunGraph, which describes the aten tensors to
 // MPSGraph against the runtime's shared MTLBuffers, schedules the graph on the
 // current flagos stream's command queue and returns the output it allocated; a
@@ -6605,6 +6637,9 @@ FILE_HEADER = """\
 #include <ATen/ops/where.h>
 #include <ATen/ops/zeros.h>
 #include <c10/core/ScalarType.h>
+#include <c10/util/SmallVector.h>
+#include <algorithm>
+#include <array>
 #include <exception>
 #include <optional>
 #include <string_view>
@@ -6629,7 +6664,7 @@ INC_HEADER = """\
 //
 // @generated by scripts/codegen/codegen_mps.py -- DO NOT EDIT.
 //
-// m.impl() lines for the ops that have an MPSGraph kernel. Included by
+// m.impl() lines for the ops that have a Metal kernel. Included by
 // register.cc inside TORCH_LIBRARY_IMPL(aten, PrivateUse1) when USE_MPS is set,
 // in place of the full generated/register.inc list: an op registered on
 // PrivateUse1 without a kernel behind it fails the dispatcher's
@@ -6707,8 +6742,7 @@ def render():
                 alpha_arg=alpha_arg,
                 alpha_operand=alpha_operand,
                 finish=FINISH.get(op, ""),
-                reduction=ARG_EXTREME.get(op, ARG_EXTREME["argmax"])[0],
-                extreme=ARG_EXTREME.get(op, ARG_EXTREME["argmax"])[1],
+                largest="true" if op in ("argmax", "max.dim") else "false",
                 key_parts=KEY_PARTS[op],
                 op=op,
                 # The rank digit the conv body puts in the selector name. `dim`
@@ -6776,7 +6810,7 @@ def render():
         covered.append((op, "metadata_view"))
 
     return (
-        FILE_HEADER + "\n\n".join(bodies) + FILE_FOOTER,
+        FILE_HEADER + INDEXED_REDUCTION + "\n\n".join(bodies) + FILE_FOOTER,
         INC_HEADER
         + "".join(f'  m.impl("{op}", {wrappers[op]});\n' for op, _ in sorted(covered)),
         covered,
