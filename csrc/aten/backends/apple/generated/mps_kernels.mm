@@ -1314,8 +1314,11 @@ at::Tensor ArgmaxKernelMps(
     TORCH_CHECK_INDEX(self.numel() != 0,
         "argmax(): Expected reduction dim to be specified for input.numel() == 0.");
   }
-  if (rank == 0) {
+  if (rank == 0 && self.scalar_type() != at::kFloat) {
     return at::zeros({}, self.options().dtype(at::kLong));
+  }
+  if (rank == 0) {
+    dim.reset();
   }
   auto out_shape = self.sizes().vec();
   if (!dim) {
@@ -1354,8 +1357,11 @@ at::Tensor ArgminKernelMps(
     TORCH_CHECK_INDEX(self.numel() != 0,
         "argmin(): Expected reduction dim to be specified for input.numel() == 0.");
   }
-  if (rank == 0) {
+  if (rank == 0 && self.scalar_type() != at::kFloat) {
     return at::zeros({}, self.options().dtype(at::kLong));
+  }
+  if (rank == 0) {
+    dim.reset();
   }
   auto out_shape = self.sizes().vec();
   if (!dim) {
@@ -1388,14 +1394,18 @@ REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kApple, Argmin
   const int64_t rank = self.dim();
   const int64_t axis = at::maybe_wrap_dim(dim, rank);
   at::native::zero_numel_check_dims(self, axis, "max()");
-  if (rank == 0) {
+  if (rank == 0 && self.scalar_type() != at::kFloat) {
     return {self.clone(), at::zeros({}, self.options().dtype(at::kLong))};
   }
   auto out_shape = self.sizes().vec();
-  if (keepdim) {
-    out_shape[axis] = 1;
-  } else {
-    out_shape.erase(out_shape.begin() + axis);
+  std::optional<int64_t> reduce_axis;
+  if (rank != 0) {
+    reduce_axis = axis;
+    if (keepdim) {
+      out_shape[axis] = 1;
+    } else {
+      out_shape.erase(out_shape.begin() + axis);
+    }
   }
   const auto values = at::empty(out_shape, self.options());
   const auto indices = at::empty(out_shape, self.options().dtype(at::kLong));
@@ -1407,7 +1417,7 @@ REGISTER_IMPL_TO_DISPATCHER(ArgminFn, argmin_dispatcher, Backend::kApple, Argmin
     auto host = at::max(self.cpu(), dim, keepdim);
     return {std::get<0>(host).to(self.device()), std::get<1>(host).to(self.device())};
   }
-  RunIndexedReduction(self, axis, true, indices, values);
+  RunIndexedReduction(self, reduce_axis, true, indices, values);
   return {values, indices};
 }
 
@@ -1422,14 +1432,18 @@ REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kApple, MaxDi
   const int64_t rank = self.dim();
   const int64_t axis = at::maybe_wrap_dim(dim, rank);
   at::native::zero_numel_check_dims(self, axis, "min()");
-  if (rank == 0) {
+  if (rank == 0 && self.scalar_type() != at::kFloat) {
     return {self.clone(), at::zeros({}, self.options().dtype(at::kLong))};
   }
   auto out_shape = self.sizes().vec();
-  if (keepdim) {
-    out_shape[axis] = 1;
-  } else {
-    out_shape.erase(out_shape.begin() + axis);
+  std::optional<int64_t> reduce_axis;
+  if (rank != 0) {
+    reduce_axis = axis;
+    if (keepdim) {
+      out_shape[axis] = 1;
+    } else {
+      out_shape.erase(out_shape.begin() + axis);
+    }
   }
   const auto values = at::empty(out_shape, self.options());
   const auto indices = at::empty(out_shape, self.options().dtype(at::kLong));
@@ -1441,7 +1455,7 @@ REGISTER_IMPL_TO_DISPATCHER(MaxDimFn, max_dim_dispatcher, Backend::kApple, MaxDi
     auto host = at::min(self.cpu(), dim, keepdim);
     return {std::get<0>(host).to(self.device()), std::get<1>(host).to(self.device())};
   }
-  RunIndexedReduction(self, axis, false, indices, values);
+  RunIndexedReduction(self, reduce_axis, false, indices, values);
   return {values, indices};
 }
 

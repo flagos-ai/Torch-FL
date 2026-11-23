@@ -2564,8 +2564,11 @@ at::Tensor {kernel}(
     TORCH_CHECK_INDEX(self.numel() != 0,
         "{at_op}(): Expected reduction dim to be specified for input.numel() == 0.");
   }}
-  if (rank == 0) {{
+  if (rank == 0 && self.scalar_type() != at::kFloat) {{
     return at::zeros({{}}, self.options().dtype(at::kLong));
+  }}
+  if (rank == 0) {{
+    dim.reset();
   }}
   auto out_shape = self.sizes().vec();
   if (!dim) {{
@@ -2599,14 +2602,18 @@ T_INDEXED_REDUCE_PAIR = """\
   const int64_t rank = self.dim();
   const int64_t axis = at::maybe_wrap_dim(dim, rank);
   at::native::zero_numel_check_dims(self, axis, "{at_op}()");
-  if (rank == 0) {{
+  if (rank == 0 && self.scalar_type() != at::kFloat) {{
     return {{self.clone(), at::zeros({{}}, self.options().dtype(at::kLong))}};
   }}
   auto out_shape = self.sizes().vec();
-  if (keepdim) {{
-    out_shape[axis] = 1;
-  }} else {{
-    out_shape.erase(out_shape.begin() + axis);
+  std::optional<int64_t> reduce_axis;
+  if (rank != 0) {{
+    reduce_axis = axis;
+    if (keepdim) {{
+      out_shape[axis] = 1;
+    }} else {{
+      out_shape.erase(out_shape.begin() + axis);
+    }}
   }}
   const auto values = at::empty(out_shape, self.options());
   const auto indices = at::empty(out_shape, self.options().dtype(at::kLong));
@@ -2618,7 +2625,7 @@ T_INDEXED_REDUCE_PAIR = """\
     auto host = at::{at_op}(self.cpu(), dim, keepdim);
     return {{std::get<0>(host).to(self.device()), std::get<1>(host).to(self.device())}};
   }}
-  RunIndexedReduction(self, axis, {largest}, indices, values);
+  RunIndexedReduction(self, reduce_axis, {largest}, indices, values);
   return {{values, indices}};
 }}
 

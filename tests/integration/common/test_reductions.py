@@ -65,6 +65,7 @@ def _check_cases(op):
     _assert_reduction(op, torch.tensor([[3.0, nan, -4, -4, 9, 9, nan]]), 1)
     _assert_reduction(op, torch.tensor([[2.0]]), 1)
     _assert_reduction(op, torch.tensor([2.0, nan, 2.0]), 0)
+    _assert_reduction(op, torch.tensor(nan), 0)
     if op == "argmin":
         _assert_reduction(op, nans, None, transpose=True)
         _assert_reduction(op, nans, None, True, transpose=True)
