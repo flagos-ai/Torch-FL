@@ -23,8 +23,8 @@ CPU_TORCH_VERSION="${TORCH_FL_CPU_TORCH_VERSION:-$CPU_TORCH_VERSION_DEFAULT}"
 CPU_TORCH_VERSION="${CPU_TORCH_VERSION%+cpu}"
 CPU_TORCH_INDEX_URL="${TORCH_FL_CPU_TORCH_INDEX_URL:-$CPU_TORCH_INDEX_URL_DEFAULT}"
 PIP_INDEX_URL_ARG="${TORCH_FL_PIP_INDEX_URL:-$PIP_INDEX_URL_DEFAULT}"
-# FlagTree provides Triton support. The source-free 0.7.0 RC wheel pairs with
-# Triton 3.6 and is published as cp312 only, so the isolated test environment
+# FlagTree provides Triton support. The source-free wheel pairs with Triton
+# 3.6 and is published as cp312 only, so the isolated test environment
 # below has to run on Python 3.12.
 FLAGTREE_INDEX_URL="${TORCH_FL_FLAGTREE_INDEX_URL:-$FLAGTREE_INDEX_URL_DEFAULT}"
 FLAGTREE_VERSION="${TORCH_FL_FLAGTREE_VERSION:-$FLAGTREE_VERSION_nvidia}"
@@ -248,30 +248,77 @@ install_test_python() {
   TEST_PYTHON="$(command -v "python$FLAGTREE_PYTHON_VERSION")"
 }
 
+check_image_requirement() {
+  local requirement="$1"
+  if ! "$VENV_PYTHON" "$REPO_ROOT/.github/scripts/seed_runtime.py" --check-installed "$requirement"; then
+    echo "::error::The NVIDIA CI image venv is missing a compatible $requirement"
+    return 1
+  fi
+}
+
+IMAGE_VENV_ROOT=/opt/torch-fl-ci-venv
+NVIDIA_REQUIREMENTS="$REPO_ROOT/.github/requirements-nvidia.txt"
 VENV_ROOT="${TORCH_FL_VENV_ROOT:-${RUNNER_TEMP:-$REPO_ROOT/.ci}/torch-fl-cuda-${CI_STAGE}}"
-TEST_PYTHON="$(select_test_python || true)"
-if [[ -z "$TEST_PYTHON" ]]; then
-  if ! install_test_python; then
-    echo "::error::Python $FLAGTREE_PYTHON_VERSION is required by FlagTree $FLAGTREE_VERSION"
+USE_IMAGE_VENV=0
+# Explicit provisioning overrides still use an independent job venv.
+if [[ ( -d "$IMAGE_VENV_ROOT" || "${VIRTUAL_ENV:-}" == "$IMAGE_VENV_ROOT" ) &&
+      "$VENDOR_SOURCE" == none &&
+      -z "${TORCH_FL_VENV_ROOT:-}${TORCH_FL_TEST_PYTHON:-}${TORCH_FL_CPU_TORCH_WHEELHOUSE:-}" &&
+      -z "${TORCH_FL_CPU_TORCH_VERSION:-}${TORCH_FL_FLAGTREE_VERSION:-}${TORCH_FL_FLAGTREE_PYTHON_VERSION:-}${TORCH_FL_FLAGGEMS_VERSION:-}" ]]; then
+  USE_IMAGE_VENV=1
+  VENV_ROOT="$IMAGE_VENV_ROOT"
+  VENV_PYTHON="$VENV_ROOT/bin/python"
+  if ! python_matches_version "$VENV_PYTHON" || ! python_has_headers "$VENV_PYTHON" || ! runtime_venv_is_isolated flagcx; then
+    echo "::error::The NVIDIA CI image requires an isolated Python $FLAGTREE_PYTHON_VERSION venv with development headers at $VENV_ROOT"
     exit 1
   fi
-fi
-echo "Test Python: $TEST_PYTHON ($("$TEST_PYTHON" -c 'import sys; print(sys.version.split()[0])'))"
+  echo "Using the NVIDIA CI image venv: $VENV_ROOT"
+else
+  if [[ -d "$IMAGE_VENV_ROOT" ]]; then
+    if [[ "$VENV_ROOT" -ef "$IMAGE_VENV_ROOT" ]]; then
+      echo "::error::A fresh NVIDIA job venv must be separate from $IMAGE_VENV_ROOT"
+      exit 1
+    fi
+    # A job-specific Torch must also supply its own CMake files and libraries.
+    IMAGE_TORCH_ROOT="$IMAGE_VENV_ROOT/lib/python$FLAGTREE_PYTHON_VERSION_cuda/site-packages/torch"
+    export CMAKE_PREFIX_PATH="$(VENDOR_TORCH_ROOT="$IMAGE_TORCH_ROOT" strip_vendor_paths "${CMAKE_PREFIX_PATH:-}")"
+    export LD_LIBRARY_PATH="$(VENDOR_TORCH_ROOT="$IMAGE_TORCH_ROOT" strip_vendor_paths "${LD_LIBRARY_PATH:-}")"
+  fi
+  TEST_PYTHON="$(select_test_python || true)"
+  if [[ -z "$TEST_PYTHON" ]]; then
+    if ! install_test_python; then
+      echo "::error::Python $FLAGTREE_PYTHON_VERSION is required by FlagTree $FLAGTREE_VERSION"
+      exit 1
+    fi
+  fi
+  echo "Test Python: $TEST_PYTHON ($("$TEST_PYTHON" -c 'import sys; print(sys.version.split()[0])'))"
 
-create_runtime_venv "$TEST_PYTHON" "" "$VENDOR_TORCH_ROOT"
-# Copy only compatible RECORD-owned distributions. CUDA Torch from the image
-# is a device-library source, never a replacement for the CPU test frontend.
-"${VENDOR_PYTHON:-$TEST_PYTHON}" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
-  --target-python "$VENV_PYTHON" \
-  --torch-version "$CPU_TORCH_VERSION" \
-  --flagtree-version "$FLAGTREE_VERSION" \
-  --flaggems-version "$FLAGGEMS_VERSION" \
-  --requirements-file "$REPO_ROOT/.github/requirements-nvidia.txt"
+  create_runtime_venv "$TEST_PYTHON" "" "$VENDOR_TORCH_ROOT"
+  # Copy only compatible RECORD-owned distributions. CUDA Torch from the image
+  # is a device-library source, never a replacement for the CPU test frontend.
+  "${VENDOR_PYTHON:-$TEST_PYTHON}" "$REPO_ROOT/.github/scripts/seed_runtime.py" \
+    --target-python "$VENV_PYTHON" \
+    --torch-version "$CPU_TORCH_VERSION" \
+    --flagtree-version "$FLAGTREE_VERSION" \
+    --flaggems-version "$FLAGGEMS_VERSION" \
+    --requirements-file "$NVIDIA_REQUIREMENTS"
+fi
 export VIRTUAL_ENV="$VENV_ROOT"
 export PATH="$VENV_ROOT/bin:$PATH"
-ensure_runtime_requirements "$REPO_ROOT/.github/requirements-nvidia.txt" "$PIP_INDEX_URL_ARG"
+if (( USE_IMAGE_VENV )); then
+  while IFS= read -r requirement || [[ -n "$requirement" ]]; do
+    [[ -z "$requirement" || "$requirement" == \#* ]] && continue
+    check_image_requirement "$requirement"
+  done < "$NVIDIA_REQUIREMENTS"
+else
+  ensure_runtime_requirements "$NVIDIA_REQUIREMENTS" "$PIP_INDEX_URL_ARG"
+fi
 validate_runtime_build_tools
 if ! runtime_cpu_torch_is_usable; then
+  if (( USE_IMAGE_VENV )); then
+    echo "::error::The NVIDIA CI image venv requires CPU PyTorch $CPU_TORCH_VERSION+cpu"
+    exit 1
+  fi
   repair_runtime_cpu_torch
 fi
 
@@ -307,6 +354,10 @@ fi
 echo "Image glibc: $IMAGE_GLIBC (FlagTree requires >= $FLAGTREE_MIN_GLIBC)"
 
 if ! runtime_flagtree_is_usable nvidia; then
+  if (( USE_IMAGE_VENV )); then
+    echo "::error::The NVIDIA CI image venv requires FlagTree $FLAGTREE_VERSION with its NVIDIA Triton backend"
+    exit 1
+  fi
   "$VENV_PYTHON" -m pip uninstall -y flagtree triton triton_kernels
   install_flagtree
 fi
@@ -318,12 +369,21 @@ echo "::notice::CI scope: FlagCX communication is deferred"
 
 # Install the published FlagGems wheel after FlagTree. --no-deps keeps the
 # CPU-only torch ABI intact; its non-torch dependencies use the common policy.
-install_flag_gems
+if (( USE_IMAGE_VENV )); then
+  if ! flag_gems_installed; then
+    echo "::error::The NVIDIA CI image venv requires FlagGems $FLAGGEMS_VERSION"
+    exit 1
+  fi
+else
+  install_flag_gems
+fi
 
 if [[ "$CI_STAGE" == "integration" ]]; then
-  # The host-program tests use torch.utils.cpp_extension.load, which requires
-  # Ninja even though the wheel itself can be built with CMake/Make.
-  ensure_runtime_requirement transformers "$PIP_INDEX_URL_ARG"
+  if (( USE_IMAGE_VENV )); then
+    check_image_requirement transformers
+  else
+    ensure_runtime_requirement transformers "$PIP_INDEX_URL_ARG"
+  fi
 fi
 
 "$VENV_PYTHON" -m pip check
@@ -397,9 +457,7 @@ print(f"Triton module: {triton_root}")
 print(f"Triton version: {triton.__version__}")
 PY
 
-if [[ "$CI_STAGE" == "build" || "$CI_STAGE" == "integration" ]]; then
-  # Prebuild so package_data sees libtorch_fl.so before the common workflow
-  # invokes python -m build.
+if (( ! USE_IMAGE_VENV )); then
   build_flagos_inplace
 fi
 
@@ -409,10 +467,9 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 nvidia-smi
 
-python - <<'PY'
+python - "$USE_IMAGE_VENV" <<'PY'
 import importlib.machinery
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -424,36 +481,31 @@ assert torch.__version__.split("+", 1)[0] == "2.10.0", torch.__version__
 assert torch.version.cuda is None, torch.version.cuda
 assert "/opt/conda/" not in str(torch_path), torch_path
 
-# Each lane's premise is the build it just made, so assert it from the
-# record the build wrote rather than from an environment variable this script
-# could itself have set. torch_fl/_env.py is loaded by path for the same reason
-# setup.py does: importing the package would run torch_fl/__init__.py, which
-# claims the flagos device before the tests are ready for it.
-_record = Path("torch_fl/_build_config.py")
-assert _record.is_file(), _record
-_loader = importlib.machinery.SourceFileLoader("_flagos_build_config", str(_record))
-_spec = importlib.util.spec_from_loader(_loader.name, _loader)
-_config = importlib.util.module_from_spec(_spec)
-_loader.exec_module(_config)
-assert "boxing" not in tuple(_config.KERNELS), _config.KERNELS
-assert "flaggems" in tuple(_config.KERNELS), _config.KERNELS
-
 print(f"Isolated Python: {sys.executable}")
 print(f"CPU PyTorch: {torch.__version__}")
 print(f"CPU torch path: {torch_path}")
-print(f"Kernel sets: {tuple(_config.KERNELS)}")
+if sys.argv[1] == "1":
+    # The wheel preflight validates the build record after python -m build.
+    assert torch_path.is_relative_to(Path(sys.prefix).resolve()), torch_path
+else:
+    # Check the legacy prebuild without importing or activating Torch-FL.
+    record = Path("torch_fl/_build_config.py")
+    assert record.is_file(), record
+    loader = importlib.machinery.SourceFileLoader("_flagos_build_config", str(record))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    config = importlib.util.module_from_spec(spec)
+    loader.exec_module(config)
+    assert "boxing" not in tuple(config.KERNELS), config.KERNELS
+    assert "flaggems" in tuple(config.KERNELS), config.KERNELS
+    print(f"Kernel sets: {tuple(config.KERNELS)}")
 PY
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   # Later steps resolve `bash` and `python` through a PATH the runner assembles
   # from these lines and from the image config:
   #   PATH=<lines, reversed, ':'-joined>:<PATH reported by `docker inspect`>
-  # (actions/runner, Handlers/StepHost.cs). This job image declares no PATH in
-  # its image config, so whatever is written here becomes the whole PATH: a bare
-  # `$VENV_ROOT/bin` line would drop `/usr/bin` and `/bin`, and the next
-  # `docker exec` fails with `exec: "bash": executable file not found in $PATH`.
-  # Publish the interpreter's own PATH, venv first, so later steps resolve
-  # commands exactly as this script does.
+  # (actions/runner, Handlers/StepHost.cs). Publish the full PATH since older
+  # job images may not declare one and later steps still need /usr/bin and /bin.
   printf '%s\n' "$PATH" >> "$GITHUB_PATH"
 fi
 if [[ -n "${GITHUB_ENV:-}" ]]; then
