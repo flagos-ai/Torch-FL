@@ -1040,6 +1040,7 @@ def main():
 
         # This process is the wheel builder. Its final C++ compilation is still
         # build-time work; installed wheels always enable the compilation guard.
+        backend.prepare_runtime()
         install_launcher(namespace, enforce_native_compilation=False)
         hosts = Hosts(package)
         hosts.activate()

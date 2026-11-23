@@ -20,6 +20,7 @@ class Backend(BackendInterface):
         utility_exports=("PyCUtensorMap",),
         capabilities=255,
         scratch_alignment=256,
+        shared_headers=("launch_params.h",),
     )
 
     def extension_options(self, driver: Path, source_dir: Path) -> BuildOptions:

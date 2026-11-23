@@ -135,6 +135,18 @@ Torch-FL defaults PPU FlagTree to serial compilation as a compatibility measure.
 Set `TORCHINDUCTOR_COMPILE_THREADS` explicitly only when testing an upstream fix
 or deliberately selecting a different worker configuration.
 
+### AOT stream chain
+
+Hardware CI also builds a `FLAGOS_BUILD_NATIVE_HOST=1` wheel using the
+published PPU FlagTree wheel pinned in `.github/version-pins.env`. The AOT
+build packages the published HGGC binary loader and submits kernels through
+the PPU SDK on the current FlagOS stream. It supports software tensor
+descriptors as provided by the published compiler.
+
+CI preflights the AOT wheel and installs it in a separate import directory.
+The common `test_compiled_stream_chain` exercises eager, Inductor and native
+host submissions on one non-default stream from that installation.
+
 ### AMP and GradScaler
 
 Use `flagos` as the AMP device name. The supported autocast dtypes are

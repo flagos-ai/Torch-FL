@@ -6,11 +6,11 @@
 # libraries separate from the native build, then test the installed opt-in wheel.
 set -euo pipefail
 case "${1:-}" in
-  ""|--metax-precision) ;;
-  *) echo "Usage: $0 [--metax-precision]" >&2; exit 2 ;;
+  ""|--metax-precision|--test-install) ;;
+  *) echo "Usage: $0 [--metax-precision|--test-install]" >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then
-  echo "Usage: $0 [--metax-precision]" >&2
+  echo "Usage: $0 [--metax-precision|--test-install]" >&2
   exit 2
 fi
 
@@ -58,7 +58,14 @@ python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.l
 python scripts/tools/torch-fl-preflight --wheel "$evidence"/*.whl \
   --platform "$FLAGOS_ACCELERATOR" --check-build-env --check-native-host-backend \
   | tee "$evidence/preflight.log"
-python -m pip install --force-reinstall --no-deps "$evidence"/*.whl
+if [[ "${1:-}" == --test-install ]]; then
+  # The common suite keeps its ordinary wheel. Native tests select this
+  # verified package in a separate interpreter.
+  python -m pip install --no-deps --upgrade --target "$RUNNER_TEMP/torch-fl-native-host-install" \
+    "$evidence"/*.whl
+else
+  python -m pip install --force-reinstall --no-deps "$evidence"/*.whl
+fi
 
 # Read the wheel without importing the source package. Reports are artifacts,
 # not source-controlled policy or claims of measured operator correctness.

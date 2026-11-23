@@ -40,6 +40,7 @@
 // plus the two Metal side-door helpers the operator layer needs, the same way
 // every other vendor backend includes runtime/accelerator/<vendor>/.
 #include "runtime/accelerator/apple/mps.h"
+#include "native_host/enqueue_trace.h"
 // and the C++ runtime surface: DrainAll, the host-read barrier the staging
 // copies live behind.
 #include "runtime/accelerator/apple/mps_runtime.h"
@@ -2542,6 +2543,8 @@ bool RunGraphImpl(
     // waiting for it: a later StreamQuery, StreamSynchronize or DeviceSynchronize
     // -- what allocator block reuse and a host read ask -- now covers this op.
     ::FlagosMPSStreamSentinel(stream);
+    ::flagos::native_host::EnqueueTrace::record(
+        reinterpret_cast<uintptr_t>(stream), true);
 
     // The sentinel above makes the *stream* report the work, but that is not
     // enough on its own, because the caching allocator's block-reuse check

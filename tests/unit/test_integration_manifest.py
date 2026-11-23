@@ -80,7 +80,20 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
     "native_host_build": tuple(
-        p for p in _PLATFORMS if p not in {"metax", "ascend", "hygon"}
+        p
+        for p in _PLATFORMS
+        if p
+        not in {
+            "metax",
+            "ascend",
+            "enflame",
+            "hygon",
+            "iluvatar",
+            "kunlunxin",
+            "mthreads",
+            "nvidia",
+            "thead",
+        }
     ),
     "native_source_hosts": tuple(p for p in _PLATFORMS if p != "ascend"),
     "native_source_hosts_metax": tuple(p for p in _PLATFORMS if p != "metax"),

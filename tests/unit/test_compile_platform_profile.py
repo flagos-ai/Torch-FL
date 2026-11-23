@@ -230,6 +230,13 @@ def test_triton_target_and_package_key_differ_on_ascend():
 
 
 @pytest.mark.anyplatform
+def test_iluvatar_profile_uses_the_published_compiler(as_iluvatar):
+    assert as_iluvatar.triton_device_type == "cuda"
+    assert as_iluvatar.triton_backend_key == "iluvatar"
+    assert not as_iluvatar.is_cuda_like
+
+
+@pytest.mark.anyplatform
 def test_only_ascend_is_not_cuda_like():
     """is_cuda_like gates every torch.cuda / CUDA-codegen route."""
     assert not pp._ASCEND_PROFILE.is_cuda_like
@@ -1209,7 +1216,7 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
     from torch_fl.compile import inductor_codegen as ic
 
     overrides = ic._device_op_overrides()
-    assert isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides)
+    assert isinstance(overrides, ic.FlagOSPythonDeviceOpOverrides)
 
     snippets = [
         overrides.set_device(0),
@@ -1236,6 +1243,7 @@ def test_ascend_device_op_overrides_emit_no_cuda(as_ascend):
         "kunlunxin",
         "tsingmicro",
         "cambricon",
+        "apple",
     ],
 )
 def test_generated_wrappers_import_the_shared_stream_getter(vendor, monkeypatch):
@@ -1244,8 +1252,8 @@ def test_generated_wrappers_import_the_shared_stream_getter(vendor, monkeypatch)
 
     _set_accelerator(monkeypatch, vendor)
     overrides = ic._device_op_overrides()
-    assert isinstance(overrides, ic.FlagOSAscendDeviceOpOverrides) == (
-        vendor == "ascend"
+    assert isinstance(overrides, ic.FlagOSPythonDeviceOpOverrides) == (
+        vendor in {"ascend", "apple"}
     )
 
     namespace = {}

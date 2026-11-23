@@ -12,40 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The one MUSA stream, and why FSDP's four streams are all the same handle.
+"""Borrowed streams for MUSA builds with the legacy single-queue runtime.
 
-``torch.flagos.Stream`` needs a native implementation on MUSA because the CPU
-torch wheel has no ``torch.cuda.Stream`` to inherit from, which is what every
-other arm of that dispatcher assumes. This module is that implementation, and it
-deliberately does not create a stream.
-
-``GetDefaultMusaStream()`` (``csrc/runtime/accelerator/musa/musa_stream.cc``) is
-the stream every device-side op in the process runs on. ``GetMudnnHandle`` binds
-each device's mudnn handle to it when that handle is first built and never
-re-reads it, so mudnn stays there for the life of the process, and the Triton
-kernels FlagGems launches reach the same handle through
-``flagtree_shim.get_musa_current_raw_stream``. ``musa_stream.h`` records what
-happened while two "default" streams existed: ``libtorch_bindings.so`` and
-``libtorch_fl.so`` each instantiated their own function-local static, so a kernel
-and the mudnn op consuming its output were never ordered against each other -- a
-wrong answer, not a slow one.
-
-``MusaStream`` therefore denotes the stream that already exists rather than
-adding a second one. FSDP asks for four streams before it starts
-(``all_gather_copy_in_stream``, ``all_gather_stream``, ``reduce_scatter_stream``,
-``all_reduce_stream``); it gets four handles to this one queue, and the copies it
-meant to overlap run one after another. That is slower than FSDP on CUDA, and it
-is correct. Handing out genuinely separate streams would be neither, because the
-mudnn ops those copies feed would keep running on the default stream, leaving an
-op and the copy that produced its input ordered either way -- the defect above,
-reintroduced. Real overlap needs mudnn moved off ``GetDefaultMusaStream`` first,
-which is a change to the op layer and not to this class.
-
-Everything FSDP waits on was submitted to this queue, so ``wait_stream`` and
-``wait_event`` have nothing to order. ``synchronize`` is real: it drains the
-device through ``flagos.synchronize``. ``flagos.current_stream`` needs no
-counterpart here -- ``flagos._streams._StreamHandle`` already carries this same
-handle on MUSA.
+Wheels with the PrivateUse1 stream registry use torch_fl.flagos._streams.
 """
 
 import torch
@@ -81,7 +50,7 @@ class MusaStream:
     what is used is the handle for the launch and
     ``wait_stream``/``wait_event``/``record_event`` for the ordering around it.
     Nothing here owns the handle, so there is no ``__del__``: the stream belongs
-    to ``GetDefaultMusaStream()`` and outlives every Python object.
+    to the legacy runtime and outlives every Python object.
     """
 
     def __init__(self, device=None, priority=0, **kwargs):

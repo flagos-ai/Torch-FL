@@ -19,6 +19,11 @@ add_library(${LIBRARY_NAME} SHARED
     module.cc
 )
 
+if(FLAGOS_PLATFORM_VENDOR STREQUAL "apple" AND FLAGOS_BUILD_VENDOR)
+  target_sources(${LIBRARY_NAME} PRIVATE metal.cc)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE FLAGOS_METAL_BINDINGS=1)
+endif()
+
 if(_flagos_is_cuda)
   # Runtime target defines do not propagate to these Python bindings. Expose
   # the native registry to the CPU-Torch CUDA shim on this build only.

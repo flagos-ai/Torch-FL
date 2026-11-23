@@ -169,3 +169,14 @@ Use `platform:iluvatar` to select this lane for a PR against main; shared checks
 still run. Hardware dispatch for fork PRs follows the trusted-maintainer controls
 in [CI controls](../../development/ci-controls.md). A mergeable PR or a successful
 image pull alone is not evidence of green hardware CI.
+
+## AOT stream chain
+
+The shared hardware pipeline builds an AOT wheel with
+`FLAGOS_BUILD_NATIVE_HOST=1`, the pinned FlagTree driver, and the CoreX SDK
+selected by `COREX_PATH`. The launcher uses the published 64-lane warp geometry
+and software tensor descriptor layout.
+
+The pipeline runs wheel preflight and installs the artifact in a separate
+import directory. The common `test_compiled_stream_chain` then checks eager,
+Inductor, and native host submissions on the same non-default stream.

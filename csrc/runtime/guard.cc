@@ -17,15 +17,36 @@ bool HasOwnedStreams() noexcept {
   return FLAGOS_GUARD_HAS_OWNED_STREAM;
 }
 
-uintptr_t OwnedStreamHandle(int64_t device, bool use_default) {
-  TORCH_CHECK(HasOwnedStreams(), "This build has no owned stream registry");
+bool HasGuardedStreams() noexcept {
+#if defined(USE_ASCEND) || defined(USE_KUNLUNXIN) || FLAGOS_GUARD_HAS_PLATFORM_STREAM
+  return true;
+#else
+  return false;
+#endif
+}
+
+namespace {
+
+uintptr_t StreamHandle(int64_t device, bool use_default) {
   TORCH_CHECK(device >= -1 && device < DeviceCount(), "Invalid stream device index: ", device);
   const c10::Device target(GuardImpl::static_type, static_cast<DeviceIndex>(device));
   const GuardImpl guard;
   const auto stream = use_default ? guard.getDefaultStream(target) : guard.getStream(target);
-  // The runtime-backed guard stores the device-library handle in the ID.
-  TORCH_CHECK(stream.id() != 0, "Native stream is unavailable for device ", device);
   return static_cast<uintptr_t>(stream.id());
+}
+
+} // namespace
+
+uintptr_t CurrentStreamHandle(int64_t device) {
+  TORCH_CHECK(HasGuardedStreams(), "This build has no guard-backed stream registry");
+  return StreamHandle(device, false);
+}
+
+uintptr_t OwnedStreamHandle(int64_t device, bool use_default) {
+  TORCH_CHECK(HasOwnedStreams(), "This build has no owned stream registry");
+  auto handle = StreamHandle(device, use_default);
+  TORCH_CHECK(handle != 0, "Native stream is unavailable for device ", device);
+  return handle;
 }
 
 } // namespace c10::flagos

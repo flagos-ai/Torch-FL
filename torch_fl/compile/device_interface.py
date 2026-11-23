@@ -995,6 +995,10 @@ def register_flagos_device_interface() -> None:
     dyn_di.get_interface_for_device("cpu")
 
     _register_gpu_type()
+    if platform_profile().compiler == "metal":
+        _patch_joint_graph_pattern_init()
+        register_interface_for_device(DEVICE_TYPE, FlagOSDeviceInterface)
+        return
     _patch_triton_warp_size()
     _patch_device_properties()
     _patch_inductor_benchmark_device()

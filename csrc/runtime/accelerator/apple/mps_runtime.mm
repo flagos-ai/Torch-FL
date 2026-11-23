@@ -169,9 +169,6 @@ StreamState* DefaultStream() {
 }
 
 StreamState* AsStream(Stream_t stream) {
-  // A null handle is the default stream. csrc/runtime/guard.h synthesizes
-  // c10::Stream(UNSAFE, device, 0) on this backend, so id 0 -- a null Stream_t
-  // -- is the stream every aten call and every allocator event arrives on.
   if (stream == nullptr) {
     return DefaultStream();
   }
@@ -182,6 +179,7 @@ void Commit(StreamState* stream, id<MTLCommandBuffer> buffer) {
   if (stream == nullptr || buffer == nil) {
     return;
   }
+  std::lock_guard<std::mutex> lock(stream->commit_mutex);
   // The buffer usually comes from -[MTLCommandQueue commandBuffer], i.e. +0,
   // and the caller's autorelease pool may drain before the next wait. Take a
   // reference so "the newest committed buffer" stays valid for Drain().
@@ -198,7 +196,11 @@ void Drain(StreamState* stream) {
   if (stream == nullptr) {
     return;
   }
-  id<MTLCommandBuffer> buffer = stream->last_committed;
+  id<MTLCommandBuffer> buffer;
+  {
+    std::lock_guard<std::mutex> lock(stream->commit_mutex);
+    buffer = [stream->last_committed retain];
+  }
   if (buffer == nil) {
     return;
   }
@@ -211,6 +213,7 @@ void Drain(StreamState* stream) {
       status == MTLCommandBufferStatusScheduled) {
     [buffer waitUntilCompleted];
   }
+  [buffer release];
 }
 
 void DrainAll() {
@@ -280,6 +283,10 @@ extern "C" void* FlagosMPSDefaultCommandQueue(void) {
   return torch_fl_mps::gDefaultStream == nullptr
       ? nullptr
       : (void*)torch_fl_mps::gDefaultStream->queue;
+}
+
+extern "C" void FlagosMPSCommitCommandBuffer(Stream_t stream, void* buffer) {
+  torch_fl_mps::Commit(torch_fl_mps::AsStream(stream), (id<MTLCommandBuffer>)buffer);
 }
 
 // See mps.h. The buffer is committed and released immediately: Commit() hands

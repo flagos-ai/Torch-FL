@@ -32,6 +32,7 @@
 
 #include "mps_runtime.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 
@@ -79,6 +80,26 @@ Error_t StreamCreateWithPriority(
 
 Error_t StreamCreate(Stream_t* stream) {
   return StreamCreateWithPriority(stream, 0, 0);
+}
+
+extern "C" Error_t FlagosMPSStreamFromPool(Stream_t* stream) {
+  if (!stream) {
+    return ErrorUnknown;
+  }
+  static std::mutex mutex;
+  static std::array<Stream_t, 32> streams{};
+  static size_t next = 0;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto& slot = streams[next];
+  if (slot == nullptr) {
+    const auto status = ::StreamCreate(&slot);
+    if (status != Success) {
+      return status;
+    }
+  }
+  *stream = slot;
+  next = (next + 1) % streams.size();
+  return Success;
 }
 
 Error_t StreamGetPriority(Stream_t /*stream*/, int* priority) {
@@ -144,7 +165,11 @@ Error_t StreamDestroy(Stream_t stream) {
 
 Error_t StreamQuery(Stream_t stream) {
   torch_fl_mps::StreamState* state = torch_fl_mps::AsStream(stream);
-  if (state == nullptr || state->last_committed == nil) {
+  if (state == nullptr) {
+    return Success;
+  }
+  std::lock_guard<std::mutex> lock(state->commit_mutex);
+  if (state->last_committed == nil) {
     return Success;
   }
   const MTLCommandBufferStatus status = state->last_committed.status;

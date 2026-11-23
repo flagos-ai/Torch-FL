@@ -74,7 +74,7 @@ murandGenerator_t get_murand_generator(const at::Tensor& tensor, uint64_t seed) 
   auto generator = it->second;
   check_murand(
       murandSetStream(
-          generator, musa::GetDefaultMusaStream()),
+          generator, musa::GetCurrentMusaStream()),
       "murandSetStream");
   check_murand(
       murandSetPseudoRandomGeneratorSeed(generator, seed),
@@ -117,7 +117,7 @@ void generate_uniform_raw(const at::Tensor& out, uint64_t seed) {
         generator, out.data_ptr<float>(), static_cast<size_t>(out.numel()));
   }
   check_murand(status, "murandGenerateUniform");
-  TORCH_CHECK(musaStreamSynchronize(musa::GetDefaultMusaStream()) == musaSuccess,
+  TORCH_CHECK(musaStreamSynchronize(musa::GetCurrentMusaStream()) == musaSuccess,
               "murand uniform stream sync failed");
 }
 
@@ -164,7 +164,7 @@ void generate_normal_raw(const at::Tensor& out, double mean, double std,
         static_cast<float>(mean), static_cast<float>(std));
   }
   check_murand(status, "murandGenerateNormal");
-  TORCH_CHECK(musaStreamSynchronize(musa::GetDefaultMusaStream()) == musaSuccess,
+  TORCH_CHECK(musaStreamSynchronize(musa::GetCurrentMusaStream()) == musaSuccess,
               "murand normal stream sync failed");
   if (work.data_ptr() != out.data_ptr()) {
     out.copy_(work.narrow(0, 0, out.numel()).view(out.sizes()));
@@ -189,7 +189,7 @@ void generate_integer(const at::Tensor& out, int64_t base, uint64_t span,
             generator, reinterpret_cast<unsigned int*>(raw.data_ptr<int32_t>()),
             static_cast<size_t>(raw.numel())),
         "murandGenerate");
-    TORCH_CHECK(musaStreamSynchronize(musa::GetDefaultMusaStream()) == musaSuccess,
+  TORCH_CHECK(musaStreamSynchronize(musa::GetCurrentMusaStream()) == musaSuccess,
                 "murand integer stream sync failed");
   }
 

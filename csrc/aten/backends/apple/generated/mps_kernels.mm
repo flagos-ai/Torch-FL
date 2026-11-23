@@ -66,6 +66,7 @@
 #include <string_view>
 #include <vector>
 #include "../mps_common.h"
+#include "../metal.h"
 #include "runtime/accelerator/apple/mps_runtime.h"
 
 namespace at::native::flagos {
@@ -2226,6 +2227,7 @@ at::Tensor CosKernelMps(const at::Tensor& self) {
   if (out.numel() == 0) {
     return out;
   }
+  if (mps::RunMetalUnary(out, self_c, "cos")) return out;
   const bool ran = mps::MpsRunGraph(
       mps::MpsGraphKey("cos"),
       {self_c},
