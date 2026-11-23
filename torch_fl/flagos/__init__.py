@@ -97,7 +97,10 @@ def current_device():
     return _C._get_device()
 
 
-def set_device(device) -> None:
+def set_device(device: torch.device | str | int) -> None:
+    """Select a FlagOS device by index or indexed device specification."""
+    if isinstance(device, (str, torch.device)):
+        device = torch.accelerator._get_device_index(device)
     return _C._set_device(device)
 
 
