@@ -108,9 +108,9 @@ FLAGGEMS_ROUTING_CALLS = {
 #: one is a deliberate conf edit and not a silent change.
 #:
 #: Keyed by the accelerator the conf names. ``metax`` carries the set the MetaX
-#: re-measurement and its differential survey landed (see the ``BOXING_GAP_NOTES
+#: re-measurement and its differential survey landed (see the ``CUDA_ABI_GAP_NOTES
 #: ["metax"]`` note in ``scripts/codegen/gen_vendor_confs.py`` for the per-op
-#: diagnosis); ``dcu`` carries the four shapes ``tests/integration/ops/
+#: diagnosis); ``dcu`` carries the remaining regressions ``tests/integration/ops/
 #: test_dcu_flaggems_pinned_routes.py`` reproduces on hardware.
 FLAGGEMS_PINNED_OFF: dict[str, tuple[str, ...]] = {
     "metax": (
