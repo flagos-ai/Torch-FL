@@ -110,6 +110,18 @@ To pin the table to one backend for A/B measurement, set
 `FLAGOS_FORCE_BACKEND` to `flaggems` or `vendor`. Ops the target does not
 implement are listed on stderr and stay on their configured backend.
 
+### Streams and AOT hosts
+
+The PrivateUse1 guard supplies `torch.Stream` and the current MUSA stream per
+thread and device. Mudnn, RNG, blocking copies, FlagTree, and Inductor use that
+selection. New streams are borrowed from a bounded pool on each device.
+
+The shared hardware lane builds a `FLAGOS_BUILD_NATIVE_HOST=1` wheel with the
+pinned FlagTree loader and MUSA SDK. It preflights and installs the wheel into
+a separate import directory before running the common `test_compiled_stream_chain`.
+The MUSA launcher uses the compiler target's warp size and the SDK tensor
+descriptor encoding.
+
 ## Testing
 
 Run the MUSA dispatch suite:

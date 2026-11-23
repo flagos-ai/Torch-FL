@@ -1,56 +1,99 @@
 // Copyright (c) 2026, BAAI. All rights reserved.
-//
-// The one definition of the MUSA default stream. This file is compiled into
-// libflagos.so -- the accelerator runtime library, built from
-// csrc/runtime/accelerator/musa/*.cc -- rather than into libtorch_fl.so or
-// libtorch_bindings.so, because those are two separate shared objects and a
-// function-local static inside an `inline` function gives each of them its own
-// copy. See musa_stream.h for the measurements that made this the headline bug
-// it is: two independently created "default" streams meant the mudnn ops and the
-// Triton kernels were never ordered against each other.
-//
-// libflagos.so is the right owner because every other MUSA shared object links
-// it, directly (libtorch_fl.so) or through it (libtorch_bindings.so, i.e.
-// torch_fl._C), so all of them resolve this single symbol.
-//
-// musa_stream.h is gated on USE_MUSA, which this target does not define -- it
-// compiles the plain C runtime and has no reason to know about the backend's
-// compile-time flags. Defining it around this one include keeps the declaration
-// and the definition in the same translation unit, so a signature drift between
-// them is a compile error instead of a second silently distinct symbol.
 
-#include <musa_runtime.h>
+#include <flagos.h>
 
+#include <algorithm>
+#include <array>
 #include <mutex>
 #include <unordered_map>
 
-#define USE_MUSA 1
 #include "musa_stream.h"
+
+namespace {
+
+struct StreamPool {
+  std::array<musaStream_t, 32> queues{};
+  size_t next = 0;
+};
+
+struct DeviceStreams {
+  musaStream_t default_stream = nullptr;
+  std::unordered_map<int, StreamPool> pools;
+};
+
+// libflagos owns the streams shared by the bindings and operator libraries.
+// Selection is per thread and per device.
+std::mutex stream_mutex;
+std::unordered_map<int, DeviceStreams> streams;
+thread_local std::unordered_map<int, Stream_t> current_streams;
+
+class ScopedDevice {
+ public:
+  explicit ScopedDevice(int device) : device_(device) {
+    valid_ = musaGetDevice(&previous_) == musaSuccess &&
+        (previous_ == device || musaSetDevice(device) == musaSuccess);
+  }
+
+  ~ScopedDevice() {
+    if (valid_ && previous_ != device_) musaSetDevice(previous_);
+  }
+
+  explicit operator bool() const { return valid_; }
+
+ private:
+  int previous_ = -1;
+  int device_;
+  bool valid_;
+};
+
+}  // namespace
+
+Stream_t GetDefaultStreamForDevice(int device) {
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  auto it = streams.find(device);
+  if (it != streams.end() && it->second.default_stream)
+    return reinterpret_cast<Stream_t>(it->second.default_stream);
+  ScopedDevice guard(device);
+  musaStream_t stream = nullptr;
+  if (!guard || musaStreamCreate(&stream) != musaSuccess) return nullptr;
+  streams[device].default_stream = stream;
+  return reinterpret_cast<Stream_t>(stream);
+}
+
+Stream_t GetCurrentStreamForDevice(int device) {
+  auto it = current_streams.find(device);
+  return it == current_streams.end() ? GetDefaultStreamForDevice(device) : it->second;
+}
+
+Error_t SetCurrentStreamForDevice(int device, Stream_t stream) {
+  if (stream) current_streams[device] = stream;
+  else current_streams.erase(device);
+  return Success;
+}
 
 namespace at::native::flagos::musa {
 
-musaStream_t GetDefaultMusaStream() {
-  static std::mutex mutex;
-  static std::unordered_map<int, musaStream_t> streams;
-
+musaStream_t GetCurrentMusaStream() {
   int device = 0;
-  if (musaGetDevice(&device) != musaSuccess) {
-    return nullptr;
-  }
+  if (musaGetDevice(&device) != musaSuccess) return nullptr;
+  return reinterpret_cast<musaStream_t>(GetCurrentStreamForDevice(device));
+}
 
-  std::lock_guard<std::mutex> lock(mutex);
-  auto it = streams.find(device);
-  if (it != streams.end()) {
-    return it->second;
-  }
-  musaStream_t stream = nullptr;
-  if (musaStreamCreate(&stream) != musaSuccess) {
-    // Fall back to the null (legacy default) stream; ops still execute, just
-    // without a dedicated queue.
-    stream = nullptr;
-  }
-  streams.emplace(device, stream);
+musaStream_t GetMusaStreamFromPool(int device, int priority) {
+  ScopedDevice guard(device);
+  if (!guard) return nullptr;
+  int least = 0;
+  int greatest = 0;
+  priority = musaDeviceGetStreamPriorityRange(&least, &greatest) == musaSuccess
+      ? std::clamp(priority, greatest, least)
+      : 0;
+  std::lock_guard<std::mutex> lock(stream_mutex);
+  auto& pool = streams[device].pools[priority];
+  auto& stream = pool.queues[pool.next];
+  if (!stream && musaStreamCreateWithPriority(&stream, musaStreamNonBlocking, priority) != musaSuccess)
+    return nullptr;
+  pool.next = (pool.next + 1) % pool.queues.size();
   return stream;
 }
 
-} // namespace at::native::flagos::musa
+}  // namespace at::native::flagos::musa

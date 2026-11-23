@@ -32,7 +32,6 @@
 #include <musa_runtime.h>
 
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -187,10 +186,8 @@ class MusaDeviceGuard {
   int prev_device_ = -1;
 };
 
-// `mudnn::Handle` is per-device, non-copyable, and not free to construct, so
-// cache one per device and bind it to that device's shared stream. Must be
-// called with the target device already current (EXEC_MUDNN_CMD's guard does
-// that), since Handle() and GetDefaultMusaStream() both key off musaGetDevice.
+// Cache one handle per thread and device. Both stream and math mode are mutable
+// properties of a handle, so each call refreshes them on its thread's handle.
 //
 // TF32 is refreshed on every call rather than only at construction: mudnn
 // enables it by default, whereas torch defaults matmul TF32 *off*, and the user
@@ -198,23 +195,23 @@ class MusaDeviceGuard {
 // default, a 64x64 float mm drifts ~2e-2 from CPU (measured); following torch's
 // flag makes it exact.
 inline mudnn::Handle& GetMudnnHandle() {
-  static std::mutex mutex;
-  static std::unordered_map<int, std::unique_ptr<mudnn::Handle>> handles;
+  thread_local std::unordered_map<int, std::unique_ptr<mudnn::Handle>> handles;
 
   int device = 0;
   if (musaGetDevice(&device) != musaSuccess) {
     device = 0;
   }
 
-  std::lock_guard<std::mutex> lock(mutex);
-  auto it = handles.find(device);
-  if (it == handles.end()) {
-    auto handle = std::make_unique<mudnn::Handle>(device);
-    handle->SetStream(at::native::flagos::musa::GetDefaultMusaStream());
-    it = handles.emplace(device, std::move(handle)).first;
+  auto& handle = handles[device];
+  if (!handle) handle = std::make_unique<mudnn::Handle>(device);
+  auto stream = at::native::flagos::musa::GetCurrentMusaStream();
+  if (handle->GetStream() != stream) {
+    auto status = handle->SetStream(stream);
+    TORCH_CHECK(status == mudnn::Status::SUCCESS,
+                "mudnn stream selection failed: ", MudnnStatusName(status));
   }
-  it->second->SetAllowTF32(at::globalContext().allowTF32CuBLAS());
-  return *it->second;
+  handle->SetAllowTF32(at::globalContext().allowTF32CuBLAS());
+  return *handle;
 }
 
 // `div`'s rounding_mode string picks the mudnn binary mode: an absent mode is
@@ -361,15 +358,8 @@ void MudnnCopy(const at::Tensor& src, at::Tensor& dst);
 
 } // namespace at::native::flagos::musa_ops
 
-// Issues a mudnn op on the shared stream of `guard_tensor`'s device and waits
-// for it, mirroring EXEC_TOPSATEN_CMD's synchronous contract.
-//
-// Ordering against the other producers on that stream comes from the stream
-// itself, not from this macro: Triton kernels launched through
-// flagtree_shim.get_musa_current_raw_stream land on the same
-// GetDefaultMusaStream() queue, so the trailing synchronize waits for their
-// writes as well as for this op's. That only holds while the stream really is a
-// single process-wide value -- see musa_stream.h.
+// Issue a mudnn op on the selected stream of `guard_tensor`'s device and
+// preserve the synchronous contract. Triton uses the same current stream.
 //
 // `op_expr` is the full call, e.g. `op.Run(_mudnn_h, t_out.get(), t_in.get())`,
 // with `_mudnn_h` naming the cached handle. Spelling it out (rather than taking

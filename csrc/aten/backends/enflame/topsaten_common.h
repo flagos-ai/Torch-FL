@@ -11,6 +11,7 @@
 
 #ifdef USE_GCU
 
+#include "native_host/enqueue_trace.h"
 #include "runtime/accelerator/enflame/tops_stream.h"
 #include "runtime/accelerator/enflame/interop.h"
 
@@ -913,6 +914,8 @@ inline at::ScalarType ClampComputeDtype(
     TORCH_CHECK(                                                              \
         _tops_sync == topsSuccess,                                            \
         #op, " stream sync failed: ", topsGetErrorString(_tops_sync));        \
+    ::flagos::native_host::EnqueueTrace::record(                             \
+        reinterpret_cast<uintptr_t>(_tops_stream), true);                   \
   } while (0)
 
 #endif // USE_GCU

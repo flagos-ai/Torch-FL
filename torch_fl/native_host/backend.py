@@ -34,10 +34,22 @@ COMPILED_FIELDS = (
     "native_source_sha256",
 )
 # Admit a backend after it passes installed-wheel conformance on hardware.
-_ADAPTERS = frozenset({"ascend", "enflame", "hygon", "metax", "nvidia"})
+_ADAPTERS = frozenset(
+    {
+        "ascend",
+        "enflame",
+        "hygon",
+        "iluvatar",
+        "kunlunxin",
+        "metax",
+        "mthreads",
+        "nvidia",
+        "thead",
+    }
+)
 _ROOT = Path(__file__).resolve().parent
 _LAUNCHER_SOURCE = "launcher.cc"
-_LAUNCHER_HEADERS = ("backend_api.h", "host_abi.h")
+_LAUNCHER_HEADERS = ("backend_api.h", "enqueue_trace.h", "host_abi.h")
 
 
 @dataclass(frozen=True)
@@ -54,6 +66,7 @@ class BackendConfig:
     driver_symbols: tuple[str, str, str] | None = None
     utility_exports: tuple[str, ...] = ()
     launcher_headers: tuple[str, ...] = ()
+    shared_headers: tuple[str, ...] = ()
 
 
 class _ExtensionOptions(TypedDict, total=False):
@@ -66,6 +79,7 @@ class _ExtensionOptions(TypedDict, total=False):
 class LauncherOptions(_ExtensionOptions, total=False):
     system_libraries: list[str]
     depends: list[str]
+    extra_objects: list[str]
 
 
 class UtilityOptions(_ExtensionOptions, total=False):
@@ -157,6 +171,7 @@ def _launcher_extension(
     system_libraries=(),
     define_macros=(),
     depends=(),
+    extra_objects=(),
 ):
     from setuptools import Extension
 
@@ -171,6 +186,7 @@ def _launcher_extension(
         include_dirs=[str(root), str(torch_dir / "include"), *include_dirs],
         library_dirs=[*library_dirs, str(torch_dir / "lib")],
         libraries=[*libraries, "torch_python", "torch_cpu", "c10", *system_libraries],
+        extra_objects=list(extra_objects),
         define_macros=[
             *define_macros,
             ("FLAGOS_NATIVE_HOST_BACKEND_SHA256", f'"{fingerprint}"'),
@@ -189,6 +205,7 @@ def _native_sources(config: BackendConfig):
     return (
         _LAUNCHER_SOURCE,
         *_LAUNCHER_HEADERS,
+        *config.shared_headers,
         f"{directory}/launch.cc",
         *(f"{directory}/{name}" for name in config.launcher_headers),
     )

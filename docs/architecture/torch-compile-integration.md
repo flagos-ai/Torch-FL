@@ -24,6 +24,20 @@ output = compiled_model(input)
 - Optional FlagTree compilation for multi-backend kernel generation (drop-in: it
   replaces `triton` at install time, so no code change is needed)
 
+### Apple Metal
+
+The Apple wheel registers PyTorch Inductor's Metal scheduler for `flagos`.
+Generated kernels use the Python wrapper and bind FlagOS tensor buffers and
+their byte offsets. Eager operators and generated kernels submit to the queue
+selected by the PrivateUse1 guard, including inside a `torch.Stream` scope.
+The allocator records each submitted buffer's stream before releasing it for reuse.
+
+The wheel's compiled operator hosts also serve `torch_fl.native_host.compile`
+for inference. The generated cosine wrapper uses the bundled PyTorch Metal
+kernel, and both compiled paths share the queue submission helper. The common
+stream regression observes the eager, Inductor and compiled-host submissions
+and checks the dependent result after synchronizing the selected stream.
+
 ## Quick Start
 
 ### Basic Usage

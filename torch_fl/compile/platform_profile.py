@@ -13,9 +13,9 @@
 # limitations under the License.
 
 """
-Which compiler a flagos build actually talks to.
+Compiler selection for the installed FlagOS runtime.
 
-flagos has no Triton backend of its own, so the compile path has to name the
+Triton builds use the installed hardware backend, so the compile path names the
 *hardware's* backend at two boundaries:
 
 * ``DeviceProperties.type`` -- inductor forwards this to Triton as
@@ -61,14 +61,16 @@ class PlatformProfile:
             code can go through torch.cuda / the CUDA codegen snippets. False on
             runtimes with no CUDA at all (Ascend, MUSA).
         vendor: the ``ACCELERATOR`` this profile describes, used to pick the
-            vendor runtime when ``is_cuda_like`` is False and the two non-CUDA
-            paths diverge (ACL streams on Ascend, musa streams on MThreads).
+            vendor runtime when ``is_cuda_like`` is False.
+        compiler: the Inductor compiler family for the runtime. Metal builds
+            use Inductor's Metal scheduler and leave the Triton names empty.
     """
 
     triton_device_type: str
     triton_backend_key: str
     is_cuda_like: bool
     vendor: str = ""
+    compiler: str = "triton"
 
 
 # NVIDIA and every CUDA-compatible vendor build (MetaX excepted, below): flagos
@@ -145,17 +147,12 @@ _KUNLUNXIN_PROFILE = PlatformProfile(
     vendor="kunlunxin",
 )
 
-# Iluvatar (corex): the runtime is CUDA-shaped -- a real cuda_runtime.h and a
-# real libcudart -- so the target name is "cuda" and FlagTree's NVIDIA backend
-# compiles for it. It is nevertheless not *CUDA-like* in this table's sense:
-# that flag means "torch.cuda can answer hardware and stream queries", and this
-# build links the CPU torch wheel with its own stream registry instead (see
-# csrc/runtime/accelerator/iluvatar/stream.cc). Leaving it off the table would
-# fall back to _CUDA_PROFILE and emit torch._C._cuda_getCurrentRawStream, which
-# the CPU wheel does not have.
+# Iluvatar's FlagTree backend accepts Inductor's CUDA target alias and compiles
+# it as CoreX. The CPU torch wheel gets hardware and stream queries from the
+# FlagOS runtime.
 _ILUVATAR_PROFILE = PlatformProfile(
     triton_device_type="cuda",
-    triton_backend_key="nvidia",
+    triton_backend_key="iluvatar",
     is_cuda_like=False,
     vendor="iluvatar",
 )
@@ -184,6 +181,14 @@ _CAMBRICON_PROFILE = PlatformProfile(
     vendor="cambricon",
 )
 
+_METAL_PROFILE = PlatformProfile(
+    triton_device_type="",
+    triton_backend_key="",
+    is_cuda_like=False,
+    vendor="apple",
+    compiler="metal",
+)
+
 _PROFILES = {
     "dcu": _DCU_PROFILE,
     "metax": _METAX_PROFILE,
@@ -194,6 +199,7 @@ _PROFILES = {
     "iluvatar": _ILUVATAR_PROFILE,
     "tsingmicro": _TSINGMICRO_PROFILE,
     "cambricon": _CAMBRICON_PROFILE,
+    "mps": _METAL_PROFILE,
 }
 
 

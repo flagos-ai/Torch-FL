@@ -620,10 +620,6 @@ steps:
       --retain tests/unit/test_startup_subprocess.py
       --retain tests/unit/test_vendor_libtorch_overlay.py
 
-  - id: common_regression
-    name: Common regression
-    command: python -m pytest tests/integration/common -v --tb=short
-
   - id: runtime_conformance
     name: Runtime conformance (hardware-agnostic)
     command: python -m pytest tests/integration/runtime -v -s --tb=short
@@ -664,19 +660,23 @@ steps:
     platforms: [apple]
     command: python -m pytest tests/integration/test_mps_runtime.py -v --tb=short
 
-  # Build a separate opt-in artifact after the ordinary vendor wheel has been
-  # tested. The following group runs the installed hosts
-  # from the same wheel-only workspace as the other operator suites.
+  # The common stream chain selects the preflight-checked AOT installation.
+  # The other common cases still exercise the ordinary installed wheel.
   - id: native_host_build
     name: Build native FlagGems hosts
-    platforms: [metax, ascend, hygon]
-    command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh
+    platforms: [metax, ascend, enflame, hygon, iluvatar, kunlunxin, mthreads, nvidia, thead]
+    command: cd "$GITHUB_WORKSPACE" && bash .github/scripts/build_native_hosts_ci.sh --test-install
+
+  - id: common_regression
+    name: Common regression
+    command: python -m pytest tests/integration/common -v --tb=short
 
   - id: native_source_hosts
     name: Native FlagGems host conformance
     platforms: [ascend]
     min_passed: 94
     command: >-
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_ascend_hosts.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
 
@@ -685,6 +685,7 @@ steps:
     platforms: [metax]
     min_passed: 86
     command: >-
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_native_metax_hosts.py
       tests/integration/ops/test_native_metax_qwen_routes.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"
@@ -694,6 +695,7 @@ steps:
     platforms: [hygon]
     min_passed: 217
     command: >-
+      PYTHONPATH="$RUNNER_TEMP/torch-fl-native-host-install${PYTHONPATH:+:$PYTHONPATH}"
       python -m pytest tests/integration/ops/test_hygon_native_hosts.py
       tests/integration/ops/test_hygon_native_routes.py -v --tb=short
       --junitxml="$RUNNER_TEMP/torch-fl-native-host-evidence/conformance.xml"

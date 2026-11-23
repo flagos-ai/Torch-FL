@@ -51,16 +51,9 @@ at::Tensor StageSourceOnDstDevice(const at::Tensor& src, const at::Tensor& dst) 
 
   const size_t nbytes = src_contig.numel() * src_contig.element_size();
   if (nbytes > 0) {
-    // A blocking musaMemcpy only orders against the device that is current when
-    // it is issued, and every producer on src's device -- mudnn, FlagGems,
-    // Triton -- writes to that device's default stream. Drain that queue before
-    // reading through it. (copy_ops.cc has the same barrier in
-    // BlockingCopyGuard, but its CUDA arm compiles out on MUSA: the
-    // FLAGOS_COPY_HAS_CUDA_STREAM guard excludes USE_MUSA, since there is no
-    // c10::cuda here to ask for the current stream. Its MUSA arm drains
-    // GetDefaultMusaStream(), which is what this line does.)
+    // Drain the producer queue on the source device before the blocking copy.
     MusaDeviceGuard src_guard(src);
-    musaStreamSynchronize(at::native::flagos::musa::GetDefaultMusaStream());
+    musaStreamSynchronize(at::native::flagos::musa::GetCurrentMusaStream());
     musaMemcpy(
         staged.data_ptr(),
         src_contig.const_data_ptr(),

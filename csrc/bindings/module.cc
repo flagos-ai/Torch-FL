@@ -28,7 +28,6 @@
 
 #ifdef USE_MUSA
 #include <musa_runtime.h>
-#include <runtime/accelerator/mthreads/musa_stream.h>
 #endif
 
 #ifdef USE_ILUVATAR
@@ -63,6 +62,10 @@
 #include <aten/route.h>
 
 #include "dataparallel.h"
+
+#ifdef FLAGOS_METAL_BINDINGS
+int InitMetalBindings(PyObject* mod);
+#endif
 
 namespace {
 
@@ -322,42 +325,15 @@ static PyObject* _getNativeDefaultRawStream(PyObject*, PyObject* arg) {
   return _getOwnedRawStream(arg, true);
 }
 
-static PyObject* _getMusaCurrentRawStream(PyObject* self, PyObject* arg) {
+static PyObject* _getCurrentRawStream(PyObject*, PyObject* arg) {
   HANDLE_TH_ERRORS
-#ifdef USE_MUSA
-  TORCH_CHECK(
-      THPUtils_checkLong(arg),
-      "_get_musa_current_raw_stream expects an int, but got ",
-      THPUtils_typename(arg));
-  auto idx = static_cast<int>(THPUtils_unpackLong(arg));
-  auto current_device = c10::flagos::CurrentDevice();
-  TORCH_CHECK(
-      idx == current_device,
-      "MUSA stream requested for device ",
-      idx,
-      ", but the current device is ",
-      current_device);
-  auto stream = at::native::flagos::musa::GetDefaultMusaStream();
+  TORCH_CHECK(THPUtils_checkLong(arg), "current stream expects a device index");
   return PyLong_FromUnsignedLongLong(
-      reinterpret_cast<unsigned long long>(stream));
-#else
-  TORCH_CHECK(false, "MUSA streams are unavailable in this build");
-#endif
+      c10::flagos::CurrentStreamHandle(THPUtils_unpackLong(arg)));
   END_HANDLE_TH_ERRORS
 }
 
-// Iluvatar's counterpart of the MUSA getter above, and for the same reason: the
-// backend links the CPU torch wheel, so there is no `_cuda_getCurrentRawStream`
-// and no torch stream to read. The handle comes from the platform's own stream
-// registry (libflagos.so, csrc/runtime/accelerator/iluvatar/stream.cc), which is
-// the queue the eager iluvatar kernels submit to, so a FlagTree/FlagGems kernel
-// launched on it is ordered against eager work.
-//
-// Unlike MUSA the index is not rejected when it is not the current device. The
-// registry is keyed by device and a current-stream entry is therefore per
-// device, while MUSA's single shared stream exists only for the current one --
-// so a wrong index there describes the wrong stream, but here it names the
-// stream that device would use.
+// Retain the CoreX shim's raw stream entry point over its device registry.
 static PyObject* _getIluvatarCurrentRawStream(PyObject* self, PyObject* arg) {
   HANDLE_TH_ERRORS
 #ifdef USE_ILUVATAR
@@ -803,7 +779,7 @@ static PyMethodDef methods[] = {
 #endif
 #ifdef USE_MUSA
     {"_get_musa_device_properties", _getMusaDeviceProperties, METH_O, nullptr},
-    {"_get_musa_current_raw_stream", _getMusaCurrentRawStream, METH_O, nullptr},
+    {"_get_musa_current_raw_stream", _getCurrentRawStream, METH_O, nullptr},
 #endif
 #ifdef USE_ILUVATAR
     {"_get_iluvatar_device_properties", _getIluvatarDeviceProperties, METH_O,
@@ -846,6 +822,14 @@ extern "C" FLAGOS_EXPORT PyObject* initFlagosModule(void) {
   static struct PyModuleDef flagos_C_module = {
       PyModuleDef_HEAD_INIT, "torch_fl._C", nullptr, -1, methods};
   PyObject* mod = PyModule_Create(&flagos_C_module);
+  static PyMethodDef guardedStreamMethods[] = {
+      {"_get_current_raw_stream", _getCurrentRawStream, METH_O, nullptr},
+      {nullptr, nullptr, 0, nullptr}};
+  if (mod && c10::flagos::HasGuardedStreams() &&
+      PyModule_AddFunctions(mod, guardedStreamMethods) < 0) {
+    Py_DECREF(mod);
+    return nullptr;
+  }
   static PyMethodDef nativeStreamMethods[] = {
       {"_get_native_current_raw_stream", _getNativeCurrentRawStream, METH_O, nullptr},
       {"_get_native_default_raw_stream", _getNativeDefaultRawStream, METH_O, nullptr},
@@ -855,5 +839,11 @@ extern "C" FLAGOS_EXPORT PyObject* initFlagosModule(void) {
     Py_DECREF(mod);
     return nullptr;
   }
+#ifdef FLAGOS_METAL_BINDINGS
+  if (mod && InitMetalBindings(mod) < 0) {
+    Py_DECREF(mod);
+    return nullptr;
+  }
+#endif
   return mod;
 }

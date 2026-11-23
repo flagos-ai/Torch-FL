@@ -3,6 +3,7 @@
 
 """Backend contracts are inspectable without importing Torch or any SDK."""
 
+from functools import cache
 from pathlib import Path
 import shutil
 import subprocess
@@ -56,9 +57,7 @@ def test_backend_record_and_compiled_extension_agree(contract):
     }
 
 
-@pytest.mark.parametrize(
-    "vendor", ["unregistered", "kunlunxin", "gcu", "cuda", "../nvidia"]
-)
+@pytest.mark.parametrize("vendor", ["unregistered", "gcu", "cuda", "../nvidia"])
 def test_unvalidated_backend_never_inherits_a_cuda_shaped_abi(vendor):
     with pytest.raises(RuntimeError, match="no validated native-host launch adapter"):
         backend.get_backend(vendor)
@@ -144,6 +143,9 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
     ]
     assert str(NATIVE_SOURCE) in launcher.include_dirs
     assert str(NATIVE_SOURCE / "backend_api.h") in launcher.depends
+    for header in adapter.config.shared_headers:
+        assert str(NATIVE_SOURCE / header) in launcher.depends
+        assert f"csrc/{header}" in record["native_sources"]
     assert launcher.extra_compile_args == [
         "-O3",
         "-std=c++17",
@@ -161,12 +163,97 @@ def test_build_reuses_the_published_loader_and_tracks_header_dependencies(
         assert "/*py_libhip_search_path*/" not in utility
         assert "cuda" not in launcher.libraries
         assert adapter.config.capabilities == 187
+    elif vendor == "kunlunxin":
+        driver = root / "backends/xpu"
+        utility = Path(utilities.sources[0])
+        assert utility.suffix == ".cc"
+        assert utility.read_bytes() == (driver / "driver.c").read_bytes()
+        assert launcher.extra_objects == [str(driver / "xpu3/lib/liblaunch.a")]
+        assert {"launch_shared", "xpurt", "cudart"} <= set(launcher.libraries)
+        assert "xpurt" in utilities.libraries
+        assert adapter.config.capabilities == 129
     else:
         assert utilities.sources == [
             str(path)
             for path in backend.driver_sources(adapter, root).values()
             if path.suffix in {".c", ".cpp"}
         ]
+
+
+@pytest.mark.parametrize(
+    "contract,sdk_variable,library,utility,compiler,capabilities",
+    [
+        ("thead", "PPU_SDK", "hggc", "hggc_utils", "ppu", 253),
+        ("iluvatar", "COREX_PATH", "cuda", "cuda_utils", "corex", 253),
+        ("mthreads", "MUSA_HOME", "musa", "musa_utils", "musa", 167),
+    ],
+    indirect=["contract"],
+)
+def test_extensions_use_the_published_sdk_driver(
+    monkeypatch,
+    contract,
+    tmp_path,
+    sdk_variable,
+    library,
+    utility,
+    compiler,
+    capabilities,
+):
+    adapter, root, record, compiled = contract
+    monkeypatch.setenv(sdk_variable, "/published-sdk")
+    monkeypatch.setenv("CUDA_HOME", "/unrelated-cuda")
+    torch = SimpleNamespace(
+        __file__="/cpu-torch/torch/__init__.py",
+        _C=SimpleNamespace(_GLIBCXX_USE_CXX11_ABI=True),
+    )
+    launcher, utilities = backend.build_extensions(
+        adapter, "test_hosts", NATIVE_SOURCE, torch, record, root, tmp_path
+    )
+    assert launcher.libraries == [library, "torch_python", "torch_cpu", "c10"]
+    assert utilities.libraries == [library]
+    assert utilities.name == f"test_hosts.{utility}"
+    assert "/published-sdk/include" in launcher.include_dirs
+    assert "/published-sdk/lib" in launcher.library_dirs
+    assert not any("/unrelated-cuda" in path for path in launcher.library_dirs)
+    assert record["compiler_backend"] == compiler
+    assert compiled["capabilities"] == capabilities
+
+
+@pytest.mark.parametrize(
+    "contract", ["nvidia", "thead", "iluvatar", "mthreads"], indirect=True
+)
+def test_shared_launch_parameters_are_part_of_the_backend_contract(contract):
+    adapter, root, record, compiled = contract
+    (backend._ROOT / "csrc/launch_params.h").write_text("// changed launch layout\n")
+    with pytest.raises(RuntimeError, match="ABI changed"):
+        backend.validate_record(record, adapter, root, compiled)
+
+
+def test_musa_launcher_packs_the_published_target_and_descriptors():
+    musa = import_native_host("backends.mthreads")
+    signature = {"descriptor": "tensordesc<fp16[16,32]>", "length": "i32"}
+    source = SimpleNamespace(
+        fn=SimpleNamespace(arg_names=("length", "descriptor")), signature=signature
+    )
+    entry = {"block_size": (16, 32), "elem_size": 2}
+    metadata = SimpleNamespace(
+        target=SimpleNamespace(warp_size=128), tensordesc_meta=[entry]
+    )
+    driver = SimpleNamespace(
+        _parse_tensordesc_type={signature["descriptor"]: ("fp16", 2)}.get,
+        _musa_tme_dtype_enum={"fp16": 4}.__getitem__,
+        _MUSA_TME_NAN_FILL={"fp16": 0x7E00},
+    )
+    prepared, parameters = musa._prepare(source, metadata, driver)
+    assert list(prepared.signature.values()) == ["i32", signature["descriptor"]]
+    assert parameters.warp_size == 128
+    assert parameters.global_scratch_size == parameters.profile_scratch_size == 0
+    assert parameters.tensordesc_meta == (
+        {**entry, "elem_type": 4, "nan_fill": 0x7E00},
+    )
+    metadata.debug_launch_hidden_arg = True
+    with pytest.raises(RuntimeError, match="debugger arguments"):
+        musa._prepare(source, metadata, driver)
 
 
 @pytest.mark.parametrize("contract", ["metax"], indirect=True)
@@ -198,7 +285,9 @@ def test_metax_extensions_use_the_native_runtime_without_cuda(
     assert adapter.config.capabilities == 141
 
 
-@pytest.mark.parametrize("contract", ["nvidia", "metax", "hygon"], indirect=True)
+@pytest.mark.parametrize(
+    "contract", ["nvidia", "metax", "hygon", "thead", "iluvatar"], indirect=True
+)
 def test_reinstallation_updates_existing_and_future_driver_streams(
     monkeypatch, contract
 ):
@@ -221,6 +310,12 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
         "triton.runtime",
         SimpleNamespace(driver=SimpleNamespace(_active=active, _default=default)),
     )
+    context = SimpleNamespace(is_lite_mode=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.runtime._distributed",
+        SimpleNamespace(DistributedRtContext=lambda: context),
+    )
     exports = config.utility_exports
     modules = {f"triton.backends.{config.driver_directory}.driver": driver}
     for package in ("first", "second"):
@@ -238,18 +333,93 @@ def test_reinstallation_updates_existing_and_future_driver_streams(
             return device + offset
 
         kernel = object()
-        driver_binding.install_driver(
-            adapter, package, SimpleNamespace(current_stream=provider), kernel
-        )
+
+        def factory(source, metadata, kernel=kernel):
+            return kernel
+
+        driver_binding.install_driver(adapter, package, provider, factory)
         utilities = modules[f"{package}.{config.utility_module}"]
         for instance in (active, default, Driver()):
             assert instance.utils is utilities
-            assert instance.launcher_cls is kernel
+            assert instance.launcher_cls(None, SimpleNamespace()) is kernel
             assert instance.get_current_stream(3) == offset + 3
         for name in exports:
             assert getattr(driver, name) is getattr(utilities, name)
         with pytest.raises(RuntimeError, match="compilation is forbidden"):
             driver.compile_module_from_src("unused")
+    if config.vendor == "iluvatar":
+        with pytest.raises(RuntimeError, match="debugger arguments"):
+            active.launcher_cls(None, SimpleNamespace(debug_launch_hidden_arg=True))
+        context.is_lite_mode = True
+        with pytest.raises(RuntimeError, match="distributed arguments"):
+            active.launcher_cls(None, SimpleNamespace())
+
+
+def test_xpubin_uses_the_prebuilt_utility_and_normalized_launch_layout(monkeypatch):
+    adapter = backend.get_backend("kunlunxin")
+    driver = SimpleNamespace(
+        XPUUtils=object,
+        XPULauncher=object,
+        get_xpu_spec=lambda arch, sdnn: (12, 8 if sdnn else 64),
+        ty_to_cpp=lambda kind: (
+            "void *"
+            if kind.startswith("*")
+            else {"i1": "int32_t", "i32": "int32_t", "i64": "int64_t", "bf16": "float"}[
+                kind
+            ]
+        ),
+    )
+
+    @cache
+    def utils():
+        return driver.XPUUtils()
+
+    class Driver:
+        def __init__(self):
+            self.utils = self.xpu_utils = utils()
+            self.launcher_cls = self.launcher_cls_xpu = driver.XPULauncher
+
+    driver.XPUDriver = Driver
+    driver._xpu_utils_singleton = utils
+    existing = Driver()
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.runtime",
+        SimpleNamespace(driver=SimpleNamespace(_active=existing)),
+    )
+    utility = object()
+    adapter.bind_driver(
+        driver, utility, lambda src, meta: (src, meta), lambda d: d + 10
+    )
+    source = SimpleNamespace(
+        fn=object(),
+        signature={
+            "value": "tensordesc<fp32[32,64]>",
+            "scale": "bf16",
+            "C": "constexpr",
+        },
+    )
+    metadata = SimpleNamespace(xpu_arch=3, tensor_args=(), ewtable="", is_sdnn=False)
+    for instance in (existing, Driver()):
+        assert instance.xpu_utils is instance.utils is utility
+        assert instance.launcher_cls_xpu is instance.launcher_cls
+        assert instance.get_current_stream(2) == 12
+        src, launch = instance.launcher_cls_xpu(source, metadata)
+        assert src.fn is source.fn
+        assert src.signature == {**source.signature, "scale": "fp32"}
+        assert launch.tensordesc_meta == [2]
+        assert launch._flagos_xpu_geometry == (12, 64)
+        assert launch._flagos_xpu_parameters == [
+            *((8, 0, False),) * 5,
+            (4, 0, True),
+            *((4, 0, False),) * 2,
+            *((8, 0, False),) * 2,
+            (4, 0, False),
+        ]
+    with pytest.raises(RuntimeError, match="launch-time quantization"):
+        existing.launcher_cls_xpu(
+            source, SimpleNamespace(**{**vars(metadata), "tensor_args": (0,)})
+        )
 
 
 def test_enflame_build_fingerprints_and_links_its_own_published_loader(
@@ -341,7 +511,7 @@ def test_enflame_installer_preserves_current_stream_after_reinstallation(monkeyp
     driver_binding.install_driver(
         adapter,
         "hosts",
-        SimpleNamespace(current_stream=lambda device: device + 100),
+        lambda device: device + 100,
         object(),
     )
     first = Driver()
@@ -350,7 +520,7 @@ def test_enflame_installer_preserves_current_stream_after_reinstallation(monkeyp
     driver_binding.install_driver(
         adapter,
         "hosts",
-        SimpleNamespace(current_stream=lambda device: device + 200),
+        lambda device: device + 200,
         object(),
     )
     assert Driver().get_current_stream(3) == active.get_current_stream(3) == 203

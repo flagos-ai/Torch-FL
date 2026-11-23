@@ -29,9 +29,11 @@
 
 #include <flagos.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 
 namespace torch_fl_mps {
 
@@ -72,11 +74,12 @@ bool MetalGraphUsable();
 // so waiting on the newest committed buffer waits on everything before it.
 struct StreamState {
   id<MTLCommandQueue> queue = nil;
+  std::mutex commit_mutex;
   id<MTLCommandBuffer> last_committed = nil;
   // Monotonic signal value, incremented per event recorded on this queue. Every
   // MTLSharedEvent carries one counter, so a value taken from it uniquely names
   // one record point and can never be confused with an earlier one.
-  uint64_t signal_counter = 0;
+  std::atomic<uint64_t> signal_counter{0};
 };
 
 // One shared event and the record point it currently describes.
@@ -98,9 +101,8 @@ struct EventState {
 // default is global rather than per-index.
 StreamState* DefaultStream();
 
-// Interpret a flagos Stream_t. A null handle means "the current stream", which
-// is what csrc/runtime/guard.h passes on this backend (its synthetic stream id
-// is 0, i.e. null) and what the caching allocator passes for the default stream.
+// Interpret a flagos Stream_t. The caching allocator can pass a null handle
+// for the default queue. The device guard passes the selected queue's handle.
 StreamState* AsStream(Stream_t stream);
 
 // Commit a command buffer to a queue and remember it as the one to drain.

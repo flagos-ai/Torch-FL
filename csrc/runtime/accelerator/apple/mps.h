@@ -57,6 +57,12 @@ FLAGOS_EXPORT void* FlagosMPSCommandQueue(Stream_t stream);
 // The runtime-owned queue behind the default stream, without creating it.
 FLAGOS_EXPORT void* FlagosMPSDefaultCommandQueue(void);
 
+// c10::Stream is a value type. These queues are owned by the runtime pool.
+FLAGOS_EXPORT Error_t FlagosMPSStreamFromPool(Stream_t* stream);
+
+// Submit an encoded MTLCommandBuffer and make it visible to stream waits.
+FLAGOS_EXPORT void FlagosMPSCommitCommandBuffer(Stream_t stream, void* buffer);
+
 // Records a completion sentinel for a producer that schedules work on the
 // stream's queue without handing back the MTLCommandBuffer it used, which is
 // what MPSGraph's asynchronous runs do.

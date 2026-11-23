@@ -31,6 +31,12 @@
 #if !defined(USE_CAMBRICON) && defined(FLAGOS_ACCEL_CAMBRICON)
 #define USE_CAMBRICON 1
 #endif
+#if !defined(USE_GCU) && defined(FLAGOS_ACCEL_GCU)
+#define USE_GCU 1
+#endif
+#if !defined(USE_MUSA) && defined(FLAGOS_ACCEL_MUSA)
+#define USE_MUSA 1
+#endif
 
 #include <cstdint>
 
@@ -40,26 +46,33 @@
 #include "runtime/allocator/caching_device_allocator.h"
 #endif
 
-#if defined(FLAGOS_ACCEL_CUDA) || defined(USE_CUDA) || defined(USE_MACA)
-#define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 1
+#ifdef USE_MPS
+#include <c10/core/DeviceGuard.h>
+#include "runtime/accelerator/apple/mps.h"
+#include "runtime/allocator/caching_device_allocator.h"
+#endif
+
+#if defined(FLAGOS_ACCEL_CUDA) || defined(FLAGOS_ACCEL_PPU) || \
+    defined(USE_CUDA) || defined(USE_MACA) || defined(USE_DCU) || defined(USE_MUSA)
+#define FLAGOS_GUARD_HAS_OWNED_STREAM 1
 #include <c10/core/DeviceGuard.h>
 #include "runtime/allocator/caching_device_allocator.h"
 #else
-#define FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM 0
+#define FLAGOS_GUARD_HAS_OWNED_STREAM 0
 #endif
 
-#if defined(USE_DCU)
-#define FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM 1
+#ifdef USE_GCU
 #include <c10/core/DeviceGuard.h>
+#include "runtime/accelerator/enflame/tops_stream.h"
 #include "runtime/allocator/caching_device_allocator.h"
-#else
-#define FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM 0
 #endif
 
-#define FLAGOS_GUARD_HAS_OWNED_STREAM \
-  (FLAGOS_GUARD_HAS_NATIVE_CUDA_STREAM || FLAGOS_GUARD_HAS_NATIVE_HYGON_STREAM)
+#ifdef USE_MUSA
+#include "runtime/accelerator/mthreads/musa_stream.h"
+#endif
 
-#if defined(USE_ILUVATAR) || defined(USE_CAMBRICON) || FLAGOS_GUARD_HAS_OWNED_STREAM
+#if defined(USE_ILUVATAR) || defined(USE_CAMBRICON) || defined(USE_MPS) || \
+    defined(USE_GCU) || FLAGOS_GUARD_HAS_OWNED_STREAM
 #define FLAGOS_GUARD_HAS_PLATFORM_STREAM 1
 #else
 #define FLAGOS_GUARD_HAS_PLATFORM_STREAM 0
@@ -245,6 +258,12 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreate(&stream);
     return MakeKunlunxinStream(device, stream);
+#elif defined(USE_MPS)
+    return getNewStream(d);
+#elif defined(USE_GCU)
+    return getNewStream(d);
+#elif defined(USE_MUSA)
+    return getNewStream(d, isHighPriority ? -1 : 0);
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
     auto device = ResolvePlatformStreamDevice(d);
 #if FLAGOS_GUARD_HAS_OWNED_STREAM
@@ -310,6 +329,23 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     Stream_t stream = nullptr;
     ::StreamCreateWithPriority(&stream, 0, priority);
     return MakeKunlunxinStream(device, stream);
+#elif defined(USE_MPS)
+    const auto device = ResolvePlatformStreamDevice(d);
+    TORCH_CHECK(device == 0, "Invalid Metal stream device index: ", device);
+    Stream_t stream = nullptr;
+    TORCH_CHECK(::FlagosMPSStreamFromPool(&stream) == Success,
+                "Metal stream creation failed");
+    return MakePlatformDeviceStream(device, stream);
+#elif defined(USE_GCU)
+    const auto device = ResolvePlatformStreamDevice(d);
+    const auto stream = at::native::flagos::gcu::GetTopsStreamFromPool(device);
+    TORCH_CHECK(stream, "TOPS stream creation failed");
+    return MakePlatformDeviceStream(device, reinterpret_cast<Stream_t>(stream));
+#elif defined(USE_MUSA)
+    const auto device = ResolvePlatformStreamDevice(d);
+    const auto stream = at::native::flagos::musa::GetMusaStreamFromPool(device, priority);
+    TORCH_CHECK(stream, "MUSA stream creation failed");
+    return MakePlatformDeviceStream(device, reinterpret_cast<Stream_t>(stream));
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
     auto device = ResolvePlatformStreamDevice(d);
 #if FLAGOS_GUARD_HAS_OWNED_STREAM
@@ -356,10 +392,13 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
     // answer requires -- never "not done" for work that is done.
     return ::StreamSynchronize(KunlunxinStreamHandle(stream)) == Success;
 #elif FLAGOS_GUARD_HAS_PLATFORM_STREAM
-    // corex does ship a stream query, so unlike Kunlunxin this can answer
-    // without draining the stream. ErrorNotReady, and any other error, mean the
-    // stream has not provably finished -- reported as not done.
-    return ::StreamQuery(PlatformStreamHandle(stream)) == Success;
+    const auto handle = PlatformStreamHandle(stream);
+    const auto status = ::StreamQuery(handle);
+#ifdef USE_GCU
+    // Older TOPS runtimes expose only a blocking stream wait.
+    if (status == ErrorNotSupported) return ::StreamSynchronize(handle) == Success;
+#endif
+    return status == Success;
 #else
     ::DeviceSynchronize();
     return true;
@@ -424,7 +463,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       GetCachingAllocator()->record_stream(
           data_ptr, reinterpret_cast<Stream_t>(AscendStreamHandle(stream)));
     }
-#elif FLAGOS_GUARD_HAS_OWNED_STREAM
+#elif FLAGOS_GUARD_HAS_OWNED_STREAM || defined(USE_MPS) || defined(USE_GCU)
     if (CachingDeviceAllocator::is_enabled()) {
       c10::OptionalDeviceGuard device_guard;
       if (getDevice() != stream.device()) device_guard.reset_device(stream.device());
@@ -462,7 +501,7 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
       const c10::Stream& stream,
       const c10::DeviceIndex device_index,
       const c10::EventFlag flag) const override {
-#if FLAGOS_GUARD_HAS_OWNED_STREAM
+#if FLAGOS_GUARD_HAS_OWNED_STREAM || defined(USE_GCU)
     c10::OptionalDeviceGuard device_guard;
     if (getDevice() != stream.device()) device_guard.reset_device(stream.device());
 #endif
@@ -498,7 +537,11 @@ struct GuardImpl final : public c10::impl::DeviceGuardImplInterface {
   }
 
   bool queryEvent(void* event) const override {
-    return ::EventQuery((Event_t)event) == Success;
+    const auto status = ::EventQuery((Event_t)event);
+#ifdef USE_GCU
+    if (status == ErrorNotSupported) return ::EventSynchronize((Event_t)event) == Success;
+#endif
+    return status == Success;
   }
 
   void destroyEvent(void* event, const c10::DeviceIndex device_index)

@@ -166,7 +166,7 @@ def test_prebuilt_driver_installation_is_repeatable_and_uses_no_host_compiler(
         driver_binding.install_driver(
             adapter.Backend(),
             package,
-            SimpleNamespace(current_stream=lambda device: 100 + device),
+            lambda device: 100 + device,
             factory,
         )
         assert active.utils.npu_utils_mod is modules[package + ".npu_utils"]

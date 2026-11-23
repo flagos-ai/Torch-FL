@@ -64,8 +64,19 @@ def execution_scope(device=None):
     return stream_scope(device)
 
 
+def _model_runtime():
+    """Return the installed runtime for precompiled operator hosts."""
+    from torch_fl import _C
+
+    if _hosts is not None and hasattr(_hosts, "typed"):
+        from .load import _launcher_module
+
+        return _launcher_module
+    return getattr(_C, "_native_host", None)
+
+
 def compile(model, *, dynamic=True, fullgraph=True):
-    """Compile an inference model's host graph; numerical kernels stay FlagGems."""
+    """Compile an inference host graph over the wheel's precompiled operators."""
     from .model import compile_model
 
     return compile_model(model, dynamic=dynamic, fullgraph=fullgraph)

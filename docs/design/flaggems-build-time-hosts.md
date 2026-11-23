@@ -85,8 +85,12 @@ scalar widths, descriptor layout, shared memory, scratch requirements and cluste
 launch configuration are data provided by kernel compilation. The NVIDIA adapter
 also compiles the installed FlagTree wheel's unchanged CUDA utility source at
 build time. Runtime native compiler invocations from the host/kernel path are
-rejected, and each launch must refer to an admitted FlagGems JIT source hash.
+rejected, and each FlagGems launch must refer to an admitted JIT source hash.
 Unrelated application subprocesses are unaffected.
+
+Inductor can bind its generated Triton kernels to the same prebuilt launcher
+while setting up the kernel's autotuner. The generated wrapper supplies the
+stream from the same device runtime used by eager and native hosts.
 
 The native launch ABI takes borrowed argument views. It reads current tensor
 addresses and streams, reevaluates grids and hooks, and allocates fresh outputs.
