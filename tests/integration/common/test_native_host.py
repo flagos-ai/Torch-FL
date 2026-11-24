@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import torch_fl
+from tests.integration.common._native_host import LAYOUT_VIEWS
 
 _DEVICE = torch.device("flagos:0")
 
@@ -37,21 +38,13 @@ def _read_layout(result):
 
 def _check_layout_and_storage():
     runtime = torch_fl.native_host._model_runtime()
-    views = {
-        "dense": lambda x: x,
-        "transpose": lambda x: x.transpose(0, 2),
-        "slice": lambda x: x[:, :, ::2],
-        "expand": lambda x: x[:, :1, :].expand_as(x),
-        "scalar": lambda x: x[0, 0, 0],
-        "empty": lambda x: x[:, :0, :],
-    }
     side = torch.Stream(device=_DEVICE)
     for dtype, tol in ((torch.float32, 1e-6), (torch.bfloat16, 1e-2)):
         cpu = torch.linspace(-2, 2, 105).reshape(3, 5, 7).to(dtype)
         changed = cpu + 0.25
         with side, torch.no_grad():
             first_device, second_device = cpu.to(_DEVICE), changed.to(_DEVICE)
-            for layout, view in views.items():
+            for layout, view in LAYOUT_VIEWS.items():
                 first_value, second_value = view(first_device), view(second_device)
                 reference = view(cpu)
                 assert first_value.stride() == reference.stride(), layout

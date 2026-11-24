@@ -11,6 +11,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_fl
+from tests.integration.common._native_host import (
+    LAYOUT_VIEWS,
+    check_add_layout,
+    check_launch_on_other_device,
+)
 
 
 pytestmark = [pytest.mark.ascend, pytest.mark.native_source_host, pytest.mark.flaggems]
@@ -78,62 +83,16 @@ def test_ascend_scalar_wire_abi_accepts_zero_grid_without_submission(kind, value
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize(
-    "layout", ["dense", "transpose", "slice", "expand", "scalar", "empty"]
-)
+@pytest.mark.parametrize("layout", LAYOUT_VIEWS)
 def test_ascend_flaggems_hosts_keep_layout_values_and_distinct_live_outputs(
     dtype, layout
 ):
-    cpu = torch.arange(3 * 5 * 7, dtype=torch.float32).reshape(3, 5, 7).to(dtype) / 16
-    if layout == "transpose":
-        cpu = cpu.transpose(0, 2)
-    elif layout == "slice":
-        cpu = cpu[:, :, ::2]
-    elif layout == "expand":
-        cpu = cpu[:, :1, :].expand(3, 5, 7)
-    elif layout == "scalar":
-        cpu = cpu[0, 0, 0]
-    elif layout == "empty":
-        cpu = cpu[:, :0, :]
-    value = cpu.to("flagos")
-    artifacts = torch_fl.native_host.audit()["host_artifacts"]
-    with torch.no_grad():
-        first = torch.add(value, value)
-        second = torch.add(first, value)
-    torch_fl.flagos.synchronize()
-    torch.testing.assert_close(first.cpu(), torch.add(cpu, cpu), atol=0, rtol=0)
-    torch.testing.assert_close(second.cpu(), torch.add(cpu + cpu, cpu), atol=0, rtol=0)
-    if cpu.numel():
-        assert first.data_ptr() != second.data_ptr()
-    assert torch_fl.native_host.audit()["host_artifacts"] == artifacts
+    check_add_layout(torch.add, dtype, layout)
 
 
 @pytest.mark.min_devices(2)
 def test_ascend_native_launch_uses_tensor_device_and_current_acl_stream():
-    initial = torch_fl.flagos.current_device()
-    target = (initial + 1) % torch_fl.flagos.device_count()
-    stream = torch.Stream(device=f"flagos:{target}")
-    hits = torch.ops.flagos.native_source_typed_hits("aten::cos")
-    outputs = []
-    try:
-        with stream, torch.no_grad():
-            torch_fl.flagos.set_device(initial)
-            for shape in ((129,), (3, 5, 7), (17, 31)):
-                cpu = torch.randn(shape)
-                actual = torch.cos(cpu.to(f"flagos:{target}"))
-                outputs.append((actual, torch.cos(cpu)))
-                assert torch_fl.flagos.current_device() == initial
-                assert (
-                    torch.accelerator.current_stream(target).stream_id
-                    == stream.stream_id
-                )
-        stream.synchronize()
-        for actual, expected in outputs:
-            torch.testing.assert_close(actual.cpu(), expected, atol=1e-6, rtol=1e-6)
-        assert len({value.data_ptr() for value, _ in outputs}) == 3
-        assert torch.ops.flagos.native_source_typed_hits("aten::cos") == hits + 3
-    finally:
-        torch_fl.flagos.set_device(initial)
+    check_launch_on_other_device()
 
 
 def test_ascend_first_allocation_binds_each_worker_thread():
