@@ -11,12 +11,14 @@ import torch_fl
 _DEVICE = torch.device("flagos:0")
 
 
-def _capture_launch(runtime, op, *, nonempty=True):
+def _capture_launch(runtime, op, *, nonempty=True, specialized=True):
     result, enqueues = runtime.capture_enqueues(op)
     handle = runtime.current_stream(_DEVICE.index)
     assert all(stream == handle for stream, _ in enqueues), enqueues
     if nonempty:
-        assert (handle, True) in enqueues, enqueues
+        assert enqueues, "the operation did not enqueue device work"
+        if specialized:
+            assert (handle, True) in enqueues, enqueues
     return result
 
 
@@ -33,27 +35,35 @@ def _check_layout_and_storage():
     side = torch.Stream(device=_DEVICE)
     for dtype, tol in ((torch.float32, 1e-6), (torch.bfloat16, 1e-2)):
         cpu = torch.linspace(-2, 2, 105).reshape(3, 5, 7).to(dtype)
+        changed = cpu + 0.25
         with side, torch.no_grad():
-            device = cpu.to(_DEVICE)
+            first_device, second_device = cpu.to(_DEVICE), changed.to(_DEVICE)
             for layout, view in views.items():
-                reference, value = view(cpu), view(device)
-                assert value.stride() == reference.stride(), layout
+                first_value, second_value = view(first_device), view(second_device)
+                reference = view(cpu)
+                assert first_value.stride() == reference.stride(), layout
+                nonempty = first_value.numel() > 0
+                # The published launcher can submit the first call while the
+                # native host records the specialization for the second one.
                 first = _capture_launch(
-                    runtime, lambda: torch.cos(value), nonempty=value.numel()
+                    runtime,
+                    lambda: torch.cos(first_value),
+                    nonempty=nonempty,
+                    specialized=False,
                 )
                 second = _capture_launch(
-                    runtime, lambda: torch.cos(first), nonempty=value.numel()
+                    runtime, lambda: torch.cos(second_value), nonempty=nonempty
                 )
                 side.synchronize()
                 for result, expected in (
                     (first, torch.cos(reference)),
-                    (second, torch.cos(torch.cos(reference))),
+                    (second, torch.cos(view(changed))),
                 ):
                     assert result.device == _DEVICE
                     torch.testing.assert_close(
                         result.cpu(), expected, rtol=tol, atol=tol
                     )
-                if value.numel():
+                if nonempty:
                     assert first.data_ptr() != second.data_ptr(), layout
 
 
@@ -71,10 +81,13 @@ def _check_dynamic_shapes_and_stream_scope():
         with side, torch.no_grad():
             value = reference.to(_DEVICE)
             output = torch.empty_like(value)
+            first = _capture_launch(
+                runtime, lambda: model(value, output), specialized=False
+            )
             actual = _capture_launch(runtime, lambda: model(value, output))
         assert torch.accelerator.current_stream(_DEVICE) == original
         assert actual.device == _DEVICE
-        assert actual.data_ptr() == output.data_ptr()
+        assert first.data_ptr() == actual.data_ptr() == output.data_ptr()
         side.synchronize()
         torch.testing.assert_close(actual.cpu(), torch.cos(reference))
     with pytest.raises(RuntimeError, match=r"require torch.no_grad\(\)"):
