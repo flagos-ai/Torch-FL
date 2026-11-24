@@ -9,6 +9,7 @@
 
 #include <ATen/native/Resize.h>
 #include <ATen/ops/copy_native.h>
+#include <c10/core/DeviceGuard.h>
 #include <flagos.h>
 #include "device_boxing.h"
 // ascend_copy.h and gcu_copy.h are included unconditionally: each supplies an
@@ -286,6 +287,16 @@ at::Tensor clone(
 #endif
       size_t nbytes = self.numel() * self.element_size();
       if (nbytes > 0 && self.is_privateuseone()) {
+#if defined(USE_DCU)
+        // The HCU current stream is non-blocking with respect to the legacy
+        // stream. Order the clone with both its producer and its consumer.
+        const c10::DeviceGuard guard(self.device());
+        const auto stream = GetCurrentStreamForDevice(self.device().index());
+        TORCH_CHECK(
+            MemcpyAsync(result.data_ptr(), self.data_ptr(), nbytes,
+                        MemcpyDeviceToDevice, stream) == Success,
+            "Hygon clone: device-to-device copy failed");
+#else
         // Blocking, and against `self`'s device rather than whichever device is
         // ambient: a bare Memcpy only orders against the current device, so
         // cloning a flagos:1 tensor while flagos:0 is current copies the buffer
@@ -297,6 +308,7 @@ at::Tensor clone(
             nbytes,
             MemcpyDeviceToDevice,
             self);
+#endif
       } else if (nbytes > 0) {
         result.copy_(self);
       }
