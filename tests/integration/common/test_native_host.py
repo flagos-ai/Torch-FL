@@ -97,14 +97,14 @@ def _check_dynamic_shapes_and_stream_scope():
 
 
 @pytest.mark.anyplatform
-def test_layout_and_storage():
+def test_layout_and_storage(pytestconfig):
     from ._native_host import run_native_host_case
 
-    run_native_host_case(_check_layout_and_storage)
+    run_native_host_case(_check_layout_and_storage, pytestconfig)
 
 
 @pytest.mark.anyplatform
-def test_dynamic_shapes_and_stream_scope():
+def test_dynamic_shapes_and_stream_scope(pytestconfig):
     from ._native_host import run_native_host_case
 
-    run_native_host_case(_check_dynamic_shapes_and_stream_scope)
+    run_native_host_case(_check_dynamic_shapes_and_stream_scope, pytestconfig)

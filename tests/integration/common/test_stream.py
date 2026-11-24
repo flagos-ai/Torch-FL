@@ -163,7 +163,7 @@ def _assert_compiled_stream_chain():
 
 
 @pytest.mark.anyplatform
-def test_compiled_stream_chain():
+def test_compiled_stream_chain(pytestconfig):
     from ._native_host import run_native_host_case
 
-    run_native_host_case(_assert_compiled_stream_chain)
+    run_native_host_case(_assert_compiled_stream_chain, pytestconfig)

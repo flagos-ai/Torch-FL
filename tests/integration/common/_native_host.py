@@ -12,15 +12,23 @@ import sys
 import torch_fl
 
 
-def run_native_host_case(case):
+def run_native_host_case(case, pytestconfig):
     package = Path(torch_fl.__file__).resolve().parent
     if runner_temp := os.environ.get("RUNNER_TEMP"):
         record = Path(runner_temp) / "torch-fl-native-host-evidence/wheel.json"
         if record.is_file() or os.environ.get("GITHUB_ACTIONS") == "true":
             assert record.is_file(), "the lane did not verify its native host wheel"
             evidence = json.loads(record.read_text())
-            assert evidence["plan"] == json.loads(
-                os.environ.get("CI_PLAN_CONTEXT") or "{}"
+            # FlagCICD consumes the plan environment when it configures
+            # pytest. The integration runner records it alongside the reports.
+            report = pytestconfig.getoption("json_report_file", default=None)
+            groups = Path(report).with_name("groups.json") if report else None
+            if groups and groups.is_file():
+                plan = json.loads(groups.read_text())["context"]
+            else:
+                plan = json.loads(os.environ.get("CI_PLAN_CONTEXT") or "{}")
+            assert evidence["plan"] == plan, (
+                "the native host wheel belongs to a different plan"
             )
             package = Path(evidence["package"])
         elif torch_fl.native_host._model_runtime() is None:
