@@ -36,7 +36,6 @@ paths_watch:
   - .github/requirements-thead.txt
   - .github/scripts/hooks/set_env_thead.sh
   - .github/scripts/set_env_thead.sh
-  - scripts/vendor/bundle_thead_libtorch.sh
 
 container_volumes: []
 # The Qwen3 steps need a checkpoint, and the runner pod was the only place one

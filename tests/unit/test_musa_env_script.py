@@ -124,7 +124,7 @@ def test_musa_uses_the_entrypoint_cache_policy():
 
 
 def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
-    # Exercise the actual export block rather than just its helper.
+    # The shared cache helper owns the export, even after the platform hook.
     start = SCRIPT.rindex('if [[ -n "${GITHUB_ENV:-}" ]]; then')
     end = SCRIPT.index('\ncd "$REPO_ROOT"', start)
     names = (
@@ -138,13 +138,17 @@ def test_cache_directory_is_persisted_to_later_ci_steps(tmp_path):
     github_env = tmp_path / "github-env"
     cache = tmp_path / "cache"
     result = run_shell(
-        shell_function("export_ci_env", COMMON) + "\n" + SCRIPT[start:end],
+        'source "$REPO_ROOT/.github/scripts/lib/pip_cache.sh"\n'
+        "prepare_pip_cache mthreads\n"
+        + shell_function("export_ci_env", COMMON)
+        + "\n"
+        + SCRIPT[start:end],
         **environment,
         PIP_CACHE_DIR=str(cache),
         GITHUB_ENV=str(github_env),
     )
     assert result.returncode == 0, result.stderr
-    assert f"PIP_CACHE_DIR={cache}\n" in github_env.read_text()
+    assert github_env.read_text().splitlines().count(f"PIP_CACHE_DIR={cache}") == 1
 
 
 @pytest.mark.parametrize(
