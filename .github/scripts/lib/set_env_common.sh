@@ -762,6 +762,15 @@ ensure_runtime_requirements() {
   done < "$requirements_file"
 }
 
+# Preserve the Iluvatar baseline when the runtime image exposes NVIDIA's
+# occupancy header. Apply this to each CI build tree, including native hosts.
+prepare_ci_cmake_cache() {
+  [[ "${FLAGOS_ACCELERATOR:-}" == iluvatar ]] || return 0
+  local build_dir="$1"
+  mkdir -p "$build_dir"
+  printf '\nCUDA_OCCUPANCY_INCLUDE_DIR:PATH=\n' >> "$build_dir/CMakeCache.txt"
+}
+
 # Build the in-tree extension so package_data sees libtorch_fl.so before the
 # common workflow runs `python -m build`.
 build_flagos_inplace() {

@@ -470,7 +470,7 @@ def test_native_metax_rejects_staged_vendor_libtorch(
         command._build_native_hosts()
 
 
-@pytest.mark.parametrize("vendor", ["metax", "ascend", "dcu"])
+@pytest.mark.parametrize("vendor", ["metax", "ascend", "dcu", "iluvatar"])
 @pytest.mark.parametrize("different_owner", [False, True])
 def test_native_host_ci_build_excludes_the_default_build(
     tmp_path, clean_kernel_env, vendor, different_owner
@@ -520,7 +520,12 @@ def test_native_host_ci_build_excludes_the_default_build(
         "if sys.argv[1] == 'setup.py':\n"
         "    root = Path.cwd()\n"
         "    assert (root / 'setup.py').read_text() == '# tracked source\\n'\n"
-        "    assert not (root / 'build').exists(), 'inherited build cache'\n"
+        "    assert not (root / 'build/stale.so').exists(), 'inherited build output'\n"
+        "    if os.environ['FLAGOS_ACCELERATOR'] == 'iluvatar':\n"
+        "        cache = (root / 'build/CMakeCache.txt').read_text().strip()\n"
+        "        assert cache == 'CUDA_OCCUPANCY_INCLUDE_DIR:PATH='\n"
+        "    else:\n"
+        "        assert not (root / 'build').exists(), 'inherited build cache'\n"
         "    assert not (root / 'torch_fl/lib_metax').exists(), 'inherited vendor bundle'\n"
         "    assert os.environ['FLAGOS_BUILD_NATIVE_HOST'] == '1'\n"
         "    if os.environ['FLAGOS_ACCELERATOR'] == 'metax':\n"

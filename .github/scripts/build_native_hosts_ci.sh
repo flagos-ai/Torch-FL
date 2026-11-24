@@ -53,6 +53,7 @@ fi
 unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 
 source "$GITHUB_WORKSPACE/.github/scripts/lib/set_env_common.sh"
+prepare_ci_cmake_cache "$build_source/build"
 PIP_RETRY_PYTHON="$(command -v python)" pip_retry 'Cython==3.2.4'
 python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
 python scripts/tools/torch-fl-preflight --wheel "$evidence"/*.whl \
