@@ -12,10 +12,11 @@ test groups come from the shared integration manifest.
 | Push or daily schedule | Every configured platform |
 | Manual dispatch | `platforms=all` or a comma-separated platform list |
 
-The automatic pull request plan requires the ten hardware lanes `apple`,
+The automatic pull request plan requires the hardware lanes `apple`,
 `ascend`, `enflame`, `hygon`, `iluvatar`, `kunlunxin`, `metax`, `mthreads`,
-`nvidia` and `thead`. It retains the changed files for audit. The workflow
-starts on PR creation, updates, reopening and marking a draft ready for review.
+`nvidia`, `thead`, and `tsingmicro`. The plan retains the changed files for
+audit. The workflow starts on PR creation, updates, reopening and marking a
+draft ready for review.
 
 FlagCICD Entry uses `paths_watch` in the platform configs for diff-based
 diagnostic selection. Selection there retains both paths when a file moves.
@@ -40,7 +41,7 @@ common pytest node IDs and outcomes across lanes. A missing lane, stale report,
 different inventory, incomplete execution, skipped case or expected failure
 blocks acceptance.
 
-Every fix and feature must work on all ten platforms. Keep the shared cases
+Every fix and feature must work on all required platforms. Keep the shared cases
 in `tests/integration/common/`. Each case exercises the same behavior with
 the same inputs, reference and assertions. Add a case when the existing suite
 does not cover the change. The [repository acceptance rules](../../AGENTS.md#cross-platform-pr-acceptance)

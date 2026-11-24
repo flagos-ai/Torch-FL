@@ -1491,8 +1491,7 @@ def _requires_python() -> str:
     pins = _version_pins()
     version = pins.get(f"FLAGTREE_PYTHON_VERSION_{FLAGOS_ACCELERATOR}")
     if not version:
-        # tsingmicro and bpu build no FlagTree; they also publish no wheel, so
-        # this only affects a local build of one of them.
+        # Platforms without a pinned FlagTree build retain the local build floor.
         return ">=3.8"
     major, minor = version.split(".")[:2]
     return f">={major}.{minor},<{major}.{int(minor) + 1}"
@@ -1543,8 +1542,7 @@ def _flagos_sibling_requires() -> list:
         # environment on every platform that has a FlagTree build.
         reqs.append(f"flagtree=={flagtree}")
     else:
-        # No FlagTree build is published for this platform, so Triton has to
-        # come from somewhere else. tsingmicro and bpu are the two.
+        # Platforms without a FlagTree pin supply their own Triton build.
         reqs.append("triton>=3.5.1")
     flag_gems = pins.get("FLAGGEMS_VERSION_DEFAULT")
     if not flag_gems:

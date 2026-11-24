@@ -291,12 +291,12 @@ After implementing changes:
 
 ### Cross-platform PR acceptance
 
-Every PR must pass hardware CI on its final revision across all ten lanes.
+Every PR must pass hardware CI on its final revision across all required lanes.
 Link the full run with the required `PR hardware parity` check. The lanes are
 Apple (MPS), Ascend, Enflame (GCU), Hygon (DCU), Iluvatar, Kunlunxin, MetaX,
-Moore Threads (MUSA), NVIDIA (CUDA), and T-Head (PPU).
+Moore Threads (MUSA), NVIDIA (CUDA), T-Head (PPU), and TsingMicro.
 
-Every fix and feature must work on all ten lanes. Add or reuse a shared
+Every fix and feature must work on all required lanes. Add or reuse a shared
 regression in `tests/integration/common/` that exercises the affected behavior
 on each platform's installed wheel. Use the same inputs, PyTorch reference,
 assertions and operation- and dtype-appropriate numerical tolerances. Check

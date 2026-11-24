@@ -64,6 +64,7 @@ _PLATFORMS = (
     "mthreads",
     "nvidia",
     "thead",
+    "tsingmicro",
 )
 
 _BOUND_KEYS = {"at_least", "more_than", "exactly"}
@@ -79,6 +80,7 @@ _CONFIG_DIR = _REPO / ".github/configs"
 # composition exactly, so wiring a platform in or out is a visible edit here,
 # and the check cannot quietly become a description of a pipeline nobody runs.
 _KNOWN_GAPS = {
+    "tsingmicro_common_and_fp32": tuple(p for p in _PLATFORMS if p != "tsingmicro"),
     "native_host_build": tuple(
         p
         for p in _PLATFORMS
@@ -110,6 +112,7 @@ _KNOWN_GAPS = {
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
     "musa_runtime": (
         "apple",
@@ -121,8 +124,9 @@ _KNOWN_GAPS = {
         "metax",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
-    "vendor_ops": ("apple",),
+    "vendor_ops": ("apple", "tsingmicro"),
     "reference_ops": tuple(
         p for p in _PLATFORMS if p not in {"hygon", "metax", "nvidia", "thead"}
     ),
@@ -133,6 +137,7 @@ _KNOWN_GAPS = {
         "iluvatar",
         "kunlunxin",
         "mthreads",
+        "tsingmicro",
     ),
     "musa_flaggems_hybrid": (
         "apple",
@@ -144,6 +149,7 @@ _KNOWN_GAPS = {
         "metax",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
     "rng": ("apple", "thead"),
     "soft_lowp_matrix": (
@@ -155,9 +161,10 @@ _KNOWN_GAPS = {
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
-    "amp_contract": ("apple", "kunlunxin", "thead"),
-    "profiler_contract": ("apple", "enflame", "kunlunxin"),
+    "amp_contract": ("apple", "kunlunxin", "thead", "tsingmicro"),
+    "profiler_contract": ("apple", "enflame", "kunlunxin", "tsingmicro"),
     "profiler_parity": (
         "apple",
         "ascend",
@@ -166,8 +173,9 @@ _KNOWN_GAPS = {
         "metax",
         "mthreads",
         "thead",
+        "tsingmicro",
     ),
-    "torch_compile": ("apple", "ascend", "hygon", "mthreads", "thead"),
+    "torch_compile": ("apple", "ascend", "hygon", "mthreads", "thead", "tsingmicro"),
     "inference": (
         "apple",
         "ascend",
@@ -178,6 +186,7 @@ _KNOWN_GAPS = {
         "metax",
         "mthreads",
         "thead",
+        "tsingmicro",
     ),
     "training": (
         "apple",
@@ -189,6 +198,7 @@ _KNOWN_GAPS = {
         "metax",
         "mthreads",
         "thead",
+        "tsingmicro",
     ),
     "native_comm_bridge": (
         "apple",
@@ -200,6 +210,7 @@ _KNOWN_GAPS = {
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
     "musa_dispatch": (
         "apple",
@@ -211,6 +222,7 @@ _KNOWN_GAPS = {
         "metax",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
     "unit_tests_per_file": (
         "apple",
@@ -222,6 +234,7 @@ _KNOWN_GAPS = {
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
     "backend_ops": (
         "ascend",
@@ -233,6 +246,7 @@ _KNOWN_GAPS = {
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
     "mps_runtime": (
         "ascend",
@@ -244,6 +258,7 @@ _KNOWN_GAPS = {
         "mthreads",
         "nvidia",
         "thead",
+        "tsingmicro",
     ),
 }
 
