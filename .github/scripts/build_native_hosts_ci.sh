@@ -6,11 +6,11 @@
 # libraries separate from the native build, then test the installed opt-in wheel.
 set -euo pipefail
 case "${1:-}" in
-  ""|--metax-precision|--test-install) ;;
-  *) echo "Usage: $0 [--metax-precision|--test-install]" >&2; exit 2 ;;
+  ""|--metax-precision|--test-install|--check-installed) ;;
+  *) echo "Usage: $0 [--metax-precision|--test-install|--check-installed]" >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then
-  echo "Usage: $0 [--metax-precision|--test-install]" >&2
+  echo "Usage: $0 [--metax-precision|--test-install|--check-installed]" >&2
   exit 2
 fi
 
@@ -28,6 +28,19 @@ else
   mkdir -p "$evidence"
 fi
 echo "Native host evidence: $evidence"
+preflight="$GITHUB_WORKSPACE/scripts/tools/torch-fl-preflight"
+record_wheel="$GITHUB_WORKSPACE/.github/scripts/record_native_host_wheel.py"
+
+if [[ "${1:-}" == --check-installed ]]; then
+  # The Metal runtime is shipped in the ordinary wheel installed by this job.
+  python "$preflight" --wheel dist/*.whl --platform "$FLAGOS_ACCELERATOR" \
+    --check-build-env | tee "$evidence/preflight.log"
+  python "$preflight" --installed --platform "$FLAGOS_ACCELERATOR" \
+    --check-build-env | tee "$evidence/installed-preflight.log"
+  python "$record_wheel" --wheel dist/*.whl --evidence "$evidence"
+  exit 0
+fi
+
 build_source="$(mktemp -d "$RUNNER_TEMP/torch-fl-native-host-source.XXXXXX")"
 # The container user can differ from the checkout owner; trust only this read.
 git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$build_source"
@@ -51,36 +64,24 @@ unset FLAGOS_FORCE_BACKEND FLAGOS_BACKEND_CONFIG FLAGOS_METAX_CUDART_SHIM
 source "$GITHUB_WORKSPACE/.github/scripts/lib/set_env_common.sh"
 PIP_RETRY_PYTHON="$(command -v python)" pip_retry 'Cython==3.2.4'
 python setup.py bdist_wheel --dist-dir "$evidence" 2>&1 | tee "$evidence/build.log"
-python scripts/tools/torch-fl-preflight --wheel "$evidence"/*.whl \
+python "$preflight" --wheel "$evidence"/*.whl \
   --platform "$FLAGOS_ACCELERATOR" --check-build-env --check-native-host-backend \
   | tee "$evidence/preflight.log"
 if [[ "${1:-}" == --test-install ]]; then
   # The common suite keeps its ordinary wheel. Native tests select this
   # verified package in a separate interpreter.
-  python -m pip install --no-deps --upgrade --target "$RUNNER_TEMP/torch-fl-native-host-install" \
-    "$evidence"/*.whl
+  install="$RUNNER_TEMP/torch-fl-native-host-install"
+  python -m pip install --no-deps --upgrade --target "$install" "$evidence"/*.whl
+  export PYTHONPATH="$install${PYTHONPATH:+:$PYTHONPATH}"
 else
   python -m pip install --force-reinstall --no-deps "$evidence"/*.whl
 fi
 
-# Read the wheel without importing the source package. Reports are artifacts,
-# not source-controlled policy or claims of measured operator correctness.
-python - "$evidence" <<'PY'
-from pathlib import Path
-import sys
-import zipfile
-
-directory = Path(sys.argv[1])
-with zipfile.ZipFile(next(directory.glob("*.whl"))) as wheel:
-    names = ["torch_fl/_build_config.py", "torch_fl/compatibility.json"]
-    names += [name for name in wheel.namelist()
-              if name.startswith("torch_fl/native_host/_generated/")
-              and name.endswith(("manifest.json", "coverage.json", "diagnostics.json"))]
-    for name in names:
-        path = directory / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(wheel.read(name))
-PY
+if [[ "${1:-}" == --test-install ]]; then
+  python "$preflight" --installed --platform "$FLAGOS_ACCELERATOR" \
+    --check-build-env --check-native-host-backend | tee "$evidence/installed-preflight.log"
+fi
+python "$record_wheel" --wheel "$evidence"/*.whl --evidence "$evidence"
 
 if [[ "${1:-}" == --metax-precision ]]; then
   # Copy the tests into a wheel-only test root so pytest cannot import the

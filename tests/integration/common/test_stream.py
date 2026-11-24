@@ -23,11 +23,6 @@ synchronize, equal the same computation on the default stream, and an event's
 elapsed time must be non-negative. Both are hardware-agnostic invariants.
 """
 
-import os
-from pathlib import Path
-import subprocess
-import sys
-
 import pytest
 import torch
 
@@ -169,35 +164,6 @@ def _assert_compiled_stream_chain():
 
 @pytest.mark.anyplatform
 def test_compiled_stream_chain():
-    if torch_fl.native_host._model_runtime() is not None:
-        _assert_compiled_stream_chain()
-        return
+    from ._native_host import run_native_host_case
 
-    # Keep the ordinary wheel in this pytest session. The AOT build group
-    # installs its wheel before the common suite in a separate import root.
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    assert runner_temp, "the stream chain requires an installed AOT wheel"
-    install = Path(runner_temp).resolve() / "torch-fl-native-host-install"
-    assert (install / "torch_fl").is_dir(), "the AOT wheel was not installed"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import runpy, sys\n"
-            "from pathlib import Path\n"
-            "import torch_fl\n"
-            "assert Path(torch_fl.__file__).resolve().is_relative_to(sys.argv[1])\n"
-            "runpy.run_path(sys.argv[2])['_assert_compiled_stream_chain']()\n",
-            str(install),
-            str(Path(__file__).resolve()),
-        ],
-        env={
-            **os.environ,
-            "PYTHONPATH": str(install),
-            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
-        },
-        capture_output=True,
-        text=True,
-        timeout=240,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    run_native_host_case(_assert_compiled_stream_chain)
