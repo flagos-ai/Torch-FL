@@ -22,6 +22,19 @@ def _capture_launch(runtime, op, *, nonempty=True, specialized=True):
     return result
 
 
+def _read_layout(result):
+    if result.is_contiguous() or result.numel() == 0:
+        return result.cpu()
+    # Transfer a contiguous view of the written storage and use the actual
+    # output strides for the comparison on CPU.
+    span = 1 + sum(
+        (size - 1) * stride
+        for size, stride in zip(result.shape, result.stride(), strict=True)
+    )
+    linear = result.as_strided((span,), (1,)).cpu()
+    return linear.as_strided(result.shape, result.stride())
+
+
 def _check_layout_and_storage():
     runtime = torch_fl.native_host._model_runtime()
     views = {
@@ -61,7 +74,7 @@ def _check_layout_and_storage():
                 ):
                     assert result.device == _DEVICE
                     torch.testing.assert_close(
-                        result.cpu(), expected, rtol=tol, atol=tol
+                        _read_layout(result), expected, rtol=tol, atol=tol
                     )
                 if nonempty:
                     assert first.data_ptr() != second.data_ptr(), layout
