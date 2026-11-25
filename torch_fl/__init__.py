@@ -605,6 +605,10 @@ def _phase_ecosystem() -> None:
     from . import native_host
 
     native_host._activate()
+    if _env.flag("FLAGOS_COSMOS_CUDA_COMPAT"):
+        from .compat.cosmos_numerics import install_cuda_numerics
+
+        install_cuda_numerics()
 
 
 def __getattr__(name: str):

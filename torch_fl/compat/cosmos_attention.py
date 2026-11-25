@@ -22,6 +22,7 @@ import torch
 
 from torch_fl import _C, _platform
 from torch_fl.compat import cuda
+from torch_fl.compat.cosmos_numerics import suspend_cuda_numerics
 
 
 _PACKAGE = "cosmos_framework.model.attention"
@@ -65,7 +66,7 @@ def _native_attention(original, first_argument):
                 views[key] = _C._flagos_to_cuda_view(tensor)
             return views[key]
 
-        with torch.cuda.device(index):
+        with suspend_cuda_numerics(), torch.cuda.device(index):
             result = original(
                 *_convert(args, "flagos", to_cuda),
                 **_convert(kwargs, "flagos", to_cuda),
