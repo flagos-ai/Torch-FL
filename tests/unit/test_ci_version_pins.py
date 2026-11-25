@@ -408,14 +408,8 @@ def test_only_an_sdk_segment_comes_with_an_interpreter_pin():
             ), platform
 
 
-def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
-    """One SDK spelling, not two.
-
-    The segment names the SDK the wheel was built against, and for every
-    platform that has a FlagCX build that is the same token FlagCX is published
-    under (`+cuda13.3`, `+dtk2604`). Ascend was aligned to CANN for this reason.
-    PPU has no FlagCX build yet, so it has no counterpart to check against.
-    """
+def test_torch_fl_and_flagcx_use_the_same_sdk_segment():
+    """Match the build SDK and verify the pin for a target-qualified artifact."""
     pins = _pins()
     for platform in _platforms_in_the_table():
         flagcx = pins.get(f"FLAGCX_VERSION_{platform}")
@@ -423,6 +417,9 @@ def test_the_wheel_segment_is_the_flagcx_pin_where_flagcx_exists():
             continue
         _, _, sdk = flagcx.partition("+")
         assert sdk, (platform, flagcx)
+        if artifact := pins.get(f"FLAGCX_WHEEL_{platform}"):
+            assert artifact.startswith(f"flagcx-{flagcx}-"), (flagcx, artifact)
+            sdk = re.sub(r"\.\d+[a-z][a-z0-9]*$", "", sdk)
         assert _wheel_local(platform) == sdk, (platform, _wheel_local(platform), sdk)
 
 

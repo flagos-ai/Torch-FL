@@ -1,0 +1,116 @@
+# Copyright 2026 FlagOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Shared inference behavior on the lane's installed native host runtime."""
+
+import pytest
+import torch
+
+import torch_fl
+from tests.integration.common._native_host import LAYOUT_VIEWS
+
+_DEVICE = torch.device("flagos:0")
+
+
+def _capture_launch(runtime, op, *, nonempty=True, specialized=True):
+    result, enqueues = runtime.capture_enqueues(op)
+    handle = runtime.current_stream(_DEVICE.index)
+    assert all(stream == handle for stream, _ in enqueues), enqueues
+    if nonempty:
+        assert enqueues, "the operation did not enqueue device work"
+        if specialized:
+            assert (handle, True) in enqueues, enqueues
+    return result
+
+
+def _read_layout(result):
+    if result.is_contiguous() or result.numel() == 0:
+        return result.cpu()
+    # Transfer a contiguous view of the written storage and use the actual
+    # output strides for the comparison on CPU.
+    span = 1 + sum(
+        (size - 1) * stride
+        for size, stride in zip(result.shape, result.stride(), strict=True)
+    )
+    linear = result.as_strided((span,), (1,)).cpu()
+    return linear.as_strided(result.shape, result.stride())
+
+
+def _check_layout_and_storage():
+    runtime = torch_fl.native_host._model_runtime()
+    side = torch.Stream(device=_DEVICE)
+    for dtype, tol in ((torch.float32, 1e-6), (torch.bfloat16, 1e-2)):
+        cpu = torch.linspace(-2, 2, 105).reshape(3, 5, 7).to(dtype)
+        changed = cpu + 0.25
+        with side, torch.no_grad():
+            first_device, second_device = cpu.to(_DEVICE), changed.to(_DEVICE)
+            for layout, view in LAYOUT_VIEWS.items():
+                first_value, second_value = view(first_device), view(second_device)
+                reference = view(cpu)
+                assert first_value.stride() == reference.stride(), layout
+                nonempty = first_value.numel() > 0
+                # The published launcher can submit the first call while the
+                # native host records the specialization for the second one.
+                first = _capture_launch(
+                    runtime,
+                    lambda: torch.cos(first_value),
+                    nonempty=nonempty,
+                    specialized=False,
+                )
+                second = _capture_launch(
+                    runtime, lambda: torch.cos(second_value), nonempty=nonempty
+                )
+                side.synchronize()
+                for result, expected in (
+                    (first, torch.cos(reference)),
+                    (second, torch.cos(view(changed))),
+                ):
+                    assert result.device == _DEVICE
+                    torch.testing.assert_close(
+                        _read_layout(result), expected, rtol=tol, atol=tol
+                    )
+                if nonempty:
+                    assert first.data_ptr() != second.data_ptr(), layout
+
+
+def _check_dynamic_shapes_and_stream_scope():
+    runtime = torch_fl.native_host._model_runtime()
+    original = torch.accelerator.current_stream(_DEVICE)
+    side = torch.Stream(device=_DEVICE)
+
+    def inference(x, output):
+        return output.copy_(torch.cos(x))
+
+    model = torch_fl.native_host.compile(inference)
+    for size in (35, 57, 35):
+        reference = torch.linspace(-2, 2, size)
+        with side, torch.no_grad():
+            value = reference.to(_DEVICE)
+            output = torch.empty_like(value)
+            first = _capture_launch(
+                runtime, lambda: model(value, output), specialized=False
+            )
+            actual = _capture_launch(runtime, lambda: model(value, output))
+        assert torch.accelerator.current_stream(_DEVICE) == original
+        assert actual.device == _DEVICE
+        assert first.data_ptr() == actual.data_ptr() == output.data_ptr()
+        side.synchronize()
+        torch.testing.assert_close(actual.cpu(), torch.cos(reference))
+    with pytest.raises(RuntimeError, match=r"require torch.no_grad\(\)"):
+        with side, torch.enable_grad():
+            model(value, output)
+    assert torch.accelerator.current_stream(_DEVICE) == original
+
+
+@pytest.mark.anyplatform
+def test_layout_and_storage(pytestconfig):
+    from ._native_host import run_native_host_case
+
+    run_native_host_case(_check_layout_and_storage, pytestconfig)
+
+
+@pytest.mark.anyplatform
+def test_dynamic_shapes_and_stream_scope(pytestconfig):
+    from ._native_host import run_native_host_case
+
+    run_native_host_case(_check_dynamic_shapes_and_stream_scope, pytestconfig)
