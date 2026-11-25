@@ -102,25 +102,25 @@ bool TryGemsDeviceCopy(const at::Tensor& src, const at::Tensor& dst) {
       src.is_alias_of(dst)) return false;
   const auto src_type = src.scalar_type();
   const auto dst_type = dst.scalar_type();
+  auto storage_type = src_type;
+  if (src_type == dst_type) {
+    // A same-dtype copy can use a supported view of identical-width storage.
+    if (src_type == at::kChar) storage_type = at::kByte;
 #if defined(USE_DCU) && defined(FLAGOS_NATIVE_HOSTS)
-  const bool copy_double_bits = src_type == at::kDouble && dst_type == at::kDouble;
-#else
-  constexpr bool copy_double_bits = false;
+    if (src_type == at::kDouble) storage_type = at::kLong;
 #endif
-  if (!copy_double_bits && (!GemsCopyType(src_type) || !GemsCopyType(dst_type))) {
-    return false;
   }
+  if (storage_type == src_type &&
+      (!GemsCopyType(src_type) || !GemsCopyType(dst_type))) return false;
   at::assert_no_internal_overlap(dst);
   struct Scope {
     bool& active;
     explicit Scope(bool& value) : active(value) { active = true; }
     ~Scope() { active = false; }
   } scope(active);
-  if (copy_double_bits) {
-    // The HCU copy host can move FP64 storage through its INT64 kernel.
-    // Same-width views preserve sizes, strides, storage offsets, and all bits.
+  if (storage_type != src_type) {
     CopyInplaceSourceHost(
-        dst.view(at::kLong), src.view(at::kLong), /*non_blocking=*/false);
+        dst.view(storage_type), src.view(storage_type), /*non_blocking=*/false);
     return true;
   }
 #if defined(FLAGOS_NATIVE_HOSTS) && defined(FLAGOS_ACCEL_METAX)

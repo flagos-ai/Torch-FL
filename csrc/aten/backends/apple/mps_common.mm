@@ -1780,10 +1780,6 @@ MPSGraphTensorData* MpsTensorData(
   return data;
 }
 
-bool MpsOffsetTensorDataAvailable() {
-  return OffsetTensorDataAvailable();
-}
-
 MPSGraphTensor* MpsFlatPlaceholder(MPSGraph* graph, int64_t count, MPSDataType dtype) {
   return [graph placeholderWithShape:FlatShape(count) dataType:dtype name:nil];
 }
