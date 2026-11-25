@@ -333,6 +333,19 @@ _GLOO_SYNTHESISED_OPS = {
 }
 
 
+def _dynamo_disable(func):
+    """Prevent TorchDynamo from tracing into ProcessGroupFlagOS transport methods.
+
+    Dynamo's ``ProcessGroupVariable.is_process_group`` checks exact ``type()``
+    against ``c10d.ProcessGroup``, so a Python ``ProcessGroup`` subclass outside
+    ``torch.distributed`` would otherwise receive an eval-frame hook when called
+    from skipped FSDP runtime hooks -- splitting host-staged or view-converted
+    collectives across graph breaks and compiling internal staging copies.
+    """
+    disable = getattr(getattr(torch, "_dynamo", None), "disable", None)
+    return disable(func) if callable(disable) else func
+
+
 class _HostStagedGloo:
     """Run a real gloo group on flagos operands staged through host memory.
 
@@ -378,6 +391,7 @@ class _HostStagedGloo:
             return op
         return functools.partial(self._run, op)
 
+    @_dynamo_disable
     def _run(self, op, *args, **kwargs):
         staged = []
         host_args = _stage_to_host(args, staged)
@@ -491,7 +505,7 @@ def _device_scoped_guard(func):
         finally:
             _C._set_device(prev)
 
-    return wrapper
+    return _dynamo_disable(wrapper)
 
 
 # ---------------------------------------------------------------------------
@@ -1190,6 +1204,7 @@ class ProcessGroupFlagOS(dist.ProcessGroup):
             opts,
         )
 
+    @_dynamo_disable
     def alltoall_base(
         self,
         output_tensor,

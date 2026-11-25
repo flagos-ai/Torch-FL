@@ -1026,10 +1026,16 @@ def register_flagos_device_interface() -> None:
     # compiled without CUDA support" / "module 'torch._C' has no attribute
     # '_cuda_getDevice'". The gate is therefore the torch, not the platform.
     device_type, _ = _triton_backend()
-    if device_type != "cuda" or not (
-        platform_profile().is_cuda_like and _torch_has_cuda_kernels()
-    ):
+    has_cuda_runtime = platform_profile().is_cuda_like and _torch_has_cuda_kernels()
+    if device_type != "cuda" or not has_cuda_runtime:
         register_interface_for_device(device_type, FlagOSDeviceInterface)
+    # Inductor's runtime launcher (`triton_heuristics.get_device_interface`)
+    # rewrites `"hip"` -> `"cuda"` before calling `get_interface_for_device`,
+    # so a DCU wheel over a CPU-only torch (`device_type == "hip"`,
+    # `_torch_has_cuda_kernels() == False`) resolves `"cuda"` too.
+    launcher_device_type = device_type.replace("hip", "cuda")
+    if launcher_device_type != device_type and not has_cuda_runtime:
+        register_interface_for_device(launcher_device_type, FlagOSDeviceInterface)
 
     # torch.utils._triton caches this result and may have been queried during
     # torch import, before torch_fl registered PrivateUse1. Invalidate it after
