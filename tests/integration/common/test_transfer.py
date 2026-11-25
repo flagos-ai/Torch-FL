@@ -123,9 +123,12 @@ def _check_strided_transfer():
                         check_stride=True,
                     )
 
-                dense = torch.empty(source.shape, device=source.device, dtype=dtype)
+                dense_storage = torch.zeros(source.numel() + 2, dtype=dtype)
+                dense_device_storage = dense_storage.to(DEVICE)
+                dense = dense_device_storage[1:-1].view(source.shape)
                 assert dense.copy_(source) is dense, case
-                compare(dense.cpu(), reference)
+                dense_storage[1:-1].copy_(reference.reshape(-1))
+                compare(dense_device_storage.cpu(), dense_storage)
 
                 # Use separate storage for each copy so missed writes and
                 # writes outside a non-overlapping destination view are visible.

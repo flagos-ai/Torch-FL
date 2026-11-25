@@ -23,6 +23,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #import <Metal/Metal.h>
 
@@ -31,6 +32,34 @@
 #include "runtime/allocator/caching_device_allocator.h"
 
 namespace at::native::flagos::mps {
+namespace {
+
+std::string GatherTemplateWithOffsets() {
+  std::string source(at::mps::GATHER_OPS_TEMPLATE);
+  // Keep the upstream indexing and specialize the two pointer origins. Metal
+  // requires aligned buffer bindings even when the view starts inside a word.
+  const auto replace = [&source](std::string_view from, std::string_view to) {
+    size_t pos = 0;
+    int replaced = 0;
+    while ((pos = source.find(from, pos)) != std::string::npos) {
+      source.replace(pos, from.size(), to);
+      pos += to.size();
+      ++replaced;
+    }
+    return replaced;
+  };
+  // The input and output have the same element type, so the type and cast
+  // parameters can be shared and the slots reused for the two offsets.
+  replace("{1}", "{0}");
+  if (replace("{2}", "x") != 1 ||
+      replace("*)src_;", "*)src_ + {1};") != 5 ||
+      replace("*)dst_;", "*)dst_ + {2};") != 5) {
+    return {};
+  }
+  return source;
+}
+
+} // namespace
 
 bool CopyStridedToDense(const at::Tensor& src, const at::Tensor& dst) {
   if (!src.defined() || !dst.defined() || !src.is_privateuseone() ||
@@ -76,6 +105,11 @@ bool CopyStridedToDense(const at::Tensor& src, const at::Tensor& dst) {
       !MpsBufferOf(dst, &dst_buffer, &dst_offset)) {
     return false;
   }
+  constexpr size_t binding_alignment = sizeof(uint32_t);
+  const size_t element_size = src.element_size();
+  if (src_offset % element_size || dst_offset % element_size) return false;
+  const size_t src_prefix = src_offset % binding_alignment;
+  const size_t dst_prefix = dst_offset % binding_alignment;
   const auto stream = ::GetCurrentStreamForDevice(src.device().index());
   const auto queue = (id<MTLCommandQueue>)::FlagosMPSCommandQueue(stream);
   TORCH_CHECK(queue != nil, "mps: no Metal command queue for the flagos device");
@@ -84,20 +118,24 @@ bool CopyStridedToDense(const at::Tensor& src, const at::Tensor& dst) {
   const auto rank = static_cast<int32_t>(sizes.size());
   @autoreleasepool {
     // Reuse PyTorch's gather and copy the storage bits without a graph cast.
-    static at::native::mps::MetalShaderLibrary library(at::mps::GATHER_OPS_TEMPLATE, 3);
+    static const auto shader = GatherTemplateWithOffsets();
+    if (shader.empty()) return false;
+    static at::native::mps::MetalShaderLibrary library(shader, 3);
     static std::mutex library_mutex;
     const std::string name = "gather_kernel_" + (rank <= 4 ? std::to_string(rank) : "n");
     id<MTLComputePipelineState> pipeline;
     {
       std::lock_guard<std::mutex> lock(library_mutex);
-      pipeline = library.getPipelineStateForFunc(name, {element, element, "x"});
+      pipeline = library.getPipelineStateForFunc(
+          name, {element, std::to_string(src_prefix / element_size),
+                 std::to_string(dst_prefix / element_size)});
     }
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     TORCH_CHECK(encoder != nil, "mps: could not encode a strided copy");
     [encoder setComputePipelineState:pipeline];
-    [encoder setBuffer:src_buffer offset:src_offset atIndex:0];
-    [encoder setBuffer:dst_buffer offset:dst_offset atIndex:1];
+    [encoder setBuffer:src_buffer offset:src_offset - src_prefix atIndex:0];
+    [encoder setBuffer:dst_buffer offset:dst_offset - dst_prefix atIndex:1];
     [encoder setBytes:sizes.data() length:sizes.size() * sizeof(uint32_t) atIndex:2];
     [encoder setBytes:strides.data() length:strides.size() * sizeof(uint32_t) atIndex:3];
     [encoder setBytes:&count length:sizeof(count) atIndex:4];
