@@ -238,13 +238,13 @@ class BlockingCopyGuard {
     // op and was wrong in 40 of 40 rounds without the barrier.
     topsStreamSynchronize(at::native::flagos::gcu::GetCurrentTopsStream());
 #elif defined(USE_KUNLUNXIN)
-    // Same shape as the DCU arm and for the same reason: no c10::cuda to ask
-    // which stream is current (see the guard above). The XPU SDK exports no
-    // stream query at all -- xpu_wait(nullptr) is its only synchronisation
-    // primitive -- and the runtime layer's DeviceSynchronize wraps that, so
-    // this is a device-wide drain: a superset of the per-stream wait, and so
-    // still correct, just coarser. Only reached on the blocking-copy paths.
-    ::DeviceSynchronize();
+    // xpu_wait(nullptr) only waits for the legacy default queue. Native hosts
+    // submit producers to the stream tracked by the FlagOS runtime.
+    int device = 0;
+    TORCH_CHECK(::GetDevice(&device) == Success,
+                "flagos: could not resolve the device for a blocking copy");
+    TORCH_CHECK(::StreamSynchronize(GetCurrentStreamForDevice(device)) == Success,
+                "flagos: could not synchronize the current copy stream");
 #elif defined(USE_ILUVATAR)
     // iluvatar owns its streams, so the queue every producer submits to is
     // reachable directly. The guard above selected *this tensor's* device

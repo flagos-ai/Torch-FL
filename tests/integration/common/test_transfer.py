@@ -118,10 +118,16 @@ def _check_copy_stream_order():
     side.wait_stream(torch.accelerator.current_stream(source.device))
     with side, torch.no_grad():
         target = torch.empty_like(source)
-        for copy in (torch.clone, target.copy_):
+        for name, copy in (("clone", torch.clone), ("copy_", target.copy_)):
             for _ in range(4):
                 result = torch.cos(copy(torch.cos(source)))
-                torch.testing.assert_close(result.cpu(), expected, atol=1e-6, rtol=1e-6)
+                torch.testing.assert_close(
+                    result.cpu(),
+                    expected,
+                    atol=1e-6,
+                    rtol=1e-6,
+                    msg=lambda message: f"{name}: {message}",
+                )
 
 
 @pytest.mark.anyplatform
